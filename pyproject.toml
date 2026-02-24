@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "claude-telegram-bot"
+version = "0.1.0"
+description = "Telegram bot for managing Claude Code CLI instances"
+requires-python = ">=3.11"
+dependencies = [
+    "python-telegram-bot[ext]>=21.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+claude-bot = "bot.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["bot*"]
