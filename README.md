@@ -64,6 +64,7 @@ python -m bot
 | `/cost` | Spending breakdown |
 | `/status` | Health dashboard |
 | `/budget` | Budget info/reset |
+| `/shutdown` | Stop the bot (switch PCs) |
 
 ## Workflow Buttons
 
@@ -77,7 +78,7 @@ Completed queries show contextual action buttons:
 
 ## Multiple PCs
 
-You can install the bot on multiple machines (e.g., desktop + laptop). Same bot token, same Telegram chat.
+Install the bot on multiple machines (e.g., desktop + laptop). Same bot token, same Telegram chat.
 
 **How it works:**
 - Claude CLI runs locally — the bot must run on the PC where your repos are
@@ -85,7 +86,13 @@ You can install the bot on multiple machines (e.g., desktop + laptop). Same bot 
 - Starting the bot on a new PC automatically takes over; the old instance detects the conflict and shuts down gracefully
 - Each PC has its own repos (`/repo add`) and local state
 
-**To switch PCs:** just start the bot on the other machine. The old one stops automatically.
+**To switch PCs:**
+1. `/shutdown` from Telegram — remotely stops the current bot
+2. Start `claude-bot` on the other PC — it takes over
+
+Or just start the bot on the new PC — the old one auto-stops on conflict.
+
+**Tip:** Set `PC_NAME=desktop` / `PC_NAME=laptop` in each `.env` so startup messages show which PC is active.
 
 ## Configuration
 
@@ -100,4 +107,5 @@ All settings via `.env` (see `.env.example`):
 | `DAILY_BUDGET_USD` | `20.0` | Daily spending limit |
 | `QUERY_TIMEOUT_SECS` | `300` | Explore mode timeout |
 | `TASK_TIMEOUT_SECS` | `600` | Build mode timeout |
+| `PC_NAME` | hostname | Label for this PC (shown in notifications) |
 | `LOG_LEVEL` | `INFO` | Logging level |

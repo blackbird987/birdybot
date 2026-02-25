@@ -97,7 +97,8 @@ async def run() -> None:
         cli_version = f"FAILED: {e}"
 
     # Initialize handlers
-    handlers = Handlers(store, runner, cli_version, start_time)
+    handlers = Handlers(store, runner, cli_version, start_time,
+                        shutdown_fn=lambda: stop_event.set())
     cb_handler = CallbackHandler(store, runner)
     cb_handler.set_handlers_ref(handlers)
 
@@ -171,6 +172,7 @@ async def run() -> None:
     app.add_handler(CommandHandler("clear", handlers.on_clear))
     app.add_handler(CommandHandler("verbose", handlers.on_verbose))
     app.add_handler(CommandHandler("session", handlers.on_session))
+    app.add_handler(CommandHandler("shutdown", handlers.on_shutdown))
 
     # Callback query handler (inline buttons)
     app.add_handler(CallbackQueryHandler(cb_handler.handle))
@@ -243,7 +245,7 @@ async def run() -> None:
             await application.bot.send_message(
                 chat_id=config.TELEGRAM_USER_ID,
                 text=(
-                    f"🤖 <b>Bot started</b>\n"
+                    f"🤖 <b>Bot started</b> ({escape_html(config.PC_NAME)})\n"
                     f"CLI: {escape_html(cli_status)}\n"
                     f"Mode: <code>{store.mode}</code>"
                     f"{escape_html(repo_info)}\n"
@@ -267,11 +269,11 @@ async def run() -> None:
 
     async def on_error(update, context):
         if isinstance(context.error, Conflict):
-            log.warning("Another bot instance is polling — shutting down gracefully")
+            log.warning("Another bot instance is polling — %s shutting down", config.PC_NAME)
             try:
                 await app.bot.send_message(
                     chat_id=config.TELEGRAM_USER_ID,
-                    text="Bot stopped: another instance took over polling.",
+                    text=f"Bot stopped on {config.PC_NAME}: another instance took over.",
                     disable_notification=True,
                 )
             except Exception:

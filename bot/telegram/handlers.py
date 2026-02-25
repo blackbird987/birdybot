@@ -57,11 +57,13 @@ class Handlers:
         runner: ClaudeRunner,
         cli_version: str,
         start_time: float,
+        shutdown_fn=None,
     ) -> None:
         self._store = store
         self._runner = runner
         self._cli_version = cli_version
         self._start_time = start_time
+        self._shutdown_fn = shutdown_fn
 
     # --- Auth ---
 
@@ -886,6 +888,19 @@ class Handlers:
         count = self._store.archive_old()
         await update.message.reply_text(f"Archived {count} old instances.")
 
+    # --- /shutdown ---
+
+    async def on_shutdown(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._auth(update) or not update.message:
+            return
+        if self._shutdown_fn:
+            await update.message.reply_text(
+                f"Shutting down {config.PC_NAME}. Start the bot on another PC to switch."
+            )
+            self._shutdown_fn()
+        else:
+            await update.message.reply_text("Shutdown not available.")
+
     # --- /session ---
 
     async def on_session(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1161,6 +1176,7 @@ class Handlers:
             "<code>/session</code> — list/resume desktop CLI sessions\n"
             "<code>/budget</code> — budget info/reset\n"
             "<code>/clear</code> — archive old instances\n"
+            "<code>/shutdown</code> — stop the bot (switch PCs)\n"
         )
         try:
             await update.message.reply_text(help_text, parse_mode=PARSE_MODE)
