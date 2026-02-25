@@ -9,6 +9,7 @@ import sys
 import time
 from logging.handlers import RotatingFileHandler
 
+from telegram.error import Conflict
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -22,10 +23,12 @@ from bot.claude.runner import ClaudeRunner
 from bot.scheduler import Scheduler
 from bot.store.state import StateStore
 from bot.telegram.callbacks import CallbackHandler
-from bot.telegram.formatter import escape_md, format_digest
+from bot.telegram.formatter import escape_html, format_digest, redact_secrets
 from bot.telegram.handlers import Handlers
 
 log = logging.getLogger(__name__)
+
+PARSE_MODE = "HTML"
 
 
 def setup_logging() -> None:
@@ -102,42 +105,40 @@ async def run() -> None:
     async def on_schedule_result(instance, result, changed):
         """Send notification for scheduled task results."""
         if instance.status.value == "failed":
-            # Always notify loudly on failure
-            formatted = format_digest(
-                store.instance_count_today(),
-                store.get_daily_cost(),
-                store.failure_count_today(),
-                store.get_active_repo()[0],
-                store.mode,
-            )
             try:
                 await app.bot.send_message(
                     chat_id=config.TELEGRAM_USER_ID,
-                    text=f"⚠️ *Scheduled task failed*\n{escape_md(instance.display_id())}: "
-                         f"{escape_md(instance.error or 'Unknown error')}",
-                    parse_mode="MarkdownV2",
+                    text=f"⚠️ <b>Scheduled task failed</b>\n"
+                         f"{escape_html(instance.display_id())}: "
+                         f"{escape_html(redact_secrets(instance.error or 'Unknown error'))}",
+                    parse_mode=PARSE_MODE,
                 )
             except Exception:
-                await app.bot.send_message(
-                    chat_id=config.TELEGRAM_USER_ID,
-                    text=f"Scheduled task failed: {instance.display_id()}: {instance.error}",
-                )
+                try:
+                    await app.bot.send_message(
+                        chat_id=config.TELEGRAM_USER_ID,
+                        text=f"Scheduled task failed: {instance.display_id()}: {instance.error}",
+                    )
+                except Exception:
+                    log.exception("Failed to send schedule failure notification")
         elif changed:
-            # Notify silently if result changed
             try:
                 await app.bot.send_message(
                     chat_id=config.TELEGRAM_USER_ID,
-                    text=f"📋 {escape_md(instance.display_id())} \\(scheduled\\)\n"
-                         f"{escape_md(instance.summary or 'No summary')}",
-                    parse_mode="MarkdownV2",
+                    text=f"📋 {escape_html(instance.display_id())} (scheduled)\n"
+                         f"{escape_html(redact_secrets(instance.summary or 'No summary'))}",
+                    parse_mode=PARSE_MODE,
                     disable_notification=True,
                 )
             except Exception:
-                await app.bot.send_message(
-                    chat_id=config.TELEGRAM_USER_ID,
-                    text=f"Scheduled: {instance.display_id()}: {instance.summary}",
-                    disable_notification=True,
-                )
+                try:
+                    await app.bot.send_message(
+                        chat_id=config.TELEGRAM_USER_ID,
+                        text=f"Scheduled: {instance.display_id()}: {instance.summary}",
+                        disable_notification=True,
+                    )
+                except Exception:
+                    log.exception("Failed to send schedule result notification")
 
     # Initialize scheduler
     scheduler = Scheduler(store, runner, on_result=on_schedule_result)
@@ -149,6 +150,7 @@ async def run() -> None:
     # Register command handlers
     app.add_handler(CommandHandler("start", handlers.on_help))
     app.add_handler(CommandHandler("help", handlers.on_help))
+    app.add_handler(CommandHandler("new", handlers.on_new))
     app.add_handler(CommandHandler("bg", handlers.on_bg))
     app.add_handler(CommandHandler("list", handlers.on_list))
     app.add_handler(CommandHandler("kill", handlers.on_kill))
@@ -167,6 +169,8 @@ async def run() -> None:
     app.add_handler(CommandHandler("repo", handlers.on_repo))
     app.add_handler(CommandHandler("budget", handlers.on_budget))
     app.add_handler(CommandHandler("clear", handlers.on_clear))
+    app.add_handler(CommandHandler("verbose", handlers.on_verbose))
+    app.add_handler(CommandHandler("session", handlers.on_session))
 
     # Callback query handler (inline buttons)
     app.add_handler(CallbackQueryHandler(cb_handler.handle))
@@ -174,7 +178,13 @@ async def run() -> None:
     # Photo handler
     app.add_handler(MessageHandler(filters.PHOTO, handlers.on_photo))
 
-    # Text handler (must be last — catches everything)
+    # Document handler
+    app.add_handler(MessageHandler(filters.Document.ALL, handlers.on_document))
+
+    # Unknown command handler (catches /alias_name and other unknown commands)
+    app.add_handler(MessageHandler(filters.COMMAND, handlers.on_unknown_command))
+
+    # Text handler (must be last — catches non-command text)
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND, handlers.on_text
     ))
@@ -193,7 +203,6 @@ async def run() -> None:
         import datetime as dt
         while True:
             now = dt.datetime.now(dt.timezone.utc)
-            # Calculate seconds until next digest hour
             target = now.replace(
                 hour=config.DIGEST_HOUR, minute=0, second=0, microsecond=0
             )
@@ -202,7 +211,6 @@ async def run() -> None:
             wait_secs = (target - now).total_seconds()
             await asyncio.sleep(wait_secs)
 
-            # Send digest
             try:
                 repo_name, _ = store.get_active_repo()
                 text = format_digest(
@@ -215,7 +223,7 @@ async def run() -> None:
                 await app.bot.send_message(
                     chat_id=config.TELEGRAM_USER_ID,
                     text=text,
-                    parse_mode="MarkdownV2",
+                    parse_mode=PARSE_MODE,
                     disable_notification=True,
                 )
             except Exception:
@@ -235,13 +243,13 @@ async def run() -> None:
             await application.bot.send_message(
                 chat_id=config.TELEGRAM_USER_ID,
                 text=(
-                    f"🤖 *Bot started*\n"
-                    f"CLI: {escape_md(cli_status)}\n"
-                    f"Mode: `{store.mode}`"
-                    f"{escape_md(repo_info)}\n"
+                    f"🤖 <b>Bot started</b>\n"
+                    f"CLI: {escape_html(cli_status)}\n"
+                    f"Mode: <code>{store.mode}</code>"
+                    f"{escape_html(repo_info)}\n"
                     f"Schedules: {len(store.list_schedules())}"
                 ),
-                parse_mode="MarkdownV2",
+                parse_mode=PARSE_MODE,
             )
         except Exception:
             log.exception("Failed to send startup notification")
@@ -254,6 +262,26 @@ async def run() -> None:
     app.post_init = post_init
     app.post_shutdown = post_shutdown
 
+    # Graceful conflict detection — another bot instance took over polling
+    stop_event = asyncio.Event()
+
+    async def on_error(update, context):
+        if isinstance(context.error, Conflict):
+            log.warning("Another bot instance is polling — shutting down gracefully")
+            try:
+                await app.bot.send_message(
+                    chat_id=config.TELEGRAM_USER_ID,
+                    text="Bot stopped: another instance took over polling.",
+                    disable_notification=True,
+                )
+            except Exception:
+                pass
+            stop_event.set()
+            return
+        log.exception("Unhandled error", exc_info=context.error)
+
+    app.add_error_handler(on_error)
+
     # Run polling
     log.info("Starting Telegram polling...")
     await app.initialize()
@@ -261,8 +289,6 @@ async def run() -> None:
     await app.updater.start_polling(drop_pending_updates=True)
 
     # Wait for shutdown signal
-    stop_event = asyncio.Event()
-
     def signal_handler(sig, frame):
         log.info("Received signal %s, shutting down...", sig)
         stop_event.set()

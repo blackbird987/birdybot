@@ -23,7 +23,7 @@ from bot.claude.types import Instance, InstanceStatus
 
 log = logging.getLogger(__name__)
 
-ProgressCallback = Callable[[str], None]  # async callback(message)
+ProgressCallback = Callable  # async callback(message: str, detail: str)
 StallCallback = Callable[[str], None]     # async callback(instance_id)
 
 
@@ -60,16 +60,18 @@ class ClaudeRunner:
         instance: Instance,
         on_progress: ProgressCallback | None = None,
         on_stall: StallCallback | None = None,
+        context: str | None = None,
     ) -> RunResult:
         """Run Claude CLI for an instance. Blocks until completion or timeout."""
         async with self._semaphore:
-            return await self._run_impl(instance, on_progress, on_stall)
+            return await self._run_impl(instance, on_progress, on_stall, context)
 
     async def _run_impl(
         self,
         instance: Instance,
         on_progress: ProgressCallback | None,
         on_stall: StallCallback | None,
+        context: str | None = None,
     ) -> RunResult:
         timeout = (config.TASK_TIMEOUT_SECS
                    if instance.instance_type.value == "task"
@@ -77,9 +79,9 @@ class ClaudeRunner:
 
         # Git branch safety for build bg tasks
         if instance.branch:
-            await self._create_branch(instance)
+            await self._ensure_branch(instance)
 
-        cmd = self._build_command(instance)
+        cmd = self._build_command(instance, context)
         log.info("Running %s: %s", instance.id, " ".join(cmd))
 
         # Clear CLAUDE_CODE env var to avoid nested-session error
@@ -94,6 +96,7 @@ class ClaudeRunner:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=instance.repo_path or None,
                 env=env,
+                limit=1024 * 1024,  # 1MB line buffer (default 64KB too small for stream-json)
             )
             instance.pid = proc.pid
             self._processes[instance.id] = proc
@@ -110,7 +113,7 @@ class ClaudeRunner:
                 log.info("Transient error for %s, retrying in 30s", instance.id)
                 instance.retry_count = 1
                 await asyncio.sleep(30)
-                return await self._run_impl(instance, on_progress, on_stall)
+                return await self._run_impl(instance, on_progress, on_stall, context)
 
             return result
 
@@ -181,7 +184,7 @@ class ClaudeRunner:
                         progress = extract_progress(event)
                         if progress and progress.message:
                             try:
-                                await on_progress(progress.message)
+                                await on_progress(progress.message, progress.detail)
                             except Exception:
                                 log.exception("Progress callback error")
         finally:
@@ -222,16 +225,20 @@ class ClaudeRunner:
 
         return result
 
-    def _build_command(self, instance: Instance) -> list[str]:
+    def _build_command(self, instance: Instance, context: str | None = None) -> list[str]:
         cmd = [config.CLAUDE_BINARY, "-p"]
 
-        # Build prompt with context
+        # Build prompt — never mutated on the instance
         prompt = instance.prompt
         if not prompt:
             prompt = "Continue the previous conversation."
 
         cmd.append(prompt)
-        cmd.extend(["--output-format", "stream-json"])
+        cmd.extend(["--output-format", "stream-json", "--verbose"])
+
+        # Build system prompt: mobile hint + bot context + pinned context + repo CLAUDE.md + projects dir
+        system_prompt = self._build_system_prompt(instance, context)
+        cmd.extend(["--append-system-prompt", system_prompt])
 
         # Resume session
         if instance.session_id:
@@ -244,6 +251,55 @@ class ClaudeRunner:
             cmd.extend(["--allowedTools", config.EXPLORE_TOOLS])
 
         return cmd
+
+    def _build_system_prompt(self, instance: Instance, context: str | None = None) -> str:
+        """Build the system prompt with mobile hint, bot context, pinned context, repo CLAUDE.md, and projects dir."""
+        parts = [config.MOBILE_HINT]
+
+        # Bot capability context so Claude knows what the user can do
+        parts.append(config.BOT_CONTEXT)
+
+        # Pinned user context (passed as parameter to avoid double-prepend on retry)
+        if context:
+            parts.append(f"\n\nUser context: {context}")
+
+        repo_path = instance.repo_path
+        if repo_path:
+            # Include CLAUDE.md from the repo if it exists
+            claude_md = Path(repo_path) / ".claude" / "CLAUDE.md"
+            if claude_md.exists():
+                try:
+                    content = claude_md.read_text(encoding="utf-8")
+                    parts.append(
+                        f"\n\n--- Repository Instructions (from .claude/CLAUDE.md) ---\n"
+                        f"{content}"
+                    )
+                except Exception:
+                    log.warning("Failed to read CLAUDE.md from %s", claude_md)
+
+            # Point Claude to the projects directory for plans/sessions
+            projects_dir = self._get_projects_dir(repo_path)
+            if projects_dir and projects_dir.exists():
+                parts.append(
+                    f"\n\nClaude Code session history and plans for this repo "
+                    f"are stored in: {projects_dir}"
+                )
+
+        return "".join(parts)
+
+    @staticmethod
+    def _get_projects_dir(repo_path: str) -> Path | None:
+        """Get the Claude projects directory for a repo path.
+
+        Claude Code stores session data in ~/.claude/projects/<sanitized-path>/
+        where the path has : and separators replaced with dashes.
+        """
+        try:
+            # Sanitize: replace : \ / with -
+            sanitized = repo_path.replace(":", "-").replace("\\", "-").replace("/", "-")
+            return config.CLAUDE_PROJECTS_DIR / sanitized
+        except Exception:
+            return None
 
     async def kill(self, instance_id: str) -> bool:
         """Terminate a running Claude process."""
@@ -271,30 +327,39 @@ class ClaudeRunner:
             return None
         return len(waiters)
 
-    async def _create_branch(self, instance: Instance) -> None:
-        """Create and checkout a git branch for build bg tasks."""
+    async def _ensure_branch(self, instance: Instance) -> None:
+        """Create or checkout a git branch for build tasks (idempotent)."""
         if not instance.repo_path:
             return
         try:
             # Get current branch name
             result = subprocess.run(
                 ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                cwd=instance.repo_path, capture_output=True, text=True
+                cwd=instance.repo_path, capture_output=True, text=True,
             )
-            instance.original_branch = result.stdout.strip()
+            current = result.stdout.strip()
 
-            branch_name = f"claude-bot/{instance.id}"
-            instance.branch = branch_name
+            # Already on the right branch
+            if current == instance.branch:
+                return
 
-            # Create and checkout branch
-            subprocess.run(
-                ["git", "checkout", "-b", branch_name],
-                cwd=instance.repo_path, capture_output=True, text=True, check=True
+            if not instance.original_branch:
+                instance.original_branch = current
+
+            # Try to create new branch; if it already exists, just checkout
+            create = subprocess.run(
+                ["git", "checkout", "-b", instance.branch],
+                cwd=instance.repo_path, capture_output=True, text=True,
             )
-            log.info("Created branch %s in %s", branch_name, instance.repo_path)
+            if create.returncode != 0:
+                subprocess.run(
+                    ["git", "checkout", instance.branch],
+                    cwd=instance.repo_path, capture_output=True, text=True, check=True,
+                )
+            log.info("On branch %s in %s", instance.branch, instance.repo_path)
         except subprocess.CalledProcessError as e:
-            log.error("Failed to create branch: %s", e.stderr)
-            raise RuntimeError(f"Failed to create branch: {e.stderr}")
+            log.error("Failed to ensure branch: %s", e.stderr)
+            raise RuntimeError(f"Failed to ensure branch: {e.stderr}")
 
     async def _save_diff(self, instance: Instance) -> None:
         """Save git diff for a build bg task."""

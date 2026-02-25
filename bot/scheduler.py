@@ -5,9 +5,9 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
-from bot.claude.types import InstanceType, Schedule
+from bot.claude.types import InstanceStatus, InstanceType, Schedule
 
 if TYPE_CHECKING:
     from bot.claude.runner import ClaudeRunner
@@ -23,7 +23,7 @@ class Scheduler:
         self,
         store: StateStore,
         runner: ClaudeRunner,
-        on_result: asyncio.coroutines | None = None,
+        on_result: Callable | None = None,
     ) -> None:
         self._store = store
         self._runner = runner
@@ -81,12 +81,11 @@ class Scheduler:
         instance.repo_name = sched.repo_name
         instance.repo_path = sched.repo_path
 
-        from bot.claude.types import InstanceStatus
         instance.status = InstanceStatus.RUNNING
         self._store.update_instance(instance)
 
-        # Run
-        result = await self._runner.run(instance)
+        # Run (pass pinned context so scheduled tasks also get it)
+        result = await self._runner.run(instance, context=self._store.context)
 
         # Update instance
         instance.session_id = result.session_id

@@ -35,6 +35,8 @@ class StateStore:
         self._context: str | None = None
         self._aliases: dict[str, str] = {}      # name -> prompt
         self._schedules: dict[str, Schedule] = {}
+        self._active_session_id: str | None = None  # Current conversation session
+        self._verbose_level: int = 1  # 0=silent, 1=normal, 2=detailed
 
         self._load()
 
@@ -60,6 +62,8 @@ class StateStore:
             self._mode = data.get("mode", "explore")
             self._context = data.get("context")
             self._aliases = data.get("aliases", {})
+            self._active_session_id = data.get("active_session_id")
+            self._verbose_level = data.get("verbose_level", 1)
             for d in data.get("schedules", []):
                 sched = Schedule.from_dict(d)
                 self._schedules[sched.id] = sched
@@ -83,6 +87,8 @@ class StateStore:
             "mode": self._mode,
             "context": self._context,
             "aliases": self._aliases,
+            "active_session_id": self._active_session_id,
+            "verbose_level": self._verbose_level,
             "schedules": [s.to_dict() for s in self._schedules.values()],
         }
         try:
@@ -310,6 +316,28 @@ class StateStore:
     @context.setter
     def context(self, value: str | None) -> None:
         self._context = value
+        self.save()
+
+    # --- Active Session ---
+
+    @property
+    def active_session_id(self) -> str | None:
+        return self._active_session_id
+
+    @active_session_id.setter
+    def active_session_id(self, value: str | None) -> None:
+        self._active_session_id = value
+        self.save()
+
+    # --- Verbose Level ---
+
+    @property
+    def verbose_level(self) -> int:
+        return self._verbose_level
+
+    @verbose_level.setter
+    def verbose_level(self, value: int) -> None:
+        self._verbose_level = max(0, min(2, value))
         self.save()
 
     # --- Aliases ---

@@ -7,9 +7,8 @@ import sys
 def main():
     from bot.app import run
 
-    if sys.platform == "win32":
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-
+    # Windows default is ProactorEventLoop which supports subprocesses.
+    # Do NOT set WindowsSelectorEventLoopPolicy — it breaks subprocess support.
     asyncio.run(run())
 
 

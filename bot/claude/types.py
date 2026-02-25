@@ -20,6 +20,16 @@ class InstanceStatus(str, Enum):
     KILLED = "killed"
 
 
+class InstanceOrigin(str, Enum):
+    DIRECT = "direct"           # User typed a message or command
+    PLAN = "plan"               # [Plan] button
+    BUILD = "build"             # [Build It] button
+    REVIEW_PLAN = "review_plan" # [Review Plan] button
+    REVIEW_CODE = "review_code" # [Review Code] button
+    COMMIT = "commit"           # [Commit] button
+    RETRY = "retry"             # [Retry] button
+
+
 @dataclass
 class Instance:
     id: str                                 # "t-001", "q-004"
@@ -45,6 +55,8 @@ class Instance:
     telegram_message_ids: list[int] = field(default_factory=list)
     pid: int | None = None
     schedule_id: str | None = None
+    origin: InstanceOrigin = InstanceOrigin.DIRECT
+    parent_id: str | None = None       # ID of instance whose button spawned this
 
     def display_id(self) -> str:
         if self.name:
@@ -76,6 +88,8 @@ class Instance:
             "telegram_message_ids": self.telegram_message_ids,
             "pid": self.pid,
             "schedule_id": self.schedule_id,
+            "origin": self.origin.value,
+            "parent_id": self.parent_id,
         }
 
     @classmethod
@@ -104,6 +118,8 @@ class Instance:
             telegram_message_ids=d.get("telegram_message_ids", []),
             pid=d.get("pid"),
             schedule_id=d.get("schedule_id"),
+            origin=InstanceOrigin(d["origin"]) if "origin" in d else InstanceOrigin.DIRECT,
+            parent_id=d.get("parent_id"),
         )
 
 

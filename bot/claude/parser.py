@@ -18,6 +18,7 @@ class ProgressEvent:
     turn: int = 0
     tool_name: str | None = None
     message: str = ""
+    detail: str = ""  # Verbose info (tool input snippet)
 
 
 def parse_stream_line(line: str) -> dict | None:
@@ -47,8 +48,13 @@ def extract_progress(event: dict) -> ProgressEvent | None:
         for block in content if isinstance(content, list) else []:
             if isinstance(block, dict) and block.get("type") == "tool_use":
                 tool = block.get("name", "thinking")
-                return ProgressEvent(turn=turn, tool_name=tool,
-                                     message=f"Turn {turn} — {_friendly_tool(tool)}")
+                tool_input = block.get("input", {})
+                detail = _tool_detail(tool, tool_input)
+                return ProgressEvent(
+                    turn=turn, tool_name=tool,
+                    message=f"Turn {turn} — {_friendly_tool(tool)}",
+                    detail=f"Turn {turn} — {detail}" if detail else "",
+                )
         if turn:
             return ProgressEvent(turn=turn, message=f"Turn {turn} — thinking...")
         return None
@@ -58,8 +64,13 @@ def extract_progress(event: dict) -> ProgressEvent | None:
         cb = event.get("content_block", {})
         if cb.get("type") == "tool_use":
             tool = cb.get("name", "")
-            return ProgressEvent(tool_name=tool,
-                                 message=f"Using {_friendly_tool(tool)}...")
+            tool_input = cb.get("input", {})
+            detail = _tool_detail(tool, tool_input)
+            return ProgressEvent(
+                tool_name=tool,
+                message=f"Using {_friendly_tool(tool)}...",
+                detail=f"{detail}..." if detail else "",
+            )
 
     # System message about turn
     if etype == "system" and "turn" in str(event):
@@ -186,3 +197,50 @@ def _friendly_tool(tool: str) -> str:
         "Task": "delegating task",
     }
     return mapping.get(tool, tool)
+
+
+def _tool_detail(tool: str, tool_input: dict) -> str:
+    """Extract verbose detail from tool input. Returns '' if no specific detail."""
+    if not isinstance(tool_input, dict) or not tool_input:
+        return ""
+    if tool == "Read":
+        path = tool_input.get("file_path", "")
+        return f"reading {_short_path(path)}" if path else ""
+    if tool == "Glob":
+        pattern = tool_input.get("pattern", "")
+        return f"glob {pattern}" if pattern else ""
+    if tool == "Grep":
+        pattern = tool_input.get("pattern", "")
+        path = tool_input.get("path", "")
+        if pattern and path:
+            return f"grep '{pattern[:30]}' in {_short_path(path)}"
+        return f"grep '{pattern[:30]}'" if pattern else ""
+    if tool == "Edit":
+        path = tool_input.get("file_path", "")
+        return f"editing {_short_path(path)}" if path else ""
+    if tool == "Write":
+        path = tool_input.get("file_path", "")
+        return f"writing {_short_path(path)}" if path else ""
+    if tool == "Bash":
+        cmd = tool_input.get("command", "")
+        return f"$ {cmd[:50]}" if cmd else ""
+    if tool == "WebSearch":
+        query = tool_input.get("query", "")
+        return f"searching '{query[:40]}'" if query else ""
+    if tool == "WebFetch":
+        url = tool_input.get("url", "")
+        return f"fetching {url[:50]}" if url else ""
+    if tool == "Task":
+        desc = tool_input.get("description", "")
+        return f"task: {desc[:40]}" if desc else ""
+    return ""
+
+
+def _short_path(path: str) -> str:
+    """Shorten a file path for progress display."""
+    if not path:
+        return ""
+    parts = path.replace("\\", "/").split("/")
+    if len(parts) <= 2:
+        return path
+    return "/".join(parts[-2:])
