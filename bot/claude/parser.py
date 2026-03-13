@@ -108,7 +108,12 @@ def extract_result(events: list[dict]) -> RunResult:
                 result.result_text = result_data.get("text", str(result_data))
 
             if result.is_error and not result.result_text:
-                result.error_message = event.get("error", "Unknown error")
+                # Check both "error" (str) and "errors" (list)
+                errors_list = event.get("errors", [])
+                if errors_list:
+                    result.error_message = "; ".join(str(e) for e in errors_list)
+                else:
+                    result.error_message = event.get("error", "Unknown error")
             break
 
     # Fallback: collect all text content from assistant messages

@@ -6,7 +6,6 @@ import asyncio
 import logging
 import os
 import subprocess
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -19,7 +18,7 @@ from bot.claude.parser import (
     is_transient_error,
     parse_stream_line,
 )
-from bot.claude.types import Instance, InstanceStatus
+from bot.claude.types import Instance, InstanceType
 
 log = logging.getLogger(__name__)
 
@@ -73,9 +72,9 @@ class ClaudeRunner:
         on_stall: StallCallback | None,
         context: str | None = None,
     ) -> RunResult:
-        timeout = (config.TASK_TIMEOUT_SECS
-                   if instance.instance_type.value == "task"
-                   else config.QUERY_TIMEOUT_SECS)
+        inactivity_timeout = (config.TASK_TIMEOUT_SECS
+                              if instance.instance_type == InstanceType.TASK
+                              else config.QUERY_TIMEOUT_SECS)
 
         # Git branch safety for build bg tasks
         if instance.branch:
@@ -101,10 +100,18 @@ class ClaudeRunner:
             instance.pid = proc.pid
             self._processes[instance.id] = proc
 
-            result = await asyncio.wait_for(
-                self._stream_output(proc, instance, on_progress, on_stall),
-                timeout=timeout,
+            # Activity-based timeout: only times out if no output for
+            # inactivity_timeout seconds (not wall-clock total runtime)
+            result = await self._stream_output(
+                proc, instance, on_progress, on_stall, inactivity_timeout,
             )
+
+            # Dead session: clear session_id and retry without --resume
+            error_text = result.error_message or result.result_text or ""
+            if result.is_error and "No conversation found" in error_text and instance.session_id:
+                log.warning("Session %s not found for %s, retrying without resume", instance.session_id, instance.id)
+                instance.session_id = None
+                return await self._run_impl(instance, on_progress, on_stall, context)
 
             # Auto-retry on transient errors
             if result.is_error and is_transient_error(
@@ -117,13 +124,6 @@ class ClaudeRunner:
 
             return result
 
-        except asyncio.TimeoutError:
-            log.warning("Timeout for %s after %ds", instance.id, timeout)
-            await self.kill(instance.id)
-            return RunResult(
-                is_error=True,
-                error_message=f"Timed out after {timeout}s",
-            )
         except Exception as e:
             log.exception("Error running %s", instance.id)
             return RunResult(is_error=True, error_message=str(e))
@@ -136,18 +136,38 @@ class ClaudeRunner:
         instance: Instance,
         on_progress: ProgressCallback | None,
         on_stall: StallCallback | None,
+        inactivity_timeout: int = 300,
     ) -> RunResult:
-        """Read stdout line-by-line, parse stream-json, detect stalls."""
+        """Read stdout line-by-line, parse stream-json, detect stalls.
+
+        Uses an activity-based timeout: the process is only killed if no
+        output is received for ``inactivity_timeout`` seconds.  This lets
+        long-running but actively-streaming sessions continue indefinitely.
+        """
         events: list[dict] = []
+        captured_session_id: str | None = None
         last_output_time = asyncio.get_event_loop().time()
         stall_warned = False
+        timed_out = False
         stall_check_task: asyncio.Task | None = None
 
         async def check_stall():
-            nonlocal stall_warned
+            nonlocal stall_warned, timed_out
             while True:
                 await asyncio.sleep(10)
                 elapsed = asyncio.get_event_loop().time() - last_output_time
+
+                # Hard inactivity timeout — kill the process
+                if elapsed > inactivity_timeout:
+                    timed_out = True
+                    log.warning(
+                        "Inactivity timeout for %s — no output for %ds",
+                        instance.id, inactivity_timeout,
+                    )
+                    proc.terminate()
+                    return
+
+                # Early stall warning
                 if elapsed > config.STALL_TIMEOUT_SECS and not stall_warned:
                     stall_warned = True
                     if on_stall:
@@ -180,6 +200,9 @@ class ClaudeRunner:
                 event = parse_stream_line(decoded)
                 if event:
                     events.append(event)
+                    # Eagerly capture session_id so it survives a timeout kill
+                    if not captured_session_id and event.get("session_id"):
+                        captured_session_id = event["session_id"]
                     if on_progress:
                         progress = extract_progress(event)
                         if progress and progress.message:
@@ -197,6 +220,13 @@ class ClaudeRunner:
 
         await proc.wait()
 
+        if timed_out:
+            return RunResult(
+                session_id=captured_session_id,
+                is_error=True,
+                error_message=f"No output for {inactivity_timeout}s — timed out",
+            )
+
         # Capture stderr for error info
         stderr_text = ""
         if proc.stderr:
@@ -209,6 +239,18 @@ class ClaudeRunner:
             result.is_error = True
             if not result.error_message:
                 result.error_message = stderr_text or f"Exit code {proc.returncode}"
+
+        if result.is_error:
+            # Log raw events for debugging
+            import json as _json
+            event_dump = _json.dumps(events[-5:], default=str)[:1000] if events else "no events"
+            log.warning(
+                "CLI error for %s (exit=%s): %s | stderr: %s | last events: %s",
+                instance.id, proc.returncode,
+                result.error_message or result.result_text or "no message",
+                stderr_text[:500] if stderr_text else "empty",
+                event_dump,
+            )
 
         # Save result file
         if result.result_text:
@@ -244,11 +286,8 @@ class ClaudeRunner:
         if instance.session_id:
             cmd.extend(["--resume", instance.session_id])
 
-        # Permission mode
-        if instance.mode == "build":
-            cmd.extend(["--permission-mode", "bypassPermissions"])
-        else:
-            cmd.extend(["--allowedTools", config.EXPLORE_TOOLS])
+        # Always use full permissions (single-user bot on subscription)
+        cmd.extend(["--permission-mode", "bypassPermissions"])
 
         return cmd
 
@@ -331,22 +370,19 @@ class ClaudeRunner:
         """Create or checkout a git branch for build tasks (idempotent)."""
         if not instance.repo_path:
             return
+        await asyncio.to_thread(self._ensure_branch_sync, instance)
+
+    def _ensure_branch_sync(self, instance: Instance) -> None:
         try:
-            # Get current branch name
             result = subprocess.run(
                 ["git", "rev-parse", "--abbrev-ref", "HEAD"],
                 cwd=instance.repo_path, capture_output=True, text=True,
             )
             current = result.stdout.strip()
-
-            # Already on the right branch
             if current == instance.branch:
                 return
-
             if not instance.original_branch:
                 instance.original_branch = current
-
-            # Try to create new branch; if it already exists, just checkout
             create = subprocess.run(
                 ["git", "checkout", "-b", instance.branch],
                 cwd=instance.repo_path, capture_output=True, text=True,
@@ -365,6 +401,9 @@ class ClaudeRunner:
         """Save git diff for a build bg task."""
         if not instance.repo_path or not instance.branch:
             return
+        await asyncio.to_thread(self._save_diff_sync, instance)
+
+    def _save_diff_sync(self, instance: Instance) -> None:
         try:
             base = instance.original_branch or "HEAD~1"
             result = subprocess.run(
@@ -382,20 +421,20 @@ class ClaudeRunner:
         """Merge task branch into original branch. Returns status message."""
         if not instance.branch or not instance.original_branch:
             return "No branch to merge"
+        return await asyncio.to_thread(self._merge_branch_sync, instance)
+
+    def _merge_branch_sync(self, instance: Instance) -> str:
         try:
             repo = instance.repo_path
-            # Checkout original branch
             subprocess.run(
                 ["git", "checkout", instance.original_branch],
                 cwd=repo, capture_output=True, text=True, check=True
             )
-            # Merge task branch
-            result = subprocess.run(
+            subprocess.run(
                 ["git", "merge", instance.branch, "--no-ff",
                  "-m", f"Merge {instance.branch} ({instance.display_id()})"],
                 cwd=repo, capture_output=True, text=True, check=True
             )
-            # Delete task branch
             subprocess.run(
                 ["git", "branch", "-d", instance.branch],
                 cwd=repo, capture_output=True, text=True
@@ -409,14 +448,15 @@ class ClaudeRunner:
         """Delete task branch without merging."""
         if not instance.branch or not instance.original_branch:
             return "No branch to discard"
+        return await asyncio.to_thread(self._discard_branch_sync, instance)
+
+    def _discard_branch_sync(self, instance: Instance) -> str:
         try:
             repo = instance.repo_path
-            # Checkout original branch first
             subprocess.run(
                 ["git", "checkout", instance.original_branch],
                 cwd=repo, capture_output=True, text=True, check=True
             )
-            # Force-delete task branch
             subprocess.run(
                 ["git", "branch", "-D", instance.branch],
                 cwd=repo, capture_output=True, text=True, check=True

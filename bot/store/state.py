@@ -37,6 +37,8 @@ class StateStore:
         self._schedules: dict[str, Schedule] = {}
         self._active_session_id: str | None = None  # Current conversation session
         self._verbose_level: int = 1  # 0=silent, 1=normal, 2=detailed
+        self._platform_state: dict[str, dict] = {}  # platform -> arbitrary state
+        self._dirty: bool = False  # Dirty flag — mark_dirty() defers save to auto-save loop
 
         self._load()
 
@@ -64,6 +66,7 @@ class StateStore:
             self._aliases = data.get("aliases", {})
             self._active_session_id = data.get("active_session_id")
             self._verbose_level = data.get("verbose_level", 1)
+            self._platform_state = data.get("platform_state", {})
             for d in data.get("schedules", []):
                 sched = Schedule.from_dict(d)
                 self._schedules[sched.id] = sched
@@ -72,8 +75,18 @@ class StateStore:
         except Exception:
             log.exception("Failed to load state file, starting fresh")
 
+    def mark_dirty(self) -> None:
+        """Mark state as changed — actual write deferred to auto-save loop."""
+        self._dirty = True
+
+    def save_if_dirty(self) -> None:
+        """Write to disk only if state has changed since last save."""
+        if self._dirty:
+            self.save()
+
     def save(self) -> None:
         """Atomic save: write to temp then rename."""
+        self._dirty = False
         data = {
             "instances": [i.to_dict() for i in self._instances.values()],
             "repos": self._repos,
@@ -89,6 +102,7 @@ class StateStore:
             "aliases": self._aliases,
             "active_session_id": self._active_session_id,
             "verbose_level": self._verbose_level,
+            "platform_state": self._platform_state,
             "schedules": [s.to_dict() for s in self._schedules.values()],
         }
         try:
@@ -158,7 +172,7 @@ class StateStore:
 
     def update_instance(self, inst: Instance) -> None:
         self._instances[inst.id] = inst
-        self.save()
+        self.mark_dirty()
 
     def find_by_name(self, name: str) -> Instance | None:
         name_lower = name.lower()
@@ -167,11 +181,16 @@ class StateStore:
                 return inst
         return None
 
-    def find_by_telegram_message(self, message_id: int) -> Instance | None:
+    def find_by_message(self, platform: str, message_id: str) -> Instance | None:
+        """Find instance by platform message ID."""
         for inst in self._instances.values():
-            if message_id in inst.telegram_message_ids:
+            if message_id in inst.message_ids.get(platform, []):
                 return inst
         return None
+
+    # Backward compat alias
+    def find_by_telegram_message(self, message_id: int) -> Instance | None:
+        return self.find_by_message("telegram", str(message_id))
 
     def list_instances(self, all_: bool = False) -> list[Instance]:
         """Return instances, most recent first. Default: last 24h only."""
@@ -190,6 +209,10 @@ class StateStore:
                     result.append(inst)
         result.sort(key=lambda i: i.created_at, reverse=True)
         return result
+
+    def instance_count(self) -> int:
+        """Total number of instances (all time)."""
+        return len(self._instances)
 
     def mark_orphans(self) -> int:
         """Mark running/queued instances as failed (for startup recovery)."""
@@ -339,6 +362,16 @@ class StateStore:
     def verbose_level(self, value: int) -> None:
         self._verbose_level = max(0, min(2, value))
         self.save()
+
+    # --- Platform State ---
+
+    def get_platform_state(self, platform: str) -> dict:
+        return self._platform_state.get(platform, {})
+
+    def set_platform_state(self, platform: str, data: dict, *, persist: bool = True) -> None:
+        self._platform_state[platform] = data
+        if persist:
+            self.save()
 
     # --- Aliases ---
 

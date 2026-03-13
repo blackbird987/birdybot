@@ -1,34 +1,25 @@
-"""Bootstrap, wiring, signal handlers, self-test, daily digest."""
+"""Multi-platform orchestrator — starts Telegram and/or Discord bots with shared state."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 import sys
 import time
 from logging.handlers import RotatingFileHandler
 
-from telegram.error import Conflict
-from telegram.ext import (
-    Application,
-    CallbackQueryHandler,
-    CommandHandler,
-    MessageHandler,
-    filters,
-)
-
 from bot import config
 from bot.claude.runner import ClaudeRunner
+from bot.claude.types import InstanceStatus
+from bot.engine import commands as engine_commands
+from bot.platform.base import NotificationService
+from bot.platform.formatting import format_digest_md, redact_secrets
 from bot.scheduler import Scheduler
 from bot.store.state import StateStore
-from bot.telegram.callbacks import CallbackHandler
-from bot.telegram.formatter import escape_html, format_digest, redact_secrets
-from bot.telegram.handlers import Handlers
 
 log = logging.getLogger(__name__)
-
-PARSE_MODE = "HTML"
 
 
 def setup_logging() -> None:
@@ -41,42 +32,95 @@ def setup_logging() -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    # File handler
     fh = RotatingFileHandler(
         str(config.LOG_FILE),
-        maxBytes=10 * 1024 * 1024,  # 10 MB
+        maxBytes=10 * 1024 * 1024,
         backupCount=3,
         encoding="utf-8",
     )
     fh.setFormatter(fmt)
     root.addHandler(fh)
 
-    # Console handler
-    ch = logging.StreamHandler(sys.stdout)
-    ch.setFormatter(fmt)
-    root.addHandler(ch)
+    # Console handler (skip if running headless via pythonw)
+    if sys.stdout is not None:
+        # Force UTF-8 on Windows console to avoid cp1252 encoding errors
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        ch = logging.StreamHandler(sys.stdout)
+        ch.setFormatter(fmt)
+        root.addHandler(ch)
 
-    # Quiet noisy libraries
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("telegram").setLevel(logging.WARNING)
+    logging.getLogger("discord").setLevel(logging.WARNING)
+
+
+def _is_process_alive(pid: int) -> bool:
+    """Check if a process with the given PID is still running (cross-platform)."""
+    if sys.platform == "win32":
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if handle:
+            kernel32.CloseHandle(handle)
+            return True
+        return False
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+
+
+def _acquire_pid_lock() -> bool:
+    """Write PID file, refusing to start if another instance is alive."""
+    pid_file = config.DATA_DIR / "bot.pid"
+    if pid_file.exists():
+        try:
+            old_pid = int(pid_file.read_text().strip())
+            if old_pid != os.getpid() and _is_process_alive(old_pid):
+                log.error("Another bot instance is running (PID %d). Exiting.", old_pid)
+                return False
+            else:
+                log.info("Stale PID file (PID %d no longer running), taking over", old_pid)
+        except (ValueError, OSError):
+            pass  # Corrupt PID file, overwrite it
+
+    pid_file.write_text(str(os.getpid()), encoding="utf-8")
+    return True
+
+
+def _release_pid_lock() -> None:
+    """Remove PID file on clean shutdown."""
+    pid_file = config.DATA_DIR / "bot.pid"
+    try:
+        if pid_file.exists() and pid_file.read_text().strip() == str(os.getpid()):
+            pid_file.unlink()
+    except OSError:
+        pass
 
 
 async def run() -> None:
     """Main async entry point."""
     setup_logging()
-    log.info("Starting Claude Telegram Bot...")
+    log.info("Starting Claude Bot...")
+
+    if not _acquire_pid_lock():
+        return
 
     start_time = time.time()
+    stop_event = asyncio.Event()
 
-    # Initialize store
+    # Initialize shared store
     store = StateStore(
         state_file=config.STATE_FILE,
         results_dir=config.RESULTS_DIR,
         retention_days=config.INSTANCE_RETENTION_DAYS,
     )
 
-    # Startup recovery
     orphan_count = store.mark_orphans()
     if orphan_count:
         log.warning("Marked %d orphaned instances as failed", orphan_count)
@@ -85,10 +129,9 @@ async def run() -> None:
     if archive_count:
         log.info("Archived %d old instances", archive_count)
 
-    # Initialize runner
+    # Initialize shared runner
     runner = ClaudeRunner()
 
-    # Self-test Claude CLI
     try:
         cli_version = await runner.check_cli()
         log.info("Claude CLI version: %s", cli_version)
@@ -96,111 +139,38 @@ async def run() -> None:
         log.error("Claude CLI self-test failed: %s", e)
         cli_version = f"FAILED: {e}"
 
-    # Initialize handlers
-    handlers = Handlers(store, runner, cli_version, start_time,
-                        shutdown_fn=lambda: stop_event.set())
-    cb_handler = CallbackHandler(store, runner)
-    cb_handler.set_handlers_ref(handlers)
+    # Initialize engine module state
+    engine_commands.init(start_time, cli_version, shutdown_fn=lambda: stop_event.set())
+
+    # Notification service
+    notifier = NotificationService()
 
     # Schedule result callback
     async def on_schedule_result(instance, result, changed):
-        """Send notification for scheduled task results."""
-        if instance.status.value == "failed":
-            try:
-                await app.bot.send_message(
-                    chat_id=config.TELEGRAM_USER_ID,
-                    text=f"⚠️ <b>Scheduled task failed</b>\n"
-                         f"{escape_html(instance.display_id())}: "
-                         f"{escape_html(redact_secrets(instance.error or 'Unknown error'))}",
-                    parse_mode=PARSE_MODE,
-                )
-            except Exception:
-                try:
-                    await app.bot.send_message(
-                        chat_id=config.TELEGRAM_USER_ID,
-                        text=f"Scheduled task failed: {instance.display_id()}: {instance.error}",
-                    )
-                except Exception:
-                    log.exception("Failed to send schedule failure notification")
+        if instance.status == InstanceStatus.FAILED:
+            escaped = redact_secrets(instance.error or 'Unknown error')
+            await notifier.broadcast(
+                f"⚠️ **Scheduled task failed**\n{instance.display_id()}: {escaped}",
+            )
         elif changed:
-            try:
-                await app.bot.send_message(
-                    chat_id=config.TELEGRAM_USER_ID,
-                    text=f"📋 {escape_html(instance.display_id())} (scheduled)\n"
-                         f"{escape_html(redact_secrets(instance.summary or 'No summary'))}",
-                    parse_mode=PARSE_MODE,
-                    disable_notification=True,
-                )
-            except Exception:
-                try:
-                    await app.bot.send_message(
-                        chat_id=config.TELEGRAM_USER_ID,
-                        text=f"Scheduled: {instance.display_id()}: {instance.summary}",
-                        disable_notification=True,
-                    )
-                except Exception:
-                    log.exception("Failed to send schedule result notification")
+            escaped = redact_secrets(instance.summary or 'No summary')
+            await notifier.broadcast(
+                f"📋 {instance.display_id()} (scheduled)\n{escaped}",
+                silent=True,
+            )
 
-    # Initialize scheduler
     scheduler = Scheduler(store, runner, on_result=on_schedule_result)
     scheduler.recalculate_next_runs()
 
-    # Build Telegram application
-    app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
-
-    # Register command handlers
-    app.add_handler(CommandHandler("start", handlers.on_help))
-    app.add_handler(CommandHandler("help", handlers.on_help))
-    app.add_handler(CommandHandler("new", handlers.on_new))
-    app.add_handler(CommandHandler("bg", handlers.on_bg))
-    app.add_handler(CommandHandler("list", handlers.on_list))
-    app.add_handler(CommandHandler("kill", handlers.on_kill))
-    app.add_handler(CommandHandler("retry", handlers.on_retry))
-    app.add_handler(CommandHandler("log", handlers.on_log))
-    app.add_handler(CommandHandler("diff", handlers.on_diff))
-    app.add_handler(CommandHandler("merge", handlers.on_merge))
-    app.add_handler(CommandHandler("discard", handlers.on_discard))
-    app.add_handler(CommandHandler("cost", handlers.on_cost))
-    app.add_handler(CommandHandler("status", handlers.on_status))
-    app.add_handler(CommandHandler("logs", handlers.on_logs))
-    app.add_handler(CommandHandler("mode", handlers.on_mode))
-    app.add_handler(CommandHandler("context", handlers.on_context))
-    app.add_handler(CommandHandler("alias", handlers.on_alias))
-    app.add_handler(CommandHandler("schedule", handlers.on_schedule))
-    app.add_handler(CommandHandler("repo", handlers.on_repo))
-    app.add_handler(CommandHandler("budget", handlers.on_budget))
-    app.add_handler(CommandHandler("clear", handlers.on_clear))
-    app.add_handler(CommandHandler("verbose", handlers.on_verbose))
-    app.add_handler(CommandHandler("session", handlers.on_session))
-    app.add_handler(CommandHandler("shutdown", handlers.on_shutdown))
-
-    # Callback query handler (inline buttons)
-    app.add_handler(CallbackQueryHandler(cb_handler.handle))
-
-    # Photo handler
-    app.add_handler(MessageHandler(filters.PHOTO, handlers.on_photo))
-
-    # Document handler
-    app.add_handler(MessageHandler(filters.Document.ALL, handlers.on_document))
-
-    # Unknown command handler (catches /alias_name and other unknown commands)
-    app.add_handler(MessageHandler(filters.COMMAND, handlers.on_unknown_command))
-
-    # Text handler (must be last — catches non-command text)
-    app.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND, handlers.on_text
-    ))
-
-    # Auto-save task
+    # Background tasks
     async def auto_save_loop():
         while True:
             await asyncio.sleep(60)
             try:
-                store.save()
+                store.save_if_dirty()
             except Exception:
                 log.exception("Auto-save failed")
 
-    # Daily digest task
     async def daily_digest_loop():
         import datetime as dt
         while True:
@@ -212,61 +182,175 @@ async def run() -> None:
                 target += dt.timedelta(days=1)
             wait_secs = (target - now).total_seconds()
             await asyncio.sleep(wait_secs)
-
             try:
                 repo_name, _ = store.get_active_repo()
-                text = format_digest(
+                text = format_digest_md(
                     instance_count=store.instance_count_today(),
                     daily_cost=store.get_daily_cost(),
                     failures=store.failure_count_today(),
                     repo_name=repo_name,
                     mode=store.mode,
                 )
-                await app.bot.send_message(
-                    chat_id=config.TELEGRAM_USER_ID,
-                    text=text,
-                    parse_mode=PARSE_MODE,
-                    disable_notification=True,
-                )
+                await notifier.broadcast(text, silent=True)
             except Exception:
                 log.exception("Failed to send daily digest")
 
-    # Start background tasks
-    async def post_init(application: Application) -> None:
-        asyncio.create_task(auto_save_loop())
-        asyncio.create_task(daily_digest_loop())
-        scheduler.start()
+    # Signal handling
+    def signal_handler(sig, frame):
+        log.info("Received signal %s, shutting down...", sig)
+        stop_event.set()
 
-        # Send startup notification
-        cli_status = f"✅ {cli_version}" if "FAILED" not in cli_version else f"❌ {cli_version}"
-        repo_name, repo_path = store.get_active_repo()
-        repo_info = f"\nRepo: {repo_name} ({repo_path})" if repo_name else "\nNo repo set"
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    # Start platform tasks
+    platform_tasks = []
+
+    # --- Telegram ---
+    telegram_app = None
+    if config.TELEGRAM_ENABLED:
         try:
-            await application.bot.send_message(
-                chat_id=config.TELEGRAM_USER_ID,
-                text=(
-                    f"🤖 <b>Bot started</b> ({escape_html(config.PC_NAME)})\n"
-                    f"CLI: {escape_html(cli_status)}\n"
-                    f"Mode: <code>{store.mode}</code>"
-                    f"{escape_html(repo_info)}\n"
-                    f"Schedules: {len(store.list_schedules())}"
-                ),
-                parse_mode=PARSE_MODE,
-            )
+            telegram_app = await _start_telegram(store, runner, notifier, stop_event, cli_version)
+            platform_tasks.append(("telegram", telegram_app))
+            log.info("Telegram platform started")
         except Exception:
-            log.exception("Failed to send startup notification")
+            log.exception("Failed to start Telegram platform")
 
-    async def post_shutdown(application: Application) -> None:
-        scheduler.stop()
-        store.save()
-        log.info("Shutdown complete")
+    # --- Discord ---
+    discord_bot = None
+    if config.DISCORD_ENABLED:
+        try:
+            discord_bot = await _start_discord(store, runner, notifier, stop_event)
+            platform_tasks.append(("discord", discord_bot))
+            log.info("Discord platform started")
+        except Exception:
+            log.exception("Failed to start Discord platform")
 
-    app.post_init = post_init
-    app.post_shutdown = post_shutdown
+    if not platform_tasks:
+        log.error("No platforms started successfully!")
+        return
 
-    # Graceful conflict detection — another bot instance took over polling
-    stop_event = asyncio.Event()
+    # Start background tasks (store refs to prevent GC)
+    _bg_tasks = [
+        asyncio.create_task(auto_save_loop()),
+        asyncio.create_task(daily_digest_loop()),
+    ]
+    scheduler.start()
 
+    log.info(
+        "Bot ready — PC: %s, CLI: %s, platforms: %s",
+        config.PC_NAME, cli_version,
+        ", ".join(name for name, _ in platform_tasks),
+    )
+
+    # Send reboot announcement if one was saved before shutdown
+    await _send_reboot_announcement(notifier)
+
+    # Wait for shutdown
+    await stop_event.wait()
+
+    # Graceful shutdown
+    log.info("Shutting down...")
+    scheduler.stop()
+    store.save()
+
+    if telegram_app:
+        try:
+            await telegram_app.updater.stop()
+            await telegram_app.stop()
+            await telegram_app.shutdown()
+        except Exception:
+            log.exception("Error shutting down Telegram")
+
+    if discord_bot:
+        try:
+            await discord_bot.close()
+        except Exception:
+            log.exception("Error shutting down Discord")
+
+    _release_pid_lock()
+    log.info("Shutdown complete")
+
+
+async def _send_reboot_announcement(notifier: NotificationService) -> None:
+    """If a reboot_message.json was left by a previous process, broadcast it."""
+    import json
+    try:
+        if not config.REBOOT_MSG_FILE.exists():
+            return
+        data = json.loads(config.REBOOT_MSG_FILE.read_text(encoding="utf-8"))
+        config.REBOOT_MSG_FILE.unlink()
+        text = data.get("text", f"✅ {config.PC_NAME} back online.")
+        await notifier.broadcast(text)
+        log.info("Sent reboot announcement: %s", text)
+    except Exception:
+        log.warning("Failed to send reboot announcement", exc_info=True)
+
+
+async def _start_telegram(store, runner, notifier, stop_event, cli_version):
+    """Start the Telegram platform."""
+    from telegram.error import Conflict
+    from telegram.ext import (
+        Application,
+        CallbackQueryHandler,
+        CommandHandler,
+        MessageHandler,
+        filters,
+    )
+
+    from bot.telegram.adapter import TelegramMessenger
+    from bot.telegram.bridge import TelegramBridge
+
+    app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
+
+    # Create messenger and bridge
+    messenger = TelegramMessenger(app.bot, config.TELEGRAM_USER_ID)
+    bridge = TelegramBridge(messenger, store, runner)
+
+    # Register with notifier
+    notifier.register(messenger, str(config.TELEGRAM_USER_ID))
+
+    # Register command handlers
+    app.add_handler(CommandHandler("start", bridge.on_help))
+    app.add_handler(CommandHandler("help", bridge.on_help))
+    app.add_handler(CommandHandler("new", bridge.on_new))
+    app.add_handler(CommandHandler("bg", bridge.on_bg))
+    app.add_handler(CommandHandler("list", bridge.on_list))
+    app.add_handler(CommandHandler("kill", bridge.on_kill))
+    app.add_handler(CommandHandler("retry", bridge.on_retry))
+    app.add_handler(CommandHandler("log", bridge.on_log))
+    app.add_handler(CommandHandler("diff", bridge.on_diff))
+    app.add_handler(CommandHandler("merge", bridge.on_merge))
+    app.add_handler(CommandHandler("discard", bridge.on_discard))
+    app.add_handler(CommandHandler("cost", bridge.on_cost))
+    app.add_handler(CommandHandler("status", bridge.on_status))
+    app.add_handler(CommandHandler("logs", bridge.on_logs))
+    app.add_handler(CommandHandler("mode", bridge.on_mode))
+    app.add_handler(CommandHandler("context", bridge.on_context))
+    app.add_handler(CommandHandler("alias", bridge.on_alias))
+    app.add_handler(CommandHandler("schedule", bridge.on_schedule))
+    app.add_handler(CommandHandler("repo", bridge.on_repo))
+    app.add_handler(CommandHandler("budget", bridge.on_budget))
+    app.add_handler(CommandHandler("clear", bridge.on_clear))
+    app.add_handler(CommandHandler("verbose", bridge.on_verbose))
+    app.add_handler(CommandHandler("session", bridge.on_session))
+    app.add_handler(CommandHandler("shutdown", bridge.on_shutdown))
+    app.add_handler(CommandHandler("reboot", bridge.on_reboot))
+
+    # Callback query handler
+    app.add_handler(CallbackQueryHandler(bridge.on_callback_query))
+
+    # Photo/document handlers
+    app.add_handler(MessageHandler(filters.PHOTO, bridge.on_photo))
+    app.add_handler(MessageHandler(filters.Document.ALL, bridge.on_document))
+
+    # Unknown command handler
+    app.add_handler(MessageHandler(filters.COMMAND, bridge.on_unknown_command))
+
+    # Text handler (last)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bridge.on_text))
+
+    # Error handler
     async def on_error(update, context):
         if isinstance(context.error, Conflict):
             log.warning("Another bot instance is polling — %s shutting down", config.PC_NAME)
@@ -280,28 +364,52 @@ async def run() -> None:
                 pass
             stop_event.set()
             return
-        log.exception("Unhandled error", exc_info=context.error)
+        log.exception("Unhandled Telegram error", exc_info=context.error)
 
     app.add_error_handler(on_error)
 
-    # Run polling
-    log.info("Starting Telegram polling...")
+    # Start polling
     await app.initialize()
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
 
-    # Wait for shutdown signal
-    def signal_handler(sig, frame):
-        log.info("Received signal %s, shutting down...", sig)
-        stop_event.set()
+    return app
 
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
 
-    await stop_event.wait()
+async def _start_discord(store, runner, notifier, stop_event):
+    """Start the Discord platform."""
+    from bot.discord.bot import ClaudeBot
 
-    # Graceful shutdown
-    log.info("Shutting down...")
-    await app.updater.stop()
-    await app.stop()
-    await app.shutdown()
+    bot = ClaudeBot(
+        store=store,
+        runner=runner,
+        guild_id=config.DISCORD_GUILD_ID,
+        lobby_channel_id=config.DISCORD_LOBBY_CHANNEL_ID,
+        category_id=config.DISCORD_CATEGORY_ID,
+        category_name=config.DISCORD_CATEGORY_NAME,
+        discord_user_id=config.DISCORD_USER_ID,
+    )
+
+    # Start in background task (discord.py's start() blocks)
+    async def _run_discord():
+        try:
+            await bot.start(config.DISCORD_BOT_TOKEN)
+        except Exception:
+            log.exception("Discord bot crashed")
+
+    asyncio.create_task(_run_discord())
+
+    # Wait for on_ready to finish (auto-provisions category/lobby)
+    try:
+        await asyncio.wait_for(bot._ready_event.wait(), timeout=15)
+    except asyncio.TimeoutError:
+        log.warning("Discord bot timed out waiting for ready")
+
+    # Register with notifier (lobby_channel_id may have been set in on_ready)
+    if bot._lobby_channel_id:
+        notifier.register(bot.messenger, str(bot._lobby_channel_id))
+
+    # Give bot access to notifier for monitor alerts
+    bot._notifier = notifier
+
+    return bot

@@ -12,16 +12,36 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(_PROJECT_ROOT / ".env")
 
 
-def _require(key: str) -> str:
-    val = os.getenv(key)
-    if not val:
-        raise RuntimeError(f"Missing required env var: {key}")
-    return val
+# --- Telegram (optional — at least one platform must be configured) ---
+TELEGRAM_BOT_TOKEN: str | None = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_USER_ID: int | None = (
+    int(os.getenv("TELEGRAM_USER_ID")) if os.getenv("TELEGRAM_USER_ID") else None
+)
+TELEGRAM_ENABLED: bool = bool(TELEGRAM_BOT_TOKEN and TELEGRAM_USER_ID)
 
+# --- Discord (optional) ---
+DISCORD_BOT_TOKEN: str | None = os.getenv("DISCORD_BOT_TOKEN")
+DISCORD_GUILD_ID: int | None = (
+    int(os.getenv("DISCORD_GUILD_ID")) if os.getenv("DISCORD_GUILD_ID") else None
+)
+DISCORD_LOBBY_CHANNEL_ID: int | None = (
+    int(os.getenv("DISCORD_LOBBY_CHANNEL_ID")) if os.getenv("DISCORD_LOBBY_CHANNEL_ID") else None
+)
+DISCORD_CATEGORY_ID: int | None = (
+    int(os.getenv("DISCORD_CATEGORY_ID")) if os.getenv("DISCORD_CATEGORY_ID") else None
+)
+DISCORD_USER_ID: int | None = (
+    int(os.getenv("DISCORD_USER_ID")) if os.getenv("DISCORD_USER_ID") else None
+)
+DISCORD_CATEGORY_NAME: str | None = os.getenv("DISCORD_CATEGORY_NAME")
+DISCORD_ENABLED: bool = bool(DISCORD_BOT_TOKEN and DISCORD_GUILD_ID)
 
-# Required
-TELEGRAM_BOT_TOKEN: str = _require("TELEGRAM_BOT_TOKEN")
-TELEGRAM_USER_ID: int = int(_require("TELEGRAM_USER_ID"))
+# Validate: at least one platform
+if not TELEGRAM_ENABLED and not DISCORD_ENABLED:
+    raise RuntimeError(
+        "No platform configured. Set TELEGRAM_BOT_TOKEN + TELEGRAM_USER_ID "
+        "and/or DISCORD_BOT_TOKEN + DISCORD_GUILD_ID + DISCORD_LOBBY_CHANNEL_ID."
+    )
 
 # Optional with defaults
 CLAUDE_BINARY: str = os.getenv("CLAUDE_BINARY", "claude")
@@ -43,6 +63,7 @@ STATE_FILE: Path = DATA_DIR / "state.json"
 LOG_FILE: Path = LOGS_DIR / "bot.log"
 
 # Ensure data dirs exist
+REBOOT_MSG_FILE: Path = DATA_DIR / "reboot_message.json"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -55,8 +76,8 @@ MOBILE_HINT = (
 
 BOT_CONTEXT = """
 
---- Telegram Bot Context ---
-You are running inside a Telegram bot that manages Claude Code instances. The user is chatting from their phone. You can do normal Claude Code work (read files, search code, run commands, etc.) but the bot also has these capabilities the user can invoke directly in Telegram:
+--- Bot Context ---
+You are running inside a bot that manages Claude Code instances. The user is chatting from their phone. You can do normal Claude Code work (read files, search code, run commands, etc.) but the bot also has these capabilities the user can invoke directly:
 
 Scheduling:
 - /schedule every <interval> <prompt> — recurring task (e.g. "every 6h", "every 30m", "every 1d")
@@ -93,7 +114,7 @@ If the user asks to do something the bot handles (like scheduling, switching rep
 CLAUDE_PROJECTS_DIR: Path = Path.home() / ".claude" / "projects"
 
 # Explore mode allowed tools
-EXPLORE_TOOLS = "Read,Glob,Grep,WebSearch,WebFetch,Task,Bash(git *)"
+EXPLORE_TOOLS = "Read,Glob,Grep,WebSearch,WebFetch,Task,Skill,Bash(git *)"
 
 # --- Canned prompts for contextual action buttons ---
 
