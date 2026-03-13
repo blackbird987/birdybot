@@ -1,9 +1,10 @@
-"""Thread/channel management for Discord sessions."""
+"""Thread/channel/forum management for Discord sessions."""
 
 from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 import discord
@@ -116,6 +117,99 @@ def build_channel_name(topic: str, repo_name: str | None = None) -> str:
         max_topic_len = max(0, 70 - len(prefix) - 1)  # 1 for │ separator
         return f"{prefix}│{topic_part[:max_topic_len]}" if max_topic_len else prefix
     return sanitize_channel_name(topic)
+
+
+# --- Forum Channel Helpers ---
+
+
+async def ensure_forum(
+    guild: discord.Guild,
+    category: discord.CategoryChannel,
+    name: str,
+    auto_archive: int = 4320,
+) -> discord.ForumChannel:
+    """Find or create a ForumChannel under the category (inherits private perms).
+
+    Args:
+        auto_archive: Default auto-archive duration in minutes (4320 = 3 days).
+    """
+    sanitized = sanitize_channel_name(name)
+
+    # Check if forum already exists in category
+    for ch in category.channels:
+        if isinstance(ch, discord.ForumChannel) and ch.name == sanitized:
+            log.info("Found existing forum %s (%s)", ch.id, ch.name)
+            return ch
+
+    forum = await guild.create_forum(
+        name=sanitized,
+        category=category,
+        default_auto_archive_duration=auto_archive,
+    )
+    # Sync permissions from category (private to owner + bot)
+    try:
+        await forum.edit(sync_permissions=True)
+    except Exception:
+        pass
+    log.info("Created forum channel %s (%s) in category %s", forum.id, forum.name, category.name)
+    return forum
+
+
+async def create_forum_post(
+    forum: discord.ForumChannel,
+    name: str,
+    repo_name: str = "",
+    origin: str = "bot",
+    topic_preview: str = "",
+) -> tuple[discord.Thread, discord.Message]:
+    """Create a new forum post (thread + starter message).
+
+    Returns (thread, starter_message).
+    """
+    name = name[:100]  # Discord thread name limit
+
+    embed = discord.Embed(
+        title=f"Session — {repo_name}" if repo_name else "Session",
+        description=topic_preview[:200] or "New session",
+        color=discord.Color.blurple(),
+        timestamp=datetime.now(timezone.utc),
+    )
+    if repo_name:
+        embed.add_field(name="Repo", value=repo_name, inline=True)
+    embed.add_field(name="Origin", value=origin, inline=True)
+
+    result = await forum.create_thread(name=name, embed=embed)
+    thread = result.thread
+    message = result.message
+    log.info("Created forum post %s (%s) in forum %s", thread.id, name, forum.name)
+    return thread, message
+
+
+async def ensure_forum_tags(forum: discord.ForumChannel) -> dict[str, discord.ForumTag]:
+    """Create standard tags on a forum channel. Returns {name: tag} dict."""
+    desired = {
+        "active": "\U0001f504",      # 🔄
+        "completed": "\u2705",       # ✅
+        "failed": "\u274c",          # ❌
+        "cli": "\U0001f4bb",         # 💻
+        "build": "\U0001f528",       # 🔨
+    }
+    existing = {tag.name: tag for tag in forum.available_tags}
+    missing = []
+    for name, emoji in desired.items():
+        if name not in existing:
+            missing.append(discord.ForumTag(name=name, emoji=emoji))
+
+    if missing:
+        new_tags = list(forum.available_tags) + missing
+        await forum.edit(available_tags=new_tags[:20])  # Discord limit: 20 tags
+        # Re-fetch to get IDs
+        existing = {tag.name: tag for tag in forum.available_tags}
+
+    return existing
+
+
+# --- Legacy channel helpers (kept for migration) ---
 
 
 async def create_session_channel(

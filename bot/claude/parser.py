@@ -227,8 +227,18 @@ def _tool_detail(tool: str, tool_input: dict) -> str:
         path = tool_input.get("file_path", "")
         return f"writing {_short_path(path)}" if path else ""
     if tool == "Bash":
+        desc = tool_input.get("description", "")
+        if desc:
+            return desc[:60]
+        # Don't show raw commands — they're confusing for users
         cmd = tool_input.get("command", "")
-        return f"$ {cmd[:50]}" if cmd else ""
+        if not cmd:
+            return ""
+        # Show first line only, truncated, no multiline scripts
+        first_line = cmd.split("\n")[0].strip()
+        if len(first_line) > 40 or not first_line:
+            return "running command"
+        return f"$ {first_line}"
     if tool == "WebSearch":
         query = tool_input.get("query", "")
         return f"searching '{query[:40]}'" if query else ""

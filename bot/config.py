@@ -36,6 +36,9 @@ DISCORD_USER_ID: int | None = (
 DISCORD_CATEGORY_NAME: str | None = os.getenv("DISCORD_CATEGORY_NAME")
 DISCORD_ENABLED: bool = bool(DISCORD_BOT_TOKEN and DISCORD_GUILD_ID)
 
+# Test webhook IDs (comma-separated) — allow webhook messages to bypass bot/auth guards
+TEST_WEBHOOK_IDS: set[str] = set(filter(None, os.getenv("TEST_WEBHOOK_IDS", "").split(",")))
+
 # Validate: at least one platform
 if not TELEGRAM_ENABLED and not DISCORD_ENABLED:
     raise RuntimeError(
@@ -71,7 +74,11 @@ LOGS_DIR.mkdir(parents=True, exist_ok=True)
 # System prompt appended via --append-system-prompt
 MOBILE_HINT = (
     "The user is reading on mobile. Be concise — lead with the answer, "
-    "short paragraphs, show only relevant code fragments."
+    "short paragraphs, show only relevant code fragments. "
+    "When resuming a conversation, briefly acknowledge what the user is asking "
+    "before continuing — don't silently pick up old work without context. "
+    "The user can't see your prior conversation history, so if their message "
+    "is ambiguous, clarify before doing heavy work."
 )
 
 BOT_CONTEXT = """

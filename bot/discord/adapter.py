@@ -12,6 +12,26 @@ from bot.platform.base import ButtonSpec, MessageHandle
 
 log = logging.getLogger(__name__)
 
+# Button style map: action prefix -> Discord button style
+_STYLE_MAP = {
+    "merge:": discord.ButtonStyle.success,     # Green
+    "build:": discord.ButtonStyle.success,
+    "commit:": discord.ButtonStyle.success,
+    "kill:": discord.ButtonStyle.danger,       # Red
+    "discard:": discord.ButtonStyle.danger,
+    "retry:": discord.ButtonStyle.primary,     # Blue
+    "review_plan:": discord.ButtonStyle.primary,
+    "review_code:": discord.ButtonStyle.primary,
+}
+
+
+def _button_style(callback_data: str) -> discord.ButtonStyle:
+    """Determine button style from callback data prefix."""
+    for prefix, style in _STYLE_MAP.items():
+        if callback_data.startswith(prefix):
+            return style
+    return discord.ButtonStyle.secondary  # Gray default
+
 
 def _buttons_to_view(
     buttons: list[list[ButtonSpec]] | None,
@@ -25,7 +45,7 @@ def _buttons_to_view(
             button = discord.ui.Button(
                 label=btn_spec.label,
                 custom_id=btn_spec.callback_data,
-                style=discord.ButtonStyle.secondary,
+                style=_button_style(btn_spec.callback_data),
                 row=row_idx,
             )
             view.add_item(button)
@@ -54,8 +74,20 @@ class DiscordMessenger:
     def _get_guild(self) -> discord.Guild | None:
         return self._bot.get_guild(self._guild_id)
 
-    def _get_channel(self, channel_id: str) -> discord.abc.Messageable | None:
-        return self._bot.get_channel(int(channel_id))
+    async def _resolve_channel(self, channel_id: str) -> discord.abc.Messageable | None:
+        """Resolve channel/thread ID, fetching from API if not cached (archived threads)."""
+        ch = self._bot.get_channel(int(channel_id))
+        if ch is not None:
+            return ch
+        try:
+            ch = await self._bot.fetch_channel(int(channel_id))
+            return ch
+        except discord.NotFound:
+            log.warning("Channel %s not found", channel_id)
+            return None
+        except discord.Forbidden:
+            log.warning("No access to channel %s", channel_id)
+            return None
 
     async def create_conversation(
         self, instance_id: str, summary: str, is_task: bool,
@@ -75,7 +107,7 @@ class DiscordMessenger:
             return str(ch.id)
         else:
             # Create thread for queries
-            lobby = self._get_channel(str(self._lobby_channel_id))
+            lobby = await self._resolve_channel(str(self._lobby_channel_id))
             if isinstance(lobby, discord.TextChannel):
                 name = f"q-{instance_id}-{summary[:60]}"
                 thread = await channels.create_thread(lobby, name)
@@ -86,13 +118,17 @@ class DiscordMessenger:
         self, channel_id: str, text: str,
         buttons: list[list[ButtonSpec]] | None = None,
     ) -> MessageHandle:
-        """Send a thinking message."""
-        channel = self._get_channel(channel_id)
+        """Send a thinking/progress message as a blue-sidebar embed."""
+        channel = await self._resolve_channel(channel_id)
         if not channel:
             return MessageHandle(platform="discord", _data={})
 
+        embed = discord.Embed(
+            description=text[:4096],
+            color=discord.Color.blurple(),
+        )
         view = _buttons_to_view(buttons)
-        msg = await channel.send(content=text, view=view)
+        msg = await channel.send(embed=embed, view=view)
         return MessageHandle(
             platform="discord",
             _data={"channel_id": channel_id, "message_id": str(msg.id)},
@@ -102,20 +138,24 @@ class DiscordMessenger:
         self, handle: MessageHandle, text: str,
         buttons: list[list[ButtonSpec]] | None = None,
     ) -> None:
-        """Edit a thinking message."""
+        """Edit a thinking/progress embed."""
         channel_id = handle.get("channel_id")
         message_id = handle.get("message_id")
         if not channel_id or not message_id:
             return
 
-        channel = self._get_channel(channel_id)
+        channel = await self._resolve_channel(channel_id)
         if not channel:
             return
 
         try:
             msg = await channel.fetch_message(int(message_id))
+            embed = discord.Embed(
+                description=text[:4096],
+                color=discord.Color.blurple(),
+            )
             view = _buttons_to_view(buttons)
-            await msg.edit(content=text, view=view)
+            await msg.edit(embed=embed, view=view)
         except Exception:
             log.debug("Failed to edit thinking message %s", message_id, exc_info=True)
 
@@ -125,7 +165,7 @@ class DiscordMessenger:
         silent: bool = False,
     ) -> str:
         """Send a text message."""
-        channel = self._get_channel(channel_id)
+        channel = await self._resolve_channel(channel_id)
         if not channel:
             return ""
 
@@ -139,8 +179,8 @@ class DiscordMessenger:
         buttons: list[list[ButtonSpec]] | None = None,
         silent: bool = False,
     ) -> str:
-        """Send a result as an embed."""
-        channel = self._get_channel(channel_id)
+        """Send a result as a structured embed with inline fields."""
+        channel = await self._resolve_channel(channel_id)
         if not channel:
             return ""
 
@@ -156,12 +196,11 @@ class DiscordMessenger:
             description=text[:4096],
             color=color,
         )
+        # Add metadata as inline fields (Duration, Cost, Repo, Branch)
         if metadata:
-            footer_parts = []
             for k, v in metadata.items():
-                footer_parts.append(f"{k}: {v}")
-            if footer_parts:
-                embed.set_footer(text=" | ".join(footer_parts))
+                if not k.startswith("_") and v:
+                    embed.add_field(name=k, value=str(v), inline=True)
 
         view = _buttons_to_view(buttons)
         msg = await channel.send(embed=embed, view=view, silent=silent)
@@ -174,7 +213,7 @@ class DiscordMessenger:
         """Edit a message."""
         if not msg_id:
             return
-        channel = self._get_channel(channel_id)
+        channel = await self._resolve_channel(channel_id)
         if not channel:
             return
 
@@ -194,7 +233,7 @@ class DiscordMessenger:
             log.debug("Failed to edit message %s", msg_id, exc_info=True)
 
     async def delete_message(self, channel_id: str, msg_id: str) -> None:
-        channel = self._get_channel(channel_id)
+        channel = await self._resolve_channel(channel_id)
         if not channel:
             return
         try:
@@ -207,7 +246,7 @@ class DiscordMessenger:
         self, channel_id: str, file_path: str, filename: str,
         caption: str | None = None,
     ) -> str:
-        channel = self._get_channel(channel_id)
+        channel = await self._resolve_channel(channel_id)
         if not channel:
             return ""
 

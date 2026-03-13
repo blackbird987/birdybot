@@ -13,6 +13,7 @@ from bot.platform.base import MessageHandle, RequestContext
 from bot.platform.formatting import (
     action_button_specs,
     expanded_button_specs,
+    format_duration,
     format_expanded_result_md,
     format_result_md,
     redact_secrets,
@@ -101,6 +102,7 @@ def make_progress_callbacks(
     start_time = asyncio.get_event_loop().time()
     last_text = [None]
     is_stalled = [False]
+    last_activity = ["processing..."]  # tracks last known tool activity
 
     def _elapsed() -> str:
         elapsed = asyncio.get_event_loop().time() - start_time
@@ -119,13 +121,15 @@ def make_progress_callbacks(
 
     async def on_progress(message: str, detail: str = ""):
         is_stalled[0] = False
+        # Always track latest activity (even if throttled)
+        display = detail if verbose >= 2 and detail else message
+        last_activity[0] = display
         if verbose == 0:
             return
         now = asyncio.get_event_loop().time()
         if now - last_update[0] < 5:
             return
         last_update[0] = now
-        display = detail if verbose >= 2 and detail else message
         escaped = ctx.messenger.escape(inst.display_id())
         escaped_display = ctx.messenger.escape(display)
         await _edit(f"🔄 {escaped} {escaped_display} ({_elapsed()})")
@@ -143,7 +147,8 @@ def make_progress_callbacks(
         while True:
             if not is_stalled[0]:
                 escaped = ctx.messenger.escape(inst.display_id())
-                await _edit(f"🔄 {escaped} processing... ({_elapsed()})")
+                activity = ctx.messenger.escape(last_activity[0])
+                await _edit(f"🔄 {escaped} {activity} ({_elapsed()})")
             await asyncio.sleep(10)
 
     return on_progress, on_stall, heartbeat
@@ -161,8 +166,17 @@ async def send_result(
     if result_text:
         result_text = redact_secrets(result_text)
 
-    # Pass status hint so Discord can color embeds (red for failed, etc.)
+    # Pass structured metadata for Discord embeds (Telegram ignores unknown fields)
     meta = {"_status": inst.status.value} if inst.status else {}
+    dur = format_duration(inst.duration_ms) if inst.duration_ms else None
+    if dur:
+        meta["Duration"] = dur
+    if inst.cost_usd:
+        meta["Cost"] = f"${inst.cost_usd:.4f}"
+    if inst.repo_name:
+        meta["Repo"] = inst.repo_name
+    if inst.branch:
+        meta["Branch"] = inst.branch
 
     try:
         if inst.status == InstanceStatus.FAILED or not result_text:

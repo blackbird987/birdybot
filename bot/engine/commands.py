@@ -152,7 +152,26 @@ async def _run_query(ctx: RequestContext, prompt: str) -> None:
     inst.status = InstanceStatus.RUNNING
     ctx.store.update_instance(inst)
 
-    label = "resuming..." if resume_session else "processing..."
+    if resume_session:
+        label = "resuming..."
+        # Show session context hint so user knows what they're continuing
+        if ctx.session_id:
+            try:
+                fpath = await asyncio.to_thread(sessions_mod.find_session_file, resume_session)
+                if fpath:
+                    msgs = await asyncio.to_thread(sessions_mod.read_session_messages, fpath, 2)
+                    # Find last assistant message for context
+                    last_topic = ""
+                    for m in reversed(msgs):
+                        if m["role"] == "assistant":
+                            last_topic = m["text"][:80].replace("\n", " ").strip()
+                            break
+                    if last_topic:
+                        label = f"resuming... (last: {last_topic})"
+            except Exception:
+                pass
+    else:
+        label = "processing..."
     escaped = ctx.messenger.escape(inst.display_id())
     handle = await ctx.messenger.send_thinking(
         ctx.channel_id, f"⏳ {escaped} {label}",

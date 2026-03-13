@@ -1,10 +1,14 @@
-"""Discord bot with slash commands, message handler, and persistent views."""
+"""Discord bot with slash commands, message handler, and persistent views.
+
+Forum-based architecture: one ForumChannel per project, one thread per session.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import time as _time
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import discord
@@ -23,6 +27,63 @@ if TYPE_CHECKING:
     from bot.store.state import StateStore
 
 log = logging.getLogger(__name__)
+
+
+# --- Data structures ---
+
+
+@dataclass
+class ThreadInfo:
+    thread_id: str
+    session_id: str | None = None
+    origin: str = "bot"           # "bot" or "cli"
+    topic: str = ""
+    _synced_msg_count: int = 0
+
+    def to_dict(self) -> dict:
+        return {
+            "thread_id": self.thread_id,
+            "session_id": self.session_id,
+            "origin": self.origin,
+            "topic": self.topic,
+            "_synced_msg_count": self._synced_msg_count,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> ThreadInfo:
+        return cls(
+            thread_id=data["thread_id"],
+            session_id=data.get("session_id"),
+            origin=data.get("origin", "bot"),
+            topic=data.get("topic", ""),
+            _synced_msg_count=data.get("_synced_msg_count", 0),
+        )
+
+
+@dataclass
+class ForumProject:
+    repo_name: str
+    forum_channel_id: str
+    threads: dict[str, ThreadInfo] = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return {
+            "repo_name": self.repo_name,
+            "forum_channel_id": self.forum_channel_id,
+            "threads": {k: v.to_dict() for k, v in self.threads.items()},
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> ForumProject:
+        threads = {
+            k: ThreadInfo.from_dict(v)
+            for k, v in data.get("threads", {}).items()
+        }
+        return cls(
+            repo_name=data["repo_name"],
+            forum_channel_id=data.get("forum_channel_id", ""),
+            threads=threads,
+        )
 
 
 class ClaudeBot(discord.Client):
@@ -56,8 +117,12 @@ class ClaudeBot(discord.Client):
 
         self.tree = app_commands.CommandTree(self)
         self._messenger: DiscordMessenger | None = None
-        # channel_id -> {"session_id": str, "repo_name": str}
-        self._channel_sessions: dict[str, dict] = {}
+
+        # Forum-based project mapping: repo_name -> ForumProject
+        self._forum_projects: dict[str, ForumProject] = {}
+        self._forum_lock = asyncio.Lock()
+        self._thread_lock = asyncio.Lock()
+
         self._monitor_service: MonitorService | None = None
         self._monitor_started: bool = False
         self._notifier = None  # set by app.py after notifier is created
@@ -94,202 +159,279 @@ class ClaudeBot(discord.Client):
             repo_name=repo_name,
         )
 
-    # --- Channel-Session Mapping ---
+    # --- Forum-Session Mapping ---
 
-    def _load_channel_map(self) -> None:
-        """Load channel→session mapping from platform_state."""
+    def _load_forum_map(self) -> None:
+        """Load forum→project mapping from platform_state, with migration from old format."""
         state = self._store.get_platform_state("discord")
-        raw = state.get("channel_sessions", {})
-        # Migrate old format (str session_id) to new format (dict)
-        migrated = {}
-        for ch_id, val in raw.items():
-            if isinstance(val, str):
-                migrated[ch_id] = {"session_id": val, "repo_name": ""}
-            elif isinstance(val, dict):
-                migrated[ch_id] = val
-        self._channel_sessions = migrated
-        log.info("Loaded %d channel-session mappings", len(self._channel_sessions))
 
-    def _save_channel_map(self) -> None:
-        """Persist channel→session mapping to platform_state (in-memory only, auto-save writes to disk)."""
+        # Migration: convert old channel_sessions to forum_projects
+        old_cs = state.get("channel_sessions")
+        if old_cs and "forum_projects" not in state:
+            log.info("Migrating %d channel_sessions to forum_projects format", len(old_cs))
+            migrated: dict[str, ForumProject] = {}
+            for ch_id, val in old_cs.items():
+                if isinstance(val, str):
+                    val = {"session_id": val, "repo_name": ""}
+                repo = val.get("repo_name", "")
+                if not repo:
+                    repo = "_default"
+                if repo not in migrated:
+                    migrated[repo] = ForumProject(
+                        repo_name=repo,
+                        forum_channel_id="",  # created on first use
+                    )
+                thread_info = ThreadInfo(
+                    thread_id=ch_id,  # old channel ID as placeholder
+                    session_id=val.get("session_id"),
+                    origin=val.get("origin", "cli"),
+                    topic=val.get("topic", ""),
+                    _synced_msg_count=val.get("_synced_msg_count", 0),
+                )
+                migrated[repo].threads[ch_id] = thread_info
+            self._forum_projects = migrated
+            # Remove old key
+            state.pop("channel_sessions", None)
+            state["forum_projects"] = {k: v.to_dict() for k, v in migrated.items()}
+            self._store.set_platform_state("discord", state, persist=True)
+            log.info("Migration complete: %d projects", len(migrated))
+            return
+
+        raw = state.get("forum_projects", {})
+        self._forum_projects = {
+            k: ForumProject.from_dict(v) for k, v in raw.items()
+        }
+        log.info("Loaded %d forum projects", len(self._forum_projects))
+
+    def _save_forum_map(self) -> None:
+        """Persist forum→project mapping to platform_state."""
         state = self._store.get_platform_state("discord")
-        state["channel_sessions"] = self._channel_sessions
+        state["forum_projects"] = {k: v.to_dict() for k, v in self._forum_projects.items()}
         self._store.set_platform_state("discord", state, persist=False)
 
-    def _session_to_channel(self, session_id: str) -> str | None:
-        """Reverse lookup: find channel for a session_id."""
-        for ch_id, info in self._channel_sessions.items():
-            if info.get("session_id") == session_id:
-                return ch_id
+    def _session_to_thread(self, session_id: str) -> tuple[str, ThreadInfo] | None:
+        """Reverse lookup: find thread for a session_id. Returns (thread_id, info)."""
+        for proj in self._forum_projects.values():
+            for tid, info in proj.threads.items():
+                if info.session_id == session_id:
+                    return tid, info
         return None
 
-    def _get_active_channel_ids(self) -> set[str]:
-        """Return channel IDs that have a running/queued instance."""
+    def _thread_to_project(self, thread_id: str) -> tuple[ForumProject, ThreadInfo] | None:
+        """Find project + thread info for a thread_id."""
+        for proj in self._forum_projects.values():
+            info = proj.threads.get(thread_id)
+            if info:
+                return proj, info
+        return None
+
+    def _forum_by_channel_id(self, forum_id: str) -> ForumProject | None:
+        """Find project by forum channel ID."""
+        for proj in self._forum_projects.values():
+            if proj.forum_channel_id == forum_id:
+                return proj
+        return None
+
+    # --- Forum Provisioning ---
+
+    async def _get_or_create_forum(self, repo_name: str) -> discord.ForumChannel | None:
+        """Get or create a forum channel for a repo."""
+        guild = self.get_guild(self._guild_id)
+        if not guild or not self._category_id:
+            return None
+        category = guild.get_channel(self._category_id)
+        if not category or not isinstance(category, discord.CategoryChannel):
+            return None
+
+        async with self._forum_lock:
+            # Double-check after acquiring lock
+            if repo_name in self._forum_projects:
+                existing = self._forum_projects[repo_name]
+                if existing.forum_channel_id:
+                    forum = guild.get_channel(int(existing.forum_channel_id))
+                    if forum and isinstance(forum, discord.ForumChannel):
+                        return forum
+                    # Forum was deleted externally — recreate
+                    log.warning("Forum %s for repo %s was deleted, recreating", existing.forum_channel_id, repo_name)
+
+            forum = await channels.ensure_forum(guild, category, repo_name)
+            if repo_name not in self._forum_projects:
+                self._forum_projects[repo_name] = ForumProject(
+                    repo_name=repo_name,
+                    forum_channel_id=str(forum.id),
+                )
+            else:
+                self._forum_projects[repo_name].forum_channel_id = str(forum.id)
+            self._save_forum_map()
+            return forum
+
+    async def _get_or_create_session_thread(
+        self, repo_name: str, session_id: str | None, topic: str,
+        origin: str = "bot",
+    ) -> discord.Thread | None:
+        """Find existing thread for session, or create a new one in the repo's forum."""
+        # Check if session already has a thread
+        if session_id:
+            result = self._session_to_thread(session_id)
+            if result:
+                tid, info = result
+                ch = self.get_channel(int(tid))
+                if ch and isinstance(ch, discord.Thread):
+                    return ch
+                # Try fetch (archived thread)
+                try:
+                    ch = await self.fetch_channel(int(tid))
+                    if isinstance(ch, discord.Thread):
+                        return ch
+                except (discord.NotFound, discord.Forbidden):
+                    pass
+                # Thread gone — remove stale mapping
+                for proj in self._forum_projects.values():
+                    proj.threads.pop(tid, None)
+
+        forum = await self._get_or_create_forum(repo_name)
+        if not forum:
+            return None
+
+        async with self._thread_lock:
+            # Double-check after lock (another message may have created it)
+            if session_id:
+                result = self._session_to_thread(session_id)
+                if result:
+                    tid, _ = result
+                    try:
+                        ch = await self.fetch_channel(int(tid))
+                        if isinstance(ch, discord.Thread):
+                            return ch
+                    except (discord.NotFound, discord.Forbidden):
+                        pass
+
+            thread_name = channels.build_channel_name(topic, None) if topic != "new-session" else "new-session"
+            thread, _msg = await channels.create_forum_post(
+                forum, thread_name, repo_name=repo_name, origin=origin,
+                topic_preview=topic,
+            )
+
+            # Store mapping
+            proj = self._forum_projects[repo_name]
+            proj.threads[str(thread.id)] = ThreadInfo(
+                thread_id=str(thread.id),
+                session_id=session_id,
+                origin=origin,
+                topic=topic,
+            )
+            self._save_forum_map()
+            return thread
+
+    def _get_active_thread_ids(self) -> set[str]:
+        """Return thread IDs that have a running/queued instance."""
         from bot.claude.types import InstanceStatus
         active = set()
         for inst in self._store.list_instances():
             if inst.status in (InstanceStatus.RUNNING, InstanceStatus.QUEUED):
-                # Match by session_id → channel mapping
                 if inst.session_id:
-                    ch_id = self._session_to_channel(inst.session_id)
-                    if ch_id:
-                        active.add(ch_id)
-                # Also match by discord message_ids (channel_id is the key)
-                for ch_id in inst.message_ids.get("discord", []):
-                    if ch_id in self._channel_sessions:
-                        active.add(ch_id)
+                    result = self._session_to_thread(inst.session_id)
+                    if result:
+                        active.add(result[0])
+                for msg_id in inst.message_ids.get("discord", []):
+                    lookup = self._thread_to_project(msg_id)
+                    if lookup:
+                        active.add(msg_id)
         return active
 
-    async def _sync_single_channel(self, ch_id: str) -> None:
-        """Refresh a single session channel: pull latest CLI messages."""
-        ch_info = self._channel_sessions.get(ch_id)
-        if not ch_info:
+    async def _sync_single_thread(self, thread_id: str) -> None:
+        """Refresh a single session thread: pull latest CLI messages."""
+        lookup = self._thread_to_project(thread_id)
+        if not lookup:
             return
-        session_id = ch_info.get("session_id")
-        repo_name = ch_info.get("repo_name")
+        proj, info = lookup
+        session_id = info.session_id
+        repo_name = proj.repo_name
         if not session_id:
             return
 
-        guild = self.get_guild(self._guild_id)
-        if not guild:
-            return
-        ch = guild.get_channel(int(ch_id))
-        if not ch or not isinstance(ch, discord.TextChannel):
+        # Try to resolve the thread
+        ch = self.get_channel(int(thread_id))
+        if not ch:
+            try:
+                ch = await self.fetch_channel(int(thread_id))
+            except (discord.NotFound, discord.Forbidden):
+                return
+        if not isinstance(ch, (discord.TextChannel, discord.Thread)):
             return
 
         # Check if there's a newer CLI session for this repo
-        if repo_name:
+        if repo_name and repo_name != "_default":
             repo_path = self._store.list_repos().get(repo_name, "")
             if repo_path:
                 latest = await asyncio.to_thread(
                     sessions_mod.find_latest_session_for_repo, repo_path,
                 )
                 if latest and latest["id"] != session_id:
-                    # Update to the newer session
-                    ch_info["session_id"] = latest["id"]
-                    ch_info["origin"] = "cli"
-                    ch_info["_synced_msg_count"] = 0  # reset for fresh populate
-                    self._save_channel_map()
-                    asyncio.create_task(self._safe_edit(ch, topic=f"session:{latest['id']}"))
-                    log.info("Single-sync updated #%s to session %s", ch.name, latest["id"][:12])
+                    info.session_id = latest["id"]
+                    info.origin = "cli"
+                    info._synced_msg_count = 0
+                    self._save_forum_map()
+                    log.info("Single-sync updated thread %s to session %s", thread_id, latest["id"][:12])
                     session_id = latest["id"]
 
-        await self._populate_channel_history(ch, session_id)
-        log.info("Single-sync refreshed #%s", ch.name)
+        await self._populate_thread_history(ch, session_id, thread_id)
+        log.info("Single-sync refreshed thread %s", thread_id)
 
-    async def _get_or_create_session_channel(
-        self, session_id: str | None, topic: str,
-        repo_name: str | None = None,
-    ) -> discord.TextChannel | None:
-        """Find existing channel for session, or create a new one.
-
-        Returns None if category is not available.
-        """
+    async def _reconcile_forums(self) -> None:
+        """Validate forum channels on startup. Clean stale mappings, archive old text channels."""
         guild = self.get_guild(self._guild_id)
         if not guild or not self._category_id:
-            return None
+            return
         category = guild.get_channel(self._category_id)
         if not category or not isinstance(category, discord.CategoryChannel):
-            return None
-
-        # Check if this session already has a channel
-        if session_id:
-            existing_ch_id = self._session_to_channel(session_id)
-            if existing_ch_id:
-                ch = guild.get_channel(int(existing_ch_id))
-                if ch and isinstance(ch, discord.TextChannel):
-                    return ch
-                # Channel was deleted externally — remove stale mapping
-                del self._channel_sessions[existing_ch_id]
-
-        # Enforce channel limit before creating
-        await self._enforce_channel_limit(category)
-
-        channel = await channels.create_session_channel(
-            guild, category, topic, session_id=session_id, repo_name=repo_name,
-        )
-        if session_id:
-            self._channel_sessions[str(channel.id)] = {
-                "session_id": session_id,
-                "repo_name": repo_name or "",
-                "origin": "bot",
-            }
-        self._save_channel_map()
-        await self._pin_lobby_top()
-        return channel
-
-    async def _pin_lobby_top(self) -> None:
-        """Ensure lobby channel stays at position 0 in the category."""
-        if not self._lobby_channel_id:
-            return
-        guild = self.get_guild(self._guild_id)
-        if not guild:
-            return
-        lobby = guild.get_channel(self._lobby_channel_id)
-        if lobby and getattr(lobby, "position", 0) != 0:
-            try:
-                await lobby.edit(position=0)
-            except Exception:
-                pass
-
-    async def _enforce_channel_limit(
-        self, category: discord.CategoryChannel,
-    ) -> None:
-        """Archive oldest session channels if over the limit."""
-        session_channels = [
-            ch for ch in category.text_channels
-            if ch.id != self._lobby_channel_id
-            and not (ch.topic and ch.topic.startswith("monitor:"))
-        ]
-        if len(session_channels) < channels.MAX_SESSION_CHANNELS:
             return
 
-        # Sort by position (higher = older/lower in list)
-        session_channels.sort(key=lambda c: c.position, reverse=True)
-        to_remove = len(session_channels) - channels.MAX_SESSION_CHANNELS + 1
-
-        for ch in session_channels[:to_remove]:
-            self._channel_sessions.pop(str(ch.id), None)
+        # Phase 6.2: Auto-archive old text channels (migration cleanup)
+        for ch in category.text_channels:
+            if ch.id == self._lobby_channel_id:
+                continue
+            if ch.topic and ch.topic.startswith("monitor:"):
+                continue
+            log.info("Archiving old text channel %s (%s)", ch.id, ch.name)
             await channels.archive_session_channel(ch)
 
-        self._save_channel_map()
-
-    async def _reconcile_channels(self) -> None:
-        """Sync mapping with reality on startup."""
-        guild = self.get_guild(self._guild_id)
-        if not guild or not self._category_id:
-            return
-        category = guild.get_channel(self._category_id)
-        if not category or not isinstance(category, discord.CategoryChannel):
-            return
-
-        # Remove mappings for channels that no longer exist
-        valid = {}
-        for ch_id, info in self._channel_sessions.items():
-            ch = guild.get_channel(int(ch_id))
-            if ch and isinstance(ch, discord.TextChannel) and ch.category_id == self._category_id:
-                valid[ch_id] = info
-            else:
-                log.info("Removed stale channel mapping %s -> %s", ch_id, info.get("session_id", "?"))
-
-        # Discover unmapped session channels by topic
-        for ch in category.text_channels:
-            ch_id = str(ch.id)
-            if ch.id == self._lobby_channel_id or ch_id in valid:
+        # Validate existing forum mappings
+        valid_projects: dict[str, ForumProject] = {}
+        for repo_name, proj in self._forum_projects.items():
+            if not proj.forum_channel_id:
+                valid_projects[repo_name] = proj
                 continue
-            if ch.topic and ch.topic.startswith("session:"):
-                sid = ch.topic.split(":", 1)[1]
-                if sid and sid != "pending":
-                    # Try to recover repo_name from channel name prefix (e.g. "aiagent│topic")
-                    repo_name = ""
-                    if "│" in ch.name:
-                        repo_name = ch.name.split("│", 1)[0]
-                    valid[ch_id] = {"session_id": sid, "repo_name": repo_name}
-                    log.info("Recovered channel mapping %s -> %s (repo: %s) from topic", ch_id, sid, repo_name or "?")
+            forum = guild.get_channel(int(proj.forum_channel_id))
+            if forum and isinstance(forum, discord.ForumChannel):
+                # Validate threads
+                valid_threads: dict[str, ThreadInfo] = {}
+                for tid, info in proj.threads.items():
+                    # Threads are lazily validated — keep all, resolve on access
+                    valid_threads[tid] = info
+                proj.threads = valid_threads
+                valid_projects[repo_name] = proj
+            else:
+                log.info("Removed stale forum mapping for repo %s (forum %s gone)", repo_name, proj.forum_channel_id)
 
-        if valid != self._channel_sessions:
-            self._channel_sessions = valid
-            self._save_channel_map()
+        # Discover unmapped forums in category
+        for ch in category.channels:
+            if not isinstance(ch, discord.ForumChannel):
+                continue
+            existing = self._forum_by_channel_id(str(ch.id))
+            if not existing:
+                # Adopt as a project — repo name = forum name
+                repo_name = ch.name
+                if repo_name not in valid_projects:
+                    valid_projects[repo_name] = ForumProject(
+                        repo_name=repo_name,
+                        forum_channel_id=str(ch.id),
+                    )
+                    log.info("Discovered unmapped forum %s (%s)", ch.id, ch.name)
+
+        if valid_projects != self._forum_projects:
+            self._forum_projects = valid_projects
+            self._save_forum_map()
 
     async def _run_slash(
         self, interaction: discord.Interaction, coro,
@@ -472,10 +614,8 @@ class ClaudeBot(discord.Client):
                 await interaction.response.defer(ephemeral=True)
                 await self._create_new_session(interaction, repo_name)
             else:
-                # Show repo picker buttons
                 repos = self._store.list_repos()
                 if len(repos) <= 1:
-                    # Only one repo — just create directly
                     await interaction.response.defer(ephemeral=True)
                     repo_name, _ = self._store.get_active_repo()
                     await self._create_new_session(interaction, repo_name)
@@ -492,144 +632,104 @@ class ClaudeBot(discord.Client):
                         "Pick a repo:", view=view, ephemeral=True,
                     )
 
-        @self.tree.command(name="sync", description="Sync sessions (in session channel: refresh this one)", guild=guild_obj)
-        @app_commands.describe(count="Number of sessions to sync (default 5, 0 = this channel only)")
-        async def cmd_sync(interaction: discord.Interaction, count: int = 5):
+        @self.tree.command(name="sync", description="Sync sessions from CLI", guild=guild_obj)
+        @app_commands.describe(count="Number of sessions to sync (0 = this thread only)")
+        async def cmd_sync(interaction: discord.Interaction, count: int = 0):
             if not self._auth(interaction.user.id):
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
             await interaction.response.defer(ephemeral=True)
 
-            # In a session channel with default count → just refresh this channel
-            ch_id_str = str(interaction.channel_id)
-            if ch_id_str in self._channel_sessions:
-                if count == 5:  # default — user didn't specify a count
-                    await self._sync_single_channel(ch_id_str)
-                    await interaction.followup.send("Channel synced.", ephemeral=True)
+            thread_id = str(interaction.channel_id)
+
+            # count=0: refresh this thread if in a session thread, else sync 5
+            if count == 0:
+                lookup = self._thread_to_project(thread_id)
+                if lookup:
+                    await self._sync_single_thread(thread_id)
+                    await interaction.followup.send("Thread synced.", ephemeral=True)
                     return
-                elif count == 0:
-                    await self._sync_single_channel(ch_id_str)
-                    await interaction.followup.send("Channel synced.", ephemeral=True)
-                    return
-            elif count == 0:
-                await interaction.followup.send(
-                    "Not in a session channel. Use `/sync <count>` from the lobby.", ephemeral=True,
-                )
-                return
+                count = 5
 
             log.info("Discord /sync count=%d by %s", count, interaction.user)
-            count = max(1, min(count, channels.MAX_SESSION_CHANNELS))
-            session_list = await asyncio.to_thread(sessions_mod.scan_sessions, count, self._store.list_repos())
+            count = max(1, min(count, 15))
+            raw_sessions = await asyncio.to_thread(sessions_mod.scan_sessions, count * 3, self._store.list_repos())
+            seen_projects: set[str] = set()
+            session_list = []
+            for s in raw_sessions:
+                proj = s["project"]
+                if proj not in seen_projects:
+                    seen_projects.add(proj)
+                    session_list.append(s)
+                if len(session_list) >= count:
+                    break
+
             created = []
             populated = []
-            updated_channels: set[str] = set()  # avoid editing same channel multiple times
+            updated_threads: set[str] = set()
             for s in session_list:
                 session_id = s["id"]
-                repo_name = s.get("project")
-                # Match by exact session_id only — each session gets its own channel
-                existing_ch_id = self._session_to_channel(session_id)
-                if existing_ch_id:
-                    if existing_ch_id in updated_channels:
+                repo_name = s.get("project") or "_default"
+
+                # Check if session already has a thread
+                existing = self._session_to_thread(session_id)
+                if existing:
+                    tid, info = existing
+                    if tid in updated_threads:
                         continue
-                    updated_channels.add(existing_ch_id)
-                    # Channel exists — update session reference, populate history
-                    # Mark as CLI-originated so on_message starts a fresh bot session
-                    guild = self.get_guild(self._guild_id)
-                    if guild:
-                        ch = guild.get_channel(int(existing_ch_id))
-                        if ch and isinstance(ch, discord.TextChannel):
-                            ch_info = self._channel_sessions.get(existing_ch_id, {})
-                            old_sid = ch_info.get("session_id")
-                            origin = ch_info.get("origin")
-                            if old_sid != session_id:
-                                self._channel_sessions[existing_ch_id]["session_id"] = session_id
-                                self._channel_sessions[existing_ch_id]["origin"] = "cli"
-                                self._save_channel_map()
-                                # Fire-and-forget topic edit — don't block sync on rate limits
-                                asyncio.create_task(self._safe_edit(ch, topic=f"session:{session_id}"))
-                                log.info("Sync updated #%s session %s -> %s (cli)", ch.name, (old_sid or "?")[:12], session_id[:12])
-                                await self._populate_channel_history(ch, session_id)
-                            elif origin != "bot":
-                                # Same session, CLI origin — check for new messages
-                                await self._populate_channel_history(ch, session_id)
-                            else:
-                                log.debug("Skipping #%s — already active on Discord", ch.name)
-                            # Rename stuck "new-session" channels using session topic
-                            if "new-session" in ch.name and s.get("topic"):
-                                await self._rename_channel_from_prompt(ch, s["topic"])
-                            populated.append(ch)
+                    updated_threads.add(tid)
+                    # Populate history
+                    ch = self.get_channel(int(tid))
+                    if not ch:
+                        try:
+                            ch = await self.fetch_channel(int(tid))
+                        except (discord.NotFound, discord.Forbidden):
+                            ch = None
+                    if ch and isinstance(ch, (discord.TextChannel, discord.Thread)):
+                        await self._populate_thread_history(ch, session_id, tid)
+                        populated.append(ch)
                     continue
-                log.info("Sync creating new channel for session %s repo=%s", session_id[:12], repo_name)
-                ch = await self._get_or_create_session_channel(
-                    session_id, s["topic"], repo_name=repo_name,
+
+                # Create new thread
+                log.info("Sync creating thread for session %s repo=%s", session_id[:12], repo_name)
+                thread = await self._get_or_create_session_thread(
+                    repo_name, session_id, s["topic"], origin="cli",
                 )
-                if ch:
-                    # Mark as CLI-originated — first user message will start fresh bot session
-                    ch_id = str(ch.id)
-                    if ch_id in self._channel_sessions:
-                        self._channel_sessions[ch_id]["origin"] = "cli"
-                    else:
-                        self._channel_sessions[ch_id] = {
-                            "session_id": session_id,
-                            "repo_name": repo_name or "",
-                            "origin": "cli",
-                        }
-                    self._save_channel_map()
-                    created.append(ch)
-                    await self._populate_channel_history(ch, session_id)
-            # Remove channels not in the synced set (skip channels with active instances)
-            synced_session_ids = {s["id"] for s in session_list}
-            active_channels = self._get_active_channel_ids()
-            removed = []
-            for ch_id, info in list(self._channel_sessions.items()):
-                sid = info.get("session_id") if isinstance(info, dict) else info
-                if sid and sid not in synced_session_ids:
-                    if ch_id in active_channels:
-                        log.info("Skipping removal of #%s — has active instance", ch_id)
-                        continue
-                    guild = self.get_guild(self._guild_id)
-                    if guild:
-                        ch = guild.get_channel(int(ch_id))
-                        if ch and isinstance(ch, discord.TextChannel):
-                            removed.append(ch.name)
-                            await channels.archive_session_channel(ch)
-                    del self._channel_sessions[ch_id]
-            if removed:
-                self._save_channel_map()
+                if thread:
+                    created.append(thread)
+                    await self._populate_thread_history(thread, session_id, str(thread.id))
 
             parts = []
             if created:
-                links = ", ".join(f"<#{ch.id}>" for ch in created)
+                links = ", ".join(f"<#{t.id}>" for t in created)
                 parts.append(f"Created {len(created)}: {links}")
             if populated:
                 links = ", ".join(f"<#{ch.id}>" for ch in populated)
                 parts.append(f"Updated {len(populated)}: {links}")
-            if removed:
-                parts.append(f"Removed {len(removed)}: {', '.join(removed)}")
             if not parts:
                 parts.append("No sessions found")
-            await self._pin_lobby_top()
             await interaction.followup.send("\n".join(parts), ephemeral=True)
 
-        @self.tree.command(name="sync-channel", description="Refresh this channel's session history", guild=guild_obj)
+        @self.tree.command(name="sync-channel", description="Refresh this thread's session history", guild=guild_obj)
         async def cmd_sync_channel(interaction: discord.Interaction):
             if not self._auth(interaction.user.id):
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
-            ch_id = str(interaction.channel_id)
-            ch_info = self._channel_sessions.get(ch_id)
-            if not ch_info:
+            thread_id = str(interaction.channel_id)
+            lookup = self._thread_to_project(thread_id)
+            if not lookup:
                 await interaction.response.send_message(
-                    "This isn't a session channel.", ephemeral=True)
+                    "This isn't a session thread.", ephemeral=True)
                 return
             await interaction.response.defer(ephemeral=True)
-            session_id = ch_info.get("session_id")
+            proj, info = lookup
+            session_id = info.session_id
             if not session_id:
-                await interaction.followup.send("No session mapped to this channel.", ephemeral=True)
+                await interaction.followup.send("No session mapped to this thread.", ephemeral=True)
                 return
-            repo_name = ch_info.get("repo_name", "")
-            # Check for a newer CLI session on the same repo
-            repo_path = self._store.list_repos().get(repo_name, "") if repo_name else ""
+            repo_name = proj.repo_name
+            # Check for newer CLI session
+            repo_path = self._store.list_repos().get(repo_name, "") if repo_name and repo_name != "_default" else ""
             if repo_path:
                 latest = await asyncio.to_thread(
                     sessions_mod.find_latest_session_for_repo, repo_path,
@@ -637,19 +737,16 @@ class ClaudeBot(discord.Client):
                 if latest and latest["id"] != session_id:
                     old_short = session_id[:12]
                     session_id = latest["id"]
-                    ch_info["session_id"] = session_id
-                    ch_info["origin"] = "cli"
-                    ch_info["_synced_msg_count"] = 0  # reset for full re-sync
-                    self._save_channel_map()
-                    ch = interaction.channel
-                    if isinstance(ch, discord.TextChannel):
-                        asyncio.create_task(self._safe_edit(ch, topic=f"session:{session_id}"))
-                    log.info("sync-channel updated #%s session %s -> %s",
-                             interaction.channel, old_short, session_id[:12])
+                    info.session_id = session_id
+                    info.origin = "cli"
+                    info._synced_msg_count = 0
+                    self._save_forum_map()
+                    log.info("sync-channel updated thread %s session %s -> %s",
+                             thread_id, old_short, session_id[:12])
             # Populate history
             ch = interaction.channel
-            if isinstance(ch, discord.TextChannel):
-                await self._populate_channel_history(ch, session_id)
+            if isinstance(ch, (discord.TextChannel, discord.Thread)):
+                await self._populate_thread_history(ch, session_id, thread_id)
             await interaction.followup.send(
                 f"Synced session `{session_id[:12]}…`", ephemeral=True)
 
@@ -788,7 +885,6 @@ class ClaudeBot(discord.Client):
         cfg = configs[name]
         channel = await self._monitor_service.setup_monitor(cfg, category)
 
-        # Start background loop if not already running
         if not self._monitor_started:
             self._monitor_service.start()
             self._monitor_started = True
@@ -830,16 +926,15 @@ class ClaudeBot(discord.Client):
                 self._category_id = category.id
                 lobby = await channels.ensure_lobby(category)
                 self._lobby_channel_id = lobby.id
-                # Reset messenger so it picks up new IDs
                 self._messenger = None
                 log.info(
                     "Auto-provisioned category=%s lobby=%s",
                     category.id, lobby.id,
                 )
 
-        # Load and reconcile channel-session mapping
-        self._load_channel_map()
-        await self._reconcile_channels()
+        # Load and reconcile forum mapping
+        self._load_forum_map()
+        await self._reconcile_forums()
 
         self._ready_event.set()
 
@@ -856,17 +951,21 @@ class ClaudeBot(discord.Client):
                 log.info("Monitor service started with %d enabled monitors",
                          sum(1 for m in monitors.values() if m.get("enabled")))
 
-        # Note: reboot announcement is handled by app.py broadcast (not here,
-        # since on_ready also fires on reconnects, not just first boot).
+        # Refresh dashboard on startup
+        asyncio.create_task(self._refresh_dashboard())
 
     def _in_scope(self, guild: discord.Guild | None, channel: discord.abc.GuildChannel | None = None) -> bool:
         """Check guild + channel is within our category."""
         if not guild or guild.id != self._guild_id:
             return False
         if channel and self._category_id:
-            # Must be inside our category (lobby or session channels)
-            parent = getattr(channel, "category_id", None)
-            if parent != self._category_id:
+            if isinstance(channel, discord.Thread):
+                # Thread → check parent channel's category
+                parent = channel.parent or guild.get_channel(channel.parent_id)
+                cat_id = getattr(parent, "category_id", None) if parent else None
+            else:
+                cat_id = getattr(channel, "category_id", None)
+            if cat_id != self._category_id:
                 return False
         return True
 
@@ -880,14 +979,24 @@ class ClaudeBot(discord.Client):
         # Ignore own messages
         if message.author == self.user:
             return
-        # Ignore bots
-        if message.author.bot:
+
+        # Detect test webhook
+        _is_test_webhook = (
+            config.TEST_WEBHOOK_IDS
+            and message.webhook_id
+            and str(message.webhook_id) in config.TEST_WEBHOOK_IDS
+        )
+
+        # Ignore bots (except test webhook)
+        if message.author.bot and not _is_test_webhook:
             return
+
         # Only respond inside our category
         if not self._in_scope(message.guild, message.channel):
             return
-        # Auth check
-        if not self._auth(message.author.id):
+
+        # Auth check — skip for test webhook
+        if not _is_test_webhook and not self._auth(message.author.id):
             return
 
         text = message.content.strip()
@@ -898,151 +1007,234 @@ class ClaudeBot(discord.Client):
         ch_name = getattr(message.channel, "name", channel_id)
         log.info("Discord msg in #%s: %s", ch_name, text[:80])
 
-        # --- Lobby: create a new session channel and redirect ---
+        # --- Lobby: route to forum thread ---
         if message.channel.id == self._lobby_channel_id:
             active_repo, _ = self._store.get_active_repo()
-            ch = await self._get_or_create_session_channel(None, text, repo_name=active_repo)
-            if ch:
-                # Delete original message from lobby to keep it clean
-                try:
-                    await message.delete()
-                except Exception:
-                    pass
-                # Post redirect in lobby (auto-delete after 5s)
-                asyncio.create_task(self._send_redirect(ch))
-                # Run query in new channel (no session_id yet — pending)
-                ctx = self._ctx(str(ch.id))
-                await commands.on_text(ctx, text)
-                # After run, the instance has a session_id — update mapping
-                await self._update_pending_channel(str(ch.id))
+            await self._route_lobby_message(message, text, active_repo)
             return
 
-        # --- Session channel: auto-resume ---
-        ch_info = self._channel_sessions.get(channel_id)
-        if ch_info:
-            session_id = ch_info.get("session_id") or None  # "" (pending) -> None
-            repo_name = ch_info.get("repo_name") or None
-            origin = ch_info.get("origin", "bot")
+        # --- Forum thread: auto-resume session ---
+        if isinstance(message.channel, discord.Thread):
+            parent = message.channel.parent
+            if parent and isinstance(parent, discord.ForumChannel):
+                lookup = self._thread_to_project(channel_id)
+                if not lookup:
+                    # Adopt unmapped thread in a known forum
+                    proj = self._forum_by_channel_id(str(parent.id))
+                    if proj:
+                        log.info("Adopted unmapped thread %s in forum %s", channel_id, parent.name)
+                        info = ThreadInfo(thread_id=channel_id, origin="bot")
+                        proj.threads[channel_id] = info
+                        self._save_forum_map()
+                        lookup = (proj, info)
 
-            # CLI → Discord transition: resume the CLI session seamlessly,
-            # then mark as "bot" so we don't auto-sync to newer CLI sessions later.
-            if session_id and origin == "cli":
-                log.info("Channel #%s resuming CLI session %s — transitioning to bot ownership",
-                         ch_name, session_id[:12])
-                ch_info["origin"] = "bot"
-                self._save_channel_map()
+                if lookup:
+                    proj, info = lookup
+                    session_id = info.session_id or None
+                    repo_name = proj.repo_name if proj.repo_name != "_default" else None
+                    origin = info.origin
 
-            was_pending = not session_id
+                    # CLI → Discord transition
+                    if session_id and origin == "cli":
+                        log.info("Thread %s resuming CLI session %s — transitioning to bot ownership",
+                                 ch_name, session_id[:12])
+                        info.origin = "bot"
+                        self._save_forum_map()
 
-            # CLI activity notification (debounced, one-shot per CLI session)
-            # Only alert if the newer session isn't already mapped to another channel
-            now_ts = asyncio.get_event_loop().time()
-            last_check = ch_info.get("_last_sync_check", 0)
-            if repo_name and (now_ts - last_check > 60):
-                ch_info["_last_sync_check"] = now_ts
-                repo_path = self._store.list_repos().get(repo_name, "")
-                if repo_path:
-                    try:
-                        latest = await asyncio.to_thread(
-                            sessions_mod.find_latest_session_for_repo, repo_path,
-                        )
-                        notified_id = ch_info.get("_cli_notified_id")
-                        # Check if this session is already tracked in another channel
-                        already_mapped = (
-                            latest and self._session_to_channel(latest["id"]) is not None
-                        )
-                        if (latest and not already_mapped
-                                and latest["id"] != (ch_info.get("session_id") or "")
-                                and latest["id"] != notified_id
-                                and _time.time() - latest["mtime"] < 3600):
-                            ch_info["_cli_notified_id"] = latest["id"]
-                            buttons = [[ButtonSpec(
-                                "Load CLI history",
-                                f"load_history:{latest['id']}",
-                            )]]
-                            await self.messenger.send_text(
-                                channel_id,
-                                "ℹ️ New CLI activity detected on this repo.",
-                                buttons=buttons,
-                                silent=True,
-                            )
-                    except Exception:
-                        log.debug("CLI activity check failed for channel %s", channel_id, exc_info=True)
+                    was_pending = not session_id
 
-            ctx = self._ctx(channel_id, session_id=session_id, repo_name=repo_name)
-            await commands.on_text(ctx, text)
-            # If session was pending, update mapping with real session_id + rename
-            if was_pending:
-                await self._finalize_pending_channel(channel_id, message.channel, text)
-            elif (isinstance(message.channel, discord.TextChannel)
-                  and "new-session" in message.channel.name):
-                # Retry rename if still stuck (e.g. previous rename was rate-limited)
-                await self._rename_channel_from_prompt(message.channel, text, position=1)
-            elif getattr(message.channel, "position", 0) > 2:
-                # Move channel toward top for most-recent ordering (skip if already near top)
-                try:
-                    await message.channel.edit(position=1)
-                except Exception:
-                    pass
-            return
+                    ctx = self._ctx(channel_id, session_id=session_id, repo_name=repo_name)
+                    await commands.on_text(ctx, text)
+
+                    if was_pending:
+                        await self._finalize_pending_thread(channel_id, message.channel, text)
+                    elif "new-session" in message.channel.name:
+                        await self._rename_thread_from_prompt(message.channel, text)
+                    # Apply tags + refresh dashboard (fire-and-forget)
+                    asyncio.create_task(self._try_apply_tags_after_run(channel_id))
+                    asyncio.create_task(self._refresh_dashboard())
+                    return
 
         # --- Other channel (unmapped): no session ---
         ctx = self._ctx(channel_id)
         await commands.on_text(ctx, text)
 
-    async def _safe_edit(self, channel: discord.TextChannel, **kwargs) -> None:
-        """Edit a channel, logging failures instead of blocking on rate limits."""
+    async def _route_lobby_message(
+        self, message: discord.Message, text: str, repo_name: str | None,
+    ) -> None:
+        """Route a lobby message to a forum thread."""
+        repo_name = repo_name or "_default"
+        thread = await self._get_or_create_session_thread(repo_name, None, text)
+        if thread:
+            # Delete original from lobby
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            # Post redirect
+            asyncio.create_task(self._send_redirect(thread))
+            # Run query in new thread
+            ctx = self._ctx(str(thread.id), repo_name=repo_name if repo_name != "_default" else None)
+            await commands.on_text(ctx, text)
+            # Update mapping with real session_id
+            await self._update_pending_thread(str(thread.id))
+            # Apply tags + refresh dashboard
+            asyncio.create_task(self._try_apply_tags_after_run(str(thread.id)))
+            asyncio.create_task(self._refresh_dashboard())
+
+    async def _safe_edit(self, channel, **kwargs) -> None:
+        """Edit a channel/thread, logging failures instead of blocking on rate limits."""
         try:
             await channel.edit(**kwargs)
         except Exception:
             log.warning("Failed to edit channel %s", channel.id, exc_info=True)
 
-    async def _rename_channel_from_prompt(
-        self, channel: discord.TextChannel, prompt: str, **extra_edits,
-    ) -> None:
-        """Rename a 'new-session' channel based on the first prompt.
-
-        Extra kwargs (e.g. topic=, position=) are included in the same edit call.
-        """
-        ch_info = self._channel_sessions.get(str(channel.id), {})
-        repo_name = ch_info.get("repo_name") or ""
-        new_name = channels.build_channel_name(prompt, repo_name or None)
+    async def _apply_thread_tags(self, thread: discord.Thread, status: str, origin: str = "bot") -> None:
+        """Apply forum tags to a thread based on status. Fire-and-forget safe."""
         try:
-            await channel.edit(name=new_name, **extra_edits)
-            log.info("Renamed channel %s -> %s", channel.id, new_name)
+            if not isinstance(thread.parent, discord.ForumChannel):
+                return
+            forum = thread.parent
+            tag_map = {t.name: t for t in forum.available_tags}
+            if not tag_map:
+                tag_map = await channels.ensure_forum_tags(forum)
+
+            desired_tags = []
+            if status == "completed" and "completed" in tag_map:
+                desired_tags.append(tag_map["completed"])
+            elif status == "failed" and "failed" in tag_map:
+                desired_tags.append(tag_map["failed"])
+            elif status == "running" and "active" in tag_map:
+                desired_tags.append(tag_map["active"])
+
+            if origin == "cli" and "cli" in tag_map:
+                desired_tags.append(tag_map["cli"])
+
+            if desired_tags:
+                await thread.edit(applied_tags=desired_tags[:5])
         except Exception:
-            log.warning("Failed to rename channel %s -> %s", channel.id, new_name, exc_info=True)
+            log.debug("Failed to apply tags to thread %s", thread.id, exc_info=True)
+
+    async def _try_apply_tags_after_run(self, channel_id: str) -> None:
+        """Check latest instance status and apply tags to the thread."""
+        ch = self.get_channel(int(channel_id))
+        if not ch or not isinstance(ch, discord.Thread):
+            return
+        lookup = self._thread_to_project(channel_id)
+        if not lookup:
+            return
+        _, info = lookup
+        # Find the most recent instance for this session
+        for inst in self._store.list_instances()[:5]:
+            if inst.session_id and inst.session_id == info.session_id:
+                await self._apply_thread_tags(ch, inst.status.value, info.origin)
+                break
+
+    # --- Dashboard ---
+
+    async def _refresh_dashboard(self) -> None:
+        """Update or create the pinned dashboard embed in lobby."""
+        if not self._lobby_channel_id:
+            return
+        lobby = self.get_channel(self._lobby_channel_id)
+        if not lobby or not isinstance(lobby, discord.TextChannel):
+            return
+
+        from bot.claude.types import InstanceStatus
+        instances = self._store.list_instances()
+        running = [i for i in instances if i.status == InstanceStatus.RUNNING]
+        today_cost = self._store.get_daily_cost()
+        total_cost = self._store.get_total_cost()
+        repos = self._store.list_repos()
+        active_repo, _ = self._store.get_active_repo()
+
+        embed = discord.Embed(
+            title="Claude Bot Dashboard",
+            color=discord.Color.blurple(),
+        )
+        # Active instances
+        if running:
+            run_lines = []
+            for inst in running[:5]:
+                run_lines.append(f"`{inst.display_id()}` — {inst.prompt[:40]}")
+            embed.add_field(name=f"Running ({len(running)})", value="\n".join(run_lines), inline=False)
+        else:
+            embed.add_field(name="Running", value="None", inline=True)
+
+        # Projects with forum links
+        if self._forum_projects:
+            proj_lines = []
+            for name, proj in self._forum_projects.items():
+                if proj.forum_channel_id and name != "_default":
+                    threads = len(proj.threads)
+                    marker = " *" if name == active_repo else ""
+                    proj_lines.append(f"<#{proj.forum_channel_id}> ({threads} threads){marker}")
+            if proj_lines:
+                embed.add_field(name="Projects", value="\n".join(proj_lines), inline=False)
+
+        # Cost
+        embed.add_field(name="Today", value=f"${today_cost:.4f}", inline=True)
+        embed.add_field(name="Total", value=f"${total_cost:.4f}", inline=True)
+        embed.add_field(name="PC", value=config.PC_NAME, inline=True)
+
+        # Get or create dashboard message
+        state = self._store.get_platform_state("discord")
+        dash_msg_id = state.get("dashboard_message_id")
+
+        try:
+            if dash_msg_id:
+                try:
+                    msg = await lobby.fetch_message(int(dash_msg_id))
+                    await msg.edit(embed=embed)
+                    return
+                except (discord.NotFound, discord.HTTPException):
+                    pass  # Message gone, create new one
+
+            msg = await lobby.send(embed=embed)
+            try:
+                await msg.pin()
+            except Exception:
+                pass
+            state["dashboard_message_id"] = str(msg.id)
+            self._store.set_platform_state("discord", state, persist=True)
+        except Exception:
+            log.debug("Failed to update dashboard", exc_info=True)
+
+    async def _rename_thread_from_prompt(
+        self, thread: discord.Thread, prompt: str,
+    ) -> None:
+        """Rename a 'new-session' thread based on the first prompt."""
+        lookup = self._thread_to_project(str(thread.id))
+        repo_name = lookup[0].repo_name if lookup else None
+        if repo_name == "_default":
+            repo_name = None
+        new_name = channels.build_channel_name(prompt, repo_name)[:100]
+        try:
+            await thread.edit(name=new_name)
+            log.info("Renamed thread %s -> %s", thread.id, new_name)
+        except Exception:
+            log.warning("Failed to rename thread %s -> %s", thread.id, new_name, exc_info=True)
 
     async def _create_new_session(
         self, interaction: discord.Interaction, repo_name: str | None,
         *, redirect: bool = False,
     ) -> None:
-        """Create a new session channel.
-
-        Args:
-            redirect: If True, post a redirect link in lobby instead of followup.
-        """
-        ch = await self._get_or_create_session_channel(None, "new-session", repo_name=repo_name)
-        if ch:
-            self._channel_sessions[str(ch.id)] = {
-                "session_id": "",
-                "repo_name": repo_name or "",
-                "origin": "bot",
-            }
-            self._save_channel_map()
+        """Create a new session thread."""
+        repo_name = repo_name or "_default"
+        thread = await self._get_or_create_session_thread(repo_name, None, "new-session")
+        if thread:
             if redirect:
-                asyncio.create_task(self._send_redirect(ch))
+                asyncio.create_task(self._send_redirect(thread))
             else:
                 await interaction.followup.send(
-                    f"Fresh session created: <#{ch.id}>", ephemeral=True,
+                    f"Fresh session created: <#{thread.id}>", ephemeral=True,
                 )
         else:
+            msg = "Could not create thread."
             if redirect:
-                asyncio.create_task(self._send_temp_lobby_msg("Could not create channel."))
+                asyncio.create_task(self._send_temp_lobby_msg(msg))
             else:
-                await interaction.followup.send(
-                    "Could not create channel.", ephemeral=True,
-                )
+                await interaction.followup.send(msg, ephemeral=True)
 
     async def _send_temp_lobby_msg(self, text: str, delay: float = 5) -> None:
         """Send a temporary message in lobby that auto-deletes."""
@@ -1055,100 +1247,87 @@ class ClaudeBot(discord.Client):
         except Exception:
             pass
 
-    async def _send_redirect(self, channel: discord.TextChannel) -> None:
+    async def _send_redirect(self, thread: discord.Thread) -> None:
         """Post a redirect link in lobby, auto-delete after 5s."""
-        await self._send_temp_lobby_msg(f"→ <#{channel.id}>")
+        await self._send_temp_lobby_msg(f"\u2192 <#{thread.id}>")
 
-    async def _finalize_pending_channel(
-        self, channel_id: str, channel: discord.abc.GuildChannel, prompt: str,
+    async def _finalize_pending_thread(
+        self, thread_id: str, thread: discord.Thread, prompt: str,
     ) -> None:
-        """After first query in a /new channel, update session mapping and rename."""
+        """After first query in a /new thread, update session mapping and rename."""
         session_id = None
-        # Find the instance that just ran in this channel (check only recent 10)
         for inst in self._store.list_instances()[:10]:
             if inst.session_id and inst.origin_platform == "discord":
                 discord_msg_ids = inst.message_ids.get("discord", [])
                 if discord_msg_ids:
                     try:
-                        if isinstance(channel, discord.TextChannel):
-                            await channel.fetch_message(int(discord_msg_ids[0]))
+                        await thread.fetch_message(int(discord_msg_ids[0]))
                     except (discord.NotFound, discord.HTTPException):
                         continue
                     session_id = inst.session_id
-                    self._channel_sessions[channel_id] = {
-                        "session_id": session_id,
-                        "repo_name": inst.repo_name or "",
-                        "origin": "bot",
-                    }
-                    self._save_channel_map()
-                    log.info("Finalized pending channel %s -> session %s", channel_id, session_id)
+                    # Update thread info
+                    lookup = self._thread_to_project(thread_id)
+                    if lookup:
+                        _, info = lookup
+                        info.session_id = session_id
+                        info.topic = prompt
+                        self._save_forum_map()
+                    log.info("Finalized pending thread %s -> session %s", thread_id, session_id)
                     break
 
-        # Single edit call: rename + topic + position (avoids rate-limit from multiple edits)
-        edits: dict = {"position": 1}
-        if session_id:
-            edits["topic"] = f"session:{session_id}"
-        if isinstance(channel, discord.TextChannel) and "new-session" in channel.name:
-            repo_name = self._channel_sessions.get(channel_id, {}).get("repo_name")
-            edits["name"] = channels.build_channel_name(prompt, repo_name or None)
-        if edits:
-            try:
-                await channel.edit(**edits)
-                if "name" in edits:
-                    log.info("Renamed channel %s -> %s", channel.id, edits["name"])
-            except Exception:
-                log.warning("Failed to edit channel %s", channel.id, exc_info=True)
+        # Rename if still "new-session"
+        if "new-session" in thread.name:
+            await self._rename_thread_from_prompt(thread, prompt)
 
-    async def _update_pending_channel(self, channel_id: str) -> None:
-        """After a query completes, update a pending channel's session mapping."""
-        if channel_id in self._channel_sessions:
-            return  # already mapped
+    async def _update_pending_thread(self, thread_id: str) -> None:
+        """After a query completes, update a pending thread's session mapping."""
+        lookup = self._thread_to_project(thread_id)
+        if lookup:
+            _, info = lookup
+            if info.session_id:
+                return  # already mapped
 
-        # Find the most recent instance with a session_id (check only recent 10)
         for inst in self._store.list_instances()[:10]:
             if inst.session_id and inst.origin_platform == "discord":
-                # Check if any of this instance's discord message_ids were sent to our channel
                 discord_msg_ids = inst.message_ids.get("discord", [])
                 if not discord_msg_ids:
                     continue
-                # Verify by checking the channel — try to fetch one message
-                guild = self.get_guild(self._guild_id)
-                if not guild:
-                    return
-                ch = guild.get_channel(int(channel_id))
-                if not ch or not isinstance(ch, discord.TextChannel):
+                ch = self.get_channel(int(thread_id))
+                if not ch:
+                    try:
+                        ch = await self.fetch_channel(int(thread_id))
+                    except (discord.NotFound, discord.Forbidden):
+                        return
+                if not isinstance(ch, (discord.TextChannel, discord.Thread)):
                     return
                 try:
                     msg = await ch.fetch_message(int(discord_msg_ids[0]))
-                    if msg:
-                        self._channel_sessions[channel_id] = {
-                            "session_id": inst.session_id,
-                            "repo_name": inst.repo_name or "",
-                            "origin": "bot",
-                        }
-                        self._save_channel_map()
-                        try:
-                            await ch.edit(topic=f"session:{inst.session_id}")
-                        except Exception:
-                            pass
-                        log.info("Mapped channel %s -> session %s (repo: %s)", channel_id, inst.session_id, inst.repo_name)
+                    if msg and lookup:
+                        proj, info = lookup
+                        info.session_id = inst.session_id
+                        info.origin = "bot"
+                        self._save_forum_map()
+                        log.info("Mapped thread %s -> session %s (repo: %s)",
+                                 thread_id, inst.session_id, proj.repo_name)
                         return
                 except (discord.NotFound, discord.HTTPException):
                     continue
 
-    async def _populate_channel_history(
-        self, channel: discord.TextChannel, session_id: str,
+    async def _populate_thread_history(
+        self, channel: discord.TextChannel | discord.Thread, session_id: str,
+        thread_id: str,
         *, force: bool = False, cli_label: bool = False,
     ) -> None:
-        """Send messages from a session into a channel.
+        """Send messages from a session into a thread/channel.
 
         Args:
             force: If True, always send last 10 (no incremental check).
             cli_label: If True, label messages as "You (CLI)" / "Claude (CLI)".
         """
-        ch_id = str(channel.id)
-        ch_info = self._channel_sessions.get(ch_id, {})
-        prev_count = 0 if force else ch_info.get("_synced_msg_count", 0)
+        lookup = self._thread_to_project(thread_id)
+        prev_count = 0
+        if not force and lookup:
+            prev_count = lookup[1]._synced_msg_count
 
         fpath = await asyncio.to_thread(sessions_mod.find_session_file, session_id)
         if not fpath:
@@ -1164,18 +1343,20 @@ class ClaudeBot(discord.Client):
         elif total > prev_count:
             to_send = all_messages[prev_count:]
         else:
-            log.debug("No new messages for #%s (total=%d, synced=%d)", channel.name, total, prev_count)
+            log.debug("No new messages for thread %s (total=%d, synced=%d)", thread_id, total, prev_count)
             return
 
         user_label = "**You (CLI)**" if cli_label else "**You**"
         bot_label = "**Claude (CLI)**" if cli_label else "**Claude**"
 
-        log.info("Populating #%s with %d messages (total=%d, prev=%d)", channel.name, len(to_send), total, prev_count)
+        log.info("Populating thread %s with %d messages (total=%d, prev=%d)",
+                 thread_id, len(to_send), total, prev_count)
+        ch_id = str(channel.id)
         for msg in to_send:
             role = user_label if msg["role"] == "user" else bot_label
             text = msg["text"]
             if len(text) > 800:
-                text = text[:800] + "…"
+                text = text[:800] + "\u2026"
             try:
                 markup = self.messenger.markdown_to_markup(f"{role}:\n{text}")
                 await self.messenger.send_text(ch_id, markup, silent=True)
@@ -1185,16 +1366,14 @@ class ClaudeBot(discord.Client):
                 except Exception:
                     break
 
-        if ch_id in self._channel_sessions:
-            self._channel_sessions[ch_id]["_synced_msg_count"] = total
-            self._save_channel_map()
+        if lookup:
+            lookup[1]._synced_msg_count = total
+            self._save_forum_map()
 
     async def on_interaction(self, interaction: discord.Interaction) -> None:
         """Handle button interactions (persistent views)."""
-        # Only handle component interactions (buttons)
         if interaction.type != discord.InteractionType.component:
             return
-        # Only respond inside our category
         if not self._in_scope(interaction.guild, interaction.channel):
             return
 
@@ -1211,32 +1390,27 @@ class ClaudeBot(discord.Client):
         log.info("Discord button %s:%s in #%s", action, instance_id[:12], getattr(interaction.channel, "name", "?"))
         await interaction.response.defer()
 
-        # --- Load CLI history into channel ---
+        # --- Load CLI history into thread ---
         if action == "load_history":
             cli_session_id = instance_id
-            ch_id = str(interaction.channel_id)
-            ch_info = self._channel_sessions.get(ch_id)
-            if ch_info and isinstance(interaction.channel, discord.TextChannel):
-                # Update channel to use the CLI session
-                ch_info["session_id"] = cli_session_id
-                ch_info["origin"] = "cli"
-                self._save_channel_map()
-                # Populate history (force — skip the "already has messages" check)
-                await self._populate_channel_history(
-                    interaction.channel, cli_session_id,
+            thread_id = str(interaction.channel_id)
+            lookup = self._thread_to_project(thread_id)
+            ch = interaction.channel
+            if lookup and isinstance(ch, (discord.TextChannel, discord.Thread)):
+                proj, info = lookup
+                info.session_id = cli_session_id
+                info.origin = "cli"
+                self._save_forum_map()
+                await self._populate_thread_history(
+                    ch, cli_session_id, thread_id,
                     force=True, cli_label=True,
                 )
-                asyncio.create_task(self._safe_edit(
-                    interaction.channel, topic=f"session:{cli_session_id}",
-                ))
-                log.info("Loaded CLI history %s into #%s", cli_session_id[:12],
-                         interaction.channel.name)
-            # Delete the notification message
+                log.info("Loaded CLI history %s into thread %s", cli_session_id[:12],
+                         getattr(ch, "name", thread_id))
             try:
                 await interaction.message.delete()
             except Exception:
                 pass
-            # Clean up deferred response
             try:
                 await interaction.delete_original_response()
             except Exception:
@@ -1245,21 +1419,39 @@ class ClaudeBot(discord.Client):
 
         # --- New session with repo picker ---
         if action == "new_repo":
-            repo_name = instance_id  # instance_id is actually the repo name here
+            repo_name = instance_id
             await self._create_new_session(interaction, repo_name, redirect=True)
-            # Clean up deferred response
             try:
                 await interaction.delete_original_response()
             except Exception:
                 pass
             return
 
-        # --- Session resume: create/find channel, redirect there ---
+        # --- Lobby routing with repo picker ---
+        if action == "lobby_route":
+            repo_name = instance_id
+            text = getattr(self, "_pending_lobby_text", None)
+            msg = getattr(self, "_pending_lobby_msg", None)
+            if text and msg:
+                self._pending_lobby_text = None
+                self._pending_lobby_msg = None
+                # Delete the picker message
+                try:
+                    await interaction.message.delete()
+                except Exception:
+                    pass
+                await self._route_lobby_message(msg, text, repo_name)
+            try:
+                await interaction.delete_original_response()
+            except Exception:
+                pass
+            return
+
+        # --- Session resume: create/find thread, redirect there ---
         if action == "sess_resume":
             session_id = instance_id
             from bot.engine import workflows
 
-            # Scan session to get topic and project for channel name + repo
             topic = "session"
             repo_name = None
             session_list = await asyncio.to_thread(
@@ -1271,19 +1463,20 @@ class ClaudeBot(discord.Client):
                     repo_name = s.get("project")
                     break
 
-            ch = await self._get_or_create_session_channel(
-                session_id, topic, repo_name=repo_name,
+            repo_name = repo_name or "_default"
+            thread = await self._get_or_create_session_thread(
+                repo_name, session_id, topic,
             )
-            if ch:
-                # Delete the "thinking" deferred response
+            if thread:
                 try:
                     await interaction.delete_original_response()
                 except Exception:
                     pass
-                # Post redirect in lobby
-                asyncio.create_task(self._send_redirect(ch))
-                # Send context messages in the new channel
-                ctx = self._ctx(str(ch.id), session_id=session_id, repo_name=repo_name)
+                asyncio.create_task(self._send_redirect(thread))
+                ctx = self._ctx(
+                    str(thread.id), session_id=session_id,
+                    repo_name=repo_name if repo_name != "_default" else None,
+                )
                 source_msg_id = str(interaction.message.id) if interaction.message else None
                 await workflows.on_sess_resume(ctx, session_id, source_msg_id)
             return
