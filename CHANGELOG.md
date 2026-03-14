@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Discord New Button
+- "New" button on completed instances now creates a new forum thread (same as `/new` command) instead of just clearing session state.
+
 ### Release Command
 - New `/release [patch|minor|major|X.Y.Z]` command — cuts a versioned release from the [Unreleased] changelog section.
 - Wired up on both Telegram and Discord (slash command with `level` parameter).

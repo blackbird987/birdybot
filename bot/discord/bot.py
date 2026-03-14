@@ -1617,6 +1617,20 @@ class ClaudeBot(discord.Client):
                 await workflows.on_sess_resume(ctx, session_id, source_msg_id)
             return
 
+        # --- New session button: create a new forum thread (like /new) ---
+        if action == "new":
+            thread_id = str(interaction.channel_id)
+            lookup = self._thread_to_project(thread_id)
+            repo_name = lookup[0].repo_name if lookup else None
+            if not repo_name:
+                repo_name, _ = self._store.get_active_repo()
+            await self._create_new_session(interaction, repo_name)
+            try:
+                await interaction.delete_original_response()
+            except Exception:
+                pass
+            return
+
         channel_id = str(interaction.channel_id)
         source_msg_id = str(interaction.message.id) if interaction.message else None
 
