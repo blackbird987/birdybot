@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 
+from dataclasses import dataclass, field
+
 from bot.claude.types import CODE_CHANGE_TOOLS, PLAN_ORIGINS, Instance, InstanceOrigin, InstanceStatus, Schedule
 from bot.platform.base import ButtonSpec
 
@@ -87,6 +89,63 @@ def strip_markdown(text: str) -> str:
     text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
     text = re.sub(r'[-—=]{3,}', '', text)
     return re.sub(r'\s+', ' ', text).strip()
+
+
+# --- Finalize Output Parsing ---
+
+
+@dataclass
+class FinalizeInfo:
+    """Structured data parsed from commit/done result text."""
+    commit_hash: str = ""
+    commit_message: str = ""
+    changelog_entries: list[str] = field(default_factory=list)
+    version: str = ""  # e.g. "v0.3.6" or empty
+
+
+_SUMMARY_BLOCK_RE = re.compile(
+    r'```summary\s*\n(.*?)```', re.DOTALL,
+)
+
+
+def parse_finalize_output(text: str) -> FinalizeInfo | None:
+    """Extract structured commit/changelog/version info from result text.
+
+    Returns None if no summary block found.
+    """
+    m = _SUMMARY_BLOCK_RE.search(text)
+    if not m:
+        return None
+
+    block = m.group(1)
+    info = FinalizeInfo()
+    in_changelog = False
+
+    for line in block.splitlines():
+        line = line.strip()
+        if line.startswith("COMMIT:"):
+            in_changelog = False
+            rest = line[len("COMMIT:"):].strip()
+            parts = rest.split(None, 1)
+            if parts:
+                info.commit_hash = parts[0]
+                info.commit_message = parts[1] if len(parts) > 1 else ""
+        elif line == "CHANGELOG:":
+            in_changelog = True
+        elif line.startswith("- ") and in_changelog:
+            info.changelog_entries.append(line[2:].strip())
+        elif line.startswith("VERSION:"):
+            in_changelog = False
+            ver = line[len("VERSION:"):].strip().strip('"')
+            if ver.lower() != "none":
+                info.version = ver
+
+    return info if (info.commit_hash or info.changelog_entries) else None
+
+
+def strip_summary_block(text: str) -> str:
+    """Remove the ```summary``` block from result text."""
+    return _SUMMARY_BLOCK_RE.sub('', text).rstrip()
 
 
 # --- Mode Display ---
@@ -239,6 +298,11 @@ def expanded_button_specs(instance: Instance) -> list[list[ButtonSpec]]:
     rows = action_button_specs(instance)
     rows.append([ButtonSpec("Collapse \u25b2", f"collapse:{instance.id}")])
     return rows
+
+
+def running_button_specs(instance_id: str) -> list[list[ButtonSpec]]:
+    """Stop button shown on progress messages while an instance is running."""
+    return [[ButtonSpec("Stop", f"kill:{instance_id}")]]
 
 
 def stall_button_specs(instance_id: str) -> list[list[ButtonSpec]]:

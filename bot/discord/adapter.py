@@ -209,19 +209,76 @@ class DiscordMessenger:
                 color = discord.Color.green()
             else:
                 color = discord.Color.blue()  # explore
-        embed = discord.Embed(
-            description=text[:4096],
-            color=color,
-        )
-        # Add metadata as inline fields (Duration, Cost, Repo, Branch)
+
+        # Check for structured finalize info (commit/done/release)
+        finalize = metadata.get("_finalize") if metadata else None
+        if finalize:
+            embed = self._build_finalize_embed(finalize, color, metadata)
+        else:
+            embed = discord.Embed(
+                description=text[:4096],
+                color=color,
+            )
+            # Add metadata as inline fields (Duration, Cost, Repo, Branch)
+            if metadata:
+                for k, v in metadata.items():
+                    if not k.startswith("_") and v:
+                        embed.add_field(name=k, value=str(v), inline=True)
+
+        view = _buttons_to_view(buttons)
+        msg = await channel.send(embed=embed, view=view, silent=silent)
+        return str(msg.id)
+
+    @staticmethod
+    def _build_finalize_embed(
+        finalize,
+        color: discord.Color,
+        metadata: dict | None,
+    ) -> discord.Embed:
+        """Build a rich embed for commit/done/release results."""
+        from bot.platform.formatting import FinalizeInfo
+        info: FinalizeInfo = finalize
+
+        # Title: version release or commit
+        if info.version:
+            title = f"\U0001f4e6 Released {info.version}"  # 📦
+            color = discord.Color.gold()
+        else:
+            title = "\u2705 Changes Committed"  # ✅
+
+        embed = discord.Embed(title=title, color=color)
+
+        # Commit field
+        if info.commit_hash:
+            commit_val = f"`{info.commit_hash}`"
+            if info.commit_message:
+                commit_val += f" {info.commit_message}"
+            embed.add_field(
+                name="\U0001f4dd Commit",  # 📝
+                value=commit_val,
+                inline=False,
+            )
+
+        # Changelog field — the main attraction
+        if info.changelog_entries:
+            # Format as a nice bulleted list with Discord markdown
+            entries = "\n".join(f"\u2022 {e}" for e in info.changelog_entries)
+            # Truncate if too long for a field (1024 char limit)
+            if len(entries) > 1000:
+                entries = entries[:997] + "..."
+            embed.add_field(
+                name="\U0001f4cb Changelog",  # 📋
+                value=entries,
+                inline=False,
+            )
+
+        # Metadata footer fields (Duration, Cost, Branch)
         if metadata:
             for k, v in metadata.items():
                 if not k.startswith("_") and v:
                     embed.add_field(name=k, value=str(v), inline=True)
 
-        view = _buttons_to_view(buttons)
-        msg = await channel.send(embed=embed, view=view, silent=silent)
-        return str(msg.id)
+        return embed
 
     async def edit_text(
         self, channel_id: str, msg_id: str | None, text: str | None,

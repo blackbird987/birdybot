@@ -13,6 +13,7 @@ from bot.claude.types import (
 )
 from bot.engine import lifecycle, sessions as sessions_mod
 from bot.platform.base import RequestContext
+from bot.platform.formatting import running_button_specs
 
 log = logging.getLogger(__name__)
 
@@ -94,6 +95,7 @@ async def spawn_from(
     escaped_status = ctx.messenger.escape(cfg.status_text.lower())
     handle = await ctx.messenger.send_thinking(
         ctx.channel_id, f"⏳ {escaped} {escaped_status}",
+        buttons=running_button_specs(new_inst.id),
     )
     # Track the thinking message
     if handle.get("message_id"):

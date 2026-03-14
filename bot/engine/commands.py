@@ -29,6 +29,7 @@ from bot.platform.formatting import (
     format_status_md,
     mode_label,
     redact_secrets,
+    running_button_specs,
     strip_markdown,
 )
 
@@ -178,6 +179,7 @@ async def _run_query(ctx: RequestContext, prompt: str) -> None:
     escaped = ctx.messenger.escape(inst.display_id())
     handle = await ctx.messenger.send_thinking(
         ctx.channel_id, f"⏳ {escaped} {label}",
+        buttons=running_button_specs(inst.id),
     )
     if handle.get("message_id"):
         inst.message_ids.setdefault(ctx.platform, []).append(handle.get("message_id"))
@@ -445,6 +447,7 @@ async def on_retry(ctx: RequestContext, text: str) -> None:
     escaped = ctx.messenger.escape(new_inst.display_id())
     handle = await ctx.messenger.send_thinking(
         ctx.channel_id, f"⏳ {escaped} retrying...",
+        buttons=running_button_specs(new_inst.id),
     )
     if handle.get("message_id"):
         new_inst.message_ids.setdefault(ctx.platform, []).append(handle.get("message_id"))
@@ -1211,6 +1214,7 @@ async def handle_callback(
         escaped = ctx.messenger.escape(new_inst.display_id())
         handle = await ctx.messenger.send_thinking(
             ctx.channel_id, f"⏳ {escaped} retrying...",
+            buttons=running_button_specs(new_inst.id),
         )
         if handle.get("message_id"):
             new_inst.message_ids.setdefault(ctx.platform, []).append(handle.get("message_id"))

@@ -11,7 +11,8 @@ from datetime import datetime, timezone
 
 from bot import config
 from bot.claude.types import (
-    CODE_CHANGE_TOOLS, PLAN_ORIGINS, Instance, InstanceStatus, RunResult,
+    CODE_CHANGE_TOOLS, PLAN_ORIGINS, Instance, InstanceOrigin, InstanceStatus,
+    RunResult,
 )
 from bot.platform.base import MessageHandle, RequestContext
 from bot.platform.formatting import (
@@ -19,8 +20,11 @@ from bot.platform.formatting import (
     format_duration,
     format_result_md,
     mode_label,
+    parse_finalize_output,
     redact_secrets,
+    running_button_specs,
     stall_button_specs,
+    strip_summary_block,
 )
 
 log = logging.getLogger(__name__)
@@ -138,6 +142,8 @@ def make_progress_callbacks(
             return f"{elapsed / 60:.1f}m"
         return f"{elapsed:.0f}s"
 
+    stop_buttons = running_button_specs(inst.id)
+
     async def _edit(text: str, buttons=None):
         if text == last_text[0] and not buttons:
             return
@@ -160,7 +166,10 @@ def make_progress_callbacks(
         last_update[0] = now
         escaped = ctx.messenger.escape(inst.display_id())
         escaped_display = ctx.messenger.escape(display)
-        await _edit(f"🔄 {mode_tag}{escaped} {escaped_display} ({_elapsed()})")
+        await _edit(
+            f"🔄 {mode_tag}{escaped} {escaped_display} ({_elapsed()})",
+            buttons=stop_buttons,
+        )
 
     async def on_stall(instance_id: str):
         is_stalled[0] = True
@@ -176,7 +185,10 @@ def make_progress_callbacks(
             if not is_stalled[0]:
                 escaped = ctx.messenger.escape(inst.display_id())
                 activity = ctx.messenger.escape(last_activity[0])
-                await _edit(f"🔄 {mode_tag}{escaped} {activity} ({_elapsed()})")
+                await _edit(
+                    f"🔄 {mode_tag}{escaped} {activity} ({_elapsed()})",
+                    buttons=stop_buttons,
+                )
             await asyncio.sleep(10)
 
     return on_progress, on_stall, heartbeat
@@ -205,8 +217,21 @@ async def send_result(
         meta["Branch"] = inst.branch
     meta["Mode"] = mode_label(inst.mode)
 
+    # Parse structured finalize output for commit/done/release origins
+    is_finalize = inst.origin in (
+        InstanceOrigin.COMMIT, InstanceOrigin.DONE, InstanceOrigin.RELEASE,
+    )
+    finalize_info = None
+    if is_finalize and result_text and inst.status == InstanceStatus.COMPLETED:
+        finalize_info = parse_finalize_output(result_text)
+        if finalize_info:
+            # Strip the raw summary block from result_text
+            result_text = strip_summary_block(result_text)
+            meta["_finalize"] = finalize_info
+
     try:
-        if inst.status == InstanceStatus.FAILED or not result_text:
+        if inst.status == InstanceStatus.FAILED or not result_text or finalize_info:
+            # Failed/empty results use summary embed; finalize results use rich embed
             formatted = format_result_md(inst)
             markup = ctx.messenger.markdown_to_markup(formatted)
             msg_id = await ctx.messenger.send_result(

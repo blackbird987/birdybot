@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Rich Finalize Embeds
+- Commit, Done, and Release results now display as rich Discord embeds with structured sections: commit hash+message, changelog entries as a bulleted list, and version badge for releases.
+- Prompts output a parseable `summary` block; bot extracts commit, changelog, and version info for display.
+- Release results get a gold-colored embed with a "Released vX.Y.Z" title.
+
+### Stop Button
+- Added a "Stop" button on all progress/thinking messages while an instance is running, so you can interrupt from Discord (or Telegram) at any time — no need to wait for a stall or type `/kill`.
+
 ### Discord New Button
 - "New" button on completed instances now creates a new forum thread (same as `/new` command) instead of just clearing session state.
 

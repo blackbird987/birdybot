@@ -204,7 +204,15 @@ COMMIT_PROMPT = (
     'Commit them with a clear, descriptive commit message. '
     'Update CHANGELOG.md: add a concise summary of changes under the '
     '## [Unreleased] section. If the file does not exist, create it with '
-    'an [Unreleased] header. Do not create version-numbered headers.'
+    'an [Unreleased] header. Do not create version-numbered headers.\n\n'
+    'At the very end of your response, output a structured summary block '
+    'in exactly this format (no extra text after the block):\n'
+    '```summary\n'
+    'COMMIT: <short_hash> <commit message>\n'
+    'CHANGELOG:\n'
+    '- <entry 1>\n'
+    '- <entry 2>\n'
+    '```'
 )
 
 _RELEASE_STEPS = (
@@ -229,9 +237,16 @@ DONE_PROMPT = (
     + _RELEASE_STEPS +
     '3. If [Unreleased] was empty (no entries after committing), skip the '
     'release.\n'
-    '4. End your response by clearly stating the released version '
-    '(e.g. "Released v0.3.6") or "No release (nothing to release)."\n'
-    'Make sure nothing is left uncommitted — this session is being closed.'
+    '4. Make sure nothing is left uncommitted — this session is being closed.\n\n'
+    'At the very end of your response, output a structured summary block '
+    'in exactly this format (no extra text after the block):\n'
+    '```summary\n'
+    'COMMIT: <short_hash> <commit message>\n'
+    'CHANGELOG:\n'
+    '- <entry 1>\n'
+    '- <entry 2>\n'
+    'VERSION: <vX.Y.Z or "none">\n'
+    '```'
 )
 
 RELEASE_PROMPT = (
