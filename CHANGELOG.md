@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.3.6 — Stop Button, Rich Embeds, Release Command (2026-03-15)
+
 ### Rich Finalize Embeds
 - Commit, Done, and Release results now display as rich Discord embeds with structured sections: commit hash+message, changelog entries as a bulleted list, and version badge for releases.
 - Prompts output a parseable `summary` block; bot extracts commit, changelog, and version info for display.

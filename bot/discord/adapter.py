@@ -8,6 +8,7 @@ import discord
 
 from bot.discord import channels, formatter as discord_fmt
 from bot.platform.base import ButtonSpec, MessageHandle
+from bot.platform.formatting import FinalizeInfo
 
 log = logging.getLogger(__name__)
 
@@ -236,7 +237,6 @@ class DiscordMessenger:
         metadata: dict | None,
     ) -> discord.Embed:
         """Build a rich embed for commit/done/release results."""
-        from bot.platform.formatting import FinalizeInfo
         info: FinalizeInfo = finalize
 
         # Title: version release or commit
