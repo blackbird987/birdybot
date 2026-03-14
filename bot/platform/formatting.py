@@ -89,6 +89,23 @@ def strip_markdown(text: str) -> str:
     return re.sub(r'\s+', ' ', text).strip()
 
 
+# --- Mode Display ---
+
+MODE_DISPLAY: dict[str, tuple[str, str]] = {
+    "explore": ("Explore", "\U0001f50d"),   # 🔍
+    "plan":    ("Plan",    "\U0001f4cb"),    # 📋
+    "build":   ("Build",   "\U0001f528"),    # 🔨
+}
+
+_VALID_MODES = frozenset(MODE_DISPLAY)
+
+
+def mode_label(mode: str) -> str:
+    """Human-readable mode label with emoji."""
+    label, emoji = MODE_DISPLAY.get(mode, (mode.capitalize(), "\u2753"))
+    return f"{label} {emoji}"
+
+
 # --- Status Icon ---
 
 def status_icon(status: InstanceStatus) -> str:
@@ -131,6 +148,22 @@ def action_button_specs(
                 ButtonSpec("Commit", f"commit:{iid}"),
                 ButtonSpec("Done", f"done:{iid}"),
             ])
+        elif made_plan and instance.origin in (InstanceOrigin.PLAN, InstanceOrigin.REVIEW_PLAN, InstanceOrigin.APPLY_REVISIONS):
+            # Plan workflow — check plan_active before code changes so
+            # "Apply Revisions" (which edits the plan file) gets plan buttons
+            if instance.origin == InstanceOrigin.REVIEW_PLAN:
+                # Just reviewed — offer to apply the suggested revisions
+                rows.append([
+                    ButtonSpec("Apply Revisions", f"apply_revisions:{iid}"),
+                    ButtonSpec("Build It", f"build:{iid}"),
+                    ButtonSpec("Done", f"done:{iid}"),
+                ])
+            else:
+                rows.append([
+                    ButtonSpec("Review Plan", f"review_plan:{iid}"),
+                    ButtonSpec("Build It", f"build:{iid}"),
+                    ButtonSpec("Done", f"done:{iid}"),
+                ])
         elif made_code_changes:
             # Edited/wrote files in-place (no branch)
             rows.append([
@@ -146,20 +179,12 @@ def action_button_specs(
                 ButtonSpec("Done", f"done:{iid}"),
             ])
         elif made_plan:
-            # Session has an active plan
-            if instance.origin == InstanceOrigin.REVIEW_PLAN:
-                # Just reviewed — offer to apply the suggested revisions
-                rows.append([
-                    ButtonSpec("Apply Revisions", f"apply_revisions:{iid}"),
-                    ButtonSpec("Build It", f"build:{iid}"),
-                    ButtonSpec("Done", f"done:{iid}"),
-                ])
-            else:
-                rows.append([
-                    ButtonSpec("Review Plan", f"review_plan:{iid}"),
-                    ButtonSpec("Build It", f"build:{iid}"),
-                    ButtonSpec("Done", f"done:{iid}"),
-                ])
+            # Plan detected outside explicit plan workflow (e.g. regular query)
+            rows.append([
+                ButtonSpec("Review Plan", f"review_plan:{iid}"),
+                ButtonSpec("Build It", f"build:{iid}"),
+                ButtonSpec("Done", f"done:{iid}"),
+            ])
         else:
             # Default buttons + workflow row when session exists
             rows.append([
@@ -184,6 +209,21 @@ def action_button_specs(
 
     elif instance.status == InstanceStatus.KILLED:
         rows.append([ButtonSpec("Retry", f"retry:{iid}")])
+
+    # Mode toggle — only on non-workflow completions
+    _WORKFLOW_ORIGINS = {
+        InstanceOrigin.PLAN, InstanceOrigin.BUILD,
+        InstanceOrigin.REVIEW_PLAN, InstanceOrigin.REVIEW_CODE,
+        InstanceOrigin.COMMIT, InstanceOrigin.DONE,
+        InstanceOrigin.APPLY_REVISIONS,
+    }
+    if (instance.status == InstanceStatus.COMPLETED
+            and instance.origin not in _WORKFLOW_ORIGINS):
+        # Cycle: explore → plan → build → explore
+        _NEXT_MODE = {"explore": "plan", "plan": "build", "build": "explore"}
+        target = _NEXT_MODE.get(instance.mode, "explore")
+        label, emoji = MODE_DISPLAY.get(target, (target.capitalize(), ""))
+        rows.append([ButtonSpec(f"{label} {emoji}", f"mode_{target}:{iid}")])
 
     if show_expand:
         rows.append([ButtonSpec("Expand \u25bc", f"expand:{iid}")])
@@ -221,8 +261,7 @@ def format_result_md(instance: Instance) -> str:
     dur = format_duration(instance.duration_ms)
     if dur:
         meta.append(dur)
-    if instance.mode == "build":
-        meta.append("build")
+    meta.append(instance.mode)
     if meta:
         parts.append(" | ".join(meta))
 

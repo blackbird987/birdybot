@@ -163,6 +163,8 @@ async def ensure_forum_tags(forum: discord.ForumChannel) -> dict[str, discord.Fo
         "failed": "\u274c",          # ❌
         "cli": "\U0001f4bb",         # 💻
         "build": "\U0001f528",       # 🔨
+        "explore": "\U0001f50d",     # 🔍
+        "plan": "\U0001f4cb",        # 📋
     }
     existing = {tag.name: tag for tag in forum.available_tags}
     missing = []

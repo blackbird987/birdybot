@@ -22,6 +22,7 @@ from bot.discord.adapter import DiscordMessenger
 from bot.engine import commands
 from bot.engine import sessions as sessions_mod
 from bot.platform.base import RequestContext
+from bot.platform.formatting import mode_label
 
 if TYPE_CHECKING:
     from bot.claude.runner import ClaudeRunner
@@ -1204,8 +1205,8 @@ class ClaudeBot(discord.Client):
             asyncio.create_task(self._try_apply_tags_after_run(str(thread.id)))
             asyncio.create_task(self._refresh_dashboard())
 
-    async def _apply_thread_tags(self, thread: discord.Thread, status: str, origin: str = "bot") -> None:
-        """Apply forum tags to a thread based on status. Fire-and-forget safe."""
+    async def _apply_thread_tags(self, thread: discord.Thread, status: str, origin: str = "bot", mode: str | None = None) -> None:
+        """Apply forum tags to a thread based on status + mode. Fire-and-forget safe."""
         try:
             if not isinstance(thread.parent, discord.ForumChannel):
                 return
@@ -1225,6 +1226,9 @@ class ClaudeBot(discord.Client):
             if origin == "cli" and "cli" in tag_map:
                 desired_tags.append(tag_map["cli"])
 
+            if mode and mode in tag_map:
+                desired_tags.append(tag_map[mode])
+
             if desired_tags:
                 await thread.edit(applied_tags=desired_tags[:5])
         except Exception:
@@ -1242,7 +1246,7 @@ class ClaudeBot(discord.Client):
         # Find the most recent instance for this session
         for inst in self._store.list_instances()[:5]:
             if inst.session_id and inst.session_id == info.session_id:
-                await self._apply_thread_tags(ch, inst.status.value, info.origin)
+                await self._apply_thread_tags(ch, inst.status.value, info.origin, mode=inst.mode)
                 break
 
     # --- Dashboard ---
@@ -1292,9 +1296,10 @@ class ClaudeBot(discord.Client):
             if proj_lines:
                 embed.add_field(name="Projects", value="\n".join(proj_lines), inline=False)
 
-        # Cost
+        # Cost + Mode
         embed.add_field(name="Today", value=f"${today_cost:.4f}", inline=True)
         embed.add_field(name="Total", value=f"${total_cost:.4f}", inline=True)
+        embed.add_field(name="Mode", value=mode_label(self._store.mode), inline=True)
         embed.add_field(name="PC", value=config.PC_NAME, inline=True)
 
         # Get or create dashboard message

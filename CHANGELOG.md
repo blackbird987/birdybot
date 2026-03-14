@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.3.5 — Plan Mode, Mode Toggle, Repo Create/Remove
+
+### Plan Mode
+- New **plan** mode alongside explore and build — sessions can now be in explore, plan, or build mode.
+- `MODE_DISPLAY` dict in `formatting.py` with emoji labels (🔍 Explore, 📋 Plan, 🔨 Build).
+- `mode_label()` helper for consistent display across all surfaces.
+- `/mode` command accepts `explore|plan|build` (was `explore|build`).
+- Mode shown in progress messages, result embeds, and dashboard.
+- Discord embed sidebar color varies by mode (blue=explore, blurple=plan, green=build).
+- Forum tags `explore` and `plan` added alongside existing `build` tag.
+
+### Mode Toggle Button
+- Completed non-workflow queries show a mode cycle button (explore → plan → build → explore).
+- Clicking the button updates the global mode and refreshes the source message buttons.
+- Discord button styles: green for build, blue for plan/explore.
+
+### Repo Create & Remove
+- `/repo create <name> [path] [--github] [--public]` — creates directory, runs `git init`, registers and switches to new repo.
+  - Path defaults to sibling of active repo (no new env var needed).
+  - `--github` flag runs `gh repo create` to push to GitHub (private by default, `--public` overrides).
+  - Handles existing git repos (just registers), non-empty dirs (safe `git init`), missing `git`/`gh` CLI gracefully.
+- `/repo remove <name>` — unregisters a repo from the bot (does not delete files on disk).
+  - Wires up the existing `StateStore.remove_repo()` method that was previously unreachable.
+- Shared `_validate_repo_name()` added — validates format, rejects reserved words. Applied to both `/repo add` and `/repo create`.
+
+### Plan Workflow Button Refinement
+- Plan-origin instances (Plan, Review Plan, Apply Revisions) now get plan-specific buttons even when code changes are detected, since their code changes are to the plan file itself.
+- Non-plan-origin instances with detected plans get generic Review Plan / Build It buttons.
+
 ## v0.3.4 — Schedule CLI Tool, Cleanup
 
 ### Schedule Management CLI

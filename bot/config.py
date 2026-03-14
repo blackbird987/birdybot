@@ -127,7 +127,9 @@ Settings:
 - /mode explore|build — switch permission mode
 - /verbose 0|1|2 — progress detail level (silent/normal/detailed)
 - /context set <text> — pin context to all prompts
-- /repo switch|add|list — manage repos
+- /repo add|remove|create|switch|list — manage repos
+- /repo create <name> [path] [--github] [--public] — create new repo (git init + register)
+- /repo remove <name> — unregister a repo (does not delete files)
 - /alias set|list|delete — saved command shortcuts
 - /new — start a fresh conversation
 - /cost — spending breakdown

@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import subprocess
 import time as _time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -17,6 +18,7 @@ from bot.claude.types import Instance, InstanceOrigin, InstanceStatus, InstanceT
 from bot.engine import lifecycle, sessions as sessions_mod, workflows
 from bot.platform.base import ButtonSpec, RequestContext
 from bot.platform.formatting import (
+    _VALID_MODES,
     action_button_specs,
     expanded_button_specs,
     format_cost_md,
@@ -25,6 +27,7 @@ from bot.platform.formatting import (
     format_result_md,
     format_schedule_list_md,
     format_status_md,
+    mode_label,
     redact_secrets,
     strip_markdown,
 )
@@ -576,13 +579,13 @@ async def on_logs(ctx: RequestContext) -> None:
 
 async def on_mode(ctx: RequestContext, text: str) -> None:
     text = text.strip().lower()
-    if text in ("explore", "build"):
+    if text in _VALID_MODES:
         ctx.store.mode = text
-        await ctx.messenger.send_text(ctx.channel_id, f"Mode set to: {text}")
+        await ctx.messenger.send_text(ctx.channel_id, f"Mode: {mode_label(text)}")
     elif text:
-        await ctx.messenger.send_text(ctx.channel_id, "Usage: /mode explore|build")
+        await ctx.messenger.send_text(ctx.channel_id, "Usage: /mode explore|plan|build")
     else:
-        await ctx.messenger.send_text(ctx.channel_id, f"Current mode: {ctx.store.mode}")
+        await ctx.messenger.send_text(ctx.channel_id, f"Mode: {mode_label(ctx.store.mode)}")
 
 
 # --- /verbose ---
@@ -738,6 +741,131 @@ async def on_schedule(ctx: RequestContext, text: str) -> None:
 
 # --- /repo ---
 
+_RESERVED_REPO_NAMES = {"add", "switch", "list", "create", "remove", "delete"}
+
+
+def _validate_repo_name(name: str) -> str | None:
+    """Return error message if invalid, None if ok."""
+    if not re.match(r'^[a-zA-Z0-9_-]+$', name):
+        return "Repo name must be alphanumeric (hyphens/underscores ok)."
+    if name.lower() in _RESERVED_REPO_NAMES:
+        return f"'{name}' is a reserved word."
+    if len(name) > 64:
+        return "Repo name too long (max 64 chars)."
+    return None
+
+
+def _resolve_default_path(name: str, store) -> Path | None:
+    """Sibling of active repo, or first registered repo's parent."""
+    _, active_path = store.get_active_repo()
+    if active_path:
+        return Path(active_path).parent / name
+    repos = store.list_repos()
+    if repos:
+        return Path(next(iter(repos.values()))).parent / name
+    return None
+
+
+async def _create_repo(ctx: RequestContext, text: str) -> None:
+    """Handle /repo create <name> [path] [--github] [--public]."""
+    # --- Parse flags and positional args ---
+    tokens = text.split()
+    flags = {t for t in tokens if t.startswith("--")}
+    positional = [t for t in tokens if not t.startswith("--")]
+    github = bool(flags & {"--github", "--gh"})
+    public = "--public" in flags
+
+    if not positional:
+        await ctx.messenger.send_text(
+            ctx.channel_id, "Usage: /repo create <name> [path] [--github] [--public]"
+        )
+        return
+    name = positional[0]
+    path_str = " ".join(positional[1:]) if len(positional) > 1 else None
+
+    # --- Validate name ---
+    if err := _validate_repo_name(name):
+        await ctx.messenger.send_text(ctx.channel_id, err)
+        return
+    if name in ctx.store.list_repos():
+        await ctx.messenger.send_text(
+            ctx.channel_id, f"Repo '{name}' already exists. Use /repo switch {name}"
+        )
+        return
+
+    # --- Resolve path ---
+    if path_str:
+        repo_path = Path(path_str.strip("\"'"))
+    else:
+        resolved = _resolve_default_path(name, ctx.store)
+        if resolved is None:
+            await ctx.messenger.send_text(
+                ctx.channel_id,
+                "No repos registered — provide a path: /repo create <name> <path>",
+            )
+            return
+        repo_path = resolved
+
+    # --- Handle existing directory with .git ---
+    if repo_path.exists() and (repo_path / ".git").exists():
+        ctx.store.add_repo(name, str(repo_path))
+        ctx.store.switch_repo(name)
+        await ctx.messenger.send_text(
+            ctx.channel_id,
+            f"'{name}' already a git repo — registered and switched: {repo_path}",
+        )
+        return
+
+    # --- Create directory + git init ---
+    created_dir = False
+    try:
+        def _init():
+            nonlocal created_dir
+            if not repo_path.exists():
+                repo_path.mkdir(parents=True)
+                created_dir = True
+            subprocess.run(
+                ["git", "init"], cwd=str(repo_path),
+                capture_output=True, check=True,
+            )
+        await asyncio.to_thread(_init)
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        if created_dir:
+            try:
+                repo_path.rmdir()  # best-effort cleanup (empty dir we just created)
+            except OSError:
+                pass
+        await ctx.messenger.send_text(ctx.channel_id, f"git init failed: {e}")
+        return
+    except OSError as e:
+        await ctx.messenger.send_text(ctx.channel_id, f"Failed to create directory: {e}")
+        return
+
+    # --- Register ---
+    ctx.store.add_repo(name, str(repo_path))
+    ctx.store.switch_repo(name)
+    msg = f"Created '{name}' at {repo_path} (git initialized)."
+
+    # --- Optional GitHub remote ---
+    if github:
+        visibility = "--public" if public else "--private"
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                ["gh", "repo", "create", name, visibility,
+                 "--source", str(repo_path), "--push"],
+                capture_output=True, text=True, cwd=str(repo_path),
+            )
+            if result.returncode == 0:
+                msg += f" Pushed to GitHub ({visibility[2:]})."
+            else:
+                msg += f"\nGitHub create failed: {result.stderr.strip()}"
+        except FileNotFoundError:
+            msg += "\nGitHub push skipped: `gh` CLI not installed."
+
+    await ctx.messenger.send_text(ctx.channel_id, msg)
+
+
 async def on_repo(ctx: RequestContext, text: str) -> None:
     text = text.strip()
 
@@ -747,12 +875,25 @@ async def on_repo(ctx: RequestContext, text: str) -> None:
             await ctx.messenger.send_text(ctx.channel_id, "Usage: /repo add <name> <path>")
             return
         name, path = parts
+        if err := _validate_repo_name(name):
+            await ctx.messenger.send_text(ctx.channel_id, err)
+            return
         path = path.strip('"\'')
         if not Path(path).is_dir():
             await ctx.messenger.send_text(ctx.channel_id, f"Directory not found: {path}")
             return
         ctx.store.add_repo(name, path)
         await ctx.messenger.send_text(ctx.channel_id, f"Repo '{name}' added: {path}")
+
+    elif text.startswith("create "):
+        await _create_repo(ctx, text[7:].strip())
+
+    elif text.startswith("remove "):
+        name = text[7:].strip()
+        if ctx.store.remove_repo(name):
+            await ctx.messenger.send_text(ctx.channel_id, f"Repo '{name}' removed from registry.")
+        else:
+            await ctx.messenger.send_text(ctx.channel_id, f"Repo '{name}' not found.")
 
     elif text.startswith("switch "):
         name = text[7:].strip()
@@ -782,7 +923,7 @@ async def on_repo(ctx: RequestContext, text: str) -> None:
             await ctx.messenger.send_text(ctx.channel_id, "No repo set. Use /repo add <name> <path>")
 
     else:
-        await ctx.messenger.send_text(ctx.channel_id, "Usage: /repo add|switch|list")
+        await ctx.messenger.send_text(ctx.channel_id, "Usage: /repo add|remove|create|switch|list")
 
 
 # --- /budget ---
@@ -827,7 +968,6 @@ async def on_reboot(ctx: RequestContext) -> None:
         return
 
     import json
-    import subprocess
     import sys
 
     # --- Wait for active instances to finish ---
@@ -951,12 +1091,12 @@ async def on_help(ctx: RequestContext) -> None:
         "`/cost` — spending breakdown\n"
         "`/status` — health dashboard\n"
         "`/logs` — bot log\n"
-        "`/mode` — explore|build\n"
+        "`/mode` — explore|plan|build\n"
         "`/verbose` — progress detail (0|1|2)\n"
         "`/context` — pinned context\n"
         "`/alias` — command shortcuts\n"
         "`/schedule` — recurring tasks\n"
-        "`/repo` — repo management\n"
+        "`/repo` — repo management (add|remove|create|switch|list)\n"
         "`/session` — list/resume desktop CLI sessions\n"
         "`/budget` — budget info/reset\n"
         "`/clear` — archive old instances\n"
@@ -1154,3 +1294,16 @@ async def handle_callback(
         await workflows.on_done(ctx, instance_id, source_msg_id)
     elif action == "sess_resume":
         await workflows.on_sess_resume(ctx, instance_id, source_msg_id)
+
+    elif action in ("mode_explore", "mode_plan", "mode_build"):
+        target = action.split("_", 1)[1]  # "explore", "plan", or "build"
+        ctx.store.mode = target
+        # Update source message buttons to reflect new mode
+        inst = ctx.store.get_instance(instance_id)
+        if inst and source_msg_id:
+            inst.mode = target
+            buttons = action_button_specs(inst)
+            await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, None, buttons)
+        await ctx.messenger.send_text(
+            ctx.channel_id, f"Mode: {mode_label(target)}", silent=True,
+        )

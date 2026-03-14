@@ -18,6 +18,7 @@ from bot.platform.formatting import (
     action_button_specs,
     format_duration,
     format_result_md,
+    mode_label,
     redact_secrets,
     stall_button_specs,
 )
@@ -130,6 +131,7 @@ def make_progress_callbacks(
     last_text = [None]
     is_stalled = [False]
     last_activity = ["processing..."]  # tracks last known tool activity
+    mode_tag = f"[{inst.mode}] " if inst.mode and inst.mode != "explore" else ""
 
     def _elapsed() -> str:
         elapsed = asyncio.get_event_loop().time() - start_time
@@ -159,7 +161,7 @@ def make_progress_callbacks(
         last_update[0] = now
         escaped = ctx.messenger.escape(inst.display_id())
         escaped_display = ctx.messenger.escape(display)
-        await _edit(f"🔄 {escaped} {escaped_display} ({_elapsed()})")
+        await _edit(f"🔄 {mode_tag}{escaped} {escaped_display} ({_elapsed()})")
 
     async def on_stall(instance_id: str):
         is_stalled[0] = True
@@ -175,7 +177,7 @@ def make_progress_callbacks(
             if not is_stalled[0]:
                 escaped = ctx.messenger.escape(inst.display_id())
                 activity = ctx.messenger.escape(last_activity[0])
-                await _edit(f"🔄 {escaped} {activity} ({_elapsed()})")
+                await _edit(f"🔄 {mode_tag}{escaped} {activity} ({_elapsed()})")
             await asyncio.sleep(10)
 
     return on_progress, on_stall, heartbeat
@@ -194,7 +196,7 @@ async def send_result(
         result_text = redact_secrets(result_text)
 
     # Pass structured metadata for Discord embeds (Telegram ignores unknown fields)
-    meta = {"_status": inst.status.value} if inst.status else {}
+    meta = {"_status": inst.status.value, "_mode": inst.mode} if inst.status else {}
     dur = format_duration(inst.duration_ms) if inst.duration_ms else None
     if dur:
         meta["Duration"] = dur
@@ -202,6 +204,7 @@ async def send_result(
         meta["Cost"] = f"${inst.cost_usd:.4f}"
     if inst.branch:
         meta["Branch"] = inst.branch
+    meta["Mode"] = mode_label(inst.mode)
 
     try:
         if inst.status == InstanceStatus.FAILED or not result_text:

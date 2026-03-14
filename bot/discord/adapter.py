@@ -24,6 +24,9 @@ _STYLE_MAP = {
     "review_plan:": discord.ButtonStyle.primary,
     "apply_revisions:": discord.ButtonStyle.primary,
     "review_code:": discord.ButtonStyle.primary,
+    "mode_build:": discord.ButtonStyle.success,    # Green
+    "mode_plan:": discord.ButtonStyle.primary,     # Blue
+    "mode_explore:": discord.ButtonStyle.primary,  # Blue
 }
 
 
@@ -191,14 +194,21 @@ class DiscordMessenger:
         if not channel:
             return ""
 
-        # Determine embed color from metadata status hint
+        # Determine embed color from status + mode
         color = discord.Color.green()
         if metadata:
             status = metadata.get("_status")
+            mode = metadata.get("_mode")
             if status == "failed":
                 color = discord.Color.red()
             elif status == "killed":
                 color = discord.Color.orange()
+            elif mode == "plan":
+                color = discord.Color.blurple()
+            elif mode == "build":
+                color = discord.Color.green()
+            else:
+                color = discord.Color.blue()  # explore
         embed = discord.Embed(
             description=text[:4096],
             color=color,
