@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.3.8 — DRY Mode Constants (2026-03-15)
+
 - Mode display constants (`MODE_DISPLAY`, `VALID_MODES`) now used consistently across Discord bot, channels, and formatting — no more hardcoded mode lists.
 - Added `mode_name()` helper for emoji-free mode labels.
 - Added `start.bat` for quick bot launch on Windows.
