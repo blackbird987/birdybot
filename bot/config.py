@@ -207,12 +207,30 @@ COMMIT_PROMPT = (
     'an [Unreleased] header. Do not create version-numbered headers.'
 )
 
+_RELEASE_STEPS = (
+    '- Replace ## [Unreleased] with ## vX.Y.Z — Summary (YYYY-MM-DD) '
+    'where Summary is a short phrase capturing the main theme\n'
+    '- Add a fresh empty ## [Unreleased] section above it\n'
+    '- Find and update the project version file (pyproject.toml, '
+    '*.csproj, package.json, etc.)\n'
+    '- Commit with message "vX.Y.Z: Summary"\n'
+    '- Create git tag vX.Y.Z\n'
+)
+
 DONE_PROMPT = (
-    'Wrap up this session. '
-    'Review all uncommitted changes and commit them with a clear, descriptive message. '
-    'Update CHANGELOG.md: add a concise summary of changes under the '
-    '## [Unreleased] section. If the file does not exist, create it with '
-    'an [Unreleased] header. Do not create version-numbered headers. '
+    'Wrap up this session.\n'
+    '1. Review all uncommitted changes and commit them with a clear, '
+    'descriptive message. Update CHANGELOG.md: add a concise summary of '
+    'changes under ## [Unreleased]. If the file does not exist, create it '
+    'with an [Unreleased] header.\n'
+    '2. After committing, read ## [Unreleased] in CHANGELOG.md. '
+    'If it has any entries, cut a release — determine the semver level '
+    'following the versioning conventions in CLAUDE.md.\n'
+    + _RELEASE_STEPS +
+    '3. If [Unreleased] was empty (no entries after committing), skip the '
+    'release.\n'
+    '4. End your response by clearly stating the released version '
+    '(e.g. "Released v0.3.6") or "No release (nothing to release)."\n'
     'Make sure nothing is left uncommitted — this session is being closed.'
 )
 
@@ -226,13 +244,7 @@ RELEASE_PROMPT = (
     '3. Determine the new version: {version_hint} (relative to the '
     'most recent versioned section, or the version file if no '
     'prior releases exist)\n'
-    '4. Replace ## [Unreleased] with ## vX.Y.Z — Summary (YYYY-MM-DD) '
-    'where Summary is a short phrase capturing the main theme\n'
-    '5. Add a fresh empty ## [Unreleased] section above it\n'
-    '6. Find and update the project version file (pyproject.toml, '
-    '*.csproj, package.json, etc.)\n'
-    '7. Commit with message "vX.Y.Z: Summary"\n'
-    '8. Create git tag vX.Y.Z\n'
-    '9. Report: version number, tag name, and summary of released changes. '
+    + _RELEASE_STEPS +
+    '4. Report: version number, tag name, and summary of released changes. '
     'Remind that git push --tags is needed to publish the tag.'
 )

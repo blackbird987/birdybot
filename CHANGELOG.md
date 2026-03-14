@@ -19,6 +19,11 @@
 - Extracted `PLAN_ORIGINS` constant to `types.py` — shared between `lifecycle.py` and `formatting.py` (was duplicated).
 - Fixed button priority: plan-workflow origins (Plan, Review Plan, Apply Revisions) now checked before `made_code_changes`, so "Apply Revisions" (which edits the plan file) correctly shows plan buttons instead of code review buttons.
 
+### Auto-Versioning on Done
+- Done button now auto-releases after committing: reads `[Unreleased]`, picks semver level via CLAUDE.md rules, bumps version, tags.
+- Extracted `_RELEASE_STEPS` shared constant — DRY between `DONE_PROMPT` and `RELEASE_PROMPT`.
+- `/release` remains available as manual override for forcing a specific version level.
+
 ### Code Review Fixes
 - `RELEASE_PROMPT` now guards against dirty working tree (aborts if uncommitted changes exist).
 - Extracted `_NEXT_MODE`, `_WORKFLOW_ORIGINS`, `VALID_MODES` to module level in `formatting.py` (was re-created inside function on every call).
