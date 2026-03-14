@@ -18,7 +18,7 @@ from bot.claude.types import Instance, InstanceOrigin, InstanceStatus, InstanceT
 from bot.engine import lifecycle, sessions as sessions_mod, workflows
 from bot.platform.base import ButtonSpec, RequestContext
 from bot.platform.formatting import (
-    _VALID_MODES,
+    VALID_MODES,
     action_button_specs,
     expanded_button_specs,
     format_cost_md,
@@ -617,7 +617,7 @@ async def on_logs(ctx: RequestContext) -> None:
 
 async def on_mode(ctx: RequestContext, text: str) -> None:
     text = text.strip().lower()
-    if text in _VALID_MODES:
+    if text in VALID_MODES:
         ctx.store.mode = text
         await ctx.messenger.send_text(ctx.channel_id, f"Mode: {mode_label(text)}")
     elif text:
@@ -1340,6 +1340,7 @@ async def handle_callback(
         inst = ctx.store.get_instance(instance_id)
         if inst and source_msg_id:
             inst.mode = target
+            ctx.store.update_instance(inst)
             buttons = action_button_specs(inst)
             await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, None, buttons)
         await ctx.messenger.send_text(

@@ -16,6 +16,12 @@
 - Extracted `PLAN_ORIGINS` constant to `types.py` — shared between `lifecycle.py` and `formatting.py` (was duplicated).
 - Fixed button priority: plan-workflow origins (Plan, Review Plan, Apply Revisions) now checked before `made_code_changes`, so "Apply Revisions" (which edits the plan file) correctly shows plan buttons instead of code review buttons.
 
+### Code Review Fixes
+- `RELEASE_PROMPT` now guards against dirty working tree (aborts if uncommitted changes exist).
+- Extracted `_NEXT_MODE`, `_WORKFLOW_ORIGINS`, `VALID_MODES` to module level in `formatting.py` (was re-created inside function on every call).
+- Mode toggle button now persists: added missing `ctx.store.update_instance(inst)` after mode change.
+- Result embeds and digest use `mode_label()` for consistent emoji-prefixed mode display.
+
 ## v0.3.5 — Plan Mode, Mode Toggle, Repo Create/Remove (2026-03-14)
 
 ### Plan Mode

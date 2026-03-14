@@ -97,7 +97,18 @@ MODE_DISPLAY: dict[str, tuple[str, str]] = {
     "build":   ("Build",   "\U0001f528"),    # 🔨
 }
 
-_VALID_MODES = frozenset(MODE_DISPLAY)
+VALID_MODES = frozenset(MODE_DISPLAY)
+
+# Mode cycle order for the toggle button
+_NEXT_MODE: dict[str, str] = {"explore": "plan", "plan": "build", "build": "explore"}
+
+# Origins where mode toggle button should NOT appear (user is in a workflow)
+_WORKFLOW_ORIGINS = frozenset({
+    InstanceOrigin.PLAN, InstanceOrigin.BUILD,
+    InstanceOrigin.REVIEW_PLAN, InstanceOrigin.REVIEW_CODE,
+    InstanceOrigin.COMMIT, InstanceOrigin.DONE,
+    InstanceOrigin.APPLY_REVISIONS, InstanceOrigin.RELEASE,
+})
 
 
 def mode_label(mode: str) -> str:
@@ -211,19 +222,11 @@ def action_button_specs(
         rows.append([ButtonSpec("Retry", f"retry:{iid}")])
 
     # Mode toggle — only on non-workflow completions
-    _WORKFLOW_ORIGINS = {
-        InstanceOrigin.PLAN, InstanceOrigin.BUILD,
-        InstanceOrigin.REVIEW_PLAN, InstanceOrigin.REVIEW_CODE,
-        InstanceOrigin.COMMIT, InstanceOrigin.DONE,
-        InstanceOrigin.APPLY_REVISIONS,
-    }
     if (instance.status == InstanceStatus.COMPLETED
             and instance.origin not in _WORKFLOW_ORIGINS):
-        # Cycle: explore → plan → build → explore
-        _NEXT_MODE = {"explore": "plan", "plan": "build", "build": "explore"}
         target = _NEXT_MODE.get(instance.mode, "explore")
         label, emoji = MODE_DISPLAY.get(target, (target.capitalize(), ""))
-        rows.append([ButtonSpec(f"{label} {emoji}", f"mode_{target}:{iid}")])
+        rows.append([ButtonSpec(f"Mode: {label} {emoji}", f"mode_{target}:{iid}")])
 
     if show_expand:
         rows.append([ButtonSpec("Expand \u25bc", f"expand:{iid}")])
@@ -261,7 +264,7 @@ def format_result_md(instance: Instance) -> str:
     dur = format_duration(instance.duration_ms)
     if dur:
         meta.append(dur)
-    meta.append(instance.mode)
+    meta.append(mode_label(instance.mode))
     if meta:
         parts.append(" | ".join(meta))
 
@@ -402,7 +405,7 @@ def format_digest_md(
     ]
     if repo_name:
         lines.append(f"Repo: `{repo_name}`")
-    lines.append(f"Mode: `{mode}`")
+    lines.append(f"Mode: {mode_label(mode)}")
     return "\n".join(lines)
 
 

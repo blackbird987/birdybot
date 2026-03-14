@@ -218,6 +218,8 @@ DONE_PROMPT = (
 
 RELEASE_PROMPT = (
     'Cut a new release.\n'
+    '0. Verify the working tree is clean (no uncommitted changes). '
+    'If dirty, abort and tell the user to commit or stash first.\n'
     '1. Read CHANGELOG.md and find the ## [Unreleased] section\n'
     '2. If [Unreleased] is empty or missing, abort and report there is '
     'nothing to release\n'
