@@ -173,7 +173,7 @@ async def create_forum_post(
     embed.add_field(name="Origin", value=origin, inline=True)
     embed.add_field(name="Mode", value=current_mode.capitalize(), inline=True)
 
-    view = _mode_select_view(current_mode)
+    view = mode_select_view(current_mode)
     result = await forum.create_thread(name=name, embed=embed, view=view)
     thread = result.thread
     message = result.message

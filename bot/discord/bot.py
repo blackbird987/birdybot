@@ -1561,24 +1561,20 @@ class ClaudeBot(discord.Client):
 
         # --- Mode selection in new thread welcome embed ---
         if action == "mode_set" and instance_id in ("explore", "plan", "build"):
-            self._store.mode = instance_id
+            target_mode = instance_id
+            self._store.mode = target_mode
             # Update the welcome embed to reflect selected mode
-            if interaction.message:
-                embed = interaction.message.embeds[0] if interaction.message.embeds else None
-                if embed:
-                    # Update Mode field in embed
-                    for i, field in enumerate(embed.fields):
-                        if field.name == "Mode":
-                            embed.set_field_at(i, name="Mode", value=instance_id.capitalize(), inline=True)
-                            break
-                    # Rebuild view with new active highlight
-                    view = channels._mode_select_view(instance_id)
-                    await interaction.response.edit_message(embed=embed, view=view)
-                else:
-                    await interaction.response.defer()
+            if interaction.message and interaction.message.embeds:
+                embed = interaction.message.embeds[0]
+                for i, field in enumerate(embed.fields):
+                    if field.name == "Mode":
+                        embed.set_field_at(i, name="Mode", value=target_mode.capitalize(), inline=True)
+                        break
+                view = channels.mode_select_view(target_mode)
+                await interaction.response.edit_message(embed=embed, view=view)
             else:
                 await interaction.response.defer()
-            log.info("Mode set to %s via welcome button", instance_id)
+            log.info("Mode set to %s via welcome button", target_mode)
             return
 
         await interaction.response.defer()
