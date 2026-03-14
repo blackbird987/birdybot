@@ -21,6 +21,7 @@
 - Extracted `_NEXT_MODE`, `_WORKFLOW_ORIGINS`, `VALID_MODES` to module level in `formatting.py` (was re-created inside function on every call).
 - Mode toggle button now persists: added missing `ctx.store.update_instance(inst)` after mode change.
 - Result embeds and digest use `mode_label()` for consistent emoji-prefixed mode display.
+- Dashboard now refreshes after mode switch via button (was lost when handler moved from `bot.py` to `handle_callback`).
 
 ## v0.3.5 — Plan Mode, Mode Toggle, Repo Create/Remove (2026-03-14)
 

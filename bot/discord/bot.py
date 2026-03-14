@@ -1622,3 +1622,7 @@ class ClaudeBot(discord.Client):
 
         ctx = self._ctx(channel_id)
         await commands.handle_callback(ctx, action, instance_id, source_msg_id)
+
+        # Refresh dashboard after mode switch (Discord-specific)
+        if action.startswith("mode_"):
+            asyncio.create_task(self._refresh_dashboard())
