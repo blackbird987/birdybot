@@ -232,12 +232,12 @@ class DiscordMessenger:
 
     @staticmethod
     def _build_finalize_embed(
-        finalize,
+        finalize: FinalizeInfo,
         color: discord.Color,
         metadata: dict | None,
     ) -> discord.Embed:
         """Build a rich embed for commit/done/release results."""
-        info: FinalizeInfo = finalize
+        info = finalize
 
         # Title: version release or commit
         if info.version:
@@ -248,11 +248,13 @@ class DiscordMessenger:
 
         embed = discord.Embed(title=title, color=color)
 
-        # Commit field
+        # Commit field (Discord field limit: 1024 chars)
         if info.commit_hash:
             commit_val = f"`{info.commit_hash}`"
             if info.commit_message:
                 commit_val += f" {info.commit_message}"
+            if len(commit_val) > 1024:
+                commit_val = commit_val[:1021] + "..."
             embed.add_field(
                 name="\U0001f4dd Commit",  # 📝
                 value=commit_val,

@@ -130,7 +130,7 @@ def parse_finalize_output(text: str) -> FinalizeInfo | None:
             if parts:
                 info.commit_hash = parts[0]
                 info.commit_message = parts[1] if len(parts) > 1 else ""
-        elif line == "CHANGELOG:":
+        elif line.startswith("CHANGELOG:"):
             in_changelog = True
         elif line.startswith("- ") and in_changelog:
             info.changelog_entries.append(line[2:].strip())

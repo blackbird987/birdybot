@@ -364,6 +364,7 @@ class ClaudeBot(discord.Client):
             thread, _msg = await channels.create_forum_post(
                 forum, thread_name, origin=origin,
                 topic_preview=topic,
+                current_mode=self._store.mode,
             )
 
             # Store mapping
@@ -682,11 +683,24 @@ class ClaudeBot(discord.Client):
             await self._run_slash(interaction, lambda ctx: commands.on_budget(ctx, args))
 
         @self.tree.command(name="new", description="Start fresh conversation", guild=guild_obj)
-        @app_commands.describe(repo="Repo name (default: active repo)")
-        async def cmd_new(interaction: discord.Interaction, repo: str = ""):
+        @app_commands.describe(
+            repo="Repo name (default: active repo)",
+            mode="Permission mode for the session",
+        )
+        @app_commands.choices(mode=[
+            app_commands.Choice(name="Explore 🔍", value="explore"),
+            app_commands.Choice(name="Plan 📋", value="plan"),
+            app_commands.Choice(name="Build 🔨", value="build"),
+        ])
+        async def cmd_new(interaction: discord.Interaction, repo: str = "", mode: str = ""):
             if not self._auth(interaction.user.id):
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
+
+            # Apply mode if specified
+            mode = mode.strip().lower()
+            if mode and mode in ("explore", "plan", "build"):
+                self._store.mode = mode
 
             repo = repo.strip()
             if repo:
@@ -1544,6 +1558,29 @@ class ClaudeBot(discord.Client):
 
         action, instance_id = parts
         log.info("Discord button %s:%s in #%s", action, instance_id[:12], getattr(interaction.channel, "name", "?"))
+
+        # --- Mode selection in new thread welcome embed ---
+        if action == "mode_set" and instance_id in ("explore", "plan", "build"):
+            self._store.mode = instance_id
+            # Update the welcome embed to reflect selected mode
+            if interaction.message:
+                embed = interaction.message.embeds[0] if interaction.message.embeds else None
+                if embed:
+                    # Update Mode field in embed
+                    for i, field in enumerate(embed.fields):
+                        if field.name == "Mode":
+                            embed.set_field_at(i, name="Mode", value=instance_id.capitalize(), inline=True)
+                            break
+                    # Rebuild view with new active highlight
+                    view = channels._mode_select_view(instance_id)
+                    await interaction.response.edit_message(embed=embed, view=view)
+                else:
+                    await interaction.response.defer()
+            else:
+                await interaction.response.defer()
+            log.info("Mode set to %s via welcome button", instance_id)
+            return
+
         await interaction.response.defer()
 
         # --- Load CLI history into thread ---

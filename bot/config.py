@@ -261,5 +261,14 @@ RELEASE_PROMPT = (
     'prior releases exist)\n'
     + _RELEASE_STEPS +
     '4. Report: version number, tag name, and summary of released changes. '
-    'Remind that git push --tags is needed to publish the tag.'
+    'Remind that git push --tags is needed to publish the tag.\n\n'
+    'At the very end of your response, output a structured summary block '
+    'in exactly this format (no extra text after the block):\n'
+    '```summary\n'
+    'COMMIT: <short_hash> <commit message>\n'
+    'CHANGELOG:\n'
+    '- <entry 1>\n'
+    '- <entry 2>\n'
+    'VERSION: <vX.Y.Z>\n'
+    '```'
 )

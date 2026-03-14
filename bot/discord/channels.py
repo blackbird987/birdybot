@@ -128,11 +128,35 @@ async def ensure_forum(
     return forum
 
 
+def mode_select_view(current_mode: str = "explore") -> discord.ui.View:
+    """Build a persistent View with mode-selection buttons for new sessions.
+
+    Active mode button is disabled (standard "already selected" UX).
+    """
+    view = discord.ui.View(timeout=None)
+    modes = [
+        ("Explore \U0001f50d", "explore", discord.ButtonStyle.secondary),
+        ("Plan \U0001f4cb", "plan", discord.ButtonStyle.primary),
+        ("Build \U0001f528", "build", discord.ButtonStyle.success),
+    ]
+    for label, mode, style in modes:
+        is_active = mode == current_mode
+        btn = discord.ui.Button(
+            label=label,
+            style=style,
+            custom_id=f"mode_set:{mode}",
+            disabled=is_active,
+        )
+        view.add_item(btn)
+    return view
+
+
 async def create_forum_post(
     forum: discord.ForumChannel,
     name: str,
     origin: str = "bot",
     topic_preview: str = "",
+    current_mode: str = "explore",
 ) -> tuple[discord.Thread, discord.Message]:
     """Create a new forum post (thread + starter message).
 
@@ -147,8 +171,10 @@ async def create_forum_post(
         timestamp=datetime.now(timezone.utc),
     )
     embed.add_field(name="Origin", value=origin, inline=True)
+    embed.add_field(name="Mode", value=current_mode.capitalize(), inline=True)
 
-    result = await forum.create_thread(name=name, embed=embed)
+    view = _mode_select_view(current_mode)
+    result = await forum.create_thread(name=name, embed=embed, view=view)
     thread = result.thread
     message = result.message
     log.info("Created forum post %s (%s) in forum %s", thread.id, name, forum.name)

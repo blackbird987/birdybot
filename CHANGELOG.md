@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Mode Selection on New Sessions
+- `/new` now accepts an optional `mode` parameter (Explore/Plan/Build) as a Discord choice dropdown, so you can start a session in the right mode without a separate `/mode` command.
+- New forum threads show mode-selection buttons in the welcome embed — click to switch mode before sending your first message.
+- Active mode is highlighted in the button row and shown in the embed's Mode field.
+
+### Finalize Embed Fixes
+- `/release` command now also outputs rich finalize embeds (was missed in v0.3.6).
+- Commit field truncated to Discord's 1024-char field limit to prevent API errors on long messages.
+- Parser robustness: `CHANGELOG:` header matching is now lenient to minor formatting variations.
+
 ## v0.3.6 — Stop Button, Rich Embeds, Release Command (2026-03-15)
 
 ### Rich Finalize Embeds
