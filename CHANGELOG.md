@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.3.7 — Mode Selection, Finalize Fixes (2026-03-15)
+
 ### Mode Selection on New Sessions
 - `/new` now accepts an optional `mode` parameter (Explore/Plan/Build) as a Discord choice dropdown, so you can start a session in the right mode without a separate `/mode` command.
 - New forum threads show mode-selection buttons in the welcome embed — click to switch mode before sending your first message.
