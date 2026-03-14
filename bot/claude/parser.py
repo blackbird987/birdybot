@@ -83,56 +83,69 @@ def extract_result(events: list[dict]) -> RunResult:
     """Extract the final result from accumulated stream-json events."""
     result = RunResult()
 
-    # Look for the result message (last event usually)
-    for event in reversed(events):
+    # Single-pass: collect tools and find result event
+    tools_seen: set[str] = set()
+    result_event: dict | None = None
+    fallback_parts: list[str] = []
+
+    for event in events:
         etype = event.get("type", "")
 
-        if etype == "result":
-            result.session_id = event.get("session_id")
-            result.cost_usd = event.get("cost_usd", 0.0)
-            result.duration_ms = event.get("duration_ms", 0)
-            result.is_error = event.get("is_error", False)
-
-            # Result text can be in different places
-            result_data = event.get("result", "")
-            if isinstance(result_data, str):
-                result.result_text = result_data
-            elif isinstance(result_data, list):
-                # Content blocks
-                parts = []
-                for block in result_data:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        parts.append(block.get("text", ""))
-                result.result_text = "\n".join(parts)
-            elif isinstance(result_data, dict):
-                result.result_text = result_data.get("text", str(result_data))
-
-            if result.is_error and not result.result_text:
-                # Check both "error" (str) and "errors" (list)
-                errors_list = event.get("errors", [])
-                if errors_list:
-                    result.error_message = "; ".join(str(e) for e in errors_list)
-                else:
-                    result.error_message = event.get("error", "Unknown error")
-            break
-
-    # Fallback: collect all text content from assistant messages
-    if not result.result_text:
-        parts = []
-        for event in events:
-            if event.get("type") == "assistant":
-                content = event.get("content", [])
-                if isinstance(content, list):
-                    for block in content:
-                        if isinstance(block, dict) and block.get("type") == "text":
-                            parts.append(block.get("text", ""))
+        # Collect tool names
+        if etype == "assistant":
+            content = event.get("content", [])
+            if not content:
                 message = event.get("message", {})
                 if isinstance(message, dict):
-                    for block in message.get("content", []):
-                        if isinstance(block, dict) and block.get("type") == "text":
-                            parts.append(block.get("text", ""))
-        if parts:
+                    content = message.get("content", [])
+            for block in content if isinstance(content, list) else []:
+                if isinstance(block, dict):
+                    if block.get("type") == "tool_use":
+                        name = block.get("name", "")
+                        if name and name not in tools_seen:
+                            tools_seen.add(name)
+                            result.tools_used.append(name)
+                    elif block.get("type") == "text":
+                        fallback_parts.append(block.get("text", ""))
+        elif etype == "content_block_start":
+            cb = event.get("content_block", {})
+            if cb.get("type") == "tool_use":
+                name = cb.get("name", "")
+                if name and name not in tools_seen:
+                    tools_seen.add(name)
+                    result.tools_used.append(name)
+        elif etype == "result":
+            result_event = event
+
+    # Extract result data
+    if result_event:
+        result.session_id = result_event.get("session_id")
+        result.cost_usd = result_event.get("cost_usd", 0.0)
+        result.duration_ms = result_event.get("duration_ms", 0)
+        result.is_error = result_event.get("is_error", False)
+
+        result_data = result_event.get("result", "")
+        if isinstance(result_data, str):
+            result.result_text = result_data
+        elif isinstance(result_data, list):
+            parts = []
+            for block in result_data:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(block.get("text", ""))
             result.result_text = "\n".join(parts)
+        elif isinstance(result_data, dict):
+            result.result_text = result_data.get("text", str(result_data))
+
+        if result.is_error and not result.result_text:
+            errors_list = result_event.get("errors", [])
+            if errors_list:
+                result.error_message = "; ".join(str(e) for e in errors_list)
+            else:
+                result.error_message = result_event.get("error", "Unknown error")
+
+    # Fallback: use text collected during the single pass
+    if not result.result_text and fallback_parts:
+        result.result_text = "\n".join(fallback_parts)
 
     return result
 

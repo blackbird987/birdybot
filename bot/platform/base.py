@@ -118,6 +118,10 @@ class Messenger(Protocol):
         """Split text into platform-safe chunks."""
         ...
 
+    async def close_conversation(self, channel_id: str) -> None:
+        """Close/archive a conversation. Discord: archive+lock thread. Telegram: no-op."""
+        ...
+
 
 @dataclass
 class RequestContext:

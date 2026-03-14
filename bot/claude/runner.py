@@ -340,6 +340,25 @@ class ClaudeRunner:
         except Exception:
             return None
 
+    @property
+    def active_count(self) -> int:
+        """Number of currently running Claude processes."""
+        return len(self._processes)
+
+    @property
+    def active_ids(self) -> list[str]:
+        """IDs of currently running instances."""
+        return list(self._processes.keys())
+
+    async def wait_until_idle(self, timeout: float = 300) -> bool:
+        """Wait until no processes are running. Returns True if idle, False on timeout."""
+        deadline = asyncio.get_event_loop().time() + timeout
+        while self._processes:
+            if asyncio.get_event_loop().time() > deadline:
+                return False
+            await asyncio.sleep(2)
+        return True
+
     async def kill(self, instance_id: str) -> bool:
         """Terminate a running Claude process."""
         proc = self._processes.get(instance_id)

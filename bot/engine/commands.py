@@ -219,6 +219,9 @@ async def _run_query(ctx: RequestContext, prompt: str) -> None:
     await lifecycle.send_result(ctx, inst, result.result_text)
     await budget_warning(ctx)
 
+    # Check if the instance requested a bot reboot
+    await lifecycle.check_reboot_request(ctx)
+
 
 # --- /new ---
 
@@ -822,14 +825,34 @@ async def on_reboot(ctx: RequestContext) -> None:
     if not _shutdown_fn:
         await ctx.messenger.send_text(ctx.channel_id, "Reboot not available.")
         return
-    await ctx.messenger.send_text(ctx.channel_id, f"\U0001f504 Rebooting {config.PC_NAME}...")
 
-    # Save reboot message so the new process announces it's back
     import json
     import subprocess
     import sys
 
-    reboot_data = {"text": f"✅ {config.PC_NAME} back online."}
+    # --- Wait for active instances to finish ---
+    active_ids = ctx.runner.active_ids
+    if active_ids:
+        ids = ", ".join(active_ids)
+        await ctx.messenger.send_text(
+            ctx.channel_id,
+            f"⏳ Waiting for {len(active_ids)} active instance(s) to finish: {ids}",
+        )
+        idle = await ctx.runner.wait_until_idle(timeout=300)
+        if not idle:
+            remaining = ", ".join(ctx.runner.active_ids)
+            await ctx.messenger.send_text(
+                ctx.channel_id,
+                f"⚠️ Timed out waiting. Force-rebooting with {len(ctx.runner.active_ids)} still running: {remaining}",
+            )
+
+    await ctx.messenger.send_text(ctx.channel_id, f"🔄 Rebooting {config.PC_NAME}...")
+
+    # Save reboot context so the new process can finish the turn
+    reboot_data = {
+        "channel_id": ctx.channel_id,
+        "platform": ctx.platform,
+    }
     try:
         config.REBOOT_MSG_FILE.write_text(
             json.dumps(reboot_data), encoding="utf-8",
@@ -1125,5 +1148,7 @@ async def handle_callback(
         await workflows.on_review_code(ctx, instance_id, source_msg_id)
     elif action == "commit":
         await workflows.on_commit(ctx, instance_id, source_msg_id)
+    elif action == "done":
+        await workflows.on_done(ctx, instance_id, source_msg_id)
     elif action == "sess_resume":
         await workflows.on_sess_resume(ctx, instance_id, source_msg_id)

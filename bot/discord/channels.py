@@ -5,16 +5,10 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
 
 import discord
 
-if TYPE_CHECKING:
-    pass
-
 log = logging.getLogger(__name__)
-
-MAX_SESSION_CHANNELS = 15  # excludes lobby; Discord category cap is 50
 
 
 def _private_overwrites(
@@ -93,29 +87,8 @@ def sanitize_channel_name(text: str, separator: str = "-") -> str:
     return name[:70] or "session"
 
 
-def _unique_channel_name(
-    name: str, existing_names: set[str],
-) -> str:
-    """Ensure name is unique by appending -2, -3, etc."""
-    if name not in existing_names:
-        return name
-    for i in range(2, 100):
-        candidate = f"{name[:67]}-{i}"
-        if candidate not in existing_names:
-            return candidate
-    return f"{name[:60]}-{hash(name) % 1000}"
-
-
-def build_channel_name(topic: str, repo_name: str | None = None) -> str:
-    """Build a channel name from topic and optional repo prefix.
-
-    Format: "repo│topic" if repo_name, else just "topic".
-    """
-    if repo_name:
-        prefix = sanitize_channel_name(repo_name)
-        topic_part = sanitize_channel_name(topic)
-        max_topic_len = max(0, 70 - len(prefix) - 1)  # 1 for │ separator
-        return f"{prefix}│{topic_part[:max_topic_len]}" if max_topic_len else prefix
+def build_channel_name(topic: str) -> str:
+    """Build a channel name from topic."""
     return sanitize_channel_name(topic)
 
 
@@ -158,7 +131,6 @@ async def ensure_forum(
 async def create_forum_post(
     forum: discord.ForumChannel,
     name: str,
-    repo_name: str = "",
     origin: str = "bot",
     topic_preview: str = "",
 ) -> tuple[discord.Thread, discord.Message]:
@@ -169,13 +141,11 @@ async def create_forum_post(
     name = name[:100]  # Discord thread name limit
 
     embed = discord.Embed(
-        title=f"Session — {repo_name}" if repo_name else "Session",
+        title="Session",
         description=topic_preview[:200] or "New session",
         color=discord.Color.blurple(),
         timestamp=datetime.now(timezone.utc),
     )
-    if repo_name:
-        embed.add_field(name="Repo", value=repo_name, inline=True)
     embed.add_field(name="Origin", value=origin, inline=True)
 
     result = await forum.create_thread(name=name, embed=embed)
@@ -210,32 +180,6 @@ async def ensure_forum_tags(forum: discord.ForumChannel) -> dict[str, discord.Fo
 
 
 # --- Legacy channel helpers (kept for migration) ---
-
-
-async def create_session_channel(
-    guild: discord.Guild,
-    category: discord.CategoryChannel,
-    name: str,
-    session_id: str | None = None,
-    repo_name: str | None = None,
-) -> discord.TextChannel:
-    """Create a session channel under the category (inherits private perms).
-
-    Sets channel topic to 'session:{session_id}' for recovery.
-    """
-    existing = {ch.name for ch in category.text_channels}
-    sanitized = build_channel_name(name, repo_name)
-    name = _unique_channel_name(sanitized, existing)
-    topic = f"session:{session_id}" if session_id else "session:pending"
-
-    channel = await guild.create_text_channel(
-        name=name,
-        category=category,
-        topic=topic,
-        position=1,  # after lobby (position 0)
-    )
-    log.info("Created session channel %s (%s) session=%s", channel.id, name, session_id)
-    return channel
 
 
 async def archive_session_channel(channel: discord.TextChannel) -> None:
@@ -279,18 +223,3 @@ async def create_task_channel(
     return channel
 
 
-async def archive_channel(
-    channel: discord.TextChannel,
-    category: discord.CategoryChannel | None = None,
-) -> None:
-    """Move a task channel to the archive category."""
-    if category:
-        await channel.edit(category=category)
-    # Set channel as read-only
-    try:
-        await channel.set_permissions(
-            channel.guild.default_role,
-            send_messages=False,
-        )
-    except Exception:
-        log.exception("Failed to archive channel %s", channel.id)

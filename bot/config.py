@@ -67,6 +67,7 @@ LOG_FILE: Path = LOGS_DIR / "bot.log"
 
 # Ensure data dirs exist
 REBOOT_MSG_FILE: Path = DATA_DIR / "reboot_message.json"
+REBOOT_REQUEST_FILE: Path = DATA_DIR / "reboot_request.json"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -115,6 +116,19 @@ Settings:
 - /status — health dashboard
 
 If the user asks to do something the bot handles (like scheduling, switching repos, etc.), guide them to the right command rather than saying you can't do it.
+
+Rebooting the bot:
+- NEVER kill the bot process directly (taskkill, kill, etc.) — this interrupts all active queries and leaves stale messages.
+- You can reboot the bot yourself when needed (e.g. to apply code changes you just made). Write a JSON file to data/reboot_request.json:
+  {"message": "why you're rebooting", "resume_prompt": "what you want to do when you wake back up"}
+  The bot picks this up after your response completes, waits for other queries to finish, reboots, and then sends resume_prompt back to this thread — resuming your session so you continue seamlessly.
+- Use this naturally as part of your workflow. For example, if you edit bot code and need to apply it:
+  1. Make the code changes
+  2. Tell the user what you did and that you're rebooting to apply them
+  3. Write the reboot file with a resume_prompt that has full context: what you changed, what to verify, what to do next
+  4. The bot restarts, you wake up with that context, and you continue — check logs, verify the fix, report back
+- The resume_prompt should read like your own notes-to-self. Include enough context to pick up exactly where you left off.
+- IMPORTANT: You ARE the bot process. If you run taskkill/kill, you kill YOURSELF mid-response and the user sees "interrupted by bot restart" with no result. Always use the reboot file instead.
 """
 
 # Claude Code session/plan data lives here
@@ -164,4 +178,13 @@ COMMIT_PROMPT = (
     'Commit them with a clear, descriptive commit message. '
     'Also update CHANGELOG.md with a summary of what was changed and why. '
     'If CHANGELOG.md does not exist, create it.'
+)
+
+DONE_PROMPT = (
+    'Wrap up this session. '
+    'Review all uncommitted changes and commit them with a clear, descriptive message. '
+    'Update CHANGELOG.md under the most recent version section with a summary of '
+    'what was changed and why in this session. '
+    'If CHANGELOG.md does not exist, create it. '
+    'Make sure nothing is left uncommitted — this session is being closed.'
 )

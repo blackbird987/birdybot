@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time as _time
+import os
+import tempfile
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import discord
@@ -19,7 +21,7 @@ from bot.discord import channels
 from bot.discord.adapter import DiscordMessenger
 from bot.engine import commands
 from bot.engine import sessions as sessions_mod
-from bot.platform.base import ButtonSpec, RequestContext
+from bot.platform.base import RequestContext
 
 if TYPE_CHECKING:
     from bot.claude.runner import ClaudeRunner
@@ -122,6 +124,7 @@ class ClaudeBot(discord.Client):
         self._forum_projects: dict[str, ForumProject] = {}
         self._forum_lock = asyncio.Lock()
         self._thread_lock = asyncio.Lock()
+        self._dashboard_last_refresh: float = 0.0  # monotonic timestamp for debounce
 
         self._monitor_service: MonitorService | None = None
         self._monitor_started: bool = False
@@ -158,6 +161,56 @@ class ClaudeBot(discord.Client):
             session_id=session_id,
             repo_name=repo_name,
         )
+
+    # --- Resume after reboot ---
+
+    async def dispatch_resume(
+        self, channel_id: str, prompt: str, announce: str | None = None,
+    ) -> None:
+        """Dispatch a query to a forum thread after reboot, resuming the session.
+
+        If announce is set, send it to the channel before running the prompt.
+        """
+        # Wait for on_ready (forum map loads there) — poll with retries
+        for attempt in range(60):  # up to 60 seconds
+            if self._ready_event.is_set() and self._forum_projects:
+                break
+            await asyncio.sleep(1)
+        else:
+            log.warning("dispatch_resume: timed out waiting for bot ready + forum map")
+            return
+
+        # Send reboot confirmation now that Discord is ready
+        if announce:
+            try:
+                await self.messenger.send_text(channel_id, announce)
+            except Exception:
+                log.warning("dispatch_resume: failed to send announcement", exc_info=True)
+
+        # Consume the reboot message file now that Discord is ready
+        try:
+            config.REBOOT_MSG_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+        # If no prompt, we're done (just needed the announcement)
+        if not prompt:
+            return
+
+        lookup = self._thread_to_project(channel_id)
+        if not lookup:
+            log.warning("dispatch_resume: no thread mapping for %s (have %d projects)",
+                        channel_id, len(self._forum_projects))
+            return
+        proj, info = lookup
+        session_id = info.session_id or None
+        repo_name = proj.repo_name if proj.repo_name != "_default" else None
+        log.info("Resuming post-reboot in thread %s session=%s: %s",
+                 channel_id, session_id and session_id[:12], prompt[:80])
+        ctx = self._ctx(channel_id, session_id=session_id, repo_name=repo_name)
+        await commands.on_text(ctx, prompt)
+        asyncio.create_task(self._try_apply_tags_after_run(channel_id))
+        asyncio.create_task(self._refresh_dashboard())
 
     # --- Forum-Session Mapping ---
 
@@ -207,7 +260,7 @@ class ClaudeBot(discord.Client):
         """Persist forum→project mapping to platform_state."""
         state = self._store.get_platform_state("discord")
         state["forum_projects"] = {k: v.to_dict() for k, v in self._forum_projects.items()}
-        self._store.set_platform_state("discord", state, persist=False)
+        self._store.set_platform_state("discord", state, persist=True)
 
     def _session_to_thread(self, session_id: str) -> tuple[str, ThreadInfo] | None:
         """Reverse lookup: find thread for a session_id. Returns (thread_id, info)."""
@@ -306,9 +359,9 @@ class ClaudeBot(discord.Client):
                     except (discord.NotFound, discord.Forbidden):
                         pass
 
-            thread_name = channels.build_channel_name(topic, None) if topic != "new-session" else "new-session"
+            thread_name = channels.build_channel_name(topic) if topic != "new-session" else "new-session"
             thread, _msg = await channels.create_forum_post(
-                forum, thread_name, repo_name=repo_name, origin=origin,
+                forum, thread_name, origin=origin,
                 topic_preview=topic,
             )
 
@@ -322,22 +375,6 @@ class ClaudeBot(discord.Client):
             )
             self._save_forum_map()
             return thread
-
-    def _get_active_thread_ids(self) -> set[str]:
-        """Return thread IDs that have a running/queued instance."""
-        from bot.claude.types import InstanceStatus
-        active = set()
-        for inst in self._store.list_instances():
-            if inst.status in (InstanceStatus.RUNNING, InstanceStatus.QUEUED):
-                if inst.session_id:
-                    result = self._session_to_thread(inst.session_id)
-                    if result:
-                        active.add(result[0])
-                for msg_id in inst.message_ids.get("discord", []):
-                    lookup = self._thread_to_project(msg_id)
-                    if lookup:
-                        active.add(msg_id)
-        return active
 
     async def _sync_single_thread(self, thread_id: str) -> None:
         """Refresh a single session thread: pull latest CLI messages."""
@@ -404,12 +441,7 @@ class ClaudeBot(discord.Client):
                 continue
             forum = guild.get_channel(int(proj.forum_channel_id))
             if forum and isinstance(forum, discord.ForumChannel):
-                # Validate threads
-                valid_threads: dict[str, ThreadInfo] = {}
-                for tid, info in proj.threads.items():
-                    # Threads are lazily validated — keep all, resolve on access
-                    valid_threads[tid] = info
-                proj.threads = valid_threads
+                # Threads are lazily validated on access — keep all mappings
                 valid_projects[repo_name] = proj
             else:
                 log.info("Removed stale forum mapping for repo %s (forum %s gone)", repo_name, proj.forum_channel_id)
@@ -432,6 +464,24 @@ class ClaudeBot(discord.Client):
         if valid_projects != self._forum_projects:
             self._forum_projects = valid_projects
             self._save_forum_map()
+
+        # Migrate thread names: strip legacy "repo│" prefix
+        for proj in valid_projects.values():
+            if not proj.forum_channel_id:
+                continue
+            forum = guild.get_channel(int(proj.forum_channel_id))
+            if not forum or not isinstance(forum, discord.ForumChannel):
+                continue
+            for thread in forum.threads:
+                if "\u2502" in thread.name:  # │ (box-drawing vertical)
+                    new_name = thread.name.split("\u2502", 1)[1].strip()
+                    if new_name:
+                        old_name = thread.name
+                        try:
+                            await thread.edit(name=new_name[:100])
+                            log.info("Renamed thread %s: %s -> %s", thread.id, old_name, new_name)
+                        except Exception:
+                            log.debug("Failed to rename thread %s", thread.id, exc_info=True)
 
     async def _run_slash(
         self, interaction: discord.Interaction, coro,
@@ -560,6 +610,34 @@ class ClaudeBot(discord.Client):
             if not self._auth(interaction.user.id):
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
+            # Discord enhancement: select menu for switch (no name) or bare /repo
+            stripped = args.strip()
+            repos = self._store.list_repos()
+            if len(repos) >= 2 and stripped in ("", "switch"):
+                active, _ = self._store.get_active_repo()
+                select = discord.ui.Select(
+                    placeholder="Switch repo...",
+                    custom_id="repo_switch_select",
+                    options=[
+                        discord.SelectOption(
+                            label=name,
+                            description=path[:80],
+                            value=name,
+                            default=(name == active),
+                        )
+                        for name, path in repos.items()
+                    ],
+                )
+                view = discord.ui.View(timeout=60)
+                view.add_item(select)
+                lines = []
+                for name, path in repos.items():
+                    marker = " \\*" if name == active else ""
+                    lines.append(f"`{name}`{marker} → `{path}`")
+                await interaction.response.send_message(
+                    "\n".join(lines), view=view, ephemeral=True,
+                )
+                return
             await self._run_slash(interaction, lambda ctx: commands.on_repo(ctx, args))
 
         @self.tree.command(name="session", description="List/resume sessions", guild=guild_obj)
@@ -605,8 +683,8 @@ class ClaudeBot(discord.Client):
             if repo:
                 repos = self._store.list_repos()
                 lower_map = {k.lower(): k for k in repos}
-                repo_name = repos.get(repo) and repo or lower_map.get(repo.lower())
-                if not repo_name or repo_name not in repos:
+                repo_name = repo if repo in repos else lower_map.get(repo.lower())
+                if not repo_name:
                     await interaction.response.send_message(
                         f"Repo '{repo}' not found.", ephemeral=True,
                     )
@@ -1000,6 +1078,45 @@ class ClaudeBot(discord.Client):
             return
 
         text = message.content.strip()
+        _temp_files: list[str] = []  # track temp files for cleanup
+
+        # Handle file attachments
+        IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+        for att in message.attachments:
+            if not att.filename:
+                continue
+            ext = Path(att.filename).suffix.lower()
+
+            # Text files (Discord sends large pastes as .txt)
+            if ext == ".txt" and att.size <= 500_000:
+                try:
+                    file_bytes = await att.read()
+                    file_text = file_bytes.decode("utf-8", errors="replace")
+                    if text:
+                        text = f"{text}\n\n{file_text}"
+                    else:
+                        text = file_text
+                    log.info("Read .txt attachment %s (%d bytes)", att.filename, att.size)
+                except Exception:
+                    log.warning("Failed to read attachment %s", att.filename, exc_info=True)
+
+            # Images — save to temp file, Claude reads from path
+            elif ext in IMAGE_EXTS and att.size <= 10_000_000:
+                try:
+                    fd, tmp_path = tempfile.mkstemp(suffix=ext)
+                    os.close(fd)
+                    file_bytes = await att.read()
+                    Path(tmp_path).write_bytes(file_bytes)
+                    _temp_files.append(tmp_path)
+                    img_prompt = f"[Image: {att.filename} saved at {tmp_path}]"
+                    if text:
+                        text = f"{text}\n\n{img_prompt}"
+                    else:
+                        text = f"Analyze this screenshot at {tmp_path}. Describe what you see."
+                    log.info("Saved image attachment %s (%d bytes) to %s", att.filename, att.size, tmp_path)
+                except Exception:
+                    log.warning("Failed to save image %s", att.filename, exc_info=True)
+
         if not text:
             return
 
@@ -1007,57 +1124,62 @@ class ClaudeBot(discord.Client):
         ch_name = getattr(message.channel, "name", channel_id)
         log.info("Discord msg in #%s: %s", ch_name, text[:80])
 
-        # --- Lobby: route to forum thread ---
-        if message.channel.id == self._lobby_channel_id:
-            active_repo, _ = self._store.get_active_repo()
-            await self._route_lobby_message(message, text, active_repo)
-            return
+        try:
+            # --- Lobby: route to forum thread ---
+            if message.channel.id == self._lobby_channel_id:
+                active_repo, _ = self._store.get_active_repo()
+                await self._route_lobby_message(message, text, active_repo)
+                return
 
-        # --- Forum thread: auto-resume session ---
-        if isinstance(message.channel, discord.Thread):
-            parent = message.channel.parent
-            if parent and isinstance(parent, discord.ForumChannel):
-                lookup = self._thread_to_project(channel_id)
-                if not lookup:
-                    # Adopt unmapped thread in a known forum
-                    proj = self._forum_by_channel_id(str(parent.id))
-                    if proj:
-                        log.info("Adopted unmapped thread %s in forum %s", channel_id, parent.name)
-                        info = ThreadInfo(thread_id=channel_id, origin="bot")
-                        proj.threads[channel_id] = info
-                        self._save_forum_map()
-                        lookup = (proj, info)
+            # --- Forum thread: auto-resume session ---
+            if isinstance(message.channel, discord.Thread):
+                parent = message.channel.parent
+                if parent and isinstance(parent, discord.ForumChannel):
+                    lookup = self._thread_to_project(channel_id)
+                    if not lookup:
+                        # Adopt unmapped thread in a known forum
+                        proj = self._forum_by_channel_id(str(parent.id))
+                        if proj:
+                            log.info("Adopted unmapped thread %s in forum %s", channel_id, parent.name)
+                            info = ThreadInfo(thread_id=channel_id, origin="bot")
+                            proj.threads[channel_id] = info
+                            self._save_forum_map()
+                            lookup = (proj, info)
 
-                if lookup:
-                    proj, info = lookup
-                    session_id = info.session_id or None
-                    repo_name = proj.repo_name if proj.repo_name != "_default" else None
-                    origin = info.origin
+                    if lookup:
+                        proj, info = lookup
+                        session_id = info.session_id or None
+                        repo_name = proj.repo_name if proj.repo_name != "_default" else None
+                        origin = info.origin
 
-                    # CLI → Discord transition
-                    if session_id and origin == "cli":
-                        log.info("Thread %s resuming CLI session %s — transitioning to bot ownership",
-                                 ch_name, session_id[:12])
-                        info.origin = "bot"
-                        self._save_forum_map()
+                        # CLI → Discord transition
+                        if session_id and origin == "cli":
+                            log.info("Thread %s resuming CLI session %s — transitioning to bot ownership",
+                                     ch_name, session_id[:12])
+                            info.origin = "bot"
+                            self._save_forum_map()
 
-                    was_pending = not session_id
+                        was_pending = not session_id
 
-                    ctx = self._ctx(channel_id, session_id=session_id, repo_name=repo_name)
-                    await commands.on_text(ctx, text)
+                        ctx = self._ctx(channel_id, session_id=session_id, repo_name=repo_name)
+                        await commands.on_text(ctx, text)
 
-                    if was_pending:
-                        await self._finalize_pending_thread(channel_id, message.channel, text)
-                    elif "new-session" in message.channel.name:
-                        await self._rename_thread_from_prompt(message.channel, text)
-                    # Apply tags + refresh dashboard (fire-and-forget)
-                    asyncio.create_task(self._try_apply_tags_after_run(channel_id))
-                    asyncio.create_task(self._refresh_dashboard())
-                    return
+                        if was_pending:
+                            await self._finalize_pending_thread(channel_id, message.channel, text)
+                        elif "new-session" in message.channel.name:
+                            await self._rename_thread_from_prompt(message.channel, text)
+                        # Apply tags + refresh dashboard (fire-and-forget)
+                        asyncio.create_task(self._try_apply_tags_after_run(channel_id))
+                        asyncio.create_task(self._refresh_dashboard())
+                        return
 
-        # --- Other channel (unmapped): no session ---
-        ctx = self._ctx(channel_id)
-        await commands.on_text(ctx, text)
+            # --- Other channel (unmapped): no session ---
+            ctx = self._ctx(channel_id)
+            await commands.on_text(ctx, text)
+        finally:
+            # Clean up temp image files
+            for tmp in _temp_files:
+                Path(tmp).unlink(missing_ok=True)
 
     async def _route_lobby_message(
         self, message: discord.Message, text: str, repo_name: str | None,
@@ -1081,13 +1203,6 @@ class ClaudeBot(discord.Client):
             # Apply tags + refresh dashboard
             asyncio.create_task(self._try_apply_tags_after_run(str(thread.id)))
             asyncio.create_task(self._refresh_dashboard())
-
-    async def _safe_edit(self, channel, **kwargs) -> None:
-        """Edit a channel/thread, logging failures instead of blocking on rate limits."""
-        try:
-            await channel.edit(**kwargs)
-        except Exception:
-            log.warning("Failed to edit channel %s", channel.id, exc_info=True)
 
     async def _apply_thread_tags(self, thread: discord.Thread, status: str, origin: str = "bot") -> None:
         """Apply forum tags to a thread based on status. Fire-and-forget safe."""
@@ -1133,7 +1248,12 @@ class ClaudeBot(discord.Client):
     # --- Dashboard ---
 
     async def _refresh_dashboard(self) -> None:
-        """Update or create the pinned dashboard embed in lobby."""
+        """Update or create the pinned dashboard embed in lobby. Debounced to 5s."""
+        now = asyncio.get_event_loop().time()
+        if now - self._dashboard_last_refresh < 5:
+            return
+        self._dashboard_last_refresh = now
+
         if not self._lobby_channel_id:
             return
         lobby = self.get_channel(self._lobby_channel_id)
@@ -1204,11 +1324,7 @@ class ClaudeBot(discord.Client):
         self, thread: discord.Thread, prompt: str,
     ) -> None:
         """Rename a 'new-session' thread based on the first prompt."""
-        lookup = self._thread_to_project(str(thread.id))
-        repo_name = lookup[0].repo_name if lookup else None
-        if repo_name == "_default":
-            repo_name = None
-        new_name = channels.build_channel_name(prompt, repo_name)[:100]
+        new_name = channels.build_channel_name(prompt)[:100]
         try:
             await thread.edit(name=new_name)
             log.info("Renamed thread %s -> %s", thread.id, new_name)
@@ -1282,34 +1398,36 @@ class ClaudeBot(discord.Client):
     async def _update_pending_thread(self, thread_id: str) -> None:
         """After a query completes, update a pending thread's session mapping."""
         lookup = self._thread_to_project(thread_id)
-        if lookup:
-            _, info = lookup
-            if info.session_id:
-                return  # already mapped
+        if not lookup:
+            return  # thread not tracked
+        proj, info = lookup
+        if info.session_id:
+            return  # already mapped
+
+        # Resolve channel once
+        ch = self.get_channel(int(thread_id))
+        if not ch:
+            try:
+                ch = await self.fetch_channel(int(thread_id))
+            except (discord.NotFound, discord.Forbidden):
+                return
+        if not isinstance(ch, (discord.TextChannel, discord.Thread)):
+            return
 
         for inst in self._store.list_instances()[:10]:
             if inst.session_id and inst.origin_platform == "discord":
                 discord_msg_ids = inst.message_ids.get("discord", [])
                 if not discord_msg_ids:
                     continue
-                ch = self.get_channel(int(thread_id))
-                if not ch:
-                    try:
-                        ch = await self.fetch_channel(int(thread_id))
-                    except (discord.NotFound, discord.Forbidden):
-                        return
-                if not isinstance(ch, (discord.TextChannel, discord.Thread)):
-                    return
                 try:
-                    msg = await ch.fetch_message(int(discord_msg_ids[0]))
-                    if msg and lookup:
-                        proj, info = lookup
-                        info.session_id = inst.session_id
-                        info.origin = "bot"
-                        self._save_forum_map()
-                        log.info("Mapped thread %s -> session %s (repo: %s)",
-                                 thread_id, inst.session_id, proj.repo_name)
-                        return
+                    await ch.fetch_message(int(discord_msg_ids[0]))
+                    # Message found in this thread — map session
+                    info.session_id = inst.session_id
+                    info.origin = "bot"
+                    self._save_forum_map()
+                    log.info("Mapped thread %s -> session %s (repo: %s)",
+                             thread_id, inst.session_id, proj.repo_name)
+                    return
                 except (discord.NotFound, discord.HTTPException):
                     continue
 
@@ -1382,6 +1500,31 @@ class ClaudeBot(discord.Client):
             return
 
         custom_id = interaction.data.get("custom_id", "") if interaction.data else ""
+
+        # --- Select menu: repo switch ---
+        if custom_id == "repo_switch_select":
+            values = interaction.data.get("values", []) if interaction.data else []
+            if values:
+                repo_name = values[0]
+                current, _ = self._store.get_active_repo()
+                if repo_name == current:
+                    await interaction.response.edit_message(
+                        content=f"**{repo_name}** is already active.",
+                        view=None,
+                    )
+                elif self._store.switch_repo(repo_name):
+                    _, path = self._store.get_active_repo()
+                    await interaction.response.edit_message(
+                        content=f"Switched to **{repo_name}**: `{path}`",
+                        view=None,
+                    )
+                else:
+                    await interaction.response.edit_message(
+                        content=f"Repo '{repo_name}' not found.",
+                        view=None,
+                    )
+            return
+
         parts = custom_id.split(":", 1)
         if len(parts) != 2:
             return
@@ -1421,26 +1564,6 @@ class ClaudeBot(discord.Client):
         if action == "new_repo":
             repo_name = instance_id
             await self._create_new_session(interaction, repo_name, redirect=True)
-            try:
-                await interaction.delete_original_response()
-            except Exception:
-                pass
-            return
-
-        # --- Lobby routing with repo picker ---
-        if action == "lobby_route":
-            repo_name = instance_id
-            text = getattr(self, "_pending_lobby_text", None)
-            msg = getattr(self, "_pending_lobby_msg", None)
-            if text and msg:
-                self._pending_lobby_text = None
-                self._pending_lobby_msg = None
-                # Delete the picker message
-                try:
-                    await interaction.message.delete()
-                except Exception:
-                    pass
-                await self._route_lobby_message(msg, text, repo_name)
             try:
                 await interaction.delete_original_response()
             except Exception:

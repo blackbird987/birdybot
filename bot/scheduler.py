@@ -55,6 +55,7 @@ class Scheduler:
             await asyncio.sleep(30)
 
     async def _check_schedules(self) -> None:
+        self._store.reload_if_changed()
         now = datetime.now(timezone.utc)
         for sched in self._store.list_schedules():
             if not sched.next_run_at:

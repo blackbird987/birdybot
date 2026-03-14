@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 import discord
 
@@ -17,9 +16,11 @@ _STYLE_MAP = {
     "merge:": discord.ButtonStyle.success,     # Green
     "build:": discord.ButtonStyle.success,
     "commit:": discord.ButtonStyle.success,
+    "done:": discord.ButtonStyle.success,
     "kill:": discord.ButtonStyle.danger,       # Red
     "discard:": discord.ButtonStyle.danger,
     "retry:": discord.ButtonStyle.primary,     # Blue
+    "plan:": discord.ButtonStyle.primary,        # Blue
     "review_plan:": discord.ButtonStyle.primary,
     "review_code:": discord.ButtonStyle.primary,
 }
@@ -66,6 +67,11 @@ class DiscordMessenger:
         self._guild_id = guild_id
         self._lobby_channel_id = lobby_channel_id
         self._category_id = category_id
+
+    def find_channel_for_session(self, session_id: str) -> str | None:
+        """Find the Discord channel/thread ID for a session. Returns None if not found."""
+        result = self._bot._session_to_thread(session_id)
+        return result[0] if result else None
 
     @property
     def platform_name(self) -> str:
@@ -187,7 +193,7 @@ class DiscordMessenger:
         # Determine embed color from metadata status hint
         color = discord.Color.green()
         if metadata:
-            status = metadata.pop("_status", None)
+            status = metadata.get("_status")
             if status == "failed":
                 color = discord.Color.red()
             elif status == "killed":
@@ -264,3 +270,14 @@ class DiscordMessenger:
     def chunk_message(self, text: str) -> list[str]:
         # Discord regular messages: 2000 char limit
         return discord_fmt.chunk_message(text, limit=2000)
+
+    async def close_conversation(self, channel_id: str) -> None:
+        """Archive and lock a Discord forum thread."""
+        ch = await self._resolve_channel(channel_id)
+        if not ch or not isinstance(ch, discord.Thread):
+            return
+        try:
+            await ch.edit(archived=True, locked=True)
+            log.info("Closed (archived+locked) thread %s", channel_id)
+        except Exception:
+            log.debug("Failed to close thread %s", channel_id, exc_info=True)

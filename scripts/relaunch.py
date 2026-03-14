@@ -17,10 +17,16 @@ def _is_process_alive(pid: int) -> bool:
         import ctypes
         kernel32 = ctypes.windll.kernel32
         handle = kernel32.OpenProcess(0x1000, False, pid)
-        if handle:
-            kernel32.CloseHandle(handle)
-            return True
-        return False
+        if not handle:
+            return False
+        STILL_ACTIVE = 259
+        exit_code = ctypes.c_ulong()
+        alive = bool(
+            kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+            and exit_code.value == STILL_ACTIVE
+        )
+        kernel32.CloseHandle(handle)
+        return alive
     else:
         import os
         try:

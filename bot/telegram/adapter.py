@@ -180,6 +180,10 @@ class TelegramMessenger:
     def chunk_message(self, text: str) -> list[str]:
         return chunk_message(text)
 
+    async def close_conversation(self, channel_id: str) -> None:
+        """No-op for Telegram."""
+        pass
+
     # --- Internal ---
 
     async def _send_safe(

@@ -6,6 +6,10 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 
+# Tools that indicate code was modified (used for button context detection)
+CODE_CHANGE_TOOLS = frozenset({"Edit", "Write", "NotebookEdit"})
+
+
 class InstanceType(str, Enum):
     TASK = "task"
     QUERY = "query"
@@ -27,6 +31,7 @@ class InstanceOrigin(str, Enum):
     REVIEW_PLAN = "review_plan" # [Review Plan] button
     REVIEW_CODE = "review_code" # [Review Code] button
     COMMIT = "commit"           # [Commit] button
+    DONE = "done"               # [Done] button — commit + close thread
     RETRY = "retry"             # [Retry] button
 
 
@@ -69,6 +74,9 @@ class Instance:
     origin: InstanceOrigin = InstanceOrigin.DIRECT
     parent_id: str | None = None       # ID of instance whose button spawned this
     origin_platform: str = "telegram"  # Platform that created this instance
+    tools_used: list[str] = field(default_factory=list)  # Tool names used (Edit, Write, TodoWrite...)
+    plan_active: bool = False  # Session has an active plan (for button context)
+    code_active: bool = False  # Session has uncommitted code changes (for button context)
 
     def display_id(self) -> str:
         if self.name:
@@ -103,6 +111,9 @@ class Instance:
             "origin": self.origin.value,
             "parent_id": self.parent_id,
             "origin_platform": self.origin_platform,
+            "tools_used": self.tools_used,
+            "plan_active": self.plan_active,
+            "code_active": self.code_active,
         }
 
     @classmethod
@@ -134,6 +145,9 @@ class Instance:
             origin=InstanceOrigin(d["origin"]) if "origin" in d else InstanceOrigin.DIRECT,
             parent_id=d.get("parent_id"),
             origin_platform=d.get("origin_platform", "telegram"),
+            tools_used=d.get("tools_used", []),
+            plan_active=d.get("plan_active", False),
+            code_active=d.get("code_active", False),
         )
 
 
@@ -145,6 +159,7 @@ class RunResult:
     duration_ms: int = 0
     is_error: bool = False
     error_message: str | None = None
+    tools_used: list[str] = field(default_factory=list)  # Unique tool names used
 
 
 @dataclass

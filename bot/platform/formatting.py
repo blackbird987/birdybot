@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from bot.claude.types import Instance, InstanceOrigin, InstanceStatus, Schedule
+from bot.claude.types import CODE_CHANGE_TOOLS, Instance, InstanceOrigin, InstanceStatus, Schedule
 from bot.platform.base import ButtonSpec
 
 
@@ -110,13 +110,17 @@ def action_button_specs(
     rows: list[list[ButtonSpec]] = []
     iid = instance.id
 
+    # Done origin is terminal on success — no further actions (thread is closing)
+    if instance.origin == InstanceOrigin.DONE and instance.status == InstanceStatus.COMPLETED:
+        return rows
+
     if instance.status == InstanceStatus.COMPLETED:
-        if instance.origin in (InstanceOrigin.PLAN, InstanceOrigin.REVIEW_PLAN):
-            rows.append([
-                ButtonSpec("Review Plan", f"review_plan:{iid}"),
-                ButtonSpec("Build It", f"build:{iid}"),
-            ])
-        elif instance.branch:
+        tools = set(instance.tools_used or [])
+        made_code_changes = bool(tools & CODE_CHANGE_TOOLS)
+        made_plan = instance.plan_active
+
+        if instance.branch:
+            # Build bg task with branch — full merge workflow
             rows.append([
                 ButtonSpec("Diff", f"diff:{iid}"),
                 ButtonSpec("Merge", f"merge:{iid}"),
@@ -125,12 +129,39 @@ def action_button_specs(
             rows.append([
                 ButtonSpec("Review Code", f"review_code:{iid}"),
                 ButtonSpec("Commit", f"commit:{iid}"),
+                ButtonSpec("Done", f"done:{iid}"),
+            ])
+        elif made_code_changes:
+            # Edited/wrote files in-place (no branch)
+            row: list[ButtonSpec] = [ButtonSpec("Review Code", f"review_code:{iid}")]
+            row.append(ButtonSpec("Retry", f"retry:{iid}"))
+            rows.append(row)
+        elif instance.code_active:
+            # Session has uncommitted code changes — offer commit/review
+            rows.append([
+                ButtonSpec("Commit", f"commit:{iid}"),
+                ButtonSpec("Review Code", f"review_code:{iid}"),
+                ButtonSpec("Done", f"done:{iid}"),
+            ])
+        elif made_plan:
+            # Session has an active plan
+            rows.append([
+                ButtonSpec("Review Plan", f"review_plan:{iid}"),
+                ButtonSpec("Build It", f"build:{iid}"),
+                ButtonSpec("Done", f"done:{iid}"),
             ])
         else:
+            # Default buttons + workflow row when session exists
             rows.append([
                 ButtonSpec("New", f"new:{iid}"),
                 ButtonSpec("Retry", f"retry:{iid}"),
             ])
+            if instance.session_id:
+                rows.append([
+                    ButtonSpec("Plan", f"plan:{iid}"),
+                    ButtonSpec("Build", f"build:{iid}"),
+                    ButtonSpec("Done", f"done:{iid}"),
+                ])
 
     elif instance.status in (InstanceStatus.RUNNING, InstanceStatus.QUEUED):
         rows.append([ButtonSpec("Kill", f"kill:{iid}")])

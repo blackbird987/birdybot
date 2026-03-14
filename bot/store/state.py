@@ -39,8 +39,10 @@ class StateStore:
         self._verbose_level: int = 1  # 0=silent, 1=normal, 2=detailed
         self._platform_state: dict[str, dict] = {}  # platform -> arbitrary state
         self._dirty: bool = False  # Dirty flag — mark_dirty() defers save to auto-save loop
+        self._last_mtime: float = 0.0  # Track file mtime for external change detection
 
         self._load()
+        self._update_mtime()
 
     # --- Persistence ---
 
@@ -74,6 +76,27 @@ class StateStore:
                      len(self._instances), len(self._repos), len(self._schedules))
         except Exception:
             log.exception("Failed to load state file, starting fresh")
+
+    def _update_mtime(self) -> None:
+        """Record current file mtime after we read or write."""
+        try:
+            self._last_mtime = self._file.stat().st_mtime if self._file.exists() else 0.0
+        except OSError:
+            self._last_mtime = 0.0
+
+    def reload_if_changed(self) -> bool:
+        """Re-read state from disk if the file was modified externally.
+        Returns True if a reload occurred."""
+        try:
+            current_mtime = self._file.stat().st_mtime if self._file.exists() else 0.0
+        except OSError:
+            return False
+        if current_mtime > self._last_mtime:
+            log.info("State file changed externally, reloading")
+            self._load()
+            self._last_mtime = current_mtime
+            return True
+        return False
 
     def mark_dirty(self) -> None:
         """Mark state as changed — actual write deferred to auto-save loop."""
@@ -117,6 +140,7 @@ class StateStore:
                 if self._file.exists():
                     self._file.unlink()
                 Path(tmp_path).rename(self._file)
+                self._update_mtime()
             except Exception:
                 Path(tmp_path).unlink(missing_ok=True)
                 raise
@@ -214,18 +238,22 @@ class StateStore:
         """Total number of instances (all time)."""
         return len(self._instances)
 
-    def mark_orphans(self) -> int:
-        """Mark running/queued instances as failed (for startup recovery)."""
-        count = 0
+    def mark_orphans(self) -> list["Instance"]:
+        """Mark running/queued instances as failed (for startup recovery).
+
+        Returns the list of orphaned instances so callers can update their
+        thinking messages after platform connections are established.
+        """
+        orphans: list["Instance"] = []
         for inst in self._instances.values():
             if inst.status in (InstanceStatus.RUNNING, InstanceStatus.QUEUED):
                 inst.status = InstanceStatus.FAILED
-                inst.error = "Bot restarted — instance orphaned"
+                inst.error = "Bot restarted — instance interrupted"
                 inst.finished_at = datetime.now(timezone.utc).isoformat()
-                count += 1
-        if count:
+                orphans.append(inst)
+        if orphans:
             self.save()
-        return count
+        return orphans
 
     def archive_old(self) -> int:
         """Delete instances older than retention period."""

@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import subprocess
+import sys
 from datetime import datetime, timezone
-from pathlib import Path
 
 from bot import config
-from bot.claude.types import Instance, InstanceStatus, RunResult
+from bot.claude.types import (
+    CODE_CHANGE_TOOLS, Instance, InstanceOrigin, InstanceStatus, RunResult,
+)
 from bot.platform.base import MessageHandle, RequestContext
 from bot.platform.formatting import (
     action_button_specs,
-    expanded_button_specs,
     format_duration,
-    format_expanded_result_md,
     format_result_md,
     redact_secrets,
     stall_button_specs,
@@ -71,13 +73,38 @@ async def run_instance(
     finalize_run(ctx, inst, result)
     await send_result(ctx, inst, result.result_text, silent=silent)
 
+    # Check if the instance requested a bot reboot
+    await check_reboot_request(ctx)
+
 
 def finalize_run(ctx: RequestContext, inst: Instance, result: RunResult) -> None:
     """Apply RunResult to Instance and persist."""
     inst.session_id = result.session_id
     inst.cost_usd = result.cost_usd
     inst.duration_ms = result.duration_ms
+    inst.tools_used = result.tools_used
     inst.finished_at = datetime.now(timezone.utc).isoformat()
+
+    # Detect session context flags (plan/code) from this instance or siblings
+    tools = set(result.tools_used)
+    plan_tools = {"EnterPlanMode"}
+    plan_origins = {InstanceOrigin.PLAN, InstanceOrigin.REVIEW_PLAN}
+
+    if (plan_tools & tools) or inst.origin in plan_origins:
+        inst.plan_active = True
+    if CODE_CHANGE_TOOLS & tools:
+        inst.code_active = True
+
+    # Inherit flags from session siblings if not already set
+    if inst.session_id and not (inst.plan_active and inst.code_active):
+        for sibling in ctx.store.list_instances():
+            if sibling.session_id == inst.session_id:
+                if sibling.plan_active:
+                    inst.plan_active = True
+                if sibling.code_active:
+                    inst.code_active = True
+                if inst.plan_active and inst.code_active:
+                    break
 
     if result.is_error:
         inst.status = InstanceStatus.FAILED
@@ -173,8 +200,6 @@ async def send_result(
         meta["Duration"] = dur
     if inst.cost_usd:
         meta["Cost"] = f"${inst.cost_usd:.4f}"
-    if inst.repo_name:
-        meta["Repo"] = inst.repo_name
     if inst.branch:
         meta["Branch"] = inst.branch
 
@@ -223,3 +248,78 @@ async def send_result(
             log.exception("Last-resort notification also failed for %s", inst.id)
 
     ctx.store.update_instance(inst)
+
+
+async def check_reboot_request(ctx: RequestContext) -> None:
+    """Check if a Claude Code instance wrote a reboot request file.
+
+    If found, wait for all other active instances to finish, save reboot
+    context (so the new process sends confirmation to the right thread),
+    spawn the relaunch script, and trigger shutdown.
+    """
+    try:
+        raw = config.REBOOT_REQUEST_FILE.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return
+    except Exception:
+        log.warning("Failed to read reboot request file", exc_info=True)
+        return
+    try:
+        data = json.loads(raw)
+    except Exception:
+        log.warning("Malformed reboot request file, removing", exc_info=True)
+        config.REBOOT_REQUEST_FILE.unlink(missing_ok=True)
+        return
+    # Remove file before proceeding — best effort, proceed even if unlink fails
+    try:
+        config.REBOOT_REQUEST_FILE.unlink()
+    except OSError:
+        pass
+
+    reason = data.get("message", "reboot requested")
+    resume_prompt = data.get("resume_prompt")
+    log.info("Reboot requested by instance: %s", reason)
+
+    # Wait for any other active instances to finish
+    active = ctx.runner.active_ids
+    if active:
+        await ctx.messenger.send_text(
+            ctx.channel_id,
+            f"⏳ Waiting for {len(active)} active query(s) to finish before rebooting: "
+            f"{', '.join(active)}",
+        )
+        idle = await ctx.runner.wait_until_idle(timeout=300)
+        if not idle:
+            still = ctx.runner.active_ids
+            await ctx.messenger.send_text(
+                ctx.channel_id,
+                f"⚠️ Timed out after 5m. Force-rebooting with {len(still)} still running.",
+            )
+
+    await ctx.messenger.send_text(ctx.channel_id, f"🔄 Rebooting: {reason}")
+
+    # Save context so the new process sends confirmation to this thread
+    reboot_data = {
+        "channel_id": ctx.channel_id,
+        "platform": ctx.platform,
+    }
+    if resume_prompt:
+        reboot_data["resume_prompt"] = resume_prompt
+    try:
+        config.REBOOT_MSG_FILE.write_text(
+            json.dumps(reboot_data), encoding="utf-8",
+        )
+    except Exception:
+        log.warning("Failed to write reboot message file", exc_info=True)
+
+    # Spawn relaunch script and trigger shutdown
+    launcher = config._PROJECT_ROOT / "scripts" / "relaunch.py"
+    subprocess.Popen(
+        [sys.executable, str(launcher), str(config._PROJECT_ROOT)],
+        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+        close_fds=True,
+    )
+
+    from bot.engine import commands as _cmds
+    if _cmds._shutdown_fn:
+        _cmds._shutdown_fn()

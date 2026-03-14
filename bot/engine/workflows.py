@@ -8,7 +8,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from bot import config
-from bot.claude.types import Instance, InstanceOrigin, InstanceStatus, InstanceType
+from bot.claude.types import (
+    CODE_CHANGE_TOOLS, Instance, InstanceOrigin, InstanceStatus, InstanceType,
+)
 from bot.engine import lifecycle, sessions as sessions_mod
 from bot.platform.base import RequestContext
 
@@ -122,7 +124,7 @@ async def on_build(ctx: RequestContext, source_id: str, source_msg_id: str | Non
     if not source:
         await ctx.messenger.send_text(ctx.channel_id, "Instance not found.")
         return
-    is_plan = source.origin in (InstanceOrigin.PLAN, InstanceOrigin.REVIEW_PLAN)
+    is_plan = source.plan_active
     await spawn_from(ctx, source_id, SpawnConfig(
         instance_type=InstanceType.TASK,
         prompt=config.BUILD_FROM_PLAN_PROMPT if is_plan else config.BUILD_FROM_QUERY_PROMPT,
@@ -141,12 +143,30 @@ async def on_review_plan(ctx: RequestContext, source_id: str, source_msg_id: str
 
 
 async def on_review_code(ctx: RequestContext, source_id: str, source_msg_id: str | None = None) -> None:
-    await spawn_from(ctx, source_id, SpawnConfig(
-        instance_type=InstanceType.TASK, prompt=config.CODE_REVIEW_PROMPT,
-        mode="build", origin=InstanceOrigin.REVIEW_CODE,
-        status_text="Reviewing code...", resume_session=True,
-        copy_branch=True, silent=True,
-    ), source_msg_id=source_msg_id)
+    """Review code, auto-looping until no issues remain (max 5 rounds)."""
+    MAX_ROUNDS = 5
+    current_source = source_id
+    current_msg = source_msg_id
+    for round_num in range(MAX_ROUNDS):
+        status = "Reviewing code..." if round_num == 0 else f"Re-reviewing (round {round_num + 1})..."
+        result = await spawn_from(ctx, current_source, SpawnConfig(
+            instance_type=InstanceType.TASK, prompt=config.CODE_REVIEW_PROMPT,
+            mode="build", origin=InstanceOrigin.REVIEW_CODE,
+            status_text=status, resume_session=True,
+            copy_branch=True, silent=True,
+        ), source_msg_id=current_msg)
+
+        if not result:
+            break
+
+        # Clean review (no code changes) — done
+        if not (CODE_CHANGE_TOOLS & set(result.tools_used or [])):
+            break
+
+        # Changes were made — strip buttons from this result, review again
+        current_source = result.id
+        result_msgs = result.message_ids.get(ctx.platform, [])
+        current_msg = result_msgs[-1] if result_msgs else None
 
 
 async def on_commit(ctx: RequestContext, source_id: str, source_msg_id: str | None = None) -> None:
@@ -156,6 +176,25 @@ async def on_commit(ctx: RequestContext, source_id: str, source_msg_id: str | No
         status_text="Committing...", resume_session=True,
         copy_branch=True, silent=True,
     ), source_msg_id=source_msg_id)
+
+
+async def on_done(ctx: RequestContext, source_id: str, source_msg_id: str | None = None) -> None:
+    """Commit all changes, update changelog, then close the conversation."""
+    result = await spawn_from(ctx, source_id, SpawnConfig(
+        instance_type=InstanceType.TASK, prompt=config.DONE_PROMPT,
+        mode="build", origin=InstanceOrigin.DONE,
+        status_text="Wrapping up...", resume_session=True,
+        copy_branch=True, silent=True,
+    ), source_msg_id=source_msg_id)
+
+    if not result or result.status != InstanceStatus.COMPLETED:
+        return
+
+    # Close the thread/conversation after successful commit
+    try:
+        await ctx.messenger.close_conversation(ctx.channel_id)
+    except Exception:
+        log.debug("Failed to close conversation for channel %s", ctx.channel_id, exc_info=True)
 
 
 async def on_sess_resume(
