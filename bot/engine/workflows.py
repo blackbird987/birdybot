@@ -142,6 +142,14 @@ async def on_review_plan(ctx: RequestContext, source_id: str, source_msg_id: str
     ), source_msg_id=source_msg_id)
 
 
+async def on_apply_revisions(ctx: RequestContext, source_id: str, source_msg_id: str | None = None) -> None:
+    await spawn_from(ctx, source_id, SpawnConfig(
+        instance_type=InstanceType.QUERY, prompt=config.APPLY_REVISIONS_PROMPT,
+        mode="explore", origin=InstanceOrigin.APPLY_REVISIONS,
+        status_text="Applying revisions...", resume_session=True,
+    ), source_msg_id=source_msg_id)
+
+
 async def on_review_code(ctx: RequestContext, source_id: str, source_msg_id: str | None = None) -> None:
     """Review code, auto-looping until no issues remain (max 5 rounds)."""
     MAX_ROUNDS = 5

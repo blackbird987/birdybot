@@ -147,11 +147,19 @@ def action_button_specs(
             ])
         elif made_plan:
             # Session has an active plan
-            rows.append([
-                ButtonSpec("Review Plan", f"review_plan:{iid}"),
-                ButtonSpec("Build It", f"build:{iid}"),
-                ButtonSpec("Done", f"done:{iid}"),
-            ])
+            if instance.origin == InstanceOrigin.REVIEW_PLAN:
+                # Just reviewed — offer to apply the suggested revisions
+                rows.append([
+                    ButtonSpec("Apply Revisions", f"apply_revisions:{iid}"),
+                    ButtonSpec("Build It", f"build:{iid}"),
+                    ButtonSpec("Done", f"done:{iid}"),
+                ])
+            else:
+                rows.append([
+                    ButtonSpec("Review Plan", f"review_plan:{iid}"),
+                    ButtonSpec("Build It", f"build:{iid}"),
+                    ButtonSpec("Done", f"done:{iid}"),
+                ])
         else:
             # Default buttons + workflow row when session exists
             rows.append([

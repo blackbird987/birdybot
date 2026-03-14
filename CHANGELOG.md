@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.3.3 — Apply Revisions Button for Plan Review Flow
+
+### Apply Revisions Workflow
+- After a **Review Plan** completes with suggested revisions, buttons now show **Apply Revisions / Build It / Done** instead of the generic **Review Plan / Build It / Done**.
+- "Apply Revisions" resumes the session and tells Claude to incorporate the proposed revisions into the plan, producing a coherent updated plan.
+- After applying, buttons cycle back to **Review Plan / Build It / Done** — enabling a natural review-revise loop until the user is satisfied, then Build.
+
+### Changes
+- `InstanceOrigin.APPLY_REVISIONS` enum value added to `types.py`.
+- `APPLY_REVISIONS_PROMPT` added to `config.py`.
+- `on_apply_revisions()` workflow function in `workflows.py` (explore mode, resumes session).
+- Button routing in `commands.py` for `apply_revisions` action.
+- `plan_origins` in `lifecycle.py` includes `APPLY_REVISIONS` so `plan_active` stays true.
+- Discord `_STYLE_MAP` in `adapter.py` maps `apply_revisions:` to blue (primary) style.
+- `sessions.py` strips the new prompt from topic extraction.
+
 ## v0.3.2 — Chat-App Communication Model, Done Button for In-Place Edits
 
 ### Chat-App Communication Model (System Prompt)

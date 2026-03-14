@@ -271,6 +271,7 @@ def scan_sessions(
             config.BUILD_FROM_PLAN_PROMPT,
             config.BUILD_FROM_QUERY_PROMPT,
             config.PLAN_REVIEW_PROMPT,
+            config.APPLY_REVISIONS_PROMPT,
             config.CODE_REVIEW_PROMPT,
             config.COMMIT_PROMPT,
             "Implement the following plan:",

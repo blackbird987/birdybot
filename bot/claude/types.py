@@ -29,6 +29,7 @@ class InstanceOrigin(str, Enum):
     PLAN = "plan"               # [Plan] button
     BUILD = "build"             # [Build It] button
     REVIEW_PLAN = "review_plan" # [Review Plan] button
+    APPLY_REVISIONS = "apply_revisions"  # [Apply Revisions] button
     REVIEW_CODE = "review_code" # [Review Code] button
     COMMIT = "commit"           # [Commit] button
     DONE = "done"               # [Done] button — commit + close thread

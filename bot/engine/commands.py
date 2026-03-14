@@ -1144,6 +1144,8 @@ async def handle_callback(
         await workflows.on_build(ctx, instance_id, source_msg_id)
     elif action == "review_plan":
         await workflows.on_review_plan(ctx, instance_id, source_msg_id)
+    elif action == "apply_revisions":
+        await workflows.on_apply_revisions(ctx, instance_id, source_msg_id)
     elif action == "review_code":
         await workflows.on_review_code(ctx, instance_id, source_msg_id)
     elif action == "commit":

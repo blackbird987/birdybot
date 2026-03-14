@@ -22,6 +22,7 @@ _STYLE_MAP = {
     "retry:": discord.ButtonStyle.primary,     # Blue
     "plan:": discord.ButtonStyle.primary,        # Blue
     "review_plan:": discord.ButtonStyle.primary,
+    "apply_revisions:": discord.ButtonStyle.primary,
     "review_code:": discord.ButtonStyle.primary,
 }
 

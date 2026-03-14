@@ -183,6 +183,12 @@ PLAN_REVIEW_PROMPT = (
     'along with git-diff style changes relative to the original plan.'
 )
 
+APPLY_REVISIONS_PROMPT = (
+    'Now apply the revisions you just proposed to the plan. Update the plan '
+    'in place, incorporating all the improvements you recommended. '
+    'Make sure the revised plan is complete and coherent.'
+)
+
 CODE_REVIEW_PROMPT = (
     'Now carefully read over all of the new code you just wrote and other '
     'existing code you just modified with "fresh eyes" looking super '
