@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Callable
 
@@ -21,6 +22,11 @@ from bot.claude.parser import (
 from bot.claude.types import Instance, InstanceType
 
 log = logging.getLogger(__name__)
+
+# On Windows, prevent subprocess console windows from popping up
+_NOWND: dict = (
+    {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
+)
 
 ProgressCallback = Callable  # async callback(message: str, detail: str)
 StallCallback = Callable[[str], None]     # async callback(instance_id)
@@ -40,6 +46,7 @@ class ClaudeRunner:
                 config.CLAUDE_BINARY, "--version",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                **_NOWND,
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
             version = stdout.decode().strip()
@@ -96,6 +103,7 @@ class ClaudeRunner:
                 cwd=instance.repo_path or None,
                 env=env,
                 limit=1024 * 1024,  # 1MB line buffer (default 64KB too small for stream-json)
+                **_NOWND,
             )
             instance.pid = proc.pid
             self._processes[instance.id] = proc
@@ -398,7 +406,7 @@ class ClaudeRunner:
         try:
             result = subprocess.run(
                 ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                cwd=instance.repo_path, capture_output=True, text=True,
+                cwd=instance.repo_path, capture_output=True, text=True, **_NOWND,
             )
             current = result.stdout.strip()
             if current == instance.branch:
@@ -407,12 +415,12 @@ class ClaudeRunner:
                 instance.original_branch = current
             create = subprocess.run(
                 ["git", "checkout", "-b", instance.branch],
-                cwd=instance.repo_path, capture_output=True, text=True,
+                cwd=instance.repo_path, capture_output=True, text=True, **_NOWND,
             )
             if create.returncode != 0:
                 subprocess.run(
                     ["git", "checkout", instance.branch],
-                    cwd=instance.repo_path, capture_output=True, text=True, check=True,
+                    cwd=instance.repo_path, capture_output=True, text=True, check=True, **_NOWND,
                 )
             log.info("On branch %s in %s", instance.branch, instance.repo_path)
         except subprocess.CalledProcessError as e:
@@ -430,7 +438,7 @@ class ClaudeRunner:
             base = instance.original_branch or "HEAD~1"
             result = subprocess.run(
                 ["git", "diff", base, "--", "."],
-                cwd=instance.repo_path, capture_output=True, text=True
+                cwd=instance.repo_path, capture_output=True, text=True, **_NOWND,
             )
             if result.stdout.strip():
                 diff_path = config.RESULTS_DIR / f"{instance.id}.diff"
@@ -450,16 +458,16 @@ class ClaudeRunner:
             repo = instance.repo_path
             subprocess.run(
                 ["git", "checkout", instance.original_branch],
-                cwd=repo, capture_output=True, text=True, check=True
+                cwd=repo, capture_output=True, text=True, check=True, **_NOWND,
             )
             subprocess.run(
                 ["git", "merge", instance.branch, "--no-ff",
                  "-m", f"Merge {instance.branch} ({instance.display_id()})"],
-                cwd=repo, capture_output=True, text=True, check=True
+                cwd=repo, capture_output=True, text=True, check=True, **_NOWND,
             )
             subprocess.run(
                 ["git", "branch", "-d", instance.branch],
-                cwd=repo, capture_output=True, text=True
+                cwd=repo, capture_output=True, text=True, **_NOWND,
             )
             instance.branch = None
             return f"Merged into {instance.original_branch}"
@@ -477,11 +485,11 @@ class ClaudeRunner:
             repo = instance.repo_path
             subprocess.run(
                 ["git", "checkout", instance.original_branch],
-                cwd=repo, capture_output=True, text=True, check=True
+                cwd=repo, capture_output=True, text=True, check=True, **_NOWND,
             )
             subprocess.run(
                 ["git", "branch", "-D", instance.branch],
-                cwd=repo, capture_output=True, text=True, check=True
+                cwd=repo, capture_output=True, text=True, check=True, **_NOWND,
             )
             instance.branch = None
             return f"Discarded branch, back on {instance.original_branch}"

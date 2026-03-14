@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Hide Claude CLI console windows on Windows — all subprocesses now use `CREATE_NO_WINDOW` flag to prevent black terminal windows from flashing on screen.
+- Redesigned finalize embed: removed emojis, added compact Stats bar with Duration, Turns, Tokens, and Cost.
+- New session metrics: `num_turns`, `input_tokens`, `output_tokens` extracted from CLI stream-json and shown in result embeds.
+
 ## v0.3.8 — DRY Mode Constants (2026-03-15)
 
 - Mode display constants (`MODE_DISPLAY`, `VALID_MODES`) now used consistently across Discord bot, channels, and formatting — no more hardcoded mode lists.

@@ -33,8 +33,9 @@ from bot.platform.formatting import (
     strip_markdown,
 )
 
-log = logging.getLogger(__name__)
+from bot.claude.runner import _NOWND
 
+log = logging.getLogger(__name__)
 
 # --- Shared state for uptime / cli_version / shutdown ---
 
@@ -867,7 +868,7 @@ async def _create_repo(ctx: RequestContext, text: str) -> None:
                 created_dir = True
             subprocess.run(
                 ["git", "init"], cwd=str(repo_path),
-                capture_output=True, check=True,
+                capture_output=True, check=True, **_NOWND,
             )
         await asyncio.to_thread(_init)
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
@@ -891,12 +892,13 @@ async def _create_repo(ctx: RequestContext, text: str) -> None:
     if github:
         visibility = "--public" if public else "--private"
         try:
-            result = await asyncio.to_thread(
-                subprocess.run,
-                ["gh", "repo", "create", name, visibility,
-                 "--source", str(repo_path), "--push"],
-                capture_output=True, text=True, cwd=str(repo_path),
-            )
+            def _gh_create():
+                return subprocess.run(
+                    ["gh", "repo", "create", name, visibility,
+                     "--source", str(repo_path), "--push"],
+                    capture_output=True, text=True, cwd=str(repo_path), **_NOWND,
+                )
+            result = await asyncio.to_thread(_gh_create)
             if result.returncode == 0:
                 msg += f" Pushed to GitHub ({visibility[2:]})."
             else:

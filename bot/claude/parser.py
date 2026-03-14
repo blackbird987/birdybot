@@ -122,7 +122,11 @@ def extract_result(events: list[dict]) -> RunResult:
         result.session_id = result_event.get("session_id")
         result.cost_usd = result_event.get("cost_usd", 0.0)
         result.duration_ms = result_event.get("duration_ms", 0)
+        result.duration_api_ms = result_event.get("duration_api_ms", 0)
         result.is_error = result_event.get("is_error", False)
+        result.num_turns = result_event.get("num_turns", 0)
+        result.input_tokens = result_event.get("input_tokens", 0)
+        result.output_tokens = result_event.get("output_tokens", 0)
 
         result_data = result_event.get("result", "")
         if isinstance(result_data, str):

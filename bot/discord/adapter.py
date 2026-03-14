@@ -239,12 +239,12 @@ class DiscordMessenger:
         """Build a rich embed for commit/done/release results."""
         info = finalize
 
-        # Title: version release or commit
+        # Title: version release or commit — clean, no emojis
         if info.version:
-            title = f"\U0001f4e6 Released {info.version}"  # 📦
+            title = f"Released {info.version}"
             color = discord.Color.gold()
         else:
-            title = "\u2705 Changes Committed"  # ✅
+            title = "Changes Committed"
 
         embed = discord.Embed(title=title, color=color)
 
@@ -256,28 +256,39 @@ class DiscordMessenger:
             if len(commit_val) > 1024:
                 commit_val = commit_val[:1021] + "..."
             embed.add_field(
-                name="\U0001f4dd Commit",  # 📝
+                name="Commit",
                 value=commit_val,
                 inline=False,
             )
 
-        # Changelog field — the main attraction
+        # Changelog field
         if info.changelog_entries:
-            # Format as a nice bulleted list with Discord markdown
             entries = "\n".join(f"\u2022 {e}" for e in info.changelog_entries)
-            # Truncate if too long for a field (1024 char limit)
             if len(entries) > 1000:
                 entries = entries[:997] + "..."
             embed.add_field(
-                name="\U0001f4cb Changelog",  # 📋
+                name="Changelog",
                 value=entries,
                 inline=False,
             )
 
-        # Metadata footer fields (Duration, Cost, Branch)
+        # Stats bar — compact single-line summary of session metrics
         if metadata:
+            stats_parts = []
+            for key in ("Duration", "Turns", "Tokens", "Cost"):
+                val = metadata.get(key)
+                if val:
+                    stats_parts.append(f"**{key}** {val}")
+            if stats_parts:
+                embed.add_field(
+                    name="Stats",
+                    value=" \u2502 ".join(stats_parts),  # │ separator
+                    inline=False,
+                )
+            # Remaining metadata (Branch, Mode, etc.) as inline fields
+            skip = {"Duration", "Turns", "Tokens", "Cost"}
             for k, v in metadata.items():
-                if not k.startswith("_") and v:
+                if not k.startswith("_") and k not in skip and v:
                     embed.add_field(name=k, value=str(v), inline=True)
 
         return embed

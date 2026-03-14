@@ -81,6 +81,9 @@ class Instance:
     parent_id: str | None = None       # ID of instance whose button spawned this
     origin_platform: str = "telegram"  # Platform that created this instance
     tools_used: list[str] = field(default_factory=list)  # Tool names used (Edit, Write, TodoWrite...)
+    num_turns: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
     plan_active: bool = False  # Session has an active plan (for button context)
     code_active: bool = False  # Session has uncommitted code changes (for button context)
 
@@ -118,6 +121,9 @@ class Instance:
             "parent_id": self.parent_id,
             "origin_platform": self.origin_platform,
             "tools_used": self.tools_used,
+            "num_turns": self.num_turns,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
             "plan_active": self.plan_active,
             "code_active": self.code_active,
         }
@@ -152,6 +158,9 @@ class Instance:
             parent_id=d.get("parent_id"),
             origin_platform=d.get("origin_platform", "telegram"),
             tools_used=d.get("tools_used", []),
+            num_turns=d.get("num_turns", 0),
+            input_tokens=d.get("input_tokens", 0),
+            output_tokens=d.get("output_tokens", 0),
             plan_active=d.get("plan_active", False),
             code_active=d.get("code_active", False),
         )
@@ -163,9 +172,13 @@ class RunResult:
     result_text: str = ""
     cost_usd: float = 0.0
     duration_ms: int = 0
+    duration_api_ms: int = 0
     is_error: bool = False
     error_message: str | None = None
     tools_used: list[str] = field(default_factory=list)  # Unique tool names used
+    num_turns: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 @dataclass

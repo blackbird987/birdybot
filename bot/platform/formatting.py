@@ -23,6 +23,15 @@ def format_duration(ms: int | float | None) -> str:
     return f"{secs:.0f}s"
 
 
+def format_tokens(count: int) -> str:
+    """Format token count to a compact human-readable string (e.g. 48.2k, 1.3M)."""
+    if count >= 1_000_000:
+        return f"{count / 1_000_000:.1f}M"
+    if count >= 1_000:
+        return f"{count / 1_000:.1f}k"
+    return str(count)
+
+
 # --- Secret Redaction ---
 
 # Well-known token prefixes (match standalone, no key name needed)
@@ -333,7 +342,7 @@ def format_result_md(instance: Instance) -> str:
     dur = format_duration(instance.duration_ms)
     if dur:
         meta.append(dur)
-    meta.append(mode_label(instance.mode))
+    meta.append(mode_name(instance.mode))
     if meta:
         parts.append(" | ".join(meta))
 

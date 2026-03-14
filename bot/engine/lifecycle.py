@@ -18,8 +18,9 @@ from bot.platform.base import MessageHandle, RequestContext
 from bot.platform.formatting import (
     action_button_specs,
     format_duration,
+    format_tokens,
     format_result_md,
-    mode_label,
+    mode_name,
     parse_finalize_output,
     redact_secrets,
     running_button_specs,
@@ -88,6 +89,9 @@ def finalize_run(ctx: RequestContext, inst: Instance, result: RunResult) -> None
     inst.cost_usd = result.cost_usd
     inst.duration_ms = result.duration_ms
     inst.tools_used = result.tools_used
+    inst.num_turns = result.num_turns
+    inst.input_tokens = result.input_tokens
+    inst.output_tokens = result.output_tokens
     inst.finished_at = datetime.now(timezone.utc).isoformat()
 
     # Detect session context flags (plan/code) from this instance or siblings
@@ -211,11 +215,16 @@ async def send_result(
     dur = format_duration(inst.duration_ms) if inst.duration_ms else None
     if dur:
         meta["Duration"] = dur
+    if inst.num_turns:
+        meta["Turns"] = str(inst.num_turns)
+    total_tokens = inst.input_tokens + inst.output_tokens
+    if total_tokens:
+        meta["Tokens"] = format_tokens(total_tokens)
     if inst.cost_usd:
         meta["Cost"] = f"${inst.cost_usd:.4f}"
     if inst.branch:
         meta["Branch"] = inst.branch
-    meta["Mode"] = mode_label(inst.mode)
+    meta["Mode"] = mode_name(inst.mode)
 
     # Parse structured finalize output for commit/done/release origins
     is_finalize = inst.origin in (
