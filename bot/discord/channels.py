@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 
 import discord
 
+from bot.platform.formatting import MODE_DISPLAY, mode_name
+
 log = logging.getLogger(__name__)
 
 
@@ -128,24 +130,27 @@ async def ensure_forum(
     return forum
 
 
+# Discord button styles per mode (explore=gray, plan=blue, build=green)
+_MODE_BUTTON_STYLE: dict[str, discord.ButtonStyle] = {
+    "explore": discord.ButtonStyle.secondary,
+    "plan":    discord.ButtonStyle.primary,
+    "build":   discord.ButtonStyle.success,
+}
+
+
 def mode_select_view(current_mode: str = "explore") -> discord.ui.View:
     """Build a persistent View with mode-selection buttons for new sessions.
 
     Active mode button is disabled (standard "already selected" UX).
+    Labels and emojis derived from MODE_DISPLAY; styles from _MODE_BUTTON_STYLE.
     """
     view = discord.ui.View(timeout=None)
-    modes = [
-        ("Explore \U0001f50d", "explore", discord.ButtonStyle.secondary),
-        ("Plan \U0001f4cb", "plan", discord.ButtonStyle.primary),
-        ("Build \U0001f528", "build", discord.ButtonStyle.success),
-    ]
-    for label, mode, style in modes:
-        is_active = mode == current_mode
+    for mode, (name, emoji) in MODE_DISPLAY.items():
         btn = discord.ui.Button(
-            label=label,
-            style=style,
+            label=f"{name} {emoji}",
+            style=_MODE_BUTTON_STYLE.get(mode, discord.ButtonStyle.secondary),
             custom_id=f"mode_set:{mode}",
-            disabled=is_active,
+            disabled=(mode == current_mode),
         )
         view.add_item(btn)
     return view
@@ -171,7 +176,7 @@ async def create_forum_post(
         timestamp=datetime.now(timezone.utc),
     )
     embed.add_field(name="Origin", value=origin, inline=True)
-    embed.add_field(name="Mode", value=current_mode.capitalize(), inline=True)
+    embed.add_field(name="Mode", value=mode_name(current_mode), inline=True)
 
     view = mode_select_view(current_mode)
     result = await forum.create_thread(name=name, embed=embed, view=view)

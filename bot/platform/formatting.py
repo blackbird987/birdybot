@@ -170,6 +170,11 @@ _WORKFLOW_ORIGINS = frozenset({
 })
 
 
+def mode_name(mode: str) -> str:
+    """Human-readable mode name (no emoji)."""
+    return MODE_DISPLAY.get(mode, (mode.capitalize(), ""))[0]
+
+
 def mode_label(mode: str) -> str:
     """Human-readable mode label with emoji."""
     label, emoji = MODE_DISPLAY.get(mode, (mode.capitalize(), "\u2753"))

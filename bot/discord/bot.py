@@ -22,7 +22,7 @@ from bot.discord.adapter import DiscordMessenger
 from bot.engine import commands
 from bot.engine import sessions as sessions_mod
 from bot.platform.base import RequestContext
-from bot.platform.formatting import mode_label
+from bot.platform.formatting import MODE_DISPLAY, VALID_MODES, mode_label, mode_name
 
 if TYPE_CHECKING:
     from bot.claude.runner import ClaudeRunner
@@ -688,9 +688,8 @@ class ClaudeBot(discord.Client):
             mode="Permission mode for the session",
         )
         @app_commands.choices(mode=[
-            app_commands.Choice(name="Explore 🔍", value="explore"),
-            app_commands.Choice(name="Plan 📋", value="plan"),
-            app_commands.Choice(name="Build 🔨", value="build"),
+            app_commands.Choice(name=f"{name} {emoji}", value=key)
+            for key, (name, emoji) in MODE_DISPLAY.items()
         ])
         async def cmd_new(interaction: discord.Interaction, repo: str = "", mode: str = ""):
             if not self._auth(interaction.user.id):
@@ -699,7 +698,7 @@ class ClaudeBot(discord.Client):
 
             # Apply mode if specified
             mode = mode.strip().lower()
-            if mode and mode in ("explore", "plan", "build"):
+            if mode and mode in VALID_MODES:
                 self._store.mode = mode
 
             repo = repo.strip()
@@ -1560,7 +1559,7 @@ class ClaudeBot(discord.Client):
         log.info("Discord button %s:%s in #%s", action, instance_id[:12], getattr(interaction.channel, "name", "?"))
 
         # --- Mode selection in new thread welcome embed ---
-        if action == "mode_set" and instance_id in ("explore", "plan", "build"):
+        if action == "mode_set" and instance_id in VALID_MODES:
             target_mode = instance_id
             self._store.mode = target_mode
             # Update the welcome embed to reflect selected mode
@@ -1568,7 +1567,7 @@ class ClaudeBot(discord.Client):
                 embed = interaction.message.embeds[0]
                 for i, field in enumerate(embed.fields):
                     if field.name == "Mode":
-                        embed.set_field_at(i, name="Mode", value=target_mode.capitalize(), inline=True)
+                        embed.set_field_at(i, name="Mode", value=mode_name(target_mode), inline=True)
                         break
                 view = channels.mode_select_view(target_mode)
                 await interaction.response.edit_message(embed=embed, view=view)
