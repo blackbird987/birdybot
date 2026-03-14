@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.3.4 — Schedule CLI Tool, Cleanup
+
+### Schedule Management CLI
+- New `scripts/schedule.py` — standalone CLI for managing bot schedules externally without the bot running.
+- Supports `list`, `add` (with `--every` / `--at`), `delete`, and `update` commands.
+- Modifies `data/state.json` directly; the running bot detects changes and reloads.
+- Supports `--build` mode flag and `--repo` targeting.
+
+### Housekeeping
+- Added `.claude/` to `.gitignore` (Claude Code local config should not be tracked).
+- Removed stray junk files from project root.
+
 ## v0.3.3 — Apply Revisions Button for Plan Review Flow
 
 ### Apply Revisions Workflow
