@@ -202,15 +202,35 @@ CODE_REVIEW_PROMPT = (
 COMMIT_PROMPT = (
     'Review all uncommitted changes on this branch. '
     'Commit them with a clear, descriptive commit message. '
-    'Also update CHANGELOG.md with a summary of what was changed and why. '
-    'If CHANGELOG.md does not exist, create it.'
+    'Update CHANGELOG.md: add a concise summary of changes under the '
+    '## [Unreleased] section. If the file does not exist, create it with '
+    'an [Unreleased] header. Do not create version-numbered headers.'
 )
 
 DONE_PROMPT = (
     'Wrap up this session. '
     'Review all uncommitted changes and commit them with a clear, descriptive message. '
-    'Update CHANGELOG.md under the most recent version section with a summary of '
-    'what was changed and why in this session. '
-    'If CHANGELOG.md does not exist, create it. '
+    'Update CHANGELOG.md: add a concise summary of changes under the '
+    '## [Unreleased] section. If the file does not exist, create it with '
+    'an [Unreleased] header. Do not create version-numbered headers. '
     'Make sure nothing is left uncommitted — this session is being closed.'
+)
+
+RELEASE_PROMPT = (
+    'Cut a new release.\n'
+    '1. Read CHANGELOG.md and find the ## [Unreleased] section\n'
+    '2. If [Unreleased] is empty or missing, abort and report there is '
+    'nothing to release\n'
+    '3. Determine the new version: {version_hint} (relative to the '
+    'most recent versioned section, or the version file if no '
+    'prior releases exist)\n'
+    '4. Replace ## [Unreleased] with ## vX.Y.Z — Summary (YYYY-MM-DD) '
+    'where Summary is a short phrase capturing the main theme\n'
+    '5. Add a fresh empty ## [Unreleased] section above it\n'
+    '6. Find and update the project version file (pyproject.toml, '
+    '*.csproj, package.json, etc.)\n'
+    '7. Commit with message "vX.Y.Z: Summary"\n'
+    '8. Create git tag vX.Y.Z\n'
+    '9. Report: version number, tag name, and summary of released changes. '
+    'Remind that git push --tags is needed to publish the tag.'
 )

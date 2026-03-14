@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 from bot import config
 from bot.claude.types import (
-    CODE_CHANGE_TOOLS, Instance, InstanceOrigin, InstanceStatus, RunResult,
+    CODE_CHANGE_TOOLS, PLAN_ORIGINS, Instance, InstanceStatus, RunResult,
 )
 from bot.platform.base import MessageHandle, RequestContext
 from bot.platform.formatting import (
@@ -89,9 +89,8 @@ def finalize_run(ctx: RequestContext, inst: Instance, result: RunResult) -> None
     # Detect session context flags (plan/code) from this instance or siblings
     tools = set(result.tools_used)
     plan_tools = {"EnterPlanMode"}
-    plan_origins = {InstanceOrigin.PLAN, InstanceOrigin.REVIEW_PLAN, InstanceOrigin.APPLY_REVISIONS}
 
-    if (plan_tools & tools) or inst.origin in plan_origins:
+    if (plan_tools & tools) or inst.origin in PLAN_ORIGINS:
         inst.plan_active = True
     if CODE_CHANGE_TOOLS & tools:
         inst.code_active = True

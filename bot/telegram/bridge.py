@@ -148,6 +148,12 @@ class TelegramBridge:
         text = (update.message.text or "").replace("/bg", "", 1).strip()
         await commands.on_bg(self._ctx(update), text)
 
+    async def on_release(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._auth(update) or not update.message:
+            return
+        text = (update.message.text or "").replace("/release", "", 1).strip()
+        await commands.on_release(self._ctx(update), text)
+
     async def on_list(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._auth(update) or not update.message:
             return

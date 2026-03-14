@@ -33,7 +33,12 @@ class InstanceOrigin(str, Enum):
     REVIEW_CODE = "review_code" # [Review Code] button
     COMMIT = "commit"           # [Commit] button
     DONE = "done"               # [Done] button — commit + close thread
+    RELEASE = "release"         # /release command
     RETRY = "retry"             # [Retry] button
+
+
+# Origins that belong to the plan workflow (used in lifecycle + button selection)
+PLAN_ORIGINS = frozenset({InstanceOrigin.PLAN, InstanceOrigin.REVIEW_PLAN, InstanceOrigin.APPLY_REVISIONS})
 
 
 def _migrate_message_ids(d: dict) -> dict[str, list[str]]:

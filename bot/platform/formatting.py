@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from bot.claude.types import CODE_CHANGE_TOOLS, Instance, InstanceOrigin, InstanceStatus, Schedule
+from bot.claude.types import CODE_CHANGE_TOOLS, PLAN_ORIGINS, Instance, InstanceOrigin, InstanceStatus, Schedule
 from bot.platform.base import ButtonSpec
 
 
@@ -148,7 +148,7 @@ def action_button_specs(
                 ButtonSpec("Commit", f"commit:{iid}"),
                 ButtonSpec("Done", f"done:{iid}"),
             ])
-        elif made_plan and instance.origin in (InstanceOrigin.PLAN, InstanceOrigin.REVIEW_PLAN, InstanceOrigin.APPLY_REVISIONS):
+        elif made_plan and instance.origin in PLAN_ORIGINS:
             # Plan workflow — check plan_active before code changes so
             # "Apply Revisions" (which edits the plan file) gets plan buttons
             if instance.origin == InstanceOrigin.REVIEW_PLAN:

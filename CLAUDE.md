@@ -41,6 +41,11 @@ Key data structures in `bot/discord/bot.py`:
 - `ThreadInfo`: thread_id + session_id + origin + topic
 - Persisted in `data/state.json` under `platform_state.discord.forum_projects`
 
+## Versioning
+
+See `~/.claude/CLAUDE.md` for universal versioning conventions.
+Version source: `pyproject.toml`
+
 ## Testing
 
 ### Discord integration test tool

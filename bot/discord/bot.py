@@ -533,6 +533,14 @@ class ClaudeBot(discord.Client):
                 return
             await self._run_slash(interaction, lambda ctx: commands.on_bg(ctx, prompt))
 
+        @self.tree.command(name="release", description="Cut a versioned release", guild=guild_obj)
+        @app_commands.describe(level="patch, minor, major, or explicit version (default: patch)")
+        async def cmd_release(interaction: discord.Interaction, level: str = "patch"):
+            if not self._auth(interaction.user.id):
+                await interaction.response.send_message("Unauthorized", ephemeral=True)
+                return
+            await self._run_slash(interaction, lambda ctx: commands.on_release(ctx, level))
+
         @self.tree.command(name="kill", description="Terminate instance", guild=guild_obj)
         @app_commands.describe(target="Instance ID or name")
         async def cmd_kill(interaction: discord.Interaction, target: str):

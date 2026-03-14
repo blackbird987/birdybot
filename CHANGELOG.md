@@ -1,6 +1,22 @@
 # Changelog
 
-## v0.3.5 — Plan Mode, Mode Toggle, Repo Create/Remove
+## [Unreleased]
+
+### Release Command
+- New `/release [patch|minor|major|X.Y.Z]` command — cuts a versioned release from the [Unreleased] changelog section.
+- Wired up on both Telegram and Discord (slash command with `level` parameter).
+- `RELEASE_PROMPT` in config handles the full release workflow: changelog freeze, version file update, commit, and git tag.
+
+### Changelog Workflow
+- `COMMIT_PROMPT` and `DONE_PROMPT` now direct changes to `## [Unreleased]` instead of version-numbered headers.
+- Added `## [Unreleased]` header to CHANGELOG.md for ongoing work.
+- Added versioning section to CLAUDE.md pointing to global conventions.
+
+### Plan Button Fix
+- Extracted `PLAN_ORIGINS` constant to `types.py` — shared between `lifecycle.py` and `formatting.py` (was duplicated).
+- Fixed button priority: plan-workflow origins (Plan, Review Plan, Apply Revisions) now checked before `made_code_changes`, so "Apply Revisions" (which edits the plan file) correctly shows plan buttons instead of code review buttons.
+
+## v0.3.5 — Plan Mode, Mode Toggle, Repo Create/Remove (2026-03-14)
 
 ### Plan Mode
 - New **plan** mode alongside explore and build — sessions can now be in explore, plan, or build mode.
@@ -29,7 +45,7 @@
 - Plan-origin instances (Plan, Review Plan, Apply Revisions) now get plan-specific buttons even when code changes are detected, since their code changes are to the plan file itself.
 - Non-plan-origin instances with detected plans get generic Review Plan / Build It buttons.
 
-## v0.3.4 — Schedule CLI Tool, Cleanup
+## v0.3.4 — Schedule CLI Tool, Cleanup (2026-03-14)
 
 ### Schedule Management CLI
 - New `scripts/schedule.py` — standalone CLI for managing bot schedules externally without the bot running.
@@ -41,7 +57,7 @@
 - Added `.claude/` to `.gitignore` (Claude Code local config should not be tracked).
 - Removed stray junk files from project root.
 
-## v0.3.3 — Apply Revisions Button for Plan Review Flow
+## v0.3.3 — Apply Revisions Button for Plan Review Flow (2026-03-14)
 
 ### Apply Revisions Workflow
 - After a **Review Plan** completes with suggested revisions, buttons now show **Apply Revisions / Build It / Done** instead of the generic **Review Plan / Build It / Done**.
@@ -57,7 +73,7 @@
 - Discord `_STYLE_MAP` in `adapter.py` maps `apply_revisions:` to blue (primary) style.
 - `sessions.py` strips the new prompt from topic extraction.
 
-## v0.3.2 — Chat-App Communication Model, Done Button for In-Place Edits
+## v0.3.2 — Chat-App Communication Model, Done Button for In-Place Edits (2026-03-14)
 
 ### Chat-App Communication Model (System Prompt)
 - Added `CHAT_APP_CONSTRAINT` — a dedicated system prompt section that explicitly tells Claude the user can only see text responses (not tool calls, diffs, or command output).
@@ -68,7 +84,7 @@
 ### Done Button for In-Place Code Edits
 - Added **Done** button to the `made_code_changes` button row (in-place edits without a branch), matching the branch/session button rows.
 
-## v0.3.1 — Session Context, Review Auto-Loop, Done Button
+## v0.3.1 — Session Context, Review Auto-Loop, Done Button (2026-03-14)
 
 ### Session Context Flags
 - **`plan_active`**: Propagates through session so plan-related buttons (Review Plan / Build It) persist across follow-up messages, not just the initial plan response.

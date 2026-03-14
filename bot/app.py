@@ -473,6 +473,7 @@ async def _start_telegram(store, runner, notifier, stop_event, cli_version):
     app.add_handler(CommandHandler("help", bridge.on_help))
     app.add_handler(CommandHandler("new", bridge.on_new))
     app.add_handler(CommandHandler("bg", bridge.on_bg))
+    app.add_handler(CommandHandler("release", bridge.on_release))
     app.add_handler(CommandHandler("list", bridge.on_list))
     app.add_handler(CommandHandler("kill", bridge.on_kill))
     app.add_handler(CommandHandler("retry", bridge.on_retry))
