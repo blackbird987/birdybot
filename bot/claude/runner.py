@@ -295,6 +295,9 @@ class ClaudeRunner:
         """Build the system prompt with mobile hint, bot context, pinned context, repo CLAUDE.md, and projects dir."""
         parts = [config.MOBILE_HINT]
 
+        # Explain that user can only see text output (critical for good responses)
+        parts.append(config.CHAT_APP_CONSTRAINT)
+
         # Bot capability context so Claude knows what the user can do
         parts.append(config.BOT_CONTEXT)
 

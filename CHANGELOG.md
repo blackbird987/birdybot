@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.3.2 — Chat-App Communication Model, Done Button for In-Place Edits
+
+### Chat-App Communication Model (System Prompt)
+- Added `CHAT_APP_CONSTRAINT` — a dedicated system prompt section that explicitly tells Claude the user can only see text responses (not tool calls, diffs, or command output).
+- Includes concrete good/bad examples and a "narrate your work" checklist so Claude describes what it read, edited, ran, and any errors.
+- Separated from `MOBILE_HINT` (formatting concerns) and `BOT_CONTEXT` (bot capabilities) for clean separation of concerns.
+- Injected between MOBILE_HINT and BOT_CONTEXT in `runner.py:_build_system_prompt()`.
+
+### Done Button for In-Place Code Edits
+- Added **Done** button to the `made_code_changes` button row (in-place edits without a branch), matching the branch/session button rows.
+
 ## v0.3.1 — Session Context, Review Auto-Loop, Done Button
 
 ### Session Context Flags

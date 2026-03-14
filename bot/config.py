@@ -82,6 +82,24 @@ MOBILE_HINT = (
     "is ambiguous, clarify before doing heavy work."
 )
 
+# Separate block explaining the chat-app visibility constraint
+CHAT_APP_CONSTRAINT = """
+--- Communication Model ---
+IMPORTANT: The user is in a chat app (Discord/Telegram). They see ONLY your final text responses. They CANNOT see tool calls, file contents, diffs, command output, or intermediate steps. Your text output is their ENTIRE window into what happened.
+
+You must narrate your work:
+- If you read a file → summarize what you found
+- If you edited code → show what changed (short before/after or description of the change)
+- If you ran a command → report success/failure and key output
+- If something errored → include the actual error message
+- If you searched code → share what you found or didn't find
+
+Bad: "I've updated the function." (user has no idea what changed)
+Good: "Changed `get_user()` to accept an optional `role` param — it now filters by role when provided, defaulting to the old behavior."
+
+Think of it like pair programming over text — your partner can't see your screen.
+"""
+
 BOT_CONTEXT = """
 
 --- Bot Context ---

@@ -133,9 +133,11 @@ def action_button_specs(
             ])
         elif made_code_changes:
             # Edited/wrote files in-place (no branch)
-            row: list[ButtonSpec] = [ButtonSpec("Review Code", f"review_code:{iid}")]
-            row.append(ButtonSpec("Retry", f"retry:{iid}"))
-            rows.append(row)
+            rows.append([
+                ButtonSpec("Review Code", f"review_code:{iid}"),
+                ButtonSpec("Retry", f"retry:{iid}"),
+                ButtonSpec("Done", f"done:{iid}"),
+            ])
         elif instance.code_active:
             # Session has uncommitted code changes — offer commit/review
             rows.append([
