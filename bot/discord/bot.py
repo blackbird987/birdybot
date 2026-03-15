@@ -117,13 +117,20 @@ class ForumProject:
     repo_name: str
     forum_channel_id: str
     threads: dict[str, ThreadInfo] = field(default_factory=dict)
+    control_thread_id: str | None = None
+    control_message_id: str | None = None
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "repo_name": self.repo_name,
             "forum_channel_id": self.forum_channel_id,
             "threads": {k: v.to_dict() for k, v in self.threads.items()},
         }
+        if self.control_thread_id:
+            d["control_thread_id"] = self.control_thread_id
+        if self.control_message_id:
+            d["control_message_id"] = self.control_message_id
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> ForumProject:
@@ -135,6 +142,8 @@ class ForumProject:
             repo_name=data["repo_name"],
             forum_channel_id=data.get("forum_channel_id", ""),
             threads=threads,
+            control_thread_id=data.get("control_thread_id"),
+            control_message_id=data.get("control_message_id"),
         )
 
 
@@ -807,6 +816,14 @@ class ClaudeBot(discord.Client):
                         except Exception:
                             log.debug("Failed to clear stale active tag", exc_info=True)
 
+        # Ensure control center posts exist for all repo forums
+        for repo_name, proj in self._forum_projects.items():
+            if proj.forum_channel_id and not proj.control_thread_id:
+                try:
+                    await self._ensure_control_post(repo_name)
+                except Exception:
+                    log.debug("Failed to create control center for %s", repo_name, exc_info=True)
+
     async def _run_slash(
         self, interaction: discord.Interaction, coro,
         *, ephemeral: bool = False,
@@ -1125,55 +1142,7 @@ class ClaudeBot(discord.Client):
                 count = 5
 
             log.info("Discord /sync count=%d by %s", count, interaction.user)
-            count = max(1, min(count, 15))
-            raw_sessions = await asyncio.to_thread(sessions_mod.scan_sessions, count * 3, self._store.list_repos())
-            seen_projects: set[str] = set()
-            session_list = []
-            for s in raw_sessions:
-                proj = s["project"]
-                if proj not in seen_projects:
-                    seen_projects.add(proj)
-                    session_list.append(s)
-                if len(session_list) >= count:
-                    break
-
-            created = []
-            populated = []
-            updated_threads: set[str] = set()
-            for s in session_list:
-                session_id = s["id"]
-                repo_name = s.get("project") or "_default"
-
-                # Check if session already has a thread
-                existing = self._session_to_thread(session_id)
-                if existing:
-                    tid, info = existing
-                    if tid in updated_threads:
-                        continue
-                    updated_threads.add(tid)
-                    # Populate history
-                    ch = self.get_channel(int(tid))
-                    if not ch:
-                        try:
-                            ch = await self.fetch_channel(int(tid))
-                        except (discord.NotFound, discord.Forbidden):
-                            ch = None
-                    if ch and isinstance(ch, (discord.TextChannel, discord.Thread)):
-                        await self._populate_thread_history(ch, session_id, tid)
-                        populated.append(ch)
-                    continue
-
-                # Create new thread
-                log.info("Sync creating thread for session %s repo=%s", session_id[:12], repo_name)
-                thread = await self._get_or_create_session_thread(
-                    repo_name, session_id, s["topic"], origin="cli",
-                )
-                if thread:
-                    created.append(thread)
-                    await self._populate_thread_history(thread, session_id, str(thread.id))
-                    # Generate smart title from CLI session topic
-                    asyncio.create_task(self._generate_smart_title(thread, s["topic"]))
-
+            created, populated = await self._sync_cli_sessions(count)
             parts = []
             if created:
                 links = ", ".join(f"<#{t.id}>" for t in created)
@@ -1797,6 +1766,9 @@ class ClaudeBot(discord.Client):
             if isinstance(message.channel, discord.Thread):
                 parent = message.channel.parent
                 if parent and isinstance(parent, discord.ForumChannel):
+                    # Skip control center threads (not session threads)
+                    if any(p.control_thread_id == channel_id for p in self._forum_projects.values()):
+                        return
                     lookup = self._thread_to_project(channel_id)
                     if not lookup:
                         # Adopt unmapped thread in a known forum (owner forums)
@@ -1913,6 +1885,8 @@ class ClaudeBot(discord.Client):
     ) -> None:
         """Route a lobby message to a forum thread."""
         repo_name = repo_name or "_default"
+        # Ensure control center exists (fire-and-forget, idempotent)
+        asyncio.create_task(self._ensure_control_post(repo_name))
         thread = await self._get_or_create_session_thread(repo_name, None, text)
         if thread:
             # Delete original from lobby
@@ -1994,6 +1968,149 @@ class ClaudeBot(discord.Client):
                 return
         # No matching instance — still clear "active" tag as fallback
         await self._set_thread_active_tag(ch, False)
+
+    # --- CLI Session Sync ---
+
+    async def _sync_cli_sessions(self, count: int) -> tuple[list[discord.Thread], list]:
+        """Scan CLI sessions and create/populate forum threads.
+
+        Returns (created_threads, populated_channels).
+        """
+        count = max(1, min(count, 15))
+        raw_sessions = await asyncio.to_thread(
+            sessions_mod.scan_sessions, count * 3, self._store.list_repos(),
+        )
+        seen_projects: set[str] = set()
+        session_list = []
+        for s in raw_sessions:
+            proj = s["project"]
+            if proj not in seen_projects:
+                seen_projects.add(proj)
+                session_list.append(s)
+            if len(session_list) >= count:
+                break
+
+        created: list[discord.Thread] = []
+        populated: list = []
+        updated_threads: set[str] = set()
+        for s in session_list:
+            session_id = s["id"]
+            repo_name = s.get("project") or "_default"
+
+            existing = self._session_to_thread(session_id)
+            if existing:
+                tid, info = existing
+                if tid in updated_threads:
+                    continue
+                updated_threads.add(tid)
+                ch = self.get_channel(int(tid))
+                if not ch:
+                    try:
+                        ch = await self.fetch_channel(int(tid))
+                    except (discord.NotFound, discord.Forbidden):
+                        ch = None
+                if ch and isinstance(ch, (discord.TextChannel, discord.Thread)):
+                    await self._populate_thread_history(ch, session_id, tid)
+                    populated.append(ch)
+                continue
+
+            log.info("Sync creating thread for session %s repo=%s", session_id[:12], repo_name)
+            thread = await self._get_or_create_session_thread(
+                repo_name, session_id, s["topic"], origin="cli",
+            )
+            if thread:
+                created.append(thread)
+                await self._populate_thread_history(thread, session_id, str(thread.id))
+                asyncio.create_task(self._generate_smart_title(thread, s["topic"]))
+
+        return created, populated
+
+    # --- Repo Control Center ---
+
+    async def _get_repo_branch(self, repo_path: str) -> str | None:
+        """Get the current git branch for a repo path (non-blocking)."""
+        if not repo_path:
+            return None
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=repo_path, capture_output=True, text=True, **_NOWND,
+            )
+            return result.stdout.strip() if result.returncode == 0 else None
+        except Exception:
+            return None
+
+    async def _ensure_control_post(self, repo_name: str) -> None:
+        """Ensure a control center post exists in the repo's forum.
+
+        Called after _get_or_create_forum() returns, outside the forum lock.
+        Idempotent — checks control_thread_id before creating.
+        """
+        proj = self._forum_projects.get(repo_name)
+        if not proj or proj.control_thread_id:
+            return
+
+        forum = self.get_channel(int(proj.forum_channel_id)) if proj.forum_channel_id else None
+        if not forum or not isinstance(forum, discord.ForumChannel):
+            return
+
+        repos = self._store.list_repos()
+        repo_path = repos.get(repo_name, "")
+        branch = await self._get_repo_branch(repo_path)
+
+        thread, msg = await channels.create_repo_control_post(
+            forum, repo_name, repo_path, branch, self._store.mode,
+        )
+        proj.control_thread_id = str(thread.id)
+        proj.control_message_id = str(msg.id)
+        self._save_forum_map()
+        log.info("Created control center for repo %s (thread=%s)", repo_name, thread.id)
+
+    async def _refresh_control_center(self, repo_name: str) -> None:
+        """Update the control center embed for a repo forum."""
+        proj = self._forum_projects.get(repo_name)
+        if not proj or not proj.control_thread_id or not proj.control_message_id:
+            return
+        try:
+            try:
+                thread = await self.fetch_channel(int(proj.control_thread_id))
+            except discord.NotFound:
+                thread = None
+            if not thread or not isinstance(thread, discord.Thread):
+                # Thread was deleted externally — clear stale IDs
+                log.info("Control center for %s was deleted, clearing stale IDs", repo_name)
+                proj.control_thread_id = None
+                proj.control_message_id = None
+                self._save_forum_map()
+                return
+            msg = await thread.fetch_message(int(proj.control_message_id))
+
+            from bot.claude.types import InstanceStatus
+            instances = self._store.list_instances()
+            active = sum(1 for i in instances if i.repo_name == repo_name
+                         and i.status == InstanceStatus.RUNNING)
+            completed = sum(1 for i in instances if i.repo_name == repo_name
+                            and i.status == InstanceStatus.COMPLETED)
+            failed = sum(1 for i in instances if i.repo_name == repo_name
+                         and i.status == InstanceStatus.FAILED)
+
+            repos = self._store.list_repos()
+            repo_path = repos.get(repo_name, "")
+            branch = await self._get_repo_branch(repo_path)
+
+            embed = channels.build_control_embed(
+                repo_name, repo_path, branch, self._store.mode,
+                active, completed, failed,
+            )
+            await msg.edit(embed=embed)
+        except discord.NotFound:
+            log.info("Control center for %s was deleted, clearing stale IDs", repo_name)
+            proj.control_thread_id = None
+            proj.control_message_id = None
+            self._save_forum_map()
+        except Exception:
+            log.debug("Failed to refresh control center for %s", repo_name, exc_info=True)
 
     # --- Dashboard ---
 
@@ -2143,6 +2260,11 @@ class ClaudeBot(discord.Client):
             self._store.set_platform_state("discord", state, persist=True)
         except Exception:
             log.debug("Failed to update dashboard", exc_info=True)
+
+        # Refresh control center embeds for all repos (fire-and-forget)
+        for rname, proj in self._forum_projects.items():
+            if proj.control_thread_id:
+                asyncio.create_task(self._refresh_control_center(rname))
 
     def _get_latest_summary(self, thread_id: str) -> str:
         """Get summary from the most recent instance for this thread's session."""
@@ -2627,6 +2749,24 @@ class ClaudeBot(discord.Client):
                 await interaction.delete_original_response()
             except Exception:
                 pass
+            return
+
+        # --- Sync CLI for a repo (control center button) ---
+        if action == "sync_repo":
+            if not btn_access.is_owner:
+                await interaction.followup.send("Owner only.", ephemeral=True)
+                return
+            created, populated = await self._sync_cli_sessions(3)
+            parts = []
+            if created:
+                parts.append(f"Created {len(created)} threads")
+            if populated:
+                parts.append(f"Updated {len(populated)} threads")
+            if not parts:
+                parts.append("No sessions found")
+            await interaction.followup.send(
+                f"Synced `{instance_id}`: " + ", ".join(parts), ephemeral=True,
+            )
             return
 
         # --- Session resume: create/find thread, redirect there ---

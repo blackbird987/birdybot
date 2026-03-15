@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- Add per-repo Control Center pinned post in each forum — shows repo name, path, branch, mode, and active/recent session counts
+- Control Center buttons: "New Session" (creates thread in repo forum) and "Sync CLI" (syncs latest CLI sessions)
+- Control Center auto-provisioned on startup for existing forums and on first lobby route for new repos
+- Control Center embed auto-refreshes alongside dashboard after each query (active/completed/failed counts, branch)
+- Graceful recovery: if control center thread is deleted externally, stale IDs are cleared and it re-creates on next access
+- Control center threads excluded from session routing (messages in them are ignored, not treated as queries)
+
 ## v0.8.4 — Anti-Hedging Prompt Fix (2026-03-16)
 
 - Add anti-hedging prompt guidance to prevent Claude from second-guessing user confirmations (offer-accept-refuse UX bug)

@@ -340,6 +340,68 @@ async def sync_user_forum_tags(
         log.warning("Failed to sync user forum tags", exc_info=True)
 
 
+def build_control_embed(
+    repo_name: str,
+    repo_path: str,
+    branch: str | None = None,
+    mode: str = "explore",
+    active_count: int = 0,
+    recent_completed: int = 0,
+    recent_failed: int = 0,
+) -> discord.Embed:
+    """Build the embed for a repo control center post."""
+    embed = discord.Embed(
+        title=f"{repo_name} \u2014 Control Center",
+        description=repo_path or "",
+        color=discord.Color.dark_grey(),
+    )
+    if branch:
+        embed.add_field(name="Branch", value=f"`{branch}`", inline=True)
+    embed.add_field(name="Mode", value=mode_name(mode), inline=True)
+    if active_count:
+        embed.add_field(name="Active", value=str(active_count), inline=True)
+    status_parts = []
+    if recent_completed:
+        status_parts.append(f"\u2705 {recent_completed}")
+    if recent_failed:
+        status_parts.append(f"\u274c {recent_failed}")
+    if status_parts:
+        embed.add_field(name="Recent", value=" ".join(status_parts), inline=True)
+    return embed
+
+
+async def create_repo_control_post(
+    forum: discord.ForumChannel,
+    repo_name: str,
+    repo_path: str,
+    branch: str | None = None,
+    mode: str = "explore",
+) -> tuple[discord.Thread, discord.Message]:
+    """Create a control center post in a repo forum with action buttons."""
+    embed = build_control_embed(repo_name, repo_path, branch, mode)
+
+    view = discord.ui.View(timeout=None)
+    view.add_item(discord.ui.Button(
+        label="New Session",
+        style=discord.ButtonStyle.green,
+        custom_id=f"new_repo:{repo_name}",
+    ))
+    view.add_item(discord.ui.Button(
+        label="Sync CLI",
+        style=discord.ButtonStyle.secondary,
+        custom_id=f"sync_repo:{repo_name}",
+    ))
+
+    result = await forum.create_thread(name="Control Center", embed=embed, view=view)
+    try:
+        await result.thread.edit(pinned=True)
+    except Exception:
+        log.debug("Could not pin control center thread", exc_info=True)
+
+    log.info("Created control center post %s in forum %s", result.thread.id, forum.name)
+    return result.thread, result.message
+
+
 async def create_user_welcome_post(
     forum: discord.ForumChannel,
     display_name: str,
