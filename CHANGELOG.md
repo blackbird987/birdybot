@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.6.0 — Plan Mode, Session Races & Button Fixes (2026-03-15)
+
 - Fix missing Review Code button when subagents (Agent tool) make code changes — now checks git diff as fallback
 - Fix smart thread titles never applying due to Discord rate-limiting 3rd thread name edit; batch smart title + processing-off into a single edit (2 edits total instead of 3)
 - Enforce plan mode via system prompt — Claude can research freely but cannot modify files; must output a structured plan for review instead
