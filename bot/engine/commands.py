@@ -1474,10 +1474,11 @@ async def handle_callback(
     elif action in ("mode_explore", "mode_plan", "mode_build"):
         target = action.split("_", 1)[1]  # "explore", "plan", or "build"
         ctx.update_mode(target)
+        actual = ctx.effective_mode  # may be capped by mode_ceiling
         # Update source message buttons to reflect new mode
         inst = ctx.store.get_instance(instance_id)
         if inst and source_msg_id:
-            inst.mode = target
+            inst.mode = actual
             ctx.store.update_instance(inst)
             buttons = action_button_specs(inst)
             await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, None, buttons)

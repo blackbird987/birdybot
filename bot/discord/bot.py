@@ -2436,14 +2436,20 @@ class ClaudeBot(discord.Client):
         # --- Mode selection in new thread welcome embed ---
         if action == "mode_set" and instance_id in VALID_MODES:
             target_mode = instance_id
+            # Enforce mode ceiling for non-owners
+            if not btn_access.is_owner and btn_access.mode_ceiling:
+                target_mode = access_effective_mode(
+                    access_mod.RepoAccess(mode=btn_access.mode_ceiling),
+                    target_mode,
+                )
             # Write to ThreadInfo (per-thread), not global store
             thread_id = str(interaction.channel_id)
             lookup = self._thread_to_project(thread_id)
             if lookup:
                 lookup[1].mode = target_mode
                 self._save_forum_map()
-            else:
-                self._store.mode = target_mode  # fallback for unmapped channels
+            elif btn_access.is_owner:
+                self._store.mode = target_mode  # fallback for unmapped channels (owner only)
             # Update the welcome embed to reflect selected mode
             if interaction.message and interaction.message.embeds:
                 embed = interaction.message.embeds[0]

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Security Fixes
+- Fix mode ceiling bypass via Build/Commit/Done buttons — `spawn_from()` now caps spawned instance mode against `ctx.mode_ceiling`
+- Fix mode action buttons (`mode_explore`/`mode_plan`/`mode_build`) writing uncapped mode to Instance
+- Fix welcome-embed mode_set button ignoring ceiling for non-owners; restrict global mode fallback to owner-only
+
 ## v0.8.0 — Access Control & Ref Bugfix (2026-03-15)
 
 ### Bugfixes

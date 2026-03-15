@@ -122,10 +122,17 @@ async def spawn_from(
         await ctx.messenger.send_text(ctx.channel_id, "No session to resume.")
         return None
 
+    # Enforce mode ceiling for non-owner sessions
+    effective_spawn_mode = cfg.mode
+    if ctx.mode_ceiling:
+        _rank = {"explore": 0, "plan": 1, "build": 2}
+        if _rank.get(cfg.mode, 0) > _rank.get(ctx.mode_ceiling, 0):
+            effective_spawn_mode = ctx.mode_ceiling
+
     new_inst = ctx.store.create_instance(
         instance_type=cfg.instance_type,
         prompt=cfg.prompt,
-        mode=cfg.mode,
+        mode=effective_spawn_mode,
     )
     new_inst.origin = cfg.origin
     new_inst.origin_platform = ctx.platform
