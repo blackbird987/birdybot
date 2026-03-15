@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.3.13 — Lobby Mode Emoji Fix (2026-03-15)
+
 - Fix: lobby-routed messages now update thread mode emoji when mode changes (e.g. `/mode build` sent in lobby).
 
 ## v0.3.12 — Mode Enforcement (2026-03-15)
