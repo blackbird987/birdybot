@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.4.0 — Thread References & Smart Titles (2026-03-15)
+
 ### Thread References
 - Add `/ref` slash command with dynamic autocomplete to reference another forum thread's conversation context
 - Autocomplete shows `[repo] topic (age)` with newest-first sorting, excludes current thread
