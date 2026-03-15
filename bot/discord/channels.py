@@ -254,16 +254,7 @@ async def ensure_forum_tags(forum: discord.ForumChannel) -> dict[str, discord.Fo
     return existing
 
 
-# --- Legacy channel helpers (kept for migration) ---
-
-
-async def archive_session_channel(channel: discord.TextChannel) -> None:
-    """Delete a stale session channel."""
-    try:
-        await channel.delete(reason="Session channel cleanup")
-        log.info("Deleted session channel %s (%s)", channel.id, channel.name)
-    except Exception:
-        log.exception("Failed to delete channel %s", channel.id)
+# --- Channel helpers ---
 
 
 async def create_thread(

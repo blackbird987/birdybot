@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- Make all thread name/tag PATCH operations fire-and-forget — prevents Discord 429 rate limits from blocking message processing entirely
+- Remove legacy `channel_sessions` migration code and auto-archive text channel loop (forums stable since v0.3.0)
+- Delete dead `archive_session_channel()` function (only caller removed above)
+- Consolidate budget check in `workflows.spawn_from()` — uses shared `check_budget()` with consistent "/budget reset" hint
+- Fix hardcoded absolute path in `scripts/discord_read.py` — now uses relative Path resolution
+- Default new repos to `main` branch (`git init -b main`)
+
 ## v0.5.0 — Per-Thread Settings & Processing Indicator (2026-03-15)
 
 ### Per-Thread Settings (Discord)

@@ -47,9 +47,12 @@ async def spawn_from(
         await ctx.messenger.send_text(ctx.channel_id, "Instance not found.")
         return None
 
-    # Budget guard
-    if ctx.store.get_daily_cost() >= config.DAILY_BUDGET_USD:
-        await ctx.messenger.send_text(ctx.channel_id, "Daily budget exceeded.")
+    # Budget guard (lazy import to avoid circular: commands -> workflows -> commands)
+    from bot.engine.commands import check_budget
+    if not check_budget(ctx):
+        await ctx.messenger.send_text(
+            ctx.channel_id, "Daily budget exceeded. Use /budget reset to override.",
+        )
         return None
 
     # Repo guard

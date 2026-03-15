@@ -895,7 +895,7 @@ async def _create_repo(ctx: RequestContext, text: str) -> None:
                 repo_path.mkdir(parents=True)
                 created_dir = True
             subprocess.run(
-                ["git", "init"], cwd=str(repo_path),
+                ["git", "init", "-b", "main"], cwd=str(repo_path),
                 capture_output=True, check=True, **_NOWND,
             )
         await asyncio.to_thread(_init)

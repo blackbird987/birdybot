@@ -2,11 +2,12 @@
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
 
 TOKEN = None
-with open("C:/Users/Quincy/Desktop/Programming/claude-telegram-bot/.env") as f:
+with open(Path(__file__).resolve().parent.parent / ".env") as f:
     for line in f:
         if line.startswith("DISCORD_BOT_TOKEN="):
             TOKEN = line.split("=", 1)[1].strip()
