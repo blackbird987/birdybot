@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.7.0 — Autopilot, Sibling Awareness & Scaling (2026-03-15)
+
 ### Autopilot — One-Click Ship
 - New **Autopilot** button: chains Review Plan loop → Build → Review Code loop → Done with zero manual clicks
 - Smart plan review loop: auto-applies only Critical/High revisions, loops up to 5 rounds until converged, collects Medium/Low as deferred revisions
