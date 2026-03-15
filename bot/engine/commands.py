@@ -397,9 +397,52 @@ async def on_release(ctx: RequestContext, text: str) -> None:
 # --- /list ---
 
 async def on_list(ctx: RequestContext, text: str) -> None:
-    show_all = "all" in text
-    instances = ctx.store.list_instances(all_=show_all)
-    msg_text = format_instance_list_md(instances)
+    tokens = text.lower().split() if text else []
+    show_all = "all" in tokens
+
+    # Filter tokens: running, failed, questions, or repo name
+    status_filters: list[InstanceStatus] = []
+    repo_filter: str | None = None
+    repos = ctx.store.list_repos()
+
+    for tok in tokens:
+        if tok == "all":
+            continue
+        elif tok == "running":
+            status_filters.append(InstanceStatus.RUNNING)
+        elif tok in ("failed", "errors"):
+            status_filters.append(InstanceStatus.FAILED)
+        elif tok in ("questions", "asking", "attention"):
+            # Will be handled separately
+            pass
+        elif tok in repos:
+            repo_filter = tok
+
+    # Build filtered list
+    if "questions" in tokens or "asking" in tokens or "attention" in tokens:
+        instances = ctx.store.needs_attention()
+    elif status_filters:
+        instances = ctx.store.list_by_status(*status_filters)
+    else:
+        instances = ctx.store.list_instances(all_=show_all)
+
+    if repo_filter:
+        instances = [i for i in instances if i.repo_name == repo_filter]
+
+    # Group by repo for display
+    if not status_filters and not repo_filter and len(repos) > 1:
+        by_repo: dict[str, list[Instance]] = {}
+        for inst in instances:
+            by_repo.setdefault(inst.repo_name or "unknown", []).append(inst)
+        lines: list[str] = []
+        for rname, repo_insts in by_repo.items():
+            lines.append(f"**{rname}**")
+            lines.append(format_instance_list_md(repo_insts))
+            lines.append("")
+        msg_text = "\n".join(lines).strip() if lines else "No instances found."
+    else:
+        msg_text = format_instance_list_md(instances)
+
     markup = ctx.messenger.markdown_to_markup(msg_text)
     chunks = ctx.messenger.chunk_message(markup)
 
@@ -1373,6 +1416,24 @@ async def handle_callback(
         await workflows.on_commit(ctx, instance_id, source_msg_id)
     elif action == "done":
         await workflows.on_done(ctx, instance_id, source_msg_id)
+    elif action == "autopilot":
+        await workflows.on_autopilot(ctx, instance_id, source_msg_id)
+    elif action == "build_and_ship":
+        await workflows.on_build_and_ship(ctx, instance_id, source_msg_id)
+    elif action == "continue_autopilot":
+        inst = ctx.store.get_instance(instance_id)
+        if inst:
+            chain = ctx.store.get_autopilot_chain(inst.session_id)
+            if chain and len(chain) > 1:
+                # Skip the step that triggered the question (it's been answered)
+                start = chain[1]
+            elif chain:
+                start = chain[0]
+            else:
+                start = "build"
+            await workflows.on_autopilot(ctx, instance_id, source_msg_id, start_from=start)
+        else:
+            await ctx.messenger.send_text(ctx.channel_id, "Instance not found.")
     elif action == "sess_resume":
         await workflows.on_sess_resume(ctx, instance_id, source_msg_id)
 

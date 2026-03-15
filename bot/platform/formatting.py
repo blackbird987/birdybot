@@ -202,6 +202,7 @@ _WORKFLOW_ORIGINS = frozenset({
     InstanceOrigin.REVIEW_PLAN, InstanceOrigin.REVIEW_CODE,
     InstanceOrigin.COMMIT, InstanceOrigin.DONE,
     InstanceOrigin.APPLY_REVISIONS, InstanceOrigin.RELEASE,
+    InstanceOrigin.AUTOPILOT, InstanceOrigin.BUILD_AND_SHIP,
 })
 
 
@@ -236,8 +237,13 @@ def status_icon(status: InstanceStatus) -> str:
 
 def action_button_specs(
     instance: Instance, show_expand: bool = False,
+    has_autopilot_chain: bool = False,
 ) -> list[list[ButtonSpec]]:
-    """Return button row specs based on instance status and origin."""
+    """Return button row specs based on instance status and origin.
+
+    has_autopilot_chain: if True, this session has a paused autopilot chain
+    that can be resumed via Continue Autopilot.
+    """
     rows: list[list[ButtonSpec]] = []
     iid = instance.id
 
@@ -266,17 +272,18 @@ def action_button_specs(
             # Plan workflow — check plan_active before code changes so
             # "Apply Revisions" (which edits the plan file) gets plan buttons
             if instance.origin == InstanceOrigin.REVIEW_PLAN:
-                # Just reviewed — offer to apply the suggested revisions
+                # Just reviewed — offer to apply or ship
                 rows.append([
                     ButtonSpec("Apply Revisions", f"apply_revisions:{iid}"),
-                    ButtonSpec("Build It", f"build:{iid}"),
+                    ButtonSpec("Build & Ship", f"build_and_ship:{iid}"),
                     ButtonSpec("Done", f"done:{iid}"),
                 ])
             else:
+                # Plan created or revisions applied
                 rows.append([
+                    ButtonSpec("Autopilot", f"autopilot:{iid}"),
                     ButtonSpec("Review Plan", f"review_plan:{iid}"),
                     ButtonSpec("Build It", f"build:{iid}"),
-                    ButtonSpec("Done", f"done:{iid}"),
                 ])
         elif made_code_changes:
             # Edited/wrote files in-place (no branch)
@@ -295,9 +302,9 @@ def action_button_specs(
         elif made_plan:
             # Plan detected outside explicit plan workflow (e.g. regular query)
             rows.append([
+                ButtonSpec("Autopilot", f"autopilot:{iid}"),
                 ButtonSpec("Review Plan", f"review_plan:{iid}"),
                 ButtonSpec("Build It", f"build:{iid}"),
-                ButtonSpec("Done", f"done:{iid}"),
             ])
         else:
             # Default buttons + workflow row when session exists
@@ -323,6 +330,10 @@ def action_button_specs(
 
     elif instance.status == InstanceStatus.KILLED:
         rows.append([ButtonSpec("Retry", f"retry:{iid}")])
+
+    # Continue Autopilot — shown when session has a paused chain
+    if has_autopilot_chain and instance.status == InstanceStatus.COMPLETED:
+        rows.append([ButtonSpec("Continue Autopilot", f"continue_autopilot:{iid}")])
 
     # Mode toggle — only on non-workflow completions
     if (instance.status == InstanceStatus.COMPLETED

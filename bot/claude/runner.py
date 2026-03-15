@@ -68,10 +68,11 @@ class ClaudeRunner:
         on_progress: ProgressCallback | None = None,
         on_stall: StallCallback | None = None,
         context: str | None = None,
+        sibling_context: str | None = None,
     ) -> RunResult:
         """Run Claude CLI for an instance. Blocks until completion or timeout."""
         async with self._semaphore:
-            return await self._run_impl(instance, on_progress, on_stall, context)
+            return await self._run_impl(instance, on_progress, on_stall, context, sibling_context)
 
     async def _run_impl(
         self,
@@ -79,6 +80,7 @@ class ClaudeRunner:
         on_progress: ProgressCallback | None,
         on_stall: StallCallback | None,
         context: str | None = None,
+        sibling_context: str | None = None,
     ) -> RunResult:
         inactivity_timeout = (config.TASK_TIMEOUT_SECS
                               if instance.instance_type == InstanceType.TASK
@@ -88,7 +90,7 @@ class ClaudeRunner:
         if instance.branch:
             await self._ensure_branch(instance)
 
-        cmd = self._build_command(instance, context)
+        cmd = self._build_command(instance, context, sibling_context)
         log.info("Running %s: %s", instance.id, " ".join(cmd))
 
         # Clear CLAUDE_CODE env var to avoid nested-session error
@@ -314,7 +316,11 @@ class ClaudeRunner:
 
         return result
 
-    def _build_command(self, instance: Instance, context: str | None = None) -> list[str]:
+    def _build_command(
+        self, instance: Instance,
+        context: str | None = None,
+        sibling_context: str | None = None,
+    ) -> list[str]:
         cmd = [config.CLAUDE_BINARY, "-p"]
 
         # Build prompt — never mutated on the instance
@@ -326,7 +332,7 @@ class ClaudeRunner:
         cmd.extend(["--output-format", "stream-json", "--verbose"])
 
         # Build system prompt: mobile hint + bot context + pinned context + repo CLAUDE.md + projects dir
-        system_prompt = self._build_system_prompt(instance, context)
+        system_prompt = self._build_system_prompt(instance, context, sibling_context)
         cmd.extend(["--append-system-prompt", system_prompt])
 
         # Resume session
@@ -341,7 +347,11 @@ class ClaudeRunner:
 
         return cmd
 
-    def _build_system_prompt(self, instance: Instance, context: str | None = None) -> str:
+    def _build_system_prompt(
+        self, instance: Instance,
+        context: str | None = None,
+        sibling_context: str | None = None,
+    ) -> str:
         """Build the system prompt with mobile hint, bot context, pinned context, repo CLAUDE.md, and projects dir."""
         parts = [config.MOBILE_HINT]
 
@@ -380,6 +390,13 @@ class ClaudeRunner:
                     f"\n\nClaude Code session history and plans for this repo "
                     f"are stored in: {projects_dir}"
                 )
+
+        # Sibling session awareness — helps Claude avoid file conflicts
+        if sibling_context:
+            parts.append(
+                f"\n\n--- Sibling Sessions ---\n{sibling_context}\n"
+                "Avoid editing files these sessions are likely working on."
+            )
 
         return "".join(parts)
 

@@ -35,6 +35,8 @@ class InstanceOrigin(str, Enum):
     DONE = "done"               # [Done] button — commit + close thread
     RELEASE = "release"         # /release command
     RETRY = "retry"             # [Retry] button
+    AUTOPILOT = "autopilot"     # [Autopilot] button — full chain
+    BUILD_AND_SHIP = "build_and_ship"  # [Build & Ship] button
 
 
 # Origins that belong to the plan workflow (used in lifecycle + button selection)
@@ -87,6 +89,7 @@ class Instance:
     plan_active: bool = False  # Session has an active plan (for button context)
     code_active: bool = False  # Session has uncommitted code changes (for button context)
     needs_input: bool = False  # AskUserQuestion detected — waiting for user reply
+    deferred_revisions: list[str] = field(default_factory=list)  # Medium/Low revisions from plan review
 
     def display_id(self) -> str:
         if self.name:
@@ -128,6 +131,7 @@ class Instance:
             "plan_active": self.plan_active,
             "code_active": self.code_active,
             "needs_input": self.needs_input,
+            "deferred_revisions": self.deferred_revisions,
         }
 
     @classmethod
@@ -166,6 +170,7 @@ class Instance:
             plan_active=d.get("plan_active", False),
             code_active=d.get("code_active", False),
             needs_input=d.get("needs_input", False),
+            deferred_revisions=d.get("deferred_revisions", []),
         )
 
 

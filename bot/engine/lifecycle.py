@@ -44,6 +44,22 @@ def _origin_label(origin: InstanceOrigin) -> str:
     return origin.value.replace("_", "-") + " "
 
 
+def get_sibling_summary(store, inst: Instance) -> str | None:
+    """Scan running instances in same repo, return summary for system prompt."""
+    if not inst.repo_name:
+        return None
+    siblings = [
+        i for i in store.list_instances()
+        if i.repo_name == inst.repo_name
+        and i.id != inst.id
+        and i.status == InstanceStatus.RUNNING
+    ]
+    if not siblings:
+        return None
+    lines = [f"[{s.display_id()}] {s.prompt[:60]}" for s in siblings[:8]]
+    return "Other active sessions in this repo:\n" + "\n".join(lines)
+
+
 async def run_instance(
     ctx: RequestContext,
     inst: Instance,
@@ -63,11 +79,14 @@ async def run_instance(
         )
         heartbeat_task = asyncio.create_task(heartbeat())
 
+    sibling_ctx = get_sibling_summary(ctx.store, inst)
+
     start_time = asyncio.get_event_loop().time()
     try:
         result = await ctx.runner.run(
             inst, on_progress=on_progress, on_stall=on_stall,
             context=ctx.effective_context,
+            sibling_context=sibling_ctx,
         )
     finally:
         if heartbeat_task:
@@ -239,7 +258,8 @@ async def send_result(
     silent: bool = False,
 ) -> None:
     """Send result to channel — short inline, long as summary + file."""
-    buttons = action_button_specs(inst)
+    has_chain = bool(ctx.store.get_autopilot_chain(inst.session_id))
+    buttons = action_button_specs(inst, has_autopilot_chain=has_chain)
 
     if result_text:
         result_text = redact_secrets(result_text)

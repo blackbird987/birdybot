@@ -2,6 +2,46 @@
 
 ## [Unreleased]
 
+### Autopilot — One-Click Ship
+- New **Autopilot** button: chains Review Plan loop → Build → Review Code loop → Done with zero manual clicks
+- Smart plan review loop: auto-applies only Critical/High revisions, loops up to 5 rounds until converged, collects Medium/Low as deferred revisions
+- New **Build & Ship** button: chains Build → Review Code → Done (for after plan review)
+- Review prompt extended with `review-status` structured block (NEEDS_REVISION: yes/no + DEFERRED items); falls back to regex if block missing
+- New `APPLY_HIGH_PRIORITY_PROMPT` — tells Claude to apply only Critical/High priority revisions
+- Autopilot pauses on failure or AskUserQuestion — "Continue Autopilot" button resumes from the next step after the user answers
+- Autopilot chain state stored per-session in state.json (`autopilot_chains`) for reliable pause/resume
+
+### Cross-Session Sibling Awareness
+- Running instances in the same repo are now listed in each other's system prompts ("Other active sessions: ...")
+- Helps Claude avoid editing files that sibling sessions are likely working on
+- Lightweight (~500 chars), informational only
+
+### Dashboard & List at Scale
+- Dashboard: added "Needs Attention" section (failed + questions) at the top
+- Dashboard: running instances grouped by repo, no 5-item cap
+- Dashboard: added "Recently Completed" section (last 5)
+- `/list` now supports filtering: `/list running`, `/list failed`, `/list questions`, `/list <repo>` (combinable)
+- `/list` groups by repo by default when multiple repos are registered
+- New store query methods: `list_by_repo()`, `list_by_status()`, `needs_attention()`
+
+### Workflow Refactor
+- All workflow functions (`on_plan`, `on_build`, `on_review_plan`, etc.) now return `Instance | None` for chaining
+- Extracted `_last_msg_id()` helper to DRY up message ID lookups across workflow chains
+- Added `deferred_revisions` field to Instance for persisting plan review deferrals
+
+### Processing Status Overhaul
+- Remove 🔄 processing emoji from thread names — was unreliable due to Discord's 2-per-10-min thread rename rate limit
+- Replace with tag-based active indicator (`_set_thread_active_tag`) using tag-only edits (~5/5s rate limit)
+- Simplify `_generate_smart_title` — removed `clear_processing` param and all fallback paths
+- Simplify `_update_thread_name` — removed `processing` and `applied_tags` params, now only handles mode changes
+- Delete `_set_thread_processing` method entirely
+- Startup cleanup now clears stale "active" tags instead of parsing thread names for 🔄
+
+### Dashboard Enhancements
+- Dashboard refreshes on query **start** (not just end) — shows running instances immediately
+- Running instances now show clickable thread links and elapsed time
+- Reduced dashboard debounce from 5s to 2s for faster status updates
+
 ## v0.6.2 — Plan Buttons & Tag-Based Active State (2026-03-15)
 
 - Fix: plan mode queries via direct messages now show correct plan buttons (Review Plan / Build It / Done) instead of default buttons

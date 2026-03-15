@@ -41,7 +41,8 @@ _DISCORD_EPOCH_MS = 1420070400000
 # Button callback actions that trigger long-running LLM queries
 _QUERY_ACTIONS: frozenset[str] = frozenset({
     "retry", "plan", "build", "review_plan", "apply_revisions",
-    "review_code", "commit", "done",
+    "review_code", "commit", "done", "autopilot", "build_and_ship",
+    "continue_autopilot",
 })
 
 
@@ -1423,7 +1424,6 @@ class ClaudeBot(discord.Client):
                                 summary = self._get_latest_summary(channel_id)
                                 asyncio.create_task(self._generate_smart_title(
                                     message.channel, text, summary))
-                            asyncio.create_task(self._set_thread_active_tag(message.channel, False))
                             asyncio.create_task(self._try_apply_tags_after_run(channel_id))
                             asyncio.create_task(self._refresh_dashboard())
                         return
@@ -1469,8 +1469,7 @@ class ClaudeBot(discord.Client):
                 # Generate smart title (fire-and-forget)
                 summary = self._get_latest_summary(str(thread.id))
                 asyncio.create_task(self._generate_smart_title(thread, text, summary))
-                # Clear active tag + apply completion tags + refresh dashboard
-                asyncio.create_task(self._set_thread_active_tag(thread, False))
+                # Apply completion tags (also clears "active") + refresh dashboard
                 asyncio.create_task(self._try_apply_tags_after_run(str(thread.id)))
                 asyncio.create_task(self._refresh_dashboard())
 
@@ -1504,7 +1503,11 @@ class ClaudeBot(discord.Client):
             log.debug("Failed to apply tags to thread %s", thread.id, exc_info=True)
 
     async def _try_apply_tags_after_run(self, channel_id: str) -> None:
-        """Check latest instance status and apply tags to the thread."""
+        """Check latest instance status and apply tags to the thread.
+
+        Always clears the 'active' tag — either by replacing with completion
+        tags, or as a standalone fallback if no instance is found.
+        """
         ch = self.get_channel(int(channel_id))
         if not ch or not isinstance(ch, discord.Thread):
             return
@@ -1516,14 +1519,16 @@ class ClaudeBot(discord.Client):
         for inst in self._store.list_instances()[:5]:
             if inst.session_id and inst.session_id == info.session_id:
                 await self._apply_thread_tags(ch, inst.status.value, info.origin, mode=inst.mode)
-                break
+                return
+        # No matching instance — still clear "active" tag as fallback
+        await self._set_thread_active_tag(ch, False)
 
     # --- Dashboard ---
 
     async def _refresh_dashboard(self) -> None:
-        """Update or create the pinned dashboard embed in lobby. Debounced to 5s."""
+        """Update or create the pinned dashboard embed in lobby. Debounced to 2s."""
         now = asyncio.get_event_loop().time()
-        if now - self._dashboard_last_refresh < 5:
+        if now - self._dashboard_last_refresh < 2:
             return
         self._dashboard_last_refresh = now
 
@@ -1534,6 +1539,7 @@ class ClaudeBot(discord.Client):
             return
 
         from bot.claude.types import InstanceStatus
+        from datetime import datetime, timezone
         instances = self._store.list_instances()
         running = [i for i in instances if i.status == InstanceStatus.RUNNING]
         today_cost = self._store.get_daily_cost()
@@ -1541,18 +1547,88 @@ class ClaudeBot(discord.Client):
         repos = self._store.list_repos()
         active_repo, _ = self._store.get_active_repo()
 
+        # Build session_id -> thread_id map for cross-referencing
+        session_to_thread: dict[str, str] = {}
+        for proj in self._forum_projects.values():
+            for tid, info in proj.threads.items():
+                if info.session_id:
+                    session_to_thread[info.session_id] = tid
+
+        # Needs attention: failed + questions
+        attention = self._store.needs_attention()
+
+        # Recently completed (last 5)
+        completed = [
+            i for i in instances
+            if i.status == InstanceStatus.COMPLETED and not i.needs_input
+        ][:5]
+
         embed = discord.Embed(
             title="Claude Bot Dashboard",
             color=discord.Color.blurple(),
         )
-        # Active instances
+
+        # Needs Attention section (top priority)
+        if attention:
+            attn_lines = []
+            for inst in attention[:10]:
+                icon = "❓" if inst.needs_input else "❌"
+                line = f"{icon} `{inst.display_id()}` — {inst.prompt[:30]}"
+                thread_id = session_to_thread.get(inst.session_id or "")
+                if thread_id:
+                    line += f" • <#{thread_id}>"
+                attn_lines.append(line)
+            embed.add_field(
+                name=f"Needs Attention ({len(attention)})",
+                value="\n".join(attn_lines), inline=False,
+            )
+
+        # Running — grouped by repo, no cap
         if running:
+            by_repo: dict[str, list] = {}
+            for inst in running:
+                by_repo.setdefault(inst.repo_name or "default", []).append(inst)
             run_lines = []
-            for inst in running[:5]:
-                run_lines.append(f"`{inst.display_id()}` — {inst.prompt[:40]}")
-            embed.add_field(name=f"Running ({len(running)})", value="\n".join(run_lines), inline=False)
+            for rname, repo_insts in by_repo.items():
+                if len(by_repo) > 1:
+                    run_lines.append(f"**{rname}**")
+                for inst in repo_insts:
+                    line = f"`{inst.display_id()}` — {inst.prompt[:30]}"
+                    thread_id = session_to_thread.get(inst.session_id or "")
+                    if thread_id:
+                        line += f" • <#{thread_id}>"
+                    if inst.created_at:
+                        try:
+                            started = datetime.fromisoformat(inst.created_at)
+                            if started.tzinfo is None:
+                                started = started.replace(tzinfo=timezone.utc)
+                            elapsed = datetime.now(timezone.utc) - started
+                            mins = int(elapsed.total_seconds() // 60)
+                            line += f" • {'<1' if mins < 1 else str(mins)}m"
+                        except (ValueError, TypeError):
+                            pass
+                    run_lines.append(line)
+            # Truncate field value to Discord 1024 limit
+            field_val = "\n".join(run_lines)
+            if len(field_val) > 1024:
+                field_val = field_val[:1021] + "..."
+            embed.add_field(name=f"Running ({len(running)})", value=field_val, inline=False)
         else:
             embed.add_field(name="Running", value="None", inline=True)
+
+        # Recently Completed
+        if completed:
+            comp_lines = []
+            for inst in completed:
+                line = f"✅ `{inst.display_id()}` — {inst.prompt[:30]}"
+                thread_id = session_to_thread.get(inst.session_id or "")
+                if thread_id:
+                    line += f" • <#{thread_id}>"
+                comp_lines.append(line)
+            embed.add_field(
+                name=f"Recently Completed ({len(completed)})",
+                value="\n".join(comp_lines), inline=False,
+            )
 
         # Projects with forum links
         if self._forum_projects:
@@ -1683,7 +1759,8 @@ class ClaudeBot(discord.Client):
             if not active_tag:
                 return
 
-            current_tags = list(channel.applied_tags)
+            original_tags = list(channel.applied_tags)
+            current_tags = list(original_tags)
             if active:
                 if active_tag not in current_tags:
                     current_tags.append(active_tag)
@@ -1702,8 +1779,9 @@ class ClaudeBot(discord.Client):
                 if active_tag in current_tags:
                     current_tags.remove(active_tag)
 
-            await channel.edit(applied_tags=current_tags[:5])
-            log.debug("Set thread %s active=%s", channel.id, active)
+            if current_tags != original_tags:
+                await channel.edit(applied_tags=current_tags[:5])
+                log.debug("Set thread %s active=%s", channel.id, active)
         except Exception:
             log.debug("Failed to set active tag on thread %s", channel.id, exc_info=True)
 
@@ -2106,7 +2184,6 @@ class ClaudeBot(discord.Client):
         finally:
             self._persist_ctx_settings(ctx)
             if is_query:
-                asyncio.create_task(self._set_thread_active_tag(interaction.channel, False))
                 asyncio.create_task(self._try_apply_tags_after_run(channel_id))
                 asyncio.create_task(self._refresh_dashboard())
             elif action.startswith("mode_"):

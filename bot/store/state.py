@@ -38,6 +38,7 @@ class StateStore:
         self._active_session_id: str | None = None  # Current conversation session
         self._verbose_level: int = 1  # 0=silent, 1=normal, 2=detailed
         self._platform_state: dict[str, dict] = {}  # platform -> arbitrary state
+        self._autopilot_chains: dict[str, list[str]] = {}  # session_id -> remaining steps
         self._dirty: bool = False  # Dirty flag — mark_dirty() defers save to auto-save loop
         self._last_mtime: float = 0.0  # Track file mtime for external change detection
 
@@ -69,6 +70,7 @@ class StateStore:
             self._active_session_id = data.get("active_session_id")
             self._verbose_level = data.get("verbose_level", 1)
             self._platform_state = data.get("platform_state", {})
+            self._autopilot_chains = data.get("autopilot_chains", {})
             for d in data.get("schedules", []):
                 sched = Schedule.from_dict(d)
                 self._schedules[sched.id] = sched
@@ -126,6 +128,7 @@ class StateStore:
             "active_session_id": self._active_session_id,
             "verbose_level": self._verbose_level,
             "platform_state": self._platform_state,
+            "autopilot_chains": self._autopilot_chains,
             "schedules": [s.to_dict() for s in self._schedules.values()],
         }
         try:
@@ -480,3 +483,43 @@ class StateStore:
     def running_count(self) -> int:
         return sum(1 for i in self._instances.values()
                    if i.status == InstanceStatus.RUNNING)
+
+    # --- Query Helpers ---
+
+    def list_by_repo(self, repo_name: str) -> list[Instance]:
+        """Return recent instances for a specific repo, newest first."""
+        return [i for i in self.list_instances() if i.repo_name == repo_name]
+
+    def list_by_status(self, *statuses: InstanceStatus) -> list[Instance]:
+        """Return recent instances matching any of the given statuses."""
+        status_set = set(statuses)
+        return [i for i in self.list_instances() if i.status in status_set]
+
+    def needs_attention(self) -> list[Instance]:
+        """Return instances that need user attention (failed + needs_input)."""
+        return [
+            i for i in self.list_instances()
+            if i.status == InstanceStatus.FAILED or i.needs_input
+        ]
+
+    # --- Autopilot Chain State ---
+
+    def get_autopilot_chain(self, session_id: str | None) -> list[str] | None:
+        """Get remaining autopilot steps for a session."""
+        if not session_id:
+            return None
+        return self._autopilot_chains.get(session_id)
+
+    def set_autopilot_chain(self, session_id: str | None, steps: list[str]) -> None:
+        """Store remaining autopilot steps for a session."""
+        if not session_id:
+            return
+        self._autopilot_chains[session_id] = steps
+        self.mark_dirty()
+
+    def clear_autopilot_chain(self, session_id: str | None) -> None:
+        """Remove autopilot chain state for a session."""
+        if not session_id:
+            return
+        self._autopilot_chains.pop(session_id, None)
+        self.mark_dirty()

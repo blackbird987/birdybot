@@ -229,7 +229,15 @@ PLAN_REVIEW_PROMPT = (
     '- Each revision must be SHORT. No field labels like Change/Pros/Cons. '
     'Just a concise paragraph.\n'
     '- Never include code snippets or diffs.\n'
-    '- Keep the entire response under 3800 characters.'
+    '- Keep the entire response under 4200 characters.\n\n'
+    'At the very end, append a structured block:\n'
+    '```review-status\n'
+    'NEEDS_REVISION: yes or no\n'
+    'DEFERRED:\n'
+    '- [TAG] Title (Priority)\n'
+    '```\n'
+    'NEEDS_REVISION is "yes" if any Critical or High revisions exist, '
+    '"no" if only Medium/Low or none.'
 )
 
 APPLY_REVISIONS_PROMPT = (
@@ -238,6 +246,14 @@ APPLY_REVISIONS_PROMPT = (
     'revised plan first. Then at the end, add a section "### Applied" '
     'listing each revision as: '
     '"[TAG] Title \u2014 applied" or "[TAG] Title \u2014 skipped (reason)".'
+)
+
+APPLY_HIGH_PRIORITY_PROMPT = (
+    'Apply ONLY the Critical and High priority revisions from the review above. '
+    'Do NOT apply Medium or Low priority revisions \u2014 leave them untouched. '
+    'Output the complete revised plan. Then at the end, add:\n\n'
+    '### Applied\n'
+    'List each revision: "[TAG] Title \u2014 applied" or "[TAG] Title \u2014 skipped (Medium/Low)".'
 )
 
 CODE_REVIEW_PROMPT = (

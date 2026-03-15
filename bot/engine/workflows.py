@@ -1,9 +1,10 @@
-"""Spawn logic from button callbacks — plan, build, review, commit."""
+"""Spawn logic from button callbacks — plan, build, review, commit, autopilot."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,6 +31,62 @@ class SpawnConfig:
     auto_branch: bool = False
     silent: bool = False
 
+
+# --- Helpers ---
+
+_REVIEW_STATUS_RE = re.compile(r'```review-status\s*\n(.*?)```', re.DOTALL)
+_HIGH_PRIO_RE = re.compile(r'(?:Critical|High)\s*[·|]', re.IGNORECASE)
+
+
+def _last_msg_id(inst: Instance, platform: str) -> str | None:
+    """Get the last message ID for an instance on a platform."""
+    msgs = inst.message_ids.get(platform, [])
+    return msgs[-1] if msgs else None
+
+
+def _needs_revision(inst: Instance) -> bool:
+    """Check if a plan review found Critical/High revisions.
+
+    Parses the review-status block first; falls back to regex on prose.
+    """
+    if not inst.result_file:
+        return False
+    try:
+        text = Path(inst.result_file).read_text(encoding="utf-8")
+    except Exception:
+        return False
+    m = _REVIEW_STATUS_RE.search(text)
+    if m:
+        return "needs_revision: yes" in m.group(1).lower()
+    # Fallback: scan prose for Critical/High markers
+    return bool(_HIGH_PRIO_RE.search(text))
+
+
+def _extract_deferred(inst: Instance) -> list[str]:
+    """Extract deferred revision items from review-status block."""
+    if not inst.result_file:
+        return []
+    try:
+        text = Path(inst.result_file).read_text(encoding="utf-8")
+    except Exception:
+        return []
+    m = _REVIEW_STATUS_RE.search(text)
+    if not m:
+        return []
+    lines: list[str] = []
+    in_deferred = False
+    for line in m.group(1).splitlines():
+        stripped = line.strip()
+        if stripped.startswith("DEFERRED:"):
+            in_deferred = True
+        elif stripped.startswith("- ") and in_deferred:
+            lines.append(stripped[2:])
+        elif stripped and not stripped.startswith("-"):
+            in_deferred = False
+    return lines
+
+
+# --- Spawn ---
 
 async def spawn_from(
     ctx: RequestContext,
@@ -111,26 +168,28 @@ async def spawn_from(
     return new_inst
 
 
-async def on_plan(ctx: RequestContext, source_id: str, source_msg_id: str | None = None) -> None:
+# --- Individual workflow steps (all return Instance | None) ---
+
+async def on_plan(ctx: RequestContext, source_id: str, source_msg_id: str | None = None) -> Instance | None:
     source = ctx.store.get_instance(source_id)
     if not source:
         await ctx.messenger.send_text(ctx.channel_id, "Instance not found.")
-        return
+        return None
     prompt = config.PLAN_PROMPT_PREFIX + source.prompt
-    await spawn_from(ctx, source_id, SpawnConfig(
+    return await spawn_from(ctx, source_id, SpawnConfig(
         instance_type=InstanceType.QUERY, prompt=prompt,
         mode="explore", origin=InstanceOrigin.PLAN,
         status_text="Planning...", resume_session=True,
     ), source_msg_id=source_msg_id)
 
 
-async def on_build(ctx: RequestContext, source_id: str, source_msg_id: str | None = None) -> None:
+async def on_build(ctx: RequestContext, source_id: str, source_msg_id: str | None = None) -> Instance | None:
     source = ctx.store.get_instance(source_id)
     if not source:
         await ctx.messenger.send_text(ctx.channel_id, "Instance not found.")
-        return
+        return None
     is_plan = source.plan_active
-    await spawn_from(ctx, source_id, SpawnConfig(
+    return await spawn_from(ctx, source_id, SpawnConfig(
         instance_type=InstanceType.TASK,
         prompt=config.BUILD_FROM_PLAN_PROMPT if is_plan else config.BUILD_FROM_QUERY_PROMPT,
         mode="build", origin=InstanceOrigin.BUILD,
@@ -139,27 +198,28 @@ async def on_build(ctx: RequestContext, source_id: str, source_msg_id: str | Non
     ), source_msg_id=source_msg_id)
 
 
-async def on_review_plan(ctx: RequestContext, source_id: str, source_msg_id: str | None = None) -> None:
-    await spawn_from(ctx, source_id, SpawnConfig(
+async def on_review_plan(ctx: RequestContext, source_id: str, source_msg_id: str | None = None) -> Instance | None:
+    return await spawn_from(ctx, source_id, SpawnConfig(
         instance_type=InstanceType.QUERY, prompt=config.PLAN_REVIEW_PROMPT,
         mode="explore", origin=InstanceOrigin.REVIEW_PLAN,
         status_text="Reviewing plan...", resume_session=True,
     ), source_msg_id=source_msg_id)
 
 
-async def on_apply_revisions(ctx: RequestContext, source_id: str, source_msg_id: str | None = None) -> None:
-    await spawn_from(ctx, source_id, SpawnConfig(
+async def on_apply_revisions(ctx: RequestContext, source_id: str, source_msg_id: str | None = None) -> Instance | None:
+    return await spawn_from(ctx, source_id, SpawnConfig(
         instance_type=InstanceType.QUERY, prompt=config.APPLY_REVISIONS_PROMPT,
         mode="explore", origin=InstanceOrigin.APPLY_REVISIONS,
         status_text="Applying revisions...", resume_session=True,
     ), source_msg_id=source_msg_id)
 
 
-async def on_review_code(ctx: RequestContext, source_id: str, source_msg_id: str | None = None) -> None:
+async def on_review_code(ctx: RequestContext, source_id: str, source_msg_id: str | None = None) -> Instance | None:
     """Review code, auto-looping until no issues remain (max 5 rounds)."""
     MAX_ROUNDS = 5
     current_source = source_id
     current_msg = source_msg_id
+    result: Instance | None = None
     for round_num in range(MAX_ROUNDS):
         status = "Reviewing code..." if round_num == 0 else f"Re-reviewing (round {round_num + 1})..."
         result = await spawn_from(ctx, current_source, SpawnConfig(
@@ -178,12 +238,13 @@ async def on_review_code(ctx: RequestContext, source_id: str, source_msg_id: str
 
         # Changes were made — strip buttons from this result, review again
         current_source = result.id
-        result_msgs = result.message_ids.get(ctx.platform, [])
-        current_msg = result_msgs[-1] if result_msgs else None
+        current_msg = _last_msg_id(result, ctx.platform)
+
+    return result
 
 
-async def on_commit(ctx: RequestContext, source_id: str, source_msg_id: str | None = None) -> None:
-    await spawn_from(ctx, source_id, SpawnConfig(
+async def on_commit(ctx: RequestContext, source_id: str, source_msg_id: str | None = None) -> Instance | None:
+    return await spawn_from(ctx, source_id, SpawnConfig(
         instance_type=InstanceType.TASK, prompt=config.COMMIT_PROMPT,
         mode="build", origin=InstanceOrigin.COMMIT,
         status_text="Committing...", resume_session=True,
@@ -191,7 +252,7 @@ async def on_commit(ctx: RequestContext, source_id: str, source_msg_id: str | No
     ), source_msg_id=source_msg_id)
 
 
-async def on_done(ctx: RequestContext, source_id: str, source_msg_id: str | None = None) -> None:
+async def on_done(ctx: RequestContext, source_id: str, source_msg_id: str | None = None) -> Instance | None:
     """Commit all changes, update changelog, then close the conversation."""
     result = await spawn_from(ctx, source_id, SpawnConfig(
         instance_type=InstanceType.TASK, prompt=config.DONE_PROMPT,
@@ -201,7 +262,7 @@ async def on_done(ctx: RequestContext, source_id: str, source_msg_id: str | None
     ), source_msg_id=source_msg_id)
 
     if not result or result.status != InstanceStatus.COMPLETED:
-        return
+        return result
 
     # Close the thread/conversation after successful commit
     try:
@@ -209,6 +270,178 @@ async def on_done(ctx: RequestContext, source_id: str, source_msg_id: str | None
     except Exception:
         log.debug("Failed to close conversation for channel %s", ctx.channel_id, exc_info=True)
 
+    return result
+
+
+# --- Autopilot chains ---
+
+_AUTOPILOT_STEPS = ["review_loop", "build", "review_code", "done"]
+_BUILD_AND_SHIP_STEPS = ["build", "review_code", "done"]
+
+
+async def _review_plan_loop(
+    ctx: RequestContext, source_id: str, source_msg_id: str | None,
+) -> Instance | None:
+    """Review plan, auto-applying Critical/High revisions. Max 5 rounds.
+
+    Stores deferred revisions on the returned Instance.
+    """
+    MAX_ROUNDS = 5
+    current_source = source_id
+    current_msg = source_msg_id
+    last_review: Instance | None = None
+
+    for round_num in range(MAX_ROUNDS):
+        status = "Reviewing plan..." if round_num == 0 else f"Re-reviewing plan (round {round_num + 1})..."
+        review = await spawn_from(ctx, current_source, SpawnConfig(
+            instance_type=InstanceType.QUERY,
+            prompt=config.PLAN_REVIEW_PROMPT,
+            mode="explore",
+            origin=InstanceOrigin.REVIEW_PLAN,
+            status_text=status,
+            resume_session=True,
+        ), source_msg_id=current_msg)
+
+        if not review or review.status != InstanceStatus.COMPLETED:
+            return review
+        if review.needs_input:
+            return review
+
+        last_review = review
+
+        # No Critical/High revisions — converged
+        if not _needs_revision(review):
+            review.deferred_revisions = _extract_deferred(review)
+            ctx.store.update_instance(review)
+            return review
+
+        # Apply only Critical/High
+        applied = await spawn_from(ctx, review.id, SpawnConfig(
+            instance_type=InstanceType.QUERY,
+            prompt=config.APPLY_HIGH_PRIORITY_PROMPT,
+            mode="explore",
+            origin=InstanceOrigin.APPLY_REVISIONS,
+            status_text=f"Applying revisions (round {round_num + 1})...",
+            resume_session=True,
+        ), source_msg_id=_last_msg_id(review, ctx.platform))
+
+        if not applied or applied.status != InstanceStatus.COMPLETED:
+            return applied
+        if applied.needs_input:
+            return applied
+
+        current_source = applied.id
+        current_msg = _last_msg_id(applied, ctx.platform)
+
+    # Max rounds hit — store whatever the last review found
+    if last_review:
+        last_review.deferred_revisions = _extract_deferred(last_review)
+        ctx.store.update_instance(last_review)
+    return last_review
+
+
+async def _run_autopilot_chain(
+    ctx: RequestContext,
+    source_id: str,
+    source_msg_id: str | None,
+    steps: list[str],
+    session_id: str | None,
+) -> Instance | None:
+    """Execute a sequence of autopilot steps. Pauses on failure/needs_input."""
+    current_id = source_id
+    current_msg = source_msg_id
+    result: Instance | None = None
+
+    for step in steps:
+        # Update remaining steps in session state for resume
+        remaining = steps[steps.index(step):]
+        ctx.store.set_autopilot_chain(session_id, remaining)
+
+        if step == "review_loop":
+            result = await _review_plan_loop(ctx, current_id, current_msg)
+            # Post deferred revisions summary if any
+            if result and result.status == InstanceStatus.COMPLETED and result.deferred_revisions:
+                deferred_text = "\n".join(f"• {d}" for d in result.deferred_revisions[:10])
+                await ctx.messenger.send_result(
+                    ctx.channel_id,
+                    f"**Deferred Revisions** (Medium/Low)\n\n{deferred_text}",
+                    metadata={"_status": "completed", "_mode": "plan", "_deferred": True},
+                    silent=True,
+                )
+        elif step == "build":
+            source = ctx.store.get_instance(current_id)
+            is_plan = source.plan_active if source else False
+            result = await spawn_from(ctx, current_id, SpawnConfig(
+                instance_type=InstanceType.TASK,
+                prompt=config.BUILD_FROM_PLAN_PROMPT if is_plan else config.BUILD_FROM_QUERY_PROMPT,
+                mode="build", origin=InstanceOrigin.BUILD,
+                status_text="Building...", resume_session=True,
+                auto_branch=True, silent=True,
+            ), source_msg_id=current_msg)
+        elif step == "review_code":
+            result = await on_review_code(ctx, current_id, current_msg)
+        elif step == "done":
+            result = await on_done(ctx, current_id, current_msg)
+
+        if not result or result.status != InstanceStatus.COMPLETED:
+            # Chain paused/failed — state already saved for resume
+            return result
+
+        current_id = result.id
+        current_msg = _last_msg_id(result, ctx.platform)
+
+    # Chain complete — clear state
+    ctx.store.clear_autopilot_chain(session_id)
+    return result
+
+
+async def on_autopilot(
+    ctx: RequestContext,
+    source_id: str,
+    source_msg_id: str | None = None,
+    start_from: str = "review_loop",
+) -> Instance | None:
+    """Full autopilot: Review Plan loop → Build → Review Code → Done."""
+    source = ctx.store.get_instance(source_id)
+    if not source:
+        await ctx.messenger.send_text(ctx.channel_id, "Instance not found.")
+        return None
+
+    steps = _AUTOPILOT_STEPS
+    try:
+        idx = steps.index(start_from)
+    except ValueError:
+        idx = 0
+    return await _run_autopilot_chain(
+        ctx, source_id, source_msg_id,
+        steps[idx:], source.session_id,
+    )
+
+
+async def on_build_and_ship(
+    ctx: RequestContext,
+    source_id: str,
+    source_msg_id: str | None = None,
+    start_from: str = "build",
+) -> Instance | None:
+    """Build → Review Code → Done."""
+    source = ctx.store.get_instance(source_id)
+    if not source:
+        await ctx.messenger.send_text(ctx.channel_id, "Instance not found.")
+        return None
+
+    steps = _BUILD_AND_SHIP_STEPS
+    try:
+        idx = steps.index(start_from)
+    except ValueError:
+        idx = 0
+    return await _run_autopilot_chain(
+        ctx, source_id, source_msg_id,
+        steps[idx:], source.session_id,
+    )
+
+
+# --- Session resume ---
 
 async def on_sess_resume(
     ctx: RequestContext,

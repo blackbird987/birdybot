@@ -28,6 +28,9 @@ _STYLE_MAP = {
     "mode_build:": discord.ButtonStyle.success,    # Green
     "mode_plan:": discord.ButtonStyle.primary,     # Blue
     "mode_explore:": discord.ButtonStyle.primary,  # Blue
+    "autopilot:": discord.ButtonStyle.success,     # Green
+    "build_and_ship:": discord.ButtonStyle.success, # Green
+    "continue_autopilot:": discord.ButtonStyle.success,  # Green
 }
 
 
@@ -210,6 +213,11 @@ class DiscordMessenger:
                 color = discord.Color.green()
             else:
                 color = discord.Color.blue()  # explore
+
+        # Deferred revisions embed (from autopilot plan review loop)
+        is_deferred = metadata.get("_deferred") if metadata else False
+        if is_deferred:
+            color = discord.Color.light_grey()
 
         # Check for structured finalize info (commit/done/release)
         finalize = metadata.get("_finalize") if metadata else None
