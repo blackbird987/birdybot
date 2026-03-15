@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.3.16 — Per-Channel Message Queue (2026-03-15)
+
 - Per-channel message queue: messages sent while a query is running in the same session/thread are now queued and processed in order, with a "Queued" notice shown to the user
 
 ## v0.3.15 — Explore/Plan Bash Access (2026-03-15)
