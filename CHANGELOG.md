@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.4.1 — Review Prompts & Title Fixes (2026-03-15)
+
 - Improved plan review prompts: structured format with tags, priority levels, and character budget for more actionable reviews
 - Fix: smart title generation race condition — claim flag early to prevent duplicate concurrent title tasks
 - Fix: process cleanup in title generation — await proc.wait() after kill to prevent zombie processes
