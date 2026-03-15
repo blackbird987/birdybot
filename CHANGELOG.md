@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## v0.4.2 — Thread Name Helpers (2026-03-15)
+
+- Add `parse_thread_name()`/`build_thread_name()` helpers to centralize thread name format
+- Refactor `_update_thread_mode_emoji` → `_update_thread_name` with optional processing state and batched tag updates
 - Tune expanded result view budget from 4000 to 3900 chars for safer Discord embed limits
 
 ## v0.4.1 — Review Prompts & Title Fixes (2026-03-15)
