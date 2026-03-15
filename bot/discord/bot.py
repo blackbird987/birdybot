@@ -597,6 +597,23 @@ class ClaudeBot(discord.Client):
                         except Exception:
                             log.debug("Failed to rename thread %s", thread.id, exc_info=True)
 
+        # Clean stale processing indicators (bot crashed mid-query)
+        for proj in valid_projects.values():
+            if not proj.forum_channel_id:
+                continue
+            forum = guild.get_channel(int(proj.forum_channel_id))
+            if not forum or not isinstance(forum, discord.ForumChannel):
+                continue
+            for thread in forum.threads:
+                is_proc, mode_key, topic = channels.parse_thread_name(thread.name)
+                if is_proc:
+                    cleaned = channels.build_thread_name(topic, mode_key or "explore", False)
+                    try:
+                        await thread.edit(name=cleaned)
+                        log.info("Cleared stale processing indicator: %s", thread.id)
+                    except Exception:
+                        log.debug("Failed to clear processing indicator", exc_info=True)
+
     async def _run_slash(
         self, interaction: discord.Interaction, coro,
         *, ephemeral: bool = False,

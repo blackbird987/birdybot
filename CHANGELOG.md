@@ -6,6 +6,7 @@
 
 - Thread processing indicator: set active/mode tags and processing state on thread name when query starts, clear in `finally` block to ensure cleanup even on errors
 - Wrap post-query thread housekeeping (finalize, smart title, mode sync, tags, dashboard) in `try/finally` so it always runs
+- Clean stale processing indicators on startup (recovers from bot crashes mid-query)
 
 ## v0.4.2 — Thread Name Helpers (2026-03-15)
 
