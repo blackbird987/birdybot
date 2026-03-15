@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.4.3 — Processing Indicator & Cleanup Safety (2026-03-15)
+
 - Thread processing indicator: set active/mode tags and processing state on thread name when query starts, clear in `finally` block to ensure cleanup even on errors
 - Wrap post-query thread housekeeping (finalize, smart title, mode sync, tags, dashboard) in `try/finally` so it always runs
 
