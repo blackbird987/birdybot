@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.5.0 — Per-Thread Settings & Processing Indicator (2026-03-15)
+
 ### Per-Thread Settings (Discord)
 - **Critical bug fix**: mode, context, and verbose_level were global singletons — clicking "Mode: Build" in one thread changed it for ALL threads
 - Settings are now per-thread in Discord: each forum thread has its own mode, context, and verbose_level
