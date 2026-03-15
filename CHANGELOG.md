@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.5.1 — Fire-and-Forget & Cleanup (2026-03-15)
+
 - Make all thread name/tag PATCH operations fire-and-forget — prevents Discord 429 rate limits from blocking message processing entirely
 - Remove legacy `channel_sessions` migration code and auto-archive text channel loop (forums stable since v0.3.0)
 - Delete dead `archive_session_channel()` function (only caller removed above)
