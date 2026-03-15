@@ -688,8 +688,8 @@ class ClaudeBot(discord.Client):
             mode="Permission mode for the session",
         )
         @app_commands.choices(mode=[
-            app_commands.Choice(name=f"{name} {emoji}", value=key)
-            for key, (name, emoji) in MODE_DISPLAY.items()
+            app_commands.Choice(name=name, value=key)
+            for key, name in MODE_DISPLAY.items()
         ])
         async def cmd_new(interaction: discord.Interaction, repo: str = "", mode: str = ""):
             if not self._auth(interaction.user.id):
@@ -943,7 +943,7 @@ class ClaudeBot(discord.Client):
                 return
             lines = []
             for m in monitors:
-                status = "\U0001f7e2" if m["enabled"] else "\u26ab"
+                status = "on" if m["enabled"] else "off"
                 attn = m.get("last_attention_level", "?")
                 ch = f"<#{m['channel_id']}>" if m.get("channel_id") else "no channel"
                 last = m.get("last_fetch_at", "never")

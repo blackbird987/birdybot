@@ -142,12 +142,12 @@ def mode_select_view(current_mode: str = "explore") -> discord.ui.View:
     """Build a persistent View with mode-selection buttons for new sessions.
 
     Active mode button is disabled (standard "already selected" UX).
-    Labels and emojis derived from MODE_DISPLAY; styles from _MODE_BUTTON_STYLE.
+    Labels from MODE_DISPLAY; styles from _MODE_BUTTON_STYLE.
     """
     view = discord.ui.View(timeout=None)
-    for mode, (name, emoji) in MODE_DISPLAY.items():
+    for mode, name in MODE_DISPLAY.items():
         btn = discord.ui.Button(
-            label=f"{name} {emoji}",
+            label=name,
             style=_MODE_BUTTON_STYLE.get(mode, discord.ButtonStyle.secondary),
             custom_id=f"mode_set:{mode}",
             disabled=(mode == current_mode),
@@ -189,13 +189,13 @@ async def create_forum_post(
 async def ensure_forum_tags(forum: discord.ForumChannel) -> dict[str, discord.ForumTag]:
     """Create standard tags on a forum channel. Returns {name: tag} dict."""
     desired = {
-        "active": "\U0001f504",      # 🔄
-        "completed": "\u2705",       # ✅
-        "failed": "\u274c",          # ❌
-        "cli": "\U0001f4bb",         # 💻
-        "build": "\U0001f528",       # 🔨
-        "explore": "\U0001f50d",     # 🔍
-        "plan": "\U0001f4cb",        # 📋
+        "active": "\U0001f504",      # 🔄  (status)
+        "completed": "\u2705",       # ✅  (status)
+        "failed": "\u274c",          # ❌  (status)
+        "cli": None,
+        "build": None,
+        "explore": None,
+        "plan": None,
     }
     existing = {tag.name: tag for tag in forum.available_tags}
     missing = []

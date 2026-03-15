@@ -159,10 +159,10 @@ def strip_summary_block(text: str) -> str:
 
 # --- Mode Display ---
 
-MODE_DISPLAY: dict[str, tuple[str, str]] = {
-    "explore": ("Explore", "\U0001f50d"),   # 🔍
-    "plan":    ("Plan",    "\U0001f4cb"),    # 📋
-    "build":   ("Build",   "\U0001f528"),    # 🔨
+MODE_DISPLAY: dict[str, str] = {
+    "explore": "Explore",
+    "plan":    "Plan",
+    "build":   "Build",
 }
 
 VALID_MODES = frozenset(MODE_DISPLAY)
@@ -180,14 +180,13 @@ _WORKFLOW_ORIGINS = frozenset({
 
 
 def mode_name(mode: str) -> str:
-    """Human-readable mode name (no emoji)."""
-    return MODE_DISPLAY.get(mode, (mode.capitalize(), ""))[0]
+    """Human-readable mode name."""
+    return MODE_DISPLAY.get(mode, mode.capitalize())
 
 
 def mode_label(mode: str) -> str:
-    """Human-readable mode label with emoji."""
-    label, emoji = MODE_DISPLAY.get(mode, (mode.capitalize(), "\u2753"))
-    return f"{label} {emoji}"
+    """Human-readable mode label (alias for mode_name)."""
+    return mode_name(mode)
 
 
 # --- Status Icon ---
@@ -298,8 +297,8 @@ def action_button_specs(
     if (instance.status == InstanceStatus.COMPLETED
             and instance.origin not in _WORKFLOW_ORIGINS):
         target = _NEXT_MODE.get(instance.mode, "explore")
-        label, emoji = MODE_DISPLAY.get(target, (target.capitalize(), ""))
-        rows.append([ButtonSpec(f"Mode: {label} {emoji}", f"mode_{target}:{iid}")])
+        label = mode_name(target)
+        rows.append([ButtonSpec(f"Mode: {label}", f"mode_{target}:{iid}")])
 
     if show_expand:
         rows.append([ButtonSpec("Expand \u25bc", f"expand:{iid}")])

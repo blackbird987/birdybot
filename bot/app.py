@@ -209,7 +209,7 @@ async def run() -> None:
         elif changed:
             escaped = redact_secrets(instance.summary or 'No summary')
             await notifier.broadcast(
-                f"📋 {instance.display_id()} (scheduled)\n{escaped}",
+                f"{instance.display_id()} (scheduled)\n{escaped}",
                 silent=True,
             )
 

@@ -290,7 +290,7 @@ async def on_bg(ctx: RequestContext, text: str) -> None:
     buttons = action_button_specs(inst)
     msg_id = await ctx.messenger.send_text(
         ctx.channel_id,
-        f"🚀 {escaped} queued (build mode, branch `{escaped_branch}`)",
+        f"{escaped} queued (build mode, branch `{escaped_branch}`)",
         buttons=buttons,
     )
     inst.message_ids.setdefault(ctx.platform, []).append(msg_id)
@@ -354,7 +354,7 @@ async def on_release(ctx: RequestContext, text: str) -> None:
     escaped = ctx.messenger.escape(inst.display_id())
     handle = await ctx.messenger.send_text(
         ctx.channel_id,
-        f"📦 {escaped} — releasing ({ctx.messenger.escape(version_hint)})...",
+        f"{escaped} — releasing ({ctx.messenger.escape(version_hint)})...",
     )
     inst.message_ids.setdefault(ctx.platform, []).append(handle)
     ctx.store.update_instance(inst)

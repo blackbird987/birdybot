@@ -125,8 +125,18 @@ def extract_result(events: list[dict]) -> RunResult:
         result.duration_api_ms = result_event.get("duration_api_ms", 0)
         result.is_error = result_event.get("is_error", False)
         result.num_turns = result_event.get("num_turns", 0)
-        result.input_tokens = result_event.get("input_tokens", 0)
-        result.output_tokens = result_event.get("output_tokens", 0)
+        # Tokens may be top-level or nested under "usage"
+        usage = result_event.get("usage") or {}
+        result.input_tokens = (
+            result_event.get("input_tokens")
+            or usage.get("input_tokens")
+            or 0
+        )
+        result.output_tokens = (
+            result_event.get("output_tokens")
+            or usage.get("output_tokens")
+            or 0
+        )
 
         result_data = result_event.get("result", "")
         if isinstance(result_data, str):

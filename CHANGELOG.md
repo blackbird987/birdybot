@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Stripped all decorative emojis from mode labels, buttons, forum tags, and notification messages — only status icons (🔄 ✅ ❌ ⏳ 💀) remain.
+- Simplified `MODE_DISPLAY` from `dict[str, tuple]` to `dict[str, str]`; `mode_label` is now an alias for `mode_name`.
+- Token parser handles both flat and nested `usage` formats from CLI stream-json.
+
 ## v0.3.9 — Hidden Windows, Session Metrics (2026-03-15)
 
 - Hide Claude CLI console windows on Windows — all subprocesses now use `CREATE_NO_WINDOW` flag to prevent black terminal windows from flashing on screen.
