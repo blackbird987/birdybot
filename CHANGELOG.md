@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.9.0 — Repo Control Center (2026-03-16)
+
 - Add per-repo Control Center pinned post in each forum — shows repo name, path, branch, mode, and active/recent session counts
 - Control Center buttons: "New Session" (creates thread in repo forum) and "Sync CLI" (syncs latest CLI sessions)
 - Control Center auto-provisioned on startup for existing forums and on first lobby route for new repos
