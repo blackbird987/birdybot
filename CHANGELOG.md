@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.8.3 — User Forum Welcome Post (2026-03-16)
+
 - Add welcome post with "New Session" button in user personal forums — created on first provisioning, retries on failure, gated by `welcome_posted` flag in access config
 
 ## v0.8.2 — Non-Owner Session Creation (2026-03-15)
