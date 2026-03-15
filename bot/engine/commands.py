@@ -43,6 +43,17 @@ _start_time: float = 0.0
 _cli_version: str = "unknown"
 _shutdown_fn = None
 
+# --- Per-channel query queue (prevents concurrent queries in same session) ---
+
+_channel_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_channel_lock(channel_id: str) -> asyncio.Lock:
+    """Get or create a per-channel lock for serializing queries."""
+    if channel_id not in _channel_locks:
+        _channel_locks[channel_id] = asyncio.Lock()
+    return _channel_locks[channel_id]
+
 
 def init(start_time: float, cli_version: str, shutdown_fn=None) -> None:
     """Initialize module-level state."""
@@ -96,6 +107,18 @@ async def on_unknown_command(ctx: RequestContext, text: str) -> None:
 
 
 async def _run_query(ctx: RequestContext, prompt: str) -> None:
+    lock = _get_channel_lock(ctx.channel_id)
+    if lock.locked():
+        await ctx.messenger.send_text(
+            ctx.channel_id,
+            "📋 Queued — waiting for current query to finish.",
+            silent=True,
+        )
+    async with lock:
+        await _run_query_inner(ctx, prompt)
+
+
+async def _run_query_inner(ctx: RequestContext, prompt: str) -> None:
     if not check_budget(ctx):
         await ctx.messenger.send_text(
             ctx.channel_id, "Daily budget exceeded. Use /budget reset to override.",
