@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### AskUserQuestion Detection
+- Detect `AskUserQuestion` tool_use in stream-json output — extract the question text, terminate the process, and display the question as the result instead of hanging until inactivity timeout
+- Add `needs_input` flag to `RunResult` — lifecycle shows ❓ icon + "asking a question" status, marks COMPLETED (not FAILED)
+- Session ID preserved so the user's reply auto-resumes the conversation via `--resume`
+- Guarded process termination with 5s timeout + `proc.kill()` fallback
+- New `iter_tool_blocks()` generator centralizes tool_use block extraction from stream events
+
 ### UX
 - Completion status message now shows the action origin (e.g., "✅ t-097 review-code done (2.3m)" instead of just "done")
 
