@@ -20,7 +20,7 @@ from bot.claude.parser import (
     iter_tool_blocks,
     parse_stream_line,
 )
-from bot.claude.types import Instance, InstanceType
+from bot.claude.types import CODE_CHANGE_TOOLS, Instance, InstanceType
 
 log = logging.getLogger(__name__)
 
@@ -333,12 +333,11 @@ class ClaudeRunner:
         if instance.session_id:
             cmd.extend(["--resume", instance.session_id])
 
-        # Map bot mode to CLI permission mode
-        if instance.mode == "build":
-            cmd.extend(["--permission-mode", "bypassPermissions"])
-        else:
-            # explore and plan: read-only (CLI enforces no Write/Edit)
-            cmd.extend(["--permission-mode", "plan"])
+        # Permissions: always bypass (non-interactive bot can't approve prompts).
+        # In explore/plan, block file-modification tools to enforce read-only.
+        cmd.extend(["--permission-mode", "bypassPermissions"])
+        if instance.mode != "build":
+            cmd.extend(["--disallowed-tools", ",".join(sorted(CODE_CHANGE_TOOLS))])
 
         return cmd
 

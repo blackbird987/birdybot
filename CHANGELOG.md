@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Fix: persist `needs_input` flag on Instance so AskUserQuestion state (❓ icon) survives bot restarts
+- Fix: explore and plan modes now allow Bash execution (e.g. read scripts, git commands) — previously both mapped to CLI `plan` permission mode which blocked all non-readonly tools. Now uses `bypassPermissions` with `--disallowed-tools Edit,Write,NotebookEdit` to allow Bash while still preventing file modifications.
+
 ## v0.3.14 — AskUserQuestion Detection & Repo Paths (2026-03-15)
 
 ### AskUserQuestion Detection

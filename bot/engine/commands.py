@@ -926,7 +926,7 @@ async def on_repo(ctx: RequestContext, text: str) -> None:
         if err := _validate_repo_name(name):
             await ctx.messenger.send_text(ctx.channel_id, err)
             return
-        path = str(Path(path.strip('"\'")).resolve())
+        path = str(Path(path.strip("\"'")).resolve())
         if not Path(path).is_dir():
             await ctx.messenger.send_text(ctx.channel_id, f"Directory not found: {path}")
             return

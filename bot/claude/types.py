@@ -86,6 +86,7 @@ class Instance:
     output_tokens: int = 0
     plan_active: bool = False  # Session has an active plan (for button context)
     code_active: bool = False  # Session has uncommitted code changes (for button context)
+    needs_input: bool = False  # AskUserQuestion detected — waiting for user reply
 
     def display_id(self) -> str:
         if self.name:
@@ -126,6 +127,7 @@ class Instance:
             "output_tokens": self.output_tokens,
             "plan_active": self.plan_active,
             "code_active": self.code_active,
+            "needs_input": self.needs_input,
         }
 
     @classmethod
@@ -163,6 +165,7 @@ class Instance:
             output_tokens=d.get("output_tokens", 0),
             plan_active=d.get("plan_active", False),
             code_active=d.get("code_active", False),
+            needs_input=d.get("needs_input", False),
         )
 
 
