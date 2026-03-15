@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from bot import config
-from bot.platform.formatting import strip_markdown
+from bot.platform.formatting import format_age, strip_markdown
 
 
 def _parse_record(line: str) -> dict | None:
@@ -255,15 +255,7 @@ def scan_sessions(
             continue
 
         mtime_dt = datetime.fromtimestamp(mtime, tz=timezone.utc)
-        delta = now - mtime_dt
-        if delta.days > 0:
-            age = f"{delta.days}d ago"
-        elif delta.seconds >= 3600:
-            age = f"{delta.seconds // 3600}h ago"
-        elif delta.seconds >= 60:
-            age = f"{delta.seconds // 60}m ago"
-        else:
-            age = "just now"
+        age = format_age(now - mtime_dt)
 
         topic = first_user_msg or last_msgs[0]
         for prefix in (

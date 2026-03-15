@@ -17,6 +17,7 @@ from bot.claude.parser import (
     extract_result,
     extract_summary,
     is_transient_error,
+    iter_tool_blocks,
     parse_stream_line,
 )
 from bot.claude.types import Instance, InstanceType
@@ -154,6 +155,7 @@ class ClaudeRunner:
         """
         events: list[dict] = []
         captured_session_id: str | None = None
+        ask_question: str | None = None  # Set when AskUserQuestion detected
         last_output_time = asyncio.get_event_loop().time()
         stall_warned = False
         timed_out = False
@@ -218,6 +220,20 @@ class ClaudeRunner:
                                 await on_progress(progress.message, progress.detail)
                             except Exception:
                                 log.exception("Progress callback error")
+
+                    # Detect AskUserQuestion — Claude is blocking on stdin
+                    if ask_question is None:
+                        for tool_name, tool_input in iter_tool_blocks(event):
+                            if tool_name == "AskUserQuestion":
+                                ask_question = tool_input.get("question", "")
+                                log.warning(
+                                    "AskUserQuestion detected for %s: %.100s",
+                                    instance.id, ask_question,
+                                )
+                                proc.terminate()
+                                break
+                        if ask_question is not None:
+                            break
         finally:
             if stall_check_task:
                 stall_check_task.cancel()
@@ -225,6 +241,31 @@ class ClaudeRunner:
                     await stall_check_task
                 except asyncio.CancelledError:
                     pass
+
+        # AskUserQuestion — wait for process to die, then return question as result
+        if ask_question is not None:
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+            result = extract_result(events)
+            result.needs_input = True
+            result.is_error = False
+            if ask_question:
+                result.result_text = ask_question
+            elif not result.result_text:
+                result.result_text = "Claude is asking a question (text not captured)"
+            # Preserve session_id from stream if result event didn't have it
+            if not result.session_id:
+                result.session_id = captured_session_id
+            # Save result file + summary
+            if result.result_text:
+                result_path = config.RESULTS_DIR / f"{instance.id}.md"
+                result_path.write_text(result.result_text, encoding="utf-8")
+                instance.result_file = str(result_path)
+                instance.summary = extract_summary(result.result_text)
+            return result
 
         await proc.wait()
 
@@ -297,8 +338,14 @@ class ClaudeRunner:
         # Map bot mode to CLI permission mode
         if instance.mode == "build":
             cmd.extend(["--permission-mode", "bypassPermissions"])
+        elif instance.mode == "plan":
+            # Plan mode: full tool access for research, block code modifications
+            cmd.extend(["--permission-mode", "bypassPermissions"])
+            cmd.extend(["--disallowed-tools",
+                        "Edit", "Write", "NotebookEdit",
+                        "EnterPlanMode", "ExitPlanMode"])
         else:
-            # explore and plan: read-only (CLI enforces no Write/Edit)
+            # explore: read-only (CLI enforces no Write/Edit)
             cmd.extend(["--permission-mode", "plan"])
 
         return cmd
@@ -312,6 +359,10 @@ class ClaudeRunner:
 
         # Bot capability context so Claude knows what the user can do
         parts.append(config.BOT_CONTEXT)
+
+        # Plan mode guidance: don't try ExitPlanMode, bot handles transitions
+        if instance.mode == "plan":
+            parts.append(config.PLAN_MODE_HINT)
 
         # Pinned user context (passed as parameter to avoid double-prepend on retry)
         if context:

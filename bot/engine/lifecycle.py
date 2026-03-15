@@ -11,8 +11,8 @@ from datetime import datetime, timezone
 
 from bot import config
 from bot.claude.types import (
-    CODE_CHANGE_TOOLS, PLAN_ORIGINS, Instance, InstanceOrigin, InstanceStatus,
-    RunResult,
+    CODE_CHANGE_TOOLS, PLAN_ORIGINS, PLAN_TOOLS, Instance, InstanceOrigin,
+    InstanceStatus, RunResult,
 )
 from bot.platform.base import MessageHandle, RequestContext
 from bot.platform.formatting import (
@@ -68,10 +68,11 @@ async def run_instance(
         else:
             elapsed_str = f"{elapsed:.0f}s"
         escaped = ctx.messenger.escape(inst.display_id())
-        icon = "✅" if not result.is_error else "❌"
+        icon = "❓" if result.needs_input else ("✅" if not result.is_error else "❌")
+        status_word = "asking a question" if result.needs_input else "done"
         try:
             await ctx.messenger.edit_thinking(
-                handle, f"{icon} {escaped} done ({elapsed_str})",
+                handle, f"{icon} {escaped} {status_word} ({elapsed_str})",
             )
         except Exception:
             pass
@@ -96,9 +97,7 @@ def finalize_run(ctx: RequestContext, inst: Instance, result: RunResult) -> None
 
     # Detect session context flags (plan/code) from this instance or siblings
     tools = set(result.tools_used)
-    plan_tools = {"EnterPlanMode"}
-
-    if (plan_tools & tools) or inst.origin in PLAN_ORIGINS:
+    if inst.mode == "plan" or (PLAN_TOOLS & tools) or inst.origin in PLAN_ORIGINS:
         inst.plan_active = True
     if CODE_CHANGE_TOOLS & tools:
         inst.code_active = True
@@ -114,7 +113,7 @@ def finalize_run(ctx: RequestContext, inst: Instance, result: RunResult) -> None
                 if inst.plan_active and inst.code_active:
                     break
 
-    if result.is_error:
+    if result.is_error and not result.needs_input:
         inst.status = InstanceStatus.FAILED
         inst.error = result.error_message or result.result_text
     else:

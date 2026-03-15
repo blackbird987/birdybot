@@ -8,6 +8,8 @@ from enum import Enum
 
 # Tools that indicate code was modified (used for button context detection)
 CODE_CHANGE_TOOLS = frozenset({"Edit", "Write", "NotebookEdit"})
+# Tools that indicate plan activity (used for button context detection)
+PLAN_TOOLS = frozenset({"EnterPlanMode", "ExitPlanMode"})
 
 
 class InstanceType(str, Enum):
@@ -179,6 +181,7 @@ class RunResult:
     num_turns: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    needs_input: bool = False  # AskUserQuestion detected — waiting for user reply
 
 
 @dataclass

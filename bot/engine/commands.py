@@ -621,11 +621,13 @@ async def on_logs(ctx: RequestContext) -> None:
 
 async def on_mode(ctx: RequestContext, text: str) -> None:
     text = text.strip().lower()
-    if text in VALID_MODES:
+    if text == "build":
+        await ctx.messenger.send_text(ctx.channel_id, config.BUILD_MODE_REJECTED)
+    elif text in VALID_MODES:
         ctx.store.mode = text
         await ctx.messenger.send_text(ctx.channel_id, f"Mode: {mode_label(text)}")
     elif text:
-        await ctx.messenger.send_text(ctx.channel_id, "Usage: /mode explore|plan|build")
+        await ctx.messenger.send_text(ctx.channel_id, "Usage: /mode explore|plan")
     else:
         await ctx.messenger.send_text(ctx.channel_id, f"Mode: {mode_label(ctx.store.mode)}")
 
@@ -797,14 +799,17 @@ def _validate_repo_name(name: str) -> str | None:
     return None
 
 
-def _resolve_default_path(name: str, store) -> Path | None:
-    """Sibling of active repo, or first registered repo's parent."""
+def _resolve_default_path(name: str, store) -> tuple[Path, str] | None:
+    """Resolve default path for a new repo. Returns (path, source) or None."""
+    from bot.config import REPOS_BASE_DIR
+    if REPOS_BASE_DIR:
+        return REPOS_BASE_DIR / name, "REPOS_BASE_DIR"
     _, active_path = store.get_active_repo()
     if active_path:
-        return Path(active_path).parent / name
+        return Path(active_path).parent / name, "sibling of active repo"
     repos = store.list_repos()
     if repos:
-        return Path(next(iter(repos.values()))).parent / name
+        return Path(next(iter(repos.values()))).parent / name, "sibling of first repo"
     return None
 
 
@@ -836,6 +841,7 @@ async def _create_repo(ctx: RequestContext, text: str) -> None:
         return
 
     # --- Resolve path ---
+    path_source: str | None = None
     if path_str:
         repo_path = Path(path_str.strip("\"'"))
     else:
@@ -846,11 +852,11 @@ async def _create_repo(ctx: RequestContext, text: str) -> None:
                 "No repos registered — provide a path: /repo create <name> <path>",
             )
             return
-        repo_path = resolved
+        repo_path, path_source = resolved
 
     # --- Handle existing directory with .git ---
     if repo_path.exists() and (repo_path / ".git").exists():
-        ctx.store.add_repo(name, str(repo_path))
+        ctx.store.add_repo(name, str(repo_path.resolve()))
         ctx.store.switch_repo(name)
         await ctx.messenger.send_text(
             ctx.channel_id,
@@ -884,9 +890,10 @@ async def _create_repo(ctx: RequestContext, text: str) -> None:
         return
 
     # --- Register ---
-    ctx.store.add_repo(name, str(repo_path))
+    ctx.store.add_repo(name, str(repo_path.resolve()))
     ctx.store.switch_repo(name)
-    msg = f"Created '{name}' at {repo_path} (git initialized)."
+    source_hint = f", default: {path_source}" if path_source else ""
+    msg = f"Created '{name}' at {repo_path} (git initialized{source_hint})."
 
     # --- Optional GitHub remote ---
     if github:
@@ -921,7 +928,7 @@ async def on_repo(ctx: RequestContext, text: str) -> None:
         if err := _validate_repo_name(name):
             await ctx.messenger.send_text(ctx.channel_id, err)
             return
-        path = path.strip('"\'')
+        path = str(Path(path.strip('"\'")).resolve())
         if not Path(path).is_dir():
             await ctx.messenger.send_text(ctx.channel_id, f"Directory not found: {path}")
             return
@@ -1134,7 +1141,7 @@ async def on_help(ctx: RequestContext) -> None:
         "`/cost` — spending breakdown\n"
         "`/status` — health dashboard\n"
         "`/logs` — bot log\n"
-        "`/mode` — explore|plan|build\n"
+        "`/mode` — explore|plan (build via 'Build It' approval)\n"
         "`/verbose` — progress detail (0|1|2)\n"
         "`/context` — pinned context\n"
         "`/alias` — command shortcuts\n"
@@ -1341,6 +1348,11 @@ async def handle_callback(
 
     elif action in ("mode_explore", "mode_plan", "mode_build"):
         target = action.split("_", 1)[1]  # "explore", "plan", or "build"
+        if target == "build":
+            await ctx.messenger.send_text(
+                ctx.channel_id, config.BUILD_MODE_REJECTED, silent=True,
+            )
+            return
         ctx.store.mode = target
         # Update source message buttons to reflect new mode
         inst = ctx.store.get_instance(instance_id)

@@ -2,6 +2,48 @@
 
 ## [Unreleased]
 
+### Repo Path Resolution
+- Fix `/repo create` default path — add `REPOS_BASE_DIR` env var so new repos land in a consistent base directory instead of as siblings of the active repo (which breaks for deeply nested repos)
+- `REPOS_BASE_DIR` validated at startup: warns and falls back to sibling logic if the directory doesn't exist
+- Normalize all stored repo paths with `.resolve()` — fixes inconsistent slash styles in state.json
+- Show path source in confirmation message ("default: REPOS_BASE_DIR" or "sibling of active repo") for transparency
+
+### Thread References
+- Add `/ref` slash command with dynamic autocomplete to reference another forum thread's conversation context
+- Autocomplete shows `[repo] topic (age)` with newest-first sorting, excludes current thread
+- Posts a purple embed with the referenced conversation excerpt (adaptive truncation)
+- Injects referenced context into the next prompt so Claude is actually aware of the cross-thread context
+- Pending context expires after 10 minutes; multiple `/ref` calls replace previous selection
+- Extract shared `format_age()` helper to `formatting.py` (DRY with `sessions.py`)
+
+### AskUserQuestion Detection
+- Detect `AskUserQuestion` tool_use in stream-json output — extract the question text, terminate the process, and display the question as the result instead of hanging until inactivity timeout
+- Add `needs_input` flag to `RunResult` — lifecycle shows ❓ icon + "asking a question" status, marks COMPLETED (not FAILED)
+- Session ID preserved so the user's reply auto-resumes the conversation via `--resume`
+- Guarded process termination with 5s timeout + `proc.kill()` fallback
+- DRY: new `iter_tool_blocks()` generator centralizes tool_use block extraction from stream events; `extract_progress()` refactored to use it
+
+### Missed Message Recovery
+- Detect unanswered user messages in Discord threads when bot recovers from downtime; prepend them as context so Claude addresses the real question instead of just the nudge
+- Track `_last_answered_msg_id` per thread to efficiently narrow the Discord API history window
+- Skip stale messages (>30 min old), slash commands, and bot thinking/status embeds
+
+### Plan Mode Approval Flow
+- Plan mode now uses `bypassPermissions` + `--disallowed-tools` (Edit, Write, NotebookEdit, EnterPlanMode, ExitPlanMode) — Claude has full access to read files, search code, and run diagnostic commands, but cannot modify code or toggle CLI plan mode
+- Added `PLAN_MODE_HINT` system prompt telling Claude not to attempt `ExitPlanMode` — just present the plan, the bot handles transitions via "Build It" button
+- Plan detection now also checks `inst.mode == "plan"` and `ExitPlanMode` tool usage, not just `EnterPlanMode`
+- "Plan" workflow button (`on_plan`) now uses `mode="plan"` instead of `mode="explore"` — fixes the ExitPlanMode stuck loop
+- Build mode fully gated behind approval:
+  - Mode toggle cycles explore ↔ plan only (build removed from cycle)
+  - `/mode build` command rejected with guidance
+- Fix: plan-mode sessions that incidentally write files (e.g. plan docs) no longer misclassify as code-change sessions — "Review Plan / Build It / Done" buttons now appear correctly
+- Fix: thread mode emoji syncs before every query, not just when mode changes during a query — covers stale emoji from mode changes in other contexts
+- Fix: thread emoji updates serialized via `asyncio.Lock` to prevent race condition on rapid mode button clicks
+  - `mode_build` button action blocked
+  - Welcome embed buttons exclude build (uses `SETTABLE_MODES`)
+  - `/new mode:build` choice removed from Discord slash command
+- Added `SETTABLE_MODES` constant (DRY) and `BUILD_MODE_REJECTED` message constant
+
 ## v0.3.13 — Lobby Mode Emoji Fix (2026-03-15)
 
 - Fix: lobby-routed messages now update thread mode emoji when mode changes (e.g. `/mode build` sent in lobby).

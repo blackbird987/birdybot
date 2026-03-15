@@ -116,7 +116,7 @@ async def on_plan(ctx: RequestContext, source_id: str, source_msg_id: str | None
     prompt = config.PLAN_PROMPT_PREFIX + source.prompt
     await spawn_from(ctx, source_id, SpawnConfig(
         instance_type=InstanceType.QUERY, prompt=prompt,
-        mode="explore", origin=InstanceOrigin.PLAN,
+        mode="plan", origin=InstanceOrigin.PLAN,
         status_text="Planning...", resume_session=True,
     ), source_msg_id=source_msg_id)
 

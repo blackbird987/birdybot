@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 import discord
 
-from bot.platform.formatting import MODE_COLOR, MODE_DISPLAY, MODE_EMOJI, mode_emoji, mode_name
+from bot.platform.formatting import MODE_COLOR, MODE_DISPLAY, MODE_EMOJI, SETTABLE_MODES, mode_emoji, mode_name
 
 log = logging.getLogger(__name__)
 
@@ -146,6 +146,8 @@ def mode_select_view(current_mode: str = "explore") -> discord.ui.View:
     """
     view = discord.ui.View(timeout=None)
     for mode, name in MODE_DISPLAY.items():
+        if mode not in SETTABLE_MODES:
+            continue
         btn = discord.ui.Button(
             label=name,
             style=_MODE_BUTTON_STYLE.get(mode, discord.ButtonStyle.secondary),

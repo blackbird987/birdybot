@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import re
+from datetime import timedelta
 
 from dataclasses import dataclass, field
 
-from bot.claude.types import CODE_CHANGE_TOOLS, PLAN_ORIGINS, Instance, InstanceOrigin, InstanceStatus, Schedule
+from bot.claude.types import CODE_CHANGE_TOOLS, PLAN_ORIGINS, PLAN_TOOLS, Instance, InstanceOrigin, InstanceStatus, Schedule
 from bot.platform.base import ButtonSpec
 
 
@@ -30,6 +31,17 @@ def format_tokens(count: int) -> str:
     if count >= 1_000:
         return f"{count / 1_000:.1f}k"
     return str(count)
+
+
+def format_age(delta: timedelta) -> str:
+    """Format a timedelta as a human-readable age string (e.g. '3h ago')."""
+    if delta.days > 0:
+        return f"{delta.days}d ago"
+    if delta.seconds >= 3600:
+        return f"{delta.seconds // 3600}h ago"
+    if delta.seconds >= 60:
+        return f"{delta.seconds // 60}m ago"
+    return "just now"
 
 
 # --- Secret Redaction ---
@@ -181,8 +193,11 @@ MODE_COLOR: dict[str, int] = {
 
 VALID_MODES = frozenset(MODE_DISPLAY)
 
-# Mode cycle order for the toggle button
-_NEXT_MODE: dict[str, str] = {"explore": "plan", "plan": "build", "build": "explore"}
+# Modes the user can set directly (build excluded — only via "Build It" approval)
+SETTABLE_MODES = frozenset(m for m in VALID_MODES if m != "build")
+
+# Mode cycle order for the toggle button (build excluded — only via "Build It" approval)
+_NEXT_MODE: dict[str, str] = {"explore": "plan", "plan": "explore", "build": "explore"}
 
 # Origins where mode toggle button should NOT appear (user is in a workflow)
 _WORKFLOW_ORIGINS = frozenset({
@@ -236,7 +251,8 @@ def action_button_specs(
     if instance.status == InstanceStatus.COMPLETED:
         tools = set(instance.tools_used or [])
         made_code_changes = bool(tools & CODE_CHANGE_TOOLS)
-        made_plan = instance.plan_active
+        instance_planned = bool(tools & PLAN_TOOLS) or instance.origin in PLAN_ORIGINS or instance.mode == "plan"
+        session_has_plan = instance.plan_active
 
         if instance.branch:
             # Build bg task with branch — full merge workflow
@@ -250,24 +266,22 @@ def action_button_specs(
                 ButtonSpec("Commit", f"commit:{iid}"),
                 ButtonSpec("Done", f"done:{iid}"),
             ])
-        elif made_plan and instance.origin in PLAN_ORIGINS:
-            # Plan workflow — check plan_active before code changes so
-            # "Apply Revisions" (which edits the plan file) gets plan buttons
-            if instance.origin == InstanceOrigin.REVIEW_PLAN:
-                # Just reviewed — offer to apply the suggested revisions
-                rows.append([
-                    ButtonSpec("Apply Revisions", f"apply_revisions:{iid}"),
-                    ButtonSpec("Build It", f"build:{iid}"),
-                    ButtonSpec("Done", f"done:{iid}"),
-                ])
-            else:
-                rows.append([
-                    ButtonSpec("Review Plan", f"review_plan:{iid}"),
-                    ButtonSpec("Build It", f"build:{iid}"),
-                    ButtonSpec("Done", f"done:{iid}"),
-                ])
+        elif instance_planned and instance.origin == InstanceOrigin.REVIEW_PLAN:
+            # Just reviewed — offer to apply the suggested revisions
+            rows.append([
+                ButtonSpec("Apply Revisions", f"apply_revisions:{iid}"),
+                ButtonSpec("Build It", f"build:{iid}"),
+                ButtonSpec("Done", f"done:{iid}"),
+            ])
+        elif instance_planned:
+            # This instance produced a plan (explicit workflow or regular query)
+            rows.append([
+                ButtonSpec("Review Plan", f"review_plan:{iid}"),
+                ButtonSpec("Build It", f"build:{iid}"),
+                ButtonSpec("Done", f"done:{iid}"),
+            ])
         elif made_code_changes:
-            # Edited/wrote files in-place (no branch)
+            # This instance edited/wrote files in-place (no branch)
             rows.append([
                 ButtonSpec("Review Code", f"review_code:{iid}"),
                 ButtonSpec("Retry", f"retry:{iid}"),
@@ -280,8 +294,8 @@ def action_button_specs(
                 ButtonSpec("Review Code", f"review_code:{iid}"),
                 ButtonSpec("Done", f"done:{iid}"),
             ])
-        elif made_plan:
-            # Plan detected outside explicit plan workflow (e.g. regular query)
+        elif session_has_plan:
+            # Inherited plan context from session sibling, no instance-level activity
             rows.append([
                 ButtonSpec("Review Plan", f"review_plan:{iid}"),
                 ButtonSpec("Build It", f"build:{iid}"),

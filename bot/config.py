@@ -65,6 +65,14 @@ LOGS_DIR: Path = DATA_DIR / "logs"
 STATE_FILE: Path = DATA_DIR / "state.json"
 LOG_FILE: Path = LOGS_DIR / "bot.log"
 
+# Base directory for new repos (optional — falls back to sibling of active repo)
+REPOS_BASE_DIR: Path | None = Path(v).resolve() if (v := os.getenv("REPOS_BASE_DIR")) else None
+
+if REPOS_BASE_DIR and not REPOS_BASE_DIR.is_dir():
+    import warnings
+    warnings.warn(f"REPOS_BASE_DIR does not exist: {REPOS_BASE_DIR}")
+    REPOS_BASE_DIR = None
+
 # Ensure data dirs exist
 REBOOT_MSG_FILE: Path = DATA_DIR / "reboot_message.json"
 REBOOT_REQUEST_FILE: Path = DATA_DIR / "reboot_request.json"
@@ -173,20 +181,40 @@ BUILD_FROM_QUERY_PROMPT = (
 )
 
 PLAN_REVIEW_PROMPT = (
-    'Carefully review this entire plan and come up with your best revisions '
-    'in terms of better architecture, new features, changed features, etc. '
-    'to make it better, more robust/reliable, more performant, more '
-    'compelling/useful, etc. Also review for DRY, modularity, scalability '
-    'and maintainability.\n\n'
-    'For each proposed change, give your detailed analysis and '
-    'rationale/justification for why it would make the project better '
-    'along with git-diff style changes relative to the original plan.'
+    'Review the plan above and propose your best revisions. '
+    'Format your response EXACTLY as described below.\n\n'
+    'START your response with a plain summary paragraph (no bold, no bullets, '
+    'no formatting). This should be 1-2 sentences summarizing the overall '
+    'assessment: how many revisions, their priorities, and the general theme. '
+    'Example: "Found 5 revisions across architecture and reliability. '
+    '2 are high-priority structural changes, 3 are cleanup improvements."\n\n'
+    'Then list each revision using this exact format:\n\n'
+    '### [TAG] Short title\n'
+    '**Change:** One-line description of the proposed change.\n'
+    '**Pros:** Concrete benefit (or "None")\n'
+    '**Cons:** Concrete tradeoff (or "None")\n'
+    '**Impact:** Low / Medium / High \u2014 brief note on what this affects\n'
+    '**Priority:** P1 (do first) / P2 (should do) / P3 (nice to have)\n\n'
+    'Available tags (use text only, no emoji): '
+    'Architecture, Performance, Reliability, DRY/Cleanup, Scalability, '
+    'Security, UX/UI, Accessibility, Integration, Dependencies, Modularity, '
+    'Bug Risk\n\n'
+    'End with:\n'
+    '**Summary**\n'
+    'A compact list: for each revision, show tag, title, and priority on one '
+    'line. Example:\n'
+    'Architecture \u2014 Extract service layer \u2014 P1\n'
+    'Performance \u2014 Add caching \u2014 P2\n'
+    'DRY/Cleanup \u2014 Remove duplicate helpers \u2014 P3\n\n'
+    'Keep the entire response under 3500 characters. '
+    'Be concise \u2014 no code diffs, no code blocks.'
 )
 
 APPLY_REVISIONS_PROMPT = (
-    'Now apply the revisions you just proposed to the plan. Update the plan '
-    'in place, incorporating all the improvements you recommended. '
-    'Make sure the revised plan is complete and coherent.'
+    'Apply the revisions you proposed above to the plan. Work through them '
+    'in priority order (P1 first, then P2, then P3). Update the plan in place, '
+    'incorporating each improvement. Skip any revision that conflicts with a '
+    'higher-priority one. Make sure the revised plan is complete and coherent.'
 )
 
 CODE_REVIEW_PROMPT = (
