@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Add anti-hedging prompt guidance to prevent Claude from second-guessing user confirmations (offer-accept-refuse UX bug)
+- Add reboot-specific nudge so Claude acts immediately when user requests a reboot
+
 ## v0.8.3 — User Forum Welcome Post (2026-03-16)
 
 - Add welcome post with "New Session" button in user personal forums — created on first provisioning, retries on failure, gated by `welcome_posted` flag in access config
