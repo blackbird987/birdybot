@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 import discord
 
-from bot.platform.formatting import MODE_DISPLAY, mode_name
+from bot.platform.formatting import MODE_COLOR, MODE_DISPLAY, mode_emoji, mode_name
 
 log = logging.getLogger(__name__)
 
@@ -167,12 +167,14 @@ async def create_forum_post(
 
     Returns (thread, starter_message).
     """
-    name = name[:100]  # Discord thread name limit
+    # Prefix thread name with mode emoji
+    emoji = mode_emoji(current_mode)
+    name = f"{emoji} {name}"[:100]  # Discord thread name limit
 
     embed = discord.Embed(
         title="Session",
         description=topic_preview[:200] or "New session",
-        color=discord.Color.blurple(),
+        color=discord.Color(MODE_COLOR.get(current_mode, 0x5865F2)),
         timestamp=datetime.now(timezone.utc),
     )
     embed.add_field(name="Origin", value=origin, inline=True)
@@ -193,9 +195,9 @@ async def ensure_forum_tags(forum: discord.ForumChannel) -> dict[str, discord.Fo
         "completed": "\u2705",       # ✅  (status)
         "failed": "\u274c",          # ❌  (status)
         "cli": None,
-        "build": None,
-        "explore": None,
-        "plan": None,
+        "build": "\U0001f7e2",    # 🟢
+        "explore": "\u26aa",      # ⚪
+        "plan": "\U0001f535",     # 🔵
     }
     existing = {tag.name: tag for tag in forum.available_tags}
     missing = []

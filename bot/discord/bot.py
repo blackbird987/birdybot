@@ -22,7 +22,7 @@ from bot.discord.adapter import DiscordMessenger
 from bot.engine import commands
 from bot.engine import sessions as sessions_mod
 from bot.platform.base import RequestContext
-from bot.platform.formatting import MODE_DISPLAY, VALID_MODES, mode_label, mode_name
+from bot.platform.formatting import MODE_COLOR, MODE_DISPLAY, VALID_MODES, mode_emoji, mode_label, mode_name
 
 if TYPE_CHECKING:
     from bot.claude.runner import ClaudeRunner
@@ -1350,7 +1350,9 @@ class ClaudeBot(discord.Client):
         self, thread: discord.Thread, prompt: str,
     ) -> None:
         """Rename a 'new-session' thread based on the first prompt."""
-        new_name = channels.build_channel_name(prompt)[:100]
+        emoji = mode_emoji(self._store.mode)
+        base = channels.build_channel_name(prompt)
+        new_name = f"{emoji} {base}"[:100]
         try:
             await thread.edit(name=new_name)
             log.info("Renamed thread %s -> %s", thread.id, new_name)
@@ -1565,14 +1567,30 @@ class ClaudeBot(discord.Client):
             # Update the welcome embed to reflect selected mode
             if interaction.message and interaction.message.embeds:
                 embed = interaction.message.embeds[0]
-                for i, field in enumerate(embed.fields):
-                    if field.name == "Mode":
+                embed.color = discord.Color(MODE_COLOR.get(target_mode, 0x5865F2))
+                for i, field_obj in enumerate(embed.fields):
+                    if field_obj.name == "Mode":
                         embed.set_field_at(i, name="Mode", value=mode_name(target_mode), inline=True)
                         break
                 view = channels.mode_select_view(target_mode)
                 await interaction.response.edit_message(embed=embed, view=view)
             else:
                 await interaction.response.defer()
+            # Update thread name emoji to match new mode
+            thread = interaction.channel
+            if isinstance(thread, discord.Thread):
+                emoji = mode_emoji(target_mode)
+                # Strip old mode emoji prefix if present, then prepend new one
+                old_name = thread.name
+                for e in ("\u26aa", "\U0001f535", "\U0001f7e2"):
+                    if old_name.startswith(e):
+                        old_name = old_name[len(e):].lstrip()
+                        break
+                new_name = f"{emoji} {old_name}"[:100]
+                try:
+                    await thread.edit(name=new_name)
+                except Exception:
+                    log.debug("Failed to update thread name emoji", exc_info=True)
             log.info("Mode set to %s via welcome button", target_mode)
             return
 

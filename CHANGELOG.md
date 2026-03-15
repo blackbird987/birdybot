@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Mode color indicators in Discord: thread names prefixed with colored circle emoji (🟢 Build, 🔵 Plan, ⚪ Explore), welcome embed sidebar color matches mode, forum tags get matching emoji, and mode button clicks update both thread name and embed color in real-time.
+
 ## v0.3.10 — Clean UI, No Emojis (2026-03-15)
 
 - Stripped all decorative emojis from mode labels, buttons, forum tags, and notification messages — only status icons (🔄 ✅ ❌ ⏳ 💀) remain.
