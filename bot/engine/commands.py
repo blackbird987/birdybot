@@ -130,6 +130,25 @@ async def _run_query_inner(ctx: RequestContext, prompt: str) -> None:
         )
         return
 
+    # Rate limit for non-owner users
+    if not ctx.is_owner and ctx.user_id:
+        from bot.discord.access import load_access_config, check_rate_limit, increment_query_count, check_user_access
+        acfg = load_access_config()
+        grant = check_user_access(acfg, ctx.user_id, ctx.repo_name)
+        if grant:
+            if not check_rate_limit(acfg, ctx.user_id, grant.max_daily_queries):
+                await ctx.messenger.send_text(
+                    ctx.channel_id,
+                    f"Daily query limit reached ({grant.max_daily_queries}/day). "
+                    "Ask the bot owner to increase your limit.",
+                )
+                return
+            increment_query_count(acfg, ctx.user_id)
+
+    # Log user attribution
+    user_label = f"{ctx.user_name} ({ctx.user_id})" if ctx.user_id else "owner"
+    log.info("Query by %s (owner=%s) repo=%s: %s", user_label, ctx.is_owner, ctx.repo_name, prompt[:80])
+
     # Per-channel repo (Discord) takes priority over global active repo
     if ctx.repo_name:
         repos = ctx.store.list_repos()
@@ -181,6 +200,17 @@ async def _run_query_inner(ctx: RequestContext, prompt: str) -> None:
     inst.origin_platform = ctx.platform
     inst.repo_name = repo_name or ""
     inst.repo_path = repo_path or ""
+    # User identity and access control
+    inst.user_id = ctx.user_id or ""
+    inst.user_name = ctx.user_name or ""
+    inst.is_owner_session = ctx.is_owner
+    if not ctx.is_owner:
+        # Import here to avoid circular dependency
+        from bot.discord.access import load_access_config, check_user_access
+        acfg = load_access_config()
+        grant = check_user_access(acfg, ctx.user_id or "", repo_name)
+        if grant:
+            inst.bash_policy = grant.bash_policy
     if resume_session:
         inst.session_id = resume_session
     inst.status = InstanceStatus.RUNNING
@@ -698,7 +728,11 @@ async def on_mode(ctx: RequestContext, text: str) -> None:
     text = text.strip().lower()
     if text in VALID_MODES:
         ctx.update_mode(text)
-        await ctx.messenger.send_text(ctx.channel_id, f"Mode: {mode_label(text)}")
+        actual = ctx.effective_mode
+        msg = f"Mode: {mode_label(actual)}"
+        if actual != text:
+            msg += f" (capped — your ceiling is {mode_label(ctx.mode_ceiling)})"
+        await ctx.messenger.send_text(ctx.channel_id, msg)
     elif text:
         await ctx.messenger.send_text(ctx.channel_id, "Usage: /mode explore|plan|build")
     else:

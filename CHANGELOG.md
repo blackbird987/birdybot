@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Bugfixes
+- Fix `/ref` context injection causing `error: unknown option` when referenced text starts with dashes — prompt now passed after `--` end-of-options separator
+
+### Per-Repo User Access Control
+- New `/access` command group: `grant`, `revoke`, `list`, `set` — owner manages who can use which repos
+- Per-user personal forum channels: each granted user gets their own private forum with repo tags
+- Mode ceiling enforcement: non-owner sessions capped at their grant's mode (explore/plan/build)
+- Bash policy: `allowlist` (default), `full`, or `none` — soft enforcement via system prompt for explore mode
+- Directory scoping: non-owner sessions run with `cwd` set to repo directory + system prompt boundaries
+- Defense-in-depth: `--disallowed-tools` always enforced for non-owner explore sessions regardless of instance mode
+- Rate limiting: configurable daily query limit per user, tracked in `data/access.json`
+- User attribution: `user_id`/`user_name` on RequestContext, Instance, and ThreadInfo; logged per query
+- Dashboard shows `[username]` on non-owner instances
+- Access config stored in dedicated `data/access.json` (not platform_state) with 30s cache TTL
+
 ## v0.7.0 — Autopilot, Sibling Awareness & Scaling (2026-03-15)
 
 ### Autopilot — One-Click Ship

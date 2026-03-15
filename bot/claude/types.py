@@ -82,6 +82,8 @@ class Instance:
     origin: InstanceOrigin = InstanceOrigin.DIRECT
     parent_id: str | None = None       # ID of instance whose button spawned this
     origin_platform: str = "telegram"  # Platform that created this instance
+    user_id: str = ""                  # Discord/Telegram user who started this instance
+    user_name: str = ""                # Display name of the user
     tools_used: list[str] = field(default_factory=list)  # Tool names used (Edit, Write, TodoWrite...)
     num_turns: int = 0
     input_tokens: int = 0
@@ -90,6 +92,9 @@ class Instance:
     code_active: bool = False  # Session has uncommitted code changes (for button context)
     needs_input: bool = False  # AskUserQuestion detected — waiting for user reply
     deferred_revisions: list[str] = field(default_factory=list)  # Medium/Low revisions from plan review
+    # Access control fields (non-owner sessions)
+    is_owner_session: bool = True     # False for granted user sessions
+    bash_policy: str = "full"         # "full", "allowlist", "none" — for non-owner explore mode
 
     def display_id(self) -> str:
         if self.name:
@@ -124,6 +129,8 @@ class Instance:
             "origin": self.origin.value,
             "parent_id": self.parent_id,
             "origin_platform": self.origin_platform,
+            "user_id": self.user_id,
+            "user_name": self.user_name,
             "tools_used": self.tools_used,
             "num_turns": self.num_turns,
             "input_tokens": self.input_tokens,
@@ -132,6 +139,8 @@ class Instance:
             "code_active": self.code_active,
             "needs_input": self.needs_input,
             "deferred_revisions": self.deferred_revisions,
+            "is_owner_session": self.is_owner_session,
+            "bash_policy": self.bash_policy,
         }
 
     @classmethod
@@ -163,6 +172,8 @@ class Instance:
             origin=InstanceOrigin(d["origin"]) if "origin" in d else InstanceOrigin.DIRECT,
             parent_id=d.get("parent_id"),
             origin_platform=d.get("origin_platform", "telegram"),
+            user_id=d.get("user_id", ""),
+            user_name=d.get("user_name", ""),
             tools_used=d.get("tools_used", []),
             num_turns=d.get("num_turns", 0),
             input_tokens=d.get("input_tokens", 0),
@@ -171,6 +182,8 @@ class Instance:
             code_active=d.get("code_active", False),
             needs_input=d.get("needs_input", False),
             deferred_revisions=d.get("deferred_revisions", []),
+            is_owner_session=d.get("is_owner_session", True),
+            bash_policy=d.get("bash_policy", "full"),
         )
 
 

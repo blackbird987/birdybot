@@ -23,6 +23,8 @@ from discord import app_commands
 
 from bot import config
 from bot.discord import channels
+from bot.discord import access as access_mod
+from bot.discord.access import AccessResult, load_access_config, check_user_access, has_any_access, get_most_restrictive_ceiling, effective_mode as access_effective_mode
 from bot.discord.adapter import DiscordMessenger
 from bot.engine import commands
 from bot.engine import sessions as sessions_mod
@@ -68,6 +70,9 @@ class ThreadInfo:
     mode: str | None = None
     context: str | None = None        # None=inherit, ""=cleared, str=set
     verbose_level: int | None = None
+    # User who created this thread (None = owner)
+    user_id: str | None = None
+    user_name: str | None = None
 
     def to_dict(self) -> dict:
         d = {
@@ -84,6 +89,10 @@ class ThreadInfo:
             d["context"] = self.context
         if self.verbose_level is not None:
             d["verbose_level"] = self.verbose_level
+        if self.user_id is not None:
+            d["user_id"] = self.user_id
+        if self.user_name is not None:
+            d["user_name"] = self.user_name
         return d
 
     @classmethod
@@ -98,6 +107,8 @@ class ThreadInfo:
             mode=data.get("mode"),
             context=data.get("context"),
             verbose_level=data.get("verbose_level"),
+            user_id=data.get("user_id"),
+            user_name=data.get("user_name"),
         )
 
 
@@ -270,16 +281,74 @@ class ClaudeBot(discord.Client):
             )
         return self._messenger
 
-    def _auth(self, user_id: int) -> bool:
+    def _is_owner(self, user_id: int) -> bool:
+        """Check if user is the bot owner."""
         if self._discord_user_id:
             return user_id == self._discord_user_id
         return True
+
+    def _check_access(
+        self, user_id: int, *,
+        repo_name: str | None = None,
+        channel_id: str | None = None,
+    ) -> AccessResult:
+        """Check if a user has access. Owner always passes."""
+        if self._is_owner(user_id):
+            return AccessResult(allowed=True, is_owner=True)
+
+        cfg = load_access_config()
+
+        # Resolve repo from channel if not explicit
+        if not repo_name and channel_id:
+            # Check owner's forum projects
+            lookup = self._thread_to_project(channel_id)
+            if lookup:
+                repo_name = lookup[0].repo_name
+            else:
+                # Check user forums: thread parent might be a user's personal forum
+                repo_name = self._resolve_repo_from_user_forum(channel_id, str(user_id))
+
+        grant = check_user_access(cfg, str(user_id), repo_name)
+        if grant:
+            return AccessResult(
+                allowed=True,
+                is_owner=False,
+                mode_ceiling=grant.mode,
+                bash_policy=grant.bash_policy,
+                max_daily_queries=grant.max_daily_queries,
+            )
+
+        # No grant for this specific repo — but allow if user has ANY grant
+        # (needed for repo-less commands like /help, /status, /list)
+        if has_any_access(cfg, str(user_id)):
+            return AccessResult(
+                allowed=True,
+                is_owner=False,
+                mode_ceiling=get_most_restrictive_ceiling(cfg, str(user_id)),
+            )
+
+        return AccessResult(allowed=False, is_owner=False, reason="No access grant")
+
+    def _resolve_repo_from_user_forum(self, channel_id: str, user_id: str) -> str | None:
+        """Resolve repo name from a thread in a user's personal forum via tags."""
+        try:
+            ch = self.get_channel(int(channel_id))
+            if not isinstance(ch, discord.Thread):
+                return None
+            repos = self._store.list_repos()
+            for tag in ch.applied_tags:
+                if tag.name in repos:
+                    return tag.name
+        except Exception:
+            pass
+        return None
 
     def _ctx(
         self, channel_id: str,
         session_id: str | None = None,
         repo_name: str | None = None,
         thread_info: ThreadInfo | None = None,
+        access_result: AccessResult | None = None,
     ) -> RequestContext:
         ctx = RequestContext(
             messenger=self.messenger,
@@ -294,6 +363,16 @@ class ClaudeBot(discord.Client):
             ctx.mode = thread_info.mode
             ctx.context = thread_info.context
             ctx.verbose_level = thread_info.verbose_level
+        if access_result:
+            ctx.is_owner = access_result.is_owner
+            if not access_result.is_owner and access_result.mode_ceiling:
+                ctx.mode_ceiling = access_result.mode_ceiling
+                # Enforce mode ceiling on initial mode
+                current = ctx.mode or self._store.mode
+                ctx.mode = access_effective_mode(
+                    access_mod.RepoAccess(mode=access_result.mode_ceiling),
+                    current,
+                )
         return ctx
 
     def _persist_ctx_settings(self, ctx: RequestContext) -> None:
@@ -406,6 +485,57 @@ class ClaudeBot(discord.Client):
             if proj.forum_channel_id == forum_id:
                 return proj
         return None
+
+    def _is_user_forum(self, forum_id: str) -> tuple[str, str] | None:
+        """Check if a forum is a user's personal forum. Returns (user_id, user_name) or None."""
+        cfg = load_access_config()
+        for uid, ua in cfg.users.items():
+            if ua.forum_channel_id == forum_id:
+                return uid, ua.display_name
+        return None
+
+    def _user_forum_thread_to_repo(self, thread: discord.Thread) -> str | None:
+        """Resolve repo name from a thread's tags in a user's personal forum."""
+        repos = self._store.list_repos()
+        for tag in thread.applied_tags:
+            if tag.name in repos:
+                return tag.name
+        return None
+
+    # --- User Forum Provisioning ---
+
+    async def _ensure_user_forum(
+        self, user_id: int, display_name: str, repo_names: list[str],
+    ) -> discord.ForumChannel | None:
+        """Create or get a personal forum channel for a granted user."""
+        guild = self.get_guild(self._guild_id)
+        if not guild or not self._category_id:
+            return None
+        category = guild.get_channel(self._category_id)
+        if not category or not isinstance(category, discord.CategoryChannel):
+            return None
+
+        forum = await channels.ensure_user_forum(
+            guild, category, guild.me, user_id,
+            display_name, repo_names,
+            owner_id=self._discord_user_id,
+        )
+        return forum
+
+    async def _sync_user_forum_tags(self, user_id: str) -> None:
+        """Sync a user's forum tags to match their current access grants."""
+        cfg = load_access_config()
+        ua = cfg.users.get(user_id)
+        if not ua or not ua.forum_channel_id:
+            return
+        guild = self.get_guild(self._guild_id)
+        if not guild:
+            return
+        forum = guild.get_channel(int(ua.forum_channel_id))
+        if not forum or not isinstance(forum, discord.ForumChannel):
+            return
+        repo_names = list(ua.repos.keys())
+        await channels.sync_user_forum_tags(forum, repo_names)
 
     # --- Forum Provisioning ---
 
@@ -560,10 +690,18 @@ class ClaudeBot(discord.Client):
             else:
                 log.info("Removed stale forum mapping for repo %s (forum %s gone)", repo_name, proj.forum_channel_id)
 
-        # Discover unmapped forums in category
+        # Discover unmapped forums in category (skip user personal forums)
+        user_forum_ids = set()
+        cfg = load_access_config()
+        for ua in cfg.users.values():
+            if ua.forum_channel_id:
+                user_forum_ids.add(ua.forum_channel_id)
+
         for ch in category.channels:
             if not isinstance(ch, discord.ForumChannel):
                 continue
+            if str(ch.id) in user_forum_ids:
+                continue  # skip personal user forums
             existing = self._forum_by_channel_id(str(ch.id))
             if not existing:
                 # Adopt as a project — repo name = forum name
@@ -636,7 +774,12 @@ class ClaudeBot(discord.Client):
         channel_id = str(interaction.channel_id)
         lookup = self._thread_to_project(channel_id)
         info = lookup[1] if lookup else None
-        ctx = self._ctx(channel_id, thread_info=info)
+        # Compute access result for non-owner mode ceiling enforcement
+        ar = self._check_access(interaction.user.id, channel_id=channel_id)
+        ctx = self._ctx(channel_id, thread_info=info, access_result=ar)
+        # Populate user identity
+        ctx.user_id = str(interaction.user.id)
+        ctx.user_name = interaction.user.display_name
         await coro(ctx)
         self._persist_ctx_settings(ctx)
         try:
@@ -650,14 +793,14 @@ class ClaudeBot(discord.Client):
 
         @self.tree.command(name="status", description="Health dashboard", guild=guild_obj)
         async def cmd_status(interaction: discord.Interaction):
-            if not self._auth(interaction.user.id):
+            if not self._is_owner(interaction.user.id) and not self._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
             await self._run_slash(interaction, commands.on_status)
 
         @self.tree.command(name="cost", description="Spending breakdown", guild=guild_obj)
         async def cmd_cost(interaction: discord.Interaction):
-            if not self._auth(interaction.user.id):
+            if not self._is_owner(interaction.user.id) and not self._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
             await self._run_slash(interaction, commands.on_cost)
@@ -665,7 +808,7 @@ class ClaudeBot(discord.Client):
         @self.tree.command(name="list", description="Show instances", guild=guild_obj)
         @app_commands.describe(scope="Show all instances or just recent")
         async def cmd_list(interaction: discord.Interaction, scope: str = ""):
-            if not self._auth(interaction.user.id):
+            if not self._is_owner(interaction.user.id) and not self._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
             await self._run_slash(interaction, lambda ctx: commands.on_list(ctx, scope))
@@ -673,7 +816,7 @@ class ClaudeBot(discord.Client):
         @self.tree.command(name="bg", description="Background task (build mode)", guild=guild_obj)
         @app_commands.describe(prompt="Task description")
         async def cmd_bg(interaction: discord.Interaction, prompt: str):
-            if not self._auth(interaction.user.id):
+            if not self._is_owner(interaction.user.id):
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
             await self._run_slash(interaction, lambda ctx: commands.on_bg(ctx, prompt))
@@ -681,7 +824,7 @@ class ClaudeBot(discord.Client):
         @self.tree.command(name="release", description="Cut a versioned release", guild=guild_obj)
         @app_commands.describe(level="patch, minor, major, or explicit version (default: patch)")
         async def cmd_release(interaction: discord.Interaction, level: str = "patch"):
-            if not self._auth(interaction.user.id):
+            if not self._is_owner(interaction.user.id):
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
             await self._run_slash(interaction, lambda ctx: commands.on_release(ctx, level))
@@ -689,7 +832,7 @@ class ClaudeBot(discord.Client):
         @self.tree.command(name="kill", description="Terminate instance", guild=guild_obj)
         @app_commands.describe(target="Instance ID or name")
         async def cmd_kill(interaction: discord.Interaction, target: str):
-            if not self._auth(interaction.user.id):
+            if not self._is_owner(interaction.user.id) and not self._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
             await self._run_slash(interaction, lambda ctx: commands.on_kill(ctx, target))
@@ -697,7 +840,7 @@ class ClaudeBot(discord.Client):
         @self.tree.command(name="retry", description="Re-run instance", guild=guild_obj)
         @app_commands.describe(target="Instance ID or name")
         async def cmd_retry(interaction: discord.Interaction, target: str):
-            if not self._auth(interaction.user.id):
+            if not self._is_owner(interaction.user.id) and not self._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
             await self._run_slash(interaction, lambda ctx: commands.on_retry(ctx, target))
@@ -705,7 +848,7 @@ class ClaudeBot(discord.Client):
         @self.tree.command(name="log", description="Full output", guild=guild_obj)
         @app_commands.describe(target="Instance ID or name")
         async def cmd_log(interaction: discord.Interaction, target: str):
-            if not self._auth(interaction.user.id):
+            if not self._is_owner(interaction.user.id) and not self._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
             await self._run_slash(interaction, lambda ctx: commands.on_log(ctx, target))
@@ -713,7 +856,7 @@ class ClaudeBot(discord.Client):
         @self.tree.command(name="diff", description="Git diff", guild=guild_obj)
         @app_commands.describe(target="Instance ID or name")
         async def cmd_diff(interaction: discord.Interaction, target: str):
-            if not self._auth(interaction.user.id):
+            if not self._is_owner(interaction.user.id) and not self._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
             await self._run_slash(interaction, lambda ctx: commands.on_diff(ctx, target))
@@ -721,7 +864,7 @@ class ClaudeBot(discord.Client):
         @self.tree.command(name="merge", description="Merge branch", guild=guild_obj)
         @app_commands.describe(target="Instance ID or name")
         async def cmd_merge(interaction: discord.Interaction, target: str):
-            if not self._auth(interaction.user.id):
+            if not self._is_owner(interaction.user.id) and not self._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
             await self._run_slash(interaction, lambda ctx: commands.on_merge(ctx, target))
@@ -729,7 +872,7 @@ class ClaudeBot(discord.Client):
         @self.tree.command(name="discard", description="Delete branch", guild=guild_obj)
         @app_commands.describe(target="Instance ID or name")
         async def cmd_discard(interaction: discord.Interaction, target: str):
-            if not self._auth(interaction.user.id):
+            if not self._is_owner(interaction.user.id) and not self._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
             await self._run_slash(interaction, lambda ctx: commands.on_discard(ctx, target))
@@ -737,7 +880,7 @@ class ClaudeBot(discord.Client):
         @self.tree.command(name="mode", description="View/set mode", guild=guild_obj)
         @app_commands.describe(mode="explore or build")
         async def cmd_mode(interaction: discord.Interaction, mode: str = ""):
-            if not self._auth(interaction.user.id):
+            if not self._is_owner(interaction.user.id) and not self._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
             # Detect mode change via ThreadInfo (per-thread, not global)
@@ -754,7 +897,7 @@ class ClaudeBot(discord.Client):
         @self.tree.command(name="verbose", description="Progress detail level", guild=guild_obj)
         @app_commands.describe(level="0, 1, or 2")
         async def cmd_verbose(interaction: discord.Interaction, level: str = ""):
-            if not self._auth(interaction.user.id):
+            if not self._is_owner(interaction.user.id) and not self._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
             await self._run_slash(interaction, lambda ctx: commands.on_verbose(ctx, level))
@@ -762,7 +905,7 @@ class ClaudeBot(discord.Client):
         @self.tree.command(name="context", description="Pinned context", guild=guild_obj)
         @app_commands.describe(args="set <text> | clear")
         async def cmd_context(interaction: discord.Interaction, args: str = ""):
-            if not self._auth(interaction.user.id):
+            if not self._is_owner(interaction.user.id) and not self._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
             await self._run_slash(interaction, lambda ctx: commands.on_context(ctx, args))
@@ -770,7 +913,7 @@ class ClaudeBot(discord.Client):
         @self.tree.command(name="repo", description="Repo management", guild=guild_obj)
         @app_commands.describe(args="add|switch|list [name] [path]")
         async def cmd_repo(interaction: discord.Interaction, args: str = ""):
-            if not self._auth(interaction.user.id):
+            if not self._is_owner(interaction.user.id):
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
             # Discord enhancement: select menu for switch (no name) or bare /repo
@@ -806,7 +949,7 @@ class ClaudeBot(discord.Client):
         @self.tree.command(name="session", description="List/resume sessions", guild=guild_obj)
         @app_commands.describe(args="resume <id> | drop")
         async def cmd_session(interaction: discord.Interaction, args: str = ""):
-            if not self._auth(interaction.user.id):
+            if not self._is_owner(interaction.user.id):
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
             await self._run_slash(interaction, lambda ctx: commands.on_session(ctx, args))
@@ -814,7 +957,7 @@ class ClaudeBot(discord.Client):
         @self.tree.command(name="schedule", description="Recurring tasks", guild=guild_obj)
         @app_commands.describe(args="every|at|list|delete ...")
         async def cmd_schedule(interaction: discord.Interaction, args: str = ""):
-            if not self._auth(interaction.user.id):
+            if not self._is_owner(interaction.user.id):
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
             await self._run_slash(interaction, lambda ctx: commands.on_schedule(ctx, args))
@@ -822,7 +965,7 @@ class ClaudeBot(discord.Client):
         @self.tree.command(name="alias", description="Command shortcuts", guild=guild_obj)
         @app_commands.describe(args="set|delete|list ...")
         async def cmd_alias(interaction: discord.Interaction, args: str = ""):
-            if not self._auth(interaction.user.id):
+            if not self._is_owner(interaction.user.id):
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
             await self._run_slash(interaction, lambda ctx: commands.on_alias(ctx, args))
@@ -830,7 +973,7 @@ class ClaudeBot(discord.Client):
         @self.tree.command(name="budget", description="Budget info/reset", guild=guild_obj)
         @app_commands.describe(args="reset")
         async def cmd_budget(interaction: discord.Interaction, args: str = ""):
-            if not self._auth(interaction.user.id):
+            if not self._is_owner(interaction.user.id):
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
             await self._run_slash(interaction, lambda ctx: commands.on_budget(ctx, args))
@@ -845,7 +988,7 @@ class ClaudeBot(discord.Client):
             for key, name in MODE_DISPLAY.items()
         ])
         async def cmd_new(interaction: discord.Interaction, repo: str = "", mode: str = ""):
-            if not self._auth(interaction.user.id):
+            if not self._is_owner(interaction.user.id):
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
 
@@ -887,7 +1030,7 @@ class ClaudeBot(discord.Client):
         @self.tree.command(name="sync", description="Sync sessions from CLI", guild=guild_obj)
         @app_commands.describe(count="Number of sessions to sync (0 = this thread only)")
         async def cmd_sync(interaction: discord.Interaction, count: int = 0):
-            if not self._auth(interaction.user.id):
+            if not self._is_owner(interaction.user.id):
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
             await interaction.response.defer(ephemeral=True)
@@ -966,7 +1109,7 @@ class ClaudeBot(discord.Client):
 
         @self.tree.command(name="sync-channel", description="Refresh this thread's session history", guild=guild_obj)
         async def cmd_sync_channel(interaction: discord.Interaction):
-            if not self._auth(interaction.user.id):
+            if not self._is_owner(interaction.user.id) and not self._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
             thread_id = str(interaction.channel_id)
@@ -1006,35 +1149,35 @@ class ClaudeBot(discord.Client):
 
         @self.tree.command(name="help", description="Show available commands", guild=guild_obj)
         async def cmd_help(interaction: discord.Interaction):
-            if not self._auth(interaction.user.id):
+            if not self._is_owner(interaction.user.id) and not self._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
             await self._run_slash(interaction, commands.on_help)
 
         @self.tree.command(name="clear", description="Archive old instances", guild=guild_obj)
         async def cmd_clear(interaction: discord.Interaction):
-            if not self._auth(interaction.user.id):
+            if not self._is_owner(interaction.user.id):
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
             await self._run_slash(interaction, commands.on_clear)
 
         @self.tree.command(name="logs", description="Bot log", guild=guild_obj)
         async def cmd_logs(interaction: discord.Interaction):
-            if not self._auth(interaction.user.id):
+            if not self._is_owner(interaction.user.id):
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
             await self._run_slash(interaction, commands.on_logs)
 
         @self.tree.command(name="shutdown", description="Stop the bot", guild=guild_obj)
         async def cmd_shutdown(interaction: discord.Interaction):
-            if not self._auth(interaction.user.id):
+            if not self._is_owner(interaction.user.id):
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
             await self._run_slash(interaction, commands.on_shutdown)
 
         @self.tree.command(name="reboot", description="Restart the bot (apply code changes)", guild=guild_obj)
         async def cmd_reboot(interaction: discord.Interaction):
-            if not self._auth(interaction.user.id):
+            if not self._is_owner(interaction.user.id):
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
             await self._run_slash(interaction, commands.on_reboot)
@@ -1062,7 +1205,7 @@ class ClaudeBot(discord.Client):
         @app_commands.describe(thread="Thread to reference", messages="Messages to include (default 6)")
         @app_commands.autocomplete(thread=thread_autocomplete)
         async def cmd_ref(interaction: discord.Interaction, thread: str, messages: int = 6):
-            if not self._auth(interaction.user.id):
+            if not self._is_owner(interaction.user.id) and not self._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
             messages = max(1, min(messages, 20))
@@ -1111,7 +1254,7 @@ class ClaudeBot(discord.Client):
         @monitor_group.command(name="setup", description="Enable a monitor (reads config from .env)")
         @app_commands.describe(name="Monitor name (e.g. aiagent)")
         async def cmd_monitor_setup(interaction: discord.Interaction, name: str):
-            if not self._auth(interaction.user.id):
+            if not self._is_owner(interaction.user.id):
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
             await interaction.response.defer(ephemeral=True)
@@ -1120,7 +1263,7 @@ class ClaudeBot(discord.Client):
 
         @monitor_group.command(name="refresh", description="Fetch & update all monitors now")
         async def cmd_monitor_refresh(interaction: discord.Interaction):
-            if not self._auth(interaction.user.id):
+            if not self._is_owner(interaction.user.id):
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
             await interaction.response.defer(ephemeral=True)
@@ -1133,7 +1276,7 @@ class ClaudeBot(discord.Client):
         @monitor_group.command(name="remove", description="Disable a monitor (keeps channel)")
         @app_commands.describe(name="Monitor name")
         async def cmd_monitor_remove(interaction: discord.Interaction, name: str):
-            if not self._auth(interaction.user.id):
+            if not self._is_owner(interaction.user.id):
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
             await interaction.response.defer(ephemeral=True)
@@ -1148,7 +1291,7 @@ class ClaudeBot(discord.Client):
 
         @monitor_group.command(name="list", description="Show all monitors with status")
         async def cmd_monitor_list(interaction: discord.Interaction):
-            if not self._auth(interaction.user.id):
+            if not self._is_owner(interaction.user.id):
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
             await interaction.response.defer(ephemeral=True)
@@ -1178,6 +1321,199 @@ class ClaudeBot(discord.Client):
             await interaction.followup.send("\n".join(lines), ephemeral=True)
 
         self.tree.add_command(monitor_group)
+
+        # --- /access command group (owner-only) ---
+        access_group = app_commands.Group(
+            name="access", description="Manage user access to repos",
+            guild_ids=[self._guild_id],
+        )
+
+        @access_group.command(name="grant", description="Grant user access to a repo")
+        @app_commands.describe(user="User to grant", repo="Repo name", mode="Mode ceiling (default: explore)")
+        @app_commands.choices(mode=[
+            app_commands.Choice(name="Explore (read-only)", value="explore"),
+            app_commands.Choice(name="Plan (read-only + plan)", value="plan"),
+            app_commands.Choice(name="Build (full access)", value="build"),
+        ])
+        async def cmd_access_grant(
+            interaction: discord.Interaction, user: discord.Member,
+            repo: str, mode: str = "explore",
+        ):
+            if not self._is_owner(interaction.user.id):
+                await interaction.response.send_message("Owner only", ephemeral=True)
+                return
+            await interaction.response.defer(ephemeral=True)
+
+            # Validate repo exists
+            repos = self._store.list_repos()
+            if repo not in repos:
+                lower_map = {k.lower(): k for k in repos}
+                repo = lower_map.get(repo.lower(), repo)
+            if repo not in repos:
+                await interaction.followup.send(f"Repo `{repo}` not found.", ephemeral=True)
+                return
+
+            cfg = load_access_config()
+            uid = str(user.id)
+
+            # Create or update user access
+            if uid not in cfg.users:
+                cfg.users[uid] = access_mod.UserAccess(
+                    user_id=uid,
+                    display_name=user.display_name,
+                )
+            ua = cfg.users[uid]
+            ua.display_name = user.display_name
+            ua.repos[repo] = access_mod.RepoAccess(mode=mode)
+
+            # Create/update personal forum
+            repo_names = list(ua.repos.keys())
+            forum = await self._ensure_user_forum(user.id, user.display_name, repo_names)
+            if forum:
+                ua.forum_channel_id = str(forum.id)
+
+            access_mod.save_access_config(cfg)
+
+            await interaction.followup.send(
+                f"Granted **{user.display_name}** access to `{repo}` "
+                f"(mode: {mode})"
+                + (f" in <#{forum.id}>" if forum else ""),
+                ephemeral=True,
+            )
+
+        @access_group.command(name="revoke", description="Revoke user access")
+        @app_commands.describe(user="User to revoke", repo="Repo name (omit for all)")
+        async def cmd_access_revoke(
+            interaction: discord.Interaction, user: discord.Member,
+            repo: str = "",
+        ):
+            if not self._is_owner(interaction.user.id):
+                await interaction.response.send_message("Owner only", ephemeral=True)
+                return
+            await interaction.response.defer(ephemeral=True)
+
+            cfg = load_access_config()
+            uid = str(user.id)
+            ua = cfg.users.get(uid)
+            if not ua:
+                await interaction.followup.send(
+                    f"**{user.display_name}** has no access grants.", ephemeral=True,
+                )
+                return
+
+            if repo:
+                ua.repos.pop(repo, None)
+                msg = f"Revoked **{user.display_name}**'s access to `{repo}`."
+            else:
+                ua.repos.clear()
+                msg = f"Revoked all access for **{user.display_name}**."
+
+            # Sync forum tags
+            if ua.forum_channel_id:
+                if ua.repos:
+                    await self._sync_user_forum_tags(uid)
+                else:
+                    # Archive the forum if no grants left
+                    guild = self.get_guild(self._guild_id)
+                    if guild:
+                        forum = guild.get_channel(int(ua.forum_channel_id))
+                        if forum and isinstance(forum, discord.ForumChannel):
+                            # Can't archive forums directly, just remove permissions
+                            try:
+                                await forum.set_permissions(
+                                    guild.get_member(user.id),
+                                    overwrite=None,
+                                )
+                            except Exception:
+                                pass
+                    msg += " Forum permissions removed."
+
+            # Clean up empty users
+            if not ua.repos and not ua.global_access:
+                del cfg.users[uid]
+
+            access_mod.save_access_config(cfg)
+            await interaction.followup.send(msg, ephemeral=True)
+
+        @access_group.command(name="list", description="Show all access grants")
+        async def cmd_access_list(interaction: discord.Interaction):
+            if not self._is_owner(interaction.user.id):
+                await interaction.response.send_message("Owner only", ephemeral=True)
+                return
+            await interaction.response.defer(ephemeral=True)
+
+            cfg = load_access_config()
+            if not cfg.users:
+                await interaction.followup.send("No access grants.", ephemeral=True)
+                return
+
+            lines = []
+            for uid, ua in cfg.users.items():
+                forum_link = f" <#{ua.forum_channel_id}>" if ua.forum_channel_id else ""
+                if ua.global_access:
+                    lines.append(f"**{ua.display_name}** — all repos{forum_link}")
+                else:
+                    for repo, grant in ua.repos.items():
+                        lines.append(
+                            f"**{ua.display_name}** — `{repo}` "
+                            f"({grant.mode}, bash={grant.bash_policy}, "
+                            f"limit={grant.max_daily_queries}/day){forum_link}"
+                        )
+
+            await interaction.followup.send("\n".join(lines) or "No grants.", ephemeral=True)
+
+        @access_group.command(name="set", description="Change access settings")
+        @app_commands.describe(
+            user="User to modify", repo="Repo name",
+            key="Setting to change", value="New value",
+        )
+        @app_commands.choices(key=[
+            app_commands.Choice(name="mode", value="mode"),
+            app_commands.Choice(name="bash", value="bash"),
+            app_commands.Choice(name="daily_limit", value="daily_limit"),
+        ])
+        async def cmd_access_set(
+            interaction: discord.Interaction, user: discord.Member,
+            repo: str, key: str, value: str,
+        ):
+            if not self._is_owner(interaction.user.id):
+                await interaction.response.send_message("Owner only", ephemeral=True)
+                return
+            await interaction.response.defer(ephemeral=True)
+
+            cfg = load_access_config()
+            uid = str(user.id)
+            ua = cfg.users.get(uid)
+            if not ua or repo not in ua.repos:
+                await interaction.followup.send(
+                    f"**{user.display_name}** has no grant for `{repo}`.", ephemeral=True,
+                )
+                return
+
+            grant = ua.repos[repo]
+            if key == "mode":
+                if value not in ("explore", "plan", "build"):
+                    await interaction.followup.send("Mode must be explore, plan, or build.", ephemeral=True)
+                    return
+                grant.mode = value
+            elif key == "bash":
+                if value not in ("allowlist", "full", "none"):
+                    await interaction.followup.send("Bash must be allowlist, full, or none.", ephemeral=True)
+                    return
+                grant.bash_policy = value
+            elif key == "daily_limit":
+                try:
+                    grant.max_daily_queries = int(value)
+                except ValueError:
+                    await interaction.followup.send("daily_limit must be a number.", ephemeral=True)
+                    return
+
+            access_mod.save_access_config(cfg)
+            await interaction.followup.send(
+                f"Updated **{user.display_name}** `{repo}`: {key}={value}", ephemeral=True,
+            )
+
+        self.tree.add_command(access_group)
 
     async def _monitor_setup(self, name: str) -> str:
         """Set up a monitor from env config."""
@@ -1314,8 +1650,14 @@ class ClaudeBot(discord.Client):
             return
 
         # Auth check — skip for test webhook
-        if not _is_test_webhook and not self._auth(message.author.id):
-            return
+        if not _is_test_webhook:
+            msg_access = self._check_access(
+                message.author.id, channel_id=str(message.channel.id),
+            )
+            if not msg_access.allowed:
+                return
+        else:
+            msg_access = AccessResult(allowed=True, is_owner=True)
 
         text = message.content.strip()
         _temp_files: list[str] = []  # track temp files for cleanup
@@ -1365,8 +1707,10 @@ class ClaudeBot(discord.Client):
         log.info("Discord msg in #%s: %s", ch_name, text[:80])
 
         try:
-            # --- Lobby: route to forum thread ---
+            # --- Lobby: route to forum thread (owner only) ---
             if message.channel.id == self._lobby_channel_id:
+                if not msg_access.is_owner:
+                    return  # non-owners can't use lobby
                 active_repo, _ = self._store.get_active_repo()
                 await self._route_lobby_message(message, text, active_repo)
                 return
@@ -1377,7 +1721,7 @@ class ClaudeBot(discord.Client):
                 if parent and isinstance(parent, discord.ForumChannel):
                     lookup = self._thread_to_project(channel_id)
                     if not lookup:
-                        # Adopt unmapped thread in a known forum
+                        # Adopt unmapped thread in a known forum (owner forums)
                         proj = self._forum_by_channel_id(str(parent.id))
                         if proj:
                             log.info("Adopted unmapped thread %s in forum %s", channel_id, parent.name)
@@ -1385,6 +1729,33 @@ class ClaudeBot(discord.Client):
                             proj.threads[channel_id] = info
                             self._save_forum_map()
                             lookup = (proj, info)
+
+                    # Check if this is a user's personal forum
+                    if not lookup:
+                        user_forum_info = self._is_user_forum(str(parent.id))
+                        if user_forum_info:
+                            # Resolve repo from thread tags
+                            repo_name = self._user_forum_thread_to_repo(message.channel)
+                            if repo_name and repo_name in self._forum_projects:
+                                proj = self._forum_projects[repo_name]
+                                info = ThreadInfo(
+                                    thread_id=channel_id, origin="bot",
+                                    user_id=user_forum_info[0],
+                                    user_name=user_forum_info[1],
+                                )
+                                proj.threads[channel_id] = info
+                                self._save_forum_map()
+                                lookup = (proj, info)
+                                log.info("Adopted user forum thread %s repo=%s user=%s",
+                                         channel_id, repo_name, user_forum_info[1])
+                            elif not repo_name:
+                                # Thread in user forum but no repo tag selected
+                                await self.messenger.send_text(
+                                    channel_id,
+                                    "Please select a repo tag on this thread so I know "
+                                    "which project to work in.",
+                                )
+                                return
 
                     if lookup:
                         proj, info = lookup
@@ -1412,7 +1783,10 @@ class ClaudeBot(discord.Client):
                         asyncio.create_task(self._set_thread_active_tag(message.channel, True))
                         asyncio.create_task(self._refresh_dashboard())
                         ctx = self._ctx(channel_id, session_id=session_id,
-                                        repo_name=repo_name, thread_info=info)
+                                        repo_name=repo_name, thread_info=info,
+                                        access_result=msg_access)
+                        ctx.user_id = str(message.author.id)
+                        ctx.user_name = message.author.display_name
                         self._attach_session_callbacks(ctx, info, channel_id)
                         try:
                             await commands.on_text(ctx, text)
@@ -1429,7 +1803,9 @@ class ClaudeBot(discord.Client):
                         return
 
             # --- Other channel (unmapped): no session ---
-            ctx = self._ctx(channel_id)
+            ctx = self._ctx(channel_id, access_result=msg_access)
+            ctx.user_id = str(message.author.id)
+            ctx.user_name = message.author.display_name
             await commands.on_text(ctx, text)
         finally:
             # Clean up temp image files
@@ -1594,6 +1970,8 @@ class ClaudeBot(discord.Client):
                     run_lines.append(f"**{rname}**")
                 for inst in repo_insts:
                     line = f"`{inst.display_id()}` — {inst.prompt[:30]}"
+                    if inst.user_name and not inst.is_owner_session:
+                        line += f" [{inst.user_name}]"
                     thread_id = session_to_thread.get(inst.session_id or "")
                     if thread_id:
                         line += f" • <#{thread_id}>"
@@ -2012,14 +2390,20 @@ class ClaudeBot(discord.Client):
         if not self._in_scope(interaction.guild, interaction.channel):
             return
 
-        if not self._auth(interaction.user.id):
+        btn_access = self._check_access(
+            interaction.user.id, channel_id=str(interaction.channel_id),
+        )
+        if not btn_access.allowed:
             await interaction.response.send_message("Unauthorized", ephemeral=True)
             return
 
         custom_id = interaction.data.get("custom_id", "") if interaction.data else ""
 
-        # --- Select menu: repo switch ---
+        # --- Select menu: repo switch (owner only) ---
         if custom_id == "repo_switch_select":
+            if not btn_access.is_owner:
+                await interaction.response.send_message("Owner only", ephemeral=True)
+                return
             values = interaction.data.get("values", []) if interaction.data else []
             if values:
                 repo_name = values[0]
@@ -2148,7 +2532,10 @@ class ClaudeBot(discord.Client):
                     str(thread.id), session_id=session_id,
                     repo_name=repo_name if repo_name != "_default" else None,
                     thread_info=ti,
+                    access_result=btn_access,
                 )
+                ctx.user_id = str(interaction.user.id)
+                ctx.user_name = interaction.user.display_name
                 source_msg_id = str(interaction.message.id) if interaction.message else None
                 await workflows.on_sess_resume(ctx, session_id, source_msg_id)
             return
@@ -2177,7 +2564,9 @@ class ClaudeBot(discord.Client):
 
         lookup = self._thread_to_project(channel_id)
         t_info = lookup[1] if lookup else None
-        ctx = self._ctx(channel_id, thread_info=t_info)
+        ctx = self._ctx(channel_id, thread_info=t_info, access_result=btn_access)
+        ctx.user_id = str(interaction.user.id)
+        ctx.user_name = interaction.user.display_name
         prev_mode = ctx.effective_mode
         try:
             await commands.handle_callback(ctx, action, instance_id, source_msg_id)

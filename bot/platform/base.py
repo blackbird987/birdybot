@@ -141,6 +141,11 @@ class RequestContext:
     # Session resolution callbacks (Discord race-condition fix)
     resolve_session_id: Callable[[], str | None] | None = None
     on_session_resolved: Callable[[str], None] | None = None
+    # User identity (for multi-user access control)
+    user_id: str | None = None
+    user_name: str | None = None
+    is_owner: bool = True             # True = bot owner (full access)
+    mode_ceiling: str | None = None   # Max mode for non-owners (None = no limit)
 
     @property
     def effective_mode(self) -> str:
@@ -157,6 +162,11 @@ class RequestContext:
         return self.verbose_level if self.verbose_level is not None else self.store.verbose_level
 
     def update_mode(self, value: str) -> None:
+        # Enforce mode ceiling for non-owners
+        if self.mode_ceiling:
+            _rank = {"explore": 0, "plan": 1, "build": 2}
+            if _rank.get(value, 0) > _rank.get(self.mode_ceiling, 0):
+                value = self.mode_ceiling
         self.mode = value
         if self.platform != "discord":
             self.store.mode = value

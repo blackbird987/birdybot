@@ -132,6 +132,11 @@ async def spawn_from(
     new_inst.parent_id = source.id
     new_inst.repo_name = source.repo_name
     new_inst.repo_path = source.repo_path
+    # Inherit user identity and access control from parent
+    new_inst.user_id = source.user_id or (ctx.user_id or "")
+    new_inst.user_name = source.user_name or (ctx.user_name or "")
+    new_inst.is_owner_session = source.is_owner_session
+    new_inst.bash_policy = source.bash_policy
 
     if cfg.resume_session:
         new_inst.session_id = source.session_id

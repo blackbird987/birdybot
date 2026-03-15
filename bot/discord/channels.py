@@ -251,6 +251,95 @@ async def ensure_forum_tags(forum: discord.ForumChannel) -> dict[str, discord.Fo
     return existing
 
 
+# --- Per-user forum helpers ---
+
+
+async def ensure_user_forum(
+    guild: discord.Guild,
+    category: discord.CategoryChannel,
+    bot_member: discord.Member,
+    user_id: int,
+    display_name: str,
+    repo_names: list[str],
+    owner_id: int | None = None,
+    auto_archive: int = 4320,
+) -> discord.ForumChannel:
+    """Create or find a personal forum channel for a granted user.
+
+    The forum is named after the user and has repo names as tags.
+    Only the bot, the owner, and the granted user can see it.
+    """
+    forum_name = sanitize_channel_name(display_name)
+
+    # Check if it already exists
+    for ch in category.channels:
+        if isinstance(ch, discord.ForumChannel) and ch.name == forum_name:
+            log.info("Found existing user forum %s (%s)", ch.id, ch.name)
+            # Sync tags
+            await sync_user_forum_tags(ch, repo_names)
+            return ch
+
+    # Build permissions: deny @everyone, allow bot + owner + user
+    overwrites = _private_overwrites(guild, bot_member, owner_id)
+    member = guild.get_member(user_id)
+    if member:
+        overwrites[member] = discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=True,
+            send_messages_in_threads=True,
+            create_public_threads=True,
+        )
+
+    forum = await guild.create_forum(
+        name=forum_name,
+        category=category,
+        default_auto_archive_duration=auto_archive,
+        overwrites=overwrites,
+    )
+    log.info("Created user forum %s (%s) for user %s", forum.id, forum_name, user_id)
+
+    # Add repo tags
+    await sync_user_forum_tags(forum, repo_names)
+
+    return forum
+
+
+async def sync_user_forum_tags(
+    forum: discord.ForumChannel,
+    repo_names: list[str],
+) -> None:
+    """Ensure a user's forum has tags matching their granted repos."""
+    existing = {tag.name: tag for tag in forum.available_tags}
+    desired = set(repo_names)
+    current = set(existing.keys())
+
+    # Also keep standard status tags
+    standard_tags = {"active", "completed", "failed"}
+    to_add = (desired | standard_tags) - current
+    to_remove = current - desired - standard_tags
+
+    if not to_add and not to_remove:
+        return
+
+    new_tags = [t for t in forum.available_tags if t.name not in to_remove]
+    for name in to_add:
+        emoji = None
+        if name == "active":
+            emoji = "\U0001f504"
+        elif name == "completed":
+            emoji = "\u2705"
+        elif name == "failed":
+            emoji = "\u274c"
+        new_tags.append(discord.ForumTag(name=name, emoji=emoji))
+
+    try:
+        await forum.edit(available_tags=new_tags[:20])
+        log.info("Synced user forum tags: %s (added=%s, removed=%s)",
+                 forum.name, to_add, to_remove)
+    except Exception:
+        log.warning("Failed to sync user forum tags", exc_info=True)
+
+
 # --- Channel helpers ---
 
 

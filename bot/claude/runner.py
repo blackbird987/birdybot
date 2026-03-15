@@ -328,7 +328,6 @@ class ClaudeRunner:
         if not prompt:
             prompt = "Continue the previous conversation."
 
-        cmd.append(prompt)
         cmd.extend(["--output-format", "stream-json", "--verbose"])
 
         # Build system prompt: mobile hint + bot context + pinned context + repo CLAUDE.md + projects dir
@@ -342,9 +341,25 @@ class ClaudeRunner:
         # Permissions: always bypass (non-interactive bot can't approve prompts).
         # In explore/plan, block file-modification tools to enforce read-only.
         cmd.extend(["--permission-mode", "bypassPermissions"])
-        if instance.mode != "build":
-            cmd.extend(["--disallowed-tools", ",".join(sorted(CODE_CHANGE_TOOLS))])
 
+        disallowed = set()
+        if instance.mode != "build":
+            disallowed.update(CODE_CHANGE_TOOLS)
+
+        # Defense-in-depth: non-owner sessions enforce code change tools
+        # even if mode somehow got set to "build" incorrectly
+        if not instance.is_owner_session:
+            if instance.mode != "build":
+                disallowed.update(CODE_CHANGE_TOOLS)  # redundant with above, but safe
+                if instance.bash_policy == "none":
+                    disallowed.add("Bash")
+
+        if disallowed:
+            cmd.extend(["--disallowed-tools", ",".join(sorted(disallowed))])
+
+        # End-of-options: prevents prompt text starting with dashes (e.g. /ref
+        # context injection) from being parsed as CLI flags by Commander.js.
+        cmd.extend(["--", prompt])
         return cmd
 
     def _build_system_prompt(
@@ -390,6 +405,32 @@ class ClaudeRunner:
                     f"\n\nClaude Code session history and plans for this repo "
                     f"are stored in: {projects_dir}"
                 )
+
+        # Non-owner user context: scope awareness + bash policy
+        if not instance.is_owner_session:
+            user_label = instance.user_name or instance.user_id or "a granted user"
+            access_parts = [
+                f"\n\n--- Access Control ---",
+                f"This session is being used by {user_label} (not the repo owner).",
+                f"Mode: {instance.mode}.",
+            ]
+            if repo_path:
+                access_parts.append(
+                    f"You are working in {repo_path}. Do not navigate outside "
+                    f"this directory or read files outside it."
+                )
+            if instance.bash_policy == "allowlist" and instance.mode != "build":
+                from bot.discord.access import DEFAULT_BASH_ALLOWLIST, DEFAULT_BASH_DENYLIST
+                access_parts.append(
+                    f"\nBash commands are restricted. Allowed: {', '.join(DEFAULT_BASH_ALLOWLIST)}."
+                    f"\nDenied: {', '.join(DEFAULT_BASH_DENYLIST)}."
+                    f"\nDo not run commands outside this allowlist."
+                )
+            elif instance.bash_policy == "none" and instance.mode != "build":
+                access_parts.append(
+                    "\nBash tool is disabled. Use Read, Grep, Glob for exploration."
+                )
+            parts.append("\n".join(access_parts))
 
         # Sibling session awareness — helps Claude avoid file conflicts
         if sibling_context:
