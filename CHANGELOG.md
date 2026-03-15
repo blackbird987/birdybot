@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Fix: plan mode queries via direct messages now show correct plan buttons (Review Plan / Build It / Done) instead of default buttons
+- Replace thread name processing emoji (🔄) with forum tag-based active indicator — avoids Discord's 2-per-10-min thread rename rate limit
+- Simplify `_generate_smart_title` and `_update_thread_name` — no longer responsible for processing state
+
 ## v0.6.1 — Cleanup & Review Prompt Polish (2026-03-15)
 
 - Extract `_attach_session_callbacks()` helper to DRY up lambda wiring in two on_message paths

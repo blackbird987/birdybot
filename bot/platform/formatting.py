@@ -248,7 +248,7 @@ def action_button_specs(
     if instance.status == InstanceStatus.COMPLETED:
         tools = set(instance.tools_used or [])
         made_code_changes = bool(tools & CODE_CHANGE_TOOLS)
-        made_plan = instance.plan_active
+        made_plan = instance.plan_active or instance.mode == "plan"
 
         if instance.branch:
             # Build bg task with branch — full merge workflow

@@ -578,13 +578,20 @@ class ClaudeBot(discord.Client):
             self._forum_projects = valid_projects
             self._save_forum_map()
 
-        # Clean up thread names: legacy "repo│" prefix + stale processing indicators
+        # Clean up thread names and stale tags
+        from bot.claude.types import InstanceStatus
+        running_sessions = {
+            i.session_id for i in self._store.list_instances()
+            if i.status == InstanceStatus.RUNNING and i.session_id
+        }
         for proj in valid_projects.values():
             if not proj.forum_channel_id:
                 continue
             forum = guild.get_channel(int(proj.forum_channel_id))
             if not forum or not isinstance(forum, discord.ForumChannel):
                 continue
+            tag_map = {t.name: t for t in forum.available_tags}
+            active_tag = tag_map.get("active")
             for thread in forum.threads:
                 # Legacy migration: strip "repo│" prefix
                 if "\u2502" in thread.name:  # │ (box-drawing vertical)
@@ -596,15 +603,26 @@ class ClaudeBot(discord.Client):
                             log.info("Renamed thread %s: %s -> %s", thread.id, old_name, new_name)
                         except Exception:
                             log.debug("Failed to rename thread %s", thread.id, exc_info=True)
-                # Stale processing indicator (bot crashed mid-query)
-                is_proc, mode_key, topic = channels.parse_thread_name(thread.name)
-                if is_proc:
-                    cleaned = channels.build_thread_name(topic, mode_key or "explore", False)
+                # Legacy migration: strip 🔄 from thread names
+                if thread.name.startswith("\U0001f504"):
+                    _, mode_key, topic = channels.parse_thread_name(thread.name)
+                    cleaned = channels.build_thread_name(topic, mode_key or "explore")
                     try:
                         await thread.edit(name=cleaned)
-                        log.info("Cleared stale processing indicator: %s", thread.id)
+                        log.info("Stripped legacy processing emoji: %s", thread.id)
                     except Exception:
-                        log.debug("Failed to clear processing indicator", exc_info=True)
+                        log.debug("Failed to strip processing emoji", exc_info=True)
+                # Clear stale "active" tag (bot crashed mid-query)
+                if active_tag and active_tag in thread.applied_tags:
+                    # Check if this thread actually has a running session
+                    info = proj.threads.get(str(thread.id))
+                    if not info or info.session_id not in running_sessions:
+                        new_tags = [t for t in thread.applied_tags if t != active_tag]
+                        try:
+                            await thread.edit(applied_tags=new_tags[:5])
+                            log.info("Cleared stale active tag: %s", thread.id)
+                        except Exception:
+                            log.debug("Failed to clear stale active tag", exc_info=True)
 
     async def _run_slash(
         self, interaction: discord.Interaction, coro,
@@ -1390,7 +1408,8 @@ class ClaudeBot(discord.Client):
                                 text = f"{ref_text}\n\n{text}"
                                 log.info("Injected /ref context into prompt in thread %s", ch_name)
 
-                        asyncio.create_task(self._set_thread_processing(message.channel, True))
+                        asyncio.create_task(self._set_thread_active_tag(message.channel, True))
+                        asyncio.create_task(self._refresh_dashboard())
                         ctx = self._ctx(channel_id, session_id=session_id,
                                         repo_name=repo_name, thread_info=info)
                         self._attach_session_callbacks(ctx, info, channel_id)
@@ -1398,18 +1417,13 @@ class ClaudeBot(discord.Client):
                             await commands.on_text(ctx, text)
                         finally:
                             self._persist_ctx_settings(ctx)
-                            smart_title_handles_processing = False
                             if was_pending:
                                 await self._finalize_pending_thread(channel_id, message.channel, text)
-                                smart_title_handles_processing = "new-session" in message.channel.name
                             elif "new-session" in message.channel.name:
                                 summary = self._get_latest_summary(channel_id)
                                 asyncio.create_task(self._generate_smart_title(
-                                    message.channel, text, summary, clear_processing=True))
-                                smart_title_handles_processing = True
-                            if not smart_title_handles_processing:
-                                asyncio.create_task(self._update_thread_name(
-                                    message.channel, ctx.effective_mode, processing=False))
+                                    message.channel, text, summary))
+                            asyncio.create_task(self._set_thread_active_tag(message.channel, False))
                             asyncio.create_task(self._try_apply_tags_after_run(channel_id))
                             asyncio.create_task(self._refresh_dashboard())
                         return
@@ -1437,7 +1451,8 @@ class ClaudeBot(discord.Client):
             # Post redirect
             asyncio.create_task(self._send_redirect(thread))
             # Run query in new thread
-            asyncio.create_task(self._set_thread_processing(thread, True))
+            asyncio.create_task(self._set_thread_active_tag(thread, True))
+            asyncio.create_task(self._refresh_dashboard())
             lookup = self._thread_to_project(str(thread.id))
             t_info = lookup[1] if lookup else None
             tid = str(thread.id)
@@ -1451,11 +1466,11 @@ class ClaudeBot(discord.Client):
                 self._persist_ctx_settings(ctx)
                 # Update mapping with real session_id
                 await self._update_pending_thread(str(thread.id))
-                # Generate smart title + clear processing in one edit (fire-and-forget)
+                # Generate smart title (fire-and-forget)
                 summary = self._get_latest_summary(str(thread.id))
-                asyncio.create_task(self._generate_smart_title(thread, text, summary, clear_processing=True))
-                # No separate _update_thread_name — smart title handles it
-                # Apply tags + refresh dashboard
+                asyncio.create_task(self._generate_smart_title(thread, text, summary))
+                # Clear active tag + apply completion tags + refresh dashboard
+                asyncio.create_task(self._set_thread_active_tag(thread, False))
                 asyncio.create_task(self._try_apply_tags_after_run(str(thread.id)))
                 asyncio.create_task(self._refresh_dashboard())
 
@@ -1595,26 +1610,15 @@ class ClaudeBot(discord.Client):
     async def _generate_smart_title(
         self, thread: discord.Thread, prompt: str,
         summary: str = "",
-        clear_processing: bool = False,
     ) -> None:
-        """Fire-and-forget: generate an LLM title and rename the thread.
-
-        When clear_processing=True, also clears the processing indicator,
-        batching both into a single thread.edit() call to stay within
-        Discord's 2-edits-per-10-min rate limit.
-        """
+        """Fire-and-forget: generate an LLM title and rename the thread."""
         try:
             thread_id = str(thread.id)
             lookup = self._thread_to_project(thread_id)
             if not lookup:
-                if clear_processing:
-                    await self._update_thread_name(thread, self._store.mode, processing=False)
                 return
             _, info = lookup
             if info._title_generated:
-                if clear_processing:
-                    thread_mode = info.mode or self._store.mode
-                    await self._update_thread_name(thread, thread_mode, processing=False)
                 return
 
             # Claim early to prevent duplicate concurrent tasks
@@ -1624,17 +1628,13 @@ class ClaudeBot(discord.Client):
             if not title:
                 log.warning("Title generation returned empty for thread %s", thread_id)
                 info._title_generated = False  # Allow retry on next query
-                if clear_processing:
-                    thread_mode = info.mode or self._store.mode
-                    await self._update_thread_name(thread, thread_mode, processing=False)
                 return
 
             base = channels.build_title_name(title)
 
             async with self._emoji_lock:
                 thread_mode = info.mode or self._store.mode
-                # Always clear processing when building the new name
-                new_name = channels.build_thread_name(base, thread_mode, False)
+                new_name = channels.build_thread_name(base, thread_mode)
                 await thread.edit(name=new_name)
 
             info.topic = title
@@ -1642,75 +1642,70 @@ class ClaudeBot(discord.Client):
             log.info("Smart title for thread %s: %s", thread_id, new_name)
         except Exception:
             log.warning("Smart title generation failed for thread %s", thread.id, exc_info=True)
-            if clear_processing:
-                try:
-                    lookup = self._thread_to_project(str(thread.id))
-                    mode = lookup[1].mode if lookup and lookup[1].mode else self._store.mode
-                    await self._update_thread_name(thread, mode, processing=False)
-                except Exception:
-                    pass
 
     async def _update_thread_name(
         self,
         channel: discord.abc.GuildChannel | discord.Thread | None,
         target_mode: str,
-        processing: bool | None = None,
-        applied_tags: list[discord.ForumTag] | None = None,
     ) -> None:
-        """Update a thread's name to reflect mode emoji and processing state.
-
-        processing=None preserves the current processing state from the name.
-        applied_tags batches a tag update into the same API call.
-        """
+        """Update a thread's name to reflect mode emoji."""
         if not isinstance(channel, discord.Thread):
             return
         async with self._emoji_lock:
-            is_proc, _, topic = channels.parse_thread_name(channel.name)
-            proc = is_proc if processing is None else processing
-            new_name = channels.build_thread_name(topic, target_mode, proc)
-            kwargs: dict = {}
+            _, _, topic = channels.parse_thread_name(channel.name)
+            new_name = channels.build_thread_name(topic, target_mode)
             if new_name != channel.name:
-                kwargs["name"] = new_name
-            if applied_tags is not None:
-                kwargs["applied_tags"] = applied_tags[:5]
-            if not kwargs:
-                return
-            try:
-                await channel.edit(**kwargs)
-                log.debug("Updated thread %s name/tags (mode=%s, proc=%s)", channel.id, target_mode, proc)
-            except Exception:
-                log.debug("Failed to update thread name/tags", exc_info=True)
+                try:
+                    await channel.edit(name=new_name)
+                    log.debug("Updated thread %s name (mode=%s)", channel.id, target_mode)
+                except Exception:
+                    log.debug("Failed to update thread name", exc_info=True)
 
-    async def _set_thread_processing(
+    async def _set_thread_active_tag(
         self,
         channel: discord.abc.GuildChannel | discord.Thread | None,
-        processing: bool,
+        active: bool,
     ) -> None:
-        """Set or clear the processing indicator on a thread name.
+        """Add or remove the 'active' forum tag on a thread.
 
-        When setting, batches the 'active' tag + mode tag in the same API call.
-        Fire-and-forget safe — always called via create_task.
+        Tag-only edits use Discord's normal rate limit (~5/5s), not the
+        harsh 2-per-10-min thread name rate limit. Fire-and-forget safe.
         """
         if not isinstance(channel, discord.Thread):
             return
+        if not isinstance(channel.parent, discord.ForumChannel):
+            return
         try:
-            # Use per-thread mode if available, otherwise global default
-            lookup = self._thread_to_project(str(channel.id))
-            thread_mode = lookup[1].mode if lookup and lookup[1].mode else self._store.mode
-            tags = None
-            if processing and isinstance(channel.parent, discord.ForumChannel):
-                tag_map = {t.name: t for t in channel.parent.available_tags}
-                if not tag_map:
-                    tag_map = await channels.ensure_forum_tags(channel.parent)
-                if "active" in tag_map:
-                    tags = [tag_map["active"]]
-                    if thread_mode in tag_map:
-                        tags.append(tag_map[thread_mode])
-            await self._update_thread_name(
-                channel, thread_mode, processing=processing, applied_tags=tags,
-            )
+            tag_map = {t.name: t for t in channel.parent.available_tags}
+            if not tag_map:
+                tag_map = await channels.ensure_forum_tags(channel.parent)
+            active_tag = tag_map.get("active")
+            if not active_tag:
+                return
+
+            current_tags = list(channel.applied_tags)
+            if active:
+                if active_tag not in current_tags:
+                    current_tags.append(active_tag)
+                # Also set mode tag
+                lookup = self._thread_to_project(str(channel.id))
+                mode = lookup[1].mode if lookup and lookup[1].mode else self._store.mode
+                mode_tag = tag_map.get(mode)
+                # Remove other mode tags, add current
+                for m in MODE_DISPLAY:
+                    mt = tag_map.get(m)
+                    if mt and mt in current_tags:
+                        current_tags.remove(mt)
+                if mode_tag and mode_tag not in current_tags:
+                    current_tags.append(mode_tag)
+            else:
+                if active_tag in current_tags:
+                    current_tags.remove(active_tag)
+
+            await channel.edit(applied_tags=current_tags[:5])
+            log.debug("Set thread %s active=%s", channel.id, active)
         except Exception:
-            log.debug("Failed to set processing indicator on thread %s", channel.id, exc_info=True)
+            log.debug("Failed to set active tag on thread %s", channel.id, exc_info=True)
 
     async def _create_new_session(
         self, interaction: discord.Interaction, repo_name: str | None,
@@ -1800,7 +1795,7 @@ class ClaudeBot(discord.Client):
         # Generate smart title if still "new-session"
         if "new-session" in thread.name:
             summary = self._get_latest_summary(thread_id)
-            asyncio.create_task(self._generate_smart_title(thread, prompt, summary, clear_processing=True))
+            asyncio.create_task(self._generate_smart_title(thread, prompt, summary))
 
     async def _update_pending_thread(self, thread_id: str) -> None:
         """After a query completes, update a pending thread's session mapping."""
@@ -2099,7 +2094,8 @@ class ClaudeBot(discord.Client):
 
         is_query = action in _QUERY_ACTIONS
         if is_query:
-            asyncio.create_task(self._set_thread_processing(interaction.channel, True))
+            asyncio.create_task(self._set_thread_active_tag(interaction.channel, True))
+            asyncio.create_task(self._refresh_dashboard())
 
         lookup = self._thread_to_project(channel_id)
         t_info = lookup[1] if lookup else None
@@ -2110,7 +2106,7 @@ class ClaudeBot(discord.Client):
         finally:
             self._persist_ctx_settings(ctx)
             if is_query:
-                asyncio.create_task(self._set_thread_processing(interaction.channel, False))
+                asyncio.create_task(self._set_thread_active_tag(interaction.channel, False))
                 asyncio.create_task(self._try_apply_tags_after_run(channel_id))
                 asyncio.create_task(self._refresh_dashboard())
             elif action.startswith("mode_"):

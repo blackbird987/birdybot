@@ -94,34 +94,31 @@ def build_channel_name(topic: str) -> str:
     return sanitize_channel_name(topic)
 
 
-# --- Thread name format: [🔄 ]{mode_emoji} {topic} ---
-
-PROCESSING_EMOJI = "\U0001f504"  # 🔄
+# --- Thread name format: {mode_emoji} {topic} ---
 
 
 def parse_thread_name(name: str) -> tuple[bool, str | None, str]:
     """Parse thread name -> (is_processing, mode_key, base_topic).
 
+    is_processing is always False (legacy compat — processing state moved to tags).
     mode_key is "explore"/"plan"/"build" or None if no mode emoji found.
     """
-    processing = False
-    if name.startswith(PROCESSING_EMOJI):
-        processing = True
-        name = name[len(PROCESSING_EMOJI):].lstrip()
+    # Strip legacy 🔄 prefix if still present in old thread names
+    if name.startswith("\U0001f504"):
+        name = name[1:].lstrip()
     mode_key = None
     for m, e in MODE_EMOJI.items():
         if name.startswith(e):
             mode_key = m
             name = name[len(e):].lstrip()
             break
-    return processing, mode_key, name
+    return False, mode_key, name
 
 
-def build_thread_name(topic: str, mode: str, processing: bool = False) -> str:
-    """Build thread name: [🔄 ]{mode_emoji} {topic}, max 100 chars."""
+def build_thread_name(topic: str, mode: str) -> str:
+    """Build thread name: {mode_emoji} {topic}, max 100 chars."""
     emoji = mode_emoji(mode)
-    prefix = f"{PROCESSING_EMOJI} {emoji}" if processing else emoji
-    return f"{prefix} {topic}"[:100]
+    return f"{emoji} {topic}"[:100]
 
 
 def build_title_name(text: str) -> str:

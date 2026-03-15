@@ -126,8 +126,10 @@ def finalize_run(ctx: RequestContext, inst: Instance, result: RunResult) -> None
     tools = set(result.tools_used)
     plan_tools = {"EnterPlanMode"}
 
-    if (plan_tools & tools) or inst.origin in PLAN_ORIGINS:
+    if (plan_tools & tools) or inst.origin in PLAN_ORIGINS or inst.mode == "plan":
         inst.plan_active = True
+        log.debug("%s plan_active=True (tools=%s, origin=%s, mode=%s)",
+                  inst.id, plan_tools & tools, inst.origin.value, inst.mode)
     if CODE_CHANGE_TOOLS & tools:
         inst.code_active = True
     elif "Agent" in tools and inst.repo_path:
