@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Fix: lobby-routed messages now update thread mode emoji when mode changes (e.g. `/mode build` sent in lobby).
+
 ## v0.3.12 — Mode Enforcement (2026-03-15)
 
 - Enforce mode via CLI: explore/plan now use `--permission-mode plan` (read-only), build uses `bypassPermissions`. Previously mode was display-only.

@@ -1225,10 +1225,14 @@ class ClaudeBot(discord.Client):
             # Post redirect
             asyncio.create_task(self._send_redirect(thread))
             # Run query in new thread
+            prev_mode = self._store.mode
             ctx = self._ctx(str(thread.id), repo_name=repo_name if repo_name != "_default" else None)
             await commands.on_text(ctx, text)
             # Update mapping with real session_id
             await self._update_pending_thread(str(thread.id))
+            # Update thread emoji if mode changed (e.g. /mode command via lobby)
+            if self._store.mode != prev_mode:
+                await self._update_thread_mode_emoji(thread, self._store.mode)
             # Apply tags + refresh dashboard
             asyncio.create_task(self._try_apply_tags_after_run(str(thread.id)))
             asyncio.create_task(self._refresh_dashboard())
