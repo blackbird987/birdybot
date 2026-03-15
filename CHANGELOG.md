@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.3.12 — Mode Enforcement (2026-03-15)
+
 - Enforce mode via CLI: explore/plan now use `--permission-mode plan` (read-only), build uses `bypassPermissions`. Previously mode was display-only.
 - Refactored thread mode emoji update into `_update_thread_mode_emoji()` helper; mode emoji now updates on `/mode` slash command, text messages, and button callbacks.
 - Forum tags use `MODE_EMOJI` dict as single source of truth instead of hardcoded emoji literals.
