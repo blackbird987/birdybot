@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.3.10 — Clean UI, No Emojis (2026-03-15)
+
 - Stripped all decorative emojis from mode labels, buttons, forum tags, and notification messages — only status icons (🔄 ✅ ❌ ⏳ 💀) remain.
 - Simplified `MODE_DISPLAY` from `dict[str, tuple]` to `dict[str, str]`; `mode_label` is now an alias for `mode_name`.
 - Token parser handles both flat and nested `usage` formats from CLI stream-json.
