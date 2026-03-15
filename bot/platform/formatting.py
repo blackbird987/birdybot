@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import timedelta
 
 from dataclasses import dataclass, field
 
@@ -30,6 +31,17 @@ def format_tokens(count: int) -> str:
     if count >= 1_000:
         return f"{count / 1_000:.1f}k"
     return str(count)
+
+
+def format_age(delta: timedelta) -> str:
+    """Format a timedelta as a human-readable age string (e.g. '3h ago')."""
+    if delta.days > 0:
+        return f"{delta.days}d ago"
+    if delta.seconds >= 3600:
+        return f"{delta.seconds // 3600}h ago"
+    if delta.seconds >= 60:
+        return f"{delta.seconds // 60}m ago"
+    return "just now"
 
 
 # --- Secret Redaction ---

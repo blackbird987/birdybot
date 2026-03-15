@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Thread References
+- Add `/ref` slash command with dynamic autocomplete to reference another forum thread's conversation context
+- Autocomplete shows `[repo] topic (age)` with newest-first sorting, excludes current thread
+- Posts a purple embed with the referenced conversation excerpt (adaptive truncation)
+- Injects referenced context into the next prompt so Claude is actually aware of the cross-thread context
+- Pending context expires after 10 minutes; multiple `/ref` calls replace previous selection
+- Extract shared `format_age()` helper to `formatting.py` (DRY with `sessions.py`)
+
+### Smart Thread Titles
+- Smart thread titles: after the first query in a Discord forum thread, an LLM generates a 3-5 word descriptive title (e.g. "Auth Middleware Rewrite") replacing the raw slugified prompt. Fires on lobby route, /new, forum resume, and /sync. Async fire-and-forget with graceful fallback to slug on failure.
+
 ## v0.3.16 — Per-Channel Message Queue (2026-03-15)
 
 - Per-channel message queue: messages sent while a query is running in the same session/thread are now queued and processed in order, with a "Queued" notice shown to the user

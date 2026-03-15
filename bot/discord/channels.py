@@ -94,6 +94,17 @@ def build_channel_name(topic: str) -> str:
     return sanitize_channel_name(topic)
 
 
+def build_title_name(text: str) -> str:
+    """Build a readable forum post name from LLM-generated title.
+
+    Unlike sanitize_channel_name(), preserves casing and allows spaces
+    for better readability (Discord forum posts support mixed case).
+    """
+    name = re.sub(r"[^a-zA-Z0-9\s\-]", "", text)
+    name = re.sub(r"\s+", " ", name).strip()
+    return name[:90] or "session"  # Leave room for emoji prefix
+
+
 # --- Forum Channel Helpers ---
 
 

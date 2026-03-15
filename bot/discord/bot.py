@@ -8,8 +8,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
+import subprocess
+import sys
 import tempfile
+import time as _time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -22,7 +27,7 @@ from bot.discord.adapter import DiscordMessenger
 from bot.engine import commands
 from bot.engine import sessions as sessions_mod
 from bot.platform.base import RequestContext
-from bot.platform.formatting import MODE_COLOR, MODE_DISPLAY, MODE_EMOJI, VALID_MODES, mode_emoji, mode_label, mode_name
+from bot.platform.formatting import MODE_COLOR, MODE_DISPLAY, MODE_EMOJI, VALID_MODES, format_age, mode_emoji, mode_label, mode_name
 
 if TYPE_CHECKING:
     from bot.claude.runner import ClaudeRunner
@@ -30,6 +35,15 @@ if TYPE_CHECKING:
     from bot.store.state import StateStore
 
 log = logging.getLogger(__name__)
+
+_DISCORD_EPOCH_MS = 1420070400000
+
+
+def _snowflake_age(snowflake_id: int) -> str:
+    """Human-readable age from a Discord snowflake ID."""
+    created_ms = (snowflake_id >> 22) + _DISCORD_EPOCH_MS
+    created = datetime.fromtimestamp(created_ms / 1000, tz=timezone.utc)
+    return format_age(datetime.now(timezone.utc) - created)
 
 
 # --- Data structures ---
@@ -42,6 +56,7 @@ class ThreadInfo:
     origin: str = "bot"           # "bot" or "cli"
     topic: str = ""
     _synced_msg_count: int = 0
+    _title_generated: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -50,6 +65,7 @@ class ThreadInfo:
             "origin": self.origin,
             "topic": self.topic,
             "_synced_msg_count": self._synced_msg_count,
+            "_title_generated": self._title_generated,
         }
 
     @classmethod
@@ -60,6 +76,7 @@ class ThreadInfo:
             origin=data.get("origin", "bot"),
             topic=data.get("topic", ""),
             _synced_msg_count=data.get("_synced_msg_count", 0),
+            _title_generated=data.get("_title_generated", False),
         )
 
 
@@ -87,6 +104,88 @@ class ForumProject:
             forum_channel_id=data.get("forum_channel_id", ""),
             threads=threads,
         )
+
+
+# On Windows, prevent subprocess console windows from popping up
+_NOWND: dict = (
+    {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
+)
+
+
+async def _generate_title_text(prompt: str, summary: str = "") -> str | None:
+    """Spawn a lightweight Claude CLI call to generate a 3-5 word thread title.
+
+    Bypasses the runner semaphore — this is a standalone, cheap subprocess.
+    Returns the title string, or None on failure/timeout.
+    """
+    from bot.claude.parser import extract_result, parse_stream_line
+
+    title_prompt = (
+        "Generate a 3-5 word title for this coding session. "
+        "Output ONLY the title — no quotes, no explanation.\n\n"
+        f"User asked: {prompt[:500]}\n"
+    )
+    if summary:
+        title_prompt += f"\nResult: {summary[:500]}"
+
+    cmd = [
+        config.CLAUDE_BINARY, "-p", title_prompt,
+        "--output-format", "stream-json", "--verbose",
+        "--permission-mode", "plan",
+        "--max-turns", "1",
+    ]
+
+    env = os.environ.copy()
+    env.pop("CLAUDE_CODE", None)
+    env.pop("CLAUDECODE", None)
+
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            env=env,
+            **_NOWND,
+        )
+        stdout, _ = await asyncio.wait_for(
+            proc.communicate(), timeout=config.TITLE_TIMEOUT_SECS,
+        )
+    except asyncio.TimeoutError:
+        log.debug("Title generation timed out")
+        if proc:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+        return None
+    except Exception:
+        log.debug("Title generation CLI call failed", exc_info=True)
+        if proc:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+        return None
+
+    # Parse stream-json to extract result text
+    events = []
+    for line in stdout.decode("utf-8", errors="replace").splitlines():
+        parsed = parse_stream_line(line)
+        if parsed:
+            events.append(parsed)
+
+    result = extract_result(events)
+    if not result.result_text:
+        return None
+
+    # Take first line only (LLM might add explanation on subsequent lines)
+    title = result.result_text.strip().split("\n")[0].strip()
+    # Strip markdown formatting, quotes, trailing punctuation
+    title = re.sub(r'[*_`#]', '', title)
+    title = title.strip('"\'').strip()
+    title = re.sub(r'[.!?:]+$', '', title).strip()
+    return title if len(title) >= 3 else None
 
 
 class ClaudeBot(discord.Client):
@@ -125,7 +224,11 @@ class ClaudeBot(discord.Client):
         self._forum_projects: dict[str, ForumProject] = {}
         self._forum_lock = asyncio.Lock()
         self._thread_lock = asyncio.Lock()
+        self._emoji_lock = asyncio.Lock()  # Serializes thread.edit(name=...) calls
         self._dashboard_last_refresh: float = 0.0  # monotonic timestamp for debounce
+        # Pending /ref context: {thread_id: (context_str, monotonic_timestamp)}
+        # Consumed by on_message, expires after 10 minutes
+        self._pending_refs: dict[str, tuple[str, float]] = {}
 
         self._monitor_service: MonitorService | None = None
         self._monitor_started: bool = False
@@ -801,6 +904,8 @@ class ClaudeBot(discord.Client):
                 if thread:
                     created.append(thread)
                     await self._populate_thread_history(thread, session_id, str(thread.id))
+                    # Generate smart title from CLI session topic
+                    asyncio.create_task(self._generate_smart_title(thread, s["topic"]))
 
             parts = []
             if created:
@@ -887,6 +992,70 @@ class ClaudeBot(discord.Client):
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
             await self._run_slash(interaction, commands.on_reboot)
+
+        # --- /ref: reference another thread's context ---
+
+        async def thread_autocomplete(
+            interaction: discord.Interaction, current: str,
+        ) -> list[app_commands.Choice[str]]:
+            choices: list[tuple[int, str, str]] = []
+            current_tid = str(interaction.channel_id)
+            for proj in self._forum_projects.values():
+                for tid, info in proj.threads.items():
+                    if tid == current_tid or not info.session_id:
+                        continue
+                    topic = info.topic or f"Thread #{tid[-6:]}"
+                    age = _snowflake_age(int(tid))
+                    label = f"[{proj.repo_name}] {topic}"[:85] + f" ({age})"
+                    if current.lower() in label.lower():
+                        choices.append((int(tid), label[:100], tid))
+            choices.sort(key=lambda x: x[0], reverse=True)  # newest first
+            return [app_commands.Choice(name=c[1], value=c[2]) for c in choices[:25]]
+
+        @self.tree.command(name="ref", description="Reference another thread's context", guild=guild_obj)
+        @app_commands.describe(thread="Thread to reference", messages="Messages to include (default 6)")
+        @app_commands.autocomplete(thread=thread_autocomplete)
+        async def cmd_ref(interaction: discord.Interaction, thread: str, messages: int = 6):
+            if not self._auth(interaction.user.id):
+                await interaction.response.send_message("Unauthorized", ephemeral=True)
+                return
+            messages = max(1, min(messages, 20))
+            lookup = self._thread_to_project(thread)
+            if not lookup:
+                await interaction.response.send_message("Thread not found.", ephemeral=True)
+                return
+            proj, info = lookup
+            if not info.session_id:
+                await interaction.response.send_message("No session in that thread.", ephemeral=True)
+                return
+            await interaction.response.defer()
+
+            fpath = await asyncio.to_thread(sessions_mod.find_session_file, info.session_id)
+            if not fpath:
+                await interaction.followup.send("Session file not found.", ephemeral=True)
+                return
+            msgs = await asyncio.to_thread(sessions_mod.read_session_messages, fpath, messages)
+            if not msgs:
+                await interaction.followup.send("No messages in that session.", ephemeral=True)
+                return
+
+            embed = self._build_ref_embed(proj, info, msgs, thread)
+
+            # Store context for prompt injection (only in forum threads)
+            channel_id = str(interaction.channel_id)
+            in_forum_thread = (
+                isinstance(interaction.channel, discord.Thread)
+                and isinstance(getattr(interaction.channel, "parent", None), discord.ForumChannel)
+            )
+            if in_forum_thread:
+                context = self._build_ref_context(proj, info, msgs, thread)
+                self._pending_refs[channel_id] = (context, _time.monotonic())
+                await interaction.followup.send(
+                    embed=embed,
+                    content="Context loaded \u2014 your next message will include this reference.",
+                )
+            else:
+                await interaction.followup.send(embed=embed)
 
         # --- Monitor command group ---
         monitor_group = app_commands.Group(
@@ -1186,6 +1355,14 @@ class ClaudeBot(discord.Client):
 
                         was_pending = not session_id
 
+                        # Inject pending /ref context
+                        ref = self._pending_refs.pop(channel_id, None)
+                        if ref:
+                            ref_text, ref_time = ref
+                            if (_time.monotonic() - ref_time) < 600:  # 10 min expiry
+                                text = f"{ref_text}\n\n{text}"
+                                log.info("Injected /ref context into prompt in thread %s", ch_name)
+
                         prev_mode = self._store.mode
                         ctx = self._ctx(channel_id, session_id=session_id, repo_name=repo_name)
                         await commands.on_text(ctx, text)
@@ -1193,7 +1370,9 @@ class ClaudeBot(discord.Client):
                         if was_pending:
                             await self._finalize_pending_thread(channel_id, message.channel, text)
                         elif "new-session" in message.channel.name:
-                            await self._rename_thread_from_prompt(message.channel, text)
+                            summary = self._get_latest_summary(channel_id)
+                            asyncio.create_task(self._generate_smart_title(
+                                message.channel, text, summary))
                         # Update thread emoji if mode changed (e.g. /mode command)
                         if self._store.mode != prev_mode:
                             await self._update_thread_mode_emoji(message.channel, self._store.mode)
@@ -1233,6 +1412,9 @@ class ClaudeBot(discord.Client):
             # Update thread emoji if mode changed (e.g. /mode command via lobby)
             if self._store.mode != prev_mode:
                 await self._update_thread_mode_emoji(thread, self._store.mode)
+            # Generate smart title (fire-and-forget)
+            summary = self._get_latest_summary(str(thread.id))
+            asyncio.create_task(self._generate_smart_title(thread, text, summary))
             # Apply tags + refresh dashboard
             asyncio.create_task(self._try_apply_tags_after_run(str(thread.id)))
             asyncio.create_task(self._refresh_dashboard())
@@ -1370,27 +1552,77 @@ class ClaudeBot(discord.Client):
         except Exception:
             log.warning("Failed to rename thread %s -> %s", thread.id, new_name, exc_info=True)
 
+    def _get_latest_summary(self, thread_id: str) -> str:
+        """Get summary from the most recent instance for this thread's session."""
+        lookup = self._thread_to_project(thread_id)
+        if not lookup:
+            return ""
+        _, info = lookup
+        if not info.session_id:
+            return ""
+        for inst in self._store.list_instances()[:10]:
+            if inst.session_id == info.session_id and inst.summary:
+                return inst.summary
+        return ""
+
+    async def _generate_smart_title(
+        self, thread: discord.Thread, prompt: str,
+        summary: str = "",
+    ) -> None:
+        """Fire-and-forget: generate an LLM title and rename the thread.
+
+        Falls back silently to the existing slug name on any failure.
+        """
+        try:
+            thread_id = str(thread.id)
+            lookup = self._thread_to_project(thread_id)
+            if not lookup:
+                return
+            _, info = lookup
+            if info._title_generated:
+                return
+
+            title = await _generate_title_text(prompt, summary)
+            if not title:
+                log.debug("Title generation returned empty for thread %s", thread_id)
+                return
+
+            emoji = mode_emoji(self._store.mode)
+            base = channels.build_title_name(title)
+            new_name = f"{emoji} {base}"[:100]
+
+            async with self._emoji_lock:
+                await thread.edit(name=new_name)
+
+            info._title_generated = True
+            info.topic = title
+            self._save_forum_map()
+            log.info("Smart title for thread %s: %s", thread_id, new_name)
+        except Exception:
+            log.debug("Smart title generation failed for thread %s", thread.id, exc_info=True)
+
     async def _update_thread_mode_emoji(
         self, channel: discord.abc.GuildChannel | discord.Thread | None, target_mode: str,
     ) -> None:
         """Update a thread's name to reflect the current mode emoji."""
         if not isinstance(channel, discord.Thread):
             return
-        emoji = mode_emoji(target_mode)
-        old_name = channel.name
-        # Strip existing mode emoji prefix
-        for e in MODE_EMOJI.values():
-            if old_name.startswith(e):
-                old_name = old_name[len(e):].lstrip()
-                break
-        new_name = f"{emoji} {old_name}"[:100]
-        if new_name == channel.name:
-            return
-        try:
-            await channel.edit(name=new_name)
-            log.debug("Updated thread %s mode emoji -> %s", channel.id, target_mode)
-        except Exception:
-            log.debug("Failed to update thread mode emoji", exc_info=True)
+        async with self._emoji_lock:
+            emoji = mode_emoji(target_mode)
+            old_name = channel.name
+            # Strip existing mode emoji prefix
+            for e in MODE_EMOJI.values():
+                if old_name.startswith(e):
+                    old_name = old_name[len(e):].lstrip()
+                    break
+            new_name = f"{emoji} {old_name}"[:100]
+            if new_name == channel.name:
+                return
+            try:
+                await channel.edit(name=new_name)
+                log.debug("Updated thread %s mode emoji -> %s", channel.id, target_mode)
+            except Exception:
+                log.debug("Failed to update thread mode emoji", exc_info=True)
 
     async def _create_new_session(
         self, interaction: discord.Interaction, repo_name: str | None,
@@ -1452,9 +1684,10 @@ class ClaudeBot(discord.Client):
                     log.info("Finalized pending thread %s -> session %s", thread_id, session_id)
                     break
 
-        # Rename if still "new-session"
+        # Generate smart title if still "new-session"
         if "new-session" in thread.name:
-            await self._rename_thread_from_prompt(thread, prompt)
+            summary = self._get_latest_summary(thread_id)
+            asyncio.create_task(self._generate_smart_title(thread, prompt, summary))
 
     async def _update_pending_thread(self, thread_id: str) -> None:
         """After a query completes, update a pending thread's session mapping."""
@@ -1491,6 +1724,43 @@ class ClaudeBot(discord.Client):
                     return
                 except (discord.NotFound, discord.HTTPException):
                     continue
+
+    def _build_ref_embed(
+        self, proj: ForumProject, info: ThreadInfo,
+        msgs: list[dict], target_thread_id: str,
+    ) -> discord.Embed:
+        """Build a purple embed showing referenced conversation context."""
+        topic = info.topic or f"Thread #{target_thread_id[-6:]}"
+        embed = discord.Embed(
+            title=f"Referenced: {topic[:60]}",
+            color=discord.Color(0x9B59B6),
+        )
+        embed.add_field(name="Repo", value=proj.repo_name, inline=True)
+        embed.add_field(name="Thread", value=f"<#{target_thread_id}>", inline=True)
+
+        # Adaptive truncation for embed display
+        per_msg = max(150, 4000 // max(len(msgs), 1))
+        lines = []
+        for m in msgs:
+            role = "**You**" if m["role"] == "user" else "**Claude**"
+            text = m["text"][:per_msg] + ("..." if len(m["text"]) > per_msg else "")
+            lines.append(f"{role}: {text}")
+        embed.description = "\n\n".join(lines)[:4096]
+        return embed
+
+    def _build_ref_context(
+        self, proj: ForumProject, info: ThreadInfo,
+        msgs: list[dict], target_thread_id: str,
+    ) -> str:
+        """Build plain-text context string for prompt injection into Claude."""
+        topic = info.topic or f"Thread #{target_thread_id[-6:]}"
+        lines = [f"--- Referenced conversation from [{proj.repo_name}] \"{topic}\" ---"]
+        for m in msgs:
+            role = "You" if m["role"] == "user" else "Claude"
+            text = m["text"][:2000]  # generous per-message limit for LLM
+            lines.append(f"{role}: {text}")
+        lines.append("--- End reference ---")
+        return "\n".join(lines)
 
     async def _populate_thread_history(
         self, channel: discord.TextChannel | discord.Thread, session_id: str,
