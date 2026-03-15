@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.4.0 — Thread Refs, Question Detection & Missed Message Recovery (2026-03-15)
+
 ### Repo Path Resolution
 - Fix `/repo create` default path — add `REPOS_BASE_DIR` env var so new repos land in a consistent base directory instead of as siblings of the active repo (which breaks for deeply nested repos)
 - `REPOS_BASE_DIR` validated at startup: warns and falls back to sibling logic if the directory doesn't exist
