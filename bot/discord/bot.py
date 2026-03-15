@@ -181,7 +181,7 @@ async def _generate_title_text(prompt: str, summary: str = "") -> str | None:
                 pass
         return None
     except Exception:
-        log.debug("Title generation CLI call failed", exc_info=True)
+        log.warning("Title generation CLI call failed", exc_info=True)
         if proc:
             try:
                 proc.kill()
@@ -1393,19 +1393,24 @@ class ClaudeBot(discord.Client):
                         asyncio.create_task(self._set_thread_processing(message.channel, True))
                         ctx = self._ctx(channel_id, session_id=session_id,
                                         repo_name=repo_name, thread_info=info)
+                        ctx.resolve_session_id = lambda _info=info: _info.session_id or None
+                        ctx.on_session_resolved = lambda sid, _tid=channel_id: self._set_thread_session(_tid, sid)
                         try:
                             await commands.on_text(ctx, text)
                         finally:
                             self._persist_ctx_settings(ctx)
+                            smart_title_handles_processing = False
                             if was_pending:
                                 await self._finalize_pending_thread(channel_id, message.channel, text)
+                                smart_title_handles_processing = "new-session" in message.channel.name
                             elif "new-session" in message.channel.name:
                                 summary = self._get_latest_summary(channel_id)
                                 asyncio.create_task(self._generate_smart_title(
-                                    message.channel, text, summary))
-                            # Always: clear processing + sync mode (fire-and-forget to avoid rate-limit stalls)
-                            asyncio.create_task(self._update_thread_name(
-                                message.channel, ctx.effective_mode, processing=False))
+                                    message.channel, text, summary, clear_processing=True))
+                                smart_title_handles_processing = True
+                            if not smart_title_handles_processing:
+                                asyncio.create_task(self._update_thread_name(
+                                    message.channel, ctx.effective_mode, processing=False))
                             asyncio.create_task(self._try_apply_tags_after_run(channel_id))
                             asyncio.create_task(self._refresh_dashboard())
                         return
@@ -1436,19 +1441,22 @@ class ClaudeBot(discord.Client):
             asyncio.create_task(self._set_thread_processing(thread, True))
             lookup = self._thread_to_project(str(thread.id))
             t_info = lookup[1] if lookup else None
-            ctx = self._ctx(str(thread.id), repo_name=repo_name if repo_name != "_default" else None,
+            tid = str(thread.id)
+            ctx = self._ctx(tid, repo_name=repo_name if repo_name != "_default" else None,
                             thread_info=t_info)
+            if t_info:
+                ctx.resolve_session_id = lambda _info=t_info: _info.session_id or None
+                ctx.on_session_resolved = lambda sid, _tid=tid: self._set_thread_session(_tid, sid)
             try:
                 await commands.on_text(ctx, text)
             finally:
                 self._persist_ctx_settings(ctx)
                 # Update mapping with real session_id
                 await self._update_pending_thread(str(thread.id))
-                # Clear processing + sync mode (fire-and-forget to avoid rate-limit stalls)
-                asyncio.create_task(self._update_thread_name(thread, ctx.effective_mode, processing=False))
-                # Generate smart title (fire-and-forget)
+                # Generate smart title + clear processing in one edit (fire-and-forget)
                 summary = self._get_latest_summary(str(thread.id))
-                asyncio.create_task(self._generate_smart_title(thread, text, summary))
+                asyncio.create_task(self._generate_smart_title(thread, text, summary, clear_processing=True))
+                # No separate _update_thread_name — smart title handles it
                 # Apply tags + refresh dashboard
                 asyncio.create_task(self._try_apply_tags_after_run(str(thread.id)))
                 asyncio.create_task(self._refresh_dashboard())
@@ -1589,18 +1597,26 @@ class ClaudeBot(discord.Client):
     async def _generate_smart_title(
         self, thread: discord.Thread, prompt: str,
         summary: str = "",
+        clear_processing: bool = False,
     ) -> None:
         """Fire-and-forget: generate an LLM title and rename the thread.
 
-        Falls back silently to the existing slug name on any failure.
+        When clear_processing=True, also clears the processing indicator,
+        batching both into a single thread.edit() call to stay within
+        Discord's 2-edits-per-10-min rate limit.
         """
         try:
             thread_id = str(thread.id)
             lookup = self._thread_to_project(thread_id)
             if not lookup:
+                if clear_processing:
+                    await self._update_thread_name(thread, self._store.mode, processing=False)
                 return
             _, info = lookup
             if info._title_generated:
+                if clear_processing:
+                    thread_mode = info.mode or self._store.mode
+                    await self._update_thread_name(thread, thread_mode, processing=False)
                 return
 
             # Claim early to prevent duplicate concurrent tasks
@@ -1608,23 +1624,33 @@ class ClaudeBot(discord.Client):
 
             title = await _generate_title_text(prompt, summary)
             if not title:
-                log.debug("Title generation returned empty for thread %s", thread_id)
+                log.warning("Title generation returned empty for thread %s", thread_id)
                 info._title_generated = False  # Allow retry on next query
+                if clear_processing:
+                    thread_mode = info.mode or self._store.mode
+                    await self._update_thread_name(thread, thread_mode, processing=False)
                 return
 
             base = channels.build_title_name(title)
 
             async with self._emoji_lock:
-                is_proc, _, _ = channels.parse_thread_name(thread.name)
                 thread_mode = info.mode or self._store.mode
-                new_name = channels.build_thread_name(base, thread_mode, is_proc)
+                # Always clear processing when building the new name
+                new_name = channels.build_thread_name(base, thread_mode, False)
                 await thread.edit(name=new_name)
 
             info.topic = title
             self._save_forum_map()
             log.info("Smart title for thread %s: %s", thread_id, new_name)
         except Exception:
-            log.debug("Smart title generation failed for thread %s", thread.id, exc_info=True)
+            log.warning("Smart title generation failed for thread %s", thread.id, exc_info=True)
+            if clear_processing:
+                try:
+                    lookup = self._thread_to_project(str(thread.id))
+                    mode = lookup[1].mode if lookup and lookup[1].mode else self._store.mode
+                    await self._update_thread_name(thread, mode, processing=False)
+                except Exception:
+                    pass
 
     async def _update_thread_name(
         self,
@@ -1730,34 +1756,48 @@ class ClaudeBot(discord.Client):
         """Post a redirect link in lobby, auto-delete after 5s."""
         await self._send_temp_lobby_msg(f"\u2192 <#{thread.id}>")
 
+    def _set_thread_session(self, thread_id: str, session_id: str) -> None:
+        """Write session_id to ThreadInfo immediately (called from engine callback)."""
+        lookup = self._thread_to_project(thread_id)
+        if lookup:
+            _, info = lookup
+            if not info.session_id:
+                info.session_id = session_id
+                self._save_forum_map()
+                log.info("Session resolved for thread %s -> %s", thread_id, session_id[:12])
+
     async def _finalize_pending_thread(
         self, thread_id: str, thread: discord.Thread, prompt: str,
     ) -> None:
         """After first query in a /new thread, update session mapping and rename."""
-        session_id = None
-        for inst in self._store.list_instances()[:10]:
-            if inst.session_id and inst.origin_platform == "discord":
-                discord_msg_ids = inst.message_ids.get("discord", [])
-                if discord_msg_ids:
-                    try:
-                        await thread.fetch_message(int(discord_msg_ids[0]))
-                    except (discord.NotFound, discord.HTTPException):
-                        continue
-                    session_id = inst.session_id
-                    # Update thread info
-                    lookup = self._thread_to_project(thread_id)
-                    if lookup:
-                        _, info = lookup
-                        info.session_id = session_id
-                        info.topic = prompt
-                        self._save_forum_map()
-                    log.info("Finalized pending thread %s -> session %s", thread_id, session_id)
-                    break
+        lookup = self._thread_to_project(thread_id)
+        if lookup:
+            _, info = lookup
+            # Happy path: on_session_resolved callback already set session_id
+            if info.session_id:
+                info.topic = prompt
+                self._save_forum_map()
+            else:
+                # Fallback: search instances (in case callback didn't fire)
+                for inst in self._store.list_instances()[:10]:
+                    if inst.session_id and inst.origin_platform == "discord":
+                        discord_msg_ids = inst.message_ids.get("discord", [])
+                        if discord_msg_ids:
+                            try:
+                                await thread.fetch_message(int(discord_msg_ids[0]))
+                            except (discord.NotFound, discord.HTTPException):
+                                continue
+                            info.session_id = inst.session_id
+                            info.topic = prompt
+                            self._save_forum_map()
+                            log.info("Finalized pending thread %s -> session %s (fallback)",
+                                     thread_id, inst.session_id)
+                            break
 
         # Generate smart title if still "new-session"
         if "new-session" in thread.name:
             summary = self._get_latest_summary(thread_id)
-            asyncio.create_task(self._generate_smart_title(thread, prompt, summary))
+            asyncio.create_task(self._generate_smart_title(thread, prompt, summary, clear_processing=True))
 
     async def _update_pending_thread(self, thread_id: str) -> None:
         """After a query completes, update a pending thread's session mapping."""

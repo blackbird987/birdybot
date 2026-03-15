@@ -115,6 +115,11 @@ async def _run_query(ctx: RequestContext, prompt: str) -> None:
             silent=True,
         )
     async with lock:
+        # Double-checked locking: re-read session_id after acquiring lock
+        if not ctx.session_id and ctx.resolve_session_id is not None:
+            fresh = ctx.resolve_session_id()
+            if fresh:
+                ctx.session_id = fresh
         await _run_query_inner(ctx, prompt)
 
 
@@ -245,6 +250,9 @@ async def _run_query_inner(ctx: RequestContext, prompt: str) -> None:
         # For Telegram/global, update the store's global active_session_id
         if not ctx.session_id:
             ctx.store.active_session_id = result.session_id
+        # Write session_id back immediately (before lock release)
+        if ctx.on_session_resolved:
+            ctx.on_session_resolved(result.session_id)
 
     await lifecycle.send_result(ctx, inst, result.result_text)
     await budget_warning(ctx)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
@@ -137,6 +138,9 @@ class RequestContext:
     mode: str | None = None
     context: str | None = None        # None=inherit, ""=cleared, str=set
     verbose_level: int | None = None
+    # Session resolution callbacks (Discord race-condition fix)
+    resolve_session_id: Callable[[], str | None] | None = None
+    on_session_resolved: Callable[[str], None] | None = None
 
     @property
     def effective_mode(self) -> str:

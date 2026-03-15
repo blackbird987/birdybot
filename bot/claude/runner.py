@@ -351,6 +351,10 @@ class ClaudeRunner:
         # Bot capability context so Claude knows what the user can do
         parts.append(config.BOT_CONTEXT)
 
+        # Plan mode: instruct Claude not to modify files, output a plan instead
+        if instance.mode == "plan":
+            parts.append(config.PLAN_MODE_CONSTRAINT)
+
         # Pinned user context (passed as parameter to avoid double-prepend on retry)
         if context:
             parts.append(f"\n\nUser context: {context}")

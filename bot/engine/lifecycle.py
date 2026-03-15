@@ -98,6 +98,24 @@ async def run_instance(
     await check_reboot_request(ctx)
 
 
+def _repo_has_changes(repo_path: str) -> bool:
+    """Check if a repo has uncommitted changes (staged or unstaged)."""
+    try:
+        r = subprocess.run(
+            ["git", "diff", "--quiet"],
+            cwd=repo_path, capture_output=True, timeout=5,
+        )
+        if r.returncode != 0:
+            return True
+        r = subprocess.run(
+            ["git", "diff", "--cached", "--quiet"],
+            cwd=repo_path, capture_output=True, timeout=5,
+        )
+        return r.returncode != 0
+    except Exception:
+        return False
+
+
 def finalize_run(ctx: RequestContext, inst: Instance, result: RunResult) -> None:
     """Apply RunResult to Instance and persist."""
     inst.session_id = result.session_id
@@ -118,6 +136,10 @@ def finalize_run(ctx: RequestContext, inst: Instance, result: RunResult) -> None
         inst.plan_active = True
     if CODE_CHANGE_TOOLS & tools:
         inst.code_active = True
+    elif "Agent" in tools and inst.repo_path:
+        # Subagents (Agent tool) can make edits that don't appear in parent's
+        # tools_used. Check git for actual uncommitted changes in the repo.
+        inst.code_active = _repo_has_changes(inst.repo_path)
 
     # Inherit flags from session siblings if not already set
     if inst.session_id and not (inst.plan_active and inst.code_active):

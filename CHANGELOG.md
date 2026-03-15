@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- Fix missing Review Code button when subagents (Agent tool) make code changes — now checks git diff as fallback
+- Fix smart thread titles never applying due to Discord rate-limiting 3rd thread name edit; batch smart title + processing-off into a single edit (2 edits total instead of 3)
+- Enforce plan mode via system prompt — Claude can research freely but cannot modify files; must output a structured plan for review instead
+- Improve plan review formatting: replace dense Change/Pros/Cons/Impact/Priority fields with concise paragraphs; use Critical/High/Medium/Low priority labels instead of P1/P2/P3
+- Fix session continuation race condition: second message in a new forum thread could start a fresh session instead of resuming, due to session_id being written to ThreadInfo too late; now uses double-checked locking with callbacks to resolve session_id inside the per-channel lock
+
 ## v0.5.1 — Fire-and-Forget & Cleanup (2026-03-15)
 
 - Make all thread name/tag PATCH operations fire-and-forget — prevents Discord 429 rate limits from blocking message processing entirely

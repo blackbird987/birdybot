@@ -160,6 +160,28 @@ Rebooting the bot:
 - IMPORTANT: You ARE the bot process. If you run taskkill/kill, you kill YOURSELF mid-response and the user sees "interrupted by bot restart" with no result. Always use the reboot file instead.
 """
 
+
+# System prompt constraint for plan mode — prevents code changes, enforces plan output
+PLAN_MODE_CONSTRAINT = """
+--- Plan Mode ---
+You are in PLAN MODE. You have full access to all tools for research, context gathering,
+testing, and verification. Use them freely to understand the codebase.
+
+CRITICAL CONSTRAINT: Do NOT modify any source files. Specifically:
+- Do NOT use Edit, Write, or NotebookEdit to change project files
+- Do NOT use Bash to write/overwrite files (no sed -i, no echo >, no tee, no cat <<EOF >file, etc.)
+- Do NOT use the Agent tool with instructions to make code changes
+- Running read-only commands (grep, git diff, tests, builds, linters) is fine and encouraged
+
+Instead of making changes, produce a structured implementation plan:
+1. List every file that needs to change and what the change is
+2. Show proposed code snippets (as fenced code blocks in your response text)
+3. Explain the reasoning and any trade-offs
+4. Note anything you want to verify or test after implementation
+
+The user will review your plan and then switch to build mode for implementation.
+"""
+
 # Claude Code session/plan data lives here
 CLAUDE_PROJECTS_DIR: Path = Path.home() / ".claude" / "projects"
 
@@ -184,32 +206,36 @@ BUILD_FROM_QUERY_PROMPT = (
 PLAN_REVIEW_PROMPT = (
     'Review the plan above and propose your best revisions. '
     'Format your response EXACTLY as described below.\n\n'
-    'START your response with a plain summary paragraph (no bold, no bullets, '
-    'no formatting). This should be 1-2 sentences summarizing the overall '
-    'assessment: how many revisions, their priorities, and the general theme. '
+    'START with a plain summary paragraph (no bold, no bullets). '
+    '1-2 sentences: how many revisions, their priorities, general theme. '
     'Example: "Found 5 revisions across architecture and reliability. '
     '2 are high-priority structural changes, 3 are cleanup improvements."\n\n'
-    'Then a compact summary list (one per line):\n'
-    'Tag \u2014 Short title \u2014 Priority\n\n'
-    'Then list each revision using this exact format:\n\n'
-    '### [TAG] Short title\n'
-    '**Change:** One-line description of the proposed change.\n'
-    '**Pros:** Concrete benefit (or "None")\n'
-    '**Cons:** Concrete tradeoff (or "None")\n'
-    '**Impact:** Low / Medium / High \u2014 brief note on what this affects\n'
-    '**Priority:** P1 (do first) / P2 (should do) / P3 (nice to have)\n\n'
-    'Available tags (use text only, no emoji): '
+    'Then a compact summary table (one per line):\n'
+    'Priority | Tag | Short title\n\n'
+    'Then list each revision using this EXACT format (do NOT deviate):\n\n'
+    '### Tag \u2014 Short title\n'
+    'Priority \u00b7 Impact: Low/Medium/High\n\n'
+    'One or two sentences max describing the change, why it matters, '
+    'and any tradeoffs.\n\n'
+    '---\n\n'
+    'Priority levels (use these exact words): '
+    'Critical (do first), High (should do), Medium (worthwhile), '
+    'Low (nice to have)\n\n'
+    'Available tags (text only, no emoji): '
     'Architecture, Performance, Reliability, DRY/Cleanup, Scalability, '
     'Security, UX/UI, Accessibility, Integration, Dependencies, Modularity, '
     'Bug Risk\n\n'
-    'Keep the entire response under 3800 characters. '
-    'Be concise \u2014 no code diffs, no code blocks.'
+    'IMPORTANT formatting rules:\n'
+    '- Each revision must be SHORT. No field labels like Change/Pros/Cons. '
+    'Just a concise paragraph.\n'
+    '- Never include code snippets or diffs.\n'
+    '- Keep the entire response under 3800 characters.'
 )
-
 APPLY_REVISIONS_PROMPT = (
     'Apply the revisions you proposed above to the plan. Work in priority '
-    'order (P1 first). Output the complete revised plan first. Then at the '
-    'end, add a section "### Applied" listing each revision as: '
+    'order (Critical first, then High, Medium, Low). Output the complete '
+    'revised plan first. Then at the end, add a section "### Applied" '
+    'listing each revision as: '
     '"[TAG] Title \u2014 applied" or "[TAG] Title \u2014 skipped (reason)".'
 )
 
