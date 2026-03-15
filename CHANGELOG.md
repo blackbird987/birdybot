@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.6.1 — Cleanup & Review Prompt Polish (2026-03-15)
+
 - Extract `_attach_session_callbacks()` helper to DRY up lambda wiring in two on_message paths
 - Simplify `_repo_has_changes()` to use single `git status --porcelain` instead of two separate diff commands
 - Improve plan review prompt readability: concise paragraph format instead of dense field labels; Critical/High/Medium/Low priorities instead of P1/P2/P3
