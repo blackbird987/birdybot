@@ -2,16 +2,30 @@
 
 ## [Unreleased]
 
-## v0.4.3 — Processing Indicator & Cleanup Safety (2026-03-15)
+### Per-Thread Settings (Discord)
+- **Critical bug fix**: mode, context, and verbose_level were global singletons — clicking "Mode: Build" in one thread changed it for ALL threads
+- Settings are now per-thread in Discord: each forum thread has its own mode, context, and verbose_level
+- New threads inherit the global default; existing threads without settings continue using globals (backward compat)
+- Added `mode`, `context`, `verbose_level` fields to `ThreadInfo` (persisted in `platform_state`)
+- Added `effective_*` properties and `update_*` methods to `RequestContext` for thread-local resolution with global fallback
+- Context uses `""` sentinel for "explicitly cleared" (no extra boolean fields needed)
+- Centralized persistence: `_persist_ctx_settings()` called from `_run_slash`, `on_interaction`, and `on_message`
+- `/new mode:build` now sets mode on the new thread only, not globally
+- `mode_set` welcome button writes to ThreadInfo, not global store
+- Thread name emoji, processing indicator, and forum tags all use per-thread mode
+- Telegram unaffected — continues using global settings as before
 
-- Thread processing indicator: set active/mode tags and processing state on thread name when query starts, clear in `finally` block to ensure cleanup even on errors
-- Wrap post-query thread housekeeping (finalize, smart title, mode sync, tags, dashboard) in `try/finally` so it always runs
-- Clean stale processing indicators on startup (recovers from bot crashes mid-query)
-
-## v0.4.2 — Thread Name Helpers (2026-03-15)
-
-- Add `parse_thread_name()`/`build_thread_name()` helpers to centralize thread name format
-- Refactor `_update_thread_mode_emoji` → `_update_thread_name` with optional processing state and batched tag updates
+### Processing Indicator
+- Thread names show 🔄 while LLM is processing: `🔄 🟢 fix login bug` → `🟢 fix login bug` when idle
+- Centralized thread name format via `parse_thread_name()`/`build_thread_name()` helpers (DRY)
+- Refactored `_update_thread_mode_emoji` → `_update_thread_name` with optional processing state and batched tag updates
+- Added `_set_thread_processing()` — batches "active" tag + mode tag with the name update in one API call
+- Revived the "active" forum tag (was dead code — now applied at query start)
+- All query flows wrapped in `try/finally` for guaranteed cleanup (forum thread, lobby, button callbacks)
+- Added missing post-processing (tags + dashboard refresh) for button callback query actions
+- Stale processing indicators cleaned up on startup (handles bot crash mid-query)
+- `_QUERY_ACTIONS` frozenset identifies which button actions trigger LLM queries
+- `_generate_smart_title` preserves processing state when renaming threads
 - Tune expanded result view budget from 4000 to 3900 chars for safer Discord embed limits
 
 ## v0.4.1 — Review Prompts & Title Fixes (2026-03-15)

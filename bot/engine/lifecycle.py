@@ -59,7 +59,7 @@ async def run_instance(
     heartbeat_task = None
     if handle:
         on_progress, on_stall, heartbeat = make_progress_callbacks(
-            ctx, inst, handle, ctx.store.verbose_level,
+            ctx, inst, handle, ctx.effective_verbose,
         )
         heartbeat_task = asyncio.create_task(heartbeat())
 
@@ -67,7 +67,7 @@ async def run_instance(
     try:
         result = await ctx.runner.run(
             inst, on_progress=on_progress, on_stall=on_stall,
-            context=ctx.store.context,
+            context=ctx.effective_context,
         )
     finally:
         if heartbeat_task:

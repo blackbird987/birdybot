@@ -133,6 +133,39 @@ class RequestContext:
     runner: ClaudeRunner
     session_id: str | None = None  # per-request override (Discord channels)
     repo_name: str | None = None   # per-request repo override (Discord channels)
+    # Per-thread settings overrides (None = inherit from global store)
+    mode: str | None = None
+    context: str | None = None        # None=inherit, ""=cleared, str=set
+    verbose_level: int | None = None
+
+    @property
+    def effective_mode(self) -> str:
+        return self.mode if self.mode is not None else self.store.mode
+
+    @property
+    def effective_context(self) -> str | None:
+        if self.context is None:
+            return self.store.context      # inherit global
+        return self.context or None        # "" sentinel -> None (cleared)
+
+    @property
+    def effective_verbose(self) -> int:
+        return self.verbose_level if self.verbose_level is not None else self.store.verbose_level
+
+    def update_mode(self, value: str) -> None:
+        self.mode = value
+        if self.platform != "discord":
+            self.store.mode = value
+
+    def update_context(self, value: str | None) -> None:
+        self.context = value if value is not None else ""  # "" = explicitly cleared
+        if self.platform != "discord":
+            self.store.context = value
+
+    def update_verbose(self, value: int) -> None:
+        self.verbose_level = value
+        if self.platform != "discord":
+            self.store.verbose_level = value
 
 
 class NotificationService:

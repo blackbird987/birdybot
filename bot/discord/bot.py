@@ -63,9 +63,13 @@ class ThreadInfo:
     topic: str = ""
     _synced_msg_count: int = 0
     _title_generated: bool = False
+    # Per-thread settings (None = inherit global default)
+    mode: str | None = None
+    context: str | None = None        # None=inherit, ""=cleared, str=set
+    verbose_level: int | None = None
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "thread_id": self.thread_id,
             "session_id": self.session_id,
             "origin": self.origin,
@@ -73,6 +77,13 @@ class ThreadInfo:
             "_synced_msg_count": self._synced_msg_count,
             "_title_generated": self._title_generated,
         }
+        if self.mode is not None:
+            d["mode"] = self.mode
+        if self.context is not None:
+            d["context"] = self.context
+        if self.verbose_level is not None:
+            d["verbose_level"] = self.verbose_level
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> ThreadInfo:
@@ -83,6 +94,9 @@ class ThreadInfo:
             topic=data.get("topic", ""),
             _synced_msg_count=data.get("_synced_msg_count", 0),
             _title_generated=data.get("_title_generated", False),
+            mode=data.get("mode"),
+            context=data.get("context"),
+            verbose_level=data.get("verbose_level"),
         )
 
 
@@ -264,8 +278,9 @@ class ClaudeBot(discord.Client):
         self, channel_id: str,
         session_id: str | None = None,
         repo_name: str | None = None,
+        thread_info: ThreadInfo | None = None,
     ) -> RequestContext:
-        return RequestContext(
+        ctx = RequestContext(
             messenger=self.messenger,
             channel_id=channel_id,
             platform="discord",
@@ -274,6 +289,30 @@ class ClaudeBot(discord.Client):
             session_id=session_id,
             repo_name=repo_name,
         )
+        if thread_info:
+            ctx.mode = thread_info.mode
+            ctx.context = thread_info.context
+            ctx.verbose_level = thread_info.verbose_level
+        return ctx
+
+    def _persist_ctx_settings(self, ctx: RequestContext) -> None:
+        """Write any ctx setting overrides back to ThreadInfo for persistence."""
+        lookup = self._thread_to_project(ctx.channel_id)
+        if not lookup:
+            return
+        _, info = lookup
+        changed = False
+        if ctx.mode is not None and ctx.mode != info.mode:
+            info.mode = ctx.mode
+            changed = True
+        if ctx.context is not None and ctx.context != info.context:
+            info.context = ctx.context
+            changed = True
+        if ctx.verbose_level is not None and ctx.verbose_level != info.verbose_level:
+            info.verbose_level = ctx.verbose_level
+            changed = True
+        if changed:
+            self._save_forum_map()
 
     # --- Resume after reboot ---
 
@@ -320,8 +359,10 @@ class ClaudeBot(discord.Client):
         repo_name = proj.repo_name if proj.repo_name != "_default" else None
         log.info("Resuming post-reboot in thread %s session=%s: %s",
                  channel_id, session_id and session_id[:12], prompt[:80])
-        ctx = self._ctx(channel_id, session_id=session_id, repo_name=repo_name)
+        ctx = self._ctx(channel_id, session_id=session_id, repo_name=repo_name,
+                        thread_info=info)
         await commands.on_text(ctx, prompt)
+        self._persist_ctx_settings(ctx)
         asyncio.create_task(self._try_apply_tags_after_run(channel_id))
         asyncio.create_task(self._refresh_dashboard())
 
@@ -579,7 +620,7 @@ class ClaudeBot(discord.Client):
             self._forum_projects = valid_projects
             self._save_forum_map()
 
-        # Migrate thread names: strip legacy "repo│" prefix
+        # Clean up thread names: legacy "repo│" prefix + stale processing indicators
         for proj in valid_projects.values():
             if not proj.forum_channel_id:
                 continue
@@ -587,6 +628,7 @@ class ClaudeBot(discord.Client):
             if not forum or not isinstance(forum, discord.ForumChannel):
                 continue
             for thread in forum.threads:
+                # Legacy migration: strip "repo│" prefix
                 if "\u2502" in thread.name:  # │ (box-drawing vertical)
                     new_name = thread.name.split("\u2502", 1)[1].strip()
                     if new_name:
@@ -596,15 +638,7 @@ class ClaudeBot(discord.Client):
                             log.info("Renamed thread %s: %s -> %s", thread.id, old_name, new_name)
                         except Exception:
                             log.debug("Failed to rename thread %s", thread.id, exc_info=True)
-
-        # Clean stale processing indicators (bot crashed mid-query)
-        for proj in valid_projects.values():
-            if not proj.forum_channel_id:
-                continue
-            forum = guild.get_channel(int(proj.forum_channel_id))
-            if not forum or not isinstance(forum, discord.ForumChannel):
-                continue
-            for thread in forum.threads:
+                # Stale processing indicator (bot crashed mid-query)
                 is_proc, mode_key, topic = channels.parse_thread_name(thread.name)
                 if is_proc:
                     cleaned = channels.build_thread_name(topic, mode_key or "explore", False)
@@ -622,8 +656,12 @@ class ClaudeBot(discord.Client):
         cmd_name = interaction.command.name if interaction.command else "?"
         log.info("Discord /%s in #%s by %s", cmd_name, getattr(interaction.channel, "name", "?"), interaction.user)
         await interaction.response.defer(ephemeral=ephemeral)
-        ctx = self._ctx(str(interaction.channel_id))
+        channel_id = str(interaction.channel_id)
+        lookup = self._thread_to_project(channel_id)
+        info = lookup[1] if lookup else None
+        ctx = self._ctx(channel_id, thread_info=info)
         await coro(ctx)
+        self._persist_ctx_settings(ctx)
         try:
             await interaction.delete_original_response()
         except Exception:
@@ -725,10 +763,16 @@ class ClaudeBot(discord.Client):
             if not self._auth(interaction.user.id):
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
-            prev_mode = self._store.mode
+            # Detect mode change via ThreadInfo (per-thread, not global)
+            channel_id = str(interaction.channel_id)
+            lookup = self._thread_to_project(channel_id)
+            prev_mode = lookup[1].mode if lookup and lookup[1].mode else self._store.mode
             await self._run_slash(interaction, lambda ctx: commands.on_mode(ctx, mode))
-            if self._store.mode != prev_mode:
-                await self._update_thread_name(interaction.channel, self._store.mode)
+            # Re-read after _run_slash persisted the change
+            lookup = self._thread_to_project(channel_id)
+            new_mode = lookup[1].mode if lookup and lookup[1].mode else self._store.mode
+            if new_mode != prev_mode:
+                await self._update_thread_name(interaction.channel, new_mode)
 
         @self.tree.command(name="verbose", description="Progress detail level", guild=guild_obj)
         @app_commands.describe(level="0, 1, or 2")
@@ -828,10 +872,9 @@ class ClaudeBot(discord.Client):
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
 
-            # Apply mode if specified
+            # Apply mode if specified (will be set on new thread's ThreadInfo)
             mode = mode.strip().lower()
-            if mode and mode in VALID_MODES:
-                self._store.mode = mode
+            new_thread_mode = mode if mode and mode in VALID_MODES else None
 
             repo = repo.strip()
             if repo:
@@ -844,13 +887,13 @@ class ClaudeBot(discord.Client):
                     )
                     return
                 await interaction.response.defer(ephemeral=True)
-                await self._create_new_session(interaction, repo_name)
+                await self._create_new_session(interaction, repo_name, mode=new_thread_mode)
             else:
                 repos = self._store.list_repos()
                 if len(repos) <= 1:
                     await interaction.response.defer(ephemeral=True)
                     repo_name, _ = self._store.get_active_repo()
-                    await self._create_new_session(interaction, repo_name)
+                    await self._create_new_session(interaction, repo_name, mode=new_thread_mode)
                 else:
                     view = discord.ui.View(timeout=60)
                     for name in repos:
@@ -1390,27 +1433,21 @@ class ClaudeBot(discord.Client):
                                 log.info("Injected /ref context into prompt in thread %s", ch_name)
 
                         await self._set_thread_processing(message.channel, True)
-                        ctx = self._ctx(channel_id, session_id=session_id, repo_name=repo_name)
+                        ctx = self._ctx(channel_id, session_id=session_id,
+                                        repo_name=repo_name, thread_info=info)
                         try:
                             await commands.on_text(ctx, text)
                         finally:
+                            self._persist_ctx_settings(ctx)
                             if was_pending:
                                 await self._finalize_pending_thread(channel_id, message.channel, text)
-                                # finalize may or may not rename; ensure processing is cleared
-                                await self._update_thread_name(
-                                    message.channel, self._store.mode, processing=False)
                             elif "new-session" in message.channel.name:
-                                # Smart title runs async; clear processing now
-                                await self._update_thread_name(
-                                    message.channel, self._store.mode, processing=False)
                                 summary = self._get_latest_summary(channel_id)
                                 asyncio.create_task(self._generate_smart_title(
                                     message.channel, text, summary))
-                            else:
-                                # Clear processing + sync mode
-                                await self._update_thread_name(
-                                    message.channel, self._store.mode, processing=False)
-                            # Apply tags + refresh dashboard (fire-and-forget)
+                            # Always: clear processing + sync mode
+                            await self._update_thread_name(
+                                message.channel, ctx.effective_mode, processing=False)
                             asyncio.create_task(self._try_apply_tags_after_run(channel_id))
                             asyncio.create_task(self._refresh_dashboard())
                         return
@@ -1439,14 +1476,18 @@ class ClaudeBot(discord.Client):
             asyncio.create_task(self._send_redirect(thread))
             # Run query in new thread
             await self._set_thread_processing(thread, True)
-            ctx = self._ctx(str(thread.id), repo_name=repo_name if repo_name != "_default" else None)
+            lookup = self._thread_to_project(str(thread.id))
+            t_info = lookup[1] if lookup else None
+            ctx = self._ctx(str(thread.id), repo_name=repo_name if repo_name != "_default" else None,
+                            thread_info=t_info)
             try:
                 await commands.on_text(ctx, text)
             finally:
+                self._persist_ctx_settings(ctx)
                 # Update mapping with real session_id
                 await self._update_pending_thread(str(thread.id))
                 # Clear processing + sync mode
-                await self._update_thread_name(thread, self._store.mode, processing=False)
+                await self._update_thread_name(thread, ctx.effective_mode, processing=False)
                 # Generate smart title (fire-and-forget)
                 summary = self._get_latest_summary(str(thread.id))
                 asyncio.create_task(self._generate_smart_title(thread, text, summary))
@@ -1617,7 +1658,8 @@ class ClaudeBot(discord.Client):
 
             async with self._emoji_lock:
                 is_proc, _, _ = channels.parse_thread_name(thread.name)
-                new_name = channels.build_thread_name(base, self._store.mode, is_proc)
+                thread_mode = info.mode or self._store.mode
+                new_name = channels.build_thread_name(base, thread_mode, is_proc)
                 await thread.edit(name=new_name)
 
             info.topic = title
@@ -1668,26 +1710,36 @@ class ClaudeBot(discord.Client):
         """
         if not isinstance(channel, discord.Thread):
             return
+        # Use per-thread mode if available, otherwise global default
+        lookup = self._thread_to_project(str(channel.id))
+        thread_mode = lookup[1].mode if lookup and lookup[1].mode else self._store.mode
         tags = None
         if processing and isinstance(channel.parent, discord.ForumChannel):
             tag_map = {t.name: t for t in channel.parent.available_tags}
+            if not tag_map:
+                tag_map = await channels.ensure_forum_tags(channel.parent)
             if "active" in tag_map:
                 tags = [tag_map["active"]]
-                mode = self._store.mode
-                if mode in tag_map:
-                    tags.append(tag_map[mode])
+                if thread_mode in tag_map:
+                    tags.append(tag_map[thread_mode])
         await self._update_thread_name(
-            channel, self._store.mode, processing=processing, applied_tags=tags,
+            channel, thread_mode, processing=processing, applied_tags=tags,
         )
 
     async def _create_new_session(
         self, interaction: discord.Interaction, repo_name: str | None,
-        *, redirect: bool = False,
+        *, redirect: bool = False, mode: str | None = None,
     ) -> None:
         """Create a new session thread."""
         repo_name = repo_name or "_default"
         thread = await self._get_or_create_session_thread(repo_name, None, "new-session")
         if thread:
+            # Apply per-thread mode if specified (e.g. /new mode:build)
+            if mode:
+                lookup = self._thread_to_project(str(thread.id))
+                if lookup:
+                    lookup[1].mode = mode
+                    self._save_forum_map()
             if redirect:
                 asyncio.create_task(self._send_redirect(thread))
             else:
@@ -1922,7 +1974,14 @@ class ClaudeBot(discord.Client):
         # --- Mode selection in new thread welcome embed ---
         if action == "mode_set" and instance_id in VALID_MODES:
             target_mode = instance_id
-            self._store.mode = target_mode
+            # Write to ThreadInfo (per-thread), not global store
+            thread_id = str(interaction.channel_id)
+            lookup = self._thread_to_project(thread_id)
+            if lookup:
+                lookup[1].mode = target_mode
+                self._save_forum_map()
+            else:
+                self._store.mode = target_mode  # fallback for unmapped channels
             # Update the welcome embed to reflect selected mode
             if interaction.message and interaction.message.embeds:
                 embed = interaction.message.embeds[0]
@@ -2005,9 +2064,12 @@ class ClaudeBot(discord.Client):
                 except Exception:
                     pass
                 asyncio.create_task(self._send_redirect(thread))
+                lookup_info = self._thread_to_project(str(thread.id))
+                ti = lookup_info[1] if lookup_info else None
                 ctx = self._ctx(
                     str(thread.id), session_id=session_id,
                     repo_name=repo_name if repo_name != "_default" else None,
+                    thread_info=ti,
                 )
                 source_msg_id = str(interaction.message.id) if interaction.message else None
                 await workflows.on_sess_resume(ctx, session_id, source_msg_id)
@@ -2034,16 +2096,19 @@ class ClaudeBot(discord.Client):
         if is_query:
             await self._set_thread_processing(interaction.channel, True)
 
-        prev_mode = self._store.mode
-        ctx = self._ctx(channel_id)
+        lookup = self._thread_to_project(channel_id)
+        t_info = lookup[1] if lookup else None
+        ctx = self._ctx(channel_id, thread_info=t_info)
+        prev_mode = ctx.effective_mode
         try:
             await commands.handle_callback(ctx, action, instance_id, source_msg_id)
         finally:
+            self._persist_ctx_settings(ctx)
             if is_query:
                 await self._set_thread_processing(interaction.channel, False)
                 asyncio.create_task(self._try_apply_tags_after_run(channel_id))
                 asyncio.create_task(self._refresh_dashboard())
             elif action.startswith("mode_"):
-                if self._store.mode != prev_mode:
-                    await self._update_thread_name(interaction.channel, self._store.mode)
+                if ctx.effective_mode != prev_mode:
+                    await self._update_thread_name(interaction.channel, ctx.effective_mode)
                 asyncio.create_task(self._refresh_dashboard())

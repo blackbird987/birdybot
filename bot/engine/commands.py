@@ -171,6 +171,7 @@ async def _run_query_inner(ctx: RequestContext, prompt: str) -> None:
     inst = ctx.store.create_instance(
         instance_type=InstanceType.QUERY,
         prompt=prompt,
+        mode=ctx.effective_mode,
     )
     inst.origin_platform = ctx.platform
     inst.repo_name = repo_name or ""
@@ -210,7 +211,7 @@ async def _run_query_inner(ctx: RequestContext, prompt: str) -> None:
         ctx.store.update_instance(inst)
 
     on_progress, on_stall, heartbeat = lifecycle.make_progress_callbacks(
-        ctx, inst, handle, ctx.store.verbose_level,
+        ctx, inst, handle, ctx.effective_verbose,
     )
 
     heartbeat_task = asyncio.create_task(heartbeat())
@@ -218,7 +219,7 @@ async def _run_query_inner(ctx: RequestContext, prompt: str) -> None:
     try:
         result = await ctx.runner.run(
             inst, on_progress=on_progress, on_stall=on_stall,
-            context=ctx.store.context,
+            context=ctx.effective_context,
         )
     finally:
         heartbeat_task.cancel()
@@ -327,7 +328,7 @@ async def _run_bg_task(ctx: RequestContext, inst: Instance) -> None:
         inst.status = InstanceStatus.RUNNING
         ctx.store.update_instance(inst)
 
-        result = await ctx.runner.run(inst, context=ctx.store.context)
+        result = await ctx.runner.run(inst, context=ctx.effective_context)
         lifecycle.finalize_run(ctx, inst, result)
 
         await lifecycle.send_result(
@@ -597,7 +598,7 @@ async def on_status(ctx: RequestContext) -> None:
         total_instances=ctx.store.instance_count(),
         repos=ctx.store.list_repos(),
         active_repo=active_repo,
-        context=ctx.store.context,
+        context=ctx.effective_context,
         schedule_count=len(ctx.store.list_schedules()),
         cli_version=_cli_version,
         pc_name=config.PC_NAME,
@@ -645,12 +646,12 @@ async def on_logs(ctx: RequestContext) -> None:
 async def on_mode(ctx: RequestContext, text: str) -> None:
     text = text.strip().lower()
     if text in VALID_MODES:
-        ctx.store.mode = text
+        ctx.update_mode(text)
         await ctx.messenger.send_text(ctx.channel_id, f"Mode: {mode_label(text)}")
     elif text:
         await ctx.messenger.send_text(ctx.channel_id, "Usage: /mode explore|plan|build")
     else:
-        await ctx.messenger.send_text(ctx.channel_id, f"Mode: {mode_label(ctx.store.mode)}")
+        await ctx.messenger.send_text(ctx.channel_id, f"Mode: {mode_label(ctx.effective_mode)}")
 
 
 # --- /verbose ---
@@ -659,14 +660,14 @@ async def on_verbose(ctx: RequestContext, text: str) -> None:
     _VERBOSE_LABELS = {0: "silent", 1: "normal", 2: "detailed"}
     text = text.strip()
     if text in ("0", "1", "2"):
-        ctx.store.verbose_level = int(text)
+        ctx.update_verbose(int(text))
         await ctx.messenger.send_text(
             ctx.channel_id, f"Verbose level: {text} ({_VERBOSE_LABELS[int(text)]})",
         )
     elif text:
         await ctx.messenger.send_text(ctx.channel_id, "Usage: /verbose 0|1|2")
     else:
-        level = ctx.store.verbose_level
+        level = ctx.effective_verbose
         await ctx.messenger.send_text(
             ctx.channel_id,
             f"Verbose: {level} ({_VERBOSE_LABELS.get(level, '?')})\n0 = silent, 1 = normal, 2 = detailed",
@@ -679,13 +680,13 @@ async def on_context(ctx: RequestContext, text: str) -> None:
     text = text.strip()
     if text.startswith("set "):
         ctx_text = text[4:].strip()
-        ctx.store.context = ctx_text
+        ctx.update_context(ctx_text)
         await ctx.messenger.send_text(ctx.channel_id, f"Context set: {ctx_text[:100]}")
     elif text == "clear":
-        ctx.store.context = None
+        ctx.update_context(None)
         await ctx.messenger.send_text(ctx.channel_id, "Context cleared.")
     else:
-        current = ctx.store.context
+        current = ctx.effective_context
         if current:
             await ctx.messenger.send_text(ctx.channel_id, f"Current context: {current}")
         else:
@@ -1369,7 +1370,7 @@ async def handle_callback(
 
     elif action in ("mode_explore", "mode_plan", "mode_build"):
         target = action.split("_", 1)[1]  # "explore", "plan", or "build"
-        ctx.store.mode = target
+        ctx.update_mode(target)
         # Update source message buttons to reflect new mode
         inst = ctx.store.get_instance(instance_id)
         if inst and source_msg_id:
