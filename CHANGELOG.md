@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.8.4 — Anti-Hedging Prompt Fix (2026-03-16)
+
 - Add anti-hedging prompt guidance to prevent Claude from second-guessing user confirmations (offer-accept-refuse UX bug)
 - Add reboot-specific nudge so Claude acts immediately when user requests a reboot
 
