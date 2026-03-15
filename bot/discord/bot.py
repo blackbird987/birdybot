@@ -705,7 +705,7 @@ class ClaudeBot(discord.Client):
             prev_mode = self._store.mode
             await self._run_slash(interaction, lambda ctx: commands.on_mode(ctx, mode))
             if self._store.mode != prev_mode:
-                await self._update_thread_mode_emoji(interaction.channel, self._store.mode)
+                await self._update_thread_name(interaction.channel, self._store.mode)
 
         @self.tree.command(name="verbose", description="Progress detail level", guild=guild_obj)
         @app_commands.describe(level="0, 1, or 2")
@@ -1378,7 +1378,7 @@ class ClaudeBot(discord.Client):
                                 message.channel, text, summary))
                         # Update thread emoji if mode changed (e.g. /mode command)
                         if self._store.mode != prev_mode:
-                            await self._update_thread_mode_emoji(message.channel, self._store.mode)
+                            await self._update_thread_name(message.channel, self._store.mode)
                         # Apply tags + refresh dashboard (fire-and-forget)
                         asyncio.create_task(self._try_apply_tags_after_run(channel_id))
                         asyncio.create_task(self._refresh_dashboard())
@@ -1414,7 +1414,7 @@ class ClaudeBot(discord.Client):
             await self._update_pending_thread(str(thread.id))
             # Update thread emoji if mode changed (e.g. /mode command via lobby)
             if self._store.mode != prev_mode:
-                await self._update_thread_mode_emoji(thread, self._store.mode)
+                await self._update_thread_name(thread, self._store.mode)
             # Generate smart title (fire-and-forget)
             summary = self._get_latest_summary(str(thread.id))
             asyncio.create_task(self._generate_smart_title(thread, text, summary))
@@ -1581,11 +1581,11 @@ class ClaudeBot(discord.Client):
                 info._title_generated = False  # Allow retry on next query
                 return
 
-            emoji = mode_emoji(self._store.mode)
             base = channels.build_title_name(title)
-            new_name = f"{emoji} {base}"[:100]
 
             async with self._emoji_lock:
+                is_proc, _, _ = channels.parse_thread_name(thread.name)
+                new_name = channels.build_thread_name(base, self._store.mode, is_proc)
                 await thread.edit(name=new_name)
 
             info.topic = title
@@ -1594,28 +1594,36 @@ class ClaudeBot(discord.Client):
         except Exception:
             log.debug("Smart title generation failed for thread %s", thread.id, exc_info=True)
 
-    async def _update_thread_mode_emoji(
-        self, channel: discord.abc.GuildChannel | discord.Thread | None, target_mode: str,
+    async def _update_thread_name(
+        self,
+        channel: discord.abc.GuildChannel | discord.Thread | None,
+        target_mode: str,
+        processing: bool | None = None,
+        applied_tags: list[discord.ForumTag] | None = None,
     ) -> None:
-        """Update a thread's name to reflect the current mode emoji."""
+        """Update a thread's name to reflect mode emoji and processing state.
+
+        processing=None preserves the current processing state from the name.
+        applied_tags batches a tag update into the same API call.
+        """
         if not isinstance(channel, discord.Thread):
             return
         async with self._emoji_lock:
-            emoji = mode_emoji(target_mode)
-            old_name = channel.name
-            # Strip existing mode emoji prefix
-            for e in MODE_EMOJI.values():
-                if old_name.startswith(e):
-                    old_name = old_name[len(e):].lstrip()
-                    break
-            new_name = f"{emoji} {old_name}"[:100]
-            if new_name == channel.name:
+            is_proc, _, topic = channels.parse_thread_name(channel.name)
+            proc = is_proc if processing is None else processing
+            new_name = channels.build_thread_name(topic, target_mode, proc)
+            kwargs: dict = {}
+            if new_name != channel.name:
+                kwargs["name"] = new_name
+            if applied_tags is not None:
+                kwargs["applied_tags"] = applied_tags[:5]
+            if not kwargs:
                 return
             try:
-                await channel.edit(name=new_name)
-                log.debug("Updated thread %s mode emoji -> %s", channel.id, target_mode)
+                await channel.edit(**kwargs)
+                log.debug("Updated thread %s name/tags (mode=%s, proc=%s)", channel.id, target_mode, proc)
             except Exception:
-                log.debug("Failed to update thread mode emoji", exc_info=True)
+                log.debug("Failed to update thread name/tags", exc_info=True)
 
     async def _create_new_session(
         self, interaction: discord.Interaction, repo_name: str | None,
@@ -1873,7 +1881,7 @@ class ClaudeBot(discord.Client):
             else:
                 await interaction.response.defer()
             # Update thread name emoji to match new mode
-            await self._update_thread_mode_emoji(interaction.channel, target_mode)
+            await self._update_thread_name(interaction.channel, target_mode)
             log.info("Mode set to %s via welcome button", target_mode)
             return
 
@@ -1974,5 +1982,5 @@ class ClaudeBot(discord.Client):
         # Refresh dashboard + thread emoji after mode switch (Discord-specific)
         if action.startswith("mode_"):
             if self._store.mode != prev_mode:
-                await self._update_thread_mode_emoji(interaction.channel, self._store.mode)
+                await self._update_thread_name(interaction.channel, self._store.mode)
             asyncio.create_task(self._refresh_dashboard())
