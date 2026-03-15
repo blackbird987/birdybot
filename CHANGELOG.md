@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.8.0 — Access Control & Ref Bugfix (2026-03-15)
+
 ### Bugfixes
 - Fix `/ref` context injection causing `error: unknown option` when referenced text starts with dashes — prompt now passed after `--` end-of-options separator
 
