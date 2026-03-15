@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 import discord
 
-from bot.platform.formatting import MODE_COLOR, MODE_DISPLAY, mode_emoji, mode_name
+from bot.platform.formatting import MODE_COLOR, MODE_DISPLAY, MODE_EMOJI, mode_emoji, mode_name
 
 log = logging.getLogger(__name__)
 
@@ -190,15 +190,15 @@ async def create_forum_post(
 
 async def ensure_forum_tags(forum: discord.ForumChannel) -> dict[str, discord.ForumTag]:
     """Create standard tags on a forum channel. Returns {name: tag} dict."""
-    desired = {
+    desired: dict[str, str | None] = {
         "active": "\U0001f504",      # 🔄  (status)
         "completed": "\u2705",       # ✅  (status)
         "failed": "\u274c",          # ❌  (status)
         "cli": None,
-        "build": "\U0001f7e2",    # 🟢
-        "explore": "\u26aa",      # ⚪
-        "plan": "\U0001f535",     # 🔵
     }
+    # Add mode tags from MODE_EMOJI (single source of truth)
+    for mode, emoji in MODE_EMOJI.items():
+        desired[mode] = emoji
     existing = {tag.name: tag for tag in forum.available_tags}
     missing = []
     for name, emoji in desired.items():

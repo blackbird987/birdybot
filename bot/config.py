@@ -154,8 +154,6 @@ Rebooting the bot:
 # Claude Code session/plan data lives here
 CLAUDE_PROJECTS_DIR: Path = Path.home() / ".claude" / "projects"
 
-# Explore mode allowed tools
-EXPLORE_TOOLS = "Read,Glob,Grep,WebSearch,WebFetch,Task,Skill,Bash(git *)"
 
 # --- Canned prompts for contextual action buttons ---
 

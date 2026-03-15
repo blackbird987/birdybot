@@ -22,7 +22,7 @@ from bot.discord.adapter import DiscordMessenger
 from bot.engine import commands
 from bot.engine import sessions as sessions_mod
 from bot.platform.base import RequestContext
-from bot.platform.formatting import MODE_COLOR, MODE_DISPLAY, VALID_MODES, mode_emoji, mode_label, mode_name
+from bot.platform.formatting import MODE_COLOR, MODE_DISPLAY, MODE_EMOJI, VALID_MODES, mode_emoji, mode_label, mode_name
 
 if TYPE_CHECKING:
     from bot.claude.runner import ClaudeRunner
@@ -596,7 +596,10 @@ class ClaudeBot(discord.Client):
             if not self._auth(interaction.user.id):
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
+            prev_mode = self._store.mode
             await self._run_slash(interaction, lambda ctx: commands.on_mode(ctx, mode))
+            if self._store.mode != prev_mode:
+                await self._update_thread_mode_emoji(interaction.channel, self._store.mode)
 
         @self.tree.command(name="verbose", description="Progress detail level", guild=guild_obj)
         @app_commands.describe(level="0, 1, or 2")
@@ -1183,6 +1186,7 @@ class ClaudeBot(discord.Client):
 
                         was_pending = not session_id
 
+                        prev_mode = self._store.mode
                         ctx = self._ctx(channel_id, session_id=session_id, repo_name=repo_name)
                         await commands.on_text(ctx, text)
 
@@ -1190,6 +1194,9 @@ class ClaudeBot(discord.Client):
                             await self._finalize_pending_thread(channel_id, message.channel, text)
                         elif "new-session" in message.channel.name:
                             await self._rename_thread_from_prompt(message.channel, text)
+                        # Update thread emoji if mode changed (e.g. /mode command)
+                        if self._store.mode != prev_mode:
+                            await self._update_thread_mode_emoji(message.channel, self._store.mode)
                         # Apply tags + refresh dashboard (fire-and-forget)
                         asyncio.create_task(self._try_apply_tags_after_run(channel_id))
                         asyncio.create_task(self._refresh_dashboard())
@@ -1358,6 +1365,28 @@ class ClaudeBot(discord.Client):
             log.info("Renamed thread %s -> %s", thread.id, new_name)
         except Exception:
             log.warning("Failed to rename thread %s -> %s", thread.id, new_name, exc_info=True)
+
+    async def _update_thread_mode_emoji(
+        self, channel: discord.abc.GuildChannel | discord.Thread | None, target_mode: str,
+    ) -> None:
+        """Update a thread's name to reflect the current mode emoji."""
+        if not isinstance(channel, discord.Thread):
+            return
+        emoji = mode_emoji(target_mode)
+        old_name = channel.name
+        # Strip existing mode emoji prefix
+        for e in MODE_EMOJI.values():
+            if old_name.startswith(e):
+                old_name = old_name[len(e):].lstrip()
+                break
+        new_name = f"{emoji} {old_name}"[:100]
+        if new_name == channel.name:
+            return
+        try:
+            await channel.edit(name=new_name)
+            log.debug("Updated thread %s mode emoji -> %s", channel.id, target_mode)
+        except Exception:
+            log.debug("Failed to update thread mode emoji", exc_info=True)
 
     async def _create_new_session(
         self, interaction: discord.Interaction, repo_name: str | None,
@@ -1577,20 +1606,7 @@ class ClaudeBot(discord.Client):
             else:
                 await interaction.response.defer()
             # Update thread name emoji to match new mode
-            thread = interaction.channel
-            if isinstance(thread, discord.Thread):
-                emoji = mode_emoji(target_mode)
-                # Strip old mode emoji prefix if present, then prepend new one
-                old_name = thread.name
-                for e in ("\u26aa", "\U0001f535", "\U0001f7e2"):
-                    if old_name.startswith(e):
-                        old_name = old_name[len(e):].lstrip()
-                        break
-                new_name = f"{emoji} {old_name}"[:100]
-                try:
-                    await thread.edit(name=new_name)
-                except Exception:
-                    log.debug("Failed to update thread name emoji", exc_info=True)
+            await self._update_thread_mode_emoji(interaction.channel, target_mode)
             log.info("Mode set to %s via welcome button", target_mode)
             return
 
@@ -1684,9 +1700,12 @@ class ClaudeBot(discord.Client):
         channel_id = str(interaction.channel_id)
         source_msg_id = str(interaction.message.id) if interaction.message else None
 
+        prev_mode = self._store.mode
         ctx = self._ctx(channel_id)
         await commands.handle_callback(ctx, action, instance_id, source_msg_id)
 
-        # Refresh dashboard after mode switch (Discord-specific)
+        # Refresh dashboard + thread emoji after mode switch (Discord-specific)
         if action.startswith("mode_"):
+            if self._store.mode != prev_mode:
+                await self._update_thread_mode_emoji(interaction.channel, self._store.mode)
             asyncio.create_task(self._refresh_dashboard())

@@ -294,8 +294,12 @@ class ClaudeRunner:
         if instance.session_id:
             cmd.extend(["--resume", instance.session_id])
 
-        # Always use full permissions (single-user bot on subscription)
-        cmd.extend(["--permission-mode", "bypassPermissions"])
+        # Map bot mode to CLI permission mode
+        if instance.mode == "build":
+            cmd.extend(["--permission-mode", "bypassPermissions"])
+        else:
+            # explore and plan: read-only (CLI enforces no Write/Edit)
+            cmd.extend(["--permission-mode", "plan"])
 
         return cmd
 
