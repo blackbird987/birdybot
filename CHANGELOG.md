@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- Improved plan review prompts: structured format with tags, priority levels, and character budget for more actionable reviews
+- Fix: smart title generation race condition — claim flag early to prevent duplicate concurrent title tasks
+- Fix: process cleanup in title generation — await proc.wait() after kill to prevent zombie processes
+- Fix: title regex now correctly strips markdown header prefixes (e.g. "# Title")
+- Removed unused _rename_thread_from_prompt method (superseded by smart titles)
+- Bump expanded result view budget from 3800 to 4000 chars
+
 ## v0.4.0 — Thread References & Smart Titles (2026-03-15)
 
 ### Thread References

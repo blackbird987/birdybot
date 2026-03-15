@@ -156,7 +156,8 @@ async def _generate_title_text(prompt: str, summary: str = "") -> str | None:
         if proc:
             try:
                 proc.kill()
-            except ProcessLookupError:
+                await proc.wait()
+            except (ProcessLookupError, OSError):
                 pass
         return None
     except Exception:
@@ -164,7 +165,8 @@ async def _generate_title_text(prompt: str, summary: str = "") -> str | None:
         if proc:
             try:
                 proc.kill()
-            except ProcessLookupError:
+                await proc.wait()
+            except (ProcessLookupError, OSError):
                 pass
         return None
 
@@ -181,8 +183,9 @@ async def _generate_title_text(prompt: str, summary: str = "") -> str | None:
 
     # Take first line only (LLM might add explanation on subsequent lines)
     title = result.result_text.strip().split("\n")[0].strip()
-    # Strip markdown formatting, quotes, trailing punctuation
-    title = re.sub(r'[*_`#]', '', title)
+    # Strip markdown formatting: leading # (headers), inline *_`
+    title = re.sub(r'^#+\s*', '', title)
+    title = re.sub(r'[*_`]', '', title)
     title = title.strip('"\'').strip()
     title = re.sub(r'[.!?:]+$', '', title).strip()
     return title if len(title) >= 3 else None
@@ -1539,19 +1542,6 @@ class ClaudeBot(discord.Client):
         except Exception:
             log.debug("Failed to update dashboard", exc_info=True)
 
-    async def _rename_thread_from_prompt(
-        self, thread: discord.Thread, prompt: str,
-    ) -> None:
-        """Rename a 'new-session' thread based on the first prompt."""
-        emoji = mode_emoji(self._store.mode)
-        base = channels.build_channel_name(prompt)
-        new_name = f"{emoji} {base}"[:100]
-        try:
-            await thread.edit(name=new_name)
-            log.info("Renamed thread %s -> %s", thread.id, new_name)
-        except Exception:
-            log.warning("Failed to rename thread %s -> %s", thread.id, new_name, exc_info=True)
-
     def _get_latest_summary(self, thread_id: str) -> str:
         """Get summary from the most recent instance for this thread's session."""
         lookup = self._thread_to_project(thread_id)
@@ -1582,9 +1572,13 @@ class ClaudeBot(discord.Client):
             if info._title_generated:
                 return
 
+            # Claim early to prevent duplicate concurrent tasks
+            info._title_generated = True
+
             title = await _generate_title_text(prompt, summary)
             if not title:
                 log.debug("Title generation returned empty for thread %s", thread_id)
+                info._title_generated = False  # Allow retry on next query
                 return
 
             emoji = mode_emoji(self._store.mode)
@@ -1594,7 +1588,6 @@ class ClaudeBot(discord.Client):
             async with self._emoji_lock:
                 await thread.edit(name=new_name)
 
-            info._title_generated = True
             info.topic = title
             self._save_forum_map()
             log.info("Smart title for thread %s: %s", thread_id, new_name)
