@@ -1393,8 +1393,7 @@ class ClaudeBot(discord.Client):
                         asyncio.create_task(self._set_thread_processing(message.channel, True))
                         ctx = self._ctx(channel_id, session_id=session_id,
                                         repo_name=repo_name, thread_info=info)
-                        ctx.resolve_session_id = lambda _info=info: _info.session_id or None
-                        ctx.on_session_resolved = lambda sid, _tid=channel_id: self._set_thread_session(_tid, sid)
+                        self._attach_session_callbacks(ctx, info, channel_id)
                         try:
                             await commands.on_text(ctx, text)
                         finally:
@@ -1445,8 +1444,7 @@ class ClaudeBot(discord.Client):
             ctx = self._ctx(tid, repo_name=repo_name if repo_name != "_default" else None,
                             thread_info=t_info)
             if t_info:
-                ctx.resolve_session_id = lambda _info=t_info: _info.session_id or None
-                ctx.on_session_resolved = lambda sid, _tid=tid: self._set_thread_session(_tid, sid)
+                self._attach_session_callbacks(ctx, t_info, tid)
             try:
                 await commands.on_text(ctx, text)
             finally:
@@ -1755,6 +1753,11 @@ class ClaudeBot(discord.Client):
     async def _send_redirect(self, thread: discord.Thread) -> None:
         """Post a redirect link in lobby, auto-delete after 5s."""
         await self._send_temp_lobby_msg(f"\u2192 <#{thread.id}>")
+
+    def _attach_session_callbacks(self, ctx, thread_info, thread_id: str) -> None:
+        """Wire up session resolution callbacks on a RequestContext."""
+        ctx.resolve_session_id = lambda _info=thread_info: _info.session_id or None
+        ctx.on_session_resolved = lambda sid, _tid=thread_id: self._set_thread_session(_tid, sid)
 
     def _set_thread_session(self, thread_id: str, session_id: str) -> None:
         """Write session_id to ThreadInfo immediately (called from engine callback)."""

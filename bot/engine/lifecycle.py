@@ -97,22 +97,16 @@ async def run_instance(
     # Check if the instance requested a bot reboot
     await check_reboot_request(ctx)
 
-
 def _repo_has_changes(repo_path: str) -> bool:
     """Check if a repo has uncommitted changes (staged or unstaged)."""
     try:
         r = subprocess.run(
-            ["git", "diff", "--quiet"],
-            cwd=repo_path, capture_output=True, timeout=5,
+            ["git", "status", "--porcelain"],
+            cwd=repo_path, capture_output=True, timeout=5, text=True,
         )
-        if r.returncode != 0:
-            return True
-        r = subprocess.run(
-            ["git", "diff", "--cached", "--quiet"],
-            cwd=repo_path, capture_output=True, timeout=5,
-        )
-        return r.returncode != 0
+        return bool(r.stdout.strip())
     except Exception:
+        log.warning("Failed to check repo changes in %s", repo_path, exc_info=True)
         return False
 
 

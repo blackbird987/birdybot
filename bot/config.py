@@ -231,6 +231,7 @@ PLAN_REVIEW_PROMPT = (
     '- Never include code snippets or diffs.\n'
     '- Keep the entire response under 3800 characters.'
 )
+
 APPLY_REVISIONS_PROMPT = (
     'Apply the revisions you proposed above to the plan. Work in priority '
     'order (Critical first, then High, Medium, Low). Output the complete '
