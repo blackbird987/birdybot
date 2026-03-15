@@ -38,6 +38,12 @@ log = logging.getLogger(__name__)
 
 _DISCORD_EPOCH_MS = 1420070400000
 
+# Button callback actions that trigger long-running LLM queries
+_QUERY_ACTIONS: frozenset[str] = frozenset({
+    "retry", "plan", "build", "review_plan", "apply_revisions",
+    "review_code", "commit", "done",
+})
+
 
 def _snowflake_age(snowflake_id: int) -> str:
     """Human-readable age from a Discord snowflake ID."""
@@ -1366,22 +1372,30 @@ class ClaudeBot(discord.Client):
                                 text = f"{ref_text}\n\n{text}"
                                 log.info("Injected /ref context into prompt in thread %s", ch_name)
 
-                        prev_mode = self._store.mode
+                        await self._set_thread_processing(message.channel, True)
                         ctx = self._ctx(channel_id, session_id=session_id, repo_name=repo_name)
-                        await commands.on_text(ctx, text)
-
-                        if was_pending:
-                            await self._finalize_pending_thread(channel_id, message.channel, text)
-                        elif "new-session" in message.channel.name:
-                            summary = self._get_latest_summary(channel_id)
-                            asyncio.create_task(self._generate_smart_title(
-                                message.channel, text, summary))
-                        # Update thread emoji if mode changed (e.g. /mode command)
-                        if self._store.mode != prev_mode:
-                            await self._update_thread_name(message.channel, self._store.mode)
-                        # Apply tags + refresh dashboard (fire-and-forget)
-                        asyncio.create_task(self._try_apply_tags_after_run(channel_id))
-                        asyncio.create_task(self._refresh_dashboard())
+                        try:
+                            await commands.on_text(ctx, text)
+                        finally:
+                            if was_pending:
+                                await self._finalize_pending_thread(channel_id, message.channel, text)
+                                # finalize may or may not rename; ensure processing is cleared
+                                await self._update_thread_name(
+                                    message.channel, self._store.mode, processing=False)
+                            elif "new-session" in message.channel.name:
+                                # Smart title runs async; clear processing now
+                                await self._update_thread_name(
+                                    message.channel, self._store.mode, processing=False)
+                                summary = self._get_latest_summary(channel_id)
+                                asyncio.create_task(self._generate_smart_title(
+                                    message.channel, text, summary))
+                            else:
+                                # Clear processing + sync mode
+                                await self._update_thread_name(
+                                    message.channel, self._store.mode, processing=False)
+                            # Apply tags + refresh dashboard (fire-and-forget)
+                            asyncio.create_task(self._try_apply_tags_after_run(channel_id))
+                            asyncio.create_task(self._refresh_dashboard())
                         return
 
             # --- Other channel (unmapped): no session ---
@@ -1407,20 +1421,21 @@ class ClaudeBot(discord.Client):
             # Post redirect
             asyncio.create_task(self._send_redirect(thread))
             # Run query in new thread
-            prev_mode = self._store.mode
+            await self._set_thread_processing(thread, True)
             ctx = self._ctx(str(thread.id), repo_name=repo_name if repo_name != "_default" else None)
-            await commands.on_text(ctx, text)
-            # Update mapping with real session_id
-            await self._update_pending_thread(str(thread.id))
-            # Update thread emoji if mode changed (e.g. /mode command via lobby)
-            if self._store.mode != prev_mode:
-                await self._update_thread_name(thread, self._store.mode)
-            # Generate smart title (fire-and-forget)
-            summary = self._get_latest_summary(str(thread.id))
-            asyncio.create_task(self._generate_smart_title(thread, text, summary))
-            # Apply tags + refresh dashboard
-            asyncio.create_task(self._try_apply_tags_after_run(str(thread.id)))
-            asyncio.create_task(self._refresh_dashboard())
+            try:
+                await commands.on_text(ctx, text)
+            finally:
+                # Update mapping with real session_id
+                await self._update_pending_thread(str(thread.id))
+                # Clear processing + sync mode
+                await self._update_thread_name(thread, self._store.mode, processing=False)
+                # Generate smart title (fire-and-forget)
+                summary = self._get_latest_summary(str(thread.id))
+                asyncio.create_task(self._generate_smart_title(thread, text, summary))
+                # Apply tags + refresh dashboard
+                asyncio.create_task(self._try_apply_tags_after_run(str(thread.id)))
+                asyncio.create_task(self._refresh_dashboard())
 
     async def _apply_thread_tags(self, thread: discord.Thread, status: str, origin: str = "bot", mode: str | None = None) -> None:
         """Apply forum tags to a thread based on status + mode. Fire-and-forget safe."""
@@ -1624,6 +1639,29 @@ class ClaudeBot(discord.Client):
                 log.debug("Updated thread %s name/tags (mode=%s, proc=%s)", channel.id, target_mode, proc)
             except Exception:
                 log.debug("Failed to update thread name/tags", exc_info=True)
+
+    async def _set_thread_processing(
+        self,
+        channel: discord.abc.GuildChannel | discord.Thread | None,
+        processing: bool,
+    ) -> None:
+        """Set or clear the processing indicator on a thread name.
+
+        When setting, batches the 'active' tag + mode tag in the same API call.
+        """
+        if not isinstance(channel, discord.Thread):
+            return
+        tags = None
+        if processing and isinstance(channel.parent, discord.ForumChannel):
+            tag_map = {t.name: t for t in channel.parent.available_tags}
+            if "active" in tag_map:
+                tags = [tag_map["active"]]
+                mode = self._store.mode
+                if mode in tag_map:
+                    tags.append(tag_map[mode])
+        await self._update_thread_name(
+            channel, self._store.mode, processing=processing, applied_tags=tags,
+        )
 
     async def _create_new_session(
         self, interaction: discord.Interaction, repo_name: str | None,
@@ -1975,12 +2013,20 @@ class ClaudeBot(discord.Client):
         channel_id = str(interaction.channel_id)
         source_msg_id = str(interaction.message.id) if interaction.message else None
 
+        is_query = action in _QUERY_ACTIONS
+        if is_query:
+            await self._set_thread_processing(interaction.channel, True)
+
         prev_mode = self._store.mode
         ctx = self._ctx(channel_id)
-        await commands.handle_callback(ctx, action, instance_id, source_msg_id)
-
-        # Refresh dashboard + thread emoji after mode switch (Discord-specific)
-        if action.startswith("mode_"):
-            if self._store.mode != prev_mode:
-                await self._update_thread_name(interaction.channel, self._store.mode)
-            asyncio.create_task(self._refresh_dashboard())
+        try:
+            await commands.handle_callback(ctx, action, instance_id, source_msg_id)
+        finally:
+            if is_query:
+                await self._set_thread_processing(interaction.channel, False)
+                asyncio.create_task(self._try_apply_tags_after_run(channel_id))
+                asyncio.create_task(self._refresh_dashboard())
+            elif action.startswith("mode_"):
+                if self._store.mode != prev_mode:
+                    await self._update_thread_name(interaction.channel, self._store.mode)
+                asyncio.create_task(self._refresh_dashboard())
