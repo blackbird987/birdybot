@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Tune expanded result view budget from 4000 to 3900 chars for safer Discord embed limits
+
 ## v0.4.1 — Review Prompts & Title Fixes (2026-03-15)
 
 - Improved plan review prompts: structured format with tags, priority levels, and character budget for more actionable reviews

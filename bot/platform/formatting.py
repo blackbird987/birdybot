@@ -379,7 +379,7 @@ def format_result_md(instance: Instance) -> str:
     return "\n".join(parts)
 
 
-def format_expanded_result_md(instance: Instance, result_text: str, budget: int = 4000) -> str:
+def format_expanded_result_md(instance: Instance, result_text: str, budget: int = 3900) -> str:
     """Format full result text for expanded view, truncated to budget."""
     header = f"**{instance.display_id()}**\n\n"
     text = redact_secrets(result_text)
