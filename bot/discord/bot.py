@@ -573,8 +573,15 @@ class ClaudeBot(discord.Client):
     async def _get_or_create_session_thread(
         self, repo_name: str, session_id: str | None, topic: str,
         origin: str = "bot",
+        forum_channel_id: str | None = None,
+        user_id: str | None = None,
+        user_name: str | None = None,
     ) -> discord.Thread | None:
-        """Find existing thread for session, or create a new one in the repo's forum."""
+        """Find existing thread for session, or create a new one in the repo's forum.
+
+        If forum_channel_id is provided, create the thread in that forum (personal
+        user forum) instead of the repo's default forum.
+        """
         # Check if session already has a thread
         if session_id:
             result = self._session_to_thread(session_id)
@@ -594,7 +601,15 @@ class ClaudeBot(discord.Client):
                 for proj in self._forum_projects.values():
                     proj.threads.pop(tid, None)
 
-        forum = await self._get_or_create_forum(repo_name)
+        # Resolve the target forum
+        if forum_channel_id:
+            guild = self.get_guild(self._guild_id)
+            forum = guild.get_channel(int(forum_channel_id)) if guild else None
+            if not forum or not isinstance(forum, discord.ForumChannel):
+                log.warning("Personal forum %s not found, falling back to repo forum", forum_channel_id)
+                forum = await self._get_or_create_forum(repo_name)
+        else:
+            forum = await self._get_or_create_forum(repo_name)
         if not forum:
             return None
 
@@ -618,15 +633,30 @@ class ClaudeBot(discord.Client):
                 current_mode=self._store.mode,
             )
 
+            # Apply repo tag in personal forums
+            if forum_channel_id:
+                tag_map = {t.name: t for t in forum.available_tags}
+                repo_tag = tag_map.get(repo_name)
+                if repo_tag:
+                    try:
+                        await thread.edit(applied_tags=[repo_tag])
+                    except Exception:
+                        log.warning("Failed to apply repo tag %s to thread %s", repo_name, thread.id)
+
             # Store mapping
-            proj = self._forum_projects[repo_name]
-            proj.threads[str(thread.id)] = ThreadInfo(
-                thread_id=str(thread.id),
-                session_id=session_id,
-                origin=origin,
-                topic=topic,
-            )
-            self._save_forum_map()
+            proj = self._forum_projects.get(repo_name)
+            if proj:
+                proj.threads[str(thread.id)] = ThreadInfo(
+                    thread_id=str(thread.id),
+                    session_id=session_id,
+                    origin=origin,
+                    topic=topic,
+                    user_id=user_id,
+                    user_name=user_name,
+                )
+                self._save_forum_map()
+            else:
+                log.warning("No ForumProject for repo %s — thread %s created but unmapped", repo_name, thread.id)
             return thread
 
     async def _sync_single_thread(self, thread_id: str) -> None:
@@ -988,35 +1018,69 @@ class ClaudeBot(discord.Client):
             for key, name in MODE_DISPLAY.items()
         ])
         async def cmd_new(interaction: discord.Interaction, repo: str = "", mode: str = ""):
-            if not self._is_owner(interaction.user.id):
-                await interaction.response.send_message("Unauthorized", ephemeral=True)
-                return
+            is_owner = self._is_owner(interaction.user.id)
+            if not is_owner:
+                access = self._check_access(interaction.user.id)
+                if not access.allowed:
+                    await interaction.response.send_message("Unauthorized", ephemeral=True)
+                    return
+
+            # Resolve user context for non-owners
+            user_id = None if is_owner else str(interaction.user.id)
+            user_name = None if is_owner else interaction.user.display_name
 
             # Apply mode if specified (will be set on new thread's ThreadInfo)
             mode = mode.strip().lower()
             new_thread_mode = mode if mode and mode in VALID_MODES else None
 
+            # Determine available repos and enforce mode ceiling for non-owners
+            if is_owner:
+                available_repos = list(self._store.list_repos().keys())
+            else:
+                cfg = load_access_config()
+                ua = cfg.users.get(str(interaction.user.id))
+                if ua and ua.global_access:
+                    available_repos = list(self._store.list_repos().keys())
+                elif ua:
+                    all_repos = self._store.list_repos()
+                    available_repos = [r for r in ua.repos if r in all_repos]
+                else:
+                    available_repos = []
+
+                # Enforce mode ceiling
+                if new_thread_mode:
+                    grant = check_user_access(cfg, str(interaction.user.id), repo.strip() or None)
+                    if grant:
+                        new_thread_mode = access_effective_mode(grant, new_thread_mode)
+
             repo = repo.strip()
             if repo:
-                repos = self._store.list_repos()
-                lower_map = {k.lower(): k for k in repos}
-                repo_name = repo if repo in repos else lower_map.get(repo.lower())
+                lower_map = {k.lower(): k for k in available_repos}
+                repo_name = repo if repo in available_repos else lower_map.get(repo.lower())
                 if not repo_name:
                     await interaction.response.send_message(
                         f"Repo '{repo}' not found.", ephemeral=True,
                     )
                     return
                 await interaction.response.defer(ephemeral=True)
-                await self._create_new_session(interaction, repo_name, mode=new_thread_mode)
+                await self._create_new_session(
+                    interaction, repo_name, mode=new_thread_mode,
+                    user_id=user_id, user_name=user_name,
+                )
             else:
-                repos = self._store.list_repos()
-                if len(repos) <= 1:
+                if len(available_repos) == 0:
+                    await interaction.response.send_message(
+                        "No repos available.", ephemeral=True,
+                    )
+                elif len(available_repos) == 1:
                     await interaction.response.defer(ephemeral=True)
-                    repo_name, _ = self._store.get_active_repo()
-                    await self._create_new_session(interaction, repo_name, mode=new_thread_mode)
+                    await self._create_new_session(
+                        interaction, available_repos[0], mode=new_thread_mode,
+                        user_id=user_id, user_name=user_name,
+                    )
                 else:
                     view = discord.ui.View(timeout=60)
-                    for name in repos:
+                    for name in available_repos:
                         btn = discord.ui.Button(
                             label=name,
                             style=discord.ButtonStyle.primary,
@@ -1749,13 +1813,31 @@ class ClaudeBot(discord.Client):
                                 log.info("Adopted user forum thread %s repo=%s user=%s",
                                          channel_id, repo_name, user_forum_info[1])
                             elif not repo_name:
-                                # Thread in user forum but no repo tag selected
-                                await self.messenger.send_text(
-                                    channel_id,
-                                    "Please select a repo tag on this thread so I know "
-                                    "which project to work in.",
-                                )
-                                return
+                                # No repo tag — try to auto-select if user has exactly one repo
+                                uid = user_forum_info[0]
+                                cfg = load_access_config()
+                                ua = cfg.users.get(uid)
+                                user_repos = [r for r in (ua.repos if ua else {}) if r in self._forum_projects]
+                                if len(user_repos) == 1:
+                                    repo_name = user_repos[0]
+                                    proj = self._forum_projects[repo_name]
+                                    info = ThreadInfo(
+                                        thread_id=channel_id, origin="bot",
+                                        user_id=user_forum_info[0],
+                                        user_name=user_forum_info[1],
+                                    )
+                                    proj.threads[channel_id] = info
+                                    self._save_forum_map()
+                                    lookup = (proj, info)
+                                    log.info("Auto-selected single repo %s for user %s",
+                                             repo_name, user_forum_info[1])
+                                else:
+                                    await self.messenger.send_text(
+                                        channel_id,
+                                        "Please select a repo tag on this thread so I know "
+                                        "which project to work in.",
+                                    )
+                                    return
 
                     if lookup:
                         proj, info = lookup
@@ -2166,10 +2248,28 @@ class ClaudeBot(discord.Client):
     async def _create_new_session(
         self, interaction: discord.Interaction, repo_name: str | None,
         *, redirect: bool = False, mode: str | None = None,
+        user_id: str | None = None, user_name: str | None = None,
     ) -> None:
-        """Create a new session thread."""
+        """Create a new session thread.
+
+        If user_id is set (non-owner), the thread is created in the user's
+        personal forum instead of the repo forum.
+        """
         repo_name = repo_name or "_default"
-        thread = await self._get_or_create_session_thread(repo_name, None, "new-session")
+
+        # Resolve personal forum for non-owners
+        forum_channel_id = None
+        if user_id:
+            cfg = load_access_config()
+            ua = cfg.users.get(user_id)
+            if ua and ua.forum_channel_id:
+                forum_channel_id = ua.forum_channel_id
+
+        thread = await self._get_or_create_session_thread(
+            repo_name, None, "new-session",
+            forum_channel_id=forum_channel_id,
+            user_id=user_id, user_name=user_name,
+        )
         if thread:
             # Apply per-thread mode if specified (e.g. /new mode:build)
             if mode:
@@ -2177,18 +2277,19 @@ class ClaudeBot(discord.Client):
                 if lookup:
                     lookup[1].mode = mode
                     self._save_forum_map()
-            if redirect:
-                asyncio.create_task(self._send_redirect(thread))
-            else:
+            # Non-owners can't see lobby, so always use ephemeral followup
+            if user_id or not redirect:
                 await interaction.followup.send(
                     f"Fresh session created: <#{thread.id}>", ephemeral=True,
                 )
+            else:
+                asyncio.create_task(self._send_redirect(thread))
         else:
             msg = "Could not create thread."
-            if redirect:
-                asyncio.create_task(self._send_temp_lobby_msg(msg))
-            else:
+            if user_id or not redirect:
                 await interaction.followup.send(msg, ephemeral=True)
+            else:
+                asyncio.create_task(self._send_temp_lobby_msg(msg))
 
     async def _send_temp_lobby_msg(self, text: str, delay: float = 5) -> None:
         """Send a temporary message in lobby that auto-deletes."""
@@ -2499,7 +2600,15 @@ class ClaudeBot(discord.Client):
         # --- New session with repo picker ---
         if action == "new_repo":
             repo_name = instance_id
-            await self._create_new_session(interaction, repo_name, redirect=True)
+            user_id = None
+            user_name = None
+            if not btn_access.is_owner:
+                user_id = str(interaction.user.id)
+                user_name = interaction.user.display_name
+            await self._create_new_session(
+                interaction, repo_name, redirect=True,
+                user_id=user_id, user_name=user_name,
+            )
             try:
                 await interaction.delete_original_response()
             except Exception:
@@ -2551,9 +2660,25 @@ class ClaudeBot(discord.Client):
             thread_id = str(interaction.channel_id)
             lookup = self._thread_to_project(thread_id)
             repo_name = lookup[0].repo_name if lookup else None
+            user_id = None
+            user_name = None
+            if not btn_access.is_owner:
+                user_id = str(interaction.user.id)
+                user_name = interaction.user.display_name
+                # Fall back to user's granted repo, not owner's active repo
+                if not repo_name:
+                    cfg = load_access_config()
+                    ua = cfg.users.get(user_id)
+                    if ua and ua.repos:
+                        granted = [r for r in ua.repos if r in self._forum_projects]
+                        if granted:
+                            repo_name = granted[0]
             if not repo_name:
                 repo_name, _ = self._store.get_active_repo()
-            await self._create_new_session(interaction, repo_name)
+            await self._create_new_session(
+                interaction, repo_name,
+                user_id=user_id, user_name=user_name,
+            )
             try:
                 await interaction.delete_original_response()
             except Exception:

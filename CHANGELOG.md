@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Auto-select repo for user forum threads when user has access to only one repo (no tag needed)
+- Allow non-owner users to create sessions via `/new` command and repo picker buttons — threads route to their personal forum with correct repo tags
+- Non-owner `/new` redirects use ephemeral followup instead of lobby redirect (which they can't see)
+
 ## v0.8.1 — Mode Ceiling Security Fixes (2026-03-15)
 
 ### Security Fixes
