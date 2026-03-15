@@ -520,6 +520,20 @@ class ClaudeBot(discord.Client):
             display_name, repo_names,
             owner_id=self._discord_user_id,
         )
+
+        # Create welcome post if not already done
+        if forum:
+            cfg = load_access_config()
+            ua = cfg.users.get(str(user_id))
+            if ua and not ua.welcome_posted:
+                try:
+                    await channels.create_user_welcome_post(forum, display_name, repo_names)
+                    ua.welcome_posted = True
+                    access_mod.save_access_config(cfg)
+                except Exception:
+                    log.warning("Failed to create welcome post in forum %s for user %s, will retry next startup",
+                                forum.id, user_id, exc_info=True)
+
         return forum
 
     async def _sync_user_forum_tags(self, user_id: str) -> None:

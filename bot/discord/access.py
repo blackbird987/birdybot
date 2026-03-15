@@ -64,6 +64,7 @@ class UserAccess:
     repos: dict[str, RepoAccess] = field(default_factory=dict)  # repo_name -> access
     global_access: bool = False
     forum_channel_id: str | None = None  # their personal forum
+    welcome_posted: bool = False         # welcome post created in personal forum
 
     def to_dict(self) -> dict:
         return {
@@ -72,6 +73,7 @@ class UserAccess:
             "repos": {k: v.to_dict() for k, v in self.repos.items()},
             "global_access": self.global_access,
             "forum_channel_id": self.forum_channel_id,
+            "welcome_posted": self.welcome_posted,
         }
 
     @classmethod
@@ -83,6 +85,7 @@ class UserAccess:
             repos=repos,
             global_access=d.get("global_access", False),
             forum_channel_id=d.get("forum_channel_id"),
+            welcome_posted=d.get("welcome_posted", False),
         )
 
 

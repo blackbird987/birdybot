@@ -340,6 +340,40 @@ async def sync_user_forum_tags(
         log.warning("Failed to sync user forum tags", exc_info=True)
 
 
+async def create_user_welcome_post(
+    forum: discord.ForumChannel,
+    display_name: str,
+    repo_names: list[str],
+) -> tuple[discord.Thread, discord.Message]:
+    """Create a welcome post in a user's personal forum with a New Session button."""
+    embed = discord.Embed(
+        title=f"Welcome, {display_name}!",
+        description=(
+            "This is your personal workspace.\n\n"
+            "**Start a session** using the button below, "
+            "or create a post and start chatting directly."
+        ),
+        color=discord.Color.blurple(),
+    )
+    if repo_names:
+        embed.add_field(
+            name="Available Repos",
+            value="\n".join(f"\u2022 {r}" for r in repo_names),
+            inline=False,
+        )
+
+    view = discord.ui.View(timeout=None)
+    view.add_item(discord.ui.Button(
+        label="New Session",
+        style=discord.ButtonStyle.green,
+        custom_id="new:welcome",
+    ))
+
+    result = await forum.create_thread(name="Welcome", embed=embed, view=view)
+    log.info("Created welcome post %s in user forum %s", result.thread.id, forum.name)
+    return result.thread, result.message
+
+
 # --- Channel helpers ---
 
 
