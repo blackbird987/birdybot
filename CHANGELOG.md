@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.3.14 — AskUserQuestion Detection & Repo Paths (2026-03-15)
+
 ### AskUserQuestion Detection
 - Detect `AskUserQuestion` tool_use in stream-json output — extract the question text, terminate the process, and display the question as the result instead of hanging until inactivity timeout
 - Add `needs_input` flag to `RunResult` — lifecycle shows ❓ icon + "asking a question" status, marks COMPLETED (not FAILED)
