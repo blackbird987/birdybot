@@ -797,14 +797,17 @@ def _validate_repo_name(name: str) -> str | None:
     return None
 
 
-def _resolve_default_path(name: str, store) -> Path | None:
-    """Sibling of active repo, or first registered repo's parent."""
+def _resolve_default_path(name: str, store) -> tuple[Path, str] | None:
+    """Resolve default path for a new repo. Returns (path, source) or None."""
+    from bot.config import REPOS_BASE_DIR
+    if REPOS_BASE_DIR:
+        return REPOS_BASE_DIR / name, "REPOS_BASE_DIR"
     _, active_path = store.get_active_repo()
     if active_path:
-        return Path(active_path).parent / name
+        return Path(active_path).parent / name, "sibling of active repo"
     repos = store.list_repos()
     if repos:
-        return Path(next(iter(repos.values()))).parent / name
+        return Path(next(iter(repos.values()))).parent / name, "sibling of first repo"
     return None
 
 
@@ -836,6 +839,7 @@ async def _create_repo(ctx: RequestContext, text: str) -> None:
         return
 
     # --- Resolve path ---
+    path_source: str | None = None
     if path_str:
         repo_path = Path(path_str.strip("\"'"))
     else:
@@ -846,11 +850,11 @@ async def _create_repo(ctx: RequestContext, text: str) -> None:
                 "No repos registered — provide a path: /repo create <name> <path>",
             )
             return
-        repo_path = resolved
+        repo_path, path_source = resolved
 
     # --- Handle existing directory with .git ---
     if repo_path.exists() and (repo_path / ".git").exists():
-        ctx.store.add_repo(name, str(repo_path))
+        ctx.store.add_repo(name, str(repo_path.resolve()))
         ctx.store.switch_repo(name)
         await ctx.messenger.send_text(
             ctx.channel_id,
@@ -884,9 +888,10 @@ async def _create_repo(ctx: RequestContext, text: str) -> None:
         return
 
     # --- Register ---
-    ctx.store.add_repo(name, str(repo_path))
+    ctx.store.add_repo(name, str(repo_path.resolve()))
     ctx.store.switch_repo(name)
-    msg = f"Created '{name}' at {repo_path} (git initialized)."
+    source_hint = f", default: {path_source}" if path_source else ""
+    msg = f"Created '{name}' at {repo_path} (git initialized{source_hint})."
 
     # --- Optional GitHub remote ---
     if github:
@@ -921,7 +926,7 @@ async def on_repo(ctx: RequestContext, text: str) -> None:
         if err := _validate_repo_name(name):
             await ctx.messenger.send_text(ctx.channel_id, err)
             return
-        path = path.strip('"\'')
+        path = str(Path(path.strip('"\'")).resolve())
         if not Path(path).is_dir():
             await ctx.messenger.send_text(ctx.channel_id, f"Directory not found: {path}")
             return

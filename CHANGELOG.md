@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### UX
+- Completion status message now shows the action origin (e.g., "✅ t-097 review-code done (2.3m)" instead of just "done")
+
+### Repo Path Resolution
+- Fix `/repo create` default path — add `REPOS_BASE_DIR` env var so new repos land in a consistent base directory instead of as siblings of the active repo (which breaks for deeply nested repos)
+- `REPOS_BASE_DIR` validated at startup: warns and falls back to sibling logic if the directory doesn't exist
+- Normalize all stored repo paths with `.resolve()` — fixes inconsistent slash styles in state.json
+- Show path source in confirmation message ("default: REPOS_BASE_DIR" or "sibling of active repo") for transparency
+
 ## v0.3.13 — Lobby Mode Emoji Fix (2026-03-15)
 
 - Fix: lobby-routed messages now update thread mode emoji when mode changes (e.g. `/mode build` sent in lobby).

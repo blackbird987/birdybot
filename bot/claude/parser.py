@@ -33,6 +33,24 @@ def parse_stream_line(line: str) -> dict | None:
         return None
 
 
+def iter_tool_blocks(event: dict):
+    """Yield (tool_name, tool_input) for each tool_use block in an event."""
+    etype = event.get("type", "")
+    if etype == "assistant":
+        content = event.get("content", [])
+        if not content:
+            msg = event.get("message", {})
+            if isinstance(msg, dict):
+                content = msg.get("content", [])
+        for block in content if isinstance(content, list) else []:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                yield block.get("name", ""), block.get("input", {})
+    elif etype == "content_block_start":
+        cb = event.get("content_block", {})
+        if cb.get("type") == "tool_use":
+            yield cb.get("name", ""), cb.get("input", {})
+
+
 def extract_progress(event: dict) -> ProgressEvent | None:
     """Extract a user-friendly progress event from a stream-json message."""
     etype = event.get("type", "")
@@ -227,6 +245,7 @@ def _friendly_tool(tool: str) -> str:
         "WebSearch": "searching web",
         "WebFetch": "fetching page",
         "Task": "delegating task",
+        "AskUserQuestion": "asking a question",
     }
     return mapping.get(tool, tool)
 
@@ -275,6 +294,9 @@ def _tool_detail(tool: str, tool_input: dict) -> str:
     if tool == "Task":
         desc = tool_input.get("description", "")
         return f"task: {desc[:40]}" if desc else ""
+    if tool == "AskUserQuestion":
+        q = tool_input.get("question", "")
+        return f"question: {q[:60]}" if q else ""
     return ""
 
 

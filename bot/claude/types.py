@@ -179,6 +179,7 @@ class RunResult:
     num_turns: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    needs_input: bool = False  # AskUserQuestion detected — waiting for user reply
 
 
 @dataclass

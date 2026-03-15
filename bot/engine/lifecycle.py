@@ -30,6 +30,19 @@ from bot.platform.formatting import (
 
 log = logging.getLogger(__name__)
 
+# Labels that don't auto-derive well from InstanceOrigin.value
+_ORIGIN_LABEL_OVERRIDES: dict[InstanceOrigin, str] = {
+    InstanceOrigin.DIRECT: "",
+    InstanceOrigin.DONE: "wrap-up ",
+}
+
+
+def _origin_label(origin: InstanceOrigin) -> str:
+    """Human-readable prefix for completion messages, e.g. 'review-code '."""
+    if origin in _ORIGIN_LABEL_OVERRIDES:
+        return _ORIGIN_LABEL_OVERRIDES[origin]
+    return origin.value.replace("_", "-") + " "
+
 
 async def run_instance(
     ctx: RequestContext,
@@ -68,10 +81,12 @@ async def run_instance(
         else:
             elapsed_str = f"{elapsed:.0f}s"
         escaped = ctx.messenger.escape(inst.display_id())
-        icon = "✅" if not result.is_error else "❌"
+        icon = "❓" if result.needs_input else ("✅" if not result.is_error else "❌")
+        origin_label = _origin_label(inst.origin)
+        status = "asking a question" if result.needs_input else ("done" if not result.is_error else "failed")
         try:
             await ctx.messenger.edit_thinking(
-                handle, f"{icon} {escaped} done ({elapsed_str})",
+                handle, f"{icon} {escaped} {origin_label}{status} ({elapsed_str})",
             )
         except Exception:
             pass
@@ -114,7 +129,7 @@ def finalize_run(ctx: RequestContext, inst: Instance, result: RunResult) -> None
                 if inst.plan_active and inst.code_active:
                     break
 
-    if result.is_error:
+    if result.is_error and not result.needs_input:
         inst.status = InstanceStatus.FAILED
         inst.error = result.error_message or result.result_text
     else:

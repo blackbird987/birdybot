@@ -65,6 +65,14 @@ LOGS_DIR: Path = DATA_DIR / "logs"
 STATE_FILE: Path = DATA_DIR / "state.json"
 LOG_FILE: Path = LOGS_DIR / "bot.log"
 
+# Base directory for new repos (optional — falls back to sibling of active repo)
+REPOS_BASE_DIR: Path | None = Path(v).resolve() if (v := os.getenv("REPOS_BASE_DIR")) else None
+
+if REPOS_BASE_DIR and not REPOS_BASE_DIR.is_dir():
+    import warnings
+    warnings.warn(f"REPOS_BASE_DIR does not exist: {REPOS_BASE_DIR}")
+    REPOS_BASE_DIR = None
+
 # Ensure data dirs exist
 REBOOT_MSG_FILE: Path = DATA_DIR / "reboot_message.json"
 REBOOT_REQUEST_FILE: Path = DATA_DIR / "reboot_request.json"
