@@ -1476,8 +1476,18 @@ class ClaudeBot(discord.Client):
         repo_name = repo_name or "_default"
         # Ensure control room exists (fire-and-forget, idempotent)
         asyncio.create_task(self._forums.ensure_control_post(repo_name))
-        thread = await self._forums.get_or_create_session_thread(repo_name, None, text)
+        thread = await self._forums.get_or_create_session_thread(
+            repo_name, None, text,
+            user_id=str(message.author.id),
+            user_name=message.author.display_name,
+        )
         if thread:
+            # Auto-follow: add the lobby message author to the thread
+            try:
+                await thread.add_user(message.author)
+            except Exception:
+                log.warning("Failed to auto-follow user %s in thread %s",
+                            message.author.id, thread.id)
             # Delete original from lobby
             try:
                 await message.delete()
@@ -1767,6 +1777,12 @@ class ClaudeBot(discord.Client):
             user_id=user_id, user_name=user_name,
         )
         if thread:
+            # Auto-follow: add the creator to the thread
+            try:
+                await thread.add_user(interaction.user)
+            except Exception:
+                log.warning("Failed to auto-follow user %s in thread %s",
+                            interaction.user.id, thread.id)
             # Apply per-thread mode if specified (e.g. /new mode:build)
             if mode:
                 lookup = self._forums.thread_to_project(str(thread.id))

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Auto-follow: users who create a forum thread (via /new, control room button, or lobby message) are automatically added to the thread so they get notifications
+
 ## v0.15.2 — Smart Title Fix (2026-03-16)
 - Fix smart title not firing on first message in /new and lobby threads (flag-based check replaces name check)
 - Reduce title generation timeout from 30s to 15s
