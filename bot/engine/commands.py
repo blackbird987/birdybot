@@ -137,20 +137,18 @@ async def _run_query_inner(ctx: RequestContext, prompt: str) -> None:
         )
         return
 
-    # Rate limit for non-owner users
-    if not ctx.is_owner and ctx.user_id:
-        from bot.discord.access import load_access_config, check_rate_limit, increment_query_count, check_user_access
-        acfg = load_access_config()
-        grant = check_user_access(acfg, ctx.user_id, ctx.repo_name)
-        if grant:
-            if not check_rate_limit(acfg, ctx.user_id, grant.max_daily_queries):
-                await ctx.messenger.send_text(
-                    ctx.channel_id,
-                    f"Daily query limit reached ({grant.max_daily_queries}/day). "
-                    "Ask the bot owner to increase your limit.",
-                )
-                return
-            increment_query_count(acfg, ctx.user_id)
+    # Rate limit for non-owner users (callbacks populated by platform layer)
+    if not ctx.is_owner and ctx.user_id and ctx.check_rate_limit:
+        if not ctx.check_rate_limit():
+            limit = ctx.max_daily_queries or "?"
+            await ctx.messenger.send_text(
+                ctx.channel_id,
+                f"Daily query limit reached ({limit}/day). "
+                "Ask the bot owner to increase your limit.",
+            )
+            return
+        if ctx.increment_query_count:
+            ctx.increment_query_count()
 
     # Log user attribution
     user_label = f"{ctx.user_name} ({ctx.user_id})" if ctx.user_id else "owner"
@@ -211,13 +209,8 @@ async def _run_query_inner(ctx: RequestContext, prompt: str) -> None:
     inst.user_id = ctx.user_id or ""
     inst.user_name = ctx.user_name or ""
     inst.is_owner_session = ctx.is_owner
-    if not ctx.is_owner:
-        # Import here to avoid circular dependency
-        from bot.discord.access import load_access_config, check_user_access
-        acfg = load_access_config()
-        grant = check_user_access(acfg, ctx.user_id or "", repo_name)
-        if grant:
-            inst.bash_policy = grant.bash_policy
+    if not ctx.is_owner and ctx.bash_policy:
+        inst.bash_policy = ctx.bash_policy
     if resume_session:
         inst.session_id = resume_session
     inst.status = InstanceStatus.RUNNING

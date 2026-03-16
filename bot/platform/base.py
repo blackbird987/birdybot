@@ -146,6 +146,11 @@ class RequestContext:
     user_name: str | None = None
     is_owner: bool = True             # True = bot owner (full access)
     mode_ceiling: str | None = None   # Max mode for non-owners (None = no limit)
+    # Access policy (populated by platform layer — engine never imports access module)
+    bash_policy: str | None = None           # "allowlist", "full", "none" (None = default)
+    max_daily_queries: int | None = None     # None = no limit
+    check_rate_limit: Callable[[], bool] | None = None    # Returns True if allowed
+    increment_query_count: Callable[[], None] | None = None
 
     @property
     def effective_mode(self) -> str:

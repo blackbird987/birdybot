@@ -228,6 +228,23 @@ class ClaudeBot(discord.Client):
                     access_mod.RepoAccess(mode=access_result.mode_ceiling),
                     current,
                 )
+            # Populate access policy on ctx so engine never imports discord.access
+            if not access_result.is_owner and access_result.bash_policy:
+                ctx.bash_policy = access_result.bash_policy
+            if not access_result.is_owner and access_result.max_daily_queries > 0:
+                ctx.max_daily_queries = access_result.max_daily_queries
+                # Wire up rate limit callbacks
+                def _make_rate_callbacks(user_id, repo_name, max_q):
+                    def _check():
+                        from bot.discord.access import load_access_config, check_rate_limit
+                        return check_rate_limit(load_access_config(), user_id, max_q)
+                    def _increment():
+                        from bot.discord.access import load_access_config, increment_query_count
+                        increment_query_count(load_access_config(), user_id)
+                    return _check, _increment
+                ctx.check_rate_limit, ctx.increment_query_count = _make_rate_callbacks(
+                    ctx.user_id or "", ctx.repo_name, access_result.max_daily_queries,
+                )
         return ctx
 
     # --- Resume after reboot ---
