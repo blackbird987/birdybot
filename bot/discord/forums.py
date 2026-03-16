@@ -696,11 +696,11 @@ class ForumManager:
                 proj.control_message_id = None
                 self.save_forum_map()
                 return
-            # Migrate old "Control Center" name to "Control Room"
-            if thread.name == "Control Center":
+            # Migrate old names to current Control Room name
+            if thread.name in ("Control Center", "Control Room"):
                 try:
-                    await thread.edit(name="Control Room")
-                    log.info("Renamed Control Center -> Control Room (thread=%s)", thread.id)
+                    await thread.edit(name=channels.CONTROL_ROOM_NAME)
+                    log.info("Renamed %s -> %s (thread=%s)", thread.name, channels.CONTROL_ROOM_NAME, thread.id)
                 except Exception:
                     pass
             msg = await thread.fetch_message(int(proj.control_message_id))
@@ -760,10 +760,11 @@ class ForumManager:
                 ua.control_message_id = None
                 access_mod.save_access_config(cfg)
                 return
-            if thread.name == "Control Center":
+            # Migrate old names to current Control Room name
+            if thread.name in ("Control Center", "Control Room"):
                 try:
-                    await thread.edit(name="Control Room")
-                    log.info("Renamed Control Center -> Control Room (thread=%s)", thread.id)
+                    await thread.edit(name=channels.CONTROL_ROOM_NAME)
+                    log.info("Renamed %s -> %s (thread=%s)", thread.name, channels.CONTROL_ROOM_NAME, thread.id)
                 except Exception:
                     pass
             msg = await thread.fetch_message(int(ua.control_message_id))

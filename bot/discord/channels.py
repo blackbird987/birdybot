@@ -12,6 +12,8 @@ from bot.platform.formatting import MODE_COLOR, MODE_DISPLAY, mode_name
 
 log = logging.getLogger(__name__)
 
+CONTROL_ROOM_NAME = "⚙️ Control Room"
+
 
 def _private_overwrites(
     guild: discord.Guild,
@@ -361,7 +363,7 @@ def build_control_embed(
 ) -> discord.Embed:
     """Build the embed for a repo control room post."""
     embed = discord.Embed(
-        title=f"{repo_name} \u2014 Control Room",
+        title=f"{repo_name} \u2014 {CONTROL_ROOM_NAME}",
         description=repo_path or "",
         color=discord.Color.dark_grey(),
     )
@@ -407,7 +409,7 @@ async def create_repo_control_post(
     embed = build_control_embed(repo_name, repo_path, branch, mode)
     view = build_control_view(repo_name)
 
-    result = await forum.create_thread(name="Control Room", embed=embed, view=view)
+    result = await forum.create_thread(name=CONTROL_ROOM_NAME, embed=embed, view=view)
     try:
         await result.thread.edit(pinned=True)
     except Exception:
@@ -424,7 +426,7 @@ def build_user_control_embed(
 ) -> discord.Embed:
     """Build the embed for a user's personal control room post."""
     embed = discord.Embed(
-        title=f"{display_name} \u2014 Control Room",
+        title=f"{display_name} \u2014 {CONTROL_ROOM_NAME}",
         color=discord.Color.dark_grey(),
     )
     if repo_names:
@@ -459,7 +461,7 @@ async def create_user_control_post(
     embed = build_user_control_embed(display_name, repo_names, mode)
     view = build_user_control_view(repo_names)
 
-    result = await forum.create_thread(name="Control Room", embed=embed, view=view)
+    result = await forum.create_thread(name=CONTROL_ROOM_NAME, embed=embed, view=view)
     try:
         await result.thread.edit(pinned=True)
     except Exception:

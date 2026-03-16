@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Architecture
+- Extract `ForumManager` class into `bot/discord/forums.py` — owns all forum/thread data, lookups, creation, sync, control rooms, and history population
+- `bot/discord/bot.py` reduced from 3,229 to 2,357 lines; delegates forum operations through ForumManager's public interface
+- ForumManager takes `discord.Client` + `StateStore` (not ClaudeBot back-reference), enabling independent reads
+
+### Fixes
+- Fix diff save crash: guard `result.stdout` against None before `.strip()` in `runner.py` (affected every build session)
+- Add ⚙️ emoji prefix to Control Room thread names and embed titles; existing threads auto-migrate on refresh
+
 ## v0.13.1 — Personal Forum Button Fix (2026-03-16)
 
 - Fix: "New" button in user's personal forum control room now creates threads in the correct forum instead of the repo's main forum
