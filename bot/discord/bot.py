@@ -108,7 +108,7 @@ class ClaudeBot(discord.Client):
             discord_user_id=discord_user_id,
         )
 
-        self._name_lock = asyncio.Lock()  # Serializes thread.edit(name=...) calls
+        self._name_editing: set[str] = set()  # thread IDs with a name edit in-flight
         self._dashboard_lock = asyncio.Lock()  # Serializes dashboard refreshes
         self._dashboard_pending_flag = [False]  # Mutable flag for dashboard_mod
         self._idle_timers: dict[str, asyncio.TimerHandle] = {}  # channel_id -> scheduled sleep
@@ -1618,9 +1618,15 @@ class ClaudeBot(discord.Client):
 
             base = channels.build_title_name(title)
 
-            async with self._name_lock:
+            if thread_id in self._name_editing:
+                info._title_generated = False  # retry next query
+                return
+            self._name_editing.add(thread_id)
+            try:
                 new_name = channels.build_thread_name(base)
                 await thread.edit(name=new_name)
+            finally:
+                self._name_editing.discard(thread_id)
 
             # Restart idle countdown from title edit, not from query completion
             self._schedule_sleep(thread_id)
@@ -1674,16 +1680,22 @@ class ClaudeBot(discord.Client):
         """
         if not isinstance(channel, discord.Thread):
             return
-        async with self._name_lock:
-            is_sleeping, topic = channels.parse_thread_name(channel.name)
-            if is_sleeping:
-                return
+        is_sleeping, topic = channels.parse_thread_name(channel.name)
+        if is_sleeping:
+            return
+        tid = str(channel.id)
+        if tid in self._name_editing:
+            return
+        self._name_editing.add(tid)
+        try:
             new_name = channels.build_sleeping_thread_name(topic)
             try:
                 await channel.edit(name=new_name)
                 log.debug("Thread %s now sleeping", channel.id)
             except Exception:
                 log.debug("Failed to set thread sleeping", exc_info=True)
+        finally:
+            self._name_editing.discard(tid)
 
     async def _clear_thread_sleeping(
         self,
@@ -1692,16 +1704,22 @@ class ClaudeBot(discord.Client):
         """Remove 💤 prefix from thread name (processing started)."""
         if not isinstance(channel, discord.Thread):
             return
-        async with self._name_lock:
-            is_sleeping, topic = channels.parse_thread_name(channel.name)
-            if not is_sleeping:
-                return
+        is_sleeping, topic = channels.parse_thread_name(channel.name)
+        if not is_sleeping:
+            return
+        tid = str(channel.id)
+        if tid in self._name_editing:
+            return
+        self._name_editing.add(tid)
+        try:
             new_name = channels.build_thread_name(topic)
             try:
                 await channel.edit(name=new_name)
                 log.debug("Thread %s woke up", channel.id)
             except Exception:
                 log.debug("Failed to clear thread sleep", exc_info=True)
+        finally:
+            self._name_editing.discard(tid)
 
     async def _set_thread_active_tag(
         self,
