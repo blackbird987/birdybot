@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.19.1 — Worktree Hardening (2026-03-16)
+
 ### Worktree Hardening
 - Worktree reuse: if parent worktree was cleaned up, child instances recreate instead of crashing
 - Copy .claude/ directory into worktrees so Claude CLI finds CLAUDE.md and project settings
