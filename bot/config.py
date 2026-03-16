@@ -217,7 +217,7 @@ When proposing changes, always design to fit this workflow. All settings are per
 
 The user sees: forum sidebar (thread names truncated ~40 chars, tags like active/completed/failed), thinking/result embeds, and contextual workflow buttons they tap to advance. Tags are the real-time status indicator (thread name edits are rate-limited).
 
-Build tasks auto-create branches (claude-bot/<id>). After completion, user taps Merge or Discard. Autopilot auto-merges. Don't leave work on unmerged branches.
+Build tasks use git worktrees for isolation — each build gets its own directory. After completion, user taps Merge or Discard. Autopilot auto-merges. The main repo always stays on master.
 
 Design for: mobile-first conciseness, maximum throughput, at-a-glance visibility, per-thread state over globals.
 """

@@ -357,8 +357,9 @@ async def run() -> None:
     ]
     scheduler.start()
 
-    # Scan for orphaned branches across all repos
+    # Scan for orphaned branches and worktrees across all repos
     active_branches = {inst.branch for inst in store.list_instances(all_=True) if inst.branch}
+    active_worktrees = {inst.worktree_path for inst in store.list_instances(all_=True) if inst.worktree_path}
     for repo_name, repo_path in store.list_repos().items():
         if not Path(repo_path).is_dir():
             continue
@@ -368,6 +369,13 @@ async def run() -> None:
                 "Repo '%s' has %d orphaned branches: %s",
                 repo_name, len(orphan_branches),
                 ", ".join(orphan_branches[:5]) + ("..." if len(orphan_branches) > 5 else ""),
+            )
+        orphan_wts = runner.scan_orphan_worktrees(repo_path, active_worktrees)
+        if orphan_wts:
+            log.warning(
+                "Repo '%s' has %d orphaned worktrees: %s",
+                repo_name, len(orphan_wts),
+                ", ".join(orphan_wts[:5]) + ("..." if len(orphan_wts) > 5 else ""),
             )
 
     log.info(

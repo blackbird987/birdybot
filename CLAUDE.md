@@ -17,7 +17,7 @@ python -m bot          # start the bot
 - **Engine** (platform-agnostic): `bot/engine/commands.py`, `lifecycle.py`, `workflows.py`, `sessions.py`
 - **Platform layer**: `bot/platform/base.py` (Messenger protocol), `bot/platform/formatting.py`
 - **Telegram**: `bot/telegram/adapter.py`, `bridge.py`, `formatter.py`
-- **Discord**: `bot/discord/bot.py`, `adapter.py`, `channels.py`, `formatter.py`
+- **Discord**: `bot/discord/bot.py` (orchestrator), `slash_commands.py`, `interactions.py`, `adapter.py`, `channels.py`, `forums.py`, `idle.py`, `tags.py`, `modals.py`, `monitoring.py`, `formatter.py`
 
 ## Discord Limits
 
@@ -36,18 +36,22 @@ Forum-based: one ForumChannel per project/repo, one thread per session.
 - Dashboard embed pinned in lobby (auto-updates on instance start/complete)
 - Forum tags: active, completed, failed, cli, build
 
-Key data structures in `bot/discord/bot.py`:
+Key data structures in `bot/discord/forums.py`:
 - `ForumProject`: repo_name + forum_channel_id + threads dict
 - `ThreadInfo`: thread_id + session_id + origin + topic
 - Persisted in `data/state.json` under `platform_state.discord.forum_projects`
 
-## Branch Lifecycle
+## Build Isolation (Git Worktrees)
 
-- Build tasks auto-create branches: `claude-bot/<instance-id>`
-- Original branch saved for merge-back after completion
+Build tasks use git worktrees for parallel isolation:
+- Each build creates a worktree at `{repo}/.worktrees/{instance-id}/`
+- Main repo always stays on master — no `git checkout` in the shared directory
+- Parallel builds on the same repo work without conflicts
+- Session files are copied between main repo and worktree project directories so `--resume` works
+- Per-repo asyncio lock serializes git admin operations (worktree add/remove, merge, branch delete)
 - After Done/Commit → Merge/Discard buttons appear in the thread
 - Autopilot auto-merges after a successful chain completes
-- Unmerged branches become orphans — always merge or discard, don't abandon
+- `/branches` scans for orphaned branches and worktree directories
 
 ## Versioning
 
