@@ -65,9 +65,11 @@ class UserAccess:
     global_access: bool = False
     forum_channel_id: str | None = None  # their personal forum
     welcome_posted: bool = False         # welcome post created in personal forum
+    control_thread_id: str | None = None   # control room thread in personal forum
+    control_message_id: str | None = None  # control room embed message
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "user_id": self.user_id,
             "display_name": self.display_name,
             "repos": {k: v.to_dict() for k, v in self.repos.items()},
@@ -75,6 +77,11 @@ class UserAccess:
             "forum_channel_id": self.forum_channel_id,
             "welcome_posted": self.welcome_posted,
         }
+        if self.control_thread_id:
+            d["control_thread_id"] = self.control_thread_id
+        if self.control_message_id:
+            d["control_message_id"] = self.control_message_id
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> UserAccess:
@@ -86,6 +93,8 @@ class UserAccess:
             global_access=d.get("global_access", False),
             forum_channel_id=d.get("forum_channel_id"),
             welcome_posted=d.get("welcome_posted", False),
+            control_thread_id=d.get("control_thread_id"),
+            control_message_id=d.get("control_message_id"),
         )
 
 

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- Rename "Control Center" to "Control Room" throughout (thread names, embeds, logs)
+- Add Control Room pinned post to personal user forums — shows user name, granted repos, mode, and "New Session" button per repo
+- User forum control rooms auto-provisioned on startup, forum creation, and /grant
+- Self-healing: if a control room's embed message is deleted, the next refresh cycle detects it, deletes the orphan thread, and recreates the full control room post
+- User control room thread IDs tracked in-memory (`_user_control_thread_ids` set) for O(1) message-routing skip checks
+
 ## v0.9.0 — Repo Control Center (2026-03-16)
 
 - Add per-repo Control Center pinned post in each forum — shows repo name, path, branch, mode, and active/recent session counts

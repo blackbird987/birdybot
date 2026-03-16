@@ -61,7 +61,7 @@ async def ensure_lobby(
     category: discord.CategoryChannel,
     name: str = "control-room",
 ) -> discord.TextChannel:
-    """Find or create the control center channel inside a category (inherits perms)."""
+    """Find or create the lobby channel inside a category (inherits perms)."""
     # Also match old name "lobby" for migration
     for ch in category.text_channels:
         if ch.name in (name, "lobby"):
@@ -349,9 +349,9 @@ def build_control_embed(
     recent_completed: int = 0,
     recent_failed: int = 0,
 ) -> discord.Embed:
-    """Build the embed for a repo control center post."""
+    """Build the embed for a repo control room post."""
     embed = discord.Embed(
-        title=f"{repo_name} \u2014 Control Center",
+        title=f"{repo_name} \u2014 Control Room",
         description=repo_path or "",
         color=discord.Color.dark_grey(),
     )
@@ -377,7 +377,7 @@ async def create_repo_control_post(
     branch: str | None = None,
     mode: str = "explore",
 ) -> tuple[discord.Thread, discord.Message]:
-    """Create a control center post in a repo forum with action buttons."""
+    """Create a control room post in a repo forum with action buttons."""
     embed = build_control_embed(repo_name, repo_path, branch, mode)
 
     view = discord.ui.View(timeout=None)
@@ -392,13 +392,60 @@ async def create_repo_control_post(
         custom_id=f"sync_repo:{repo_name}",
     ))
 
-    result = await forum.create_thread(name="Control Center", embed=embed, view=view)
+    result = await forum.create_thread(name="Control Room", embed=embed, view=view)
     try:
         await result.thread.edit(pinned=True)
     except Exception:
-        log.debug("Could not pin control center thread", exc_info=True)
+        log.debug("Could not pin control room thread", exc_info=True)
 
-    log.info("Created control center post %s in forum %s", result.thread.id, forum.name)
+    log.info("Created control room post %s in forum %s", result.thread.id, forum.name)
+    return result.thread, result.message
+
+
+def build_user_control_embed(
+    display_name: str,
+    repo_names: list[str],
+    mode: str = "explore",
+) -> discord.Embed:
+    """Build the embed for a user's personal control room post."""
+    embed = discord.Embed(
+        title=f"{display_name} \u2014 Control Room",
+        color=discord.Color.dark_grey(),
+    )
+    if repo_names:
+        embed.add_field(
+            name="Repos",
+            value="\n".join(f"\u2022 {r}" for r in repo_names),
+            inline=True,
+        )
+    embed.add_field(name="Mode", value=mode_name(mode), inline=True)
+    return embed
+
+
+async def create_user_control_post(
+    forum: discord.ForumChannel,
+    display_name: str,
+    repo_names: list[str],
+    mode: str = "explore",
+) -> tuple[discord.Thread, discord.Message]:
+    """Create a control room post in a user's personal forum."""
+    embed = build_user_control_embed(display_name, repo_names, mode)
+
+    view = discord.ui.View(timeout=None)
+    for rname in repo_names[:5]:
+        view.add_item(discord.ui.Button(
+            label=f"New: {rname}" if len(repo_names) > 1 else "New Session",
+            style=discord.ButtonStyle.green,
+            custom_id=f"new_repo:{rname}",
+        ))
+
+    result = await forum.create_thread(name="Control Room", embed=embed, view=view)
+    try:
+        await result.thread.edit(pinned=True)
+    except Exception:
+        log.debug("Could not pin user control room", exc_info=True)
+
+    log.info("Created control room post %s in user forum %s", result.thread.id, forum.name)
     return result.thread, result.message
 
 

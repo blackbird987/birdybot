@@ -273,6 +273,8 @@ class ClaudeBot(discord.Client):
         # Pending /ref context: {thread_id: (context_str, monotonic_timestamp)}
         # Consumed by on_message, expires after 10 minutes
         self._pending_refs: dict[str, tuple[str, float]] = {}
+        # In-memory set of user forum control room thread IDs (O(1) skip check)
+        self._user_control_thread_ids: set[str] = set()
 
         self._monitor_service: MonitorService | None = None
         self._monitor_started: bool = False
@@ -542,6 +544,13 @@ class ClaudeBot(discord.Client):
                 except Exception:
                     log.warning("Failed to create welcome post in forum %s for user %s, will retry next startup",
                                 forum.id, user_id, exc_info=True)
+            # Create control room post (awaited to populate skip-set before messages arrive).
+            # Pass forum directly — forum_channel_id may not be persisted yet during /grant.
+            try:
+                await self._ensure_user_control_post(str(user_id), forum)
+            except Exception:
+                log.warning("Failed to create control room in forum %s for user %s",
+                            forum.id, user_id, exc_info=True)
 
         return forum
 
@@ -816,13 +825,24 @@ class ClaudeBot(discord.Client):
                         except Exception:
                             log.debug("Failed to clear stale active tag", exc_info=True)
 
-        # Ensure control center posts exist for all repo forums
+        # Ensure control room posts exist for all repo forums
         for repo_name, proj in self._forum_projects.items():
             if proj.forum_channel_id and not proj.control_thread_id:
                 try:
                     await self._ensure_control_post(repo_name)
                 except Exception:
-                    log.debug("Failed to create control center for %s", repo_name, exc_info=True)
+                    log.debug("Failed to create control room for %s", repo_name, exc_info=True)
+
+        # Populate user control room thread ID set + create missing control rooms
+        cfg = load_access_config()
+        for uid, ua in cfg.users.items():
+            if ua.control_thread_id:
+                self._user_control_thread_ids.add(ua.control_thread_id)
+            elif ua.forum_channel_id:
+                try:
+                    await self._ensure_user_control_post(uid)
+                except Exception:
+                    log.debug("Failed to create control room for user %s", uid, exc_info=True)
 
     async def _run_slash(
         self, interaction: discord.Interaction, coro,
@@ -1766,8 +1786,10 @@ class ClaudeBot(discord.Client):
             if isinstance(message.channel, discord.Thread):
                 parent = message.channel.parent
                 if parent and isinstance(parent, discord.ForumChannel):
-                    # Skip control center threads (not session threads)
+                    # Skip control room threads (not session threads)
                     if any(p.control_thread_id == channel_id for p in self._forum_projects.values()):
+                        return
+                    if channel_id in self._user_control_thread_ids:
                         return
                     lookup = self._thread_to_project(channel_id)
                     if not lookup:
@@ -1885,7 +1907,7 @@ class ClaudeBot(discord.Client):
     ) -> None:
         """Route a lobby message to a forum thread."""
         repo_name = repo_name or "_default"
-        # Ensure control center exists (fire-and-forget, idempotent)
+        # Ensure control room exists (fire-and-forget, idempotent)
         asyncio.create_task(self._ensure_control_post(repo_name))
         thread = await self._get_or_create_session_thread(repo_name, None, text)
         if thread:
@@ -2042,7 +2064,7 @@ class ClaudeBot(discord.Client):
             return None
 
     async def _ensure_control_post(self, repo_name: str) -> None:
-        """Ensure a control center post exists in the repo's forum.
+        """Ensure a control room post exists in the repo's forum.
 
         Called after _get_or_create_forum() returns, outside the forum lock.
         Idempotent — checks control_thread_id before creating.
@@ -2065,21 +2087,56 @@ class ClaudeBot(discord.Client):
         proj.control_thread_id = str(thread.id)
         proj.control_message_id = str(msg.id)
         self._save_forum_map()
-        log.info("Created control center for repo %s (thread=%s)", repo_name, thread.id)
+        log.info("Created control room for repo %s (thread=%s)", repo_name, thread.id)
 
-    async def _refresh_control_center(self, repo_name: str) -> None:
-        """Update the control center embed for a repo forum."""
+    async def _ensure_user_control_post(
+        self, user_id: str,
+        forum: discord.ForumChannel | None = None,
+    ) -> None:
+        """Ensure a control room post exists in a user's personal forum.
+
+        If *forum* is passed, use it directly (avoids stale config when
+        forum_channel_id hasn't been persisted yet, e.g. during /grant).
+        """
+        cfg = load_access_config()
+        ua = cfg.users.get(user_id)
+        if not ua or ua.control_thread_id:
+            return
+
+        if not forum:
+            if not ua.forum_channel_id:
+                return
+            forum = self.get_channel(int(ua.forum_channel_id))
+        if not forum or not isinstance(forum, discord.ForumChannel):
+            return
+
+        repo_names = list(ua.repos.keys())
+        mode = "explore"
+        if repo_names and repo_names[0] in ua.repos:
+            mode = ua.repos[repo_names[0]].mode
+
+        thread, msg = await channels.create_user_control_post(
+            forum, ua.display_name, repo_names, mode,
+        )
+        ua.control_thread_id = str(thread.id)
+        ua.control_message_id = str(msg.id)
+        access_mod.save_access_config(cfg)
+        self._user_control_thread_ids.add(str(thread.id))
+        log.info("Created control room for user %s (thread=%s)", ua.display_name, thread.id)
+
+    async def _refresh_control_room(self, repo_name: str) -> None:
+        """Update the control room embed for a repo forum."""
         proj = self._forum_projects.get(repo_name)
         if not proj or not proj.control_thread_id or not proj.control_message_id:
             return
+        thread = None
         try:
             try:
                 thread = await self.fetch_channel(int(proj.control_thread_id))
             except discord.NotFound:
                 thread = None
             if not thread or not isinstance(thread, discord.Thread):
-                # Thread was deleted externally — clear stale IDs
-                log.info("Control center for %s was deleted, clearing stale IDs", repo_name)
+                log.info("Control room thread for %s was deleted, clearing stale IDs", repo_name)
                 proj.control_thread_id = None
                 proj.control_message_id = None
                 self._save_forum_map()
@@ -2105,12 +2162,71 @@ class ClaudeBot(discord.Client):
             )
             await msg.edit(embed=embed)
         except discord.NotFound:
-            log.info("Control center for %s was deleted, clearing stale IDs", repo_name)
+            log.info("Control room message for %s was deleted, recreating", repo_name)
             proj.control_thread_id = None
             proj.control_message_id = None
             self._save_forum_map()
+            # Delete orphan thread if it still exists
+            try:
+                if thread and isinstance(thread, discord.Thread):
+                    await thread.delete()
+            except Exception:
+                pass
+            # Recreate immediately
+            try:
+                await self._ensure_control_post(repo_name)
+            except Exception:
+                log.debug("Failed to recreate control room for %s", repo_name, exc_info=True)
         except Exception:
-            log.debug("Failed to refresh control center for %s", repo_name, exc_info=True)
+            log.debug("Failed to refresh control room for %s", repo_name, exc_info=True)
+
+    async def _refresh_user_control_room(self, user_id: str) -> None:
+        """Update the control room embed for a user's personal forum."""
+        cfg = load_access_config()
+        ua = cfg.users.get(user_id)
+        if not ua or not ua.control_thread_id or not ua.control_message_id:
+            return
+        thread = None
+        try:
+            try:
+                thread = await self.fetch_channel(int(ua.control_thread_id))
+            except discord.NotFound:
+                thread = None
+            if not thread or not isinstance(thread, discord.Thread):
+                log.info("Control room thread for user %s was deleted, clearing stale IDs", ua.display_name)
+                self._user_control_thread_ids.discard(ua.control_thread_id)
+                ua.control_thread_id = None
+                ua.control_message_id = None
+                access_mod.save_access_config(cfg)
+                return
+            msg = await thread.fetch_message(int(ua.control_message_id))
+
+            repo_names = list(ua.repos.keys())
+            mode = "explore"
+            if repo_names and repo_names[0] in ua.repos:
+                mode = ua.repos[repo_names[0]].mode
+
+            embed = channels.build_user_control_embed(ua.display_name, repo_names, mode)
+            await msg.edit(embed=embed)
+        except discord.NotFound:
+            log.info("Control room message for user %s was deleted, recreating", ua.display_name)
+            self._user_control_thread_ids.discard(ua.control_thread_id)
+            ua.control_thread_id = None
+            ua.control_message_id = None
+            access_mod.save_access_config(cfg)
+            # Delete orphan thread if it still exists
+            try:
+                if thread and isinstance(thread, discord.Thread):
+                    await thread.delete()
+            except Exception:
+                pass
+            # Recreate immediately
+            try:
+                await self._ensure_user_control_post(user_id)
+            except Exception:
+                log.debug("Failed to recreate control room for user %s", user_id, exc_info=True)
+        except Exception:
+            log.debug("Failed to refresh control room for user %s", user_id, exc_info=True)
 
     # --- Dashboard ---
 
@@ -2261,10 +2377,16 @@ class ClaudeBot(discord.Client):
         except Exception:
             log.debug("Failed to update dashboard", exc_info=True)
 
-        # Refresh control center embeds for all repos (fire-and-forget)
+        # Refresh control room embeds for all repos (fire-and-forget)
         for rname, proj in self._forum_projects.items():
             if proj.control_thread_id:
-                asyncio.create_task(self._refresh_control_center(rname))
+                asyncio.create_task(self._refresh_control_room(rname))
+
+        # Refresh user forum control rooms
+        cfg = load_access_config()
+        for uid, ua in cfg.users.items():
+            if ua.control_thread_id:
+                asyncio.create_task(self._refresh_user_control_room(uid))
 
     def _get_latest_summary(self, thread_id: str) -> str:
         """Get summary from the most recent instance for this thread's session."""
