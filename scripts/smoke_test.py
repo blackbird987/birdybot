@@ -141,7 +141,7 @@ def check_platforms(startup_lines: list[str]) -> CheckResult:
     platforms: list[str] = []
     for line in startup_lines:
         if "Bot ready" in line:
-            # Extract platforms from "platforms: discord, telegram"
+            # Extract platforms from "platforms: discord"
             m = re.search(r"platforms:\s*(.+)", line)
             if m:
                 platforms = [p.strip() for p in m.group(1).split(",")]

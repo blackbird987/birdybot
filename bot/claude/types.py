@@ -44,7 +44,10 @@ PLAN_ORIGINS = frozenset({InstanceOrigin.PLAN, InstanceOrigin.REVIEW_PLAN, Insta
 
 
 def _migrate_message_ids(d: dict) -> dict[str, list[str]]:
-    """Backward compat: convert old telegram_message_ids list[int] to new dict format."""
+    """Backward compat: convert old telegram_message_ids list[int] to new dict format.
+
+    Deprecated: kept to avoid breaking state.json files from older versions.
+    """
     if "message_ids" in d:
         return d["message_ids"]
     # Migrate from old format
@@ -82,8 +85,8 @@ class Instance:
     schedule_id: str | None = None
     origin: InstanceOrigin = InstanceOrigin.DIRECT
     parent_id: str | None = None       # ID of instance whose button spawned this
-    origin_platform: str = "telegram"  # Platform that created this instance
-    user_id: str = ""                  # Discord/Telegram user who started this instance
+    origin_platform: str = "discord"  # Platform that created this instance
+    user_id: str = ""                  # User who started this instance
     user_name: str = ""                # Display name of the user
     tools_used: list[str] = field(default_factory=list)  # Tool names used (Edit, Write, TodoWrite...)
     num_turns: int = 0
@@ -176,7 +179,7 @@ class Instance:
             schedule_id=d.get("schedule_id"),
             origin=InstanceOrigin(d["origin"]) if "origin" in d else InstanceOrigin.DIRECT,
             parent_id=d.get("parent_id"),
-            origin_platform=d.get("origin_platform", "telegram"),
+            origin_platform=d.get("origin_platform", "discord"),
             user_id=d.get("user_id", ""),
             user_name=d.get("user_name", ""),
             tools_used=d.get("tools_used", []),

@@ -306,7 +306,7 @@ async def send_result(
     if result_text:
         result_text = redact_secrets(result_text)
 
-    # Pass structured metadata for Discord embeds (Telegram ignores unknown fields)
+    # Pass structured metadata for Discord embeds
     meta = {"_status": inst.status.value, "_mode": inst.mode} if inst.status else {}
     dur = format_duration(inst.duration_ms) if inst.duration_ms else None
     if dur:

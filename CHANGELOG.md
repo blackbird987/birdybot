@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- Strip Telegram platform support — gut adapter/bridge/formatter to stubs, remove `python-telegram-bot` dependency, delete `_start_telegram()` orchestration (~860 lines removed)
+- Remove dead global-write guards in `RequestContext.update_mode/context/verbose/effort` (only Discord uses per-thread persistence)
+- Change default `origin_platform` from `"telegram"` to `"discord"` (backward-compat migration shim kept)
+- Remove `find_by_telegram_message()` compat alias from StateStore
+- Clean up Telegram references in docstrings, comments, and config across engine, lifecycle, and scripts
+- Update CLAUDE.md, .env.example, pyproject.toml description, and MEMORY.md
+
 ## v0.19.4 — Worktree Session & Merge Fixes (2026-03-17)
 
 ### Bug Fixes

@@ -1,4 +1,4 @@
-"""Delayed bot relaunch — spawned by /reboot to avoid Telegram polling conflicts.
+"""Delayed bot relaunch — spawned by /reboot to ensure clean restart.
 
 Usage: python scripts/relaunch.py <project_root>
 

@@ -1,6 +1,6 @@
 # Claude Code Bot
 
-Multi-platform (Telegram + Discord) bot for managing Claude Code instances remotely.
+Discord bot for managing Claude Code instances remotely.
 
 ## Quick Start
 
@@ -16,7 +16,6 @@ python -m bot          # start the bot
 - **State**: `data/state.json`
 - **Engine** (platform-agnostic): `bot/engine/commands.py`, `lifecycle.py`, `workflows.py`, `sessions.py`
 - **Platform layer**: `bot/platform/base.py` (Messenger protocol), `bot/platform/formatting.py`
-- **Telegram**: `bot/telegram/adapter.py`, `bridge.py`, `formatter.py`
 - **Discord**: `bot/discord/bot.py` (orchestrator), `slash_commands.py`, `interactions.py`, `adapter.py`, `channels.py`, `forums.py`, `idle.py`, `tags.py`, `modals.py`, `monitoring.py`, `formatter.py`
 
 ## Discord Limits
