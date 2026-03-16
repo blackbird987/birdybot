@@ -3,13 +3,18 @@
 ## [Unreleased]
 
 ### Architecture
-- Extract `ForumManager` class into `bot/discord/forums.py` — owns all forum/thread data, lookups, creation, sync, control rooms, and history population
-- `bot/discord/bot.py` reduced from 3,229 to 2,357 lines; delegates forum operations through ForumManager's public interface
+- Extract `ForumManager` class into `bot/discord/forums.py` (1,015 lines) — owns all forum/thread data, lookups, creation, sync, control rooms, and history population
+- Extract dashboard embed generation into `bot/discord/dashboard.py` (222 lines) — pure `build_dashboard_embed()` function + serialized refresh
+- Extract title generation into `bot/discord/titles.py` (103 lines) — stateless CLI subprocess for 4-6 word titles
+- `bot/discord/bot.py` reduced from 3,229 to 2,116 lines (35% reduction); delegates to ForumManager, dashboard_mod, titles
 - ForumManager takes `discord.Client` + `StateStore` (not ClaudeBot back-reference), enabling independent reads
 
 ### Fixes
 - Fix diff save crash: guard `result.stdout` against None before `.strip()` in `runner.py` (affected every build session)
 - Add ⚙️ emoji prefix to Control Room thread names and embed titles; existing threads auto-migrate on refresh
+- Graceful shutdown drain: wait up to 30s for active queries before tearing down platforms, then kill remaining processes and give 10s for result delivery
+- CancelledError handling in `run_instance`: deliver computed results or mark as failed instead of silently dropping
+- Add `kill_all()` to ClaudeRunner for bulk process termination during shutdown
 
 ## v0.13.1 — Personal Forum Button Fix (2026-03-16)
 
