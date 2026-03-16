@@ -719,6 +719,18 @@ class ClaudeRunner:
             head = r.stdout.strip()
             if head and not head.startswith("claude-bot/"):
                 return head
+        # Last resort: find any non-claude-bot branch
+        r = subprocess.run(
+            ["git", "branch", "--format=%(refname:short)"],
+            cwd=repo_path, capture_output=True, text=True, **_NOWND,
+        )
+        if r.returncode == 0:
+            for line in r.stdout.strip().splitlines():
+                branch = line.strip()
+                if branch and not branch.startswith("claude-bot/"):
+                    return branch
+        log.warning("No default branch in %s — every branch is bot-managed",
+                     repo_path)
         return "master"
 
     # --- Session file management (worktree ↔ main repo) ---
@@ -815,14 +827,14 @@ class ClaudeRunner:
             return await asyncio.to_thread(self._merge_branch_sync, instance)
 
     def _merge_branch_sync(self, instance: Instance) -> str:
+        stashed = False
+        repo = instance.repo_path
+        target = instance.original_branch
         try:
-            repo = instance.repo_path
-
             # Copy session files back before cleanup
             self._copy_session_from_worktree(instance)
 
             # Re-verify original_branch exists; re-detect if stale
-            target = instance.original_branch
             r = subprocess.run(
                 ["git", "rev-parse", "--verify", f"refs/heads/{target}"],
                 cwd=repo, capture_output=True, text=True, **_NOWND,
@@ -831,18 +843,51 @@ class ClaudeRunner:
                 target = self._get_default_branch(repo)
                 instance.original_branch = target
 
+            # Stash uncommitted changes that would block checkout
+            status_r = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=repo, capture_output=True, text=True, **_NOWND,
+            )
+            if status_r.stdout.strip():
+                log.info("Stashing dirty working tree in %s before merge", repo)
+                stash_r = subprocess.run(
+                    ["git", "stash", "push", "-m",
+                     f"auto-stash for merge {instance.branch}"],
+                    cwd=repo, capture_output=True, text=True, **_NOWND,
+                )
+                if stash_r.returncode == 0:
+                    stashed = True
+
+            # Set up union merge driver for changelog (prevents conflict failures)
+            try:
+                attrs_dir = Path(repo) / ".git" / "info"
+                attrs_dir.mkdir(parents=True, exist_ok=True)
+                attrs_file = attrs_dir / "attributes"
+                attrs_content = attrs_file.read_text() if attrs_file.exists() else ""
+                if "CHANGELOG.md" not in attrs_content:
+                    with open(attrs_file, "a") as f:
+                        f.write("CHANGELOG.md merge=union\n")
+            except OSError:
+                log.debug("Could not set up merge driver for %s", repo)
+
             # Ensure main repo is on the correct branch before merging
             subprocess.run(
                 ["git", "checkout", target],
                 cwd=repo, capture_output=True, text=True, check=True, **_NOWND,
             )
 
-            # Merge the worktree's branch
-            subprocess.run(
-                ["git", "merge", instance.branch, "--no-ff",
-                 "-m", f"Merge {instance.branch} ({instance.display_id()})"],
-                cwd=repo, capture_output=True, text=True, check=True, **_NOWND,
-            )
+            # Merge the worktree's branch (auto-resolve known conflicts on failure)
+            try:
+                subprocess.run(
+                    ["git", "merge", instance.branch, "--no-ff",
+                     "-m", f"Merge {instance.branch} ({instance.display_id()})"],
+                    cwd=repo, capture_output=True, text=True, check=True, **_NOWND,
+                )
+            except subprocess.CalledProcessError as merge_err:
+                if not self._try_auto_resolve_conflicts(repo, instance):
+                    raise merge_err
+
+            # --- Cleanup (reached on successful merge or successful auto-resolve) ---
 
             # Remove worktree if it exists
             if instance.worktree_path and Path(instance.worktree_path).exists():
@@ -869,7 +914,67 @@ class ClaudeRunner:
                 ["git", "merge", "--abort"],
                 cwd=instance.repo_path, capture_output=True, text=True, **_NOWND,
             )
-            return f"Merge failed: {e.stderr.strip()}"
+            detail = (e.stderr or e.stdout or "").strip()
+            log.error("Merge failed for %s into %s in %s: %s",
+                      instance.branch, target, repo, detail)
+            return f"Merge failed: {detail}"
+        finally:
+            if stashed:
+                # Only pop if working tree is clean (abort or merge succeeded)
+                check_r = subprocess.run(
+                    ["git", "status", "--porcelain"],
+                    cwd=repo, capture_output=True, text=True, **_NOWND,
+                )
+                if not check_r.stdout.strip():
+                    subprocess.run(
+                        ["git", "stash", "pop"],
+                        cwd=repo, capture_output=True, text=True, **_NOWND,
+                    )
+                else:
+                    log.warning(
+                        "Skipping stash pop — working tree not clean in %s",
+                        repo)
+
+    def _try_auto_resolve_conflicts(self, repo: str, instance: Instance) -> bool:
+        """Try to auto-resolve merge conflicts in known files (CHANGELOG, pyproject).
+
+        Returns True if all conflicts were resolved and committed.
+        """
+        _AUTO_RESOLVABLE = {"CHANGELOG.md", "pyproject.toml"}
+
+        conflict_r = subprocess.run(
+            ["git", "diff", "--name-only", "--diff-filter=U"],
+            cwd=repo, capture_output=True, text=True, **_NOWND,
+        )
+        conflict_files = [
+            f.strip() for f in conflict_r.stdout.strip().splitlines() if f.strip()
+        ]
+        if not conflict_files or not set(conflict_files) <= _AUTO_RESOLVABLE:
+            return False
+
+        try:
+            for f in conflict_files:
+                # pyproject.toml: --ours keeps master's version (latest released)
+                # CHANGELOG.md: --theirs as fallback if union driver didn't catch it
+                strategy = "--ours" if f == "pyproject.toml" else "--theirs"
+                subprocess.run(
+                    ["git", "checkout", strategy, f],
+                    cwd=repo, capture_output=True, text=True, check=True, **_NOWND,
+                )
+                subprocess.run(
+                    ["git", "add", f],
+                    cwd=repo, capture_output=True, text=True, check=True, **_NOWND,
+                )
+            subprocess.run(
+                ["git", "commit", "--no-edit"],
+                cwd=repo, capture_output=True, text=True, check=True, **_NOWND,
+            )
+            log.info("Auto-resolved merge conflicts in %s for %s",
+                     conflict_files, instance.branch)
+            return True
+        except subprocess.CalledProcessError:
+            log.warning("Auto-resolve failed for %s", conflict_files)
+            return False
 
     async def discard_branch(self, instance: Instance) -> str:
         """Delete worktree and branch without merging."""
