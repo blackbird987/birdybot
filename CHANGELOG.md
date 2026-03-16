@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.14.0 — Discord Extraction & Graceful Shutdown (2026-03-16)
+
 ### Architecture
 - Extract `ForumManager` class into `bot/discord/forums.py` (1,015 lines) — owns all forum/thread data, lookups, creation, sync, control rooms, and history population
 - Extract dashboard embed generation into `bot/discord/dashboard.py` (222 lines) — pure `build_dashboard_embed()` function + serialized refresh
