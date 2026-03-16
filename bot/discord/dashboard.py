@@ -1,0 +1,222 @@
+"""Dashboard embed generation and refresh for Discord lobby.
+
+Builds the pinned dashboard embed showing running instances, costs,
+projects, and attention items. Extracted from bot.py for isolation.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING
+
+import discord
+
+from bot import config
+from bot.discord.access import load_access_config
+from bot.platform.formatting import mode_label
+
+if TYPE_CHECKING:
+    from bot.discord.forums import ForumManager, ForumProject
+    from bot.store.state import StateStore
+
+log = logging.getLogger(__name__)
+
+
+def build_dashboard_embed(
+    store: StateStore,
+    forum_projects: dict[str, ForumProject],
+) -> discord.Embed:
+    """Build the dashboard embed from current state.
+
+    Pure function — no side effects, no Discord API calls.
+    """
+    from bot.claude.types import InstanceStatus
+
+    instances = store.list_instances()
+    running = [i for i in instances if i.status == InstanceStatus.RUNNING]
+    today_cost = store.get_daily_cost()
+    total_cost = store.get_total_cost()
+    active_repo, _ = store.get_active_repo()
+
+    # Build session_id -> thread_id map for cross-referencing
+    session_to_thread: dict[str, str] = {}
+    for proj in forum_projects.values():
+        for tid, info in proj.threads.items():
+            if info.session_id:
+                session_to_thread[info.session_id] = tid
+
+    # Needs attention: failed + questions
+    attention = store.needs_attention()
+
+    # Recently completed (last 5)
+    completed = [
+        i for i in instances
+        if i.status == InstanceStatus.COMPLETED and not i.needs_input
+    ][:5]
+
+    embed = discord.Embed(
+        title="Claude Bot Dashboard",
+        color=discord.Color.blurple(),
+    )
+
+    # Needs Attention section (top priority)
+    if attention:
+        attn_lines = []
+        for inst in attention[:10]:
+            icon = "\u2753" if inst.needs_input else "\u274c"
+            line = f"{icon} `{inst.display_id()}` \u2014 {inst.prompt[:30]}"
+            thread_id = session_to_thread.get(inst.session_id or "")
+            if thread_id:
+                line += f" \u2022 <#{thread_id}>"
+            attn_lines.append(line)
+        embed.add_field(
+            name=f"Needs Attention ({len(attention)})",
+            value="\n".join(attn_lines), inline=False,
+        )
+
+    # Running — grouped by repo, no cap
+    if running:
+        by_repo: dict[str, list] = {}
+        for inst in running:
+            by_repo.setdefault(inst.repo_name or "default", []).append(inst)
+        run_lines = []
+        for rname, repo_insts in by_repo.items():
+            if len(by_repo) > 1:
+                run_lines.append(f"**{rname}**")
+            for inst in repo_insts:
+                line = f"`{inst.display_id()}` \u2014 {inst.prompt[:30]}"
+                if inst.user_name and not inst.is_owner_session:
+                    line += f" [{inst.user_name}]"
+                thread_id = session_to_thread.get(inst.session_id or "")
+                if thread_id:
+                    line += f" \u2022 <#{thread_id}>"
+                if inst.created_at:
+                    try:
+                        started = datetime.fromisoformat(inst.created_at)
+                        if started.tzinfo is None:
+                            started = started.replace(tzinfo=timezone.utc)
+                        elapsed = datetime.now(timezone.utc) - started
+                        mins = int(elapsed.total_seconds() // 60)
+                        line += f" \u2022 {'<1' if mins < 1 else str(mins)}m"
+                    except (ValueError, TypeError):
+                        pass
+                run_lines.append(line)
+        # Truncate field value to Discord 1024 limit
+        field_val = "\n".join(run_lines)
+        if len(field_val) > 1024:
+            field_val = field_val[:1021] + "..."
+        embed.add_field(name=f"Running ({len(running)})", value=field_val, inline=False)
+    else:
+        embed.add_field(name="Running", value="None", inline=True)
+
+    # Recently Completed
+    if completed:
+        comp_lines = []
+        for inst in completed:
+            line = f"\u2705 `{inst.display_id()}` \u2014 {inst.prompt[:30]}"
+            thread_id = session_to_thread.get(inst.session_id or "")
+            if thread_id:
+                line += f" \u2022 <#{thread_id}>"
+            comp_lines.append(line)
+        embed.add_field(
+            name=f"Recently Completed ({len(completed)})",
+            value="\n".join(comp_lines), inline=False,
+        )
+
+    # Projects with forum links
+    if forum_projects:
+        proj_lines = []
+        for name, proj in forum_projects.items():
+            if proj.forum_channel_id and name != "_default":
+                threads = len(proj.threads)
+                marker = " *" if name == active_repo else ""
+                proj_lines.append(f"<#{proj.forum_channel_id}> ({threads} threads){marker}")
+        if proj_lines:
+            embed.add_field(name="Projects", value="\n".join(proj_lines), inline=False)
+
+    # Cost + Mode
+    embed.add_field(name="Today", value=f"${today_cost:.4f}", inline=True)
+    embed.add_field(name="Total", value=f"${total_cost:.4f}", inline=True)
+    embed.add_field(name="Mode", value=mode_label(store.mode), inline=True)
+    embed.add_field(name="PC", value=config.PC_NAME, inline=True)
+
+    return embed
+
+
+async def refresh_dashboard(
+    client: discord.Client,
+    store: StateStore,
+    forums: ForumManager,
+    lobby_channel_id: int | None,
+    dashboard_lock: asyncio.Lock,
+    dashboard_pending: list[bool],
+) -> None:
+    """Update or create the pinned dashboard embed in lobby.
+
+    Serialized: only one refresh runs at a time. If more requests arrive
+    while one is running, exactly one additional refresh is queued.
+
+    dashboard_pending is a mutable list[bool] used as a flag.
+    """
+    if dashboard_lock.locked():
+        dashboard_pending[0] = True
+        return
+
+    async with dashboard_lock:
+        await _refresh_dashboard_impl(client, store, forums, lobby_channel_id)
+        while dashboard_pending[0]:
+            dashboard_pending[0] = False
+            await _refresh_dashboard_impl(client, store, forums, lobby_channel_id)
+
+
+async def _refresh_dashboard_impl(
+    client: discord.Client,
+    store: StateStore,
+    forums: ForumManager,
+    lobby_channel_id: int | None,
+) -> None:
+    """Inner dashboard refresh logic."""
+    if not lobby_channel_id:
+        return
+    lobby = client.get_channel(lobby_channel_id)
+    if not lobby or not isinstance(lobby, discord.TextChannel):
+        return
+
+    embed = build_dashboard_embed(store, forums.forum_projects)
+
+    # Get or create dashboard message
+    dash_msg_id = store.get_platform_state("discord").get("dashboard_message_id")
+
+    try:
+        if dash_msg_id:
+            try:
+                msg = await lobby.fetch_message(int(dash_msg_id))
+                await msg.edit(embed=embed)
+            except (discord.NotFound, discord.HTTPException):
+                dash_msg_id = None  # Message gone, create new one
+
+        if not dash_msg_id:
+            msg = await lobby.send(embed=embed)
+            try:
+                await msg.pin()
+            except Exception:
+                pass
+            # Re-fetch state after await to avoid clobbering concurrent mutations
+            state = store.get_platform_state("discord")
+            state["dashboard_message_id"] = str(msg.id)
+            store.set_platform_state("discord", state, persist=True)
+    except Exception:
+        log.debug("Failed to update dashboard", exc_info=True)
+
+    # Always refresh control rooms, independent of dashboard success
+    for rname, proj in forums.forum_projects.items():
+        if proj.control_thread_id:
+            asyncio.create_task(forums.refresh_control_room(rname))
+
+    # Refresh user forum control rooms
+    cfg = load_access_config()
+    for uid, ua in cfg.users.items():
+        if ua.control_thread_id:
+            asyncio.create_task(forums.refresh_user_control_room(uid))

@@ -27,6 +27,7 @@ from bot.discord.channels import CONTROL_ROOM_NAME
 from bot.discord import access as access_mod
 from bot.discord.access import AccessResult, load_access_config, check_user_access, has_any_access, get_most_restrictive_ceiling, effective_mode as access_effective_mode
 from bot.discord.adapter import DiscordMessenger
+from bot.discord import dashboard as dashboard_mod
 from bot.discord.forums import ForumManager, ForumProject, ThreadInfo
 from bot.engine import commands
 from bot.engine import sessions as sessions_mod
@@ -185,7 +186,7 @@ class ClaudeBot(discord.Client):
 
         self._name_lock = asyncio.Lock()  # Serializes thread.edit(name=...) calls
         self._dashboard_lock = asyncio.Lock()  # Serializes dashboard refreshes
-        self._dashboard_pending = False  # True if a refresh is queued behind the lock
+        self._dashboard_pending_flag = [False]  # Mutable flag for dashboard_mod
         self._idle_timers: dict[str, asyncio.TimerHandle] = {}  # channel_id -> scheduled sleep
         self._sleep_gen: dict[str, int] = {}  # generation counter per channel (stale-callback guard)
         # Pending /ref context: {thread_id: (context_str, monotonic_timestamp)}
@@ -1620,181 +1621,15 @@ class ClaudeBot(discord.Client):
 
 
 
-    # --- Dashboard ---
+    # --- Dashboard (delegated to dashboard_mod) ---
 
     async def _refresh_dashboard(self) -> None:
-        """Update or create the pinned dashboard embed in lobby.
-
-        Serialized: only one refresh runs at a time. If more requests arrive
-        while one is running, exactly one additional refresh is queued.
-        """
-        if self._dashboard_lock.locked():
-            # A refresh is already running — mark that another is needed
-            self._dashboard_pending = True
-            return
-
-        async with self._dashboard_lock:
-            await self._refresh_dashboard_impl()
-            # If more requests arrived while we held the lock, run once more
-            while self._dashboard_pending:
-                self._dashboard_pending = False
-                await self._refresh_dashboard_impl()
-
-    async def _refresh_dashboard_impl(self) -> None:
-        """Inner dashboard refresh logic (must be called under _dashboard_lock)."""
-        if not self._lobby_channel_id:
-            return
-        lobby = self.get_channel(self._lobby_channel_id)
-        if not lobby or not isinstance(lobby, discord.TextChannel):
-            return
-
-        from bot.claude.types import InstanceStatus
-        from datetime import datetime, timezone
-        instances = self._store.list_instances()
-        running = [i for i in instances if i.status == InstanceStatus.RUNNING]
-        today_cost = self._store.get_daily_cost()
-        total_cost = self._store.get_total_cost()
-        repos = self._store.list_repos()
-        active_repo, _ = self._store.get_active_repo()
-
-        # Build session_id -> thread_id map for cross-referencing
-        session_to_thread: dict[str, str] = {}
-        for proj in self._forums.forum_projects.values():
-            for tid, info in proj.threads.items():
-                if info.session_id:
-                    session_to_thread[info.session_id] = tid
-
-        # Needs attention: failed + questions
-        attention = self._store.needs_attention()
-
-        # Recently completed (last 5)
-        completed = [
-            i for i in instances
-            if i.status == InstanceStatus.COMPLETED and not i.needs_input
-        ][:5]
-
-        embed = discord.Embed(
-            title="Claude Bot Dashboard",
-            color=discord.Color.blurple(),
+        """Update or create the pinned dashboard embed in lobby."""
+        await dashboard_mod.refresh_dashboard(
+            self, self._store, self._forums,
+            self._lobby_channel_id, self._dashboard_lock,
+            self._dashboard_pending_flag,
         )
-
-        # Needs Attention section (top priority)
-        if attention:
-            attn_lines = []
-            for inst in attention[:10]:
-                icon = "❓" if inst.needs_input else "❌"
-                line = f"{icon} `{inst.display_id()}` — {inst.prompt[:30]}"
-                thread_id = session_to_thread.get(inst.session_id or "")
-                if thread_id:
-                    line += f" • <#{thread_id}>"
-                attn_lines.append(line)
-            embed.add_field(
-                name=f"Needs Attention ({len(attention)})",
-                value="\n".join(attn_lines), inline=False,
-            )
-
-        # Running — grouped by repo, no cap
-        if running:
-            by_repo: dict[str, list] = {}
-            for inst in running:
-                by_repo.setdefault(inst.repo_name or "default", []).append(inst)
-            run_lines = []
-            for rname, repo_insts in by_repo.items():
-                if len(by_repo) > 1:
-                    run_lines.append(f"**{rname}**")
-                for inst in repo_insts:
-                    line = f"`{inst.display_id()}` — {inst.prompt[:30]}"
-                    if inst.user_name and not inst.is_owner_session:
-                        line += f" [{inst.user_name}]"
-                    thread_id = session_to_thread.get(inst.session_id or "")
-                    if thread_id:
-                        line += f" • <#{thread_id}>"
-                    if inst.created_at:
-                        try:
-                            started = datetime.fromisoformat(inst.created_at)
-                            if started.tzinfo is None:
-                                started = started.replace(tzinfo=timezone.utc)
-                            elapsed = datetime.now(timezone.utc) - started
-                            mins = int(elapsed.total_seconds() // 60)
-                            line += f" • {'<1' if mins < 1 else str(mins)}m"
-                        except (ValueError, TypeError):
-                            pass
-                    run_lines.append(line)
-            # Truncate field value to Discord 1024 limit
-            field_val = "\n".join(run_lines)
-            if len(field_val) > 1024:
-                field_val = field_val[:1021] + "..."
-            embed.add_field(name=f"Running ({len(running)})", value=field_val, inline=False)
-        else:
-            embed.add_field(name="Running", value="None", inline=True)
-
-        # Recently Completed
-        if completed:
-            comp_lines = []
-            for inst in completed:
-                line = f"✅ `{inst.display_id()}` — {inst.prompt[:30]}"
-                thread_id = session_to_thread.get(inst.session_id or "")
-                if thread_id:
-                    line += f" • <#{thread_id}>"
-                comp_lines.append(line)
-            embed.add_field(
-                name=f"Recently Completed ({len(completed)})",
-                value="\n".join(comp_lines), inline=False,
-            )
-
-        # Projects with forum links
-        if self._forums.forum_projects:
-            proj_lines = []
-            for name, proj in self._forums.forum_projects.items():
-                if proj.forum_channel_id and name != "_default":
-                    threads = len(proj.threads)
-                    marker = " *" if name == active_repo else ""
-                    proj_lines.append(f"<#{proj.forum_channel_id}> ({threads} threads){marker}")
-            if proj_lines:
-                embed.add_field(name="Projects", value="\n".join(proj_lines), inline=False)
-
-        # Cost + Mode
-        embed.add_field(name="Today", value=f"${today_cost:.4f}", inline=True)
-        embed.add_field(name="Total", value=f"${total_cost:.4f}", inline=True)
-        embed.add_field(name="Mode", value=mode_label(self._store.mode), inline=True)
-        embed.add_field(name="PC", value=config.PC_NAME, inline=True)
-
-        # Get or create dashboard message
-        # Read dash_msg_id from state, but don't hold the dict reference across awaits
-        # to avoid overwriting concurrent _save_forum_map() mutations.
-        dash_msg_id = self._store.get_platform_state("discord").get("dashboard_message_id")
-
-        try:
-            if dash_msg_id:
-                try:
-                    msg = await lobby.fetch_message(int(dash_msg_id))
-                    await msg.edit(embed=embed)
-                except (discord.NotFound, discord.HTTPException):
-                    dash_msg_id = None  # Message gone, create new one
-
-            if not dash_msg_id:
-                msg = await lobby.send(embed=embed)
-                try:
-                    await msg.pin()
-                except Exception:
-                    pass
-                # Re-fetch state after await to avoid clobbering concurrent mutations
-                state = self._store.get_platform_state("discord")
-                state["dashboard_message_id"] = str(msg.id)
-                self._store.set_platform_state("discord", state, persist=True)
-        except Exception:
-            log.debug("Failed to update dashboard", exc_info=True)
-
-        # Always refresh control rooms, independent of dashboard success
-        for rname, proj in self._forums.forum_projects.items():
-            if proj.control_thread_id:
-                asyncio.create_task(self._forums.refresh_control_room(rname))
-
-        # Refresh user forum control rooms
-        cfg = load_access_config()
-        for uid, ua in cfg.users.items():
-            if ua.control_thread_id:
-                asyncio.create_task(self._forums.refresh_user_control_room(uid))
 
 
     async def _generate_smart_title(
