@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Bug Fixes
+- Fix auto-merge failures: search all non-bot branches when detecting default branch (fixes repos with neither `master` nor `main`)
+- Fix empty merge error messages: report stdout when stderr is empty (merge conflicts write to stdout)
+- Auto-resolve CHANGELOG.md conflicts using git's union merge driver
+- Auto-resolve pyproject.toml version conflicts (keeps master's version)
+- Stash dirty working tree before merge checkout, safely pop after (with clean-tree guard)
+
 ## v0.19.4 — Worktree Session & Merge Fixes (2026-03-17)
 
 ### Bug Fixes
