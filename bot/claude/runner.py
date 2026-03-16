@@ -407,6 +407,9 @@ class ClaudeRunner:
         # Explain that user can only see text output (critical for good responses)
         parts.append(config.CHAT_APP_CONSTRAINT)
 
+        # Honesty & verification guidance
+        parts.append(config.HONESTY_CONSTRAINT)
+
         # Bot capability context so Claude knows what the user can do
         parts.append(config.BOT_CONTEXT)
 

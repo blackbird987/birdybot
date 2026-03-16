@@ -776,10 +776,17 @@ async def on_logs(ctx: RequestContext) -> None:
 async def on_mode(ctx: RequestContext, text: str) -> None:
     text = text.strip().lower()
     if text in VALID_MODES:
+        current = ctx.effective_mode
         ctx.update_mode(text)
         actual = ctx.effective_mode
+        if actual == current:
+            if actual != text and ctx.mode_ceiling:
+                # Capped — always explain why
+                msg = f"Mode: {mode_label(actual)} (capped — your ceiling is {mode_label(ctx.mode_ceiling)})"
+                await ctx.messenger.send_text(ctx.channel_id, msg)
+            return  # same effective mode, skip duplicate
         msg = f"Mode: {mode_label(actual)}"
-        if actual != text:
+        if actual != text and ctx.mode_ceiling:
             msg += f" (capped — your ceiling is {mode_label(ctx.mode_ceiling)})"
         await ctx.messenger.send_text(ctx.channel_id, msg)
     elif text:
@@ -1542,8 +1549,10 @@ async def handle_callback(
 
     elif action in ("mode_explore", "mode_plan", "mode_build"):
         target = action.split("_", 1)[1]  # "explore", "plan", or "build"
+        current = ctx.effective_mode
         ctx.update_mode(target)
         actual = ctx.effective_mode  # may be capped by mode_ceiling
+
         # Update source message buttons to reflect new mode
         inst = ctx.store.get_instance(instance_id)
         if inst and source_msg_id:
@@ -1551,6 +1560,18 @@ async def handle_callback(
             ctx.store.update_instance(inst)
             buttons = action_button_specs(inst)
             await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, None, buttons)
-        await ctx.messenger.send_text(
-            ctx.channel_id, f"Mode: {mode_label(target)}", silent=True,
-        )
+
+        if actual == current:
+            if actual != target and ctx.mode_ceiling:
+                # Capped — always explain why, even on repeat taps
+                await ctx.messenger.send_text(
+                    ctx.channel_id,
+                    f"Mode: {mode_label(actual)} (capped — your ceiling is {mode_label(ctx.mode_ceiling)})",
+                    silent=True,
+                )
+            return  # same effective mode, skip duplicate message
+
+        msg = f"Mode: {mode_label(actual)}"
+        if actual != target and ctx.mode_ceiling:
+            msg += f" (capped — your ceiling is {mode_label(ctx.mode_ceiling)})"
+        await ctx.messenger.send_text(ctx.channel_id, msg, silent=True)
