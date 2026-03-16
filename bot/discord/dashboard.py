@@ -242,12 +242,18 @@ async def _refresh_dashboard_impl(
         log.debug("Failed to update dashboard", exc_info=True)
 
     # Always refresh control rooms, independent of dashboard success
+    async def _safe_refresh(coro):
+        try:
+            await coro
+        except Exception:
+            log.debug("Control room refresh failed", exc_info=True)
+
     for rname, proj in forums.forum_projects.items():
         if proj.control_thread_id:
-            asyncio.create_task(forums.refresh_control_room(rname))
+            asyncio.create_task(_safe_refresh(forums.refresh_control_room(rname)))
 
     # Refresh user forum control rooms
     cfg = load_access_config()
     for uid, ua in cfg.users.items():
         if ua.control_thread_id:
-            asyncio.create_task(forums.refresh_user_control_room(uid))
+            asyncio.create_task(_safe_refresh(forums.refresh_user_control_room(uid)))
