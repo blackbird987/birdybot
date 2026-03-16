@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.19.3 — Review Fixes (2026-03-16)
+
 ### Bug Fixes
 - Fix `code_active` detection for worktree builds — Agent-made changes now checked in worktree path, not main repo
 - Remove dead `escaped` variable in session resume display
