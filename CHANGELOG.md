@@ -2,8 +2,10 @@
 
 ## [Unreleased]
 
+## v0.18.1 — Discord Bot Refactoring (2026-03-16)
+
 ### Refactoring
-- Extract `bot/discord/bot.py` (2418 → 858 lines) into 6 focused modules:
+- Extract `bot/discord/bot.py` (2418 → 847 lines) into 6 focused modules:
   - `slash_commands.py` (704 lines) — all slash command registration
   - `interactions.py` (574 lines) — button/select/modal dispatch
   - `tags.py` (119 lines) — forum tag management
