@@ -199,6 +199,71 @@ async def run() -> None:
     # Notification service
     notifier = NotificationService()
 
+    # Reboot coalescing: register idle callback that executes pending reboots
+    # after all tasks finish. Multiple autopilots requesting reboots produce
+    # a single reboot instead of racing.
+    async def _execute_pending_reboots() -> None:
+        """Called by runner when idle + reboots pending. Runs at most once."""
+        import json as _json
+        reboots = runner.pending_reboots()
+        runner.clear_reboots()
+        if not reboots:
+            runner._reboot_executing = False
+            return
+
+        try:
+            last = reboots[-1]
+            reason = last.get("message", "reboot requested")
+
+            # Notify all distinct channels that requested reboots
+            channels_seen: set[tuple[str, str]] = set()
+            for r in reboots:
+                ch = r.get("channel_id")
+                plat = r.get("platform")
+                if ch and plat and (ch, plat) not in channels_seen:
+                    channels_seen.add((ch, plat))
+                    if plat in notifier._messengers:
+                        messenger, _ = notifier._messengers[plat]
+                        try:
+                            await messenger.send_text(ch, f"🔄 Rebooting: {reason}")
+                        except Exception:
+                            log.warning("Failed to notify %s:%s about reboot", plat, ch)
+
+            # Merge resume prompts from all requesters
+            resume_parts = [r["resume_prompt"] for r in reboots if r.get("resume_prompt")]
+            merged_prompt = "\n---\n".join(resume_parts) if resume_parts else None
+
+            reboot_data = {
+                "channel_id": last.get("channel_id", ""),
+                "platform": last.get("platform", ""),
+            }
+            if merged_prompt:
+                reboot_data["resume_prompt"] = merged_prompt
+
+            try:
+                config.REBOOT_MSG_FILE.write_text(
+                    _json.dumps(reboot_data), encoding="utf-8",
+                )
+            except Exception:
+                log.warning("Failed to write reboot message file", exc_info=True)
+
+            log.info("Executing coalesced reboot (%d requests merged)", len(reboots))
+
+            # Spawn relaunch script and trigger shutdown
+            import subprocess as _sp
+            launcher = config._PROJECT_ROOT / "scripts" / "relaunch.py"
+            _sp.Popen(
+                [sys.executable, str(launcher), str(config._PROJECT_ROOT)],
+                creationflags=_sp.DETACHED_PROCESS | _sp.CREATE_NEW_PROCESS_GROUP,
+                close_fds=True,
+            )
+            stop_event.set()
+        except Exception:
+            log.exception("Reboot executor failed — resetting for retry")
+            runner._reboot_executing = False
+
+    runner.set_on_idle_reboot(_execute_pending_reboots)
+
     # Schedule result callback
     async def on_schedule_result(instance, result, changed):
         if instance.status == InstanceStatus.FAILED:

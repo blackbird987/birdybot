@@ -6,7 +6,6 @@ import asyncio
 import json
 import logging
 import subprocess
-import sys
 from datetime import datetime, timezone
 
 from bot import config
@@ -82,39 +81,45 @@ async def run_instance(
     sibling_ctx = get_sibling_summary(ctx.store, inst)
 
     start_time = asyncio.get_event_loop().time()
+    ctx.runner.begin_task(inst.id)
     try:
-        result = await ctx.runner.run(
-            inst, on_progress=on_progress, on_stall=on_stall,
-            context=ctx.effective_context,
-            sibling_context=sibling_ctx,
-        )
-    finally:
-        if heartbeat_task:
-            heartbeat_task.cancel()
-
-    # Update thinking message to show completion
-    if handle:
-        elapsed = asyncio.get_event_loop().time() - start_time
-        if elapsed >= 60:
-            elapsed_str = f"{elapsed / 60:.1f}m"
-        else:
-            elapsed_str = f"{elapsed:.0f}s"
-        escaped = ctx.messenger.escape(inst.display_id())
-        icon = "❓" if result.needs_input else ("✅" if not result.is_error else "❌")
-        origin_label = _origin_label(inst.origin)
-        status = "asking a question" if result.needs_input else ("done" if not result.is_error else "failed")
         try:
-            await ctx.messenger.edit_thinking(
-                handle, f"{icon} {escaped} {origin_label}{status} ({elapsed_str})",
+            result = await ctx.runner.run(
+                inst, on_progress=on_progress, on_stall=on_stall,
+                context=ctx.effective_context,
+                sibling_context=sibling_ctx,
             )
-        except Exception:
-            pass
+        finally:
+            if heartbeat_task:
+                heartbeat_task.cancel()
 
-    finalize_run(ctx, inst, result)
-    await send_result(ctx, inst, result.result_text, silent=silent)
+        # Update thinking message to show completion
+        if handle:
+            elapsed = asyncio.get_event_loop().time() - start_time
+            if elapsed >= 60:
+                elapsed_str = f"{elapsed / 60:.1f}m"
+            else:
+                elapsed_str = f"{elapsed:.0f}s"
+            escaped = ctx.messenger.escape(inst.display_id())
+            icon = "❓" if result.needs_input else ("✅" if not result.is_error else "❌")
+            origin_label = _origin_label(inst.origin)
+            status = "asking a question" if result.needs_input else ("done" if not result.is_error else "failed")
+            try:
+                await ctx.messenger.edit_thinking(
+                    handle, f"{icon} {escaped} {origin_label}{status} ({elapsed_str})",
+                )
+            except Exception:
+                pass
 
-    # Check if the instance requested a bot reboot
-    await check_reboot_request(ctx)
+        finalize_run(ctx, inst, result)
+        await send_result(ctx, inst, result.result_text, silent=silent)
+
+        # Check reboot request BEFORE end_task so it's queued when end_task
+        # checks for pending reboots on idle.  Safe because check_reboot_request
+        # just queues (no waiting) — the actual reboot fires from end_task.
+        await check_reboot_request(ctx)
+    finally:
+        ctx.runner.end_task(inst.id)
 
 def _repo_has_changes(repo_path: str) -> bool:
     """Check if a repo has uncommitted changes (staged or unstaged)."""
@@ -343,9 +348,9 @@ async def send_result(
 async def check_reboot_request(ctx: RequestContext) -> None:
     """Check if a Claude Code instance wrote a reboot request file.
 
-    If found, wait for all other active instances to finish, save reboot
-    context (so the new process sends confirmation to the right thread),
-    spawn the relaunch script, and trigger shutdown.
+    If found, queue the reboot on the runner. The actual reboot executes
+    after all active tasks finish (coalesced — multiple autopilots requesting
+    reboots produce a single reboot).
     """
     try:
         raw = config.REBOOT_REQUEST_FILE.read_text(encoding="utf-8")
@@ -360,56 +365,20 @@ async def check_reboot_request(ctx: RequestContext) -> None:
         log.warning("Malformed reboot request file, removing", exc_info=True)
         config.REBOOT_REQUEST_FILE.unlink(missing_ok=True)
         return
-    # Remove file before proceeding — best effort, proceed even if unlink fails
+
+    # Delete file immediately to prevent re-reads by concurrent instances
     try:
         config.REBOOT_REQUEST_FILE.unlink()
     except OSError:
         pass
 
-    reason = data.get("message", "reboot requested")
-    resume_prompt = data.get("resume_prompt")
-    log.info("Reboot requested by instance: %s", reason)
+    # Attach channel context so the reboot executor knows where to notify
+    data["channel_id"] = ctx.channel_id
+    data["platform"] = ctx.platform
 
-    # Wait for any other active instances to finish
-    active = ctx.runner.active_ids
-    if active:
-        await ctx.messenger.send_text(
-            ctx.channel_id,
-            f"⏳ Waiting for {len(active)} active query(s) to finish before rebooting: "
-            f"{', '.join(active)}",
-        )
-        idle = await ctx.runner.wait_until_idle(timeout=300)
-        if not idle:
-            still = ctx.runner.active_ids
-            await ctx.messenger.send_text(
-                ctx.channel_id,
-                f"⚠️ Timed out after 5m. Force-rebooting with {len(still)} still running.",
-            )
-
-    await ctx.messenger.send_text(ctx.channel_id, f"🔄 Rebooting: {reason}")
-
-    # Save context so the new process sends confirmation to this thread
-    reboot_data = {
-        "channel_id": ctx.channel_id,
-        "platform": ctx.platform,
-    }
-    if resume_prompt:
-        reboot_data["resume_prompt"] = resume_prompt
-    try:
-        config.REBOOT_MSG_FILE.write_text(
-            json.dumps(reboot_data), encoding="utf-8",
-        )
-    except Exception:
-        log.warning("Failed to write reboot message file", exc_info=True)
-
-    # Spawn relaunch script and trigger shutdown
-    launcher = config._PROJECT_ROOT / "scripts" / "relaunch.py"
-    subprocess.Popen(
-        [sys.executable, str(launcher), str(config._PROJECT_ROOT)],
-        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
-        close_fds=True,
+    ctx.runner.queue_reboot(data)
+    log.info(
+        "Queued reboot request (reason: %s, total pending: %d)",
+        data.get("message", "reboot requested"),
+        len(ctx.runner.pending_reboots()),
     )
-
-    from bot.engine import commands as _cmds
-    if _cmds._shutdown_fn:
-        _cmds._shutdown_fn()

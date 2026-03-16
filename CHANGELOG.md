@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Concurrency Improvements
+- Reboot coalescing: multiple autopilots requesting reboots now produce a single reboot instead of racing (queue + idle callback pattern)
+- Dashboard refresh serialization: replace timestamp debounce with lock + pending flag to prevent API storms when multiple instances finish simultaneously
+- Platform state race fix: dashboard no longer holds stale dict reference across awaits, preventing `_save_forum_map()` mutations from being overwritten
+
+### Fixes
+- Fix `/reboot` not waiting for autopilot chains: track task-level activity (not just subprocesses) so reboot waits for the entire workflow including gaps between steps
+- Fix control room refresh never executing: `_refresh_dashboard()` had an early `return` that prevented control room rename migration ("Control Center" → "Control Room") and button re-attachment from ever running
+
 ## v0.12.1 — Concise Thread Titles (2026-03-16)
 
 - Tighten smart title generation: prompt asks for 4-6 words with no filler/articles, hard cap at 6 words and 60 chars in `build_title_name()`

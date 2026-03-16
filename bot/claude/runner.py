@@ -8,7 +8,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Callable
+from typing import Awaitable, Callable
 
 from bot import config
 from bot.claude.parser import (
@@ -39,6 +39,19 @@ class ClaudeRunner:
     def __init__(self) -> None:
         self._semaphore = asyncio.Semaphore(config.MAX_CONCURRENT)
         self._processes: dict[str, asyncio.subprocess.Process] = {}
+        # Task-level tracking: covers the full lifecycle of a query/workflow,
+        # not just the subprocess.  Prevents reboot from slipping through
+        # gaps between autopilot chain steps.
+        self._active_tasks: set[str] = set()
+        self._idle_event = asyncio.Event()
+        self._idle_event.set()  # starts idle
+
+        # Reboot coalescing: multiple instances can queue reboot requests,
+        # but only one reboot executes after all tasks finish.
+        self._reboot_requests: list[dict] = []
+        self._reboot_executing = False
+        self._on_idle_callback: Callable[[], Awaitable[None]] | None = None
+        self._idle_loop: asyncio.AbstractEventLoop | None = None
 
     async def check_cli(self) -> str:
         """Verify Claude CLI is available. Returns version string."""
@@ -140,6 +153,8 @@ class ClaudeRunner:
             return RunResult(is_error=True, error_message=str(e))
         finally:
             self._processes.pop(instance.id, None)
+            if not self._active_tasks and not self._processes:
+                self._idle_event.set()
 
     async def _stream_output(
         self,
@@ -455,6 +470,42 @@ class ClaudeRunner:
         except Exception:
             return None
 
+    # --- Task-level tracking ---
+
+    def begin_task(self, instance_id: str) -> None:
+        """Mark a high-level task (query/workflow chain) as active."""
+        self._active_tasks.add(instance_id)
+        self._idle_event.clear()
+
+    def end_task(self, instance_id: str) -> None:
+        """Mark a high-level task as completed.
+
+        If all tasks are done and reboot requests are pending, fires the
+        idle callback (exactly once) to execute the coalesced reboot.
+        """
+        self._active_tasks.discard(instance_id)
+        if not self._active_tasks and not self._processes:
+            self._idle_event.set()
+            # Trigger coalesced reboot if pending
+            if (self._on_idle_callback
+                    and self._reboot_requests
+                    and not self._reboot_executing
+                    and self._idle_loop):
+                self._reboot_executing = True
+                self._idle_loop.call_soon(
+                    lambda: self._idle_loop.create_task(self._on_idle_callback())
+                )
+
+    @property
+    def is_busy(self) -> bool:
+        """Whether any tasks or processes are active."""
+        return bool(self._active_tasks) or bool(self._processes)
+
+    @property
+    def active_task_count(self) -> int:
+        """Number of active high-level tasks."""
+        return len(self._active_tasks)
+
     @property
     def active_count(self) -> int:
         """Number of currently running Claude processes."""
@@ -466,13 +517,35 @@ class ClaudeRunner:
         return list(self._processes.keys())
 
     async def wait_until_idle(self, timeout: float = 300) -> bool:
-        """Wait until no processes are running. Returns True if idle, False on timeout."""
-        deadline = asyncio.get_event_loop().time() + timeout
-        while self._processes:
-            if asyncio.get_event_loop().time() > deadline:
-                return False
-            await asyncio.sleep(2)
-        return True
+        """Wait until no tasks or processes are running."""
+        try:
+            await asyncio.wait_for(self._idle_event.wait(), timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
+
+    # --- Reboot coalescing ---
+
+    def queue_reboot(self, data: dict) -> None:
+        """Queue a reboot request. Executed after all tasks finish."""
+        self._reboot_requests.append(data)
+
+    def pending_reboots(self) -> list[dict]:
+        """Return a copy of pending reboot requests."""
+        return list(self._reboot_requests)
+
+    def clear_reboots(self) -> None:
+        """Clear all pending reboot requests."""
+        self._reboot_requests.clear()
+
+    def set_on_idle_reboot(self, callback: Callable[[], Awaitable[None]]) -> None:
+        """Register async callback invoked when last task ends and reboots are pending.
+
+        Captures the running loop for safe task scheduling from sync end_task().
+        Must be called from an async context (e.g. during startup).
+        """
+        self._on_idle_callback = callback
+        self._idle_loop = asyncio.get_running_loop()
 
     async def kill(self, instance_id: str) -> bool:
         """Terminate a running Claude process."""
@@ -491,6 +564,8 @@ class ClaudeRunner:
             return False
         finally:
             self._processes.pop(instance_id, None)
+            if not self._active_tasks and not self._processes:
+                self._idle_event.set()
 
     def queue_position(self, instance_id: str) -> int | None:
         """Approximate queue position (not exact with asyncio.Semaphore)."""

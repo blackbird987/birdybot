@@ -258,44 +258,50 @@ async def _run_query_inner(ctx: RequestContext, prompt: str) -> None:
 
     heartbeat_task = asyncio.create_task(heartbeat())
     start_time = asyncio.get_event_loop().time()
+    ctx.runner.begin_task(inst.id)
     try:
-        result = await ctx.runner.run(
-            inst, on_progress=on_progress, on_stall=on_stall,
-            context=ctx.effective_context,
-        )
+        try:
+            result = await ctx.runner.run(
+                inst, on_progress=on_progress, on_stall=on_stall,
+                context=ctx.effective_context,
+            )
+        finally:
+            heartbeat_task.cancel()
+
+        # Update thinking message to show completion
+        elapsed = asyncio.get_event_loop().time() - start_time
+        if elapsed >= 60:
+            elapsed_str = f"{elapsed / 60:.1f}m"
+        else:
+            elapsed_str = f"{elapsed:.0f}s"
+        icon = "✅" if not result.is_error else "❌"
+        try:
+            await ctx.messenger.edit_thinking(
+                handle, f"{icon} {escaped} done ({elapsed_str})",
+            )
+        except Exception:
+            pass
+
+        lifecycle.finalize_run(ctx, inst, result)
+
+        if not result.is_error and result.session_id:
+            # For Discord channels, update the per-request session_id (caller reads inst.session_id)
+            # For Telegram/global, update the store's global active_session_id
+            if not ctx.session_id:
+                ctx.store.active_session_id = result.session_id
+            # Write session_id back immediately (before lock release)
+            if ctx.on_session_resolved:
+                ctx.on_session_resolved(result.session_id)
+
+        await lifecycle.send_result(ctx, inst, result.result_text)
+        await budget_warning(ctx)
+
+        # Check reboot request BEFORE end_task so it's queued when end_task
+        # checks for pending reboots on idle.  Safe because check_reboot_request
+        # just queues (no waiting) — the actual reboot fires from end_task.
+        await lifecycle.check_reboot_request(ctx)
     finally:
-        heartbeat_task.cancel()
-
-    # Update thinking message to show completion
-    elapsed = asyncio.get_event_loop().time() - start_time
-    if elapsed >= 60:
-        elapsed_str = f"{elapsed / 60:.1f}m"
-    else:
-        elapsed_str = f"{elapsed:.0f}s"
-    icon = "✅" if not result.is_error else "❌"
-    try:
-        await ctx.messenger.edit_thinking(
-            handle, f"{icon} {escaped} done ({elapsed_str})",
-        )
-    except Exception:
-        pass
-
-    lifecycle.finalize_run(ctx, inst, result)
-
-    if not result.is_error and result.session_id:
-        # For Discord channels, update the per-request session_id (caller reads inst.session_id)
-        # For Telegram/global, update the store's global active_session_id
-        if not ctx.session_id:
-            ctx.store.active_session_id = result.session_id
-        # Write session_id back immediately (before lock release)
-        if ctx.on_session_resolved:
-            ctx.on_session_resolved(result.session_id)
-
-    await lifecycle.send_result(ctx, inst, result.result_text)
-    await budget_warning(ctx)
-
-    # Check if the instance requested a bot reboot
-    await lifecycle.check_reboot_request(ctx)
+        ctx.runner.end_task(inst.id)
 
 
 # --- /new ---
@@ -1134,13 +1140,12 @@ async def on_reboot(ctx: RequestContext) -> None:
     import json
     import sys
 
-    # --- Wait for active instances to finish ---
-    active_ids = ctx.runner.active_ids
-    if active_ids:
-        ids = ", ".join(active_ids)
+    # --- Wait for active instances/tasks to finish ---
+    if ctx.runner.is_busy:
+        ids = ", ".join(ctx.runner.active_ids) or "(between steps)"
         await ctx.messenger.send_text(
             ctx.channel_id,
-            f"⏳ Waiting for {len(active_ids)} active instance(s) to finish: {ids}",
+            f"⏳ Waiting for active work to finish: {ids}",
         )
         idle = await ctx.runner.wait_until_idle(timeout=300)
         if not idle:

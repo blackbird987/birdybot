@@ -364,47 +364,54 @@ async def _run_autopilot_chain(
     current_msg = source_msg_id
     result: Instance | None = None
 
-    for step in steps:
-        # Update remaining steps in session state for resume
-        remaining = steps[steps.index(step):]
-        ctx.store.set_autopilot_chain(session_id, remaining)
+    # Keep a chain-level task active so reboot waits for the entire chain,
+    # not just individual steps (which have gaps between them).
+    chain_task_id = f"chain:{source_id}"
+    ctx.runner.begin_task(chain_task_id)
+    try:
+        for step in steps:
+            # Update remaining steps in session state for resume
+            remaining = steps[steps.index(step):]
+            ctx.store.set_autopilot_chain(session_id, remaining)
 
-        if step == "review_loop":
-            result = await _review_plan_loop(ctx, current_id, current_msg)
-            # Post deferred revisions summary if any
-            if result and result.status == InstanceStatus.COMPLETED and result.deferred_revisions:
-                deferred_text = "\n".join(f"• {d}" for d in result.deferred_revisions[:10])
-                await ctx.messenger.send_result(
-                    ctx.channel_id,
-                    f"**Deferred Revisions** (Medium/Low)\n\n{deferred_text}",
-                    metadata={"_status": "completed", "_mode": "plan", "_deferred": True},
-                    silent=True,
-                )
-        elif step == "build":
-            source = ctx.store.get_instance(current_id)
-            is_plan = source.plan_active if source else False
-            result = await spawn_from(ctx, current_id, SpawnConfig(
-                instance_type=InstanceType.TASK,
-                prompt=config.BUILD_FROM_PLAN_PROMPT if is_plan else config.BUILD_FROM_QUERY_PROMPT,
-                mode="build", origin=InstanceOrigin.BUILD,
-                status_text="Building...", resume_session=True,
-                auto_branch=True, silent=True,
-            ), source_msg_id=current_msg)
-        elif step == "review_code":
-            result = await on_review_code(ctx, current_id, current_msg)
-        elif step == "done":
-            result = await on_done(ctx, current_id, current_msg)
+            if step == "review_loop":
+                result = await _review_plan_loop(ctx, current_id, current_msg)
+                # Post deferred revisions summary if any
+                if result and result.status == InstanceStatus.COMPLETED and result.deferred_revisions:
+                    deferred_text = "\n".join(f"• {d}" for d in result.deferred_revisions[:10])
+                    await ctx.messenger.send_result(
+                        ctx.channel_id,
+                        f"**Deferred Revisions** (Medium/Low)\n\n{deferred_text}",
+                        metadata={"_status": "completed", "_mode": "plan", "_deferred": True},
+                        silent=True,
+                    )
+            elif step == "build":
+                source = ctx.store.get_instance(current_id)
+                is_plan = source.plan_active if source else False
+                result = await spawn_from(ctx, current_id, SpawnConfig(
+                    instance_type=InstanceType.TASK,
+                    prompt=config.BUILD_FROM_PLAN_PROMPT if is_plan else config.BUILD_FROM_QUERY_PROMPT,
+                    mode="build", origin=InstanceOrigin.BUILD,
+                    status_text="Building...", resume_session=True,
+                    auto_branch=True, silent=True,
+                ), source_msg_id=current_msg)
+            elif step == "review_code":
+                result = await on_review_code(ctx, current_id, current_msg)
+            elif step == "done":
+                result = await on_done(ctx, current_id, current_msg)
 
-        if not result or result.status != InstanceStatus.COMPLETED:
-            # Chain paused/failed — state already saved for resume
-            return result
+            if not result or result.status != InstanceStatus.COMPLETED:
+                # Chain paused/failed — state already saved for resume
+                return result
 
-        current_id = result.id
-        current_msg = _last_msg_id(result, ctx.platform)
+            current_id = result.id
+            current_msg = _last_msg_id(result, ctx.platform)
 
-    # Chain complete — clear state
-    ctx.store.clear_autopilot_chain(session_id)
-    return result
+        # Chain complete — clear state
+        ctx.store.clear_autopilot_chain(session_id)
+        return result
+    finally:
+        ctx.runner.end_task(chain_task_id)
 
 
 async def on_autopilot(

@@ -270,9 +270,10 @@ class ClaudeBot(discord.Client):
         self._forum_lock = asyncio.Lock()
         self._thread_lock = asyncio.Lock()
         self._name_lock = asyncio.Lock()  # Serializes thread.edit(name=...) calls
+        self._dashboard_lock = asyncio.Lock()  # Serializes dashboard refreshes
+        self._dashboard_pending = False  # True if a refresh is queued behind the lock
         self._idle_timers: dict[str, asyncio.TimerHandle] = {}  # channel_id -> scheduled sleep
         self._sleep_gen: dict[str, int] = {}  # generation counter per channel (stale-callback guard)
-        self._dashboard_last_refresh: float = 0.0  # monotonic timestamp for debounce
         # Pending /ref context: {thread_id: (context_str, monotonic_timestamp)}
         # Consumed by on_message, expires after 10 minutes
         self._pending_refs: dict[str, tuple[str, float]] = {}
@@ -2322,12 +2323,25 @@ class ClaudeBot(discord.Client):
     # --- Dashboard ---
 
     async def _refresh_dashboard(self) -> None:
-        """Update or create the pinned dashboard embed in lobby. Debounced to 2s."""
-        now = asyncio.get_event_loop().time()
-        if now - self._dashboard_last_refresh < 2:
-            return
-        self._dashboard_last_refresh = now
+        """Update or create the pinned dashboard embed in lobby.
 
+        Serialized: only one refresh runs at a time. If more requests arrive
+        while one is running, exactly one additional refresh is queued.
+        """
+        if self._dashboard_lock.locked():
+            # A refresh is already running — mark that another is needed
+            self._dashboard_pending = True
+            return
+
+        async with self._dashboard_lock:
+            await self._refresh_dashboard_impl()
+            # If more requests arrived while we held the lock, run once more
+            while self._dashboard_pending:
+                self._dashboard_pending = False
+                await self._refresh_dashboard_impl()
+
+    async def _refresh_dashboard_impl(self) -> None:
+        """Inner dashboard refresh logic (must be called under _dashboard_lock)."""
         if not self._lobby_channel_id:
             return
         lobby = self.get_channel(self._lobby_channel_id)
@@ -2446,29 +2460,32 @@ class ClaudeBot(discord.Client):
         embed.add_field(name="PC", value=config.PC_NAME, inline=True)
 
         # Get or create dashboard message
-        state = self._store.get_platform_state("discord")
-        dash_msg_id = state.get("dashboard_message_id")
+        # Read dash_msg_id from state, but don't hold the dict reference across awaits
+        # to avoid overwriting concurrent _save_forum_map() mutations.
+        dash_msg_id = self._store.get_platform_state("discord").get("dashboard_message_id")
 
         try:
             if dash_msg_id:
                 try:
                     msg = await lobby.fetch_message(int(dash_msg_id))
                     await msg.edit(embed=embed)
-                    return
                 except (discord.NotFound, discord.HTTPException):
-                    pass  # Message gone, create new one
+                    dash_msg_id = None  # Message gone, create new one
 
-            msg = await lobby.send(embed=embed)
-            try:
-                await msg.pin()
-            except Exception:
-                pass
-            state["dashboard_message_id"] = str(msg.id)
-            self._store.set_platform_state("discord", state, persist=True)
+            if not dash_msg_id:
+                msg = await lobby.send(embed=embed)
+                try:
+                    await msg.pin()
+                except Exception:
+                    pass
+                # Re-fetch state after await to avoid clobbering concurrent mutations
+                state = self._store.get_platform_state("discord")
+                state["dashboard_message_id"] = str(msg.id)
+                self._store.set_platform_state("discord", state, persist=True)
         except Exception:
             log.debug("Failed to update dashboard", exc_info=True)
 
-        # Refresh control room embeds for all repos (fire-and-forget)
+        # Always refresh control rooms, independent of dashboard success
         for rname, proj in self._forum_projects.items():
             if proj.control_thread_id:
                 asyncio.create_task(self._refresh_control_room(rname))
