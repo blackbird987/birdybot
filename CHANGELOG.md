@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.17.0 — Control Room Buttons & Branch Management (2026-03-16)
+
 ### Branch Management
 - New branches always fork from master/main instead of current HEAD (prevents fork drift from parallel sessions)
 - Dirty-worktree guard: auto-stash uncommitted changes before branch switch, pop onto new branch
