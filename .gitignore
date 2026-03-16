@@ -16,6 +16,9 @@ build/
 # Claude Code
 .claude/
 
+# Git worktrees (build isolation)
+.worktrees/
+
 # IDE
 .vscode/
 .idea/

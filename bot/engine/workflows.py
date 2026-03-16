@@ -152,6 +152,7 @@ async def spawn_from(
     if cfg.copy_branch:
         new_inst.branch = source.branch
         new_inst.original_branch = source.original_branch
+        new_inst.worktree_path = source.worktree_path
     elif cfg.auto_branch:
         new_inst.branch = f"claude-bot/{new_inst.id}"
 

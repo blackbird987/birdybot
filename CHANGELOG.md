@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Git Worktrees
+- Build tasks now use git worktrees for file isolation — each build gets its own directory (`{repo}/.worktrees/{id}/`)
+- Main repo always stays on master — no more `git checkout` in the shared directory
+- Parallel builds on the same repo run in separate worktrees without conflicts
+- Per-repo asyncio lock serializes git admin operations (worktree add/remove, merge, branch delete)
+- Session files are copied between main repo and worktree project directories so `--resume` works
+- Merge/discard operations clean up worktrees and session directories automatically
+- `/branches` command now also scans for orphaned worktree directories
+
 ## v0.18.1 — Discord Bot Refactoring (2026-03-16)
 
 ### Refactoring

@@ -550,6 +550,7 @@ async def on_retry(ctx: RequestContext, text: str) -> None:
     if inst.branch:
         new_inst.branch = inst.branch
         new_inst.original_branch = inst.original_branch
+        new_inst.worktree_path = inst.worktree_path
     ctx.store.update_instance(new_inst)
 
     escaped = ctx.messenger.escape(new_inst.display_id())
@@ -657,31 +658,38 @@ async def on_branches(ctx: RequestContext) -> None:
         await ctx.messenger.send_text(ctx.channel_id, "No repos configured.")
         return
 
-    # Collect branches tracked by ANY instance (including old ones)
+    # Collect branches and worktrees tracked by ANY instance
     active_branches: set[str] = set()
+    active_worktrees: set[str] = set()
     for inst in ctx.store.list_instances(all_=True):
         if inst.branch:
             active_branches.add(inst.branch)
+        if inst.worktree_path:
+            active_worktrees.add(inst.worktree_path)
 
     lines: list[str] = []
     total_orphans = 0
     for repo_name, repo_path in repos.items():
         if not Path(repo_path).is_dir():
             continue
-        orphans = ClaudeRunner.scan_orphan_branches(repo_path, active_branches)
-        if orphans:
-            total_orphans += len(orphans)
-            lines.append(f"**{repo_name}** ({len(orphans)} orphaned)")
-            for b in orphans[:10]:
-                lines.append(f"  `{b}`")
-            if len(orphans) > 10:
-                lines.append(f"  ... and {len(orphans) - 10} more")
+        # Orphan branches
+        orphan_branches = ClaudeRunner.scan_orphan_branches(repo_path, active_branches)
+        # Orphan worktrees
+        orphan_wts = ClaudeRunner.scan_orphan_worktrees(repo_path, active_worktrees)
+        repo_orphans = len(orphan_branches) + len(orphan_wts)
+        if repo_orphans:
+            total_orphans += repo_orphans
+            lines.append(f"**{repo_name}** ({repo_orphans} orphaned)")
+            for b in orphan_branches[:10]:
+                lines.append(f"  `{b}` (branch)")
+            for w in orphan_wts[:10]:
+                lines.append(f"  `{w}` (worktree)")
 
     if not lines:
-        await ctx.messenger.send_text(ctx.channel_id, "No orphaned branches found.")
+        await ctx.messenger.send_text(ctx.channel_id, "No orphaned branches or worktrees found.")
         return
 
-    header = f"**Orphaned Branches** ({total_orphans} total)\n\n"
+    header = f"**Orphaned** ({total_orphans} total)\n\n"
     text = header + "\n".join(lines)
     markup = ctx.messenger.markdown_to_markup(text)
     await ctx.messenger.send_text(ctx.channel_id, markup)
@@ -1367,6 +1375,7 @@ async def handle_callback(
         if inst.branch:
             new_inst.branch = inst.branch
             new_inst.original_branch = inst.original_branch
+            new_inst.worktree_path = inst.worktree_path
         ctx.store.update_instance(new_inst)
 
         if source_msg_id:

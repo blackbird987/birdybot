@@ -67,6 +67,7 @@ class Instance:
     mode: str = "explore"                   # "explore" or "build"
     branch: str | None = None               # Auto-created branch for build bg tasks
     original_branch: str | None = None      # Branch to merge back into
+    worktree_path: str | None = None        # Isolated worktree directory for builds
     created_at: str = ""
     finished_at: str | None = None
     summary: str | None = None
@@ -115,6 +116,7 @@ class Instance:
             "mode": self.mode,
             "branch": self.branch,
             "original_branch": self.original_branch,
+            "worktree_path": self.worktree_path,
             "created_at": self.created_at,
             "finished_at": self.finished_at,
             "summary": self.summary,
@@ -159,6 +161,7 @@ class Instance:
             mode=d.get("mode", "explore"),
             branch=d.get("branch"),
             original_branch=d.get("original_branch"),
+            worktree_path=d.get("worktree_path"),
             created_at=d.get("created_at", ""),
             finished_at=d.get("finished_at"),
             summary=d.get("summary"),

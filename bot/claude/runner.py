@@ -1,10 +1,11 @@
-"""Claude Code subprocess management — streaming, kill, semaphore, stall detection, git branching."""
+"""Claude Code subprocess management — streaming, kill, semaphore, stall detection, git worktrees."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -53,6 +54,10 @@ class ClaudeRunner:
         self._on_idle_callback: Callable[[], Awaitable[None]] | None = None
         self._idle_loop: asyncio.AbstractEventLoop | None = None
 
+        # Per-repo lock: serializes git-metadata-mutating operations
+        # (worktree add/remove, merge, branch delete) to prevent lock file races
+        self._repo_locks: dict[str, asyncio.Lock] = {}
+
     async def check_cli(self) -> str:
         """Verify Claude CLI is available. Returns version string."""
         try:
@@ -99,9 +104,18 @@ class ClaudeRunner:
                               if instance.instance_type == InstanceType.TASK
                               else config.QUERY_TIMEOUT_SECS)
 
-        # Git branch safety for build bg tasks
+        # Git worktree isolation for build tasks
         if instance.branch:
-            await self._ensure_branch(instance)
+            await self._ensure_worktree(instance)
+
+        # Copy session file to worktree's project dir so --resume works
+        if instance.worktree_path and instance.session_id:
+            await asyncio.to_thread(
+                self._copy_session_to_worktree, instance,
+            )
+
+        # Use worktree as cwd if available (file isolation)
+        working_dir = instance.worktree_path or instance.repo_path or None
 
         cmd = self._build_command(instance, context, sibling_context)
         log.info("Running %s: %s", instance.id, " ".join(cmd))
@@ -116,7 +130,7 @@ class ClaudeRunner:
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=instance.repo_path or None,
+                cwd=working_dir,
                 env=env,
                 limit=1024 * 1024,  # 1MB line buffer (default 64KB too small for stream-json)
                 **_NOWND,
@@ -322,9 +336,13 @@ class ClaudeRunner:
             result_path.write_text(result.result_text, encoding="utf-8")
             instance.result_file = str(result_path)
 
-        # Save git diff for build bg tasks
+        # Save git diff for build tasks
         if instance.branch and not result.is_error:
             await self._save_diff(instance)
+
+        # Copy session files back from worktree to main repo project dir
+        if instance.worktree_path:
+            await asyncio.to_thread(self._copy_session_from_worktree, instance)
 
         # Extract summary
         instance.summary = extract_summary(result.result_text)
@@ -603,103 +621,147 @@ class ClaudeRunner:
             return None
         return len(waiters)
 
-    async def _ensure_branch(self, instance: Instance) -> None:
-        """Create or checkout a git branch for build tasks (idempotent)."""
+    # --- Per-repo locking ---
+
+    def _get_repo_lock(self, repo_path: str) -> asyncio.Lock:
+        """Get or create a per-repo lock for serializing git admin operations."""
+        if repo_path not in self._repo_locks:
+            self._repo_locks[repo_path] = asyncio.Lock()
+        return self._repo_locks[repo_path]
+
+    # --- Git worktree management ---
+
+    async def _ensure_worktree(self, instance: Instance) -> None:
+        """Create a git worktree for build isolation (idempotent)."""
         if not instance.repo_path:
             return
-        await asyncio.to_thread(self._ensure_branch_sync, instance)
+        # If worktree already exists (copy_branch from parent), skip creation
+        if instance.worktree_path and Path(instance.worktree_path).is_dir():
+            return
+        repo_lock = self._get_repo_lock(instance.repo_path)
+        async with repo_lock:
+            await asyncio.to_thread(self._create_worktree_sync, instance)
 
-    def _ensure_branch_sync(self, instance: Instance) -> None:
+    def _create_worktree_sync(self, instance: Instance) -> None:
         repo = instance.repo_path
-        try:
-            result = subprocess.run(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                cwd=repo, capture_output=True, text=True, **_NOWND,
-            )
-            current = result.stdout.strip()
-            if current == instance.branch:
-                return
+        wt_dir = str(Path(repo) / ".worktrees" / instance.id)
+        branch = instance.branch
+        default_branch = self._get_default_branch(repo)
 
-            # Always branch from the default branch to prevent fork drift
-            default_branch = self._get_default_branch(repo)
+        # Idempotent: skip if worktree already exists
+        if Path(wt_dir).is_dir():
+            instance.worktree_path = wt_dir
             instance.original_branch = default_branch
+            return
 
-            # Stash uncommitted changes before switching branches
-            stashed = False
-            dirty = subprocess.run(
-                ["git", "status", "--porcelain"],
+        try:
+            # Create .worktrees/ parent if needed
+            Path(wt_dir).parent.mkdir(parents=True, exist_ok=True)
+
+            # Create worktree with a new branch from current HEAD (master/main)
+            result = subprocess.run(
+                ["git", "worktree", "add", wt_dir, "-b", branch],
                 cwd=repo, capture_output=True, text=True, **_NOWND,
             )
-            if dirty.stdout.strip():
-                stash_msg = f"auto-stash before branch switch {instance.id}"
-                stash_result = subprocess.run(
-                    ["git", "stash", "push", "-m", stash_msg],
-                    cwd=repo, capture_output=True, text=True, **_NOWND,
-                )
-                if stash_result.returncode == 0:
-                    stashed = True
-                    log.warning("Stashed uncommitted changes before branching for %s", instance.id)
-                else:
-                    log.warning("git stash push failed for %s: %s", instance.id, stash_result.stderr.strip())
-
-            # Checkout default branch first, then create task branch from it
-            if current != default_branch:
+            if result.returncode != 0:
+                # Branch might already exist (retry/resume) — try without -b
                 subprocess.run(
-                    ["git", "checkout", default_branch],
+                    ["git", "worktree", "add", wt_dir, branch],
                     cwd=repo, capture_output=True, text=True, check=True, **_NOWND,
                 )
 
-            create = subprocess.run(
-                ["git", "checkout", "-b", instance.branch],
-                cwd=repo, capture_output=True, text=True, **_NOWND,
-            )
-            if create.returncode != 0:
-                subprocess.run(
-                    ["git", "checkout", instance.branch],
-                    cwd=repo, capture_output=True, text=True, check=True, **_NOWND,
-                )
-
-            # Pop stash onto the new branch so changes aren't lost
-            if stashed:
-                pop = subprocess.run(
-                    ["git", "stash", "pop"],
-                    cwd=repo, capture_output=True, text=True, **_NOWND,
-                )
-                if pop.returncode != 0:
-                    log.warning(
-                        "Stash pop failed for %s (stash preserved as stash@{0}): %s",
-                        instance.id, pop.stderr.strip(),
-                    )
-
-            log.info("On branch %s (from %s) in %s", instance.branch, default_branch, repo)
+            instance.worktree_path = wt_dir
+            instance.original_branch = default_branch
+            log.info("Created worktree %s (branch %s) in %s", wt_dir, branch, repo)
         except subprocess.CalledProcessError as e:
-            log.error("Failed to ensure branch: %s", e.stderr)
-            raise RuntimeError(f"Failed to ensure branch: {e.stderr}")
+            log.error("Failed to create worktree: %s", e.stderr)
+            raise RuntimeError(f"Failed to create worktree: {e.stderr}")
 
     @staticmethod
     def _get_default_branch(repo_path: str) -> str:
         """Determine the default branch (master or main)."""
         for candidate in ("master", "main"):
             r = subprocess.run(
-                ["git", "rev-parse", "--verify", candidate],
+                ["git", "rev-parse", "--verify", f"refs/heads/{candidate}"],
                 cwd=repo_path, capture_output=True, text=True, **_NOWND,
             )
             if r.returncode == 0:
                 return candidate
         return "master"
 
+    # --- Session file management (worktree ↔ main repo) ---
+
+    @staticmethod
+    def _encode_project_path(path: str) -> str:
+        """Encode path the same way Claude Code does for project dirs."""
+        path = path.replace("\\", "/").rstrip("/")
+        return path.replace("/", "-").replace(":", "-")
+
+    def _copy_session_to_worktree(self, instance: Instance) -> None:
+        """Copy session JSONL from main repo's project dir to worktree's project dir."""
+        if not instance.repo_path or not instance.worktree_path or not instance.session_id:
+            return
+        repo_encoded = self._encode_project_path(instance.repo_path)
+        wt_encoded = self._encode_project_path(instance.worktree_path)
+        if repo_encoded == wt_encoded:
+            return  # Same path, no copy needed
+
+        src_dir = config.CLAUDE_PROJECTS_DIR / repo_encoded
+        dst_dir = config.CLAUDE_PROJECTS_DIR / wt_encoded
+        src_file = src_dir / f"{instance.session_id}.jsonl"
+
+        if not src_file.exists():
+            log.debug("No session file to copy for %s", instance.session_id[:12])
+            return
+
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        dst_file = dst_dir / f"{instance.session_id}.jsonl"
+        shutil.copy2(str(src_file), str(dst_file))
+        log.info("Copied session %s to worktree project dir", instance.session_id[:12])
+
+    def _copy_session_from_worktree(self, instance: Instance) -> None:
+        """Copy session JSONL back from worktree's project dir to main repo's project dir.
+
+        Also handles the case where Claude created a NEW session (different ID).
+        """
+        if not instance.repo_path or not instance.worktree_path:
+            return
+        wt_encoded = self._encode_project_path(instance.worktree_path)
+        repo_encoded = self._encode_project_path(instance.repo_path)
+        if wt_encoded == repo_encoded:
+            return
+
+        wt_proj_dir = config.CLAUDE_PROJECTS_DIR / wt_encoded
+        repo_proj_dir = config.CLAUDE_PROJECTS_DIR / repo_encoded
+
+        if not wt_proj_dir.is_dir():
+            return
+
+        # Copy all .jsonl files (handles new session IDs)
+        repo_proj_dir.mkdir(parents=True, exist_ok=True)
+        for f in wt_proj_dir.glob("*.jsonl"):
+            dst = repo_proj_dir / f.name
+            shutil.copy2(str(f), str(dst))
+            log.debug("Copied session file %s back to main repo project dir", f.name)
+
+    # --- Diff ---
+
     async def _save_diff(self, instance: Instance) -> None:
-        """Save git diff for a build bg task."""
-        if not instance.repo_path or not instance.branch:
+        """Save git diff for a build task."""
+        if not instance.branch:
+            return
+        if not instance.worktree_path and not instance.repo_path:
             return
         await asyncio.to_thread(self._save_diff_sync, instance)
 
     def _save_diff_sync(self, instance: Instance) -> None:
         try:
+            # Diff runs in worktree (where changes are) against the merge base
+            diff_cwd = instance.worktree_path or instance.repo_path
             base = instance.original_branch or "HEAD~1"
             result = subprocess.run(
                 ["git", "diff", base, "--", "."],
-                cwd=instance.repo_path, capture_output=True, text=True, **_NOWND,
+                cwd=diff_cwd, capture_output=True, text=True, **_NOWND,
             )
             if (result.stdout or "").strip():
                 diff_path = config.RESULTS_DIR / f"{instance.id}.diff"
@@ -708,32 +770,111 @@ class ClaudeRunner:
         except Exception:
             log.exception("Failed to save diff for %s", instance.id)
 
+    # --- Merge / Discard ---
+
     async def merge_branch(self, instance: Instance) -> str:
-        """Merge task branch into original branch. Returns status message."""
+        """Merge worktree branch into master. Returns status message."""
         if not instance.branch or not instance.original_branch:
             return "No branch to merge"
+        if instance.repo_path:
+            repo_lock = self._get_repo_lock(instance.repo_path)
+            async with repo_lock:
+                return await asyncio.to_thread(self._merge_branch_sync, instance)
         return await asyncio.to_thread(self._merge_branch_sync, instance)
 
     def _merge_branch_sync(self, instance: Instance) -> str:
         try:
             repo = instance.repo_path
+
+            # Copy session files back before cleanup
+            self._copy_session_from_worktree(instance)
+
+            # Ensure main repo is on the correct branch before merging
             subprocess.run(
                 ["git", "checkout", instance.original_branch],
                 cwd=repo, capture_output=True, text=True, check=True, **_NOWND,
             )
+
+            # Merge the worktree's branch
             subprocess.run(
                 ["git", "merge", instance.branch, "--no-ff",
                  "-m", f"Merge {instance.branch} ({instance.display_id()})"],
                 cwd=repo, capture_output=True, text=True, check=True, **_NOWND,
             )
+
+            # Remove worktree if it exists
+            if instance.worktree_path and Path(instance.worktree_path).exists():
+                subprocess.run(
+                    ["git", "worktree", "remove", instance.worktree_path],
+                    cwd=repo, capture_output=True, text=True, **_NOWND,
+                )
+
+            # Delete branch
             subprocess.run(
                 ["git", "branch", "-d", instance.branch],
                 cwd=repo, capture_output=True, text=True, **_NOWND,
             )
+
+            # Clean up worktree project dir
+            self._cleanup_worktree_session_dir(instance)
+
             instance.branch = None
+            instance.worktree_path = None
             return f"Merged into {instance.original_branch}"
         except subprocess.CalledProcessError as e:
+            # Abort any in-progress merge to keep main repo clean for other sessions
+            subprocess.run(
+                ["git", "merge", "--abort"],
+                cwd=instance.repo_path, capture_output=True, text=True, **_NOWND,
+            )
             return f"Merge failed: {e.stderr.strip()}"
+
+    async def discard_branch(self, instance: Instance) -> str:
+        """Delete worktree and branch without merging."""
+        if not instance.branch or not instance.original_branch:
+            return "No branch to discard"
+        if instance.repo_path:
+            repo_lock = self._get_repo_lock(instance.repo_path)
+            async with repo_lock:
+                return await asyncio.to_thread(self._discard_branch_sync, instance)
+        return await asyncio.to_thread(self._discard_branch_sync, instance)
+
+    def _discard_branch_sync(self, instance: Instance) -> str:
+        try:
+            repo = instance.repo_path
+
+            # Remove worktree (force in case of uncommitted changes)
+            if instance.worktree_path and Path(instance.worktree_path).exists():
+                subprocess.run(
+                    ["git", "worktree", "remove", instance.worktree_path, "--force"],
+                    cwd=repo, capture_output=True, text=True, **_NOWND,
+                )
+
+            # Force delete branch
+            subprocess.run(
+                ["git", "branch", "-D", instance.branch],
+                cwd=repo, capture_output=True, text=True, **_NOWND,
+            )
+
+            # Clean up worktree project dir
+            self._cleanup_worktree_session_dir(instance)
+
+            instance.branch = None
+            instance.worktree_path = None
+            return f"Discarded branch, back on {instance.original_branch}"
+        except subprocess.CalledProcessError as e:
+            return f"Discard failed: {e.stderr.strip()}"
+
+    def _cleanup_worktree_session_dir(self, instance: Instance) -> None:
+        """Remove the worktree's Claude project directory (session files already copied back)."""
+        if not instance.worktree_path:
+            return
+        wt_encoded = self._encode_project_path(instance.worktree_path)
+        wt_proj_dir = config.CLAUDE_PROJECTS_DIR / wt_encoded
+        if wt_proj_dir.is_dir():
+            shutil.rmtree(str(wt_proj_dir), ignore_errors=True)
+
+    # --- Orphan scanning ---
 
     @staticmethod
     def scan_orphan_branches(repo_path: str, active_branches: set[str]) -> list[str]:
@@ -749,24 +890,14 @@ class ClaudeRunner:
             log.debug("Failed to scan branches in %s", repo_path, exc_info=True)
             return []
 
-    async def discard_branch(self, instance: Instance) -> str:
-        """Delete task branch without merging."""
-        if not instance.branch or not instance.original_branch:
-            return "No branch to discard"
-        return await asyncio.to_thread(self._discard_branch_sync, instance)
-
-    def _discard_branch_sync(self, instance: Instance) -> str:
-        try:
-            repo = instance.repo_path
-            subprocess.run(
-                ["git", "checkout", instance.original_branch],
-                cwd=repo, capture_output=True, text=True, check=True, **_NOWND,
-            )
-            subprocess.run(
-                ["git", "branch", "-D", instance.branch],
-                cwd=repo, capture_output=True, text=True, check=True, **_NOWND,
-            )
-            instance.branch = None
-            return f"Discarded branch, back on {instance.original_branch}"
-        except subprocess.CalledProcessError as e:
-            return f"Discard failed: {e.stderr.strip()}"
+    @staticmethod
+    def scan_orphan_worktrees(repo_path: str, active_worktrees: set[str]) -> list[str]:
+        """Find stale .worktrees/ directories not associated with active instances."""
+        wt_parent = Path(repo_path) / ".worktrees"
+        if not wt_parent.is_dir():
+            return []
+        orphans = []
+        for d in wt_parent.iterdir():
+            if d.is_dir() and str(d) not in active_worktrees:
+                orphans.append(d.name)
+        return orphans
