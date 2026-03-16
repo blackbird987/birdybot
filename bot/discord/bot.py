@@ -29,6 +29,7 @@ from bot.discord.access import AccessResult, load_access_config, check_user_acce
 from bot.discord.adapter import DiscordMessenger
 from bot.discord import dashboard as dashboard_mod
 from bot.discord.forums import ForumManager, ForumProject, ThreadInfo
+from bot.discord.titles import generate_title_text
 from bot.engine import commands
 from bot.engine import sessions as sessions_mod
 from bot.platform.base import RequestContext
@@ -63,84 +64,7 @@ def _snowflake_age(snowflake_id: int) -> str:
     return format_age(datetime.now(timezone.utc) - created)
 
 
-async def _generate_title_text(prompt: str, summary: str = "") -> str | None:
-    """Spawn a lightweight Claude CLI call to generate a 4-6 word thread title.
-
-    Bypasses the runner semaphore — this is a standalone, cheap subprocess.
-    Returns the title string, or None on failure/timeout.
-    """
-    from bot.claude.parser import extract_result, parse_stream_line
-
-    title_prompt = (
-        "Generate a 4-6 word title for this coding session. "
-        "Maximum 6 words. No articles or filler words like 'the', 'a', 'for'. "
-        "Output ONLY the title — no quotes, no explanation.\n\n"
-        f"User asked: {prompt[:300]}\n"
-    )
-    if summary:
-        title_prompt += f"\nResult: {summary[:500]}"
-
-    cmd = [
-        config.CLAUDE_BINARY, "-p", title_prompt,
-        "--output-format", "stream-json", "--verbose",
-        "--permission-mode", "plan",
-        "--max-turns", "1",
-    ]
-
-    env = os.environ.copy()
-    env.pop("CLAUDE_CODE", None)
-    env.pop("CLAUDECODE", None)
-
-    proc = None
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-            env=env,
-            **_NOWND,
-        )
-        stdout, _ = await asyncio.wait_for(
-            proc.communicate(), timeout=config.TITLE_TIMEOUT_SECS,
-        )
-    except asyncio.TimeoutError:
-        log.debug("Title generation timed out")
-        if proc:
-            try:
-                proc.kill()
-                await proc.wait()
-            except (ProcessLookupError, OSError):
-                pass
-        return None
-    except Exception:
-        log.warning("Title generation CLI call failed", exc_info=True)
-        if proc:
-            try:
-                proc.kill()
-                await proc.wait()
-            except (ProcessLookupError, OSError):
-                pass
-        return None
-
-    # Parse stream-json to extract result text
-    events = []
-    for line in stdout.decode("utf-8", errors="replace").splitlines():
-        parsed = parse_stream_line(line)
-        if parsed:
-            events.append(parsed)
-
-    result = extract_result(events)
-    if not result.result_text:
-        return None
-
-    # Take first line only (LLM might add explanation on subsequent lines)
-    title = result.result_text.strip().split("\n")[0].strip()
-    # Strip markdown formatting: leading # (headers), inline *_`
-    title = re.sub(r'^#+\s*', '', title)
-    title = re.sub(r'[*_`]', '', title)
-    title = title.strip('"\'').strip()
-    title = re.sub(r'[.!?:]+$', '', title).strip()
-    return title if len(title) >= 3 else None
+    # Title generation: generate_title_text() lives in bot.discord.titles
 
 
 class ClaudeBot(discord.Client):
@@ -1650,7 +1574,7 @@ class ClaudeBot(discord.Client):
             # Claim early to prevent duplicate concurrent tasks
             info._title_generated = True
 
-            title = await _generate_title_text(prompt, summary)
+            title = await generate_title_text(prompt, summary)
             if not title:
                 log.warning("Title generation returned empty for thread %s", thread_id)
                 info._title_generated = False  # Allow retry on next query
