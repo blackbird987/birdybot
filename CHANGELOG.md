@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Architecture
+- Decouple engine from discord.access: rate limits and bash policy resolved via RequestContext callbacks instead of direct imports
+- Rename `_run_query_inner` -> `_execute_query` for self-documentation
+
 ## v0.14.0 — Discord Extraction & Graceful Shutdown (2026-03-16)
 
 ### Architecture
