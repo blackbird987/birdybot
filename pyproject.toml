@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-bot"
-version = "0.15.2"
+version = "0.16.0"
 description = "Multi-platform bot for managing Claude Code CLI instances (Telegram + Discord)"
 requires-python = ">=3.11"
 dependencies = [

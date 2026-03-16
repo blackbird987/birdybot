@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.16.0 — Auto-Follow Thread Creators (2026-03-16)
+
 - Auto-follow: users who create a forum thread (via /new, control room button, or lobby message) are automatically added to the thread so they get notifications
 
 ## v0.15.2 — Smart Title Fix (2026-03-16)
