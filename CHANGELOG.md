@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.11.1 — Control Room Button Fix (2026-03-16)
+
 - Fix control room button deleting the control room post on press (`new_repo` handler was calling `delete_original_response()` which destroys the component message)
 - Add immediate control room refresh after `new_repo` button press (recovers if embed deleted externally)
 - Migrate existing "Control Center" thread names to "Control Room" on refresh
