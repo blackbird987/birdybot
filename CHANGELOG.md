@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.16.1 — Thread Name Edit Dedup (2026-03-16)
+
 - Fix smart title blocked by global `_name_lock` during Discord 429 rate limits — replaced with per-thread dedup set so thread name edits are independent
 
 ## v0.16.0 — Auto-Follow Thread Creators (2026-03-16)
