@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## v0.20.0 — Honesty & Mode UX (2026-03-17)
+
+### UX Improvements
+- Add honesty/verification clause to system prompt — Claude must disclose when it hasn't verified URLs, prices, or other external data
+- Add wrong-mode guidance — Claude now tells users exactly how to switch modes instead of just saying it can't do something
+- Suppress duplicate mode-change messages — tapping the same mode button no longer spams the channel
+- Always show ceiling explanation when a non-owner's mode request is capped (even on repeat taps)
+
+### Access Control
+- Upgrade Mardy (Minecraft 4K Gameplay) to build mode + full bash on MardyShiiiits repo
+
 ## v0.19.4 — Worktree Session & Merge Fixes (2026-03-17)
 
 ### Bug Fixes
