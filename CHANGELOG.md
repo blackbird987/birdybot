@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+- Fix smart title not firing on first message in /new and lobby threads (flag-based check replaces name check)
+- Reduce title generation timeout from 30s to 15s
 
 ## v0.15.1 — Deferred Revision Persistence (2026-03-16)
 

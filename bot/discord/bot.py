@@ -1390,7 +1390,7 @@ class ClaudeBot(discord.Client):
                             self._forums.persist_ctx_settings(ctx)
                             if was_pending:
                                 await self._forums.finalize_pending_thread(channel_id, message.channel, text)
-                            elif "new-session" in message.channel.name:
+                            if not info._title_generated:
                                 summary = self._forums.get_latest_summary(channel_id)
                                 asyncio.create_task(self._generate_smart_title(
                                     message.channel, text, summary))
