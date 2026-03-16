@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+- Fix thread title generation getting permanently stuck after exceptions (threads staying "new session" forever)
+- Fix plan buttons not showing when a regular query enters plan mode (was showing Commit/Review Code instead of Autopilot/Review Plan/Build It)
 
 ## v0.9.1 — User Control Rooms & Self-Healing (2026-03-16)
 

@@ -2406,6 +2406,7 @@ class ClaudeBot(discord.Client):
         summary: str = "",
     ) -> None:
         """Fire-and-forget: generate an LLM title and rename the thread."""
+        info = None
         try:
             thread_id = str(thread.id)
             lookup = self._thread_to_project(thread_id)
@@ -2436,6 +2437,9 @@ class ClaudeBot(discord.Client):
             log.info("Smart title for thread %s: %s", thread_id, new_name)
         except Exception:
             log.warning("Smart title generation failed for thread %s", thread.id, exc_info=True)
+            # Reset flag so next query can retry title generation
+            if info is not None:
+                info._title_generated = False
 
     async def _update_thread_name(
         self,
