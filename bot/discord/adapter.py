@@ -293,6 +293,17 @@ class DiscordMessenger:
                     value=" \u2502 ".join(stats_parts),  # │ separator
                     inline=False,
                 )
+            # Deferred revisions from autopilot plan review
+            deferred = metadata.get("_deferred_revisions")
+            if deferred:
+                items = "\n".join(f"\u2022 {d}" for d in deferred[:10])
+                if len(items) > 1000:
+                    items = items[:997] + "..."
+                embed.add_field(
+                    name="Deferred Revisions",
+                    value=items,
+                    inline=False,
+                )
             # Remaining metadata (Branch, Mode, etc.) as inline fields
             skip = {"Duration", "Turns", "Tokens", "Cost"}
             for k, v in metadata.items():

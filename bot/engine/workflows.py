@@ -144,6 +144,7 @@ async def spawn_from(
     new_inst.user_name = source.user_name or (ctx.user_name or "")
     new_inst.is_owner_session = source.is_owner_session
     new_inst.bash_policy = source.bash_policy
+    new_inst.deferred_revisions = source.deferred_revisions
 
     if cfg.resume_session:
         new_inst.session_id = source.session_id
@@ -364,6 +365,9 @@ async def _run_autopilot_chain(
     current_msg = source_msg_id
     result: Instance | None = None
 
+    # Recover deferred revisions from prior run (survives reboot)
+    chain_deferred = ctx.store.get_chain_deferred(session_id)
+
     # Keep a chain-level task active so reboot waits for the entire chain,
     # not just individual steps (which have gaps between them).
     chain_task_id = f"chain:{source_id}"
@@ -378,6 +382,8 @@ async def _run_autopilot_chain(
                 result = await _review_plan_loop(ctx, current_id, current_msg)
                 # Post deferred revisions summary if any
                 if result and result.status == InstanceStatus.COMPLETED and result.deferred_revisions:
+                    chain_deferred = result.deferred_revisions
+                    ctx.store.set_chain_deferred(session_id, chain_deferred)
                     deferred_text = "\n".join(f"• {d}" for d in result.deferred_revisions[:10])
                     await ctx.messenger.send_result(
                         ctx.channel_id,
@@ -407,8 +413,12 @@ async def _run_autopilot_chain(
             current_id = result.id
             current_msg = _last_msg_id(result, ctx.platform)
 
-        # Chain complete — clear state
+        # Chain complete — carry deferred revisions to final result
+        if result and chain_deferred and not result.deferred_revisions:
+            result.deferred_revisions = chain_deferred
+            ctx.store.update_instance(result)
         ctx.store.clear_autopilot_chain(session_id)
+        ctx.store.clear_chain_deferred(session_id)
         return result
     finally:
         ctx.runner.end_task(chain_task_id)

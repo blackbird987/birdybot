@@ -39,6 +39,7 @@ class StateStore:
         self._verbose_level: int = 1  # 0=silent, 1=normal, 2=detailed
         self._platform_state: dict[str, dict] = {}  # platform -> arbitrary state
         self._autopilot_chains: dict[str, list[str]] = {}  # session_id -> remaining steps
+        self._chain_deferred: dict[str, list[str]] = {}  # session_id -> deferred revisions
         self._dirty: bool = False  # Dirty flag — mark_dirty() defers save to auto-save loop
         self._last_mtime: float = 0.0  # Track file mtime for external change detection
 
@@ -71,6 +72,7 @@ class StateStore:
             self._verbose_level = data.get("verbose_level", 1)
             self._platform_state = data.get("platform_state", {})
             self._autopilot_chains = data.get("autopilot_chains", {})
+            self._chain_deferred = data.get("chain_deferred", {})
             for d in data.get("schedules", []):
                 sched = Schedule.from_dict(d)
                 self._schedules[sched.id] = sched
@@ -129,6 +131,7 @@ class StateStore:
             "verbose_level": self._verbose_level,
             "platform_state": self._platform_state,
             "autopilot_chains": self._autopilot_chains,
+            "chain_deferred": self._chain_deferred,
             "schedules": [s.to_dict() for s in self._schedules.values()],
         }
         try:
@@ -522,4 +525,26 @@ class StateStore:
         if not session_id:
             return
         self._autopilot_chains.pop(session_id, None)
+        self.mark_dirty()
+
+    # --- Chain Deferred Revisions ---
+
+    def get_chain_deferred(self, session_id: str | None) -> list[str]:
+        """Get deferred revisions persisted for an autopilot chain."""
+        if not session_id:
+            return []
+        return self._chain_deferred.get(session_id, [])
+
+    def set_chain_deferred(self, session_id: str | None, revisions: list[str]) -> None:
+        """Persist deferred revisions for an autopilot chain."""
+        if not session_id or not revisions:
+            return
+        self._chain_deferred[session_id] = revisions
+        self.mark_dirty()
+
+    def clear_chain_deferred(self, session_id: str | None) -> None:
+        """Remove deferred revisions for an autopilot chain."""
+        if not session_id:
+            return
+        self._chain_deferred.pop(session_id, None)
         self.mark_dirty()

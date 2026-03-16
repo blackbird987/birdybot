@@ -320,6 +320,8 @@ async def send_result(
     if inst.branch:
         meta["Branch"] = inst.branch
     meta["Mode"] = mode_name(inst.mode)
+    if inst.deferred_revisions:
+        meta["_deferred_revisions"] = inst.deferred_revisions
 
     # Parse structured finalize output for commit/done/release origins
     is_finalize = inst.origin in (
