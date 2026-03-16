@@ -62,6 +62,11 @@ INSTANCE_RETENTION_DAYS: int = int(os.getenv("INSTANCE_RETENTION_DAYS", "7"))
 DIGEST_HOUR: int = int(os.getenv("DIGEST_HOUR", "20"))
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
 
+# Auto-update: secondary devices auto-pull and reboot when code changes
+AUTO_UPDATE: bool = os.getenv("AUTO_UPDATE", "").lower() in ("1", "true", "yes")
+AUTO_UPDATE_INTERVAL_SECS: int = int(os.getenv("AUTO_UPDATE_INTERVAL_SECS", "300"))
+AUTO_UPDATE_BRANCH: str | None = os.getenv("AUTO_UPDATE_BRANCH")
+
 # Data directory
 DATA_DIR: Path = Path(os.getenv("DATA_DIR", str(_PROJECT_ROOT / "data")))
 RESULTS_DIR: Path = DATA_DIR / "results"
