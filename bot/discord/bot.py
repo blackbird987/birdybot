@@ -2120,7 +2120,7 @@ class ClaudeBot(discord.Client):
 
         return created, populated
 
-    # --- Repo Control Center ---
+    # --- Repo Control Room ---
 
     async def _get_repo_branch(self, repo_path: str) -> str | None:
         """Get the current git branch for a repo path (non-blocking)."""
@@ -2214,6 +2214,13 @@ class ClaudeBot(discord.Client):
                 proj.control_message_id = None
                 self._save_forum_map()
                 return
+            # Migrate old "Control Center" name to "Control Room"
+            if thread.name == "Control Center":
+                try:
+                    await thread.edit(name="Control Room")
+                    log.info("Renamed Control Center -> Control Room (thread=%s)", thread.id)
+                except Exception:
+                    pass
             msg = await thread.fetch_message(int(proj.control_message_id))
 
             from bot.claude.types import InstanceStatus
@@ -2272,6 +2279,13 @@ class ClaudeBot(discord.Client):
                 ua.control_message_id = None
                 access_mod.save_access_config(cfg)
                 return
+            # Migrate old "Control Center" name to "Control Room"
+            if thread.name == "Control Center":
+                try:
+                    await thread.edit(name="Control Room")
+                    log.info("Renamed Control Center -> Control Room (thread=%s)", thread.id)
+                except Exception:
+                    pass
             msg = await thread.fetch_message(int(ua.control_message_id))
 
             repo_names = list(ua.repos.keys())
@@ -3018,13 +3032,13 @@ class ClaudeBot(discord.Client):
                 interaction, repo_name, redirect=True,
                 user_id=user_id, user_name=user_name,
             )
-            try:
-                await interaction.delete_original_response()
-            except Exception:
-                pass
+            # Refresh control room immediately (recovers if embed was deleted externally)
+            asyncio.create_task(self._refresh_control_room(repo_name))
+            if user_id:
+                asyncio.create_task(self._refresh_user_control_room(user_id))
             return
 
-        # --- Sync CLI for a repo (control center button) ---
+        # --- Sync CLI for a repo (control room button) ---
         if action == "sync_repo":
             if not btn_access.is_owner:
                 await interaction.followup.send("Owner only.", ephemeral=True)
