@@ -541,7 +541,6 @@ async def on_sess_resume(
                 text = user_msg["text"]
                 if len(text) > 400:
                     text = text[:400] + "…"
-                escaped = ctx.messenger.escape(text)
                 markup = ctx.messenger.markdown_to_markup(f"**You:**\n{text}")
                 try:
                     await ctx.messenger.send_text(ctx.channel_id, markup, silent=True)

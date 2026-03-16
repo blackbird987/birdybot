@@ -149,7 +149,7 @@ class ClaudeRunner:
             if result.is_error and "No conversation found" in error_text and instance.session_id:
                 log.warning("Session %s not found for %s, retrying without resume", instance.session_id, instance.id)
                 instance.session_id = None
-                return await self._run_impl(instance, on_progress, on_stall, context)
+                return await self._run_impl(instance, on_progress, on_stall, context, sibling_context)
 
             # Auto-retry on transient errors
             if result.is_error and is_transient_error(
@@ -158,7 +158,7 @@ class ClaudeRunner:
                 log.info("Transient error for %s, retrying in 30s", instance.id)
                 instance.retry_count = 1
                 await asyncio.sleep(30)
-                return await self._run_impl(instance, on_progress, on_stall, context)
+                return await self._run_impl(instance, on_progress, on_stall, context, sibling_context)
 
             return result
 
@@ -796,11 +796,11 @@ class ClaudeRunner:
         """Merge worktree branch into master. Returns status message."""
         if not instance.branch or not instance.original_branch:
             return "No branch to merge"
-        if instance.repo_path:
-            repo_lock = self._get_repo_lock(instance.repo_path)
-            async with repo_lock:
-                return await asyncio.to_thread(self._merge_branch_sync, instance)
-        return await asyncio.to_thread(self._merge_branch_sync, instance)
+        if not instance.repo_path:
+            return "No repo path"
+        repo_lock = self._get_repo_lock(instance.repo_path)
+        async with repo_lock:
+            return await asyncio.to_thread(self._merge_branch_sync, instance)
 
     def _merge_branch_sync(self, instance: Instance) -> str:
         try:
@@ -853,11 +853,11 @@ class ClaudeRunner:
         """Delete worktree and branch without merging."""
         if not instance.branch or not instance.original_branch:
             return "No branch to discard"
-        if instance.repo_path:
-            repo_lock = self._get_repo_lock(instance.repo_path)
-            async with repo_lock:
-                return await asyncio.to_thread(self._discard_branch_sync, instance)
-        return await asyncio.to_thread(self._discard_branch_sync, instance)
+        if not instance.repo_path:
+            return "No repo path"
+        repo_lock = self._get_repo_lock(instance.repo_path)
+        async with repo_lock:
+            return await asyncio.to_thread(self._discard_branch_sync, instance)
 
     def _discard_branch_sync(self, instance: Instance) -> str:
         repo = instance.repo_path
