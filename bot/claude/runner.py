@@ -707,6 +707,15 @@ class ClaudeRunner:
             )
             if r.returncode == 0:
                 return candidate
+        # Fallback: use HEAD if it's not a bot-managed branch
+        r = subprocess.run(
+            ["git", "symbolic-ref", "--short", "HEAD"],
+            cwd=repo_path, capture_output=True, text=True, **_NOWND,
+        )
+        if r.returncode == 0:
+            head = r.stdout.strip()
+            if head and not head.startswith("claude-bot/"):
+                return head
         return "master"
 
     # --- Session file management (worktree ↔ main repo) ---
@@ -715,7 +724,7 @@ class ClaudeRunner:
     def _encode_project_path(path: str) -> str:
         """Encode path the same way Claude Code does for project dirs."""
         path = path.replace("\\", "/").rstrip("/")
-        return path.replace("/", "-").replace(":", "-")
+        return path.replace("/", "-").replace(":", "-").replace(".", "-")
 
     def _copy_session_to_worktree(self, instance: Instance) -> None:
         """Copy session JSONL from main repo's project dir to worktree's project dir."""
@@ -809,9 +818,19 @@ class ClaudeRunner:
             # Copy session files back before cleanup
             self._copy_session_from_worktree(instance)
 
+            # Re-verify original_branch exists; re-detect if stale
+            target = instance.original_branch
+            r = subprocess.run(
+                ["git", "rev-parse", "--verify", f"refs/heads/{target}"],
+                cwd=repo, capture_output=True, text=True, **_NOWND,
+            )
+            if r.returncode != 0:
+                target = self._get_default_branch(repo)
+                instance.original_branch = target
+
             # Ensure main repo is on the correct branch before merging
             subprocess.run(
-                ["git", "checkout", instance.original_branch],
+                ["git", "checkout", target],
                 cwd=repo, capture_output=True, text=True, check=True, **_NOWND,
             )
 

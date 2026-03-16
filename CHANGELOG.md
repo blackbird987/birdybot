@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Bug Fixes
+- Fix worktree session resume: `_encode_project_path` now replaces dots to match Claude Code's path encoding — plans were lost on every worktree build
+- Fix `_get_default_branch` fallback: check HEAD (filtering `claude-bot/*`) instead of blindly returning `"master"` when neither master nor main exists
+- Fix merge safety: re-verify `original_branch` exists before checkout, re-detect if stale
+- Add empty-build guard: autopilot halts + auto-discards branch/worktree when build produces no changes
+
 ## v0.19.3 — Review Fixes (2026-03-16)
 
 ### Bug Fixes
@@ -455,12 +461,8 @@
 - `RELEASE_PROMPT` in config handles the full release workflow: changelog freeze, version file update, commit, and git tag.
 
 ### Changelog Workflow
-- `COMMIT_PROMPT` and `DONE_PROMPT` now direct changes to `## [Unreleased]
-
-## v0.15.2 — Smart Title Fix (2026-03-16)` instead of version-numbered headers.
-- Added `## [Unreleased]
-
-## v0.15.2 — Smart Title Fix (2026-03-16)` header to CHANGELOG.md for ongoing work.
+- `COMMIT_PROMPT` and `DONE_PROMPT` now direct changes to `## [Unreleased]` instead of version-numbered headers.
+- Added `## [Unreleased]` header to CHANGELOG.md for ongoing work.
 - Added versioning section to CLAUDE.md pointing to global conventions.
 
 ### Plan Button Fix

@@ -414,6 +414,20 @@ async def _run_autopilot_chain(
                 # Chain paused/failed — state already saved for resume
                 return result
 
+
+            # Guard: build produced no code changes — halt chain
+            if step == "build" and result and not result.code_active:
+                await ctx.messenger.send_text(
+                    ctx.channel_id,
+                    "⚠️ Build produced no code changes. Check the plan or retry.",
+                    silent=True,
+                )
+                # Clean up empty branch/worktree so Merge/Discard don't appear
+                if result.branch:
+                    await ctx.runner.discard_branch(result)
+                    ctx.store.update_instance(result)
+                ctx.store.clear_autopilot_chain(session_id)
+                return result
             current_id = result.id
             current_msg = _last_msg_id(result, ctx.platform)
 
