@@ -279,6 +279,9 @@ class ClaudeBot(discord.Client):
         self._monitor_service: MonitorService | None = None
         self._monitor_started: bool = False
         self._notifier = None  # set by app.py after notifier is created
+        self._voice_enabled: bool = bool(config.OPENAI_API_KEY)
+        # Pending voice transcriptions: {confirm_msg_id: {transcription, author_id, channel_id}}
+        self._pending_voice: dict[str, dict] = {}
         self._setup_commands()
 
     @property
@@ -1634,6 +1637,10 @@ class ClaudeBot(discord.Client):
     async def on_ready(self) -> None:
         log.info("Discord bot ready as %s", self.user)
 
+        if not self._voice_enabled and not getattr(self, "_voice_warning_logged", False):
+            log.warning("OPENAI_API_KEY not configured — voice messages will be ignored")
+            self._voice_warning_logged = True
+
         # Auto-provision category + lobby if not configured
         if self._category_name and not self._lobby_channel_id:
             guild = self.get_guild(self._guild_id)
@@ -1731,10 +1738,16 @@ class ClaudeBot(discord.Client):
 
         # Handle file attachments
         IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+        AUDIO_EXTS = {".ogg", ".mp3", ".wav", ".m4a", ".webm"}
         for att in message.attachments:
             if not att.filename:
                 continue
             ext = Path(att.filename).suffix.lower()
+
+            # Voice messages / audio — transcribe and confirm before running
+            if ext in AUDIO_EXTS and self._voice_enabled and att.size <= 25_000_000:
+                await self._handle_voice_attachment(message, att, msg_access)
+                return  # voice flow handles everything via confirmation buttons
 
             # Text files (Discord sends large pastes as .txt)
             if ext == ".txt" and att.size <= 500_000:
@@ -1901,6 +1914,66 @@ class ClaudeBot(discord.Client):
             # Clean up temp image files
             for tmp in _temp_files:
                 Path(tmp).unlink(missing_ok=True)
+
+    async def _handle_voice_attachment(
+        self, message: discord.Message, att: discord.Attachment,
+        msg_access: AccessResult,
+    ) -> None:
+        """Download a voice attachment, transcribe it, and show confirmation buttons."""
+        try:
+            file_bytes = await att.read()
+            log.info("Downloaded voice attachment %s (%d bytes)", att.filename, att.size)
+
+            from bot.services.audio import transcribe
+            transcription = await transcribe(file_bytes, filename=att.filename)
+
+            if not transcription or not transcription.strip():
+                await message.channel.send("Couldn't detect any speech in that voice message.")
+                return
+
+            # Build confirmation embed with buttons
+            embed = discord.Embed(
+                description=transcription,
+                color=discord.Color.blurple(),
+            )
+            embed.set_author(name="Voice Transcription")
+            embed.set_footer(text="Send to run as a query, or Cancel to discard.")
+
+            view = discord.ui.View(timeout=120)
+            send_btn = discord.ui.Button(
+                label="Send", style=discord.ButtonStyle.green,
+                custom_id=f"voice_send:{message.author.id}",
+            )
+            cancel_btn = discord.ui.Button(
+                label="Cancel", style=discord.ButtonStyle.secondary,
+                custom_id=f"voice_cancel:{message.author.id}",
+            )
+            view.add_item(send_btn)
+            view.add_item(cancel_btn)
+
+            confirm_msg = await message.channel.send(embed=embed, view=view)
+
+            # Store transcription keyed by confirmation message ID
+            self._pending_voice[str(confirm_msg.id)] = {
+                "transcription": transcription,
+                "author_id": str(message.author.id),
+                "_ts": _time.monotonic(),
+            }
+            # Expire stale entries older than 5 minutes
+            now = _time.monotonic()
+            self._pending_voice = {
+                k: v for k, v in self._pending_voice.items()
+                if now - v.get("_ts", now) < 300
+            }
+            log.info("Voice transcription pending confirmation in #%s: %s",
+                      getattr(message.channel, "name", "?"), transcription[:80])
+
+        except Exception:
+            log.warning("Voice transcription failed for %s", att.filename, exc_info=True)
+            try:
+                await message.channel.send("Couldn't transcribe that voice message.")
+            except Exception:
+                pass
 
     async def _route_lobby_message(
         self, message: discord.Message, text: str, repo_name: str | None,
@@ -2761,6 +2834,80 @@ class ClaudeBot(discord.Client):
             return
 
         custom_id = interaction.data.get("custom_id", "") if interaction.data else ""
+
+        # --- Voice transcription confirm/cancel ---
+        if custom_id.startswith("voice_send:") or custom_id.startswith("voice_cancel:"):
+            confirm_msg_id = str(interaction.message.id) if interaction.message else None
+            pending = self._pending_voice.get(confirm_msg_id) if confirm_msg_id else None
+            if not pending:
+                await interaction.response.edit_message(
+                    content="This transcription has expired.", embed=None, view=None,
+                )
+                return
+
+            # Only the original author can confirm
+            if str(interaction.user.id) != pending["author_id"]:
+                await interaction.response.send_message(
+                    "Only the person who sent the voice message can do this.",
+                    ephemeral=True,
+                )
+                return
+
+            if custom_id.startswith("voice_cancel:"):
+                self._pending_voice.pop(confirm_msg_id, None)
+                await interaction.response.edit_message(
+                    content="Voice message cancelled.", embed=None, view=None,
+                )
+                return
+
+            # voice_send — run transcription as a normal message
+            transcription = pending["transcription"]
+            channel_id = str(interaction.channel_id)
+            self._pending_voice.pop(confirm_msg_id, None)
+
+            # Update embed to show it was sent
+            if interaction.message and interaction.message.embeds:
+                embed = interaction.message.embeds[0]
+                embed.color = discord.Color.green()
+                embed.set_footer(text="Sent")
+                await interaction.response.edit_message(embed=embed, view=None)
+            else:
+                await interaction.response.edit_message(
+                    content=f"Sending: {transcription[:100]}...", view=None,
+                )
+
+            # Feed transcription through the normal message handling pipeline
+            channel = interaction.channel
+            if isinstance(channel, discord.Thread):
+                parent = channel.parent
+                if parent and isinstance(parent, discord.ForumChannel):
+                    lookup = self._thread_to_project(channel_id)
+                    if lookup:
+                        proj, info = lookup
+                        session_id = info.session_id or None
+                        repo_name = proj.repo_name if proj.repo_name != "_default" else None
+                        asyncio.create_task(self._set_thread_active_tag(channel, True))
+                        asyncio.create_task(self._refresh_dashboard())
+                        ctx = self._ctx(channel_id, session_id=session_id,
+                                        repo_name=repo_name, thread_info=info,
+                                        access_result=btn_access)
+                        ctx.user_id = str(interaction.user.id)
+                        ctx.user_name = interaction.user.display_name
+                        self._attach_session_callbacks(ctx, info, channel_id)
+                        try:
+                            await commands.on_text(ctx, transcription)
+                        finally:
+                            self._persist_ctx_settings(ctx)
+                            asyncio.create_task(self._try_apply_tags_after_run(channel_id))
+                            asyncio.create_task(self._refresh_dashboard())
+                        return
+
+            # Fallback: unmapped channel
+            ctx = self._ctx(channel_id, access_result=btn_access)
+            ctx.user_id = str(interaction.user.id)
+            ctx.user_name = interaction.user.display_name
+            await commands.on_text(ctx, transcription)
+            return
 
         # --- Select menu: repo switch (owner only) ---
         if custom_id == "repo_switch_select":

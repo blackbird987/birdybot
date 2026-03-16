@@ -39,6 +39,9 @@ DISCORD_ENABLED: bool = bool(DISCORD_BOT_TOKEN and DISCORD_GUILD_ID)
 # Test webhook IDs (comma-separated) — allow webhook messages to bypass bot/auth guards
 TEST_WEBHOOK_IDS: set[str] = set(filter(None, os.getenv("TEST_WEBHOOK_IDS", "").split(",")))
 
+# --- OpenAI (voice transcription) ---
+OPENAI_API_KEY: str | None = os.getenv("OPENAI_API_KEY")
+
 # Validate: at least one platform
 if not TELEGRAM_ENABLED and not DISCORD_ENABLED:
     raise RuntimeError(
