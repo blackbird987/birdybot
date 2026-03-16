@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+
+## v0.9.3 — Plan Button Fix (2026-03-16)
 - Fix plan buttons not showing when a regular query enters plan mode (was showing Commit/Review Code instead of Autopilot/Review Plan/Build It)
 
 ## v0.9.2 — Sticky Title Fix (2026-03-16)
