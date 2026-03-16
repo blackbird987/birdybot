@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.13.1 — Personal Forum Button Fix (2026-03-16)
+
 - Fix: "New" button in user's personal forum control room now creates threads in the correct forum instead of the repo's main forum
 - Refactor: Extract ForumManager and data classes (ForumProject, ThreadInfo) into `bot/discord/forums.py`
 - Fix: Defensive `result.stdout` handling in runner.py diff capture
