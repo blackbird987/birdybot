@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.18.0 — Session Context Awareness (2026-03-16)
+
 - Inject universal working context into every spawned session (user workflow, Discord UI, branch model, design principles) via `config.WORKING_CONTEXT`
 - Add per-step behavioral guidance (`config.WORKFLOW_GUIDANCE`) so Claude knows its role in each workflow step (plan, build, review, commit, etc.)
 - Document branch lifecycle in CLAUDE.md
