@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Refactoring
+- Extract `bot/discord/bot.py` (2418 → 858 lines) into 6 focused modules:
+  - `slash_commands.py` (704 lines) — all slash command registration
+  - `interactions.py` (574 lines) — button/select/modal dispatch
+  - `tags.py` (119 lines) — forum tag management
+  - `idle.py` (100 lines) — thread sleep/wake timers
+  - `modals.py` (81 lines) — QuickTaskModal
+  - `monitoring.py` (57 lines) — monitor service lifecycle
+- bot.py now contains only core orchestration: init, auth, lifecycle, message routing
+
 ## v0.18.0 — Session Context Awareness (2026-03-16)
 
 - Inject universal working context into every spawned session (user workflow, Discord UI, branch model, design principles) via `config.WORKING_CONTEXT`
