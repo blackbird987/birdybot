@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.20.0 — Strip Telegram (2026-03-17)
+
 - Strip Telegram platform support — gut adapter/bridge/formatter to stubs, remove `python-telegram-bot` dependency, delete `_start_telegram()` orchestration (~860 lines removed)
 - Remove dead global-write guards in `RequestContext.update_mode/context/verbose/effort` (only Discord uses per-thread persistence)
 - Change default `origin_platform` from `"telegram"` to `"discord"` (backward-compat migration shim kept)
