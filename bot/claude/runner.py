@@ -638,9 +638,9 @@ class ClaudeRunner:
         # If worktree already exists (copy_branch from parent), skip creation
         if instance.worktree_path and Path(instance.worktree_path).is_dir():
             return
-        # If worktree_path is set but directory is gone (parent was cleaned up),
+        # worktree_path is set but directory is gone (parent was cleaned up) —
         # clear it so _create_worktree_sync creates a fresh one
-        if instance.worktree_path and not Path(instance.worktree_path).is_dir():
+        if instance.worktree_path:
             log.warning("Worktree %s no longer exists for %s, recreating",
                         instance.worktree_path, instance.id)
             instance.worktree_path = None
@@ -682,12 +682,15 @@ class ClaudeRunner:
             # Copy .claude/ directory into worktree so Claude CLI finds
             # CLAUDE.md and project settings (worktrees have a .git file,
             # not directory — some tools may not follow it correctly)
-            src_claude_dir = Path(repo) / ".claude"
-            dst_claude_dir = Path(wt_dir) / ".claude"
-            if src_claude_dir.is_dir() and not dst_claude_dir.exists():
-                shutil.copytree(str(src_claude_dir), str(dst_claude_dir),
-                                ignore=shutil.ignore_patterns("*.jsonl"))
-                log.debug("Copied .claude/ into worktree %s", wt_dir)
+            try:
+                src_claude_dir = Path(repo) / ".claude"
+                dst_claude_dir = Path(wt_dir) / ".claude"
+                if src_claude_dir.is_dir() and not dst_claude_dir.exists():
+                    shutil.copytree(str(src_claude_dir), str(dst_claude_dir),
+                                    ignore=shutil.ignore_patterns("*.jsonl"))
+                    log.debug("Copied .claude/ into worktree %s", wt_dir)
+            except Exception:
+                log.warning("Failed to copy .claude/ into worktree %s", wt_dir, exc_info=True)
 
             log.info("Created worktree %s (branch %s) in %s", wt_dir, branch, repo)
         except subprocess.CalledProcessError as e:
