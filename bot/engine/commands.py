@@ -108,13 +108,20 @@ async def on_unknown_command(ctx: RequestContext, text: str) -> None:
 
 async def _run_query(ctx: RequestContext, prompt: str) -> None:
     lock = _get_channel_lock(ctx.channel_id)
+    queued_msg_id = None
     if lock.locked():
-        await ctx.messenger.send_text(
+        queued_msg_id = await ctx.messenger.send_text(
             ctx.channel_id,
             "📋 Queued — waiting for current query to finish.",
             silent=True,
         )
     async with lock:
+        # Clean up the "queued" notice now that we're running
+        if queued_msg_id:
+            try:
+                await ctx.messenger.delete_message(ctx.channel_id, queued_msg_id)
+            except Exception:
+                pass
         # Double-checked locking: re-read session_id after acquiring lock
         if not ctx.session_id and ctx.resolve_session_id is not None:
             fresh = ctx.resolve_session_id()
