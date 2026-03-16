@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Tighten smart title generation: prompt asks for 4-6 words with no filler/articles, hard cap at 6 words and 60 chars in `build_title_name()`
+
 ## v0.12.0 — Idle Sleep Indicator (2026-03-16)
 
 ### Thread Name Overhaul
