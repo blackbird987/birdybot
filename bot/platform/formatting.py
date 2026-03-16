@@ -177,13 +177,6 @@ MODE_DISPLAY: dict[str, str] = {
     "build":   "Build",
 }
 
-# Color circle emojis for visual mode indicators in Discord thread names
-MODE_EMOJI: dict[str, str] = {
-    "explore": "\u26aa",  # ⚪
-    "plan":    "\U0001f535",  # 🔵
-    "build":   "\U0001f7e2",  # 🟢
-}
-
 # Embed sidebar colors per mode
 MODE_COLOR: dict[str, int] = {
     "explore": 0x95a5a6,  # gray
@@ -204,11 +197,6 @@ _WORKFLOW_ORIGINS = frozenset({
     InstanceOrigin.APPLY_REVISIONS, InstanceOrigin.RELEASE,
     InstanceOrigin.AUTOPILOT, InstanceOrigin.BUILD_AND_SHIP,
 })
-
-
-def mode_emoji(mode: str) -> str:
-    """Color circle emoji for a mode."""
-    return MODE_EMOJI.get(mode, "\u26aa")
 
 
 def mode_name(mode: str) -> str:

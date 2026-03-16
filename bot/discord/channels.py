@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 import discord
 
-from bot.platform.formatting import MODE_COLOR, MODE_DISPLAY, MODE_EMOJI, mode_emoji, mode_name
+from bot.platform.formatting import MODE_COLOR, MODE_DISPLAY, mode_name
 
 log = logging.getLogger(__name__)
 
@@ -94,31 +94,38 @@ def build_channel_name(topic: str) -> str:
     return sanitize_channel_name(topic)
 
 
-# --- Thread name format: {mode_emoji} {topic} ---
+# --- Thread name helpers ---
+
+# Legacy emoji prefixes to strip from old thread names
+_LEGACY_PREFIXES = ("\U0001f504", "\u26aa", "\U0001f535", "\U0001f7e2")  # 🔄 ⚪ 🔵 🟢
+
+_SLEEP_EMOJI = "\U0001f4a4"  # 💤
 
 
-def parse_thread_name(name: str) -> tuple[bool, str | None, str]:
-    """Parse thread name -> (is_processing, mode_key, base_topic).
-
-    is_processing is always False (legacy compat — processing state moved to tags).
-    mode_key is "explore"/"plan"/"build" or None if no mode emoji found.
-    """
-    # Strip legacy 🔄 prefix if still present in old thread names
-    if name.startswith("\U0001f504"):
-        name = name[1:].lstrip()
-    mode_key = None
-    for m, e in MODE_EMOJI.items():
-        if name.startswith(e):
-            mode_key = m
-            name = name[len(e):].lstrip()
-            break
-    return False, mode_key, name
+def parse_thread_name(name: str) -> tuple[bool, str]:
+    """Parse thread name -> (is_sleeping, base_topic)."""
+    # Strip legacy prefixes (🔄, mode circles)
+    for legacy in _LEGACY_PREFIXES:
+        if name.startswith(legacy):
+            name = name[len(legacy):].lstrip()
+    # Strip sleep prefix
+    is_sleeping = False
+    if name.startswith(_SLEEP_EMOJI):
+        is_sleeping = True
+        name = name[len(_SLEEP_EMOJI):].lstrip()
+        if name.startswith("|"):
+            name = name[1:].lstrip()
+    return is_sleeping, name
 
 
-def build_thread_name(topic: str, mode: str) -> str:
-    """Build thread name: {mode_emoji} {topic}, max 100 chars."""
-    emoji = mode_emoji(mode)
-    return f"{emoji} {topic}"[:100]
+def build_thread_name(topic: str) -> str:
+    """Build thread name, max 100 chars."""
+    return topic[:100]
+
+
+def build_sleeping_thread_name(topic: str) -> str:
+    """Build thread name with sleep indicator: 💤 | {topic}, max 100 chars."""
+    return f"{_SLEEP_EMOJI} | {topic}"[:100]
 
 
 def build_title_name(text: str) -> str:
@@ -129,7 +136,7 @@ def build_title_name(text: str) -> str:
     """
     name = re.sub(r"[^a-zA-Z0-9\s\-]", "", text)
     name = re.sub(r"\s+", " ", name).strip()
-    return name[:90] or "session"  # Leave room for emoji prefix
+    return name[:100] or "session"
 
 
 # --- Forum Channel Helpers ---
@@ -205,8 +212,7 @@ async def create_forum_post(
 
     Returns (thread, starter_message).
     """
-    # Prefix thread name with mode emoji
-    name = build_thread_name(name, current_mode)
+    name = build_thread_name(name)
 
     embed = discord.Embed(
         title="Session",
@@ -233,9 +239,9 @@ async def ensure_forum_tags(forum: discord.ForumChannel) -> dict[str, discord.Fo
         "failed": "\u274c",          # ❌  (status)
         "cli": None,
     }
-    # Add mode tags from MODE_EMOJI (single source of truth)
-    for mode, emoji in MODE_EMOJI.items():
-        desired[mode] = emoji
+    # Mode tags (explore/plan/build)
+    for mode in MODE_DISPLAY:
+        desired[mode] = None
     existing = {tag.name: tag for tag in forum.available_tags}
     missing = []
     for name, emoji in desired.items():
@@ -370,16 +376,8 @@ def build_control_embed(
     return embed
 
 
-async def create_repo_control_post(
-    forum: discord.ForumChannel,
-    repo_name: str,
-    repo_path: str,
-    branch: str | None = None,
-    mode: str = "explore",
-) -> tuple[discord.Thread, discord.Message]:
-    """Create a control room post in a repo forum with action buttons."""
-    embed = build_control_embed(repo_name, repo_path, branch, mode)
-
+def build_control_view(repo_name: str) -> discord.ui.View:
+    """Build the button view for a repo control room post."""
     view = discord.ui.View(timeout=None)
     view.add_item(discord.ui.Button(
         label="New Session",
@@ -391,6 +389,19 @@ async def create_repo_control_post(
         style=discord.ButtonStyle.secondary,
         custom_id=f"sync_repo:{repo_name}",
     ))
+    return view
+
+
+async def create_repo_control_post(
+    forum: discord.ForumChannel,
+    repo_name: str,
+    repo_path: str,
+    branch: str | None = None,
+    mode: str = "explore",
+) -> tuple[discord.Thread, discord.Message]:
+    """Create a control room post in a repo forum with action buttons."""
+    embed = build_control_embed(repo_name, repo_path, branch, mode)
+    view = build_control_view(repo_name)
 
     result = await forum.create_thread(name="Control Room", embed=embed, view=view)
     try:
@@ -422,6 +433,18 @@ def build_user_control_embed(
     return embed
 
 
+def build_user_control_view(repo_names: list[str]) -> discord.ui.View:
+    """Build the button view for a user's personal control room post."""
+    view = discord.ui.View(timeout=None)
+    for rname in repo_names[:5]:
+        view.add_item(discord.ui.Button(
+            label=f"New: {rname}" if len(repo_names) > 1 else "New Session",
+            style=discord.ButtonStyle.green,
+            custom_id=f"new_repo:{rname}",
+        ))
+    return view
+
+
 async def create_user_control_post(
     forum: discord.ForumChannel,
     display_name: str,
@@ -430,14 +453,7 @@ async def create_user_control_post(
 ) -> tuple[discord.Thread, discord.Message]:
     """Create a control room post in a user's personal forum."""
     embed = build_user_control_embed(display_name, repo_names, mode)
-
-    view = discord.ui.View(timeout=None)
-    for rname in repo_names[:5]:
-        view.add_item(discord.ui.Button(
-            label=f"New: {rname}" if len(repo_names) > 1 else "New Session",
-            style=discord.ButtonStyle.green,
-            custom_id=f"new_repo:{rname}",
-        ))
+    view = build_user_control_view(repo_names)
 
     result = await forum.create_thread(name="Control Room", embed=embed, view=view)
     try:

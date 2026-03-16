@@ -29,7 +29,7 @@ from bot.discord.adapter import DiscordMessenger
 from bot.engine import commands
 from bot.engine import sessions as sessions_mod
 from bot.platform.base import RequestContext
-from bot.platform.formatting import MODE_COLOR, MODE_DISPLAY, MODE_EMOJI, VALID_MODES, format_age, mode_emoji, mode_label, mode_name
+from bot.platform.formatting import MODE_COLOR, MODE_DISPLAY, VALID_MODES, format_age, mode_label, mode_name
 
 if TYPE_CHECKING:
     from bot.claude.runner import ClaudeRunner
@@ -268,7 +268,9 @@ class ClaudeBot(discord.Client):
         self._forum_projects: dict[str, ForumProject] = {}
         self._forum_lock = asyncio.Lock()
         self._thread_lock = asyncio.Lock()
-        self._emoji_lock = asyncio.Lock()  # Serializes thread.edit(name=...) calls
+        self._name_lock = asyncio.Lock()  # Serializes thread.edit(name=...) calls
+        self._idle_timers: dict[str, asyncio.TimerHandle] = {}  # channel_id -> scheduled sleep
+        self._sleep_gen: dict[str, int] = {}  # generation counter per channel (stale-callback guard)
         self._dashboard_last_refresh: float = 0.0  # monotonic timestamp for debounce
         # Pending /ref context: {thread_id: (context_str, monotonic_timestamp)}
         # Consumed by on_message, expires after 10 minutes
@@ -453,11 +455,13 @@ class ClaudeBot(discord.Client):
         repo_name = proj.repo_name if proj.repo_name != "_default" else None
         log.info("Resuming post-reboot in thread %s session=%s: %s",
                  channel_id, session_id and session_id[:12], prompt[:80])
+        self._cancel_sleep(channel_id)
         ctx = self._ctx(channel_id, session_id=session_id, repo_name=repo_name,
                         thread_info=info)
         await commands.on_text(ctx, prompt)
         self._persist_ctx_settings(ctx)
         asyncio.create_task(self._try_apply_tags_after_run(channel_id))
+        self._schedule_sleep(channel_id)
         asyncio.create_task(self._refresh_dashboard())
 
     # --- Forum-Session Mapping ---
@@ -807,15 +811,15 @@ class ClaudeBot(discord.Client):
                             log.info("Renamed thread %s: %s -> %s", thread.id, old_name, new_name)
                         except Exception:
                             log.debug("Failed to rename thread %s", thread.id, exc_info=True)
-                # Legacy migration: strip 🔄 from thread names
-                if thread.name.startswith("\U0001f504"):
-                    _, mode_key, topic = channels.parse_thread_name(thread.name)
-                    cleaned = channels.build_thread_name(topic, mode_key or "explore")
+                # Legacy migration: strip old emoji prefixes (🔄, mode circles)
+                _, topic = channels.parse_thread_name(thread.name)
+                clean_name = channels.build_thread_name(topic)
+                if clean_name != thread.name:
                     try:
-                        await thread.edit(name=cleaned)
-                        log.info("Stripped legacy processing emoji: %s", thread.id)
+                        await thread.edit(name=clean_name)
+                        log.info("Stripped legacy emoji from thread: %s", thread.id)
                     except Exception:
-                        log.debug("Failed to strip processing emoji", exc_info=True)
+                        log.debug("Failed to strip legacy emoji", exc_info=True)
                 # Clear stale "active" tag (bot crashed mid-query)
                 if active_tag and active_tag in thread.applied_tags:
                     # Check if this thread actually has a running session
@@ -967,16 +971,7 @@ class ClaudeBot(discord.Client):
             if not self._is_owner(interaction.user.id) and not self._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
-            # Detect mode change via ThreadInfo (per-thread, not global)
-            channel_id = str(interaction.channel_id)
-            lookup = self._thread_to_project(channel_id)
-            prev_mode = lookup[1].mode if lookup and lookup[1].mode else self._store.mode
             await self._run_slash(interaction, lambda ctx: commands.on_mode(ctx, mode))
-            # Re-read after _run_slash persisted the change
-            lookup = self._thread_to_project(channel_id)
-            new_mode = lookup[1].mode if lookup and lookup[1].mode else self._store.mode
-            if new_mode != prev_mode:
-                asyncio.create_task(self._update_thread_name(interaction.channel, new_mode))
 
         @self.tree.command(name="verbose", description="Progress detail level", guild=guild_obj)
         @app_commands.describe(level="0, 1, or 2")
@@ -1883,6 +1878,8 @@ class ClaudeBot(discord.Client):
                                 text = f"{ref_text}\n\n{text}"
                                 log.info("Injected /ref context into prompt in thread %s", ch_name)
 
+                        self._cancel_sleep(channel_id)
+                        asyncio.create_task(self._clear_thread_sleeping(message.channel))
                         asyncio.create_task(self._set_thread_active_tag(message.channel, True))
                         asyncio.create_task(self._refresh_dashboard())
                         ctx = self._ctx(channel_id, session_id=session_id,
@@ -1902,6 +1899,7 @@ class ClaudeBot(discord.Client):
                                 asyncio.create_task(self._generate_smart_title(
                                     message.channel, text, summary))
                             asyncio.create_task(self._try_apply_tags_after_run(channel_id))
+                            self._schedule_sleep(channel_id)
                             asyncio.create_task(self._refresh_dashboard())
                         return
 
@@ -1992,11 +1990,13 @@ class ClaudeBot(discord.Client):
             # Post redirect
             asyncio.create_task(self._send_redirect(thread))
             # Run query in new thread
+            tid = str(thread.id)
+            self._cancel_sleep(tid)
+            asyncio.create_task(self._clear_thread_sleeping(thread))
             asyncio.create_task(self._set_thread_active_tag(thread, True))
             asyncio.create_task(self._refresh_dashboard())
-            lookup = self._thread_to_project(str(thread.id))
+            lookup = self._thread_to_project(tid)
             t_info = lookup[1] if lookup else None
-            tid = str(thread.id)
             ctx = self._ctx(tid, repo_name=repo_name if repo_name != "_default" else None,
                             thread_info=t_info)
             if t_info:
@@ -2006,12 +2006,13 @@ class ClaudeBot(discord.Client):
             finally:
                 self._persist_ctx_settings(ctx)
                 # Update mapping with real session_id
-                await self._update_pending_thread(str(thread.id))
+                await self._update_pending_thread(tid)
                 # Generate smart title (fire-and-forget)
-                summary = self._get_latest_summary(str(thread.id))
+                summary = self._get_latest_summary(tid)
                 asyncio.create_task(self._generate_smart_title(thread, text, summary))
                 # Apply completion tags (also clears "active") + refresh dashboard
-                asyncio.create_task(self._try_apply_tags_after_run(str(thread.id)))
+                asyncio.create_task(self._try_apply_tags_after_run(tid))
+                self._schedule_sleep(tid)
                 asyncio.create_task(self._refresh_dashboard())
 
     async def _apply_thread_tags(self, thread: discord.Thread, status: str, origin: str = "bot", mode: str | None = None) -> None:
@@ -2240,7 +2241,8 @@ class ClaudeBot(discord.Client):
                 repo_name, repo_path, branch, self._store.mode,
                 active, completed, failed,
             )
-            await msg.edit(embed=embed)
+            view = channels.build_control_view(repo_name)
+            await msg.edit(embed=embed, view=view)
         except discord.NotFound:
             log.info("Control room message for %s was deleted, recreating", repo_name)
             proj.control_thread_id = None
@@ -2294,7 +2296,8 @@ class ClaudeBot(discord.Client):
                 mode = ua.repos[repo_names[0]].mode
 
             embed = channels.build_user_control_embed(ua.display_name, repo_names, mode)
-            await msg.edit(embed=embed)
+            view = channels.build_user_control_view(repo_names)
+            await msg.edit(embed=embed, view=view)
         except discord.NotFound:
             log.info("Control room message for user %s was deleted, recreating", ua.display_name)
             self._user_control_thread_ids.discard(ua.control_thread_id)
@@ -2514,10 +2517,12 @@ class ClaudeBot(discord.Client):
 
             base = channels.build_title_name(title)
 
-            async with self._emoji_lock:
-                thread_mode = info.mode or self._store.mode
-                new_name = channels.build_thread_name(base, thread_mode)
+            async with self._name_lock:
+                new_name = channels.build_thread_name(base)
                 await thread.edit(name=new_name)
+
+            # Restart idle countdown from title edit, not from query completion
+            self._schedule_sleep(thread_id)
 
             info.topic = title
             self._save_forum_map()
@@ -2528,23 +2533,74 @@ class ClaudeBot(discord.Client):
             if info is not None:
                 info._title_generated = False
 
-    async def _update_thread_name(
+    # --- Thread sleep/wake (idle indicator) ---
+
+    def _schedule_sleep(self, channel_id: str) -> None:
+        """Schedule 💤 after 5 min idle. Cancel any existing timer first."""
+        self._cancel_sleep(channel_id)
+        gen = self._sleep_gen.get(channel_id, 0) + 1
+        self._sleep_gen[channel_id] = gen
+        loop = asyncio.get_running_loop()
+        self._idle_timers[channel_id] = loop.call_later(
+            300,  # 5 min — leaves room for wake edit within 10-min rate limit
+            lambda cid=channel_id, g=gen: asyncio.create_task(self._apply_sleep(cid, g)),
+        )
+
+    def _cancel_sleep(self, channel_id: str) -> None:
+        """Cancel pending sleep timer and invalidate any in-flight callbacks."""
+        timer = self._idle_timers.pop(channel_id, None)
+        if timer:
+            timer.cancel()
+        # Bump generation so stale create_task'd coroutines no-op
+        self._sleep_gen[channel_id] = self._sleep_gen.get(channel_id, 0) + 1
+
+    async def _apply_sleep(self, channel_id: str, gen: int) -> None:
+        """Called by timer — set the thread to sleeping."""
+        if self._sleep_gen.get(channel_id) != gen:
+            return  # Stale: timer was cancelled or rescheduled
+        self._idle_timers.pop(channel_id, None)
+        ch = self.get_channel(int(channel_id))
+        await self._set_thread_sleeping(ch)
+
+    async def _set_thread_sleeping(
         self,
         channel: discord.abc.GuildChannel | discord.Thread | None,
-        target_mode: str,
     ) -> None:
-        """Update a thread's name to reflect mode emoji."""
+        """Add 💤 prefix to thread name (idle > 5 min).
+
+        Thread name edits have a harsh 2-per-10-min rate limit.
+        We budget one edit for sleep, one for wake.
+        """
         if not isinstance(channel, discord.Thread):
             return
-        async with self._emoji_lock:
-            _, _, topic = channels.parse_thread_name(channel.name)
-            new_name = channels.build_thread_name(topic, target_mode)
-            if new_name != channel.name:
-                try:
-                    await channel.edit(name=new_name)
-                    log.debug("Updated thread %s name (mode=%s)", channel.id, target_mode)
-                except Exception:
-                    log.debug("Failed to update thread name", exc_info=True)
+        async with self._name_lock:
+            is_sleeping, topic = channels.parse_thread_name(channel.name)
+            if is_sleeping:
+                return
+            new_name = channels.build_sleeping_thread_name(topic)
+            try:
+                await channel.edit(name=new_name)
+                log.debug("Thread %s now sleeping", channel.id)
+            except Exception:
+                log.debug("Failed to set thread sleeping", exc_info=True)
+
+    async def _clear_thread_sleeping(
+        self,
+        channel: discord.abc.GuildChannel | discord.Thread | None,
+    ) -> None:
+        """Remove 💤 prefix from thread name (processing started)."""
+        if not isinstance(channel, discord.Thread):
+            return
+        async with self._name_lock:
+            is_sleeping, topic = channels.parse_thread_name(channel.name)
+            if not is_sleeping:
+                return
+            new_name = channels.build_thread_name(topic)
+            try:
+                await channel.edit(name=new_name)
+                log.debug("Thread %s woke up", channel.id)
+            except Exception:
+                log.debug("Failed to clear thread sleep", exc_info=True)
 
     async def _set_thread_active_tag(
         self,
@@ -2900,6 +2956,8 @@ class ClaudeBot(discord.Client):
                         proj, info = lookup
                         session_id = info.session_id or None
                         repo_name = proj.repo_name if proj.repo_name != "_default" else None
+                        self._cancel_sleep(channel_id)
+                        asyncio.create_task(self._clear_thread_sleeping(channel))
                         asyncio.create_task(self._set_thread_active_tag(channel, True))
                         asyncio.create_task(self._refresh_dashboard())
                         ctx = self._ctx(channel_id, session_id=session_id,
@@ -2913,6 +2971,7 @@ class ClaudeBot(discord.Client):
                         finally:
                             self._persist_ctx_settings(ctx)
                             asyncio.create_task(self._try_apply_tags_after_run(channel_id))
+                            self._schedule_sleep(channel_id)
                             asyncio.create_task(self._refresh_dashboard())
                         return
 
@@ -2986,8 +3045,6 @@ class ClaudeBot(discord.Client):
                 await interaction.response.edit_message(embed=embed, view=view)
             else:
                 await interaction.response.defer()
-            # Update thread name emoji to match new mode
-            asyncio.create_task(self._update_thread_name(interaction.channel, target_mode))
             log.info("Mode set to %s via welcome button", target_mode)
             return
 
@@ -3131,6 +3188,8 @@ class ClaudeBot(discord.Client):
 
         is_query = action in _QUERY_ACTIONS
         if is_query:
+            self._cancel_sleep(channel_id)
+            asyncio.create_task(self._clear_thread_sleeping(interaction.channel))
             asyncio.create_task(self._set_thread_active_tag(interaction.channel, True))
             asyncio.create_task(self._refresh_dashboard())
 
@@ -3139,15 +3198,13 @@ class ClaudeBot(discord.Client):
         ctx = self._ctx(channel_id, thread_info=t_info, access_result=btn_access)
         ctx.user_id = str(interaction.user.id)
         ctx.user_name = interaction.user.display_name
-        prev_mode = ctx.effective_mode
         try:
             await commands.handle_callback(ctx, action, instance_id, source_msg_id)
         finally:
             self._persist_ctx_settings(ctx)
             if is_query:
                 asyncio.create_task(self._try_apply_tags_after_run(channel_id))
+                self._schedule_sleep(channel_id)
                 asyncio.create_task(self._refresh_dashboard())
             elif action.startswith("mode_"):
-                if ctx.effective_mode != prev_mode:
-                    asyncio.create_task(self._update_thread_name(interaction.channel, ctx.effective_mode))
                 asyncio.create_task(self._refresh_dashboard())

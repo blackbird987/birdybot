@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Control Room
+- Fix control room buttons disappearing on refresh (embed-only edit was stripping the view)
+- Extract `build_control_view()` / `build_user_control_view()` helpers so create and refresh share button logic
+
+### Thread Name Overhaul
+- Remove mode-colored emoji prefixes (⚪🔵🟢) from Discord forum post names
+- Add idle sleep indicator: posts show `💤 | {topic}` after 5 min idle, cleared instantly when processing starts
+- Legacy migration: old emoji prefixes stripped automatically on startup
+- Rate-limit safe: budgets 1 name edit for sleep + 1 for wake within Discord's 2-per-10-min window
+
 ## v0.11.1 — Control Room Button Fix (2026-03-16)
 
 - Fix control room button deleting the control room post on press (`new_repo` handler was calling `delete_original_response()` which destroys the component message)
