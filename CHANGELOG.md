@@ -8,6 +8,8 @@
 - Discard cleanup is now best-effort: each step (worktree remove, branch delete) runs independently
 - Orphan scan on startup now covers both branches and worktrees
 - Dashboard embed shows orphaned branch/worktree count when > 0
+- Fix: .claude/ copytree failure no longer crashes build setup (now best-effort with warning)
+- Fix: dashboard orphan scan no longer blocks the asyncio event loop (moved to thread)
 
 ## v0.19.0 — Git Worktree Isolation (2026-03-16)
 

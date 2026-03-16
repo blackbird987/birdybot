@@ -27,6 +27,7 @@ log = logging.getLogger(__name__)
 def build_dashboard_embed(
     store: StateStore,
     forum_projects: dict[str, ForumProject],
+    orphan_count: int = 0,
 ) -> discord.Embed:
     """Build the dashboard embed from current state.
 
@@ -136,30 +137,38 @@ def build_dashboard_embed(
         if proj_lines:
             embed.add_field(name="Projects", value="\n".join(proj_lines), inline=False)
 
-    # Orphaned branches/worktrees
-    from bot.claude.runner import ClaudeRunner
-    active_branches = {i.branch for i in instances if i.branch}
-    active_worktrees = {i.worktree_path for i in instances if i.worktree_path}
-    total_orphans = 0
-    for rname, rpath in store.list_repos().items():
-        from pathlib import Path as _P
-        if not _P(rpath).is_dir():
-            continue
-        total_orphans += len(ClaudeRunner.scan_orphan_branches(rpath, active_branches))
-        total_orphans += len(ClaudeRunner.scan_orphan_worktrees(rpath, active_worktrees))
-
     # Cost + Mode
     embed.add_field(name="Today", value=f"${today_cost:.4f}", inline=True)
     embed.add_field(name="Total", value=f"${total_cost:.4f}", inline=True)
     embed.add_field(name="Mode", value=mode_label(store.mode), inline=True)
     embed.add_field(name="PC", value=config.PC_NAME, inline=True)
-    if total_orphans:
+    if orphan_count:
         embed.add_field(
-            name="Orphans", value=f"{total_orphans} branch/worktree",
+            name="Orphans", value=f"{orphan_count} branch/worktree",
             inline=True,
         )
 
     return embed
+
+
+def _count_orphans(store: StateStore) -> int:
+    """Count orphaned branches and worktree directories across all repos.
+
+    Runs subprocess calls (git branch --list) — must be called from a thread.
+    """
+    from pathlib import Path
+    from bot.claude.runner import ClaudeRunner
+
+    instances = store.list_instances()
+    active_branches = {i.branch for i in instances if i.branch}
+    active_worktrees = {i.worktree_path for i in instances if i.worktree_path}
+    total = 0
+    for _rname, rpath in store.list_repos().items():
+        if not Path(rpath).is_dir():
+            continue
+        total += len(ClaudeRunner.scan_orphan_branches(rpath, active_branches))
+        total += len(ClaudeRunner.scan_orphan_worktrees(rpath, active_worktrees))
+    return total
 
 
 async def refresh_dashboard(
@@ -201,7 +210,12 @@ async def _refresh_dashboard_impl(
     if not lobby or not isinstance(lobby, discord.TextChannel):
         return
 
-    embed = build_dashboard_embed(store, forums.forum_projects)
+    # Count orphaned branches/worktrees in a thread (best-effort, don't block dashboard)
+    try:
+        orphan_count = await asyncio.to_thread(_count_orphans, store)
+    except Exception:
+        orphan_count = 0
+    embed = build_dashboard_embed(store, forums.forum_projects, orphan_count)
 
     # Get or create dashboard message
     dash_msg_id = store.get_platform_state("discord").get("dashboard_message_id")
