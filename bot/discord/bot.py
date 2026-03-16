@@ -154,7 +154,7 @@ _NOWND: dict = (
 
 
 async def _generate_title_text(prompt: str, summary: str = "") -> str | None:
-    """Spawn a lightweight Claude CLI call to generate a 3-5 word thread title.
+    """Spawn a lightweight Claude CLI call to generate a 4-6 word thread title.
 
     Bypasses the runner semaphore — this is a standalone, cheap subprocess.
     Returns the title string, or None on failure/timeout.
