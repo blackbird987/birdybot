@@ -136,6 +136,7 @@ async def spawn_from(
     )
     new_inst.origin = cfg.origin
     new_inst.origin_platform = ctx.platform
+    new_inst.effort = ctx.effective_effort
     new_inst.parent_id = source.id
     new_inst.repo_name = source.repo_name
     new_inst.repo_path = source.repo_path

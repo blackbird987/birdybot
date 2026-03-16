@@ -223,6 +223,12 @@ class TelegramBridge:
         text = (update.message.text or "").replace("/verbose", "", 1).strip()
         await commands.on_verbose(self._ctx(update), text)
 
+    async def on_effort(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._auth(update) or not update.message:
+            return
+        text = (update.message.text or "").replace("/effort", "", 1).strip()
+        await commands.on_effort(self._ctx(update), text)
+
     async def on_context(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._auth(update) or not update.message:
             return

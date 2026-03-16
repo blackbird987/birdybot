@@ -95,6 +95,7 @@ class Instance:
     # Access control fields (non-owner sessions)
     is_owner_session: bool = True     # False for granted user sessions
     bash_policy: str = "full"         # "full", "allowlist", "none" — for non-owner explore mode
+    effort: str = "high"             # reasoning effort: low/medium/high/max
 
     def display_id(self) -> str:
         if self.name:
@@ -141,6 +142,7 @@ class Instance:
             "deferred_revisions": self.deferred_revisions,
             "is_owner_session": self.is_owner_session,
             "bash_policy": self.bash_policy,
+            "effort": self.effort,
         }
 
     @classmethod
@@ -184,6 +186,7 @@ class Instance:
             deferred_revisions=d.get("deferred_revisions", []),
             is_owner_session=d.get("is_owner_session", True),
             bash_policy=d.get("bash_policy", "full"),
+            effort=d.get("effort", "high"),
         )
 
 

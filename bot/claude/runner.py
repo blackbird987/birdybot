@@ -344,6 +344,7 @@ class ClaudeRunner:
             prompt = "Continue the previous conversation."
 
         cmd.extend(["--output-format", "stream-json", "--verbose"])
+        cmd.extend(["--effort", instance.effort])
 
         # Build system prompt: mobile hint + bot context + pinned context + repo CLAUDE.md + projects dir
         system_prompt = self._build_system_prompt(instance, context, sibling_context)

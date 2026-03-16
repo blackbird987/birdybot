@@ -576,6 +576,7 @@ async def _start_telegram(store, runner, notifier, stop_event, cli_version):
     app.add_handler(CommandHandler("budget", bridge.on_budget))
     app.add_handler(CommandHandler("clear", bridge.on_clear))
     app.add_handler(CommandHandler("verbose", bridge.on_verbose))
+    app.add_handler(CommandHandler("effort", bridge.on_effort))
     app.add_handler(CommandHandler("session", bridge.on_session))
     app.add_handler(CommandHandler("shutdown", bridge.on_shutdown))
     app.add_handler(CommandHandler("reboot", bridge.on_reboot))

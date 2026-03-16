@@ -138,6 +138,7 @@ class RequestContext:
     mode: str | None = None
     context: str | None = None        # None=inherit, ""=cleared, str=set
     verbose_level: int | None = None
+    effort: str | None = None         # None=inherit, "low"/"medium"/"high"/"max"
     # Session resolution callbacks (Discord race-condition fix)
     resolve_session_id: Callable[[], str | None] | None = None
     on_session_resolved: Callable[[str], None] | None = None
@@ -166,6 +167,10 @@ class RequestContext:
     def effective_verbose(self) -> int:
         return self.verbose_level if self.verbose_level is not None else self.store.verbose_level
 
+    @property
+    def effective_effort(self) -> str:
+        return self.effort if self.effort is not None else self.store.effort
+
     def update_mode(self, value: str) -> None:
         # Enforce mode ceiling for non-owners
         if self.mode_ceiling:
@@ -185,6 +190,11 @@ class RequestContext:
         self.verbose_level = value
         if self.platform != "discord":
             self.store.verbose_level = value
+
+    def update_effort(self, value: str) -> None:
+        self.effort = value
+        if self.platform != "discord":
+            self.store.effort = value
 
 
 class NotificationService:

@@ -81,6 +81,7 @@ class Scheduler:
         # Override repo from schedule
         instance.repo_name = sched.repo_name
         instance.repo_path = sched.repo_path
+        instance.effort = self._store.effort
 
         instance.status = InstanceStatus.RUNNING
         self._store.update_instance(instance)

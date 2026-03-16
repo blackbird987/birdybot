@@ -218,6 +218,7 @@ class ClaudeBot(discord.Client):
             ctx.mode = thread_info.mode
             ctx.context = thread_info.context
             ctx.verbose_level = thread_info.verbose_level
+            ctx.effort = thread_info.effort
         if access_result:
             ctx.is_owner = access_result.is_owner
             if not access_result.is_owner and access_result.mode_ceiling:
@@ -466,6 +467,14 @@ class ClaudeBot(discord.Client):
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
             await self._run_slash(interaction, lambda ctx: commands.on_verbose(ctx, level))
+
+        @self.tree.command(name="effort", description="Reasoning effort level", guild=guild_obj)
+        @app_commands.describe(level="low, medium, high, or max")
+        async def cmd_effort(interaction: discord.Interaction, level: str = ""):
+            if not self._is_owner(interaction.user.id) and not self._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
+                await interaction.response.send_message("Unauthorized", ephemeral=True)
+                return
+            await self._run_slash(interaction, lambda ctx: commands.on_effort(ctx, level))
 
         @self.tree.command(name="context", description="Pinned context", guild=guild_obj)
         @app_commands.describe(args="set <text> | clear")

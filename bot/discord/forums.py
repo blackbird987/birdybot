@@ -52,6 +52,7 @@ class ThreadInfo:
     mode: str | None = None
     context: str | None = None        # None=inherit, ""=cleared, str=set
     verbose_level: int | None = None
+    effort: str | None = None         # None=inherit, "low"/"medium"/"high"/"max"
     # User who created this thread (None = owner)
     user_id: str | None = None
     user_name: str | None = None
@@ -71,6 +72,8 @@ class ThreadInfo:
             d["context"] = self.context
         if self.verbose_level is not None:
             d["verbose_level"] = self.verbose_level
+        if self.effort is not None:
+            d["effort"] = self.effort
         if self.user_id is not None:
             d["user_id"] = self.user_id
         if self.user_name is not None:
@@ -89,6 +92,7 @@ class ThreadInfo:
             mode=data.get("mode"),
             context=data.get("context"),
             verbose_level=data.get("verbose_level"),
+            effort=data.get("effort"),
             user_id=data.get("user_id"),
             user_name=data.get("user_name"),
         )
@@ -827,6 +831,9 @@ class ForumManager:
             changed = True
         if ctx.verbose_level is not None and ctx.verbose_level != info.verbose_level:
             info.verbose_level = ctx.verbose_level
+            changed = True
+        if ctx.effort is not None and ctx.effort != info.effort:
+            info.effort = ctx.effort
             changed = True
         if changed:
             self.save_forum_map()

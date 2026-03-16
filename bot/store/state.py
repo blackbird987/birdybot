@@ -37,6 +37,7 @@ class StateStore:
         self._schedules: dict[str, Schedule] = {}
         self._active_session_id: str | None = None  # Current conversation session
         self._verbose_level: int = 1  # 0=silent, 1=normal, 2=detailed
+        self._effort: str = "high"  # reasoning effort: low/medium/high/max
         self._platform_state: dict[str, dict] = {}  # platform -> arbitrary state
         self._autopilot_chains: dict[str, list[str]] = {}  # session_id -> remaining steps
         self._chain_deferred: dict[str, list[str]] = {}  # session_id -> deferred revisions
@@ -70,6 +71,7 @@ class StateStore:
             self._aliases = data.get("aliases", {})
             self._active_session_id = data.get("active_session_id")
             self._verbose_level = data.get("verbose_level", 1)
+            self._effort = data.get("effort", "high")
             self._platform_state = data.get("platform_state", {})
             self._autopilot_chains = data.get("autopilot_chains", {})
             self._chain_deferred = data.get("chain_deferred", {})
@@ -129,6 +131,7 @@ class StateStore:
             "aliases": self._aliases,
             "active_session_id": self._active_session_id,
             "verbose_level": self._verbose_level,
+            "effort": self._effort,
             "platform_state": self._platform_state,
             "autopilot_chains": self._autopilot_chains,
             "chain_deferred": self._chain_deferred,
@@ -395,6 +398,17 @@ class StateStore:
     @verbose_level.setter
     def verbose_level(self, value: int) -> None:
         self._verbose_level = max(0, min(2, value))
+        self.save()
+
+    # --- Effort ---
+
+    @property
+    def effort(self) -> str:
+        return self._effort
+
+    @effort.setter
+    def effort(self, value: str) -> None:
+        self._effort = value
         self.save()
 
     # --- Platform State ---

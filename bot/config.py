@@ -142,6 +142,7 @@ Settings:
 - /session — list recent desktop CLI sessions; /session resume <id> to continue one
 - /mode explore|build — switch permission mode
 - /verbose 0|1|2 — progress detail level (silent/normal/detailed)
+- /effort low|medium|high|max — reasoning effort level
 - /context set <text> — pin context to all prompts
 - /repo add|remove|create|switch|list — manage repos
 - /repo create <name> [path] [--github] [--public] — create new repo (git init + register)

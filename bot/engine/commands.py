@@ -203,6 +203,7 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
         mode=ctx.effective_mode,
     )
     inst.origin_platform = ctx.platform
+    inst.effort = ctx.effective_effort
     inst.repo_name = repo_name or ""
     inst.repo_path = repo_path or ""
     # User identity and access control
@@ -349,6 +350,7 @@ async def on_bg(ctx: RequestContext, text: str) -> None:
         mode="build",
     )
     inst.origin_platform = ctx.platform
+    inst.effort = ctx.effective_effort
     inst.branch = f"claude-bot/{inst.id}"
     inst.status = InstanceStatus.QUEUED
     ctx.store.update_instance(inst)
@@ -416,6 +418,7 @@ async def on_release(ctx: RequestContext, text: str) -> None:
     )
     inst.origin = InstanceOrigin.RELEASE
     inst.origin_platform = ctx.platform
+    inst.effort = ctx.effective_effort
     inst.status = InstanceStatus.QUEUED
     ctx.store.update_instance(inst)
 
@@ -546,6 +549,7 @@ async def on_retry(ctx: RequestContext, text: str) -> None:
     )
     new_inst.origin = inst.origin
     new_inst.origin_platform = ctx.platform
+    new_inst.effort = ctx.effective_effort
     new_inst.parent_id = inst.id
     new_inst.repo_name = inst.repo_name
     new_inst.repo_path = inst.repo_path
@@ -762,6 +766,26 @@ async def on_verbose(ctx: RequestContext, text: str) -> None:
         await ctx.messenger.send_text(
             ctx.channel_id,
             f"Verbose: {level} ({_VERBOSE_LABELS.get(level, '?')})\n0 = silent, 1 = normal, 2 = detailed",
+        )
+
+
+# --- /effort ---
+
+_VALID_EFFORT = ("low", "medium", "high", "max")
+
+
+async def on_effort(ctx: RequestContext, text: str) -> None:
+    text = text.strip().lower()
+    if text in _VALID_EFFORT:
+        ctx.update_effort(text)
+        await ctx.messenger.send_text(ctx.channel_id, f"Effort: {text}")
+    elif text:
+        await ctx.messenger.send_text(ctx.channel_id, "Usage: /effort low|medium|high|max")
+    else:
+        level = ctx.effective_effort
+        await ctx.messenger.send_text(
+            ctx.channel_id,
+            f"Effort: {level}\nSet with: /effort low|medium|high|max",
         )
 
 
@@ -1240,6 +1264,7 @@ async def on_help(ctx: RequestContext) -> None:
         "`/logs` — bot log\n"
         "`/mode` — explore|plan|build\n"
         "`/verbose` — progress detail (0|1|2)\n"
+        "`/effort` — reasoning effort (low|medium|high|max)\n"
         "`/context` — pinned context\n"
         "`/alias` — command shortcuts\n"
         "`/schedule` — recurring tasks\n"
@@ -1301,6 +1326,7 @@ async def handle_callback(
         )
         new_inst.origin = inst.origin
         new_inst.origin_platform = ctx.platform
+        new_inst.effort = ctx.effective_effort
         new_inst.parent_id = inst.id
         new_inst.repo_name = inst.repo_name
         new_inst.repo_path = inst.repo_path
