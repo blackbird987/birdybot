@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Add `scripts/smoke_test.py` — post-reboot health check (log errors, bot ready, platform status, optional response test via `--respond`)
+- Add mandatory pre-reboot preflight (py_compile + import check) and post-reboot verification (smoke_test + feature check) to LLM system prompt
+
 ## v0.10.0 — Voice Message Transcription (2026-03-16)
 
 - Add voice message transcription: send a voice memo in Discord, bot transcribes via OpenAI Whisper and shows Send/Cancel confirmation before running as a query

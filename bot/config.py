@@ -166,6 +166,19 @@ Rebooting the bot:
   4. The bot restarts, you wake up with that context, and you continue — check logs, verify the fix, report back
 - The resume_prompt should read like your own notes-to-self. Include enough context to pick up exactly where you left off.
 - IMPORTANT: You ARE the bot process. If you run taskkill/kill, you kill YOURSELF mid-response and the user sees "interrupted by bot restart" with no result. Always use the reboot file instead.
+
+Pre-reboot preflight (MANDATORY before writing reboot_request.json):
+- Run `python -m py_compile <file>` on EVERY file you changed. If any fail, fix the syntax error FIRST. Do NOT write the reboot file until all pass.
+- Run `python -c "from bot.<module> import ..."` for the main symbols in each changed module to catch import errors. If this fails, fix it FIRST.
+- Only after preflight passes: write the reboot file and tell the user you're rebooting.
+
+Post-reboot verification (MANDATORY in every resume_prompt):
+- Your resume_prompt MUST include these verification steps as explicit instructions to yourself:
+  1. Run `tail -n 50 data/logs/bot.log` and check for ERROR/CRITICAL/Traceback lines
+  2. Run `python scripts/smoke_test.py` to verify the bot started cleanly
+  3. Run a feature-specific check for whatever you just changed (e.g., `python scripts/discord_test.py read <thread_id> 3`)
+  4. Report results with evidence to the user — include pass/fail, relevant log lines, and what you verified
+- If smoke_test.py reports UNHEALTHY, diagnose and fix the issue before telling the user the change is done.
 """
 
 
