@@ -127,10 +127,10 @@ async def _run_query(ctx: RequestContext, prompt: str) -> None:
             fresh = ctx.resolve_session_id()
             if fresh:
                 ctx.session_id = fresh
-        await _run_query_inner(ctx, prompt)
+        await _execute_query(ctx, prompt)
 
 
-async def _run_query_inner(ctx: RequestContext, prompt: str) -> None:
+async def _execute_query(ctx: RequestContext, prompt: str) -> None:
     if not check_budget(ctx):
         await ctx.messenger.send_text(
             ctx.channel_id, "Daily budget exceeded. Use /budget reset to override.",
