@@ -1,6 +1,7 @@
 """Discord bot with slash commands, message handler, and persistent views.
 
 Forum-based architecture: one ForumChannel per project, one thread per session.
+Delegates forum/thread management to ForumManager (bot.discord.forums).
 """
 
 from __future__ import annotations
@@ -13,7 +14,6 @@ import subprocess
 import sys
 import tempfile
 import time as _time
-from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -26,6 +26,7 @@ from bot.discord import channels
 from bot.discord import access as access_mod
 from bot.discord.access import AccessResult, load_access_config, check_user_access, has_any_access, get_most_restrictive_ceiling, effective_mode as access_effective_mode
 from bot.discord.adapter import DiscordMessenger
+from bot.discord.forums import ForumManager, ForumProject, ThreadInfo
 from bot.engine import commands
 from bot.engine import sessions as sessions_mod
 from bot.platform.base import RequestContext
@@ -47,110 +48,17 @@ _QUERY_ACTIONS: frozenset[str] = frozenset({
     "continue_autopilot",
 })
 
+# On Windows, prevent subprocess console windows from popping up
+_NOWND: dict = (
+    {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
+)
+
 
 def _snowflake_age(snowflake_id: int) -> str:
     """Human-readable age from a Discord snowflake ID."""
     created_ms = (snowflake_id >> 22) + _DISCORD_EPOCH_MS
     created = datetime.fromtimestamp(created_ms / 1000, tz=timezone.utc)
     return format_age(datetime.now(timezone.utc) - created)
-
-
-# --- Data structures ---
-
-
-@dataclass
-class ThreadInfo:
-    thread_id: str
-    session_id: str | None = None
-    origin: str = "bot"           # "bot" or "cli"
-    topic: str = ""
-    _synced_msg_count: int = 0
-    _title_generated: bool = False
-    # Per-thread settings (None = inherit global default)
-    mode: str | None = None
-    context: str | None = None        # None=inherit, ""=cleared, str=set
-    verbose_level: int | None = None
-    # User who created this thread (None = owner)
-    user_id: str | None = None
-    user_name: str | None = None
-
-    def to_dict(self) -> dict:
-        d = {
-            "thread_id": self.thread_id,
-            "session_id": self.session_id,
-            "origin": self.origin,
-            "topic": self.topic,
-            "_synced_msg_count": self._synced_msg_count,
-            "_title_generated": self._title_generated,
-        }
-        if self.mode is not None:
-            d["mode"] = self.mode
-        if self.context is not None:
-            d["context"] = self.context
-        if self.verbose_level is not None:
-            d["verbose_level"] = self.verbose_level
-        if self.user_id is not None:
-            d["user_id"] = self.user_id
-        if self.user_name is not None:
-            d["user_name"] = self.user_name
-        return d
-
-    @classmethod
-    def from_dict(cls, data: dict) -> ThreadInfo:
-        return cls(
-            thread_id=data["thread_id"],
-            session_id=data.get("session_id"),
-            origin=data.get("origin", "bot"),
-            topic=data.get("topic", ""),
-            _synced_msg_count=data.get("_synced_msg_count", 0),
-            _title_generated=data.get("_title_generated", False),
-            mode=data.get("mode"),
-            context=data.get("context"),
-            verbose_level=data.get("verbose_level"),
-            user_id=data.get("user_id"),
-            user_name=data.get("user_name"),
-        )
-
-
-@dataclass
-class ForumProject:
-    repo_name: str
-    forum_channel_id: str
-    threads: dict[str, ThreadInfo] = field(default_factory=dict)
-    control_thread_id: str | None = None
-    control_message_id: str | None = None
-
-    def to_dict(self) -> dict:
-        d = {
-            "repo_name": self.repo_name,
-            "forum_channel_id": self.forum_channel_id,
-            "threads": {k: v.to_dict() for k, v in self.threads.items()},
-        }
-        if self.control_thread_id:
-            d["control_thread_id"] = self.control_thread_id
-        if self.control_message_id:
-            d["control_message_id"] = self.control_message_id
-        return d
-
-    @classmethod
-    def from_dict(cls, data: dict) -> ForumProject:
-        threads = {
-            k: ThreadInfo.from_dict(v)
-            for k, v in data.get("threads", {}).items()
-        }
-        return cls(
-            repo_name=data["repo_name"],
-            forum_channel_id=data.get("forum_channel_id", ""),
-            threads=threads,
-            control_thread_id=data.get("control_thread_id"),
-            control_message_id=data.get("control_message_id"),
-        )
-
-
-# On Windows, prevent subprocess console windows from popping up
-_NOWND: dict = (
-    {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
-)
 
 
 async def _generate_title_text(prompt: str, summary: str = "") -> str | None:
@@ -265,10 +173,15 @@ class ClaudeBot(discord.Client):
         self.tree = app_commands.CommandTree(self)
         self._messenger: DiscordMessenger | None = None
 
-        # Forum-based project mapping: repo_name -> ForumProject
-        self._forum_projects: dict[str, ForumProject] = {}
-        self._forum_lock = asyncio.Lock()
-        self._thread_lock = asyncio.Lock()
+        # Forum manager — owns all forum/thread data and operations
+        self._forums = ForumManager(
+            client=self,
+            store=store,
+            guild_id=guild_id,
+            category_id=category_id,
+            discord_user_id=discord_user_id,
+        )
+
         self._name_lock = asyncio.Lock()  # Serializes thread.edit(name=...) calls
         self._dashboard_lock = asyncio.Lock()  # Serializes dashboard refreshes
         self._dashboard_pending = False  # True if a refresh is queued behind the lock
@@ -277,8 +190,6 @@ class ClaudeBot(discord.Client):
         # Pending /ref context: {thread_id: (context_str, monotonic_timestamp)}
         # Consumed by on_message, expires after 10 minutes
         self._pending_refs: dict[str, tuple[str, float]] = {}
-        # In-memory set of user forum control room thread IDs (O(1) skip check)
-        self._user_control_thread_ids: set[str] = set()
 
         self._monitor_service: MonitorService | None = None
         self._monitor_started: bool = False
@@ -319,7 +230,7 @@ class ClaudeBot(discord.Client):
         # Resolve repo from channel if not explicit
         if not repo_name and channel_id:
             # Check owner's forum projects
-            lookup = self._thread_to_project(channel_id)
+            lookup = self._forums.thread_to_project(channel_id)
             if lookup:
                 repo_name = lookup[0].repo_name
             else:
@@ -395,7 +306,7 @@ class ClaudeBot(discord.Client):
 
     def _persist_ctx_settings(self, ctx: RequestContext) -> None:
         """Write any ctx setting overrides back to ThreadInfo for persistence."""
-        lookup = self._thread_to_project(ctx.channel_id)
+        lookup = self._forums.thread_to_project(ctx.channel_id)
         if not lookup:
             return
         _, info = lookup
@@ -410,7 +321,7 @@ class ClaudeBot(discord.Client):
             info.verbose_level = ctx.verbose_level
             changed = True
         if changed:
-            self._save_forum_map()
+            self._forums.save_forum_map()
 
     # --- Resume after reboot ---
 
@@ -423,7 +334,7 @@ class ClaudeBot(discord.Client):
         """
         # Wait for on_ready (forum map loads there) — poll with retries
         for attempt in range(60):  # up to 60 seconds
-            if self._ready_event.is_set() and self._forum_projects:
+            if self._ready_event.is_set() and self._forums.forum_projects:
                 break
             await asyncio.sleep(1)
         else:
@@ -447,10 +358,10 @@ class ClaudeBot(discord.Client):
         if not prompt:
             return
 
-        lookup = self._thread_to_project(channel_id)
+        lookup = self._forums.thread_to_project(channel_id)
         if not lookup:
             log.warning("dispatch_resume: no thread mapping for %s (have %d projects)",
-                        channel_id, len(self._forum_projects))
+                        channel_id, len(self._forums.forum_projects))
             return
         proj, info = lookup
         session_id = info.session_id or None
@@ -461,7 +372,7 @@ class ClaudeBot(discord.Client):
         ctx = self._ctx(channel_id, session_id=session_id, repo_name=repo_name,
                         thread_info=info)
         await commands.on_text(ctx, prompt)
-        self._persist_ctx_settings(ctx)
+        self._forums.persist_ctx_settings(ctx)
         asyncio.create_task(self._try_apply_tags_after_run(channel_id))
         self._schedule_sleep(channel_id)
         asyncio.create_task(self._refresh_dashboard())
@@ -472,20 +383,20 @@ class ClaudeBot(discord.Client):
         """Load forum→project mapping from platform_state."""
         state = self._store.get_platform_state("discord")
         raw = state.get("forum_projects", {})
-        self._forum_projects = {
+        self._forums.forum_projects = {
             k: ForumProject.from_dict(v) for k, v in raw.items()
         }
-        log.info("Loaded %d forum projects", len(self._forum_projects))
+        log.info("Loaded %d forum projects", len(self._forums.forum_projects))
 
     def _save_forum_map(self) -> None:
         """Persist forum→project mapping to platform_state."""
         state = self._store.get_platform_state("discord")
-        state["forum_projects"] = {k: v.to_dict() for k, v in self._forum_projects.items()}
+        state["forum_projects"] = {k: v.to_dict() for k, v in self._forums.forum_projects.items()}
         self._store.set_platform_state("discord", state, persist=True)
 
     def _session_to_thread(self, session_id: str) -> tuple[str, ThreadInfo] | None:
         """Reverse lookup: find thread for a session_id. Returns (thread_id, info)."""
-        for proj in self._forum_projects.values():
+        for proj in self._forums.forum_projects.values():
             for tid, info in proj.threads.items():
                 if info.session_id == session_id:
                     return tid, info
@@ -493,7 +404,7 @@ class ClaudeBot(discord.Client):
 
     def _thread_to_project(self, thread_id: str) -> tuple[ForumProject, ThreadInfo] | None:
         """Find project + thread info for a thread_id."""
-        for proj in self._forum_projects.values():
+        for proj in self._forums.forum_projects.values():
             info = proj.threads.get(thread_id)
             if info:
                 return proj, info
@@ -501,7 +412,7 @@ class ClaudeBot(discord.Client):
 
     def _forum_by_channel_id(self, forum_id: str) -> ForumProject | None:
         """Find project by forum channel ID."""
-        for proj in self._forum_projects.values():
+        for proj in self._forums.forum_projects.values():
             if proj.forum_channel_id == forum_id:
                 return proj
         return None
@@ -513,6 +424,29 @@ class ClaudeBot(discord.Client):
             if ua.forum_channel_id == forum_id:
                 return uid, ua.display_name
         return None
+
+    def _resolve_user_forum_context(
+        self, interaction: discord.Interaction,
+    ) -> tuple[str, str, str | None] | None:
+        """If interaction is inside a user's personal forum, return (user_id, user_name, repo_name).
+
+        repo_name is the first granted repo found in _forum_projects, or None.
+        """
+        parent = getattr(interaction.channel, "parent", None)
+        if not parent:
+            return None
+        uf = self._forums.is_user_forum(str(parent.id))
+        if not uf:
+            return None
+        user_id, user_name = uf
+        repo_name = None
+        cfg = load_access_config()
+        ua = cfg.users.get(user_id)
+        if ua and ua.repos:
+            granted = [r for r in ua.repos if r in self._forums.forum_projects]
+            if granted:
+                repo_name = granted[0]
+        return user_id, user_name, repo_name
 
     def _user_forum_thread_to_repo(self, thread: discord.Thread) -> str | None:
         """Resolve repo name from a thread's tags in a user's personal forum."""
@@ -591,8 +525,8 @@ class ClaudeBot(discord.Client):
 
         async with self._forum_lock:
             # Double-check after acquiring lock
-            if repo_name in self._forum_projects:
-                existing = self._forum_projects[repo_name]
+            if repo_name in self._forums.forum_projects:
+                existing = self._forums.forum_projects[repo_name]
                 if existing.forum_channel_id:
                     forum = guild.get_channel(int(existing.forum_channel_id))
                     if forum and isinstance(forum, discord.ForumChannel):
@@ -601,14 +535,14 @@ class ClaudeBot(discord.Client):
                     log.warning("Forum %s for repo %s was deleted, recreating", existing.forum_channel_id, repo_name)
 
             forum = await channels.ensure_forum(guild, category, repo_name)
-            if repo_name not in self._forum_projects:
-                self._forum_projects[repo_name] = ForumProject(
+            if repo_name not in self._forums.forum_projects:
+                self._forums.forum_projects[repo_name] = ForumProject(
                     repo_name=repo_name,
                     forum_channel_id=str(forum.id),
                 )
             else:
-                self._forum_projects[repo_name].forum_channel_id = str(forum.id)
-            self._save_forum_map()
+                self._forums.forum_projects[repo_name].forum_channel_id = str(forum.id)
+            self._forums.save_forum_map()
             return forum
 
     async def _get_or_create_session_thread(
@@ -625,7 +559,7 @@ class ClaudeBot(discord.Client):
         """
         # Check if session already has a thread
         if session_id:
-            result = self._session_to_thread(session_id)
+            result = self._forums.session_to_thread(session_id)
             if result:
                 tid, info = result
                 ch = self.get_channel(int(tid))
@@ -639,7 +573,7 @@ class ClaudeBot(discord.Client):
                 except (discord.NotFound, discord.Forbidden):
                     pass
                 # Thread gone — remove stale mapping
-                for proj in self._forum_projects.values():
+                for proj in self._forums.forum_projects.values():
                     proj.threads.pop(tid, None)
 
         # Resolve the target forum
@@ -648,16 +582,16 @@ class ClaudeBot(discord.Client):
             forum = guild.get_channel(int(forum_channel_id)) if guild else None
             if not forum or not isinstance(forum, discord.ForumChannel):
                 log.warning("Personal forum %s not found, falling back to repo forum", forum_channel_id)
-                forum = await self._get_or_create_forum(repo_name)
+                forum = await self._forums.get_or_create_forum(repo_name)
         else:
-            forum = await self._get_or_create_forum(repo_name)
+            forum = await self._forums.get_or_create_forum(repo_name)
         if not forum:
             return None
 
         async with self._thread_lock:
             # Double-check after lock (another message may have created it)
             if session_id:
-                result = self._session_to_thread(session_id)
+                result = self._forums.session_to_thread(session_id)
                 if result:
                     tid, _ = result
                     try:
@@ -685,7 +619,7 @@ class ClaudeBot(discord.Client):
                         log.warning("Failed to apply repo tag %s to thread %s", repo_name, thread.id)
 
             # Store mapping
-            proj = self._forum_projects.get(repo_name)
+            proj = self._forums.forum_projects.get(repo_name)
             if proj:
                 proj.threads[str(thread.id)] = ThreadInfo(
                     thread_id=str(thread.id),
@@ -695,14 +629,14 @@ class ClaudeBot(discord.Client):
                     user_id=user_id,
                     user_name=user_name,
                 )
-                self._save_forum_map()
+                self._forums.save_forum_map()
             else:
                 log.warning("No ForumProject for repo %s — thread %s created but unmapped", repo_name, thread.id)
             return thread
 
     async def _sync_single_thread(self, thread_id: str) -> None:
         """Refresh a single session thread: pull latest CLI messages."""
-        lookup = self._thread_to_project(thread_id)
+        lookup = self._forums.thread_to_project(thread_id)
         if not lookup:
             return
         proj, info = lookup
@@ -732,7 +666,7 @@ class ClaudeBot(discord.Client):
                     info.session_id = latest["id"]
                     info.origin = "cli"
                     info._synced_msg_count = 0
-                    self._save_forum_map()
+                    self._forums.save_forum_map()
                     log.info("Single-sync updated thread %s to session %s", thread_id, latest["id"][:12])
                     session_id = latest["id"]
 
@@ -750,7 +684,7 @@ class ClaudeBot(discord.Client):
 
         # Validate existing forum mappings
         valid_projects: dict[str, ForumProject] = {}
-        for repo_name, proj in self._forum_projects.items():
+        for repo_name, proj in self._forums.forum_projects.items():
             if not proj.forum_channel_id:
                 valid_projects[repo_name] = proj
                 continue
@@ -773,7 +707,7 @@ class ClaudeBot(discord.Client):
                 continue
             if str(ch.id) in user_forum_ids:
                 continue  # skip personal user forums
-            existing = self._forum_by_channel_id(str(ch.id))
+            existing = self._forums.forum_by_channel_id(str(ch.id))
             if not existing:
                 # Adopt as a project — repo name = forum name
                 repo_name = ch.name
@@ -784,9 +718,9 @@ class ClaudeBot(discord.Client):
                     )
                     log.info("Discovered unmapped forum %s (%s)", ch.id, ch.name)
 
-        if valid_projects != self._forum_projects:
-            self._forum_projects = valid_projects
-            self._save_forum_map()
+        if valid_projects != self._forums.forum_projects:
+            self._forums.forum_projects = valid_projects
+            self._forums.save_forum_map()
 
         # Clean up thread names and stale tags
         from bot.claude.types import InstanceStatus
@@ -835,7 +769,7 @@ class ClaudeBot(discord.Client):
                             log.debug("Failed to clear stale active tag", exc_info=True)
 
         # Ensure control room posts exist for all repo forums
-        for repo_name, proj in self._forum_projects.items():
+        for repo_name, proj in self._forums.forum_projects.items():
             if proj.forum_channel_id and not proj.control_thread_id:
                 try:
                     await self._ensure_control_post(repo_name)
@@ -862,7 +796,7 @@ class ClaudeBot(discord.Client):
         log.info("Discord /%s in #%s by %s", cmd_name, getattr(interaction.channel, "name", "?"), interaction.user)
         await interaction.response.defer(ephemeral=ephemeral)
         channel_id = str(interaction.channel_id)
-        lookup = self._thread_to_project(channel_id)
+        lookup = self._forums.thread_to_project(channel_id)
         info = lookup[1] if lookup else None
         # Compute access result for non-owner mode ceiling enforcement
         ar = self._check_access(interaction.user.id, channel_id=channel_id)
@@ -871,7 +805,7 @@ class ClaudeBot(discord.Client):
         ctx.user_id = str(interaction.user.id)
         ctx.user_name = interaction.user.display_name
         await coro(ctx)
-        self._persist_ctx_settings(ctx)
+        self._forums.persist_ctx_settings(ctx)
         try:
             await interaction.delete_original_response()
         except Exception:
@@ -1154,7 +1088,7 @@ class ClaudeBot(discord.Client):
 
             # count=0: refresh this thread if in a session thread, else sync 5
             if count == 0:
-                lookup = self._thread_to_project(thread_id)
+                lookup = self._forums.thread_to_project(thread_id)
                 if lookup:
                     await self._sync_single_thread(thread_id)
                     await interaction.followup.send("Thread synced.", ephemeral=True)
@@ -1180,7 +1114,7 @@ class ClaudeBot(discord.Client):
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
             thread_id = str(interaction.channel_id)
-            lookup = self._thread_to_project(thread_id)
+            lookup = self._forums.thread_to_project(thread_id)
             if not lookup:
                 await interaction.response.send_message(
                     "This isn't a session thread.", ephemeral=True)
@@ -1204,7 +1138,7 @@ class ClaudeBot(discord.Client):
                     info.session_id = session_id
                     info.origin = "cli"
                     info._synced_msg_count = 0
-                    self._save_forum_map()
+                    self._forums.save_forum_map()
                     log.info("sync-channel updated thread %s session %s -> %s",
                              thread_id, old_short, session_id[:12])
             # Populate history
@@ -1256,7 +1190,7 @@ class ClaudeBot(discord.Client):
         ) -> list[app_commands.Choice[str]]:
             choices: list[tuple[int, str, str]] = []
             current_tid = str(interaction.channel_id)
-            for proj in self._forum_projects.values():
+            for proj in self._forums.forum_projects.values():
                 for tid, info in proj.threads.items():
                     if tid == current_tid or not info.session_id:
                         continue
@@ -1276,7 +1210,7 @@ class ClaudeBot(discord.Client):
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
             messages = max(1, min(messages, 20))
-            lookup = self._thread_to_project(thread)
+            lookup = self._forums.thread_to_project(thread)
             if not lookup:
                 await interaction.response.send_message("Thread not found.", ephemeral=True)
                 return
@@ -1797,36 +1731,36 @@ class ClaudeBot(discord.Client):
                 parent = message.channel.parent
                 if parent and isinstance(parent, discord.ForumChannel):
                     # Skip control room threads (not session threads)
-                    if any(p.control_thread_id == channel_id for p in self._forum_projects.values()):
+                    if any(p.control_thread_id == channel_id for p in self._forums.forum_projects.values()):
                         return
                     if channel_id in self._user_control_thread_ids:
                         return
-                    lookup = self._thread_to_project(channel_id)
+                    lookup = self._forums.thread_to_project(channel_id)
                     if not lookup:
                         # Adopt unmapped thread in a known forum (owner forums)
-                        proj = self._forum_by_channel_id(str(parent.id))
+                        proj = self._forums.forum_by_channel_id(str(parent.id))
                         if proj:
                             log.info("Adopted unmapped thread %s in forum %s", channel_id, parent.name)
                             info = ThreadInfo(thread_id=channel_id, origin="bot")
                             proj.threads[channel_id] = info
-                            self._save_forum_map()
+                            self._forums.save_forum_map()
                             lookup = (proj, info)
 
                     # Check if this is a user's personal forum
                     if not lookup:
-                        user_forum_info = self._is_user_forum(str(parent.id))
+                        user_forum_info = self._forums.is_user_forum(str(parent.id))
                         if user_forum_info:
                             # Resolve repo from thread tags
-                            repo_name = self._user_forum_thread_to_repo(message.channel)
-                            if repo_name and repo_name in self._forum_projects:
-                                proj = self._forum_projects[repo_name]
+                            repo_name = self._forums.user_forum_thread_to_repo(message.channel)
+                            if repo_name and repo_name in self._forums.forum_projects:
+                                proj = self._forums.forum_projects[repo_name]
                                 info = ThreadInfo(
                                     thread_id=channel_id, origin="bot",
                                     user_id=user_forum_info[0],
                                     user_name=user_forum_info[1],
                                 )
                                 proj.threads[channel_id] = info
-                                self._save_forum_map()
+                                self._forums.save_forum_map()
                                 lookup = (proj, info)
                                 log.info("Adopted user forum thread %s repo=%s user=%s",
                                          channel_id, repo_name, user_forum_info[1])
@@ -1835,17 +1769,17 @@ class ClaudeBot(discord.Client):
                                 uid = user_forum_info[0]
                                 cfg = load_access_config()
                                 ua = cfg.users.get(uid)
-                                user_repos = [r for r in (ua.repos if ua else {}) if r in self._forum_projects]
+                                user_repos = [r for r in (ua.repos if ua else {}) if r in self._forums.forum_projects]
                                 if len(user_repos) == 1:
                                     repo_name = user_repos[0]
-                                    proj = self._forum_projects[repo_name]
+                                    proj = self._forums.forum_projects[repo_name]
                                     info = ThreadInfo(
                                         thread_id=channel_id, origin="bot",
                                         user_id=user_forum_info[0],
                                         user_name=user_forum_info[1],
                                     )
                                     proj.threads[channel_id] = info
-                                    self._save_forum_map()
+                                    self._forums.save_forum_map()
                                     lookup = (proj, info)
                                     log.info("Auto-selected single repo %s for user %s",
                                              repo_name, user_forum_info[1])
@@ -1868,7 +1802,7 @@ class ClaudeBot(discord.Client):
                             log.info("Thread %s resuming CLI session %s — transitioning to bot ownership",
                                      ch_name, session_id[:12])
                             info.origin = "bot"
-                            self._save_forum_map()
+                            self._forums.save_forum_map()
 
                         was_pending = not session_id
 
@@ -1889,11 +1823,11 @@ class ClaudeBot(discord.Client):
                                         access_result=msg_access)
                         ctx.user_id = str(message.author.id)
                         ctx.user_name = message.author.display_name
-                        self._attach_session_callbacks(ctx, info, channel_id)
+                        self._forums.attach_session_callbacks(ctx, info, channel_id)
                         try:
                             await commands.on_text(ctx, text)
                         finally:
-                            self._persist_ctx_settings(ctx)
+                            self._forums.persist_ctx_settings(ctx)
                             if was_pending:
                                 await self._finalize_pending_thread(channel_id, message.channel, text)
                             elif "new-session" in message.channel.name:
@@ -1982,7 +1916,7 @@ class ClaudeBot(discord.Client):
         repo_name = repo_name or "_default"
         # Ensure control room exists (fire-and-forget, idempotent)
         asyncio.create_task(self._ensure_control_post(repo_name))
-        thread = await self._get_or_create_session_thread(repo_name, None, text)
+        thread = await self._forums.get_or_create_session_thread(repo_name, None, text)
         if thread:
             # Delete original from lobby
             try:
@@ -1997,16 +1931,16 @@ class ClaudeBot(discord.Client):
             asyncio.create_task(self._clear_thread_sleeping(thread))
             asyncio.create_task(self._set_thread_active_tag(thread, True))
             asyncio.create_task(self._refresh_dashboard())
-            lookup = self._thread_to_project(tid)
+            lookup = self._forums.thread_to_project(tid)
             t_info = lookup[1] if lookup else None
             ctx = self._ctx(tid, repo_name=repo_name if repo_name != "_default" else None,
                             thread_info=t_info)
             if t_info:
-                self._attach_session_callbacks(ctx, t_info, tid)
+                self._forums.attach_session_callbacks(ctx, t_info, tid)
             try:
                 await commands.on_text(ctx, text)
             finally:
-                self._persist_ctx_settings(ctx)
+                self._forums.persist_ctx_settings(ctx)
                 # Update mapping with real session_id
                 await self._update_pending_thread(tid)
                 # Generate smart title (fire-and-forget)
@@ -2055,7 +1989,7 @@ class ClaudeBot(discord.Client):
         ch = self.get_channel(int(channel_id))
         if not ch or not isinstance(ch, discord.Thread):
             return
-        lookup = self._thread_to_project(channel_id)
+        lookup = self._forums.thread_to_project(channel_id)
         if not lookup:
             return
         _, info = lookup
@@ -2095,7 +2029,7 @@ class ClaudeBot(discord.Client):
             session_id = s["id"]
             repo_name = s.get("project") or "_default"
 
-            existing = self._session_to_thread(session_id)
+            existing = self._forums.session_to_thread(session_id)
             if existing:
                 tid, info = existing
                 if tid in updated_threads:
@@ -2113,7 +2047,7 @@ class ClaudeBot(discord.Client):
                 continue
 
             log.info("Sync creating thread for session %s repo=%s", session_id[:12], repo_name)
-            thread = await self._get_or_create_session_thread(
+            thread = await self._forums.get_or_create_session_thread(
                 repo_name, session_id, s["topic"], origin="cli",
             )
             if thread:
@@ -2145,7 +2079,7 @@ class ClaudeBot(discord.Client):
         Called after _get_or_create_forum() returns, outside the forum lock.
         Idempotent — checks control_thread_id before creating.
         """
-        proj = self._forum_projects.get(repo_name)
+        proj = self._forums.forum_projects.get(repo_name)
         if not proj or proj.control_thread_id:
             return
 
@@ -2162,7 +2096,7 @@ class ClaudeBot(discord.Client):
         )
         proj.control_thread_id = str(thread.id)
         proj.control_message_id = str(msg.id)
-        self._save_forum_map()
+        self._forums.save_forum_map()
         log.info("Created control room for repo %s (thread=%s)", repo_name, thread.id)
 
     async def _ensure_user_control_post(
@@ -2202,7 +2136,7 @@ class ClaudeBot(discord.Client):
 
     async def _refresh_control_room(self, repo_name: str) -> None:
         """Update the control room embed for a repo forum."""
-        proj = self._forum_projects.get(repo_name)
+        proj = self._forums.forum_projects.get(repo_name)
         if not proj or not proj.control_thread_id or not proj.control_message_id:
             return
         thread = None
@@ -2215,7 +2149,7 @@ class ClaudeBot(discord.Client):
                 log.info("Control room thread for %s was deleted, clearing stale IDs", repo_name)
                 proj.control_thread_id = None
                 proj.control_message_id = None
-                self._save_forum_map()
+                self._forums.save_forum_map()
                 return
             # Migrate old "Control Center" name to "Control Room"
             if thread.name == "Control Center":
@@ -2249,7 +2183,7 @@ class ClaudeBot(discord.Client):
             log.info("Control room message for %s was deleted, recreating", repo_name)
             proj.control_thread_id = None
             proj.control_message_id = None
-            self._save_forum_map()
+            self._forums.save_forum_map()
             # Delete orphan thread if it still exists
             try:
                 if thread and isinstance(thread, discord.Thread):
@@ -2359,7 +2293,7 @@ class ClaudeBot(discord.Client):
 
         # Build session_id -> thread_id map for cross-referencing
         session_to_thread: dict[str, str] = {}
-        for proj in self._forum_projects.values():
+        for proj in self._forums.forum_projects.values():
             for tid, info in proj.threads.items():
                 if info.session_id:
                     session_to_thread[info.session_id] = tid
@@ -2443,9 +2377,9 @@ class ClaudeBot(discord.Client):
             )
 
         # Projects with forum links
-        if self._forum_projects:
+        if self._forums.forum_projects:
             proj_lines = []
-            for name, proj in self._forum_projects.items():
+            for name, proj in self._forums.forum_projects.items():
                 if proj.forum_channel_id and name != "_default":
                     threads = len(proj.threads)
                     marker = " *" if name == active_repo else ""
@@ -2486,7 +2420,7 @@ class ClaudeBot(discord.Client):
             log.debug("Failed to update dashboard", exc_info=True)
 
         # Always refresh control rooms, independent of dashboard success
-        for rname, proj in self._forum_projects.items():
+        for rname, proj in self._forums.forum_projects.items():
             if proj.control_thread_id:
                 asyncio.create_task(self._refresh_control_room(rname))
 
@@ -2498,7 +2432,7 @@ class ClaudeBot(discord.Client):
 
     def _get_latest_summary(self, thread_id: str) -> str:
         """Get summary from the most recent instance for this thread's session."""
-        lookup = self._thread_to_project(thread_id)
+        lookup = self._forums.thread_to_project(thread_id)
         if not lookup:
             return ""
         _, info = lookup
@@ -2517,7 +2451,7 @@ class ClaudeBot(discord.Client):
         info = None
         try:
             thread_id = str(thread.id)
-            lookup = self._thread_to_project(thread_id)
+            lookup = self._forums.thread_to_project(thread_id)
             if not lookup:
                 return
             _, info = lookup
@@ -2543,7 +2477,7 @@ class ClaudeBot(discord.Client):
             self._schedule_sleep(thread_id)
 
             info.topic = title
-            self._save_forum_map()
+            self._forums.save_forum_map()
             log.info("Smart title for thread %s: %s", thread_id, new_name)
         except Exception:
             log.warning("Smart title generation failed for thread %s", thread.id, exc_info=True)
@@ -2648,7 +2582,7 @@ class ClaudeBot(discord.Client):
                 if active_tag not in current_tags:
                     current_tags.append(active_tag)
                 # Also set mode tag
-                lookup = self._thread_to_project(str(channel.id))
+                lookup = self._forums.thread_to_project(str(channel.id))
                 mode = lookup[1].mode if lookup and lookup[1].mode else self._store.mode
                 mode_tag = tag_map.get(mode)
                 # Remove other mode tags, add current
@@ -2688,7 +2622,7 @@ class ClaudeBot(discord.Client):
             if ua and ua.forum_channel_id:
                 forum_channel_id = ua.forum_channel_id
 
-        thread = await self._get_or_create_session_thread(
+        thread = await self._forums.get_or_create_session_thread(
             repo_name, None, "new-session",
             forum_channel_id=forum_channel_id,
             user_id=user_id, user_name=user_name,
@@ -2696,10 +2630,10 @@ class ClaudeBot(discord.Client):
         if thread:
             # Apply per-thread mode if specified (e.g. /new mode:build)
             if mode:
-                lookup = self._thread_to_project(str(thread.id))
+                lookup = self._forums.thread_to_project(str(thread.id))
                 if lookup:
                     lookup[1].mode = mode
-                    self._save_forum_map()
+                    self._forums.save_forum_map()
             # Non-owners can't see lobby, so always use ephemeral followup
             if user_id or not redirect:
                 await interaction.followup.send(
@@ -2736,25 +2670,25 @@ class ClaudeBot(discord.Client):
 
     def _set_thread_session(self, thread_id: str, session_id: str) -> None:
         """Write session_id to ThreadInfo immediately (called from engine callback)."""
-        lookup = self._thread_to_project(thread_id)
+        lookup = self._forums.thread_to_project(thread_id)
         if lookup:
             _, info = lookup
             if not info.session_id:
                 info.session_id = session_id
-                self._save_forum_map()
+                self._forums.save_forum_map()
                 log.info("Session resolved for thread %s -> %s", thread_id, session_id[:12])
 
     async def _finalize_pending_thread(
         self, thread_id: str, thread: discord.Thread, prompt: str,
     ) -> None:
         """After first query in a /new thread, update session mapping and rename."""
-        lookup = self._thread_to_project(thread_id)
+        lookup = self._forums.thread_to_project(thread_id)
         if lookup:
             _, info = lookup
             # Happy path: on_session_resolved callback already set session_id
             if info.session_id:
                 info.topic = prompt
-                self._save_forum_map()
+                self._forums.save_forum_map()
             else:
                 # Fallback: search instances (in case callback didn't fire)
                 for inst in self._store.list_instances()[:10]:
@@ -2767,7 +2701,7 @@ class ClaudeBot(discord.Client):
                                 continue
                             info.session_id = inst.session_id
                             info.topic = prompt
-                            self._save_forum_map()
+                            self._forums.save_forum_map()
                             log.info("Finalized pending thread %s -> session %s (fallback)",
                                      thread_id, inst.session_id)
                             break
@@ -2779,7 +2713,7 @@ class ClaudeBot(discord.Client):
 
     async def _update_pending_thread(self, thread_id: str) -> None:
         """After a query completes, update a pending thread's session mapping."""
-        lookup = self._thread_to_project(thread_id)
+        lookup = self._forums.thread_to_project(thread_id)
         if not lookup:
             return  # thread not tracked
         proj, info = lookup
@@ -2806,7 +2740,7 @@ class ClaudeBot(discord.Client):
                     # Message found in this thread — map session
                     info.session_id = inst.session_id
                     info.origin = "bot"
-                    self._save_forum_map()
+                    self._forums.save_forum_map()
                     log.info("Mapped thread %s -> session %s (repo: %s)",
                              thread_id, inst.session_id, proj.repo_name)
                     return
@@ -2861,7 +2795,7 @@ class ClaudeBot(discord.Client):
             force: If True, always send last 10 (no incremental check).
             cli_label: If True, label messages as "You (CLI)" / "Claude (CLI)".
         """
-        lookup = self._thread_to_project(thread_id)
+        lookup = self._forums.thread_to_project(thread_id)
         prev_count = 0
         if not force and lookup:
             prev_count = lookup[1]._synced_msg_count
@@ -2905,7 +2839,7 @@ class ClaudeBot(discord.Client):
 
         if lookup:
             lookup[1]._synced_msg_count = total
-            self._save_forum_map()
+            self._forums.save_forum_map()
 
     async def on_interaction(self, interaction: discord.Interaction) -> None:
         """Handle button interactions (persistent views)."""
@@ -2969,7 +2903,7 @@ class ClaudeBot(discord.Client):
             if isinstance(channel, discord.Thread):
                 parent = channel.parent
                 if parent and isinstance(parent, discord.ForumChannel):
-                    lookup = self._thread_to_project(channel_id)
+                    lookup = self._forums.thread_to_project(channel_id)
                     if lookup:
                         proj, info = lookup
                         session_id = info.session_id or None
@@ -2983,11 +2917,11 @@ class ClaudeBot(discord.Client):
                                         access_result=btn_access)
                         ctx.user_id = str(interaction.user.id)
                         ctx.user_name = interaction.user.display_name
-                        self._attach_session_callbacks(ctx, info, channel_id)
+                        self._forums.attach_session_callbacks(ctx, info, channel_id)
                         try:
                             await commands.on_text(ctx, transcription)
                         finally:
-                            self._persist_ctx_settings(ctx)
+                            self._forums.persist_ctx_settings(ctx)
                             asyncio.create_task(self._try_apply_tags_after_run(channel_id))
                             self._schedule_sleep(channel_id)
                             asyncio.create_task(self._refresh_dashboard())
@@ -3045,10 +2979,10 @@ class ClaudeBot(discord.Client):
                 )
             # Write to ThreadInfo (per-thread), not global store
             thread_id = str(interaction.channel_id)
-            lookup = self._thread_to_project(thread_id)
+            lookup = self._forums.thread_to_project(thread_id)
             if lookup:
                 lookup[1].mode = target_mode
-                self._save_forum_map()
+                self._forums.save_forum_map()
             elif btn_access.is_owner:
                 self._store.mode = target_mode  # fallback for unmapped channels (owner only)
             # Update the welcome embed to reflect selected mode
@@ -3072,13 +3006,13 @@ class ClaudeBot(discord.Client):
         if action == "load_history":
             cli_session_id = instance_id
             thread_id = str(interaction.channel_id)
-            lookup = self._thread_to_project(thread_id)
+            lookup = self._forums.thread_to_project(thread_id)
             ch = interaction.channel
             if lookup and isinstance(ch, (discord.TextChannel, discord.Thread)):
                 proj, info = lookup
                 info.session_id = cli_session_id
                 info.origin = "cli"
-                self._save_forum_map()
+                self._forums.save_forum_map()
                 await self._populate_thread_history(
                     ch, cli_session_id, thread_id,
                     force=True, cli_label=True,
@@ -3103,6 +3037,11 @@ class ClaudeBot(discord.Client):
             if not btn_access.is_owner:
                 user_id = str(interaction.user.id)
                 user_name = interaction.user.display_name
+            else:
+                # Owner clicking in a user's personal forum — create there
+                uf = self._resolve_user_forum_context(interaction)
+                if uf:
+                    user_id, user_name = uf[0], uf[1]
             await self._create_new_session(
                 interaction, repo_name, redirect=True,
                 user_id=user_id, user_name=user_name,
@@ -3148,7 +3087,7 @@ class ClaudeBot(discord.Client):
                     break
 
             repo_name = repo_name or "_default"
-            thread = await self._get_or_create_session_thread(
+            thread = await self._forums.get_or_create_session_thread(
                 repo_name, session_id, topic,
             )
             if thread:
@@ -3157,7 +3096,7 @@ class ClaudeBot(discord.Client):
                 except Exception:
                     pass
                 asyncio.create_task(self._send_redirect(thread))
-                lookup_info = self._thread_to_project(str(thread.id))
+                lookup_info = self._forums.thread_to_project(str(thread.id))
                 ti = lookup_info[1] if lookup_info else None
                 ctx = self._ctx(
                     str(thread.id), session_id=session_id,
@@ -3174,7 +3113,7 @@ class ClaudeBot(discord.Client):
         # --- New session button: create a new forum thread (like /new) ---
         if action == "new":
             thread_id = str(interaction.channel_id)
-            lookup = self._thread_to_project(thread_id)
+            lookup = self._forums.thread_to_project(thread_id)
             repo_name = lookup[0].repo_name if lookup else None
             user_id = None
             user_name = None
@@ -3186,9 +3125,16 @@ class ClaudeBot(discord.Client):
                     cfg = load_access_config()
                     ua = cfg.users.get(user_id)
                     if ua and ua.repos:
-                        granted = [r for r in ua.repos if r in self._forum_projects]
+                        granted = [r for r in ua.repos if r in self._forums.forum_projects]
                         if granted:
                             repo_name = granted[0]
+            else:
+                # Owner clicking in a user's personal forum — create there
+                uf = self._resolve_user_forum_context(interaction)
+                if uf:
+                    user_id, user_name = uf[0], uf[1]
+                    if not repo_name:
+                        repo_name = uf[2]
             if not repo_name:
                 repo_name, _ = self._store.get_active_repo()
             await self._create_new_session(
@@ -3211,7 +3157,7 @@ class ClaudeBot(discord.Client):
             asyncio.create_task(self._set_thread_active_tag(interaction.channel, True))
             asyncio.create_task(self._refresh_dashboard())
 
-        lookup = self._thread_to_project(channel_id)
+        lookup = self._forums.thread_to_project(channel_id)
         t_info = lookup[1] if lookup else None
         ctx = self._ctx(channel_id, thread_info=t_info, access_result=btn_access)
         ctx.user_id = str(interaction.user.id)
@@ -3219,7 +3165,7 @@ class ClaudeBot(discord.Client):
         try:
             await commands.handle_callback(ctx, action, instance_id, source_msg_id)
         finally:
-            self._persist_ctx_settings(ctx)
+            self._forums.persist_ctx_settings(ctx)
             if is_query:
                 asyncio.create_task(self._try_apply_tags_after_run(channel_id))
                 self._schedule_sleep(channel_id)

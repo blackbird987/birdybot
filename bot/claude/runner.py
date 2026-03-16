@@ -629,7 +629,7 @@ class ClaudeRunner:
                 ["git", "diff", base, "--", "."],
                 cwd=instance.repo_path, capture_output=True, text=True, **_NOWND,
             )
-            if result.stdout.strip():
+            if (result.stdout or "").strip():
                 diff_path = config.RESULTS_DIR / f"{instance.id}.diff"
                 diff_path.write_text(result.stdout, encoding="utf-8")
                 instance.diff_file = str(diff_path)
