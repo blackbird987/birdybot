@@ -402,6 +402,25 @@ async def run() -> None:
     # Graceful shutdown
     log.info("Shutting down...")
     scheduler.stop()
+
+    # Drain active queries before tearing down platforms.
+    # After kill_all(), the run_instance coroutines process the killed-process
+    # result through the normal finalize + send_result flow (platforms still up).
+    if runner.is_busy:
+        log.info(
+            "Waiting for %d active tasks to finish (30s timeout)...",
+            runner.active_task_count,
+        )
+        drained = await runner.wait_until_idle(timeout=30)
+        if not drained:
+            log.warning(
+                "Drain timed out; killing %d remaining processes",
+                runner.active_count,
+            )
+            await runner.kill_all()
+            # Give run_instance coroutines time to finalize + deliver results
+            await runner.wait_until_idle(timeout=10)
+
     store.save()
 
     if telegram_app:

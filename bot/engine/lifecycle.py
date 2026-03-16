@@ -81,6 +81,8 @@ async def run_instance(
     sibling_ctx = get_sibling_summary(ctx.store, inst)
 
     start_time = asyncio.get_event_loop().time()
+    result = None
+    finalized = False
     ctx.runner.begin_task(inst.id)
     try:
         try:
@@ -112,12 +114,46 @@ async def run_instance(
                 pass
 
         finalize_run(ctx, inst, result)
+        finalized = True
         await send_result(ctx, inst, result.result_text, silent=silent)
 
         # Check reboot request BEFORE end_task so it's queued when end_task
         # checks for pending reboots on idle.  Safe because check_reboot_request
         # just queues (no waiting) — the actual reboot fires from end_task.
         await check_reboot_request(ctx)
+
+    except asyncio.CancelledError:
+        # Shutdown cancelled this task. The 30s drain in app.py keeps the
+        # event loop alive long enough for us to attempt delivery.
+        delivered = False
+        if result is not None:
+            # Result was computed — try to finalize + deliver it.
+            # Guard against double-finalize if cancellation hit after
+            # finalize_run() but before send_result().
+            try:
+                if not finalized:
+                    finalize_run(ctx, inst, result)
+                await send_result(ctx, inst, result.result_text, silent=silent)
+                delivered = True
+            except (asyncio.CancelledError, Exception):
+                pass
+        else:
+            # Killed mid-execution — mark as failed
+            inst.status = InstanceStatus.FAILED
+            inst.error = "Bot restarted — instance interrupted"
+            inst.finished_at = datetime.now(timezone.utc).isoformat()
+            ctx.store.update_instance(inst)
+        # Only overwrite thinking message if result wasn't delivered —
+        # otherwise it already shows the correct completion status.
+        if not delivered and handle:
+            try:
+                await ctx.messenger.edit_thinking(
+                    handle, "⚠️ Interrupted by bot restart",
+                )
+            except (asyncio.CancelledError, Exception):
+                pass
+        raise
+
     finally:
         ctx.runner.end_task(inst.id)
 

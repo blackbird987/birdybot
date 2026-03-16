@@ -577,6 +577,14 @@ class ClaudeRunner:
             if not self._active_tasks and not self._processes:
                 self._idle_event.set()
 
+    async def kill_all(self) -> int:
+        """Terminate all running processes. Returns count killed."""
+        killed = 0
+        for iid in list(self._processes.keys()):
+            if await self.kill(iid):
+                killed += 1
+        return killed
+
     def queue_position(self, instance_id: str) -> int | None:
         """Approximate queue position (not exact with asyncio.Semaphore)."""
         # Semaphore doesn't expose waiter count directly
