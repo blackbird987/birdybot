@@ -136,7 +136,11 @@ def build_title_name(text: str) -> str:
     """
     name = re.sub(r"[^a-zA-Z0-9\s\-]", "", text)
     name = re.sub(r"\s+", " ", name).strip()
-    return name[:100] or "session"
+    # Keep at most 6 words for concise forum post names
+    words = name.split()
+    if len(words) > 6:
+        name = " ".join(words[:6])
+    return name[:60] or "session"
 
 
 # --- Forum Channel Helpers ---

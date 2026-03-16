@@ -162,9 +162,10 @@ async def _generate_title_text(prompt: str, summary: str = "") -> str | None:
     from bot.claude.parser import extract_result, parse_stream_line
 
     title_prompt = (
-        "Generate a 3-5 word title for this coding session. "
+        "Generate a 4-6 word title for this coding session. "
+        "Maximum 6 words. No articles or filler words like 'the', 'a', 'for'. "
         "Output ONLY the title — no quotes, no explanation.\n\n"
-        f"User asked: {prompt[:500]}\n"
+        f"User asked: {prompt[:300]}\n"
     )
     if summary:
         title_prompt += f"\nResult: {summary[:500]}"
