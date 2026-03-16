@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Bug Fixes
+- Fix `code_active` detection for worktree builds — Agent-made changes now checked in worktree path, not main repo
+- Remove dead `escaped` variable in session resume display
+- DRY: deduplicate `_NOWND` subprocess constant (forums.py now imports from runner.py)
+
 ## v0.19.1 — Worktree Hardening (2026-03-16)
 
 ### Worktree Hardening

@@ -195,7 +195,8 @@ def finalize_run(ctx: RequestContext, inst: Instance, result: RunResult) -> None
     elif "Agent" in tools and inst.repo_path:
         # Subagents (Agent tool) can make edits that don't appear in parent's
         # tools_used. Check git for actual uncommitted changes in the repo.
-        inst.code_active = _repo_has_changes(inst.repo_path)
+        # Use worktree path when available (worktree builds isolate changes there).
+        inst.code_active = _repo_has_changes(inst.worktree_path or inst.repo_path)
 
     # Inherit flags from session siblings if not already set
     if inst.session_id and not (inst.plan_active and inst.code_active):
