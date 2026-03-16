@@ -221,10 +221,6 @@ class StateStore:
                 return inst
         return None
 
-    # Backward compat alias
-    def find_by_telegram_message(self, message_id: int) -> Instance | None:
-        return self.find_by_message("telegram", str(message_id))
-
     def list_instances(self, all_: bool = False) -> list[Instance]:
         """Return instances, most recent first. Default: last 24h only."""
         now = datetime.now(timezone.utc)

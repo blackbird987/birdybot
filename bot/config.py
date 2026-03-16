@@ -12,14 +12,14 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(_PROJECT_ROOT / ".env")
 
 
-# --- Telegram (optional — at least one platform must be configured) ---
+# --- Telegram (stripped — shell only, not started) ---
 TELEGRAM_BOT_TOKEN: str | None = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_USER_ID: int | None = (
     int(os.getenv("TELEGRAM_USER_ID")) if os.getenv("TELEGRAM_USER_ID") else None
 )
-TELEGRAM_ENABLED: bool = bool(TELEGRAM_BOT_TOKEN and TELEGRAM_USER_ID)
+TELEGRAM_ENABLED: bool = False  # Telegram stripped — shell only
 
-# --- Discord (optional) ---
+# --- Discord ---
 DISCORD_BOT_TOKEN: str | None = os.getenv("DISCORD_BOT_TOKEN")
 DISCORD_GUILD_ID: int | None = (
     int(os.getenv("DISCORD_GUILD_ID")) if os.getenv("DISCORD_GUILD_ID") else None
@@ -42,11 +42,11 @@ TEST_WEBHOOK_IDS: set[str] = set(filter(None, os.getenv("TEST_WEBHOOK_IDS", "").
 # --- OpenAI (voice transcription) ---
 OPENAI_API_KEY: str | None = os.getenv("OPENAI_API_KEY")
 
-# Validate: at least one platform
-if not TELEGRAM_ENABLED and not DISCORD_ENABLED:
+# Validate: Discord must be configured
+if not DISCORD_ENABLED:
     raise RuntimeError(
-        "No platform configured. Set TELEGRAM_BOT_TOKEN + TELEGRAM_USER_ID "
-        "and/or DISCORD_BOT_TOKEN + DISCORD_GUILD_ID + DISCORD_LOBBY_CHANNEL_ID."
+        "Discord not configured. Set DISCORD_BOT_TOKEN + DISCORD_GUILD_ID "
+        "+ DISCORD_LOBBY_CHANNEL_ID in .env."
     )
 
 # Optional with defaults
@@ -102,7 +102,7 @@ MOBILE_HINT = (
 # Separate block explaining the chat-app visibility constraint
 CHAT_APP_CONSTRAINT = """
 --- Communication Model ---
-IMPORTANT: The user is in a chat app (Discord/Telegram). They see ONLY your final text responses. They CANNOT see tool calls, file contents, diffs, command output, or intermediate steps. Your text output is their ENTIRE window into what happened.
+IMPORTANT: The user is in a chat app (Discord). They see ONLY your final text responses. They CANNOT see tool calls, file contents, diffs, command output, or intermediate steps. Your text output is their ENTIRE window into what happened.
 
 You must narrate your work:
 - If you read a file → summarize what you found

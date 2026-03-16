@@ -181,7 +181,7 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
         )
         return
 
-    # Per-channel session (Discord) is authoritative; global fallback only for Telegram
+    # Per-channel session (Discord) is authoritative; global fallback for other platforms
     if ctx.session_id:
         resume_session = ctx.session_id
     elif ctx.platform == "discord":
@@ -272,7 +272,7 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
 
         if not result.is_error and result.session_id:
             # For Discord channels, update the per-request session_id (caller reads inst.session_id)
-            # For Telegram/global, update the store's global active_session_id
+            # For non-Discord platforms, update the store's global active_session_id
             if not ctx.session_id:
                 ctx.store.active_session_id = result.session_id
             # Write session_id back immediately (before lock release)
@@ -715,8 +715,6 @@ async def on_status(ctx: RequestContext) -> None:
 
     # Determine active platforms
     platforms = []
-    if config.TELEGRAM_ENABLED:
-        platforms.append("Telegram")
     if config.DISCORD_ENABLED:
         platforms.append("Discord")
 
@@ -1255,8 +1253,7 @@ async def on_session(ctx: RequestContext, text: str) -> None:
         await ctx.messenger.send_text(ctx.channel_id, "Session cleared. Next message starts fresh.")
 
     else:
-        # Discord allows max 5 button rows; Telegram is fine with more
-        scan_limit = 5 if ctx.platform == "discord" else 8
+        scan_limit = 5  # Discord allows max 5 button rows
         session_list = await asyncio.to_thread(sessions_mod.scan_sessions, scan_limit, ctx.store.list_repos())
         active = ctx.store.active_session_id
 

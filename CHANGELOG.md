@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## v0.22.0 — Strip Telegram (2026-03-17)
+
+- Strip Telegram platform support — gut adapter/bridge/formatter to stubs, remove `python-telegram-bot` dependency, delete `_start_telegram()` orchestration (~860 lines removed)
+- Remove dead global-write guards in `RequestContext.update_mode/context/verbose/effort` (only Discord uses per-thread persistence)
+- Change default `origin_platform` from `"telegram"` to `"discord"` (backward-compat migration shim kept)
+- Remove `find_by_telegram_message()` compat alias from StateStore
+- Clean up Telegram references in docstrings, comments, and config across engine, lifecycle, and scripts
+- Update CLAUDE.md, .env.example, pyproject.toml description, and MEMORY.md
+
 ## v0.21.0 — Multi-Device Auto-Update (2026-03-17)
 
 - Add auto-update feature: secondary devices auto-pull code changes from origin and reboot (opt-in via `AUTO_UPDATE=true`)

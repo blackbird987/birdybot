@@ -41,17 +41,13 @@ class Messenger(Protocol):
 
     @property
     def platform_name(self) -> str:
-        """Return 'telegram' or 'discord'."""
+        """Return the platform identifier (e.g. 'discord')."""
         ...
 
     async def create_conversation(
         self, instance_id: str, summary: str, is_task: bool,
     ) -> str:
-        """Create a conversation space. Returns channel_id.
-
-        Discord: thread (query) or channel (task).
-        Telegram: returns existing chat_id.
-        """
+        """Create a conversation space. Returns channel_id."""
         ...
 
     async def send_thinking(
@@ -82,9 +78,7 @@ class Messenger(Protocol):
         buttons: list[list[ButtonSpec]] | None = None,
         silent: bool = False,
     ) -> str:
-        """Send a result message. Discord uses embed; Telegram uses HTML.
-        Returns message_id as string.
-        """
+        """Send a result message. Returns message_id as string."""
         ...
 
     async def edit_text(
@@ -106,9 +100,7 @@ class Messenger(Protocol):
         ...
 
     def markdown_to_markup(self, md: str) -> str:
-        """Convert markdown to platform markup.
-        Telegram: converts to HTML. Discord: passes through.
-        """
+        """Convert markdown to platform markup."""
         ...
 
     def escape(self, text: str) -> str:
@@ -120,7 +112,7 @@ class Messenger(Protocol):
         ...
 
     async def close_conversation(self, channel_id: str) -> None:
-        """Close/archive a conversation. Discord: archive+lock thread. Telegram: no-op."""
+        """Close/archive a conversation."""
         ...
 
 
@@ -129,7 +121,7 @@ class RequestContext:
     """Everything an engine function needs to operate on a request."""
     messenger: Messenger
     channel_id: str
-    platform: str           # "telegram" or "discord"
+    platform: str           # e.g. "discord"
     store: StateStore
     runner: ClaudeRunner
     session_id: str | None = None  # per-request override (Discord channels)
@@ -178,23 +170,15 @@ class RequestContext:
             if _rank.get(value, 0) > _rank.get(self.mode_ceiling, 0):
                 value = self.mode_ceiling
         self.mode = value
-        if self.platform != "discord":
-            self.store.mode = value
 
     def update_context(self, value: str | None) -> None:
         self.context = value if value is not None else ""  # "" = explicitly cleared
-        if self.platform != "discord":
-            self.store.context = value
 
     def update_verbose(self, value: int) -> None:
         self.verbose_level = value
-        if self.platform != "discord":
-            self.store.verbose_level = value
 
     def update_effort(self, value: str) -> None:
         self.effort = value
-        if self.platform != "discord":
-            self.store.effort = value
 
 
 class NotificationService:

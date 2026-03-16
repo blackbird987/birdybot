@@ -1,4 +1,4 @@
-"""Multi-platform orchestrator — starts Telegram and/or Discord bots with shared state."""
+"""Bot orchestrator — starts Discord bot with shared state."""
 
 from __future__ import annotations
 
@@ -54,7 +54,6 @@ def setup_logging() -> None:
 
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
-    logging.getLogger("telegram").setLevel(logging.WARNING)
     logging.getLogger("discord").setLevel(logging.WARNING)
 
 
@@ -483,16 +482,6 @@ async def run() -> None:
     # Start platform tasks
     platform_tasks = []
 
-    # --- Telegram ---
-    telegram_app = None
-    if config.TELEGRAM_ENABLED:
-        try:
-            telegram_app = await _start_telegram(store, runner, notifier, stop_event, cli_version)
-            platform_tasks.append(("telegram", telegram_app))
-            log.info("Telegram platform started")
-        except Exception:
-            log.exception("Failed to start Telegram platform")
-
     # --- Discord ---
     discord_bot = None
     if config.DISCORD_ENABLED:
@@ -561,21 +550,6 @@ async def run() -> None:
             ))
             log.info("Dispatched post-reboot resume to discord channel %s", _resume_channel)
 
-        elif _resume_prompt and _resume_channel and _resume_platform in notifier._messengers:
-            # Generic fallback (Telegram, etc): build context from notifier
-            from bot.engine import commands as _cmds
-            from bot.platform.base import RequestContext
-            _messenger, _ = notifier._messengers[_resume_platform]
-            _ctx = RequestContext(
-                messenger=_messenger,
-                channel_id=_resume_channel,
-                platform=_resume_platform,
-                store=store,
-                runner=runner,
-            )
-            asyncio.create_task(_cmds.on_text(_ctx, _resume_prompt))
-            log.info("Dispatched post-reboot resume to %s channel %s", _resume_platform, _resume_channel)
-
     # Update thinking messages for orphaned instances (interrupted by restart)
     await _cleanup_orphan_messages(notifier, orphans)
 
@@ -606,14 +580,6 @@ async def run() -> None:
 
     store.save()
 
-    if telegram_app:
-        try:
-            await telegram_app.updater.stop()
-            await telegram_app.stop()
-            await telegram_app.shutdown()
-        except Exception:
-            log.exception("Error shutting down Telegram")
-
     if discord_bot:
         try:
             await discord_bot.close()
@@ -627,38 +593,20 @@ async def run() -> None:
 async def _send_reboot_announcement(notifier: NotificationService) -> dict | None:
     """If a reboot_message.json was left by a previous process, read and return it.
 
-    For Discord, the announcement is deferred to dispatch_resume (which waits
-    for the bot to be ready). For other platforms, send immediately.
+    The announcement is deferred to dispatch_resume (which waits for the bot
+    to be ready and handles file cleanup).
     """
     import json
     try:
         data = json.loads(config.REBOOT_MSG_FILE.read_text(encoding="utf-8"))
-    except FileNotFoundError:
+    except (FileNotFoundError, json.JSONDecodeError):
         return None
-    try:
-        platform = data.get("platform")
-        channel_id = data.get("channel_id")
 
-        # Discord: defer to dispatch_resume (which deletes the file after success)
-        if platform == "discord":
-            log.info("Read reboot message for discord channel %s (deferred)", channel_id)
-            return data
-
-        # Non-Discord: consume file and send immediately
-        config.REBOOT_MSG_FILE.unlink(missing_ok=True)
-        text = f"✅ {config.PC_NAME} back online."
-        if channel_id and platform and platform in notifier._messengers:
-            messenger, _ = notifier._messengers[platform]
-            await messenger.send_text(channel_id, text)
-            log.info("Sent reboot confirmation to %s channel %s", platform, channel_id)
-        else:
-            await notifier.broadcast(text)
-            log.info("Broadcast reboot announcement (no specific channel)")
-
-        return data
-    except Exception:
-        log.warning("Failed to send reboot announcement", exc_info=True)
-        return None
+    log.info(
+        "Read reboot message for %s channel %s (deferred)",
+        data.get("platform"), data.get("channel_id"),
+    )
+    return data
 
 
 async def _cleanup_orphan_messages(notifier: NotificationService, orphans: list) -> None:
@@ -710,98 +658,6 @@ async def _cleanup_orphan_messages(notifier: NotificationService, orphans: list)
                         log.debug("Could not edit orphan thinking msg for %s", inst.id)
             except Exception:
                 log.debug("Orphan message cleanup failed for %s", inst.id, exc_info=True)
-
-
-async def _start_telegram(store, runner, notifier, stop_event, cli_version):
-    """Start the Telegram platform."""
-    from telegram.error import Conflict
-    from telegram.ext import (
-        Application,
-        CallbackQueryHandler,
-        CommandHandler,
-        MessageHandler,
-        filters,
-    )
-
-    from bot.telegram.adapter import TelegramMessenger
-    from bot.telegram.bridge import TelegramBridge
-
-    app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
-
-    # Create messenger and bridge
-    messenger = TelegramMessenger(app.bot, config.TELEGRAM_USER_ID)
-    bridge = TelegramBridge(messenger, store, runner)
-
-    # Register with notifier
-    notifier.register(messenger, str(config.TELEGRAM_USER_ID))
-
-    # Register command handlers
-    app.add_handler(CommandHandler("start", bridge.on_help))
-    app.add_handler(CommandHandler("help", bridge.on_help))
-    app.add_handler(CommandHandler("new", bridge.on_new))
-    app.add_handler(CommandHandler("bg", bridge.on_bg))
-    app.add_handler(CommandHandler("release", bridge.on_release))
-    app.add_handler(CommandHandler("list", bridge.on_list))
-    app.add_handler(CommandHandler("kill", bridge.on_kill))
-    app.add_handler(CommandHandler("retry", bridge.on_retry))
-    app.add_handler(CommandHandler("log", bridge.on_log))
-    app.add_handler(CommandHandler("diff", bridge.on_diff))
-    app.add_handler(CommandHandler("merge", bridge.on_merge))
-    app.add_handler(CommandHandler("discard", bridge.on_discard))
-    app.add_handler(CommandHandler("branches", bridge.on_branches))
-    app.add_handler(CommandHandler("cost", bridge.on_cost))
-    app.add_handler(CommandHandler("status", bridge.on_status))
-    app.add_handler(CommandHandler("logs", bridge.on_logs))
-    app.add_handler(CommandHandler("mode", bridge.on_mode))
-    app.add_handler(CommandHandler("context", bridge.on_context))
-    app.add_handler(CommandHandler("alias", bridge.on_alias))
-    app.add_handler(CommandHandler("schedule", bridge.on_schedule))
-    app.add_handler(CommandHandler("repo", bridge.on_repo))
-    app.add_handler(CommandHandler("budget", bridge.on_budget))
-    app.add_handler(CommandHandler("clear", bridge.on_clear))
-    app.add_handler(CommandHandler("verbose", bridge.on_verbose))
-    app.add_handler(CommandHandler("effort", bridge.on_effort))
-    app.add_handler(CommandHandler("session", bridge.on_session))
-    app.add_handler(CommandHandler("shutdown", bridge.on_shutdown))
-    app.add_handler(CommandHandler("reboot", bridge.on_reboot))
-
-    # Callback query handler
-    app.add_handler(CallbackQueryHandler(bridge.on_callback_query))
-
-    # Photo/document handlers
-    app.add_handler(MessageHandler(filters.PHOTO, bridge.on_photo))
-    app.add_handler(MessageHandler(filters.Document.ALL, bridge.on_document))
-
-    # Unknown command handler
-    app.add_handler(MessageHandler(filters.COMMAND, bridge.on_unknown_command))
-
-    # Text handler (last)
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bridge.on_text))
-
-    # Error handler
-    async def on_error(update, context):
-        if isinstance(context.error, Conflict):
-            log.warning("Another bot instance is polling — %s shutting down", config.PC_NAME)
-            try:
-                await app.bot.send_message(
-                    chat_id=config.TELEGRAM_USER_ID,
-                    text=f"Bot stopped on {config.PC_NAME}: another instance took over.",
-                    disable_notification=True,
-                )
-            except Exception:
-                pass
-            stop_event.set()
-            return
-        log.exception("Unhandled Telegram error", exc_info=context.error)
-
-    app.add_error_handler(on_error)
-
-    # Start polling
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling(drop_pending_updates=True)
-
-    return app
 
 
 async def _start_discord(store, runner, notifier, stop_event):
