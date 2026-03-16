@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.19.4 — Worktree Session & Merge Fixes (2026-03-17)
+
 ### Bug Fixes
 - Fix worktree session resume: `_encode_project_path` now replaces dots to match Claude Code's path encoding — plans were lost on every worktree build
 - Fix `_get_default_branch` fallback: check HEAD (filtering `claude-bot/*`) instead of blindly returning `"master"` when neither master nor main exists
