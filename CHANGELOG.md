@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## v0.15.0 — Reasoning Effort & Fixes (2026-03-16)
+
+### Effort (Reasoning Effort)
+- Add `/effort` command (low|medium|high|max) — per-thread in Discord, global in Telegram
+- Pass `--effort` flag to Claude CLI on every invocation (never rely on CLI default)
+- Add `effort` field to Instance, ThreadInfo, RequestContext, and StateStore with full serialization
+- Set effort on all 7 instance creation sites (query, bg, release, retry, callback retry, workflow spawn, scheduler)
+
+### Fixes
+- Fix smart title not firing on first message in /new threads (elif→if with flag check)
+- Fix lobby-created threads unable to retry title gen on follow-up messages
+- Reduce title generation timeout from 30s to 15s
+- Persist deferred revisions across autopilot chain steps and reboots; surface them in the Done embed so they're visible even after thread closure
+
 ## v0.14.1 — Engine Decoupling (2026-03-16)
 
 ### Architecture
