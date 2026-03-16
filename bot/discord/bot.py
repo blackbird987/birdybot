@@ -23,6 +23,7 @@ from discord import app_commands
 
 from bot import config
 from bot.discord import channels
+from bot.discord.channels import CONTROL_ROOM_NAME
 from bot.discord import access as access_mod
 from bot.discord.access import AccessResult, load_access_config, check_user_access, has_any_access, get_most_restrictive_ceiling, effective_mode as access_effective_mode
 from bot.discord.adapter import DiscordMessenger
@@ -304,25 +305,6 @@ class ClaudeBot(discord.Client):
                 )
         return ctx
 
-    def _persist_ctx_settings(self, ctx: RequestContext) -> None:
-        """Write any ctx setting overrides back to ThreadInfo for persistence."""
-        lookup = self._forums.thread_to_project(ctx.channel_id)
-        if not lookup:
-            return
-        _, info = lookup
-        changed = False
-        if ctx.mode is not None and ctx.mode != info.mode:
-            info.mode = ctx.mode
-            changed = True
-        if ctx.context is not None and ctx.context != info.context:
-            info.context = ctx.context
-            changed = True
-        if ctx.verbose_level is not None and ctx.verbose_level != info.verbose_level:
-            info.verbose_level = ctx.verbose_level
-            changed = True
-        if changed:
-            self._forums.save_forum_map()
-
     # --- Resume after reboot ---
 
     async def dispatch_resume(
@@ -377,53 +359,7 @@ class ClaudeBot(discord.Client):
         self._schedule_sleep(channel_id)
         asyncio.create_task(self._refresh_dashboard())
 
-    # --- Forum-Session Mapping ---
-
-    def _load_forum_map(self) -> None:
-        """Load forum→project mapping from platform_state."""
-        state = self._store.get_platform_state("discord")
-        raw = state.get("forum_projects", {})
-        self._forums.forum_projects = {
-            k: ForumProject.from_dict(v) for k, v in raw.items()
-        }
-        log.info("Loaded %d forum projects", len(self._forums.forum_projects))
-
-    def _save_forum_map(self) -> None:
-        """Persist forum→project mapping to platform_state."""
-        state = self._store.get_platform_state("discord")
-        state["forum_projects"] = {k: v.to_dict() for k, v in self._forums.forum_projects.items()}
-        self._store.set_platform_state("discord", state, persist=True)
-
-    def _session_to_thread(self, session_id: str) -> tuple[str, ThreadInfo] | None:
-        """Reverse lookup: find thread for a session_id. Returns (thread_id, info)."""
-        for proj in self._forums.forum_projects.values():
-            for tid, info in proj.threads.items():
-                if info.session_id == session_id:
-                    return tid, info
-        return None
-
-    def _thread_to_project(self, thread_id: str) -> tuple[ForumProject, ThreadInfo] | None:
-        """Find project + thread info for a thread_id."""
-        for proj in self._forums.forum_projects.values():
-            info = proj.threads.get(thread_id)
-            if info:
-                return proj, info
-        return None
-
-    def _forum_by_channel_id(self, forum_id: str) -> ForumProject | None:
-        """Find project by forum channel ID."""
-        for proj in self._forums.forum_projects.values():
-            if proj.forum_channel_id == forum_id:
-                return proj
-        return None
-
-    def _is_user_forum(self, forum_id: str) -> tuple[str, str] | None:
-        """Check if a forum is a user's personal forum. Returns (user_id, user_name) or None."""
-        cfg = load_access_config()
-        for uid, ua in cfg.users.items():
-            if ua.forum_channel_id == forum_id:
-                return uid, ua.display_name
-        return None
+    # Forum operations delegated to self._forums (ForumManager)
 
     def _resolve_user_forum_context(
         self, interaction: discord.Interaction,
@@ -448,344 +384,16 @@ class ClaudeBot(discord.Client):
                 repo_name = granted[0]
         return user_id, user_name, repo_name
 
-    def _user_forum_thread_to_repo(self, thread: discord.Thread) -> str | None:
-        """Resolve repo name from a thread's tags in a user's personal forum."""
-        repos = self._store.list_repos()
-        for tag in thread.applied_tags:
-            if tag.name in repos:
-                return tag.name
-        return None
 
     # --- User Forum Provisioning ---
 
-    async def _ensure_user_forum(
-        self, user_id: int, display_name: str, repo_names: list[str],
-    ) -> discord.ForumChannel | None:
-        """Create or get a personal forum channel for a granted user."""
-        guild = self.get_guild(self._guild_id)
-        if not guild or not self._category_id:
-            return None
-        category = guild.get_channel(self._category_id)
-        if not category or not isinstance(category, discord.CategoryChannel):
-            return None
 
-        forum = await channels.ensure_user_forum(
-            guild, category, guild.me, user_id,
-            display_name, repo_names,
-            owner_id=self._discord_user_id,
-        )
-
-        # Create welcome post if not already done
-        if forum:
-            cfg = load_access_config()
-            ua = cfg.users.get(str(user_id))
-            if ua and not ua.welcome_posted:
-                try:
-                    await channels.create_user_welcome_post(forum, display_name, repo_names)
-                    ua.welcome_posted = True
-                    access_mod.save_access_config(cfg)
-                except Exception:
-                    log.warning("Failed to create welcome post in forum %s for user %s, will retry next startup",
-                                forum.id, user_id, exc_info=True)
-            # Create control room post (awaited to populate skip-set before messages arrive).
-            # Pass forum directly — forum_channel_id may not be persisted yet during /grant.
-            try:
-                await self._ensure_user_control_post(str(user_id), forum)
-            except Exception:
-                log.warning("Failed to create control room in forum %s for user %s",
-                            forum.id, user_id, exc_info=True)
-
-        return forum
-
-    async def _sync_user_forum_tags(self, user_id: str) -> None:
-        """Sync a user's forum tags to match their current access grants."""
-        cfg = load_access_config()
-        ua = cfg.users.get(user_id)
-        if not ua or not ua.forum_channel_id:
-            return
-        guild = self.get_guild(self._guild_id)
-        if not guild:
-            return
-        forum = guild.get_channel(int(ua.forum_channel_id))
-        if not forum or not isinstance(forum, discord.ForumChannel):
-            return
-        repo_names = list(ua.repos.keys())
-        await channels.sync_user_forum_tags(forum, repo_names)
 
     # --- Forum Provisioning ---
 
-    async def _get_or_create_forum(self, repo_name: str) -> discord.ForumChannel | None:
-        """Get or create a forum channel for a repo."""
-        guild = self.get_guild(self._guild_id)
-        if not guild or not self._category_id:
-            return None
-        category = guild.get_channel(self._category_id)
-        if not category or not isinstance(category, discord.CategoryChannel):
-            return None
 
-        async with self._forum_lock:
-            # Double-check after acquiring lock
-            if repo_name in self._forums.forum_projects:
-                existing = self._forums.forum_projects[repo_name]
-                if existing.forum_channel_id:
-                    forum = guild.get_channel(int(existing.forum_channel_id))
-                    if forum and isinstance(forum, discord.ForumChannel):
-                        return forum
-                    # Forum was deleted externally — recreate
-                    log.warning("Forum %s for repo %s was deleted, recreating", existing.forum_channel_id, repo_name)
 
-            forum = await channels.ensure_forum(guild, category, repo_name)
-            if repo_name not in self._forums.forum_projects:
-                self._forums.forum_projects[repo_name] = ForumProject(
-                    repo_name=repo_name,
-                    forum_channel_id=str(forum.id),
-                )
-            else:
-                self._forums.forum_projects[repo_name].forum_channel_id = str(forum.id)
-            self._forums.save_forum_map()
-            return forum
 
-    async def _get_or_create_session_thread(
-        self, repo_name: str, session_id: str | None, topic: str,
-        origin: str = "bot",
-        forum_channel_id: str | None = None,
-        user_id: str | None = None,
-        user_name: str | None = None,
-    ) -> discord.Thread | None:
-        """Find existing thread for session, or create a new one in the repo's forum.
-
-        If forum_channel_id is provided, create the thread in that forum (personal
-        user forum) instead of the repo's default forum.
-        """
-        # Check if session already has a thread
-        if session_id:
-            result = self._forums.session_to_thread(session_id)
-            if result:
-                tid, info = result
-                ch = self.get_channel(int(tid))
-                if ch and isinstance(ch, discord.Thread):
-                    return ch
-                # Try fetch (archived thread)
-                try:
-                    ch = await self.fetch_channel(int(tid))
-                    if isinstance(ch, discord.Thread):
-                        return ch
-                except (discord.NotFound, discord.Forbidden):
-                    pass
-                # Thread gone — remove stale mapping
-                for proj in self._forums.forum_projects.values():
-                    proj.threads.pop(tid, None)
-
-        # Resolve the target forum
-        if forum_channel_id:
-            guild = self.get_guild(self._guild_id)
-            forum = guild.get_channel(int(forum_channel_id)) if guild else None
-            if not forum or not isinstance(forum, discord.ForumChannel):
-                log.warning("Personal forum %s not found, falling back to repo forum", forum_channel_id)
-                forum = await self._forums.get_or_create_forum(repo_name)
-        else:
-            forum = await self._forums.get_or_create_forum(repo_name)
-        if not forum:
-            return None
-
-        async with self._thread_lock:
-            # Double-check after lock (another message may have created it)
-            if session_id:
-                result = self._forums.session_to_thread(session_id)
-                if result:
-                    tid, _ = result
-                    try:
-                        ch = await self.fetch_channel(int(tid))
-                        if isinstance(ch, discord.Thread):
-                            return ch
-                    except (discord.NotFound, discord.Forbidden):
-                        pass
-
-            thread_name = channels.build_channel_name(topic) if topic != "new-session" else "new-session"
-            thread, _msg = await channels.create_forum_post(
-                forum, thread_name, origin=origin,
-                topic_preview=topic,
-                current_mode=self._store.mode,
-            )
-
-            # Apply repo tag in personal forums
-            if forum_channel_id:
-                tag_map = {t.name: t for t in forum.available_tags}
-                repo_tag = tag_map.get(repo_name)
-                if repo_tag:
-                    try:
-                        await thread.edit(applied_tags=[repo_tag])
-                    except Exception:
-                        log.warning("Failed to apply repo tag %s to thread %s", repo_name, thread.id)
-
-            # Store mapping
-            proj = self._forums.forum_projects.get(repo_name)
-            if proj:
-                proj.threads[str(thread.id)] = ThreadInfo(
-                    thread_id=str(thread.id),
-                    session_id=session_id,
-                    origin=origin,
-                    topic=topic,
-                    user_id=user_id,
-                    user_name=user_name,
-                )
-                self._forums.save_forum_map()
-            else:
-                log.warning("No ForumProject for repo %s — thread %s created but unmapped", repo_name, thread.id)
-            return thread
-
-    async def _sync_single_thread(self, thread_id: str) -> None:
-        """Refresh a single session thread: pull latest CLI messages."""
-        lookup = self._forums.thread_to_project(thread_id)
-        if not lookup:
-            return
-        proj, info = lookup
-        session_id = info.session_id
-        repo_name = proj.repo_name
-        if not session_id:
-            return
-
-        # Try to resolve the thread
-        ch = self.get_channel(int(thread_id))
-        if not ch:
-            try:
-                ch = await self.fetch_channel(int(thread_id))
-            except (discord.NotFound, discord.Forbidden):
-                return
-        if not isinstance(ch, (discord.TextChannel, discord.Thread)):
-            return
-
-        # Check if there's a newer CLI session for this repo
-        if repo_name and repo_name != "_default":
-            repo_path = self._store.list_repos().get(repo_name, "")
-            if repo_path:
-                latest = await asyncio.to_thread(
-                    sessions_mod.find_latest_session_for_repo, repo_path,
-                )
-                if latest and latest["id"] != session_id:
-                    info.session_id = latest["id"]
-                    info.origin = "cli"
-                    info._synced_msg_count = 0
-                    self._forums.save_forum_map()
-                    log.info("Single-sync updated thread %s to session %s", thread_id, latest["id"][:12])
-                    session_id = latest["id"]
-
-        await self._populate_thread_history(ch, session_id, thread_id)
-        log.info("Single-sync refreshed thread %s", thread_id)
-
-    async def _reconcile_forums(self) -> None:
-        """Validate forum channels on startup. Clean stale mappings."""
-        guild = self.get_guild(self._guild_id)
-        if not guild or not self._category_id:
-            return
-        category = guild.get_channel(self._category_id)
-        if not category or not isinstance(category, discord.CategoryChannel):
-            return
-
-        # Validate existing forum mappings
-        valid_projects: dict[str, ForumProject] = {}
-        for repo_name, proj in self._forums.forum_projects.items():
-            if not proj.forum_channel_id:
-                valid_projects[repo_name] = proj
-                continue
-            forum = guild.get_channel(int(proj.forum_channel_id))
-            if forum and isinstance(forum, discord.ForumChannel):
-                # Threads are lazily validated on access — keep all mappings
-                valid_projects[repo_name] = proj
-            else:
-                log.info("Removed stale forum mapping for repo %s (forum %s gone)", repo_name, proj.forum_channel_id)
-
-        # Discover unmapped forums in category (skip user personal forums)
-        user_forum_ids = set()
-        cfg = load_access_config()
-        for ua in cfg.users.values():
-            if ua.forum_channel_id:
-                user_forum_ids.add(ua.forum_channel_id)
-
-        for ch in category.channels:
-            if not isinstance(ch, discord.ForumChannel):
-                continue
-            if str(ch.id) in user_forum_ids:
-                continue  # skip personal user forums
-            existing = self._forums.forum_by_channel_id(str(ch.id))
-            if not existing:
-                # Adopt as a project — repo name = forum name
-                repo_name = ch.name
-                if repo_name not in valid_projects:
-                    valid_projects[repo_name] = ForumProject(
-                        repo_name=repo_name,
-                        forum_channel_id=str(ch.id),
-                    )
-                    log.info("Discovered unmapped forum %s (%s)", ch.id, ch.name)
-
-        if valid_projects != self._forums.forum_projects:
-            self._forums.forum_projects = valid_projects
-            self._forums.save_forum_map()
-
-        # Clean up thread names and stale tags
-        from bot.claude.types import InstanceStatus
-        running_sessions = {
-            i.session_id for i in self._store.list_instances()
-            if i.status == InstanceStatus.RUNNING and i.session_id
-        }
-        for proj in valid_projects.values():
-            if not proj.forum_channel_id:
-                continue
-            forum = guild.get_channel(int(proj.forum_channel_id))
-            if not forum or not isinstance(forum, discord.ForumChannel):
-                continue
-            tag_map = {t.name: t for t in forum.available_tags}
-            active_tag = tag_map.get("active")
-            for thread in forum.threads:
-                # Legacy migration: strip "repo│" prefix
-                if "\u2502" in thread.name:  # │ (box-drawing vertical)
-                    new_name = thread.name.split("\u2502", 1)[1].strip()
-                    if new_name:
-                        old_name = thread.name
-                        try:
-                            await thread.edit(name=new_name[:100])
-                            log.info("Renamed thread %s: %s -> %s", thread.id, old_name, new_name)
-                        except Exception:
-                            log.debug("Failed to rename thread %s", thread.id, exc_info=True)
-                # Legacy migration: strip old emoji prefixes (🔄, mode circles)
-                _, topic = channels.parse_thread_name(thread.name)
-                clean_name = channels.build_thread_name(topic)
-                if clean_name != thread.name:
-                    try:
-                        await thread.edit(name=clean_name)
-                        log.info("Stripped legacy emoji from thread: %s", thread.id)
-                    except Exception:
-                        log.debug("Failed to strip legacy emoji", exc_info=True)
-                # Clear stale "active" tag (bot crashed mid-query)
-                if active_tag and active_tag in thread.applied_tags:
-                    # Check if this thread actually has a running session
-                    info = proj.threads.get(str(thread.id))
-                    if not info or info.session_id not in running_sessions:
-                        new_tags = [t for t in thread.applied_tags if t != active_tag]
-                        try:
-                            await thread.edit(applied_tags=new_tags[:5])
-                            log.info("Cleared stale active tag: %s", thread.id)
-                        except Exception:
-                            log.debug("Failed to clear stale active tag", exc_info=True)
-
-        # Ensure control room posts exist for all repo forums
-        for repo_name, proj in self._forums.forum_projects.items():
-            if proj.forum_channel_id and not proj.control_thread_id:
-                try:
-                    await self._ensure_control_post(repo_name)
-                except Exception:
-                    log.debug("Failed to create control room for %s", repo_name, exc_info=True)
-
-        # Populate user control room thread ID set + create missing control rooms
-        cfg = load_access_config()
-        for uid, ua in cfg.users.items():
-            if ua.control_thread_id:
-                self._user_control_thread_ids.add(ua.control_thread_id)
-            elif ua.forum_channel_id:
-                try:
-                    await self._ensure_user_control_post(uid)
-                except Exception:
-                    log.debug("Failed to create control room for user %s", uid, exc_info=True)
 
     async def _run_slash(
         self, interaction: discord.Interaction, coro,
@@ -1090,13 +698,13 @@ class ClaudeBot(discord.Client):
             if count == 0:
                 lookup = self._forums.thread_to_project(thread_id)
                 if lookup:
-                    await self._sync_single_thread(thread_id)
+                    await self._forums.sync_single_thread(thread_id, self.messenger)
                     await interaction.followup.send("Thread synced.", ephemeral=True)
                     return
                 count = 5
 
             log.info("Discord /sync count=%d by %s", count, interaction.user)
-            created, populated = await self._sync_cli_sessions(count)
+            created, populated = await self._forums.sync_cli_sessions(count)
             parts = []
             if created:
                 links = ", ".join(f"<#{t.id}>" for t in created)
@@ -1144,7 +752,7 @@ class ClaudeBot(discord.Client):
             # Populate history
             ch = interaction.channel
             if isinstance(ch, (discord.TextChannel, discord.Thread)):
-                await self._populate_thread_history(ch, session_id, thread_id)
+                await self._forums.populate_thread_history(ch, session_id, thread_id, messenger=self.messenger)
             await interaction.followup.send(
                 f"Synced session `{session_id[:12]}…`", ephemeral=True)
 
@@ -1229,7 +837,7 @@ class ClaudeBot(discord.Client):
                 await interaction.followup.send("No messages in that session.", ephemeral=True)
                 return
 
-            embed = self._build_ref_embed(proj, info, msgs, thread)
+            embed = self._forums.build_ref_embed(proj, info, msgs, thread)
 
             # Store context for prompt injection (only in forum threads)
             channel_id = str(interaction.channel_id)
@@ -1238,7 +846,7 @@ class ClaudeBot(discord.Client):
                 and isinstance(getattr(interaction.channel, "parent", None), discord.ForumChannel)
             )
             if in_forum_thread:
-                context = self._build_ref_context(proj, info, msgs, thread)
+                context = self._forums.build_ref_context(proj, info, msgs, thread)
                 self._pending_refs[channel_id] = (context, _time.monotonic())
                 await interaction.followup.send(
                     embed=embed,
@@ -1369,7 +977,7 @@ class ClaudeBot(discord.Client):
 
             # Create/update personal forum
             repo_names = list(ua.repos.keys())
-            forum = await self._ensure_user_forum(user.id, user.display_name, repo_names)
+            forum = await self._forums.ensure_user_forum(user.id, user.display_name, repo_names)
             if forum:
                 ua.forum_channel_id = str(forum.id)
 
@@ -1412,7 +1020,7 @@ class ClaudeBot(discord.Client):
             # Sync forum tags
             if ua.forum_channel_id:
                 if ua.repos:
-                    await self._sync_user_forum_tags(uid)
+                    await self._forums.sync_user_forum_tags(uid)
                 else:
                     # Archive the forum if no grants left
                     guild = self.get_guild(self._guild_id)
@@ -1583,6 +1191,7 @@ class ClaudeBot(discord.Client):
                     owner_id=self._discord_user_id,
                 )
                 self._category_id = category.id
+                self._forums.category_id = category.id
                 lobby = await channels.ensure_lobby(category)
                 self._lobby_channel_id = lobby.id
                 self._messenger = None
@@ -1592,8 +1201,8 @@ class ClaudeBot(discord.Client):
                 )
 
         # Load and reconcile forum mapping
-        self._load_forum_map()
-        await self._reconcile_forums()
+        self._forums.load_forum_map()
+        await self._forums.reconcile_forums()
 
         self._ready_event.set()
 
@@ -1733,7 +1342,7 @@ class ClaudeBot(discord.Client):
                     # Skip control room threads (not session threads)
                     if any(p.control_thread_id == channel_id for p in self._forums.forum_projects.values()):
                         return
-                    if channel_id in self._user_control_thread_ids:
+                    if channel_id in self._forums.user_control_thread_ids:
                         return
                     lookup = self._forums.thread_to_project(channel_id)
                     if not lookup:
@@ -1829,9 +1438,9 @@ class ClaudeBot(discord.Client):
                         finally:
                             self._forums.persist_ctx_settings(ctx)
                             if was_pending:
-                                await self._finalize_pending_thread(channel_id, message.channel, text)
+                                await self._forums.finalize_pending_thread(channel_id, message.channel, text)
                             elif "new-session" in message.channel.name:
-                                summary = self._get_latest_summary(channel_id)
+                                summary = self._forums.get_latest_summary(channel_id)
                                 asyncio.create_task(self._generate_smart_title(
                                     message.channel, text, summary))
                             asyncio.create_task(self._try_apply_tags_after_run(channel_id))
@@ -1915,7 +1524,7 @@ class ClaudeBot(discord.Client):
         """Route a lobby message to a forum thread."""
         repo_name = repo_name or "_default"
         # Ensure control room exists (fire-and-forget, idempotent)
-        asyncio.create_task(self._ensure_control_post(repo_name))
+        asyncio.create_task(self._forums.ensure_control_post(repo_name))
         thread = await self._forums.get_or_create_session_thread(repo_name, None, text)
         if thread:
             # Delete original from lobby
@@ -1942,9 +1551,9 @@ class ClaudeBot(discord.Client):
             finally:
                 self._forums.persist_ctx_settings(ctx)
                 # Update mapping with real session_id
-                await self._update_pending_thread(tid)
+                await self._forums.update_pending_thread(tid)
                 # Generate smart title (fire-and-forget)
-                summary = self._get_latest_summary(tid)
+                summary = self._forums.get_latest_summary(tid)
                 asyncio.create_task(self._generate_smart_title(thread, text, summary))
                 # Apply completion tags (also clears "active") + refresh dashboard
                 asyncio.create_task(self._try_apply_tags_after_run(tid))
@@ -2003,256 +1612,13 @@ class ClaudeBot(discord.Client):
 
     # --- CLI Session Sync ---
 
-    async def _sync_cli_sessions(self, count: int) -> tuple[list[discord.Thread], list]:
-        """Scan CLI sessions and create/populate forum threads.
-
-        Returns (created_threads, populated_channels).
-        """
-        count = max(1, min(count, 15))
-        raw_sessions = await asyncio.to_thread(
-            sessions_mod.scan_sessions, count * 3, self._store.list_repos(),
-        )
-        seen_projects: set[str] = set()
-        session_list = []
-        for s in raw_sessions:
-            proj = s["project"]
-            if proj not in seen_projects:
-                seen_projects.add(proj)
-                session_list.append(s)
-            if len(session_list) >= count:
-                break
-
-        created: list[discord.Thread] = []
-        populated: list = []
-        updated_threads: set[str] = set()
-        for s in session_list:
-            session_id = s["id"]
-            repo_name = s.get("project") or "_default"
-
-            existing = self._forums.session_to_thread(session_id)
-            if existing:
-                tid, info = existing
-                if tid in updated_threads:
-                    continue
-                updated_threads.add(tid)
-                ch = self.get_channel(int(tid))
-                if not ch:
-                    try:
-                        ch = await self.fetch_channel(int(tid))
-                    except (discord.NotFound, discord.Forbidden):
-                        ch = None
-                if ch and isinstance(ch, (discord.TextChannel, discord.Thread)):
-                    await self._populate_thread_history(ch, session_id, tid)
-                    populated.append(ch)
-                continue
-
-            log.info("Sync creating thread for session %s repo=%s", session_id[:12], repo_name)
-            thread = await self._forums.get_or_create_session_thread(
-                repo_name, session_id, s["topic"], origin="cli",
-            )
-            if thread:
-                created.append(thread)
-                await self._populate_thread_history(thread, session_id, str(thread.id))
-                asyncio.create_task(self._generate_smart_title(thread, s["topic"]))
-
-        return created, populated
 
     # --- Repo Control Room ---
 
-    async def _get_repo_branch(self, repo_path: str) -> str | None:
-        """Get the current git branch for a repo path (non-blocking)."""
-        if not repo_path:
-            return None
-        try:
-            result = await asyncio.to_thread(
-                subprocess.run,
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                cwd=repo_path, capture_output=True, text=True, **_NOWND,
-            )
-            return result.stdout.strip() if result.returncode == 0 else None
-        except Exception:
-            return None
 
-    async def _ensure_control_post(self, repo_name: str) -> None:
-        """Ensure a control room post exists in the repo's forum.
 
-        Called after _get_or_create_forum() returns, outside the forum lock.
-        Idempotent — checks control_thread_id before creating.
-        """
-        proj = self._forums.forum_projects.get(repo_name)
-        if not proj or proj.control_thread_id:
-            return
 
-        forum = self.get_channel(int(proj.forum_channel_id)) if proj.forum_channel_id else None
-        if not forum or not isinstance(forum, discord.ForumChannel):
-            return
 
-        repos = self._store.list_repos()
-        repo_path = repos.get(repo_name, "")
-        branch = await self._get_repo_branch(repo_path)
-
-        thread, msg = await channels.create_repo_control_post(
-            forum, repo_name, repo_path, branch, self._store.mode,
-        )
-        proj.control_thread_id = str(thread.id)
-        proj.control_message_id = str(msg.id)
-        self._forums.save_forum_map()
-        log.info("Created control room for repo %s (thread=%s)", repo_name, thread.id)
-
-    async def _ensure_user_control_post(
-        self, user_id: str,
-        forum: discord.ForumChannel | None = None,
-    ) -> None:
-        """Ensure a control room post exists in a user's personal forum.
-
-        If *forum* is passed, use it directly (avoids stale config when
-        forum_channel_id hasn't been persisted yet, e.g. during /grant).
-        """
-        cfg = load_access_config()
-        ua = cfg.users.get(user_id)
-        if not ua or ua.control_thread_id:
-            return
-
-        if not forum:
-            if not ua.forum_channel_id:
-                return
-            forum = self.get_channel(int(ua.forum_channel_id))
-        if not forum or not isinstance(forum, discord.ForumChannel):
-            return
-
-        repo_names = list(ua.repos.keys())
-        mode = "explore"
-        if repo_names and repo_names[0] in ua.repos:
-            mode = ua.repos[repo_names[0]].mode
-
-        thread, msg = await channels.create_user_control_post(
-            forum, ua.display_name, repo_names, mode,
-        )
-        ua.control_thread_id = str(thread.id)
-        ua.control_message_id = str(msg.id)
-        access_mod.save_access_config(cfg)
-        self._user_control_thread_ids.add(str(thread.id))
-        log.info("Created control room for user %s (thread=%s)", ua.display_name, thread.id)
-
-    async def _refresh_control_room(self, repo_name: str) -> None:
-        """Update the control room embed for a repo forum."""
-        proj = self._forums.forum_projects.get(repo_name)
-        if not proj or not proj.control_thread_id or not proj.control_message_id:
-            return
-        thread = None
-        try:
-            try:
-                thread = await self.fetch_channel(int(proj.control_thread_id))
-            except discord.NotFound:
-                thread = None
-            if not thread or not isinstance(thread, discord.Thread):
-                log.info("Control room thread for %s was deleted, clearing stale IDs", repo_name)
-                proj.control_thread_id = None
-                proj.control_message_id = None
-                self._forums.save_forum_map()
-                return
-            # Migrate old "Control Center" name to "Control Room"
-            if thread.name == "Control Center":
-                try:
-                    await thread.edit(name="Control Room")
-                    log.info("Renamed Control Center -> Control Room (thread=%s)", thread.id)
-                except Exception:
-                    pass
-            msg = await thread.fetch_message(int(proj.control_message_id))
-
-            from bot.claude.types import InstanceStatus
-            instances = self._store.list_instances()
-            active = sum(1 for i in instances if i.repo_name == repo_name
-                         and i.status == InstanceStatus.RUNNING)
-            completed = sum(1 for i in instances if i.repo_name == repo_name
-                            and i.status == InstanceStatus.COMPLETED)
-            failed = sum(1 for i in instances if i.repo_name == repo_name
-                         and i.status == InstanceStatus.FAILED)
-
-            repos = self._store.list_repos()
-            repo_path = repos.get(repo_name, "")
-            branch = await self._get_repo_branch(repo_path)
-
-            embed = channels.build_control_embed(
-                repo_name, repo_path, branch, self._store.mode,
-                active, completed, failed,
-            )
-            view = channels.build_control_view(repo_name)
-            await msg.edit(embed=embed, view=view)
-        except discord.NotFound:
-            log.info("Control room message for %s was deleted, recreating", repo_name)
-            proj.control_thread_id = None
-            proj.control_message_id = None
-            self._forums.save_forum_map()
-            # Delete orphan thread if it still exists
-            try:
-                if thread and isinstance(thread, discord.Thread):
-                    await thread.delete()
-            except Exception:
-                pass
-            # Recreate immediately
-            try:
-                await self._ensure_control_post(repo_name)
-            except Exception:
-                log.debug("Failed to recreate control room for %s", repo_name, exc_info=True)
-        except Exception:
-            log.debug("Failed to refresh control room for %s", repo_name, exc_info=True)
-
-    async def _refresh_user_control_room(self, user_id: str) -> None:
-        """Update the control room embed for a user's personal forum."""
-        cfg = load_access_config()
-        ua = cfg.users.get(user_id)
-        if not ua or not ua.control_thread_id or not ua.control_message_id:
-            return
-        thread = None
-        try:
-            try:
-                thread = await self.fetch_channel(int(ua.control_thread_id))
-            except discord.NotFound:
-                thread = None
-            if not thread or not isinstance(thread, discord.Thread):
-                log.info("Control room thread for user %s was deleted, clearing stale IDs", ua.display_name)
-                self._user_control_thread_ids.discard(ua.control_thread_id)
-                ua.control_thread_id = None
-                ua.control_message_id = None
-                access_mod.save_access_config(cfg)
-                return
-            # Migrate old "Control Center" name to "Control Room"
-            if thread.name == "Control Center":
-                try:
-                    await thread.edit(name="Control Room")
-                    log.info("Renamed Control Center -> Control Room (thread=%s)", thread.id)
-                except Exception:
-                    pass
-            msg = await thread.fetch_message(int(ua.control_message_id))
-
-            repo_names = list(ua.repos.keys())
-            mode = "explore"
-            if repo_names and repo_names[0] in ua.repos:
-                mode = ua.repos[repo_names[0]].mode
-
-            embed = channels.build_user_control_embed(ua.display_name, repo_names, mode)
-            view = channels.build_user_control_view(repo_names)
-            await msg.edit(embed=embed, view=view)
-        except discord.NotFound:
-            log.info("Control room message for user %s was deleted, recreating", ua.display_name)
-            self._user_control_thread_ids.discard(ua.control_thread_id)
-            ua.control_thread_id = None
-            ua.control_message_id = None
-            access_mod.save_access_config(cfg)
-            # Delete orphan thread if it still exists
-            try:
-                if thread and isinstance(thread, discord.Thread):
-                    await thread.delete()
-            except Exception:
-                pass
-            # Recreate immediately
-            try:
-                await self._ensure_user_control_post(user_id)
-            except Exception:
-                log.debug("Failed to recreate control room for user %s", user_id, exc_info=True)
-        except Exception:
-            log.debug("Failed to refresh control room for user %s", user_id, exc_info=True)
 
     # --- Dashboard ---
 
@@ -2422,26 +1788,14 @@ class ClaudeBot(discord.Client):
         # Always refresh control rooms, independent of dashboard success
         for rname, proj in self._forums.forum_projects.items():
             if proj.control_thread_id:
-                asyncio.create_task(self._refresh_control_room(rname))
+                asyncio.create_task(self._forums.refresh_control_room(rname))
 
         # Refresh user forum control rooms
         cfg = load_access_config()
         for uid, ua in cfg.users.items():
             if ua.control_thread_id:
-                asyncio.create_task(self._refresh_user_control_room(uid))
+                asyncio.create_task(self._forums.refresh_user_control_room(uid))
 
-    def _get_latest_summary(self, thread_id: str) -> str:
-        """Get summary from the most recent instance for this thread's session."""
-        lookup = self._forums.thread_to_project(thread_id)
-        if not lookup:
-            return ""
-        _, info = lookup
-        if not info.session_id:
-            return ""
-        for inst in self._store.list_instances()[:10]:
-            if inst.session_id == info.session_id and inst.summary:
-                return inst.summary
-        return ""
 
     async def _generate_smart_title(
         self, thread: discord.Thread, prompt: str,
@@ -2663,183 +2017,12 @@ class ClaudeBot(discord.Client):
         """Post a redirect link in lobby, auto-delete after 5s."""
         await self._send_temp_lobby_msg(f"\u2192 <#{thread.id}>")
 
-    def _attach_session_callbacks(self, ctx, thread_info, thread_id: str) -> None:
-        """Wire up session resolution callbacks on a RequestContext."""
-        ctx.resolve_session_id = lambda _info=thread_info: _info.session_id or None
-        ctx.on_session_resolved = lambda sid, _tid=thread_id: self._set_thread_session(_tid, sid)
 
-    def _set_thread_session(self, thread_id: str, session_id: str) -> None:
-        """Write session_id to ThreadInfo immediately (called from engine callback)."""
-        lookup = self._forums.thread_to_project(thread_id)
-        if lookup:
-            _, info = lookup
-            if not info.session_id:
-                info.session_id = session_id
-                self._forums.save_forum_map()
-                log.info("Session resolved for thread %s -> %s", thread_id, session_id[:12])
 
-    async def _finalize_pending_thread(
-        self, thread_id: str, thread: discord.Thread, prompt: str,
-    ) -> None:
-        """After first query in a /new thread, update session mapping and rename."""
-        lookup = self._forums.thread_to_project(thread_id)
-        if lookup:
-            _, info = lookup
-            # Happy path: on_session_resolved callback already set session_id
-            if info.session_id:
-                info.topic = prompt
-                self._forums.save_forum_map()
-            else:
-                # Fallback: search instances (in case callback didn't fire)
-                for inst in self._store.list_instances()[:10]:
-                    if inst.session_id and inst.origin_platform == "discord":
-                        discord_msg_ids = inst.message_ids.get("discord", [])
-                        if discord_msg_ids:
-                            try:
-                                await thread.fetch_message(int(discord_msg_ids[0]))
-                            except (discord.NotFound, discord.HTTPException):
-                                continue
-                            info.session_id = inst.session_id
-                            info.topic = prompt
-                            self._forums.save_forum_map()
-                            log.info("Finalized pending thread %s -> session %s (fallback)",
-                                     thread_id, inst.session_id)
-                            break
 
-        # Generate smart title if still "new-session"
-        if "new-session" in thread.name:
-            summary = self._get_latest_summary(thread_id)
-            asyncio.create_task(self._generate_smart_title(thread, prompt, summary))
 
-    async def _update_pending_thread(self, thread_id: str) -> None:
-        """After a query completes, update a pending thread's session mapping."""
-        lookup = self._forums.thread_to_project(thread_id)
-        if not lookup:
-            return  # thread not tracked
-        proj, info = lookup
-        if info.session_id:
-            return  # already mapped
 
-        # Resolve channel once
-        ch = self.get_channel(int(thread_id))
-        if not ch:
-            try:
-                ch = await self.fetch_channel(int(thread_id))
-            except (discord.NotFound, discord.Forbidden):
-                return
-        if not isinstance(ch, (discord.TextChannel, discord.Thread)):
-            return
 
-        for inst in self._store.list_instances()[:10]:
-            if inst.session_id and inst.origin_platform == "discord":
-                discord_msg_ids = inst.message_ids.get("discord", [])
-                if not discord_msg_ids:
-                    continue
-                try:
-                    await ch.fetch_message(int(discord_msg_ids[0]))
-                    # Message found in this thread — map session
-                    info.session_id = inst.session_id
-                    info.origin = "bot"
-                    self._forums.save_forum_map()
-                    log.info("Mapped thread %s -> session %s (repo: %s)",
-                             thread_id, inst.session_id, proj.repo_name)
-                    return
-                except (discord.NotFound, discord.HTTPException):
-                    continue
-
-    def _build_ref_embed(
-        self, proj: ForumProject, info: ThreadInfo,
-        msgs: list[dict], target_thread_id: str,
-    ) -> discord.Embed:
-        """Build a purple embed showing referenced conversation context."""
-        topic = info.topic or f"Thread #{target_thread_id[-6:]}"
-        embed = discord.Embed(
-            title=f"Referenced: {topic[:60]}",
-            color=discord.Color(0x9B59B6),
-        )
-        embed.add_field(name="Repo", value=proj.repo_name, inline=True)
-        embed.add_field(name="Thread", value=f"<#{target_thread_id}>", inline=True)
-
-        # Adaptive truncation for embed display
-        per_msg = max(150, 4000 // max(len(msgs), 1))
-        lines = []
-        for m in msgs:
-            role = "**You**" if m["role"] == "user" else "**Claude**"
-            text = m["text"][:per_msg] + ("..." if len(m["text"]) > per_msg else "")
-            lines.append(f"{role}: {text}")
-        embed.description = "\n\n".join(lines)[:4096]
-        return embed
-
-    def _build_ref_context(
-        self, proj: ForumProject, info: ThreadInfo,
-        msgs: list[dict], target_thread_id: str,
-    ) -> str:
-        """Build plain-text context string for prompt injection into Claude."""
-        topic = info.topic or f"Thread #{target_thread_id[-6:]}"
-        lines = [f"--- Referenced conversation from [{proj.repo_name}] \"{topic}\" ---"]
-        for m in msgs:
-            role = "You" if m["role"] == "user" else "Claude"
-            text = m["text"][:2000]  # generous per-message limit for LLM
-            lines.append(f"{role}: {text}")
-        lines.append("--- End reference ---")
-        return "\n".join(lines)
-
-    async def _populate_thread_history(
-        self, channel: discord.TextChannel | discord.Thread, session_id: str,
-        thread_id: str,
-        *, force: bool = False, cli_label: bool = False,
-    ) -> None:
-        """Send messages from a session into a thread/channel.
-
-        Args:
-            force: If True, always send last 10 (no incremental check).
-            cli_label: If True, label messages as "You (CLI)" / "Claude (CLI)".
-        """
-        lookup = self._forums.thread_to_project(thread_id)
-        prev_count = 0
-        if not force and lookup:
-            prev_count = lookup[1]._synced_msg_count
-
-        fpath = await asyncio.to_thread(sessions_mod.find_session_file, session_id)
-        if not fpath:
-            return
-
-        all_messages = await asyncio.to_thread(sessions_mod.read_session_messages, fpath, 9999)
-        if not all_messages:
-            return
-
-        total = len(all_messages)
-        if prev_count == 0:
-            to_send = all_messages[-10:]
-        elif total > prev_count:
-            to_send = all_messages[prev_count:]
-        else:
-            log.debug("No new messages for thread %s (total=%d, synced=%d)", thread_id, total, prev_count)
-            return
-
-        user_label = "**You (CLI)**" if cli_label else "**You**"
-        bot_label = "**Claude (CLI)**" if cli_label else "**Claude**"
-
-        log.info("Populating thread %s with %d messages (total=%d, prev=%d)",
-                 thread_id, len(to_send), total, prev_count)
-        ch_id = str(channel.id)
-        for msg in to_send:
-            role = user_label if msg["role"] == "user" else bot_label
-            text = msg["text"]
-            if len(text) > 800:
-                text = text[:800] + "\u2026"
-            try:
-                markup = self.messenger.markdown_to_markup(f"{role}:\n{text}")
-                await self.messenger.send_text(ch_id, markup, silent=True)
-            except Exception:
-                try:
-                    await self.messenger.send_text(ch_id, f"{role}:\n{text[:800]}", silent=True)
-                except Exception:
-                    break
-
-        if lookup:
-            lookup[1]._synced_msg_count = total
-            self._forums.save_forum_map()
 
     async def on_interaction(self, interaction: discord.Interaction) -> None:
         """Handle button interactions (persistent views)."""
@@ -3013,9 +2196,9 @@ class ClaudeBot(discord.Client):
                 info.session_id = cli_session_id
                 info.origin = "cli"
                 self._forums.save_forum_map()
-                await self._populate_thread_history(
+                await self._forums.populate_thread_history(
                     ch, cli_session_id, thread_id,
-                    force=True, cli_label=True,
+                    force=True, cli_label=True, messenger=self.messenger,
                 )
                 log.info("Loaded CLI history %s into thread %s", cli_session_id[:12],
                          getattr(ch, "name", thread_id))
@@ -3047,9 +2230,9 @@ class ClaudeBot(discord.Client):
                 user_id=user_id, user_name=user_name,
             )
             # Refresh control room immediately (recovers if embed was deleted externally)
-            asyncio.create_task(self._refresh_control_room(repo_name))
+            asyncio.create_task(self._forums.refresh_control_room(repo_name))
             if user_id:
-                asyncio.create_task(self._refresh_user_control_room(user_id))
+                asyncio.create_task(self._forums.refresh_user_control_room(user_id))
             return
 
         # --- Sync CLI for a repo (control room button) ---
@@ -3057,7 +2240,7 @@ class ClaudeBot(discord.Client):
             if not btn_access.is_owner:
                 await interaction.followup.send("Owner only.", ephemeral=True)
                 return
-            created, populated = await self._sync_cli_sessions(3)
+            created, populated = await self._forums.sync_cli_sessions(3)
             parts = []
             if created:
                 parts.append(f"Created {len(created)} threads")
