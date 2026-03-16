@@ -254,7 +254,14 @@ def action_button_specs(
     if instance.status == InstanceStatus.COMPLETED:
         tools = set(instance.tools_used or [])
         made_code_changes = bool(tools & CODE_CHANGE_TOOLS)
-        made_plan = instance.plan_active or instance.mode == "plan"
+        # this_planned: THIS instance produced/dealt with a plan
+        this_planned = bool(
+            {"EnterPlanMode", "ExitPlanMode"} & tools
+            or instance.origin in PLAN_ORIGINS
+            or instance.mode == "plan"
+        )
+        # session_has_plan: inherited plan_active from any sibling
+        session_has_plan = instance.plan_active
 
         if instance.branch:
             # Build bg task with branch — full merge workflow
@@ -268,9 +275,8 @@ def action_button_specs(
                 ButtonSpec("Commit", f"commit:{iid}"),
                 ButtonSpec("Done", f"done:{iid}"),
             ])
-        elif made_plan and instance.origin in PLAN_ORIGINS:
-            # Plan workflow — check plan_active before code changes so
-            # "Apply Revisions" (which edits the plan file) gets plan buttons
+        elif this_planned:
+            # This instance directly produced or reviewed a plan
             if instance.origin == InstanceOrigin.REVIEW_PLAN:
                 # Just reviewed — offer to apply or ship
                 rows.append([
@@ -299,8 +305,9 @@ def action_button_specs(
                 ButtonSpec("Review Code", f"review_code:{iid}"),
                 ButtonSpec("Done", f"done:{iid}"),
             ])
-        elif made_plan:
-            # Plan detected outside explicit plan workflow (e.g. regular query)
+        elif session_has_plan:
+            # Fallback: session has a plan from a prior instance, and this
+            # instance didn't do anything code-related — offer plan actions
             rows.append([
                 ButtonSpec("Autopilot", f"autopilot:{iid}"),
                 ButtonSpec("Review Plan", f"review_plan:{iid}"),
