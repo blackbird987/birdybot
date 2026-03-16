@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import subprocess
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -18,6 +17,7 @@ from typing import TYPE_CHECKING
 import discord
 
 from bot import config
+from bot.claude.runner import _NOWND
 from bot.discord import channels
 from bot.discord import access as access_mod
 from bot.discord.access import load_access_config
@@ -30,11 +30,6 @@ if TYPE_CHECKING:
     from bot.store.state import StateStore
 
 log = logging.getLogger(__name__)
-
-# On Windows, prevent subprocess console windows from popping up
-_NOWND: dict = (
-    {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
-)
 
 
 # --- Data structures ---
