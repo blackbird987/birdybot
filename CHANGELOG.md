@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.19.2 — Worktree Review Fixes (2026-03-16)
+
 ### Review Fixes
 - Fix: `_repo_has_changes` now checks worktree path for builds instead of main repo (code_active detection was broken for worktree builds)
 - Fix: recursive retries (dead session, transient error) now preserve sibling_context in system prompt
