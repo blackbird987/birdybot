@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.15.1 — Deferred Revision Persistence (2026-03-16)
+
 - Persist deferred revisions across autopilot chain steps and reboots; surface them in the Done embed so they're visible even after thread closure
 
 ## v0.15.0 — Reasoning Effort & Fixes (2026-03-16)
