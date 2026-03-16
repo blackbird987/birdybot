@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.20.0 — Honesty & Mode UX (2026-03-17)
+
 ### UX Improvements
 - Add honesty/verification clause to system prompt — Claude must disclose when it hasn't verified URLs, prices, or other external data
 - Add wrong-mode guidance — Claude now tells users exactly how to switch modes instead of just saying it can't do something
