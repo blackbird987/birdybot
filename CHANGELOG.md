@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Worktree Hardening
+- Worktree reuse: if parent worktree was cleaned up, child instances recreate instead of crashing
+- Copy .claude/ directory into worktrees so Claude CLI finds CLAUDE.md and project settings
+- Discard cleanup is now best-effort: each step (worktree remove, branch delete) runs independently
+- Orphan scan on startup now covers both branches and worktrees
+
 ## v0.19.0 — Git Worktree Isolation (2026-03-16)
 
 ### Git Worktrees

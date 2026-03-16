@@ -638,6 +638,12 @@ class ClaudeRunner:
         # If worktree already exists (copy_branch from parent), skip creation
         if instance.worktree_path and Path(instance.worktree_path).is_dir():
             return
+        # If worktree_path is set but directory is gone (parent was cleaned up),
+        # clear it so _create_worktree_sync creates a fresh one
+        if instance.worktree_path and not Path(instance.worktree_path).is_dir():
+            log.warning("Worktree %s no longer exists for %s, recreating",
+                        instance.worktree_path, instance.id)
+            instance.worktree_path = None
         repo_lock = self._get_repo_lock(instance.repo_path)
         async with repo_lock:
             await asyncio.to_thread(self._create_worktree_sync, instance)
@@ -672,6 +678,17 @@ class ClaudeRunner:
 
             instance.worktree_path = wt_dir
             instance.original_branch = default_branch
+
+            # Copy .claude/ directory into worktree so Claude CLI finds
+            # CLAUDE.md and project settings (worktrees have a .git file,
+            # not directory — some tools may not follow it correctly)
+            src_claude_dir = Path(repo) / ".claude"
+            dst_claude_dir = Path(wt_dir) / ".claude"
+            if src_claude_dir.is_dir() and not dst_claude_dir.exists():
+                shutil.copytree(str(src_claude_dir), str(dst_claude_dir),
+                                ignore=shutil.ignore_patterns("*.jsonl"))
+                log.debug("Copied .claude/ into worktree %s", wt_dir)
+
             log.info("Created worktree %s (branch %s) in %s", wt_dir, branch, repo)
         except subprocess.CalledProcessError as e:
             log.error("Failed to create worktree: %s", e.stderr)
@@ -840,30 +857,34 @@ class ClaudeRunner:
         return await asyncio.to_thread(self._discard_branch_sync, instance)
 
     def _discard_branch_sync(self, instance: Instance) -> str:
-        try:
-            repo = instance.repo_path
+        repo = instance.repo_path
+        errors: list[str] = []
 
-            # Remove worktree (force in case of uncommitted changes)
-            if instance.worktree_path and Path(instance.worktree_path).exists():
-                subprocess.run(
-                    ["git", "worktree", "remove", instance.worktree_path, "--force"],
-                    cwd=repo, capture_output=True, text=True, **_NOWND,
-                )
-
-            # Force delete branch
-            subprocess.run(
-                ["git", "branch", "-D", instance.branch],
+        # Each cleanup step is independent — continue on failure
+        if instance.worktree_path and Path(instance.worktree_path).exists():
+            r = subprocess.run(
+                ["git", "worktree", "remove", instance.worktree_path, "--force"],
                 cwd=repo, capture_output=True, text=True, **_NOWND,
             )
+            if r.returncode != 0:
+                log.warning("Failed to remove worktree %s: %s", instance.worktree_path, r.stderr.strip())
+                errors.append(f"worktree remove: {r.stderr.strip()}")
 
-            # Clean up worktree project dir
-            self._cleanup_worktree_session_dir(instance)
+        r = subprocess.run(
+            ["git", "branch", "-D", instance.branch],
+            cwd=repo, capture_output=True, text=True, **_NOWND,
+        )
+        if r.returncode != 0:
+            log.warning("Failed to delete branch %s: %s", instance.branch, r.stderr.strip())
+            errors.append(f"branch delete: {r.stderr.strip()}")
 
-            instance.branch = None
-            instance.worktree_path = None
-            return f"Discarded branch, back on {instance.original_branch}"
-        except subprocess.CalledProcessError as e:
-            return f"Discard failed: {e.stderr.strip()}"
+        self._cleanup_worktree_session_dir(instance)
+
+        instance.branch = None
+        instance.worktree_path = None
+        if errors:
+            return f"Discarded (with warnings: {'; '.join(errors)})"
+        return f"Discarded branch, back on {instance.original_branch}"
 
     def _cleanup_worktree_session_dir(self, instance: Instance) -> None:
         """Remove the worktree's Claude project directory (session files already copied back)."""
