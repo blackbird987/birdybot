@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.9.1 — User Control Rooms & Self-Healing (2026-03-16)
+
 - Rename "Control Center" to "Control Room" throughout (thread names, embeds, logs)
 - Add Control Room pinned post to personal user forums — shows user name, granted repos, mode, and "New Session" button per repo
 - User forum control rooms auto-provisioned on startup, forum creation, and /grant
