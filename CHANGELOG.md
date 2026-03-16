@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.10.0 — Voice Message Transcription (2026-03-16)
+
 - Add voice message transcription: send a voice memo in Discord, bot transcribes via OpenAI Whisper and shows Send/Cancel confirmation before running as a query
 - New `OPENAI_API_KEY` env var (optional — voice messages ignored if not set)
 - Fix queued prompt UX: "Queued" notice now auto-deletes when execution starts (no more visual overlap with next query)
