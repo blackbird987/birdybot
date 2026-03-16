@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.19.0 — Git Worktree Isolation (2026-03-16)
+
 ### Git Worktrees
 - Build tasks now use git worktrees for file isolation — each build gets its own directory (`{repo}/.worktrees/{id}/`)
 - Main repo always stays on master — no more `git checkout` in the shared directory
