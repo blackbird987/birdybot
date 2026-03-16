@@ -376,7 +376,7 @@ async def check_reboot_request(ctx: RequestContext) -> None:
     data["channel_id"] = ctx.channel_id
     data["platform"] = ctx.platform
 
-    ctx.runner.queue_reboot(data)
+    ctx.runner.request_reboot(data)
     log.info(
         "Queued reboot request (reason: %s, total pending: %d)",
         data.get("message", "reboot requested"),

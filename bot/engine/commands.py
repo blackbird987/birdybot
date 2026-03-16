@@ -1132,15 +1132,16 @@ async def on_shutdown(ctx: RequestContext) -> None:
 
 
 async def on_reboot(ctx: RequestContext) -> None:
-    """Shut down and relaunch the bot process."""
+    """Shut down and relaunch the bot process.
+
+    Uses the same coalesced reboot path as autopilot-requested reboots.
+    If other instances are still running, waits for them to finish first.
+    """
     if not _shutdown_fn:
         await ctx.messenger.send_text(ctx.channel_id, "Reboot not available.")
         return
 
-    import json
-    import sys
-
-    # --- Wait for active instances/tasks to finish ---
+    # Wait for active instances/tasks to finish before queueing
     if ctx.runner.is_busy:
         ids = ", ".join(ctx.runner.active_ids) or "(between steps)"
         await ctx.messenger.send_text(
@@ -1155,28 +1156,12 @@ async def on_reboot(ctx: RequestContext) -> None:
                 f"⚠️ Timed out waiting. Force-rebooting with {len(ctx.runner.active_ids)} still running: {remaining}",
             )
 
-    await ctx.messenger.send_text(ctx.channel_id, f"🔄 Rebooting {config.PC_NAME}...")
-
-    # Save reboot context so the new process can finish the turn
-    reboot_data = {
+    # Queue reboot and trigger — since we waited for idle, this fires immediately
+    ctx.runner.request_reboot({
+        "message": f"Manual reboot from {ctx.platform}",
         "channel_id": ctx.channel_id,
         "platform": ctx.platform,
-    }
-    try:
-        config.REBOOT_MSG_FILE.write_text(
-            json.dumps(reboot_data), encoding="utf-8",
-        )
-    except Exception:
-        log.warning("Failed to write reboot message file", exc_info=True)
-
-    # Use the dedicated relaunch script (no temp files, no path interpolation)
-    launcher = config._PROJECT_ROOT / "scripts" / "relaunch.py"
-    subprocess.Popen(
-        [sys.executable, str(launcher), str(config._PROJECT_ROOT)],
-        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
-        close_fds=True,
-    )
-    _shutdown_fn()
+    })
 
 
 # --- /session ---

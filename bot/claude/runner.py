@@ -486,15 +486,7 @@ class ClaudeRunner:
         self._active_tasks.discard(instance_id)
         if not self._active_tasks and not self._processes:
             self._idle_event.set()
-            # Trigger coalesced reboot if pending
-            if (self._on_idle_callback
-                    and self._reboot_requests
-                    and not self._reboot_executing
-                    and self._idle_loop):
-                self._reboot_executing = True
-                self._idle_loop.call_soon(
-                    lambda: self._idle_loop.create_task(self._on_idle_callback())
-                )
+            self._maybe_fire_idle_reboot()
 
     @property
     def is_busy(self) -> bool:
@@ -526,9 +518,14 @@ class ClaudeRunner:
 
     # --- Reboot coalescing ---
 
-    def queue_reboot(self, data: dict) -> None:
-        """Queue a reboot request. Executed after all tasks finish."""
+    def request_reboot(self, data: dict) -> None:
+        """Queue a reboot request and trigger execution if already idle.
+
+        Safe to call from both task context (check_reboot_request — fires
+        after end_task) and non-task context (on_reboot — fires immediately).
+        """
         self._reboot_requests.append(data)
+        self._maybe_fire_idle_reboot()
 
     def pending_reboots(self) -> list[dict]:
         """Return a copy of pending reboot requests."""
@@ -546,6 +543,19 @@ class ClaudeRunner:
         """
         self._on_idle_callback = callback
         self._idle_loop = asyncio.get_running_loop()
+
+    def _maybe_fire_idle_reboot(self) -> None:
+        """Schedule the reboot callback if idle + reboots pending + not already running."""
+        if (self._on_idle_callback
+                and self._reboot_requests
+                and not self._reboot_executing
+                and not self._active_tasks
+                and not self._processes
+                and self._idle_loop):
+            self._reboot_executing = True
+            self._idle_loop.call_soon(
+                lambda: self._idle_loop.create_task(self._on_idle_callback())
+            )
 
     async def kill(self, instance_id: str) -> bool:
         """Terminate a running Claude process."""
