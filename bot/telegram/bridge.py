@@ -196,6 +196,11 @@ class TelegramBridge:
         text = (update.message.text or "").replace("/discard", "", 1).strip()
         await commands.on_discard(self._ctx(update), text)
 
+    async def on_branches(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._auth(update) or not update.message:
+            return
+        await commands.on_branches(self._ctx(update))
+
     async def on_cost(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._auth(update) or not update.message:
             return

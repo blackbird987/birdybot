@@ -726,7 +726,11 @@ class ForumManager:
                 repo_name, repo_path, branch, self._store.mode,
                 active, completed, failed,
             )
-            view = channels.build_control_view(repo_name)
+            view = channels.build_control_view(
+                repo_name,
+                current_mode=self._store.mode,
+                active_count=active,
+            )
             await msg.edit(embed=embed, view=view)
         except discord.NotFound:
             log.info("Control room message for %s was deleted, recreating", repo_name)
@@ -779,7 +783,7 @@ class ForumManager:
                 mode = ua.repos[repo_names[0]].mode
 
             embed = channels.build_user_control_embed(ua.display_name, repo_names, mode)
-            view = channels.build_user_control_view(repo_names)
+            view = channels.build_user_control_view(repo_names, current_mode=mode)
             await msg.edit(embed=embed, view=view)
         except discord.NotFound:
             log.info("Control room message for user %s was deleted, recreating", ua.display_name)

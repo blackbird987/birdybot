@@ -601,29 +601,83 @@ class ClaudeRunner:
         await asyncio.to_thread(self._ensure_branch_sync, instance)
 
     def _ensure_branch_sync(self, instance: Instance) -> None:
+        repo = instance.repo_path
         try:
             result = subprocess.run(
                 ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                cwd=instance.repo_path, capture_output=True, text=True, **_NOWND,
+                cwd=repo, capture_output=True, text=True, **_NOWND,
             )
             current = result.stdout.strip()
             if current == instance.branch:
                 return
-            if not instance.original_branch:
-                instance.original_branch = current
+
+            # Always branch from the default branch to prevent fork drift
+            default_branch = self._get_default_branch(repo)
+            instance.original_branch = default_branch
+
+            # Stash uncommitted changes before switching branches
+            stashed = False
+            dirty = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=repo, capture_output=True, text=True, **_NOWND,
+            )
+            if dirty.stdout.strip():
+                stash_msg = f"auto-stash before branch switch {instance.id}"
+                stash_result = subprocess.run(
+                    ["git", "stash", "push", "-m", stash_msg],
+                    cwd=repo, capture_output=True, text=True, **_NOWND,
+                )
+                if stash_result.returncode == 0:
+                    stashed = True
+                    log.warning("Stashed uncommitted changes before branching for %s", instance.id)
+                else:
+                    log.warning("git stash push failed for %s: %s", instance.id, stash_result.stderr.strip())
+
+            # Checkout default branch first, then create task branch from it
+            if current != default_branch:
+                subprocess.run(
+                    ["git", "checkout", default_branch],
+                    cwd=repo, capture_output=True, text=True, check=True, **_NOWND,
+                )
+
             create = subprocess.run(
                 ["git", "checkout", "-b", instance.branch],
-                cwd=instance.repo_path, capture_output=True, text=True, **_NOWND,
+                cwd=repo, capture_output=True, text=True, **_NOWND,
             )
             if create.returncode != 0:
                 subprocess.run(
                     ["git", "checkout", instance.branch],
-                    cwd=instance.repo_path, capture_output=True, text=True, check=True, **_NOWND,
+                    cwd=repo, capture_output=True, text=True, check=True, **_NOWND,
                 )
-            log.info("On branch %s in %s", instance.branch, instance.repo_path)
+
+            # Pop stash onto the new branch so changes aren't lost
+            if stashed:
+                pop = subprocess.run(
+                    ["git", "stash", "pop"],
+                    cwd=repo, capture_output=True, text=True, **_NOWND,
+                )
+                if pop.returncode != 0:
+                    log.warning(
+                        "Stash pop failed for %s (stash preserved as stash@{0}): %s",
+                        instance.id, pop.stderr.strip(),
+                    )
+
+            log.info("On branch %s (from %s) in %s", instance.branch, default_branch, repo)
         except subprocess.CalledProcessError as e:
             log.error("Failed to ensure branch: %s", e.stderr)
             raise RuntimeError(f"Failed to ensure branch: {e.stderr}")
+
+    @staticmethod
+    def _get_default_branch(repo_path: str) -> str:
+        """Determine the default branch (master or main)."""
+        for candidate in ("master", "main"):
+            r = subprocess.run(
+                ["git", "rev-parse", "--verify", candidate],
+                cwd=repo_path, capture_output=True, text=True, **_NOWND,
+            )
+            if r.returncode == 0:
+                return candidate
+        return "master"
 
     async def _save_diff(self, instance: Instance) -> None:
         """Save git diff for a build bg task."""
@@ -671,6 +725,20 @@ class ClaudeRunner:
             return f"Merged into {instance.original_branch}"
         except subprocess.CalledProcessError as e:
             return f"Merge failed: {e.stderr.strip()}"
+
+    @staticmethod
+    def scan_orphan_branches(repo_path: str, active_branches: set[str]) -> list[str]:
+        """Find claude-bot/* branches not associated with active instances."""
+        try:
+            result = subprocess.run(
+                ["git", "branch", "--list", "claude-bot/*"],
+                cwd=repo_path, capture_output=True, text=True, **_NOWND,
+            )
+            branches = [b.strip().lstrip("* ") for b in result.stdout.splitlines() if b.strip()]
+            return [b for b in branches if b not in active_branches]
+        except Exception:
+            log.debug("Failed to scan branches in %s", repo_path, exc_info=True)
+            return []
 
     async def discard_branch(self, instance: Instance) -> str:
         """Delete task branch without merging."""

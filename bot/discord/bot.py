@@ -67,6 +67,70 @@ def _snowflake_age(snowflake_id: int) -> str:
     # Title generation: generate_title_text() lives in bot.discord.titles
 
 
+class _QuickTaskModal(discord.ui.Modal):
+    """Modal for Quick Task — collects a prompt and spawns a session."""
+
+    prompt_input = discord.ui.TextInput(
+        label="Prompt",
+        placeholder="What should Claude do?",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=2000,
+    )
+
+    def __init__(self, bot: 'ClaudeBot', repo_name: str, access: AccessResult):
+        super().__init__(title=f"Quick Task — {repo_name}"[:45])
+        self._bot = bot
+        self._repo_name = repo_name
+        self._access = access
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        prompt = self.prompt_input.value
+        if not prompt or not prompt.strip():
+            await interaction.response.send_message("No prompt provided.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        bot = self._bot
+
+        thread = await bot._forums.get_or_create_session_thread(
+            self._repo_name, None, prompt[:60],
+        )
+        if not thread:
+            await interaction.followup.send("Could not create thread.", ephemeral=True)
+            return
+
+        thread_id = str(thread.id)
+        lookup = bot._forums.thread_to_project(thread_id)
+        t_info = lookup[1] if lookup else None
+        ctx = bot._ctx(thread_id, repo_name=self._repo_name, thread_info=t_info,
+                       access_result=self._access)
+        ctx.user_id = str(interaction.user.id)
+        ctx.user_name = interaction.user.display_name
+        if t_info:
+            bot._forums.attach_session_callbacks(ctx, t_info, thread_id)
+
+        # Auto-follow creator to the thread
+        try:
+            await thread.add_user(interaction.user)
+        except Exception:
+            pass
+
+        await interaction.followup.send(
+            f"Quick task started: <#{thread.id}>", ephemeral=True,
+        )
+
+        asyncio.create_task(bot._send_redirect(thread))
+        asyncio.create_task(bot._set_thread_active_tag(thread, True))
+        try:
+            await commands.on_text(ctx, prompt)
+        finally:
+            bot._forums.persist_ctx_settings(ctx)
+            asyncio.create_task(bot._try_apply_tags_after_run(thread_id))
+            bot._schedule_sleep(thread_id)
+            asyncio.create_task(bot._refresh_dashboard())
+
+
 class ClaudeBot(discord.Client):
     """Discord bot for Claude Code instance management."""
 
@@ -451,6 +515,13 @@ class ClaudeBot(discord.Client):
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
             await self._run_slash(interaction, lambda ctx: commands.on_discard(ctx, target))
+
+        @self.tree.command(name="branches", description="List orphaned branches", guild=guild_obj)
+        async def cmd_branches(interaction: discord.Interaction):
+            if not self._is_owner(interaction.user.id):
+                await interaction.response.send_message("Unauthorized", ephemeral=True)
+                return
+            await self._run_slash(interaction, commands.on_branches)
 
         @self.tree.command(name="mode", description="View/set mode", guild=guild_obj)
         @app_commands.describe(mode="explore or build")
@@ -1970,6 +2041,91 @@ class ClaudeBot(discord.Client):
         action, instance_id = parts
         log.info("Discord button %s:%s in #%s", action, instance_id[:12], getattr(interaction.channel, "name", "?"))
 
+        # --- Control room mode toggle (repo-scoped default) ---
+        if action == "control_mode":
+            # instance_id = "{repo}:{mode}"
+            cr_parts = instance_id.split(":", 1)
+            if len(cr_parts) == 2 and cr_parts[1] in VALID_MODES:
+                cr_repo, target_mode = cr_parts
+                # Enforce mode ceiling for non-owners
+                if not btn_access.is_owner and btn_access.mode_ceiling:
+                    target_mode = access_effective_mode(
+                        access_mod.RepoAccess(mode=btn_access.mode_ceiling),
+                        target_mode,
+                    )
+                if btn_access.is_owner:
+                    self._store.mode = target_mode
+                else:
+                    cfg = load_access_config()
+                    ua = cfg.users.get(str(interaction.user.id))
+                    if ua and cr_repo in ua.repos:
+                        ua.repos[cr_repo].mode = target_mode
+                        access_mod.save_access_config(cfg)
+                # Update the control room embed
+                if interaction.message and interaction.message.embeds:
+                    embed = interaction.message.embeds[0]
+                    for i, field_obj in enumerate(embed.fields):
+                        if field_obj.name == "Mode":
+                            embed.set_field_at(i, name="Mode", value=mode_name(target_mode), inline=True)
+                            break
+                    from bot.claude.types import InstanceStatus
+                    instances = self._store.list_instances()
+                    active = sum(1 for inst in instances if inst.repo_name == cr_repo
+                                 and inst.status == InstanceStatus.RUNNING)
+                    view = channels.build_control_view(cr_repo, current_mode=target_mode, active_count=active)
+                    await interaction.response.edit_message(embed=embed, view=view)
+                else:
+                    await interaction.response.defer()
+                log.info("Control room mode set to %s for repo %s", target_mode, cr_repo)
+            return
+
+        # --- User control room mode toggle ---
+        if action == "user_control_mode":
+            cr_parts = instance_id.split(":", 1)
+            if len(cr_parts) == 2 and cr_parts[1] in VALID_MODES:
+                cr_repo, target_mode = cr_parts
+                if not btn_access.is_owner and btn_access.mode_ceiling:
+                    target_mode = access_effective_mode(
+                        access_mod.RepoAccess(mode=btn_access.mode_ceiling),
+                        target_mode,
+                    )
+                target_user_id = str(interaction.user.id)
+                if btn_access.is_owner:
+                    uf = self._resolve_user_forum_context(interaction)
+                    if uf:
+                        target_user_id = uf[0]
+                cfg = load_access_config()
+                ua = cfg.users.get(target_user_id)
+                if ua and cr_repo in ua.repos:
+                    ua.repos[cr_repo].mode = target_mode
+                    access_mod.save_access_config(cfg)
+                elif btn_access.is_owner:
+                    self._store.mode = target_mode
+                # Rebuild user control room view
+                if interaction.message and interaction.message.embeds:
+                    embed = interaction.message.embeds[0]
+                    for i, field_obj in enumerate(embed.fields):
+                        if field_obj.name == "Mode":
+                            embed.set_field_at(i, name="Mode", value=mode_name(target_mode), inline=True)
+                            break
+                    repo_names = list(ua.repos.keys()) if ua else [cr_repo]
+                    view = channels.build_user_control_view(repo_names, current_mode=target_mode)
+                    await interaction.response.edit_message(embed=embed, view=view)
+                else:
+                    await interaction.response.defer()
+                log.info("User control room mode set to %s for %s", target_mode, cr_repo)
+            return
+
+        # --- Quick Task modal (must send modal as initial response, NOT defer) ---
+        if action == "quick_task":
+            if not btn_access.is_owner:
+                await interaction.response.send_message("Owner only.", ephemeral=True)
+                return
+            repo_name = instance_id
+            modal = _QuickTaskModal(self, repo_name, btn_access)
+            await interaction.response.send_modal(modal)
+            return
+
         # --- Mode selection in new thread welcome embed ---
         if action == "mode_set" and instance_id in VALID_MODES:
             target_mode = instance_id
@@ -2070,6 +2226,92 @@ class ClaudeBot(discord.Client):
             await interaction.followup.send(
                 f"Synced `{instance_id}`: " + ", ".join(parts), ephemeral=True,
             )
+            return
+
+        # --- Resume latest session for a repo (control room button) ---
+        if action == "resume_latest":
+            repo_name = instance_id
+            proj = self._forums.forum_projects.get(repo_name)
+            if not proj or not proj.threads:
+                await interaction.followup.send(
+                    "No sessions yet — start one with **New Session**.",
+                    ephemeral=True,
+                )
+                return
+            # Find most recent thread by snowflake ID (chronological)
+            latest_tid = max(
+                (tid for tid, info in proj.threads.items()
+                 if info.session_id and tid != (proj.control_thread_id or "")),
+                key=lambda t: int(t),
+                default=None,
+            )
+            if not latest_tid:
+                await interaction.followup.send(
+                    "No sessions yet — start one with **New Session**.",
+                    ephemeral=True,
+                )
+                return
+            info = proj.threads[latest_tid]
+            topic = info.topic or "session"
+            await interaction.followup.send(
+                f"Resuming: <#{latest_tid}> — {topic[:60]}",
+                ephemeral=True,
+            )
+            # Unarchive if needed
+            try:
+                thread = await self.fetch_channel(int(latest_tid))
+                if isinstance(thread, discord.Thread) and thread.archived:
+                    await thread.edit(archived=False)
+            except Exception:
+                pass
+            return
+
+        # --- Refresh control room (repo or user) ---
+        if action == "refresh_control":
+            repo_name = instance_id
+            await self._forums.refresh_control_room(repo_name)
+            await interaction.followup.send("Refreshed.", ephemeral=True)
+            return
+
+        if action == "refresh_user_control":
+            user_id = str(interaction.user.id)
+            await self._forums.refresh_user_control_room(user_id)
+            await interaction.followup.send("Refreshed.", ephemeral=True)
+            return
+
+        # --- Stop all running instances for a repo (owner-only) ---
+        if action == "stop_all":
+            if not btn_access.is_owner:
+                await interaction.followup.send("Owner only.", ephemeral=True)
+                return
+            repo_name = instance_id
+            from bot.claude.types import InstanceStatus
+            instances = self._store.list_instances()
+            running = [i for i in instances if i.repo_name == repo_name
+                       and i.status == InstanceStatus.RUNNING]
+            if not running:
+                await interaction.followup.send("No running instances.", ephemeral=True)
+                return
+            count = len(running)
+            await interaction.followup.send(
+                f"Stopping {count} instance{'s' if count != 1 else ''}...",
+                ephemeral=True,
+            )
+            # Kill sequentially to avoid concurrent message edits / rate limits
+            killed = 0
+            for inst in running:
+                try:
+                    if await self._runner.kill(inst.id):
+                        inst.status = InstanceStatus.KILLED
+                        inst.finished_at = datetime.now(timezone.utc).isoformat()
+                        self._store.update_instance(inst)
+                        killed += 1
+                except Exception:
+                    log.debug("Failed to kill %s during stop_all", inst.id, exc_info=True)
+            # Single refresh at the end
+            asyncio.create_task(self._forums.refresh_control_room(repo_name))
+            asyncio.create_task(self._refresh_dashboard())
+            log.info("Stop all: killed %d/%d instances for %s", killed, count, repo_name)
             return
 
         # --- Session resume: create/find thread, redirect there ---

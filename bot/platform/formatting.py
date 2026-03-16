@@ -235,8 +235,13 @@ def action_button_specs(
     rows: list[list[ButtonSpec]] = []
     iid = instance.id
 
-    # Done origin is terminal on success — no further actions (thread is closing)
+    # Done origin: if branch is pending merge, show Merge/Discard; otherwise terminal
     if instance.origin == InstanceOrigin.DONE and instance.status == InstanceStatus.COMPLETED:
+        if instance.branch:
+            rows.append([
+                ButtonSpec("Merge", f"merge:{iid}"),
+                ButtonSpec("Discard", f"discard:{iid}"),
+            ])
         return rows
 
     if instance.status == InstanceStatus.COMPLETED:

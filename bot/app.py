@@ -9,6 +9,7 @@ import signal
 import sys
 import time
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 from bot import config
 from bot.claude.runner import ClaudeRunner
@@ -356,6 +357,19 @@ async def run() -> None:
     ]
     scheduler.start()
 
+    # Scan for orphaned branches across all repos
+    active_branches = {inst.branch for inst in store.list_instances(all_=True) if inst.branch}
+    for repo_name, repo_path in store.list_repos().items():
+        if not Path(repo_path).is_dir():
+            continue
+        orphan_branches = runner.scan_orphan_branches(repo_path, active_branches)
+        if orphan_branches:
+            log.warning(
+                "Repo '%s' has %d orphaned branches: %s",
+                repo_name, len(orphan_branches),
+                ", ".join(orphan_branches[:5]) + ("..." if len(orphan_branches) > 5 else ""),
+            )
+
     log.info(
         "Bot ready — PC: %s, CLI: %s, platforms: %s",
         config.PC_NAME, cli_version,
@@ -565,6 +579,7 @@ async def _start_telegram(store, runner, notifier, stop_event, cli_version):
     app.add_handler(CommandHandler("diff", bridge.on_diff))
     app.add_handler(CommandHandler("merge", bridge.on_merge))
     app.add_handler(CommandHandler("discard", bridge.on_discard))
+    app.add_handler(CommandHandler("branches", bridge.on_branches))
     app.add_handler(CommandHandler("cost", bridge.on_cost))
     app.add_handler(CommandHandler("status", bridge.on_status))
     app.add_handler(CommandHandler("logs", bridge.on_logs))

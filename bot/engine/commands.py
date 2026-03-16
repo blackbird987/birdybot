@@ -33,7 +33,7 @@ from bot.platform.formatting import (
     strip_markdown,
 )
 
-from bot.claude.runner import _NOWND
+from bot.claude.runner import ClaudeRunner, _NOWND
 
 log = logging.getLogger(__name__)
 
@@ -166,21 +166,13 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
             if match:
                 repo_name, repo_path = match
         if not repo_path:
-            # Fall through to active repo instead of blocking
-            fallback_name, fallback_path = ctx.store.get_active_repo()
-            if fallback_path:
-                repo_name, repo_path = fallback_name, fallback_path
-                await ctx.messenger.send_text(
-                    ctx.channel_id,
-                    f"Repo '{ctx.repo_name}' not found — using active repo '{repo_name}'.\n"
-                    f"To add it: `/repo add {ctx.repo_name} <path>`",
-                    silent=True,
-                )
-            else:
-                await ctx.messenger.send_text(
-                    ctx.channel_id, f"Repo '{ctx.repo_name}' not found. Use /repo add.",
-                )
-                return
+            available = ", ".join(sorted(repos.keys())) if repos else "none"
+            await ctx.messenger.send_text(
+                ctx.channel_id,
+                f"Repo '{ctx.repo_name}' not found (available: {available}).\n"
+                f"To add it: `/repo add {ctx.repo_name} <path>`",
+            )
+            return
     else:
         repo_name, repo_path = ctx.store.get_active_repo()
     if not repo_path:
@@ -654,6 +646,45 @@ async def on_discard(ctx: RequestContext, text: str) -> None:
     msg = await ctx.runner.discard_branch(inst)
     ctx.store.update_instance(inst)
     await ctx.messenger.send_text(ctx.channel_id, msg)
+
+
+# --- /branches ---
+
+async def on_branches(ctx: RequestContext) -> None:
+    """List unmerged claude-bot/* branches across all repos."""
+    repos = ctx.store.list_repos()
+    if not repos:
+        await ctx.messenger.send_text(ctx.channel_id, "No repos configured.")
+        return
+
+    # Collect branches tracked by ANY instance (including old ones)
+    active_branches: set[str] = set()
+    for inst in ctx.store.list_instances(all_=True):
+        if inst.branch:
+            active_branches.add(inst.branch)
+
+    lines: list[str] = []
+    total_orphans = 0
+    for repo_name, repo_path in repos.items():
+        if not Path(repo_path).is_dir():
+            continue
+        orphans = ClaudeRunner.scan_orphan_branches(repo_path, active_branches)
+        if orphans:
+            total_orphans += len(orphans)
+            lines.append(f"**{repo_name}** ({len(orphans)} orphaned)")
+            for b in orphans[:10]:
+                lines.append(f"  `{b}`")
+            if len(orphans) > 10:
+                lines.append(f"  ... and {len(orphans) - 10} more")
+
+    if not lines:
+        await ctx.messenger.send_text(ctx.channel_id, "No orphaned branches found.")
+        return
+
+    header = f"**Orphaned Branches** ({total_orphans} total)\n\n"
+    text = header + "\n".join(lines)
+    markup = ctx.messenger.markdown_to_markup(text)
+    await ctx.messenger.send_text(ctx.channel_id, markup)
 
 
 # --- /cost ---
@@ -1259,6 +1290,7 @@ async def on_help(ctx: RequestContext) -> None:
         "`/diff` — git diff\n"
         "`/merge` — merge branch\n"
         "`/discard` — delete branch\n"
+        "`/branches` — list orphaned branches\n"
         "`/cost` — spending breakdown\n"
         "`/status` — health dashboard\n"
         "`/logs` — bot log\n"
@@ -1397,6 +1429,12 @@ async def handle_callback(
             await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, escaped)
         else:
             await ctx.messenger.send_text(ctx.channel_id, escaped)
+        # Close thread if this was a post-Done merge (branch resolved)
+        if inst.origin == InstanceOrigin.DONE and not inst.branch:
+            try:
+                await ctx.messenger.close_conversation(ctx.channel_id)
+            except Exception:
+                pass
 
     elif action == "discard":
         inst = ctx.store.get_instance(instance_id)
@@ -1410,6 +1448,12 @@ async def handle_callback(
             await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, escaped)
         else:
             await ctx.messenger.send_text(ctx.channel_id, escaped)
+        # Close thread if this was a post-Done discard (branch resolved)
+        if inst.origin == InstanceOrigin.DONE and not inst.branch:
+            try:
+                await ctx.messenger.close_conversation(ctx.channel_id)
+            except Exception:
+                pass
 
     elif action == "wait":
         if source_msg_id:

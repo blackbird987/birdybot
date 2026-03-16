@@ -278,11 +278,13 @@ async def on_done(ctx: RequestContext, source_id: str, source_msg_id: str | None
     if not result or result.status != InstanceStatus.COMPLETED:
         return result
 
-    # Close the thread/conversation after successful commit
-    try:
-        await ctx.messenger.close_conversation(ctx.channel_id)
-    except Exception:
-        log.debug("Failed to close conversation for channel %s", ctx.channel_id, exc_info=True)
+    # Only close the thread if no branch is pending merge.
+    # If a branch exists, the user still needs to click Merge/Discard.
+    if not result.branch:
+        try:
+            await ctx.messenger.close_conversation(ctx.channel_id)
+        except Exception:
+            log.debug("Failed to close conversation for channel %s", ctx.channel_id, exc_info=True)
 
     return result
 
@@ -418,6 +420,28 @@ async def _run_autopilot_chain(
         if result and chain_deferred and not result.deferred_revisions:
             result.deferred_revisions = chain_deferred
             ctx.store.update_instance(result)
+
+        # Auto-merge for autopilot: user chose fire-and-forget, merge back to default
+        if result and result.branch and result.original_branch:
+            merge_msg = await ctx.runner.merge_branch(result)
+            ctx.store.update_instance(result)
+            log.info("Autopilot auto-merge: %s", merge_msg)
+            if "failed" in merge_msg.lower():
+                await ctx.messenger.send_text(
+                    ctx.channel_id,
+                    f"⚠️ Auto-merge failed: {merge_msg}\nUse /merge to resolve.",
+                    silent=True,
+                )
+            else:
+                await ctx.messenger.send_text(
+                    ctx.channel_id, f"✅ {merge_msg}", silent=True,
+                )
+                # Close thread now that branch is resolved (Done deferred this)
+                try:
+                    await ctx.messenger.close_conversation(ctx.channel_id)
+                except Exception:
+                    log.debug("Failed to close conversation after autopilot merge")
+
         ctx.store.clear_autopilot_chain(session_id)
         ctx.store.clear_chain_deferred(session_id)
         return result

@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### Branch Management
+- New branches always fork from master/main instead of current HEAD (prevents fork drift from parallel sessions)
+- Dirty-worktree guard: auto-stash uncommitted changes before branch switch, pop onto new branch
+- Autopilot chains auto-merge branch back to master on successful completion
+- Done workflow shows Merge/Discard buttons when branch is pending (defers thread close until resolved)
+- Merge/Discard after Done now closes the thread automatically
+- `/branches` command to list orphaned `claude-bot/*` branches across all repos
+- Orphan branch detection on startup with log warnings
+
+### Control Room Buttons
+- Expanded repo control room: New Session, Resume Latest, Mode toggle (Explore/Plan/Build), Quick Task modal, Sync CLI, Stop All (conditional), Refresh
+- Expanded user control room: New Session per repo, Mode toggle, Refresh
+- Button handlers: mode ceiling enforcement for non-owners, sequential stop_all to avoid rate limits
+- QuickTaskModal: discord.py modal that collects a prompt and spawns a session in a new thread
+
+### Cross-Repo Access Fix
+- Refuse queries when forum repo name doesn't resolve (was: silently fall back to active repo)
+- Show available repos in error message to guide the user
+
 ## v0.16.1 — Thread Name Edit Dedup (2026-03-16)
 
 - Fix smart title blocked by global `_name_lock` during Discord 429 rate limits — replaced with per-thread dedup set so thread name edits are independent
