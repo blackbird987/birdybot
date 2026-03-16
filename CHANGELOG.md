@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Add auto-update feature: secondary devices auto-pull code changes from origin and reboot (opt-in via `AUTO_UPDATE=true`)
+- Auto-detect remote default branch (`main`/`master`) with `AUTO_UPDATE_BRANCH` override
+- Failure notifications with dedup — broadcasts once per ongoing error, resets on success
+
 ## v0.20.0 — Honesty & Mode UX (2026-03-17)
 
 ### UX Improvements

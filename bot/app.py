@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import signal
+import subprocess
 import sys
 import time
 from logging.handlers import RotatingFileHandler
@@ -109,6 +110,162 @@ def _release_pid_lock() -> None:
             pid_file.unlink()
     except OSError:
         pass
+
+
+def _detect_update_branch() -> str:
+    """Detect the remote default branch for auto-update.
+
+    Priority: AUTO_UPDATE_BRANCH env > git symbolic-ref > fallback 'master'.
+    """
+    if config.AUTO_UPDATE_BRANCH:
+        return config.AUTO_UPDATE_BRANCH
+    try:
+        result = subprocess.run(
+            ["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
+            cwd=str(config._PROJECT_ROOT),
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            # "refs/remotes/origin/main" -> "main"
+            ref = result.stdout.strip()
+            return ref.rsplit("/", 1)[-1]
+    except Exception:
+        pass
+    return "master"
+
+
+async def auto_update_loop(
+    stop_event: asyncio.Event,
+    runner: ClaudeRunner,
+    notifier: NotificationService,
+) -> None:
+    """Periodically check for upstream changes, pull, and reboot."""
+    branch = _detect_update_branch()
+    interval = config.AUTO_UPDATE_INTERVAL_SECS
+    log.info("Auto-update started (branch=%s, interval=%ds)", branch, interval)
+
+    failure_notified = False  # dedup: only notify once per ongoing failure
+    first_check = True
+
+    while not stop_event.is_set():
+        if not first_check:
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=interval)
+                break  # stop_event was set
+            except asyncio.TimeoutError:
+                pass  # normal: interval elapsed
+        first_check = False
+
+        try:
+            # 1. Fetch
+            fetch = await asyncio.to_thread(
+                subprocess.run,
+                ["git", "fetch", "origin"],
+                cwd=str(config._PROJECT_ROOT),
+                capture_output=True, text=True, timeout=30,
+            )
+            if fetch.returncode != 0:
+                err = fetch.stderr.strip() or "unknown error"
+                if not failure_notified:
+                    log.warning("Auto-update: git fetch failed — %s", err)
+                    await notifier.broadcast(
+                        f"⚠️ Auto-update: git fetch failed — {err}",
+                    )
+                    failure_notified = True
+                continue
+
+            # 2. Compare HEAD vs remote
+            local_head = await asyncio.to_thread(
+                subprocess.run,
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(config._PROJECT_ROOT),
+                capture_output=True, text=True, timeout=10,
+            )
+            remote_head = await asyncio.to_thread(
+                subprocess.run,
+                ["git", "rev-parse", f"origin/{branch}"],
+                cwd=str(config._PROJECT_ROOT),
+                capture_output=True, text=True, timeout=10,
+            )
+            if local_head.returncode != 0 or remote_head.returncode != 0:
+                if not failure_notified:
+                    log.warning("Auto-update: git rev-parse failed (branch=%s)", branch)
+                    await notifier.broadcast(
+                        f"⚠️ Auto-update: can't resolve branch `{branch}` — check AUTO_UPDATE_BRANCH",
+                    )
+                    failure_notified = True
+                continue
+            local_sha = local_head.stdout.strip()
+            remote_sha = remote_head.stdout.strip()
+
+            if local_sha == remote_sha:
+                if failure_notified:
+                    failure_notified = False  # reset on success
+                continue
+
+            # 3. Get commit log for notification
+            log_result = await asyncio.to_thread(
+                subprocess.run,
+                ["git", "log", "--oneline", f"{local_sha}..{remote_sha}"],
+                cwd=str(config._PROJECT_ROOT),
+                capture_output=True, text=True, timeout=10,
+            )
+            commits = log_result.stdout.strip().splitlines()
+            n_commits = len(commits)
+            latest_msg = commits[0] if commits else "unknown"
+
+            log.info("Auto-update: %d new commit(s) on origin/%s", n_commits, branch)
+
+            # 4. Pull (ff-only)
+            pull = await asyncio.to_thread(
+                subprocess.run,
+                ["git", "pull", "--ff-only", "origin", branch],
+                cwd=str(config._PROJECT_ROOT),
+                capture_output=True, text=True, timeout=30,
+            )
+            if pull.returncode != 0:
+                err = pull.stderr.strip() or "unknown error"
+                if not failure_notified:
+                    log.warning("Auto-update: git pull failed — %s", err)
+                    await notifier.broadcast(
+                        f"⚠️ Auto-update: pull failed — {err}. Manual intervention needed.",
+                    )
+                    failure_notified = True
+                continue
+
+            # 5. pip install (non-fatal)
+            try:
+                await asyncio.to_thread(
+                    subprocess.run,
+                    [sys.executable, "-m", "pip", "install", "-e", ".", "--quiet"],
+                    cwd=str(config._PROJECT_ROOT),
+                    capture_output=True, text=True, timeout=120,
+                )
+            except Exception:
+                log.warning("Auto-update: pip install failed (non-fatal)", exc_info=True)
+
+            # 6. Request reboot first (just a list append — can't fail)
+            failure_notified = False
+            runner.request_reboot({
+                "message": f"Auto-update: pulled {n_commits} commits",
+            })
+
+            # 7. Notify (best-effort — reboot already queued)
+            try:
+                await notifier.broadcast(
+                    f"🔄 Auto-update: pulled {n_commits} commit(s) — `{latest_msg}`\nRebooting...",
+                )
+            except Exception:
+                log.warning("Auto-update: notification failed (reboot still queued)")
+            return  # reboot requested, exit loop
+
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            log.exception("Auto-update: unexpected error")
+            if not failure_notified:
+                await notifier.broadcast("⚠️ Auto-update: unexpected error — check logs.")
+                failure_notified = True
 
 
 async def run() -> None:
@@ -355,6 +512,10 @@ async def run() -> None:
         asyncio.create_task(auto_save_loop()),
         asyncio.create_task(daily_digest_loop()),
     ]
+    if config.AUTO_UPDATE:
+        _bg_tasks.append(asyncio.create_task(
+            auto_update_loop(stop_event, runner, notifier),
+        ))
     scheduler.start()
 
     # Scan for orphaned branches and worktrees across all repos
