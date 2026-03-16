@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.19.5 — Auto-Merge Reliability (2026-03-17)
+
 ### Bug Fixes
 - Fix auto-merge failures: search all non-bot branches when detecting default branch (fixes repos with neither `master` nor `main`)
 - Fix empty merge error messages: report stdout when stderr is empty (merge conflicts write to stdout)
