@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.13.0 — Reboot Concurrency & Task Tracking (2026-03-16)
+
 ### Concurrency Improvements
 - Reboot coalescing: multiple autopilots requesting reboots now produce a single reboot instead of racing (queue + idle callback pattern)
 - Dashboard refresh serialization: replace timestamp debounce with lock + pending flag to prevent API storms when multiple instances finish simultaneously
