@@ -392,6 +392,15 @@ class ClaudeRunner:
         # Bot capability context so Claude knows what the user can do
         parts.append(config.BOT_CONTEXT)
 
+        # Universal working context — workflow, Discord UI, branch model, design principles
+        parts.append(config.WORKING_CONTEXT)
+
+        # Per-step behavioral guidance based on workflow origin
+        origin_key = instance.origin.value if instance.origin else "direct"
+        guidance = config.WORKFLOW_GUIDANCE.get(origin_key)
+        if guidance:
+            parts.append(f"\n\n--- Your Role in This Step ---\n{guidance}")
+
         # Plan mode: instruct Claude not to modify files, output a plan instead
         if instance.mode == "plan":
             parts.append(config.PLAN_MODE_CONSTRAINT)

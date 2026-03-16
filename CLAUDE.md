@@ -41,6 +41,14 @@ Key data structures in `bot/discord/bot.py`:
 - `ThreadInfo`: thread_id + session_id + origin + topic
 - Persisted in `data/state.json` under `platform_state.discord.forum_projects`
 
+## Branch Lifecycle
+
+- Build tasks auto-create branches: `claude-bot/<instance-id>`
+- Original branch saved for merge-back after completion
+- After Done/Commit → Merge/Discard buttons appear in the thread
+- Autopilot auto-merges after a successful chain completes
+- Unmerged branches become orphans — always merge or discard, don't abandon
+
 ## Versioning
 
 See `~/.claude/CLAUDE.md` for universal versioning conventions.

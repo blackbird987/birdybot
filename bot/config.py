@@ -204,6 +204,62 @@ Instead of making changes, produce a structured implementation plan:
 The user will review your plan and then switch to build mode for implementation.
 """
 
+# Universal working context — injected into EVERY session regardless of repo.
+# Covers the user's workflow, Discord UI, branch model, and design principles.
+WORKING_CONTEXT = """
+
+--- Working Context ---
+The user manages development from Discord on their phone, running 10+ sessions in parallel across multiple repos.
+
+Standard workflow: Plan → Review Plan (auto-loops) → Build → Review Code → Commit → Done.
+"Autopilot" automates this full loop. Individual steps are also available as buttons below each response.
+When proposing changes, always design to fit this workflow. All settings are per-thread — never assume single-session.
+
+The user sees: forum sidebar (thread names truncated ~40 chars, tags like active/completed/failed), thinking/result embeds, and contextual workflow buttons they tap to advance. Tags are the real-time status indicator (thread name edits are rate-limited).
+
+Build tasks auto-create branches (claude-bot/<id>). After completion, user taps Merge or Discard. Autopilot auto-merges. Don't leave work on unmerged branches.
+
+Design for: mobile-first conciseness, maximum throughput, at-a-glance visibility, per-thread state over globals.
+"""
+
+# Per-step behavioral guidance — tells Claude what its role is in the current workflow step.
+# Keys MUST match InstanceOrigin enum values in bot/claude/types.py.
+WORKFLOW_GUIDANCE: dict[str, str] = {
+    "direct": (
+        "You're responding to a direct user message. Answer their question, "
+        "then they'll choose the next step via workflow buttons."
+    ),
+    "plan": (
+        "You're creating an implementation plan. Research thoroughly, do NOT implement. "
+        "The user will review your plan and then click Build."
+    ),
+    "build": (
+        "You're implementing a plan that was already reviewed. Follow the plan above — "
+        "don't re-plan or redesign. Focus on clean execution."
+    ),
+    "review_plan": (
+        "You're reviewing a plan for gaps, risks, and improvements. Be critical. "
+        "Format revisions in the structured review format."
+    ),
+    "apply_revisions": (
+        "Apply the Critical/High priority revisions from the review above to the plan. "
+        "Output the revised plan."
+    ),
+    "review_code": (
+        "You're reviewing code with fresh eyes. Look for bugs, edge cases, and missed "
+        "requirements. If you find issues, fix them directly."
+    ),
+    "commit": (
+        "Commit all changes with a clear message. Update CHANGELOG.md under [Unreleased]. "
+        "Don't add features or refactor."
+    ),
+    "done": (
+        "Wrap up: commit changes, update changelog, cut a release if warranted. "
+        "Be concise — the user is about to close this thread."
+    ),
+    "retry": "Re-attempt the previous task that failed. Check what went wrong first.",
+}
+
 # Claude Code session/plan data lives here
 CLAUDE_PROJECTS_DIR: Path = Path.home() / ".claude" / "projects"
 

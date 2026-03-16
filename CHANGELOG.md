@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Inject universal working context into every spawned session (user workflow, Discord UI, branch model, design principles) via `config.WORKING_CONTEXT`
+- Add per-step behavioral guidance (`config.WORKFLOW_GUIDANCE`) so Claude knows its role in each workflow step (plan, build, review, commit, etc.)
+- Document branch lifecycle in CLAUDE.md
+
 ## v0.17.0 — Control Room Buttons & Branch Management (2026-03-16)
 
 ### Branch Management
