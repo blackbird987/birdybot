@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.14.1 — Engine Decoupling (2026-03-16)
+
 ### Architecture
 - Decouple engine from discord.access: rate limits and bash policy resolved via RequestContext callbacks instead of direct imports
 - Rename `_run_query_inner` -> `_execute_query` for self-documentation
