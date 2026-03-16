@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+
+## v0.15.2 — Smart Title Fix (2026-03-16)
 - Fix smart title not firing on first message in /new and lobby threads (flag-based check replaces name check)
 - Reduce title generation timeout from 30s to 15s
 
@@ -368,8 +370,12 @@
 - `RELEASE_PROMPT` in config handles the full release workflow: changelog freeze, version file update, commit, and git tag.
 
 ### Changelog Workflow
-- `COMMIT_PROMPT` and `DONE_PROMPT` now direct changes to `## [Unreleased]` instead of version-numbered headers.
-- Added `## [Unreleased]` header to CHANGELOG.md for ongoing work.
+- `COMMIT_PROMPT` and `DONE_PROMPT` now direct changes to `## [Unreleased]
+
+## v0.15.2 — Smart Title Fix (2026-03-16)` instead of version-numbered headers.
+- Added `## [Unreleased]
+
+## v0.15.2 — Smart Title Fix (2026-03-16)` header to CHANGELOG.md for ongoing work.
 - Added versioning section to CLAUDE.md pointing to global conventions.
 
 ### Plan Button Fix
