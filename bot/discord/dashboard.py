@@ -136,11 +136,28 @@ def build_dashboard_embed(
         if proj_lines:
             embed.add_field(name="Projects", value="\n".join(proj_lines), inline=False)
 
+    # Orphaned branches/worktrees
+    from bot.claude.runner import ClaudeRunner
+    active_branches = {i.branch for i in instances if i.branch}
+    active_worktrees = {i.worktree_path for i in instances if i.worktree_path}
+    total_orphans = 0
+    for rname, rpath in store.list_repos().items():
+        from pathlib import Path as _P
+        if not _P(rpath).is_dir():
+            continue
+        total_orphans += len(ClaudeRunner.scan_orphan_branches(rpath, active_branches))
+        total_orphans += len(ClaudeRunner.scan_orphan_worktrees(rpath, active_worktrees))
+
     # Cost + Mode
     embed.add_field(name="Today", value=f"${today_cost:.4f}", inline=True)
     embed.add_field(name="Total", value=f"${total_cost:.4f}", inline=True)
     embed.add_field(name="Mode", value=mode_label(store.mode), inline=True)
     embed.add_field(name="PC", value=config.PC_NAME, inline=True)
+    if total_orphans:
+        embed.add_field(
+            name="Orphans", value=f"{total_orphans} branch/worktree",
+            inline=True,
+        )
 
     return embed
 
