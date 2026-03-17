@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## v0.23.0 — Setup Wizard (2026-03-17)
+
+- Add `scripts/setup.py` interactive setup wizard — automates new-device onboarding (token validation, invite URL, guild detection, intent reminders, auto-update config)
+- Update `.env.example` with setup hint and Discord-only layout
+
 ## v0.22.0 — Strip Telegram (2026-03-17)
 
 - Strip Telegram platform support — gut adapter/bridge/formatter to stubs, remove `python-telegram-bot` dependency, delete `_start_telegram()` orchestration (~860 lines removed)
