@@ -177,6 +177,7 @@ def finalize_run(ctx: RequestContext, inst: Instance, result: RunResult) -> None
     inst.cost_usd = result.cost_usd
     inst.duration_ms = result.duration_ms
     inst.tools_used = result.tools_used
+    inst.bash_commands = result.bash_commands
     inst.num_turns = result.num_turns
     inst.input_tokens = result.input_tokens
     inst.output_tokens = result.output_tokens
@@ -223,6 +224,13 @@ def finalize_run(ctx: RequestContext, inst: Instance, result: RunResult) -> None
 
     # Append to persistent session history log (best-effort)
     _log_history(ctx, inst, result.result_text)
+
+    # Run session evaluation (best-effort, never blocks)
+    try:
+        from bot.engine.eval import evaluate_instance
+        evaluate_instance(inst, result.result_text)
+    except Exception:
+        log.debug("Eval failed for %s", inst.id, exc_info=True)
 
 
 # Origins that are internal auto-loop iterations — not useful in history

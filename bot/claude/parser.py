@@ -123,6 +123,10 @@ def extract_result(events: list[dict]) -> RunResult:
                         if name and name not in tools_seen:
                             tools_seen.add(name)
                             result.tools_used.append(name)
+                        if name == "Bash":
+                            cmd = block.get("input", {}).get("command", "")
+                            if cmd:
+                                result.bash_commands.append(cmd[:200])
                     elif block.get("type") == "text":
                         fallback_parts.append(block.get("text", ""))
         elif etype == "content_block_start":
@@ -132,6 +136,10 @@ def extract_result(events: list[dict]) -> RunResult:
                 if name and name not in tools_seen:
                     tools_seen.add(name)
                     result.tools_used.append(name)
+                if name == "Bash":
+                    cmd = cb.get("input", {}).get("command", "")
+                    if cmd:
+                        result.bash_commands.append(cmd[:200])
         elif etype == "result":
             result_event = event
 

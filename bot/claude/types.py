@@ -89,6 +89,7 @@ class Instance:
     user_id: str = ""                  # User who started this instance
     user_name: str = ""                # Display name of the user
     tools_used: list[str] = field(default_factory=list)  # Tool names used (Edit, Write, TodoWrite...)
+    bash_commands: list[str] = field(default_factory=list)  # Bash commands run (for eval)
     num_turns: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
@@ -138,6 +139,7 @@ class Instance:
             "user_id": self.user_id,
             "user_name": self.user_name,
             "tools_used": self.tools_used,
+            "bash_commands": self.bash_commands,
             "num_turns": self.num_turns,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
@@ -183,6 +185,7 @@ class Instance:
             user_id=d.get("user_id", ""),
             user_name=d.get("user_name", ""),
             tools_used=d.get("tools_used", []),
+            bash_commands=d.get("bash_commands", []),
             num_turns=d.get("num_turns", 0),
             input_tokens=d.get("input_tokens", 0),
             output_tokens=d.get("output_tokens", 0),
@@ -206,6 +209,7 @@ class RunResult:
     is_error: bool = False
     error_message: str | None = None
     tools_used: list[str] = field(default_factory=list)  # Unique tool names used
+    bash_commands: list[str] = field(default_factory=list)  # Bash commands run (for eval)
     num_turns: int = 0
     input_tokens: int = 0
     output_tokens: int = 0

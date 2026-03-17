@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Session evaluation & reporting
+- Add per-instance heuristic eval: narration compliance, tool hygiene (checks actual Bash commands), verbosity, claim grounding, efficiency
+- Add chain-level eval for autopilot workflows: tracks steps, cost, revision loops, outcome
+- Add `/report` slash command with daily (1d) and weekly (7d) modes
+- Enhance daily digest with eval summary (flags, warnings, clean session rate)
+- Capture Bash commands from CLI stream for tool hygiene analysis
+- Eval data stored in `data/evals/` with same retention as instances
+- Eval is on by default, disable with `EVAL_ENABLED=0`
+
 ## v0.27.1 — Done Button for Plan States (2026-03-17)
 
 - Add Done button to plan-related completion states so threads with plans can be wrapped up without going back to a previous message
