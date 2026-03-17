@@ -467,6 +467,14 @@ async def run() -> None:
                     repo_name=repo_name,
                     mode=store.mode,
                 )
+                # Append eval summary if available
+                try:
+                    from bot.engine.report import daily_digest as eval_digest
+                    eval_text = eval_digest(hours=24)
+                    if eval_text and eval_text != "No sessions to evaluate.":
+                        text += f"\n\n**Eval Summary**\n{eval_text}"
+                except Exception:
+                    log.debug("Eval digest failed for daily digest", exc_info=True)
                 await notifier.broadcast(text, silent=True)
             except Exception:
                 log.exception("Failed to send daily digest")

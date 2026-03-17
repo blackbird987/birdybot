@@ -232,6 +232,25 @@ def setup(bot: ClaudeBot) -> None:
             return
         await bot._run_slash(interaction, lambda ctx: commands.on_budget(ctx, args))
 
+    @bot.tree.command(name="report", description="Session quality report", guild=guild_obj)
+    @app_commands.describe(days="Number of days to cover (default: 1)")
+    async def cmd_report(interaction: discord.Interaction, days: int = 1):
+        if not bot._is_owner(interaction.user.id):
+            await interaction.response.send_message("Unauthorized", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        from bot.engine.report import daily_digest, full_report
+        try:
+            text = daily_digest(hours=days * 24) if days <= 1 else full_report(days=days)
+        except Exception as exc:
+            log.warning("Report generation failed", exc_info=True)
+            text = f"Report generation failed: {exc}"
+        await interaction.followup.send(embed=discord.Embed(
+            title=f"Session Report ({days}d)",
+            description=text[:4096],
+            color=0x5865F2,
+        ), ephemeral=True)
+
     @bot.tree.command(name="new", description="Start fresh conversation", guild=guild_obj)
     @app_commands.describe(
         repo="Repo name (default: active repo)",

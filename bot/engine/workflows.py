@@ -422,6 +422,20 @@ def clear_stale_branches(store, branch_name: str) -> int:
     return count
 
 
+def _eval_chain_safe(
+    store, root_id: str, steps_expected: list[str],
+    steps_completed: list[str], instances: list[Instance],
+    outcome: str, intervention: bool = False,
+) -> None:
+    """Run chain evaluation, never raising."""
+    try:
+        from bot.engine.eval import evaluate_chain
+        evaluate_chain(store, root_id, steps_expected, steps_completed,
+                       instances, outcome, intervention=intervention)
+    except Exception:
+        log.debug("Chain eval failed for %s", root_id, exc_info=True)
+
+
 async def _run_autopilot_chain(
     ctx: RequestContext,
     source_id: str,
@@ -436,6 +450,10 @@ async def _run_autopilot_chain(
 
     # Recover deferred revisions from prior run (survives reboot)
     chain_deferred = ctx.store.get_chain_deferred(session_id)
+
+    # Track chain progress for eval
+    chain_instances: list[Instance] = []
+    completed_steps: list[str] = []
 
     # Keep a chain-level task active so reboot waits for the entire chain,
     # not just individual steps (which have gaps between them).
@@ -505,12 +523,18 @@ async def _run_autopilot_chain(
                             silent=True,
                         )
                         await _notify_user(ctx, "Merge failed — needs resolution.")
+                completed_steps.append(step)
                 # Break unconditionally — merge is always the final step.
                 # This avoids the status guard running on a non-Instance result.
                 break
 
             if not result or result.status != InstanceStatus.COMPLETED or result.needs_input:
                 # Chain paused/failed/question — notify user, state saved for resume
+                if result:
+                    chain_instances.append(result)
+                outcome = "needs_input" if (result and result.needs_input) else "failed"
+                _eval_chain_safe(ctx.store, source_id, steps, completed_steps,
+                                 chain_instances, outcome, intervention=True)
                 await _notify_user(ctx, "Needs your attention.")
                 return result
 
@@ -526,8 +550,14 @@ async def _run_autopilot_chain(
                     await ctx.runner.discard_branch(result)
                     ctx.store.update_instance(result)
                 ctx.store.clear_autopilot_chain(session_id)
+                chain_instances.append(result)
+                completed_steps.append(step)
+                _eval_chain_safe(ctx.store, source_id, steps, completed_steps,
+                                 chain_instances, "abandoned")
                 await _notify_user(ctx, "Build had no changes.")
                 return result
+            chain_instances.append(result)
+            completed_steps.append(step)
             current_id = result.id
             current_msg = _last_msg_id(result, ctx.platform)
 
@@ -544,6 +574,11 @@ async def _run_autopilot_chain(
                 result.repo_name, chain_deferred,
                 thread_id=result.id, topic=topic,
             )
+
+        # Evaluate the completed chain
+        outcome = "merged" if "merge" in completed_steps else "completed"
+        _eval_chain_safe(ctx.store, source_id, steps, completed_steps,
+                         chain_instances, outcome)
 
         ctx.store.clear_autopilot_chain(session_id)
         ctx.store.clear_chain_deferred(session_id)
