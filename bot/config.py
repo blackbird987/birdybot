@@ -373,6 +373,30 @@ APPLY_HIGH_PRIORITY_PROMPT = (
     'List each revision: "[TAG] Title \u2014 applied" or "[TAG] Title \u2014 skipped (Medium/Low)".'
 )
 
+TRIAGE_DEFERRED_PROMPT = (
+    'The review above found the following Medium/Low priority revisions '
+    'that were not auto-applied:\n\n{deferred_items}\n\n'
+    'Evaluate each one. Apply any that are:\n'
+    '- Quick wins (minimal effort, clear improvement)\n'
+    '- Bug risk reducers\n'
+    '- Directly relevant to the plan\'s core goals\n\n'
+    'Skip any that are:\n'
+    '- Purely cosmetic or stylistic\n'
+    '- Scope creep (adding features not in the plan)\n'
+    '- Risky refactors that could introduce bugs\n\n'
+    'Apply the selected revisions directly to the plan. '
+    'Then at the end, add:\n\n'
+    '### Triaged\n'
+    'List each: "[TAG] Title \u2014 applied (reason)" or '
+    '"[TAG] Title \u2014 deferred (reason)".\n\n'
+    'End with:\n'
+    '```triage-result\n'
+    'APPLIED: <count>\n'
+    'DEFERRED:\n'
+    '- [TAG] Title (Priority)\n'
+    '```'
+)
+
 CODE_REVIEW_PROMPT = (
     'Now carefully read over all of the new code you just wrote and other '
     'existing code you just modified with "fresh eyes" looking super '

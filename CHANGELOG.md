@@ -12,6 +12,9 @@
 - Capture Bash commands from CLI stream for tool hygiene analysis
 - Eval data stored in `data/evals/` with same retention as instances
 - Eval is on by default, disable with `EVAL_ENABLED=0`
+## v0.28.1 — LLM-Triaged Medium/Low Revisions (2026-03-17)
+
+- Add LLM-triaged Medium/Low revision step to review loop — after Critical/High converge, the LLM evaluates deferred items and applies quick wins before build
 
 ## v0.27.1 — Done Button for Plan States (2026-03-17)
 
