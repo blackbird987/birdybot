@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.28.0 — Concurrency & Reliability Hardening (2026-03-17)
+
 ### Concurrency & reliability hardening
 - Fix duplicate instance spawning: button callbacks now acquire the per-channel lock (matching text message serialization)
 - Add reboot drain guard: new prompts are blocked with a message while a reboot is pending, instead of being started and killed
