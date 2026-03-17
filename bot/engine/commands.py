@@ -131,6 +131,12 @@ async def _run_query(ctx: RequestContext, prompt: str) -> None:
 
 
 async def _execute_query(ctx: RequestContext, prompt: str) -> None:
+    # Block spawns during reboot drain or if session already has a running task
+    spawn_err = ctx.runner.check_spawn_allowed(ctx.session_id)
+    if spawn_err:
+        await ctx.messenger.send_text(ctx.channel_id, spawn_err)
+        return
+
     if not check_budget(ctx):
         await ctx.messenger.send_text(
             ctx.channel_id, "Daily budget exceeded. Use /budget reset to override.",
@@ -207,7 +213,7 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
     if resume_session:
         inst.session_id = resume_session
     inst.status = InstanceStatus.RUNNING
-    ctx.store.update_instance(inst)
+    ctx.store.update_instance(inst, critical=True)
 
     if resume_session:
         label = "resuming..."
@@ -244,7 +250,7 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
 
     heartbeat_task = asyncio.create_task(heartbeat())
     start_time = asyncio.get_event_loop().time()
-    ctx.runner.begin_task(inst.id)
+    ctx.runner.begin_task(inst.id, session_id=inst.session_id)
     try:
         try:
             result = await ctx.runner.run(
@@ -364,7 +370,7 @@ async def on_bg(ctx: RequestContext, text: str) -> None:
 async def _run_bg_task(ctx: RequestContext, inst: Instance) -> None:
     try:
         inst.status = InstanceStatus.RUNNING
-        ctx.store.update_instance(inst)
+        ctx.store.update_instance(inst, critical=True)
 
         result = await ctx.runner.run(inst, context=ctx.effective_context)
         lifecycle.finalize_run(ctx, inst, result)
@@ -377,7 +383,7 @@ async def _run_bg_task(ctx: RequestContext, inst: Instance) -> None:
         log.exception("Background task %s crashed", inst.id)
         inst.status = InstanceStatus.FAILED
         inst.error = "Background task crashed unexpectedly"
-        ctx.store.update_instance(inst)
+        ctx.store.update_instance(inst, critical=True)
         try:
             await ctx.messenger.send_text(
                 ctx.channel_id, f"❌ {inst.display_id()} crashed unexpectedly.",
@@ -506,7 +512,7 @@ async def on_kill(ctx: RequestContext, text: str) -> None:
     if killed:
         inst.status = InstanceStatus.KILLED
         inst.finished_at = datetime.now(timezone.utc).isoformat()
-        ctx.store.update_instance(inst)
+        ctx.store.update_instance(inst, critical=True)
         await ctx.messenger.send_text(ctx.channel_id, f"Killed {inst.display_id()}")
     else:
         await ctx.messenger.send_text(ctx.channel_id, "Process not found or already stopped.")
@@ -1382,7 +1388,7 @@ async def handle_callback(
         if killed:
             inst.status = InstanceStatus.KILLED
             inst.finished_at = datetime.now(timezone.utc).isoformat()
-            ctx.store.update_instance(inst)
+            ctx.store.update_instance(inst, critical=True)
             buttons = action_button_specs(inst)
             escaped = ctx.messenger.escape(inst.display_id())
             markup = f"Killed {escaped}"

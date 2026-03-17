@@ -156,81 +156,85 @@ async def auto_update_loop(
         first_check = False
 
         try:
-            # 1. Fetch
-            fetch = await asyncio.to_thread(
-                subprocess.run,
-                ["git", "fetch", "origin"],
-                cwd=str(config._PROJECT_ROOT),
-                capture_output=True, text=True, timeout=30,
-            )
-            if fetch.returncode != 0:
-                err = fetch.stderr.strip() or "unknown error"
-                if not failure_notified:
-                    log.warning("Auto-update: git fetch failed — %s", err)
-                    await notifier.broadcast(
-                        f"⚠️ Auto-update: git fetch failed — {err}",
-                    )
-                    failure_notified = True
-                continue
+            # Hold repo lock for the entire fetch-compare-pull sequence
+            # to prevent racing with worktree operations on the bot repo
+            repo_lock = runner._get_repo_lock(str(config._PROJECT_ROOT))
+            async with repo_lock:
+                # 1. Fetch
+                fetch = await asyncio.to_thread(
+                    subprocess.run,
+                    ["git", "fetch", "origin"],
+                    cwd=str(config._PROJECT_ROOT),
+                    capture_output=True, text=True, timeout=30,
+                )
+                if fetch.returncode != 0:
+                    err = fetch.stderr.strip() or "unknown error"
+                    if not failure_notified:
+                        log.warning("Auto-update: git fetch failed — %s", err)
+                        await notifier.broadcast(
+                            f"⚠️ Auto-update: git fetch failed — {err}",
+                        )
+                        failure_notified = True
+                    continue
 
-            # 2. Compare HEAD vs remote
-            local_head = await asyncio.to_thread(
-                subprocess.run,
-                ["git", "rev-parse", "HEAD"],
-                cwd=str(config._PROJECT_ROOT),
-                capture_output=True, text=True, timeout=10,
-            )
-            remote_head = await asyncio.to_thread(
-                subprocess.run,
-                ["git", "rev-parse", f"origin/{branch}"],
-                cwd=str(config._PROJECT_ROOT),
-                capture_output=True, text=True, timeout=10,
-            )
-            if local_head.returncode != 0 or remote_head.returncode != 0:
-                if not failure_notified:
-                    log.warning("Auto-update: git rev-parse failed (branch=%s)", branch)
-                    await notifier.broadcast(
-                        f"⚠️ Auto-update: can't resolve branch `{branch}` — check AUTO_UPDATE_BRANCH",
-                    )
-                    failure_notified = True
-                continue
-            local_sha = local_head.stdout.strip()
-            remote_sha = remote_head.stdout.strip()
+                # 2. Compare HEAD vs remote
+                local_head = await asyncio.to_thread(
+                    subprocess.run,
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=str(config._PROJECT_ROOT),
+                    capture_output=True, text=True, timeout=10,
+                )
+                remote_head = await asyncio.to_thread(
+                    subprocess.run,
+                    ["git", "rev-parse", f"origin/{branch}"],
+                    cwd=str(config._PROJECT_ROOT),
+                    capture_output=True, text=True, timeout=10,
+                )
+                if local_head.returncode != 0 or remote_head.returncode != 0:
+                    if not failure_notified:
+                        log.warning("Auto-update: git rev-parse failed (branch=%s)", branch)
+                        await notifier.broadcast(
+                            f"⚠️ Auto-update: can't resolve branch `{branch}` — check AUTO_UPDATE_BRANCH",
+                        )
+                        failure_notified = True
+                    continue
+                local_sha = local_head.stdout.strip()
+                remote_sha = remote_head.stdout.strip()
 
-            if local_sha == remote_sha:
-                if failure_notified:
-                    failure_notified = False  # reset on success
-                continue
+                if local_sha == remote_sha:
+                    if failure_notified:
+                        failure_notified = False  # reset on success
+                    continue
 
-            # 3. Get commit log for notification
-            log_result = await asyncio.to_thread(
-                subprocess.run,
-                ["git", "log", "--oneline", f"{local_sha}..{remote_sha}"],
-                cwd=str(config._PROJECT_ROOT),
-                capture_output=True, text=True, timeout=10,
-            )
-            commits = log_result.stdout.strip().splitlines()
-            n_commits = len(commits)
-            latest_msg = commits[0] if commits else "unknown"
+                # 3. Get commit log for notification
+                log_result = await asyncio.to_thread(
+                    subprocess.run,
+                    ["git", "log", "--oneline", f"{local_sha}..{remote_sha}"],
+                    cwd=str(config._PROJECT_ROOT),
+                    capture_output=True, text=True, timeout=10,
+                )
+                commits = log_result.stdout.strip().splitlines()
+                n_commits = len(commits)
+                latest_msg = commits[0] if commits else "unknown"
 
-            log.info("Auto-update: %d new commit(s) on origin/%s", n_commits, branch)
+                log.info("Auto-update: %d new commit(s) on origin/%s", n_commits, branch)
 
-            # 4. Pull (ff-only)
-            pull = await asyncio.to_thread(
-                subprocess.run,
-                ["git", "pull", "--ff-only", "origin", branch],
-                cwd=str(config._PROJECT_ROOT),
-                capture_output=True, text=True, timeout=30,
-            )
-            if pull.returncode != 0:
-                err = pull.stderr.strip() or "unknown error"
-                if not failure_notified:
-                    log.warning("Auto-update: git pull failed — %s", err)
-                    await notifier.broadcast(
-                        f"⚠️ Auto-update: pull failed — {err}. Manual intervention needed.",
-                    )
-                    failure_notified = True
-                continue
+                # 4. Pull (ff-only)
+                pull = await asyncio.to_thread(
+                    subprocess.run,
+                    ["git", "pull", "--ff-only", "origin", branch],
+                    cwd=str(config._PROJECT_ROOT),
+                    capture_output=True, text=True, timeout=30,
+                )
+                if pull.returncode != 0:
+                    err = pull.stderr.strip() or "unknown error"
+                    if not failure_notified:
+                        log.warning("Auto-update: git pull failed — %s", err)
+                        await notifier.broadcast(
+                            f"⚠️ Auto-update: pull failed — {err}. Manual intervention needed.",
+                        )
+                        failure_notified = True
+                    continue
 
             # 5. pip install (non-fatal)
             try:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -145,8 +146,13 @@ class StateStore:
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
                     json.dump(data, f, indent=2)
-                # On Windows, must remove target first
+                # Backup the current (last-known-good) file before replacing
                 if self._file.exists():
+                    backup = self._file.with_suffix(".bak")
+                    try:
+                        shutil.copy2(str(self._file), str(backup))
+                    except Exception:
+                        pass  # best-effort backup
                     self._file.unlink()
                 Path(tmp_path).rename(self._file)
                 self._update_mtime()
@@ -203,9 +209,12 @@ class StateStore:
         # Try by name
         return self.find_by_name(id_or_name)
 
-    def update_instance(self, inst: Instance) -> None:
+    def update_instance(self, inst: Instance, *, critical: bool = False) -> None:
         self._instances[inst.id] = inst
-        self.mark_dirty()
+        if critical:
+            self.save()
+        else:
+            self.mark_dirty()
 
     def find_by_name(self, name: str) -> Instance | None:
         name_lower = name.lower()

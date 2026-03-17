@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Concurrency & reliability hardening
+- Fix duplicate instance spawning: button callbacks now acquire the per-channel lock (matching text message serialization)
+- Add reboot drain guard: new prompts are blocked with a message while a reboot is pending, instead of being started and killed
+- Add pre-spawn session-active check: prevents spawning a second instance for a session that already has a running task
+- Immediate state.json save on critical status transitions (RUNNING, COMPLETED, FAILED, KILLED) — closes 60s crash window
+- Protect startup git cleanup and auto-update with per-repo locks to prevent racing with active worktree operations
+- Add state.json backup: last-known-good copy saved to `.bak` before each write
+
 ## v0.27.1 — Done Button for Plan States (2026-03-17)
 
 - Add Done button to plan-related completion states so threads with plans can be wrapped up without going back to a previous message
