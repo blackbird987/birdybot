@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.25.0 — Session History & Smart Recall (2026-03-17)
+
 - Add persistent session history log (`data/history.jsonl`) — completed/failed sessions recorded with topic, summary, cost, branch
 - Add `/history` slash command — browse recent sessions as clickable thread links, scoped to current repo
 - Inject recent session history into system prompt — enables smart recall ("check if the auth fix works") without needing IDs
