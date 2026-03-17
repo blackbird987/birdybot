@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.24.0 — Per-Repo Deferred Review Backlog (2026-03-17)
+
 - Add persistent per-repo deferred review storage in `data/deferred/{repo}.md` — Medium/Low items from plan reviews accumulate across sessions instead of being discarded
 - Add `/deferred` slash command to view or clear the backlog per repo
 - Inject prior deferred items into plan review prompts so they get triaged alongside new findings
