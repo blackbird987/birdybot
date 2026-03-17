@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.28.0 — Session Evaluation & Reporting (2026-03-17)
+
 ### Session evaluation & reporting
 - Add per-instance heuristic eval: narration compliance, tool hygiene (checks actual Bash commands), verbosity, claim grounding, efficiency
 - Add chain-level eval for autopilot workflows: tracks steps, cost, revision loops, outcome
