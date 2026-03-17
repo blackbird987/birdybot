@@ -193,6 +193,7 @@ class DiscordMessenger:
         metadata: dict | None = None,
         buttons: list[list[ButtonSpec]] | None = None,
         silent: bool = False,
+        mention_user_id: str | None = None,
     ) -> str:
         """Send a result as a structured embed with inline fields."""
         channel = await self._resolve_channel(channel_id)
@@ -236,7 +237,14 @@ class DiscordMessenger:
                         embed.add_field(name=k, value=str(v), inline=True)
 
         view = _buttons_to_view(buttons)
-        msg = await channel.send(embed=embed, view=view, silent=silent)
+        # Include @mention as content alongside the embed to ping the user.
+        # Force non-silent when mentioning so the notification actually fires.
+        mention_content = self.format_mention(mention_user_id) if mention_user_id else None
+        effective_silent = False if mention_content else silent
+        msg = await channel.send(
+            content=mention_content, embed=embed, view=view,
+            silent=effective_silent,
+        )
         return str(msg.id)
 
     @staticmethod
@@ -367,6 +375,9 @@ class DiscordMessenger:
 
     def escape(self, text: str) -> str:
         return discord_fmt.escape_discord(text)
+
+    def format_mention(self, user_id: str) -> str | None:
+        return f"<@{user_id}>"
 
     def chunk_message(self, text: str) -> list[str]:
         # Discord regular messages: 2000 char limit

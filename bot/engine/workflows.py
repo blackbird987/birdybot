@@ -19,6 +19,20 @@ from bot.platform.formatting import running_button_specs
 log = logging.getLogger(__name__)
 
 
+async def _notify_user(ctx: RequestContext, suffix: str = "") -> None:
+    """Send a @mention to notify the user that the chain needs attention."""
+    if not ctx.user_id:
+        return
+    mention = ctx.messenger.format_mention(ctx.user_id)
+    if not mention:
+        return
+    text = f"{mention} {suffix}" if suffix else mention
+    try:
+        await ctx.messenger.send_text(ctx.channel_id, text, silent=False)
+    except Exception:
+        log.debug("Failed to send chain completion mention", exc_info=True)
+
+
 @dataclass
 class SpawnConfig:
     instance_type: InstanceType
@@ -426,9 +440,9 @@ async def _run_autopilot_chain(
                 result = await on_done(ctx, current_id, current_msg)
 
             if not result or result.status != InstanceStatus.COMPLETED:
-                # Chain paused/failed — state already saved for resume
+                # Chain paused/failed — notify user, state already saved for resume
+                await _notify_user(ctx, "Needs your attention.")
                 return result
-
 
             # Guard: build produced no code changes — halt chain
             if step == "build" and result and not result.code_active:
@@ -442,6 +456,7 @@ async def _run_autopilot_chain(
                     await ctx.runner.discard_branch(result)
                     ctx.store.update_instance(result)
                 ctx.store.clear_autopilot_chain(session_id)
+                await _notify_user(ctx, "Build had no changes.")
                 return result
             current_id = result.id
             current_msg = _last_msg_id(result, ctx.platform)
@@ -471,6 +486,7 @@ async def _run_autopilot_chain(
                     f"⚠️ Auto-merge failed: {merge_msg}\nUse /merge to resolve.",
                     silent=True,
                 )
+                await _notify_user(ctx, "Merge failed — needs resolution.")
             else:
                 await ctx.messenger.send_text(
                     ctx.channel_id, f"✅ {merge_msg}", silent=True,

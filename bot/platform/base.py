@@ -77,6 +77,7 @@ class Messenger(Protocol):
         metadata: dict | None = None,
         buttons: list[list[ButtonSpec]] | None = None,
         silent: bool = False,
+        mention_user_id: str | None = None,
     ) -> str:
         """Send a result message. Returns message_id as string."""
         ...
@@ -110,6 +111,10 @@ class Messenger(Protocol):
     def chunk_message(self, text: str) -> list[str]:
         """Split text into platform-safe chunks."""
         ...
+
+    def format_mention(self, user_id: str) -> str | None:
+        """Format a user mention string. Returns None if not supported."""
+        return None
 
     async def close_conversation(self, channel_id: str) -> None:
         """Close/archive a conversation."""
