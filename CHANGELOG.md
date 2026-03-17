@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Add "answer from context" guidance to direct-message workflow — prevents Claude from reflexively using tools for conversational questions
+
 ## v0.23.2 — System Prompt Scoping (2026-03-17)
 
 - Add scope-awareness preamble to BOT_CONTEXT — Claude instances now know management bot instructions don't apply to target projects

@@ -248,7 +248,12 @@ Design for: mobile-first conciseness, maximum throughput, at-a-glance visibility
 WORKFLOW_GUIDANCE: dict[str, str] = {
     "direct": (
         "You're responding to a direct user message. Answer their question, "
-        "then they'll choose the next step via workflow buttons."
+        "then they'll choose the next step via workflow buttons.\n\n"
+        "IMPORTANT: If the message does not ask you to investigate, change, or "
+        "verify something in the codebase, answer directly from conversation "
+        "context without using tools. Opinions, follow-ups, confirmations, "
+        "explanations, and 'what about X?' messages do not need file reads or "
+        "commands — just reply."
     ),
     "plan": (
         "You're creating an implementation plan. Research thoroughly, do NOT implement. "
