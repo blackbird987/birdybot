@@ -26,6 +26,7 @@ from bot.platform.formatting import (
     stall_button_specs,
     strip_summary_block,
 )
+from bot.store import history as history_mod
 
 log = logging.getLogger(__name__)
 
@@ -219,6 +220,68 @@ def finalize_run(ctx: RequestContext, inst: Instance, result: RunResult) -> None
 
     if result.cost_usd:
         ctx.store.add_cost(result.cost_usd)
+
+    # Append to persistent session history log (best-effort)
+    _log_history(ctx, inst, result.result_text)
+
+
+# Origins that are internal auto-loop iterations — not useful in history
+_SKIP_HISTORY_ORIGINS = frozenset({
+    InstanceOrigin.REVIEW_PLAN,
+    InstanceOrigin.APPLY_REVISIONS,
+})
+
+
+def _log_history(
+    ctx: RequestContext, inst: Instance, result_text: str | None = None,
+) -> None:
+    """Append a session history entry for completed/failed instances.
+
+    Skips internal auto-loop origins (review_plan, apply_revisions) unless
+    they failed — failures are always logged.
+    """
+    if inst.status not in (InstanceStatus.COMPLETED, InstanceStatus.FAILED):
+        return
+    # Skip noisy intermediate steps (unless they failed)
+    if (inst.origin in _SKIP_HISTORY_ORIGINS
+            and inst.status != InstanceStatus.FAILED):
+        return
+
+    # Build summary: prefer error for failures, result text for successes
+    summary = ""
+    if inst.status == InstanceStatus.FAILED:
+        summary = (inst.error or "")[:300]
+    elif result_text:
+        # Redact secrets before persisting to history file
+        summary = redact_secrets(result_text.strip())[:300]
+
+    # For workflow steps (build, done, etc.), the prompt is a canned string.
+    # Traverse parent chain to find the root instance's prompt (the user's question).
+    topic = inst.prompt[:200] if inst.prompt else ""
+    if inst.origin != InstanceOrigin.DIRECT and inst.parent_id:
+        parent = ctx.store.get_instance(inst.parent_id)
+        for _ in range(10):  # max chain depth
+            if not parent or not parent.parent_id:
+                break
+            parent = ctx.store.get_instance(parent.parent_id)
+        if parent and parent.prompt:
+            topic = parent.prompt[:200]
+
+    entry = {
+        "id": inst.id,
+        "thread_id": ctx.channel_id,
+        "repo": inst.repo_name or "",
+        "topic": topic,
+        "status": inst.status.value,
+        "started": inst.created_at,
+        "finished": inst.finished_at,
+        "summary": summary,
+        "cost": f"${inst.cost_usd:.4f}" if inst.cost_usd else None,
+        "branch": inst.branch,
+        "mode": inst.mode,
+        "origin": inst.origin.value if inst.origin else "direct",
+    }
+    history_mod.append_entry(entry)
 
 
 def make_progress_callbacks(

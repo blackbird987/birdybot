@@ -567,6 +567,8 @@ class ClaudeBot(discord.Client):
 
                     if lookup:
                         proj, info = lookup
+                        # Track interacting user for close mentions
+                        info.user_ids.add(str(message.author.id))
                         session_id = info.session_id or None
                         repo_name = proj.repo_name if proj.repo_name != "_default" else None
                         origin = info.origin
