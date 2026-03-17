@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.26.0 — Completion Notifications & Sleep Timer Fix (2026-03-17)
+
 ### User notifications
 - Mention user (@ping) on final result when no autopilot chain is pending — works on embeds and text results
 - Mention user when autopilot chain pauses (needs input/failed), build produces no changes, or merge fails
