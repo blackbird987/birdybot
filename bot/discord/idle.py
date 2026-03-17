@@ -16,9 +16,34 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+def _channel_has_running_task(bot: ClaudeBot, channel_id: str) -> bool:
+    """Check if any instance is actively running for this channel's session."""
+    from bot.claude.types import InstanceStatus
+
+    lookup = bot._forums.thread_to_project(channel_id)
+    if not lookup:
+        return False
+    _, info = lookup
+    if not info.session_id:
+        return False
+    for inst in bot._store.list_instances():
+        if inst.session_id == info.session_id and inst.status == InstanceStatus.RUNNING:
+            return True
+    return False
+
+
 def schedule_sleep(bot: ClaudeBot, channel_id: str) -> None:
-    """Schedule 💤 after 5 min idle. Cancel any existing timer first."""
+    """Schedule 💤 after 5 min idle. Cancel any existing timer first.
+
+    Skips scheduling if an instance is actively running on this channel's
+    session — the timer will be rescheduled when the task finishes.
+    """
     cancel_sleep(bot, channel_id)
+
+    # Don't schedule sleep if a task is running on this channel's session
+    if _channel_has_running_task(bot, channel_id):
+        return
+
     gen = bot._sleep_gen.get(channel_id, 0) + 1
     bot._sleep_gen[channel_id] = gen
     loop = asyncio.get_running_loop()
@@ -41,6 +66,10 @@ async def _apply_sleep(bot: ClaudeBot, channel_id: str, gen: int) -> None:
     """Called by timer — set the thread to sleeping."""
     if bot._sleep_gen.get(channel_id) != gen:
         return  # Stale: timer was cancelled or rescheduled
+    # Double-check: don't sleep if a task is running on this channel
+    if _channel_has_running_task(bot, channel_id):
+        bot._idle_timers.pop(channel_id, None)
+        return
     bot._idle_timers.pop(channel_id, None)
     ch = bot.get_channel(int(channel_id))
     await set_thread_sleeping(bot, ch)

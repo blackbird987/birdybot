@@ -366,6 +366,14 @@ async def send_result(
     has_chain = bool(ctx.store.get_autopilot_chain(inst.session_id))
     buttons = action_button_specs(inst, has_autopilot_chain=has_chain)
 
+    # Mention user on final result embed (no pending chain steps).
+    # Skip mention for Done-without-branch: close_conversation will ping instead.
+    mention_uid = ctx.user_id if not has_chain else None
+    if (mention_uid
+            and inst.origin == InstanceOrigin.DONE
+            and not inst.branch):
+        mention_uid = None
+
     if result_text:
         result_text = redact_secrets(result_text)
 
@@ -407,19 +415,36 @@ async def send_result(
             msg_id = await ctx.messenger.send_result(
                 ctx.channel_id, markup, metadata=meta,
                 buttons=buttons, silent=silent,
+                mention_user_id=mention_uid,
             )
             inst.message_ids.setdefault(ctx.platform, []).append(msg_id)
 
         elif len(result_text) < 2000:
             markup = ctx.messenger.markdown_to_markup(result_text)
             chunks = ctx.messenger.chunk_message(markup)
+            # Prepend mention to first chunk so user gets pinged.
+            # Force non-silent only for the chunk carrying the mention.
+            mention = ctx.messenger.format_mention(mention_uid) if mention_uid else None
             for i, chunk in enumerate(chunks):
                 is_last = i == len(chunks) - 1
+                text = chunk
+                chunk_silent = silent
+                if mention and i == 0:
+                    combined = f"{mention}\n{chunk}"
+                    if len(combined) <= 2000:
+                        text = combined
+                        mention = None  # consumed
+                        chunk_silent = False
                 msg_id = await ctx.messenger.send_text(
-                    ctx.channel_id, chunk,
-                    buttons if is_last else None, silent,
+                    ctx.channel_id, text,
+                    buttons if is_last else None, chunk_silent,
                 )
                 inst.message_ids.setdefault(ctx.platform, []).append(msg_id)
+            # Mention didn't fit in chunk — send separately
+            if mention:
+                await ctx.messenger.send_text(
+                    ctx.channel_id, mention, silent=False,
+                )
 
         else:
             expand_buttons = action_button_specs(inst, show_expand=True)
@@ -428,6 +453,7 @@ async def send_result(
             msg_id = await ctx.messenger.send_result(
                 ctx.channel_id, markup, metadata=meta,
                 buttons=expand_buttons, silent=silent,
+                mention_user_id=mention_uid,
             )
             inst.message_ids.setdefault(ctx.platform, []).append(msg_id)
 

@@ -767,8 +767,6 @@ class ClaudeBot(discord.Client):
             finally:
                 self._name_editing.discard(thread_id)
 
-            self._schedule_sleep(thread_id)
-
             info.topic = title
             self._forums.save_forum_map()
             log.info("Smart title for thread %s: %s", thread_id, new_name)

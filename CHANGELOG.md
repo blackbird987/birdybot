@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### User notifications
+- Mention user (@ping) on final result when no autopilot chain is pending — works on embeds and text results
+- Mention user when autopilot chain pauses (needs input/failed), build produces no changes, or merge fails
+- Users can mute the forum channel and only get pinged when action is needed (@mentions bypass mute)
+
+### Sleep timer fixes
+- Fix race condition: remove `_schedule_sleep` from `_generate_smart_title` — background title rename could reset idle timer while a build was running, causing false Zzz
+- Guard `schedule_sleep` and `_apply_sleep` against running instances — won't schedule or apply sleep if the channel's session has a running task
+
 ## v0.25.0 — Session History & Smart Recall (2026-03-17)
 
 - Add persistent session history log (`data/history.jsonl`) — completed/failed sessions recorded with topic, summary, cost, branch
