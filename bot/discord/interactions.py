@@ -160,16 +160,39 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
     ctx = bot._ctx(channel_id, thread_info=t_info, access_result=btn_access)
     ctx.user_id = str(interaction.user.id)
     ctx.user_name = interaction.user.display_name
-    try:
-        await commands.handle_callback(ctx, action, instance_id, source_msg_id)
-    finally:
-        bot._forums.persist_ctx_settings(ctx)
-        if is_query:
-            asyncio.create_task(bot._try_apply_tags_after_run(channel_id))
-            bot._schedule_sleep(channel_id)
-            asyncio.create_task(bot._refresh_dashboard())
-        elif action.startswith("mode_"):
-            asyncio.create_task(bot._refresh_dashboard())
+
+    # Acquire channel lock for query actions to prevent concurrent spawns
+    # (matches the serialization in _run_query for text messages)
+    if is_query:
+        from bot.engine.commands import _get_channel_lock
+        lock = _get_channel_lock(channel_id)
+        queued_msg_id = None
+        if lock.locked():
+            queued_msg_id = await ctx.messenger.send_text(
+                ctx.channel_id,
+                "📋 Queued — waiting for current query to finish.",
+                silent=True,
+            )
+        async with lock:
+            if queued_msg_id:
+                try:
+                    await ctx.messenger.delete_message(ctx.channel_id, queued_msg_id)
+                except Exception:
+                    pass
+            try:
+                await commands.handle_callback(ctx, action, instance_id, source_msg_id)
+            finally:
+                bot._forums.persist_ctx_settings(ctx)
+                asyncio.create_task(bot._try_apply_tags_after_run(channel_id))
+                bot._schedule_sleep(channel_id)
+                asyncio.create_task(bot._refresh_dashboard())
+    else:
+        try:
+            await commands.handle_callback(ctx, action, instance_id, source_msg_id)
+        finally:
+            bot._forums.persist_ctx_settings(ctx)
+            if action.startswith("mode_"):
+                asyncio.create_task(bot._refresh_dashboard())
 
 
 # --- Individual handlers ---

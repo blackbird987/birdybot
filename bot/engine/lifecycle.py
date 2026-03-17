@@ -68,7 +68,7 @@ async def run_instance(
 ) -> None:
     """Run an instance with optional live progress via handle."""
     inst.status = InstanceStatus.RUNNING
-    ctx.store.update_instance(inst)
+    ctx.store.update_instance(inst, critical=True)
 
     on_progress = None
     on_stall = None
@@ -84,7 +84,7 @@ async def run_instance(
     start_time = asyncio.get_event_loop().time()
     result = None
     finalized = False
-    ctx.runner.begin_task(inst.id)
+    ctx.runner.begin_task(inst.id, session_id=inst.session_id)
     try:
         try:
             result = await ctx.runner.run(
@@ -143,7 +143,7 @@ async def run_instance(
             inst.status = InstanceStatus.FAILED
             inst.error = "Bot restarted — instance interrupted"
             inst.finished_at = datetime.now(timezone.utc).isoformat()
-            ctx.store.update_instance(inst)
+            ctx.store.update_instance(inst, critical=True)
         # Only overwrite thinking message if result wasn't delivered —
         # otherwise it already shows the correct completion status.
         if not delivered and handle:
@@ -217,7 +217,7 @@ def finalize_run(ctx: RequestContext, inst: Instance, result: RunResult) -> None
     else:
         inst.status = InstanceStatus.COMPLETED
 
-    ctx.store.update_instance(inst)
+    ctx.store.update_instance(inst, critical=True)
 
     if result.cost_usd:
         ctx.store.add_cost(result.cost_usd)

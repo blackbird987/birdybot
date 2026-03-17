@@ -48,8 +48,12 @@ class ClaudeRunner:
         # not just the subprocess.  Prevents reboot from slipping through
         # gaps between autopilot chain steps.
         self._active_tasks: set[str] = set()
+        self._active_sessions: dict[str, str] = {}  # session_id -> task_id
         self._idle_event = asyncio.Event()
         self._idle_event.set()  # starts idle
+
+        # Reboot draining: set when a reboot is queued to block new spawns
+        self._draining = False
 
         # Reboot coalescing: multiple instances can queue reboot requests,
         # but only one reboot executes after all tasks finish.
@@ -547,9 +551,11 @@ class ClaudeRunner:
 
     # --- Task-level tracking ---
 
-    def begin_task(self, instance_id: str) -> None:
+    def begin_task(self, instance_id: str, session_id: str | None = None) -> None:
         """Mark a high-level task (query/workflow chain) as active."""
         self._active_tasks.add(instance_id)
+        if session_id:
+            self._active_sessions[session_id] = instance_id
         self._idle_event.clear()
 
     def end_task(self, instance_id: str) -> None:
@@ -559,6 +565,10 @@ class ClaudeRunner:
         idle callback (exactly once) to execute the coalesced reboot.
         """
         self._active_tasks.discard(instance_id)
+        # Clean up session tracking
+        stale = [s for s, t in self._active_sessions.items() if t == instance_id]
+        for s in stale:
+            del self._active_sessions[s]
         if not self._active_tasks and not self._processes:
             self._idle_event.set()
             self._maybe_fire_idle_reboot()
@@ -583,6 +593,25 @@ class ClaudeRunner:
         """IDs of currently running instances."""
         return list(self._processes.keys())
 
+    @property
+    def is_draining(self) -> bool:
+        """Whether a reboot is pending and no new work should start."""
+        return self._draining
+
+    def is_session_active(self, session_id: str | None) -> bool:
+        """Check if a task is currently running for this session."""
+        if not session_id:
+            return False
+        return session_id in self._active_sessions
+
+    def check_spawn_allowed(self, session_id: str | None = None) -> str | None:
+        """Return an error message if spawning is blocked, or None if OK."""
+        if self._draining:
+            return "Reboot in progress — try again shortly."
+        if session_id and self.is_session_active(session_id):
+            return "Session is busy — please wait for the current task to finish."
+        return None
+
     async def wait_until_idle(self, timeout: float = 300) -> bool:
         """Wait until no tasks or processes are running."""
         try:
@@ -598,7 +627,9 @@ class ClaudeRunner:
 
         Safe to call from both task context (check_reboot_request — fires
         after end_task) and non-task context (on_reboot — fires immediately).
+        Sets draining flag to block new spawns while waiting for idle.
         """
+        self._draining = True
         self._reboot_requests.append(data)
         self._maybe_fire_idle_reboot()
 
@@ -607,8 +638,9 @@ class ClaudeRunner:
         return list(self._reboot_requests)
 
     def clear_reboots(self) -> None:
-        """Clear all pending reboot requests."""
+        """Clear all pending reboot requests and reset draining flag."""
         self._reboot_requests.clear()
+        self._draining = False
 
     def set_on_idle_reboot(self, callback: Callable[[], Awaitable[None]]) -> None:
         """Register async callback invoked when last task ends and reboots are pending.
@@ -1081,18 +1113,21 @@ class ClaudeRunner:
         """
         messages: list[str] = []
 
-        # 1. Fix repos stuck on claude-bot/* branches
+        # 1. Fix repos stuck on claude-bot/* branches (under repo lock)
         for name, path in repos.items():
             if not Path(path).is_dir():
                 continue
             try:
-                msg = await asyncio.to_thread(self._fix_repo_head, path)
+                repo_lock = self._get_repo_lock(path)
+                async with repo_lock:
+                    msg = await asyncio.to_thread(self._fix_repo_head, path)
                 if msg:
                     messages.append(f"{name}: {msg}")
             except Exception:
                 log.warning("Failed to fix HEAD for %s", name, exc_info=True)
 
         # 2. Merge completed done instances that still have branches
+        # (merge_branch already acquires repo lock internally)
         done_insts = [
             inst for inst in store.list_instances(all_=True)
             if inst.origin == InstanceOrigin.DONE
@@ -1111,14 +1146,16 @@ class ClaudeRunner:
             except Exception as e:
                 messages.append(f"merge {branch_name}: error ({e})")
 
-        # 3. Clean up remaining orphaned branches and worktrees
+        # 3. Clean up remaining orphaned branches and worktrees (under repo lock)
         for name, path in repos.items():
             if not Path(path).is_dir():
                 continue
             try:
-                cleaned = await asyncio.to_thread(
-                    self._cleanup_orphans_sync, store, path,
-                )
+                repo_lock = self._get_repo_lock(path)
+                async with repo_lock:
+                    cleaned = await asyncio.to_thread(
+                        self._cleanup_orphans_sync, store, path,
+                    )
                 messages.extend(f"{name}: {c}" for c in cleaned)
             except Exception:
                 log.warning("Orphan cleanup failed for %s", name, exc_info=True)

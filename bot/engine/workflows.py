@@ -129,6 +129,13 @@ async def spawn_from(
         await ctx.messenger.send_text(ctx.channel_id, "Instance not found.")
         return None
 
+    # Block spawns during reboot drain or if session already has a running task
+    check_session = source.session_id if cfg.resume_session else None
+    spawn_err = ctx.runner.check_spawn_allowed(check_session)
+    if spawn_err:
+        await ctx.messenger.send_text(ctx.channel_id, spawn_err)
+        return None
+
     # Budget guard (lazy import to avoid circular: commands -> workflows -> commands)
     from bot.engine.commands import check_budget
     if not check_budget(ctx):
@@ -512,6 +519,9 @@ async def _run_autopilot_chain(
     # Keep a chain-level task active so reboot waits for the entire chain,
     # not just individual steps (which have gaps between them).
     chain_task_id = f"chain:{source_id}"
+    # No session_id here — chain task is for reboot idle tracking only.
+    # Individual steps register their session via lifecycle.run_instance.
+    # Passing session_id would block spawn_from's check_spawn_allowed guard.
     ctx.runner.begin_task(chain_task_id)
     try:
         for step in steps:
