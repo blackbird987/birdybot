@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## v0.28.0 — LLM-Triaged Medium/Low Revisions (2026-03-17)
+## v0.28.1 — LLM-Triaged Medium/Low Revisions (2026-03-17)
 
 - Add LLM-triaged Medium/Low revision step to review loop — after Critical/High converge, the LLM evaluates deferred items and applies quick wins before build
 
