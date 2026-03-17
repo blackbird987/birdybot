@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.27.0 — Worktree Reliability Overhaul (2026-03-17)
+
 ### Worktree reliability overhaul
 - Add "merge" as a formal autopilot chain step — survives bot restarts (persisted in chain state), no longer runs as fragile post-loop code
 - Add `needs_input` guard to chain loop — prevents chain from proceeding when Claude asks a question mid-step
