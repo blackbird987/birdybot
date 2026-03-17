@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.23.2 — System Prompt Scoping (2026-03-17)
+
 - Add scope-awareness preamble to BOT_CONTEXT — Claude instances now know management bot instructions don't apply to target projects
 - Add bootstrap case to reboot instructions — handles first-boot scenario where reboot-watcher isn't loaded yet
 - Soften "NEVER kill" to allow process kill as last resort when user explicitly asks
