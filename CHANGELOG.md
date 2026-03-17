@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## v0.23.1 — Auto-Merge Fix (2026-03-17)
+
+- Use `git merge -X ours` strategy for auto-merge — resolves config/meta file conflicts automatically instead of failing on files outside a hardcoded allowlist
+- Remove `_try_auto_resolve_conflicts` method — no longer needed with `-X ours` strategy
+
 ## v0.23.0 — Setup Wizard (2026-03-17)
 
 - Add `scripts/setup.py` interactive setup wizard — automates new-device onboarding (token validation, invite URL, guild detection, intent reminders, auto-update config)
