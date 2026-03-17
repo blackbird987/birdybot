@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## v0.23.2 — System Prompt Scoping (2026-03-17)
+
+- Add scope-awareness preamble to BOT_CONTEXT — Claude instances now know management bot instructions don't apply to target projects
+- Add bootstrap case to reboot instructions — handles first-boot scenario where reboot-watcher isn't loaded yet
+- Soften "NEVER kill" to allow process kill as last resort when user explicitly asks
+- Add post-action verification rule to honesty constraint — no more claiming success from indirect evidence
+
 ## v0.23.1 — Auto-Merge Fix (2026-03-17)
 
 - Use `git merge -X ours` strategy for auto-merge — resolves config/meta file conflicts automatically instead of failing on files outside a hardcoded allowlist
