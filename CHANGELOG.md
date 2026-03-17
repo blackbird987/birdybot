@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Add Done button to plan-related completion states so threads with plans can be wrapped up without going back to a previous message
+
 ## v0.27.0 — Worktree Reliability Overhaul (2026-03-17)
 
 ### Worktree reliability overhaul
