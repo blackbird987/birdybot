@@ -22,7 +22,9 @@ from bot.claude.parser import (
     iter_tool_blocks,
     parse_stream_line,
 )
-from bot.claude.types import CODE_CHANGE_TOOLS, Instance, InstanceType
+from bot.claude.types import (
+    CODE_CHANGE_TOOLS, Instance, InstanceOrigin, InstanceStatus, InstanceType,
+)
 from bot.store import history as history_mod
 
 log = logging.getLogger(__name__)
@@ -927,18 +929,35 @@ class ClaudeRunner:
 
             # --- Cleanup (reached on successful merge) ---
 
-            # Remove worktree if it exists
+            # Remove worktree (--force handles uncommitted changes)
             if instance.worktree_path and Path(instance.worktree_path).exists():
-                subprocess.run(
-                    ["git", "worktree", "remove", instance.worktree_path],
+                r = subprocess.run(
+                    ["git", "worktree", "remove", instance.worktree_path, "--force"],
                     cwd=repo, capture_output=True, text=True, **_NOWND,
                 )
+                if r.returncode != 0:
+                    log.warning("git worktree remove failed for %s: %s",
+                                instance.worktree_path, r.stderr.strip())
+                    # Fallback: manual removal + prune
+                    try:
+                        shutil.rmtree(instance.worktree_path, ignore_errors=True)
+                        subprocess.run(
+                            ["git", "worktree", "prune"],
+                            cwd=repo, capture_output=True, text=True, **_NOWND,
+                        )
+                    except Exception:
+                        pass
 
-            # Delete branch
-            subprocess.run(
+            # Delete branch (-d safe after merge; -D fallback if -d fails)
+            r = subprocess.run(
                 ["git", "branch", "-d", instance.branch],
                 cwd=repo, capture_output=True, text=True, **_NOWND,
             )
+            if r.returncode != 0:
+                subprocess.run(
+                    ["git", "branch", "-D", instance.branch],
+                    cwd=repo, capture_output=True, text=True, **_NOWND,
+                )
 
             # Clean up worktree project dir
             self._cleanup_worktree_session_dir(instance)
@@ -1049,3 +1068,127 @@ class ClaudeRunner:
             if d.is_dir() and str(d) not in active_worktrees:
                 orphans.append(d.name)
         return orphans
+
+    # --- Startup cleanup ---
+
+    async def cleanup_stale_worktrees(
+        self, store, repos: dict[str, str],
+    ) -> list[str]:
+        """Merge pending done instances, fix repo HEADs, clean orphans.
+
+        Called on startup to recover from interrupted autopilot chains.
+        Returns a list of actions taken (for logging).
+        """
+        messages: list[str] = []
+
+        # 1. Fix repos stuck on claude-bot/* branches
+        for name, path in repos.items():
+            if not Path(path).is_dir():
+                continue
+            try:
+                msg = await asyncio.to_thread(self._fix_repo_head, path)
+                if msg:
+                    messages.append(f"{name}: {msg}")
+            except Exception:
+                log.warning("Failed to fix HEAD for %s", name, exc_info=True)
+
+        # 2. Merge completed done instances that still have branches
+        done_insts = [
+            inst for inst in store.list_instances(all_=True)
+            if inst.origin == InstanceOrigin.DONE
+            and inst.status == InstanceStatus.COMPLETED
+            and inst.branch and inst.original_branch
+            and inst.repo_path and Path(inst.repo_path).is_dir()
+        ]
+        for inst in done_insts:
+            branch_name = inst.branch
+            try:
+                msg = await self.merge_branch(inst)
+                store.update_instance(inst)
+                if "failed" not in msg.lower():
+                    self._clear_stale_branches_static(store, branch_name)
+                messages.append(f"merge {branch_name}: {msg}")
+            except Exception as e:
+                messages.append(f"merge {branch_name}: error ({e})")
+
+        # 3. Clean up remaining orphaned branches and worktrees
+        for name, path in repos.items():
+            if not Path(path).is_dir():
+                continue
+            try:
+                cleaned = await asyncio.to_thread(
+                    self._cleanup_orphans_sync, store, path,
+                )
+                messages.extend(f"{name}: {c}" for c in cleaned)
+            except Exception:
+                log.warning("Orphan cleanup failed for %s", name, exc_info=True)
+
+        return messages
+
+    def _fix_repo_head(self, repo_path: str) -> str | None:
+        """If repo HEAD is on a claude-bot/* branch, checkout default branch."""
+        r = subprocess.run(
+            ["git", "symbolic-ref", "--short", "HEAD"],
+            cwd=repo_path, capture_output=True, text=True, **_NOWND,
+        )
+        current = r.stdout.strip() if r.returncode == 0 else ""
+        if not current.startswith("claude-bot/"):
+            return None
+        target = self._get_default_branch(repo_path)
+        r = subprocess.run(
+            ["git", "checkout", target],
+            cwd=repo_path, capture_output=True, text=True, **_NOWND,
+        )
+        if r.returncode != 0:
+            log.warning("Failed to checkout %s in %s: %s",
+                        target, repo_path, r.stderr.strip())
+            return f"stuck on {current} (checkout {target} failed)"
+        return f"switched HEAD from {current} to {target}"
+
+    def _cleanup_orphans_sync(self, store, repo_path: str) -> list[str]:
+        """Remove orphaned branches and worktrees for a repo."""
+        cleaned: list[str] = []
+
+        # Collect branches still referenced by any instance
+        active_branches = {
+            inst.branch for inst in store.list_instances(all_=True)
+            if inst.branch
+        }
+
+        orphan_branches = self.scan_orphan_branches(repo_path, active_branches)
+        for branch in orphan_branches:
+            # Infer worktree dir from branch name (claude-bot/t-xxx → .worktrees/t-xxx)
+            wt_name = branch.split("/")[-1] if "/" in branch else branch
+            wt_dir = Path(repo_path) / ".worktrees" / wt_name
+            if wt_dir.exists():
+                r = subprocess.run(
+                    ["git", "worktree", "remove", str(wt_dir), "--force"],
+                    cwd=repo_path, capture_output=True, text=True, **_NOWND,
+                )
+                if r.returncode != 0:
+                    shutil.rmtree(str(wt_dir), ignore_errors=True)
+            subprocess.run(
+                ["git", "branch", "-D", branch],
+                cwd=repo_path, capture_output=True, text=True, **_NOWND,
+            )
+            cleaned.append(f"cleaned orphan {branch}")
+
+        # Prune any worktree registrations pointing to deleted directories
+        subprocess.run(
+            ["git", "worktree", "prune"],
+            cwd=repo_path, capture_output=True, text=True, **_NOWND,
+        )
+
+        return cleaned
+
+    @staticmethod
+    def _clear_stale_branches_static(store, branch_name: str) -> int:
+        """Clear branch/worktree_path on ALL instances sharing a branch name."""
+        count = 0
+        for inst in store.list_instances(all_=True):
+            if inst.branch == branch_name:
+                inst.branch = None
+                inst.worktree_path = None
+                store.update_instance(inst)
+                count += 1
+        return count

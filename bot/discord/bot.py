@@ -399,6 +399,25 @@ class ClaudeBot(discord.Client):
         # Refresh dashboard on startup
         asyncio.create_task(self._refresh_dashboard())
 
+        # Clean up stale worktrees/branches from interrupted autopilot chains
+        asyncio.create_task(self._startup_worktree_cleanup())
+
+    async def _startup_worktree_cleanup(self) -> None:
+        """Merge pending autopilot results and clean up orphaned worktrees."""
+        try:
+            repos = self._store.list_repos()
+            if not repos:
+                return
+            messages = await self._runner.cleanup_stale_worktrees(
+                self._store, repos,
+            )
+            for msg in messages:
+                log.info("Startup cleanup: %s", msg)
+            if messages:
+                log.info("Startup cleanup complete: %d actions", len(messages))
+        except Exception:
+            log.warning("Startup worktree cleanup failed", exc_info=True)
+
     def _in_scope(self, guild: discord.Guild | None, channel: discord.abc.GuildChannel | None = None) -> bool:
         """Check guild + channel is within our category."""
         if not guild or guild.id != self._guild_id:
