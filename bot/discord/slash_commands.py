@@ -20,6 +20,7 @@ from bot.discord.monitoring import monitor_setup
 from bot.engine import commands
 from bot.engine import sessions as sessions_mod
 from bot.platform.formatting import MODE_DISPLAY, VALID_MODES, format_age, mode_name
+from bot.store import history as history_mod
 
 if TYPE_CHECKING:
     from bot.discord.bot import ClaudeBot
@@ -304,6 +305,75 @@ def setup(bot: ClaudeBot) -> None:
                 await interaction.response.send_message(
                     "Pick a repo:", view=view, ephemeral=True,
                 )
+
+    @bot.tree.command(name="history", description="Recent completed sessions", guild=guild_obj)
+    @app_commands.describe(count="Number of entries (default 10, max 25)")
+    async def cmd_history(interaction: discord.Interaction, count: int = 10):
+        if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
+            await interaction.response.send_message("Unauthorized", ephemeral=True)
+            return
+        await interaction.response.defer()
+        count = max(1, min(count, 25))
+
+        # Resolve repo context from the current thread/forum
+        repo_name: str | None = None
+        channel_id = str(interaction.channel_id)
+        lookup = bot._forums.thread_to_project(channel_id)
+        if lookup:
+            repo_name = lookup[0].repo_name
+        elif isinstance(interaction.channel, discord.Thread):
+            parent = interaction.channel.parent
+            if parent and isinstance(parent, discord.ForumChannel):
+                proj = bot._forums.forum_by_channel_id(str(parent.id))
+                if proj:
+                    repo_name = proj.repo_name
+
+        entries = history_mod.load_recent(repo=repo_name, limit=count, dedupe_thread=True)
+        if not entries:
+            label = f" for **{repo_name}**" if repo_name else ""
+            await interaction.followup.send(f"No session history{label} yet.")
+            return
+
+        guild_id = bot._guild_id
+        lines: list[str] = []
+        for e in entries:
+            status = e.get("status", "?")
+            icon = "\u2705" if status == "completed" else "\u274c"
+            eid = e.get("id", "?")
+            topic = e.get("topic", "")[:50]
+            thread_id = e.get("thread_id", "")
+
+            # Relative age from finished timestamp
+            age = ""
+            finished = e.get("finished")
+            if finished:
+                try:
+                    from datetime import datetime, timezone
+                    dt = datetime.fromisoformat(finished)
+                    age = format_age(datetime.now(timezone.utc) - dt)
+                except Exception:
+                    pass
+
+            # Thread link if available
+            if thread_id:
+                link = f"[{eid}](https://discord.com/channels/{guild_id}/{thread_id})"
+            else:
+                link = f"`{eid}`"
+
+            line = f"{icon} {link} {topic}"
+            if age:
+                line += f"  *{age}*"
+            lines.append(line)
+
+        title = f"Recent Sessions"
+        if repo_name:
+            title += f" — {repo_name}"
+        embed = discord.Embed(
+            title=title,
+            description="\n".join(lines),
+            color=discord.Color.blue(),
+        )
+        await interaction.followup.send(embed=embed)
 
     @bot.tree.command(name="sync", description="Sync sessions from CLI", guild=guild_obj)
     @app_commands.describe(count="Number of sessions to sync (0 = this thread only)")

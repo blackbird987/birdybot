@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import discord
@@ -372,12 +373,30 @@ class DiscordMessenger:
         return discord_fmt.chunk_message(text, limit=2000)
 
     async def close_conversation(self, channel_id: str) -> None:
-        """Archive and lock a Discord forum thread."""
+        """Mention interacting users, then archive a Discord forum thread.
+
+        Does not lock — users can reopen by posting (Discord auto-unarchives).
+        """
         ch = await self._resolve_channel(channel_id)
         if not ch or not isinstance(ch, discord.Thread):
             return
+        if ch.archived:
+            return
         try:
-            await ch.edit(archived=True, locked=True)
-            log.info("Closed (archived+locked) thread %s", channel_id)
+            # Mention users who interacted with this thread
+            thread_info = self._bot._forums.thread_to_project(channel_id)
+            if thread_info:
+                _, info = thread_info
+                # Filter out the bot's own ID
+                bot_id = str(self._bot.user.id) if self._bot.user else None
+                user_ids = {uid for uid in info.user_ids if uid != bot_id}
+                if user_ids:
+                    mentions = " ".join(f"<@{uid}>" for uid in user_ids)
+                    await ch.send(f"Thread archived. {mentions}")
+                    # Wait for Discord to fanout the notification before archiving
+                    await asyncio.sleep(1.5)
+
+            await ch.edit(archived=True)
+            log.info("Closed (archived) thread %s", channel_id)
         except Exception:
             log.debug("Failed to close thread %s", channel_id, exc_info=True)

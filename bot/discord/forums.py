@@ -51,6 +51,8 @@ class ThreadInfo:
     # User who created this thread (None = owner)
     user_id: str | None = None
     user_name: str | None = None
+    # All users who interacted with this thread (for close mentions)
+    user_ids: set[str] = field(default_factory=set)
 
     def to_dict(self) -> dict:
         d = {
@@ -73,6 +75,8 @@ class ThreadInfo:
             d["user_id"] = self.user_id
         if self.user_name is not None:
             d["user_name"] = self.user_name
+        if self.user_ids:
+            d["user_ids"] = sorted(self.user_ids)
         return d
 
     @classmethod
@@ -90,6 +94,7 @@ class ThreadInfo:
             effort=data.get("effort"),
             user_id=data.get("user_id"),
             user_name=data.get("user_name"),
+            user_ids=set(data.get("user_ids", [])),
         )
 
 

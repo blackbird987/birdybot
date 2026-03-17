@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -22,6 +23,7 @@ from bot.claude.parser import (
     parse_stream_line,
 )
 from bot.claude.types import CODE_CHANGE_TOOLS, Instance, InstanceType
+from bot.store import history as history_mod
 
 log = logging.getLogger(__name__)
 
@@ -477,6 +479,46 @@ class ClaudeRunner:
                     "\nBash tool is disabled. Use Read, Grep, Glob for exploration."
                 )
             parts.append("\n".join(access_parts))
+
+        # Recent session history — enables smart recall of past work
+        if instance.repo_name:
+            recent = history_mod.load_recent(
+                repo=instance.repo_name, limit=20, dedupe_thread=True,
+            )
+            if recent:
+                lines = []
+                for e in recent:
+                    eid = e.get("id", "?")
+                    topic = e.get("topic", "")[:80]
+                    status = e.get("status", "?")
+                    finished = e.get("finished", "")
+                    branch = e.get("branch")
+                    summary = e.get("summary", "")[:120]
+
+                    age = ""
+                    if finished:
+                        try:
+                            dt = datetime.fromisoformat(finished)
+                            delta = datetime.now(timezone.utc) - dt
+                            if delta.days > 0:
+                                age = f"{delta.days}d ago"
+                            else:
+                                hours = delta.seconds // 3600
+                                age = f"{hours}h ago" if hours else f"{delta.seconds // 60}m ago"
+                        except Exception:
+                            pass
+
+                    line = f'- [{eid}] "{topic}" — {status} {age}'
+                    if branch:
+                        line += f" (branch: {branch})"
+                    if summary:
+                        line += f"\n  Summary: {summary}"
+                    lines.append(line)
+
+                parts.append(
+                    "\n\n--- Recent Sessions (this project) ---\n"
+                    + "\n".join(lines)
+                )
 
         # Sibling session awareness — helps Claude avoid file conflicts
         if sibling_context:
