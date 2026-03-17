@@ -558,3 +558,70 @@ class StateStore:
             return
         self._chain_deferred.pop(session_id, None)
         self.mark_dirty()
+
+    # --- Persistent Per-Repo Deferred Revisions ---
+
+    def append_deferred(
+        self, repo_name: str, items: list[str],
+        thread_id: str = "", topic: str = "",
+    ) -> None:
+        """Append deferred revision items to the repo's persistent backlog."""
+        if not repo_name or not items:
+            return
+        from bot.config import DEFERRED_DIR, safe_repo_slug
+        slug = safe_repo_slug(repo_name)
+        fpath = DEFERRED_DIR / f"{slug}.md"
+        date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        header = f"## {date}"
+        if thread_id:
+            header += f" — {thread_id}"
+        if topic:
+            header += f" ({topic})"
+        lines = [header]
+        for item in items:
+            lines.append(f"- {item}")
+        lines.append("")
+        block = "\n".join(lines)
+
+        if fpath.exists():
+            existing = fpath.read_text(encoding="utf-8")
+            fpath.write_text(existing + block, encoding="utf-8")
+        else:
+            preamble = f"# Deferred Revisions — {repo_name}\n\n"
+            fpath.write_text(preamble + block, encoding="utf-8")
+        log.info("Appended %d deferred items for repo %s", len(items), repo_name)
+
+    def get_deferred(self, repo_name: str) -> str:
+        """Get the full deferred revisions markdown for a repo."""
+        if not repo_name:
+            return ""
+        from bot.config import DEFERRED_DIR, safe_repo_slug
+        fpath = DEFERRED_DIR / f"{safe_repo_slug(repo_name)}.md"
+        if not fpath.exists():
+            return ""
+        return fpath.read_text(encoding="utf-8")
+
+    def get_deferred_items(self, repo_name: str) -> list[str]:
+        """Get just the bullet items from the deferred file."""
+        text = self.get_deferred(repo_name)
+        if not text:
+            return []
+        items = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("- "):
+                items.append(stripped[2:])
+        return items
+
+    def clear_deferred(self, repo_name: str) -> int:
+        """Remove all deferred items for a repo. Returns count removed."""
+        if not repo_name:
+            return 0
+        from bot.config import DEFERRED_DIR, safe_repo_slug
+        fpath = DEFERRED_DIR / f"{safe_repo_slug(repo_name)}.md"
+        if not fpath.exists():
+            return 0
+        items = self.get_deferred_items(repo_name)
+        fpath.unlink()
+        log.info("Cleared %d deferred items for repo %s", len(items), repo_name)
+        return len(items)

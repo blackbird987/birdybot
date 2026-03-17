@@ -464,6 +464,14 @@ def setup(bot: ClaudeBot) -> None:
         else:
             await interaction.followup.send(embed=embed)
 
+    @bot.tree.command(name="deferred", description="View/clear deferred review items", guild=guild_obj)
+    @app_commands.describe(args="[repo_name] | clear [repo_name]")
+    async def cmd_deferred(interaction: discord.Interaction, args: str = ""):
+        if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
+            await interaction.response.send_message("Unauthorized", ephemeral=True)
+            return
+        await bot._run_slash(interaction, lambda ctx: commands.on_deferred(ctx, args))
+
     # --- Monitor command group ---
     monitor_group = app_commands.Group(
         name="monitor", description="Live app monitoring dashboards", guild_ids=[bot._guild_id],
