@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Add LLM-triaged Medium/Low revision step to review loop — after Critical/High converge, the LLM evaluates deferred items and applies quick wins before build
+
 ## v0.27.1 — Done Button for Plan States (2026-03-17)
 
 - Add Done button to plan-related completion states so threads with plans can be wrapped up without going back to a previous message

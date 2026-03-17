@@ -50,6 +50,7 @@ class SpawnConfig:
 
 _REVIEW_STATUS_RE = re.compile(r'```review-status\s*\n(.*?)```', re.DOTALL)
 _HIGH_PRIO_RE = re.compile(r'(?:Critical|High)\s*[·|]', re.IGNORECASE)
+_TRIAGE_RESULT_RE = re.compile(r'```triage-result\s*\n(.*?)```', re.DOTALL)
 
 
 def _last_msg_id(inst: Instance, platform: str) -> str | None:
@@ -76,15 +77,15 @@ def _needs_revision(inst: Instance) -> bool:
     return bool(_HIGH_PRIO_RE.search(text))
 
 
-def _extract_deferred(inst: Instance) -> list[str]:
-    """Extract deferred revision items from review-status block."""
+def _parse_deferred_block(inst: Instance, pattern: re.Pattern[str]) -> list[str]:
+    """Parse DEFERRED items from a structured block matching *pattern*."""
     if not inst.result_file:
         return []
     try:
         text = Path(inst.result_file).read_text(encoding="utf-8")
     except Exception:
         return []
-    m = _REVIEW_STATUS_RE.search(text)
+    m = pattern.search(text)
     if not m:
         return []
     lines: list[str] = []
@@ -98,6 +99,16 @@ def _extract_deferred(inst: Instance) -> list[str]:
         elif stripped and not stripped.startswith("-"):
             in_deferred = False
     return lines
+
+
+def _extract_deferred(inst: Instance) -> list[str]:
+    """Extract deferred revision items from review-status block."""
+    return _parse_deferred_block(inst, _REVIEW_STATUS_RE)
+
+
+def _extract_triage_deferred(inst: Instance) -> list[str]:
+    """Extract still-deferred items after LLM triage."""
+    return _parse_deferred_block(inst, _TRIAGE_RESULT_RE)
 
 
 # --- Spawn ---
@@ -357,7 +368,50 @@ async def _review_plan_loop(
 
         # No Critical/High revisions — converged
         if not _needs_revision(review):
-            review.deferred_revisions = _extract_deferred(review)
+            deferred = _extract_deferred(review)
+
+            # LLM triage: let the model decide which Medium/Low to apply
+            if deferred:
+                deferred_text = "\n".join(f"- {d}" for d in deferred)
+                triage_prompt = config.TRIAGE_DEFERRED_PROMPT.format(
+                    deferred_items=deferred_text,
+                )
+                pre_triage_id = review.id
+                pre_triage_msg = _last_msg_id(review, ctx.platform)
+
+                triage_result = await spawn_from(ctx, review.id, SpawnConfig(
+                    instance_type=InstanceType.QUERY,
+                    prompt=triage_prompt,
+                    mode="explore",
+                    origin=InstanceOrigin.APPLY_REVISIONS,
+                    status_text="Triaging medium/low revisions...",
+                    resume_session=True,
+                ), source_msg_id=pre_triage_msg)
+
+                if (triage_result
+                        and triage_result.status == InstanceStatus.COMPLETED
+                        and not triage_result.needs_input):
+                    triage_result.deferred_revisions = _extract_triage_deferred(triage_result)
+                    ctx.store.update_instance(triage_result)
+                    return triage_result
+
+                # Triage needs user input — pause chain as normal
+                if triage_result and triage_result.needs_input:
+                    return triage_result
+
+                # Triage failed — log, notify, fall back to pre-triage review
+                log.warning(
+                    "Triage step failed (status=%s), falling back to pre-triage review",
+                    triage_result.status if triage_result else "None",
+                )
+                await ctx.messenger.send_text(
+                    ctx.channel_id,
+                    "\u26a0\ufe0f Medium/Low triage step failed \u2014 deferring all items.",
+                    silent=True,
+                )
+                review = ctx.store.get_instance(pre_triage_id) or review
+
+            review.deferred_revisions = deferred
             ctx.store.update_instance(review)
             return review
 
