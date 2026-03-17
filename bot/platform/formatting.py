@@ -283,6 +283,7 @@ def action_button_specs(
                     ButtonSpec("Autopilot", f"autopilot:{iid}"),
                     ButtonSpec("Review Plan", f"review_plan:{iid}"),
                     ButtonSpec("Build It", f"build:{iid}"),
+                    ButtonSpec("Done", f"done:{iid}"),
                 ])
         elif made_code_changes:
             # Edited/wrote files in-place (no branch)
@@ -305,6 +306,7 @@ def action_button_specs(
                 ButtonSpec("Autopilot", f"autopilot:{iid}"),
                 ButtonSpec("Review Plan", f"review_plan:{iid}"),
                 ButtonSpec("Build It", f"build:{iid}"),
+                ButtonSpec("Done", f"done:{iid}"),
             ])
         else:
             # Default buttons + workflow row when session exists
