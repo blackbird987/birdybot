@@ -1477,8 +1477,12 @@ async def handle_callback(
         if not inst:
             await ctx.messenger.send_text(ctx.channel_id, "Instance not found.")
             return
+        branch_name = inst.branch  # Save before merge clears it
         msg = await ctx.runner.merge_branch(inst)
         ctx.store.update_instance(inst)
+        # Clear stale branch refs on all sibling instances
+        if branch_name and "failed" not in msg.lower():
+            workflows.clear_stale_branches(ctx.store, branch_name)
         escaped = ctx.messenger.escape(msg)
         if source_msg_id:
             await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, escaped)
@@ -1496,8 +1500,12 @@ async def handle_callback(
         if not inst:
             await ctx.messenger.send_text(ctx.channel_id, "Instance not found.")
             return
+        branch_name = inst.branch  # Save before discard clears it
         msg = await ctx.runner.discard_branch(inst)
         ctx.store.update_instance(inst)
+        # Clear stale branch refs on all sibling instances
+        if branch_name:
+            workflows.clear_stale_branches(ctx.store, branch_name)
         escaped = ctx.messenger.escape(msg)
         if source_msg_id:
             await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, escaped)

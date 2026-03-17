@@ -306,8 +306,8 @@ async def on_done(ctx: RequestContext, source_id: str, source_msg_id: str | None
 
 # --- Autopilot chains ---
 
-_AUTOPILOT_STEPS = ["review_loop", "build", "review_code", "done"]
-_BUILD_AND_SHIP_STEPS = ["build", "review_code", "done"]
+_AUTOPILOT_STEPS = ["review_loop", "build", "review_code", "done", "merge"]
+_BUILD_AND_SHIP_STEPS = ["build", "review_code", "done", "merge"]
 
 
 async def _review_plan_loop(
@@ -386,6 +386,42 @@ async def _review_plan_loop(
     return last_review
 
 
+def _find_mergeable_instance(store, session_id: str | None) -> Instance | None:
+    """Find a completed done instance with a branch, for merge-step resume."""
+    if not session_id:
+        return None
+    # list_instances returns newest-first — first match is the most recent
+    all_insts = store.list_instances(all_=True)
+    # Prefer a done instance
+    for inst in all_insts:
+        if (inst.session_id == session_id
+                and inst.origin == InstanceOrigin.DONE
+                and inst.status == InstanceStatus.COMPLETED
+                and inst.branch and inst.original_branch):
+            return inst
+    # Fallback: any instance in the session with a branch
+    for inst in all_insts:
+        if (inst.session_id == session_id
+                and inst.branch and inst.original_branch):
+            return inst
+    return None
+
+
+def clear_stale_branches(store, branch_name: str) -> int:
+    """Clear branch/worktree_path on ALL instances sharing a branch name.
+
+    Returns the number of instances updated.
+    """
+    count = 0
+    for inst in store.list_instances(all_=True):
+        if inst.branch == branch_name:
+            inst.branch = None
+            inst.worktree_path = None
+            store.update_instance(inst)
+            count += 1
+    return count
+
+
 async def _run_autopilot_chain(
     ctx: RequestContext,
     source_id: str,
@@ -438,9 +474,43 @@ async def _run_autopilot_chain(
                 result = await on_review_code(ctx, current_id, current_msg)
             elif step == "done":
                 result = await on_done(ctx, current_id, current_msg)
+            elif step == "merge":
+                # Merge step: git operations only, no Claude instance.
+                # On resume after restart, result may be None — look up the
+                # done instance to merge.
+                merge_target = None
+                if result and result.branch and result.original_branch:
+                    merge_target = result
+                else:
+                    merge_target = _find_mergeable_instance(ctx.store, session_id)
 
-            if not result or result.status != InstanceStatus.COMPLETED:
-                # Chain paused/failed — notify user, state already saved for resume
+                if merge_target and merge_target.branch and merge_target.original_branch:
+                    branch_name = merge_target.branch
+                    merge_msg = await ctx.runner.merge_branch(merge_target)
+                    ctx.store.update_instance(merge_target)
+                    log.info("Autopilot auto-merge: %s", merge_msg)
+                    if "failed" not in merge_msg.lower():
+                        clear_stale_branches(ctx.store, branch_name)
+                        await ctx.messenger.send_text(
+                            ctx.channel_id, f"✅ {merge_msg}", silent=True,
+                        )
+                        try:
+                            await ctx.messenger.close_conversation(ctx.channel_id)
+                        except Exception:
+                            log.debug("Failed to close conversation after autopilot merge")
+                    else:
+                        await ctx.messenger.send_text(
+                            ctx.channel_id,
+                            f"⚠️ Auto-merge failed: {merge_msg}\nUse /merge to resolve.",
+                            silent=True,
+                        )
+                        await _notify_user(ctx, "Merge failed — needs resolution.")
+                # Break unconditionally — merge is always the final step.
+                # This avoids the status guard running on a non-Instance result.
+                break
+
+            if not result or result.status != InstanceStatus.COMPLETED or result.needs_input:
+                # Chain paused/failed/question — notify user, state saved for resume
                 await _notify_user(ctx, "Needs your attention.")
                 return result
 
@@ -474,28 +544,6 @@ async def _run_autopilot_chain(
                 result.repo_name, chain_deferred,
                 thread_id=result.id, topic=topic,
             )
-
-        # Auto-merge for autopilot: user chose fire-and-forget, merge back to default
-        if result and result.branch and result.original_branch:
-            merge_msg = await ctx.runner.merge_branch(result)
-            ctx.store.update_instance(result)
-            log.info("Autopilot auto-merge: %s", merge_msg)
-            if "failed" in merge_msg.lower():
-                await ctx.messenger.send_text(
-                    ctx.channel_id,
-                    f"⚠️ Auto-merge failed: {merge_msg}\nUse /merge to resolve.",
-                    silent=True,
-                )
-                await _notify_user(ctx, "Merge failed — needs resolution.")
-            else:
-                await ctx.messenger.send_text(
-                    ctx.channel_id, f"✅ {merge_msg}", silent=True,
-                )
-                # Close thread now that branch is resolved (Done deferred this)
-                try:
-                    await ctx.messenger.close_conversation(ctx.channel_id)
-                except Exception:
-                    log.debug("Failed to close conversation after autopilot merge")
 
         ctx.store.clear_autopilot_chain(session_id)
         ctx.store.clear_chain_deferred(session_id)
