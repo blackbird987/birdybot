@@ -308,11 +308,26 @@ async def _review_plan_loop(
     current_msg = source_msg_id
     last_review: Instance | None = None
 
+    # Build review prompt with prior deferred context
+    source = ctx.store.get_instance(source_id)
+    prior_deferred: list[str] = []
+    if source and source.repo_name:
+        prior_deferred = ctx.store.get_deferred_items(source.repo_name)
+
+    review_prompt = config.PLAN_REVIEW_PROMPT
+    if prior_deferred:
+        items_text = "\n".join(f"- {d}" for d in prior_deferred[:15])
+        review_prompt = (
+            "Previously deferred review items for this repo "
+            "(address if relevant to this plan):\n"
+            f"{items_text}\n\n{review_prompt}"
+        )
+
     for round_num in range(MAX_ROUNDS):
         status = "Reviewing plan..." if round_num == 0 else f"Re-reviewing plan (round {round_num + 1})..."
         review = await spawn_from(ctx, current_source, SpawnConfig(
             instance_type=InstanceType.QUERY,
-            prompt=config.PLAN_REVIEW_PROMPT,
+            prompt=review_prompt,
             mode="explore",
             origin=InstanceOrigin.REVIEW_PLAN,
             status_text=status,
@@ -435,6 +450,15 @@ async def _run_autopilot_chain(
         if result and chain_deferred and not result.deferred_revisions:
             result.deferred_revisions = chain_deferred
             ctx.store.update_instance(result)
+
+        # Persist deferred revisions to per-repo backlog
+        if chain_deferred and result and result.repo_name:
+            original = ctx.store.get_instance(source_id)
+            topic = original.prompt[:60] if original and original.prompt else ""
+            ctx.store.append_deferred(
+                result.repo_name, chain_deferred,
+                thread_id=result.id, topic=topic,
+            )
 
         # Auto-merge for autopilot: user chose fire-and-forget, merge back to default
         if result and result.branch and result.original_branch:

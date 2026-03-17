@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## v0.24.0 — Per-Repo Deferred Review Backlog (2026-03-17)
+
+- Add persistent per-repo deferred review storage in `data/deferred/{repo}.md` — Medium/Low items from plan reviews accumulate across sessions instead of being discarded
+- Add `/deferred` slash command to view or clear the backlog per repo
+- Inject prior deferred items into plan review prompts so they get triaged alongside new findings
+- Add `safe_repo_slug()` to sanitize repo names for filesystem safety (prevents path traversal)
+
 ## v0.23.3 — Context-First Replies (2026-03-17)
 
 - Add "answer from context" guidance to direct-message workflow — prevents Claude from reflexively using tools for conversational questions

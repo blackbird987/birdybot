@@ -1285,6 +1285,47 @@ async def on_session(ctx: RequestContext, text: str) -> None:
         )
 
 
+# --- /deferred ---
+
+async def on_deferred(ctx: RequestContext, args: str = "") -> None:
+    """Show or clear deferred revision items for a repo."""
+    parts = args.strip().split(None, 1)
+    subcmd = parts[0].lower() if parts else ""
+
+    if subcmd == "clear":
+        repo_name = parts[1] if len(parts) > 1 else None
+        if not repo_name:
+            repo_name, _ = ctx.store.get_active_repo()
+        if not repo_name:
+            await ctx.messenger.send_text(ctx.channel_id, "No active repo.")
+            return
+        count = ctx.store.clear_deferred(repo_name)
+        await ctx.messenger.send_text(
+            ctx.channel_id, f"Cleared {count} deferred item(s) for `{repo_name}`.",
+        )
+        return
+
+    # Default: show deferred items
+    repo_name = subcmd if subcmd else None
+    if not repo_name:
+        repo_name, _ = ctx.store.get_active_repo()
+    if not repo_name:
+        await ctx.messenger.send_text(ctx.channel_id, "No active repo.")
+        return
+
+    text = ctx.store.get_deferred(repo_name)
+    if not text:
+        await ctx.messenger.send_text(
+            ctx.channel_id, f"No deferred items for `{repo_name}`.",
+        )
+        return
+
+    if len(text) > 3800:
+        text = text[:3800] + "\n\n*(truncated)*"
+    markup = ctx.messenger.markdown_to_markup(text)
+    await ctx.messenger.send_text(ctx.channel_id, markup)
+
+
 # --- /help ---
 
 async def on_help(ctx: RequestContext) -> None:
@@ -1312,6 +1353,7 @@ async def on_help(ctx: RequestContext) -> None:
         "`/context` — pinned context\n"
         "`/alias` — command shortcuts\n"
         "`/schedule` — recurring tasks\n"
+        "`/deferred` — view/clear deferred review items\n"
         "`/repo` — repo management (add|remove|create|switch|list)\n"
         "`/session` — list/resume desktop CLI sessions\n"
         "`/budget` — budget info/reset\n"
