@@ -876,18 +876,14 @@ class ClaudeRunner:
                 cwd=repo, capture_output=True, text=True, check=True, **_NOWND,
             )
 
-            # Merge the worktree's branch (auto-resolve known conflicts on failure)
-            try:
-                subprocess.run(
-                    ["git", "merge", instance.branch, "--no-ff",
-                     "-m", f"Merge {instance.branch} ({instance.display_id()})"],
-                    cwd=repo, capture_output=True, text=True, check=True, **_NOWND,
-                )
-            except subprocess.CalledProcessError as merge_err:
-                if not self._try_auto_resolve_conflicts(repo, instance):
-                    raise merge_err
+            # Merge the worktree's branch (-X ours auto-resolves config conflicts)
+            subprocess.run(
+                ["git", "merge", instance.branch, "--no-ff", "-X", "ours",
+                 "-m", f"Merge {instance.branch} ({instance.display_id()})"],
+                cwd=repo, capture_output=True, text=True, check=True, **_NOWND,
+            )
 
-            # --- Cleanup (reached on successful merge or successful auto-resolve) ---
+            # --- Cleanup (reached on successful merge) ---
 
             # Remove worktree if it exists
             if instance.worktree_path and Path(instance.worktree_path).exists():
@@ -934,47 +930,6 @@ class ClaudeRunner:
                     log.warning(
                         "Skipping stash pop — working tree not clean in %s",
                         repo)
-
-    def _try_auto_resolve_conflicts(self, repo: str, instance: Instance) -> bool:
-        """Try to auto-resolve merge conflicts in known files (CHANGELOG, pyproject).
-
-        Returns True if all conflicts were resolved and committed.
-        """
-        _AUTO_RESOLVABLE = {"CHANGELOG.md", "pyproject.toml"}
-
-        conflict_r = subprocess.run(
-            ["git", "diff", "--name-only", "--diff-filter=U"],
-            cwd=repo, capture_output=True, text=True, **_NOWND,
-        )
-        conflict_files = [
-            f.strip() for f in conflict_r.stdout.strip().splitlines() if f.strip()
-        ]
-        if not conflict_files or not set(conflict_files) <= _AUTO_RESOLVABLE:
-            return False
-
-        try:
-            for f in conflict_files:
-                # pyproject.toml: --ours keeps master's version (latest released)
-                # CHANGELOG.md: --theirs as fallback if union driver didn't catch it
-                strategy = "--ours" if f == "pyproject.toml" else "--theirs"
-                subprocess.run(
-                    ["git", "checkout", strategy, f],
-                    cwd=repo, capture_output=True, text=True, check=True, **_NOWND,
-                )
-                subprocess.run(
-                    ["git", "add", f],
-                    cwd=repo, capture_output=True, text=True, check=True, **_NOWND,
-                )
-            subprocess.run(
-                ["git", "commit", "--no-edit"],
-                cwd=repo, capture_output=True, text=True, check=True, **_NOWND,
-            )
-            log.info("Auto-resolved merge conflicts in %s for %s",
-                     conflict_files, instance.branch)
-            return True
-        except subprocess.CalledProcessError:
-            log.warning("Auto-resolve failed for %s", conflict_files)
-            return False
 
     async def discard_branch(self, instance: Instance) -> str:
         """Delete worktree and branch without merging."""
