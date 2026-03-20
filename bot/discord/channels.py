@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 
 import discord
 
+from bot.engine.deploy import DeployState
 from bot.platform.formatting import MODE_COLOR, MODE_DISPLAY, mode_name
 
 log = logging.getLogger(__name__)
@@ -378,6 +379,8 @@ def build_control_embed(
     active_count: int = 0,
     recent_completed: int = 0,
     recent_failed: int = 0,
+    deploy_state: DeployState | None = None,
+    thread_ids: dict[str, str] | None = None,
 ) -> discord.Embed:
     """Build the embed for a repo control room post."""
     embed = discord.Embed(
@@ -397,6 +400,38 @@ def build_control_embed(
         status_parts.append(f"\u274c {recent_failed}")
     if status_parts:
         embed.add_field(name="Recent", value=" ".join(status_parts), inline=True)
+
+    # Deploy state section
+    if deploy_state and deploy_state.needs_reboot:
+        version_line = ""
+        if deploy_state.boot_version and deploy_state.current_version:
+            version_line = f"`{deploy_state.boot_version}` \u2192 `{deploy_state.current_version}`\n"
+
+        changes = deploy_state.pending_changes[:5]
+        change_lines = "\n".join(f"\u2022 {c}" for c in changes)
+        if len(deploy_state.pending_changes) > 5:
+            change_lines += f"\n\u2026 and {len(deploy_state.pending_changes) - 5} more"
+
+        session_links = ""
+        if deploy_state.pending_sessions and thread_ids:
+            links = [f"<#{thread_ids[s]}>" for s in deploy_state.pending_sessions
+                     if s in thread_ids]
+            if links:
+                session_links = "\n\U0001f4ce " + " \u00b7 ".join(links)
+
+        value = f"{version_line}{change_lines}{session_links}".strip()
+        if not value:
+            value = "Changes detected"
+        # Discord embed field value limit is 1024 chars
+        if len(value) > 1024:
+            value = value[:1021] + "..."
+
+        label = "\U0001f504 Reboot Required" if deploy_state.self_managed else "\U0001f504 Redeploy Required"
+        embed.add_field(name=label, value=value, inline=False)
+    elif deploy_state and not deploy_state.needs_reboot:
+        v = deploy_state.boot_version or "unknown"
+        embed.add_field(name="\u2705 Up to date", value=f"`{v}`", inline=True)
+
     return embed
 
 
@@ -404,6 +439,7 @@ def build_control_view(
     repo_name: str,
     current_mode: str = "explore",
     active_count: int = 0,
+    deploy_state: DeployState | None = None,
 ) -> discord.ui.View:
     """Build the button view for a repo control room post."""
     view = discord.ui.View(timeout=None)
@@ -442,12 +478,20 @@ def build_control_view(
         custom_id=f"sync_repo:{repo_name}",
         row=2,
     ))
-    # Row 3: Stop All (only when instances running) + Refresh
+    # Row 3: Stop All (only when instances running) + Reboot + Refresh
     if active_count > 0:
         view.add_item(discord.ui.Button(
             label=f"Stop All ({active_count})",
             style=discord.ButtonStyle.danger,
             custom_id=f"stop_all:{repo_name}",
+            row=3,
+        ))
+    if deploy_state and deploy_state.needs_reboot and deploy_state.self_managed:
+        view.add_item(discord.ui.Button(
+            label="Reboot",
+            style=discord.ButtonStyle.danger,
+            custom_id=f"reboot_repo:{repo_name}",
+            emoji="\U0001f504",
             row=3,
         ))
     view.add_item(discord.ui.Button(

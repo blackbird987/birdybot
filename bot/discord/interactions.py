@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import discord
@@ -115,6 +116,22 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
     # --- Resume latest session for a repo (control room button) ---
     if action == "resume_latest":
         await _handle_resume_latest(bot, interaction, instance_id)
+        return
+
+    # --- Reboot from control room (self-managed repo only) ---
+    if action == "reboot_repo":
+        if not btn_access.is_owner:
+            await interaction.followup.send("Owner only.", ephemeral=True)
+            return
+        import json as _json
+        reboot_data = {
+            "message": f"Reboot requested from control room ({instance_id})",
+            "resume_prompt": "Post-reboot: verify health, check deploy state cleared.",
+        }
+        Path("data/reboot_request.json").write_text(
+            _json.dumps(reboot_data), encoding="utf-8",
+        )
+        await interaction.followup.send("\U0001f504 Rebooting...", ephemeral=True)
         return
 
     # --- Refresh control room (repo or user) ---
@@ -330,7 +347,8 @@ async def _handle_control_mode(
         instances = bot._store.list_instances()
         active = sum(1 for inst in instances if inst.repo_name == cr_repo
                      and inst.status == InstanceStatus.RUNNING)
-        view = channels.build_control_view(cr_repo, current_mode=target_mode, active_count=active)
+        ds = bot._store.get_deploy_state(cr_repo)
+        view = channels.build_control_view(cr_repo, current_mode=target_mode, active_count=active, deploy_state=ds)
         await interaction.response.edit_message(embed=embed, view=view)
     else:
         await interaction.response.defer()
