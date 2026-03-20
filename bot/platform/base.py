@@ -116,6 +116,12 @@ class Messenger(Protocol):
         """Format a user mention string. Returns None if not supported."""
         return None
 
+    async def on_repo_added(self, repo_name: str) -> None:
+        """Called after a repo is registered. Platform can provision resources.
+
+        Default: no-op.
+        """
+
     async def on_deploy_state_changed(self, repo_name: str) -> None:
         """Called after deploy state is updated post-merge.
 

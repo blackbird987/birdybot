@@ -78,13 +78,125 @@ async def budget_warning(ctx: RequestContext) -> None:
         )
 
 
+# --- Natural language repo detection (Tier 1 — fast regex) ---
+
+_FAST_REPO_PATTERNS = [
+    # "add repo <name> <path>" / "register repo <name> <path>"
+    re.compile(
+        r"(?:add|register)\s+(?:a\s+)?(?:repo|repository|project)\s+"
+        r"['\"]?(\w[\w-]{2,31})['\"]?\s+(?:at\s+)?['\"]?"
+        r"([A-Za-z]:\\[^\s'\"]+|/[^\s'\"]+)['\"]?",
+        re.IGNORECASE,
+    ),
+    # "create repo <name>" / "create a new repo <name>" [+ optional path]
+    re.compile(
+        r"(?:create|init)\s+(?:a\s+)?(?:new\s+)?(?:repo|repository|project)\s+"
+        r"(?:called\s+|named\s+)?['\"]?(\w[\w-]{2,31})['\"]?"
+        r"(?:\s+(?:at\s+)?['\"]?([A-Za-z]:\\[^\s'\"]+|/[^\s'\"]+)['\"]?)?$",
+        re.IGNORECASE,
+    ),
+]
+
+
+async def _try_fast_repo_command(ctx: RequestContext, text: str) -> bool:
+    """Catch very explicit natural-language repo commands. Returns True if handled."""
+    stripped = text.strip()
+    for i, pat in enumerate(_FAST_REPO_PATTERNS):
+        m = pat.search(stripped)
+        if not m:
+            continue
+        if i == 0:  # add/register pattern
+            name, path = m.group(1), m.group(2)
+            await ctx.messenger.send_text(
+                ctx.channel_id, f"📂 Registering repo **{name}** at `{path}`…",
+            )
+            await on_repo(ctx, f"add {name} {path}")
+            return True
+        elif i == 1:  # create pattern
+            name = m.group(1)
+            path = m.group(2) or ""
+            await ctx.messenger.send_text(
+                ctx.channel_id, f"📂 Creating repo **{name}**…",
+            )
+            await on_repo(ctx, f"create {name} {path}".strip())
+            return True
+    return False
+
+
+# --- Natural language repo detection (Tier 2 — Claude-assisted BOT_CMD) ---
+
+_BOT_CMD_RE = re.compile(r'\[BOT_CMD:\s*/repo\s+(.+?)\]')
+_ALLOWED_BOT_CMD_ACTIONS = {"add", "create", "switch"}
+_DANGEROUS_PATH_CHARS = re.compile(r'[;&|`$(){}!<>]')
+_QUOTED_LINE_PREFIX = re.compile(r'^\s*(?:>|`|```|#{1,3}\s)')
+
+
+async def _execute_bot_commands(ctx: RequestContext, result_text: str) -> None:
+    """Scan final assistant output for [BOT_CMD: /repo ...] directives."""
+    if not result_text:
+        return
+    for m in _BOT_CMD_RE.finditer(result_text):
+        # Skip matches inside quoted/code content
+        line_start = result_text.rfind('\n', 0, m.start()) + 1
+        line_prefix = result_text[line_start:m.start()]
+        if _QUOTED_LINE_PREFIX.match(line_prefix):
+            log.debug("BOT_CMD skipped — inside quoted content")
+            continue
+
+        repo_args = m.group(1).strip()
+        action = repo_args.split()[0] if repo_args else ""
+        if action not in _ALLOWED_BOT_CMD_ACTIONS:
+            log.warning("BOT_CMD blocked — disallowed action: %s", action)
+            continue
+        if _DANGEROUS_PATH_CHARS.search(repo_args):
+            log.warning("BOT_CMD blocked — dangerous characters: %s", repo_args)
+            continue
+        # For add commands, validate the path exists
+        if action == "add":
+            parts = repo_args.split(None, 2)  # "add <name> <path>"
+            if len(parts) >= 3:
+                candidate = Path(parts[2].strip("\"'"))
+                if not candidate.is_dir():
+                    log.warning("BOT_CMD blocked — path not found: %s", parts[2])
+                    continue
+        try:
+            await ctx.messenger.send_text(
+                ctx.channel_id, f"⚡ Auto-executing: `/repo {repo_args}`",
+            )
+            await on_repo(ctx, repo_args)
+        except Exception:
+            log.warning("Failed to execute bot command: /repo %s", repo_args)
+
+
 # --- Query ---
 
 async def on_text(ctx: RequestContext, text: str) -> None:
     """Handle a plain text message — run as query."""
     if not text.strip():
         return
-    await _run_query(ctx, text)
+    # Check for natural-language repo commands (shares channel lock to prevent races)
+    lock = _get_channel_lock(ctx.channel_id)
+    queued_msg_id = None
+    if lock.locked():
+        queued_msg_id = await ctx.messenger.send_text(
+            ctx.channel_id,
+            "📋 Queued — waiting for current query to finish.",
+            silent=True,
+        )
+    async with lock:
+        if queued_msg_id:
+            try:
+                await ctx.messenger.delete_message(ctx.channel_id, queued_msg_id)
+            except Exception:
+                pass
+        if await _try_fast_repo_command(ctx, text):
+            return
+        # Double-checked locking: re-read session_id after acquiring lock
+        if not ctx.session_id and ctx.resolve_session_id is not None:
+            fresh = ctx.resolve_session_id()
+            if fresh:
+                ctx.session_id = fresh
+        await _execute_query(ctx, text)
 
 
 async def on_unknown_command(ctx: RequestContext, text: str) -> None:
@@ -286,6 +398,11 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
                 ctx.on_session_resolved(result.session_id)
 
         await lifecycle.send_result(ctx, inst, result.result_text)
+
+        # Tier 2: scan Claude's response for [BOT_CMD: /repo ...] directives
+        if result.result_text and not result.is_error:
+            await _execute_bot_commands(ctx, result.result_text)
+
         await budget_warning(ctx)
 
         # Check reboot request BEFORE end_task so it's queued when end_task
@@ -1102,6 +1219,7 @@ async def _create_repo(ctx: RequestContext, text: str) -> None:
             ctx.channel_id,
             f"'{name}' already a git repo — registered and switched: {repo_path}",
         )
+        await ctx.messenger.on_repo_added(name)
         return
 
     # --- Create directory + git init ---
@@ -1154,6 +1272,7 @@ async def _create_repo(ctx: RequestContext, text: str) -> None:
             msg += "\nGitHub push skipped: `gh` CLI not installed."
 
     await ctx.messenger.send_text(ctx.channel_id, msg)
+    await ctx.messenger.on_repo_added(name)
 
 
 async def on_repo(ctx: RequestContext, text: str) -> None:
@@ -1174,6 +1293,7 @@ async def on_repo(ctx: RequestContext, text: str) -> None:
             return
         ctx.store.add_repo(name, path)
         await ctx.messenger.send_text(ctx.channel_id, f"Repo '{name}' added: {path}")
+        await ctx.messenger.on_repo_added(name)
 
     elif text.startswith("create "):
         await _create_repo(ctx, text[7:].strip())
