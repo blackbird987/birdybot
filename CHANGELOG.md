@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Ignore messages in archive channels — bot no longer responds to text posted in `archive-*` channels
+
 ## v0.34.2 — Fix Control Room Reboot Button (2026-03-20)
 
 - Fix control room Reboot button not draining active tasks before requesting reboot (unlike /reboot which waited)

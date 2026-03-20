@@ -537,6 +537,10 @@ class ClaudeBot(discord.Client):
         log.info("Discord msg in #%s: %s", ch_name, text[:80])
 
         try:
+            # --- Archive channels: read-only, never respond ---
+            if message.channel.id in self._forums.archive_channel_ids:
+                return
+
             # --- Lobby: route to forum thread (owner only) ---
             if message.channel.id == self._lobby_channel_id:
                 if not msg_access.is_owner:
