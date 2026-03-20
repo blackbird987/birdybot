@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.42.0 — Bidirectional Sync Git (2026-03-20)
+
 - Sync Git button now does bidirectional sync: fetches + pulls (ff-only) from remote before pushing. Self-managed repos (the bot itself) skip pull and report "N commits behind — reboot to apply." Dirty worktree detected before pull with clear error message.
 
 ## v0.41.0 — Sync Git Button (2026-03-20)
