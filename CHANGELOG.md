@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.37.1 — Hide Autopilot Merge/Discard Buttons (2026-03-20)
+
 - Hide Merge/Discard buttons during autopilot (auto-merge handles it); manual `/bg` builds still show them
 
 ## v0.36.0 — Natural Language Repo Management (2026-03-20)
