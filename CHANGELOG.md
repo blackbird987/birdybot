@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- Auto-resolve merge conflicts during autopilot -- when parallel builds cause merge conflicts, the bot now automatically resolves them instead of halting the chain. Uses three-way merge-file for both-modified (UU) files to preserve both builds' changes, falls back to accepting feature branch version for remaining conflicts (AA, DU, AU, UA), and accepts deletions for UD/DD. Aborts cleanly if auto-resolve fails.
+
 ## v0.39.0 — Usage Plan Percentages & Instant /usage (2026-03-20)
 
 ### Usage Display Redesign

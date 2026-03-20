@@ -7,6 +7,7 @@ import logging
 import os
 import shutil
 import subprocess
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -988,11 +989,33 @@ class ClaudeRunner:
             )
 
             # Merge the worktree's branch (-X ours auto-resolves config conflicts)
-            subprocess.run(
+            merge_r = subprocess.run(
                 ["git", "merge", instance.branch, "--no-ff", "-X", "ours",
                  "-m", f"Merge {instance.branch} ({instance.display_id()})"],
-                cwd=repo, capture_output=True, text=True, check=True, **_NOWND,
+                cwd=repo, capture_output=True, text=True, **_NOWND,
             )
+
+            auto_resolved = 0
+            if merge_r.returncode != 0:
+                detail = (merge_r.stderr or merge_r.stdout or "").strip()
+                log.warning("Merge conflict for %s into %s: %s — attempting auto-resolve",
+                            instance.branch, target, detail)
+                try:
+                    auto_resolved = self._auto_resolve_merge_conflicts(
+                        repo, instance.branch, detail,
+                    )
+                except Exception:
+                    log.warning("Auto-resolve raised unexpected error for %s",
+                                instance.branch, exc_info=True)
+                    auto_resolved = -1
+                if auto_resolved < 0:
+                    subprocess.run(
+                        ["git", "merge", "--abort"],
+                        cwd=repo, capture_output=True, text=True, **_NOWND,
+                    )
+                    log.error("Merge failed for %s into %s in %s: %s",
+                              instance.branch, target, repo, detail)
+                    return f"Merge failed: {detail}"
 
             # --- Cleanup (reached on successful merge) ---
 
@@ -1031,7 +1054,10 @@ class ClaudeRunner:
 
             instance.branch = None
             instance.worktree_path = None
-            return f"Merged into {instance.original_branch}"
+            suffix = ""
+            if auto_resolved > 0:
+                suffix = f" (auto-resolved {auto_resolved} conflict{'s' if auto_resolved != 1 else ''})"
+            return f"Merged into {target}{suffix}"
         except subprocess.CalledProcessError as e:
             # Abort any in-progress merge to keep main repo clean for other sessions
             subprocess.run(
@@ -1058,6 +1084,166 @@ class ClaudeRunner:
                     log.warning(
                         "Skipping stash pop — working tree not clean in %s",
                         repo)
+
+    def _auto_resolve_merge_conflicts(
+        self, repo: str, branch: str, detail: str,
+    ) -> int:
+        """Auto-resolve merge conflicts by preferring the feature branch.
+
+        Called when a merge is in-progress with unresolved conflicts.
+        For UU (both-modified) files, attempts a three-way merge-file first
+        to preserve both sides' changes. Falls back to --theirs for remaining
+        conflicts. Returns number of resolved files, or -1 on failure.
+        """
+        status_r = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=repo, capture_output=True, text=True, **_NOWND,
+        )
+
+        conflicts: list[tuple[str, str]] = []
+        for line in status_r.stdout.splitlines():
+            if len(line) < 3:
+                continue
+            code = line[:2]
+            filepath = line[3:]
+            if code in ("UU", "AA", "DU", "UD", "DD", "AU", "UA"):
+                conflicts.append((code, filepath))
+
+        if not conflicts:
+            log.warning("Merge failed but no conflicted files for %s: %s",
+                        branch, detail)
+            return -1
+
+        log.info("Auto-resolving %d conflict(s) for %s: %s",
+                 len(conflicts), branch,
+                 ", ".join(f"{c}:{f}" for c, f in conflicts))
+
+        for code, filepath in conflicts:
+            if code in ("UD", "DD"):
+                # Feature branch deleted — accept deletion
+                r = subprocess.run(
+                    ["git", "rm", "--", filepath],
+                    cwd=repo, capture_output=True, text=True, **_NOWND,
+                )
+                if r.returncode != 0:
+                    log.warning("git rm failed for %s: %s",
+                                filepath, r.stderr.strip())
+                    return -1
+            elif code == "UU":
+                # Both modified — try three-way merge-file to keep both sides
+                if not self._try_merge_file(repo, filepath):
+                    # Fallback: accept feature branch version
+                    if not self._checkout_theirs(repo, filepath):
+                        return -1
+            else:
+                # AA, AU, UA, DU — accept feature branch version
+                if not self._checkout_theirs(repo, filepath):
+                    return -1
+
+        commit_r = subprocess.run(
+            ["git", "commit", "--no-edit"],
+            cwd=repo, capture_output=True, text=True, **_NOWND,
+        )
+        if commit_r.returncode != 0:
+            log.warning("Failed to commit auto-resolved merge for %s: %s",
+                        branch, commit_r.stderr.strip())
+            return -1
+
+        log.info("Auto-resolved merge for %s completed successfully", branch)
+        return len(conflicts)
+
+    def _try_merge_file(self, repo: str, filepath: str) -> bool:
+        """Attempt three-way merge-file for a UU conflict.
+
+        Extracts base/ours/theirs from index stages, runs git merge-file,
+        and writes the result back if successful. Returns True on success.
+        """
+        tmp_base = tmp_ours = tmp_theirs = None
+        try:
+            # Extract the three stages into temp files (Windows-safe)
+            tmp_base = tempfile.NamedTemporaryFile(
+                delete=False, suffix=".base", prefix="merge_")
+            tmp_ours = tempfile.NamedTemporaryFile(
+                delete=False, suffix=".ours", prefix="merge_")
+            tmp_theirs = tempfile.NamedTemporaryFile(
+                delete=False, suffix=".theirs", prefix="merge_")
+            # Close handles before git writes to them (Windows requirement)
+            tmp_base.close()
+            tmp_ours.close()
+            tmp_theirs.close()
+
+            stages = [
+                (":1:" + filepath, tmp_base.name),   # base
+                (":2:" + filepath, tmp_ours.name),    # ours
+                (":3:" + filepath, tmp_theirs.name),  # theirs
+            ]
+            for ref, dest in stages:
+                r = subprocess.run(
+                    ["git", "show", ref],
+                    cwd=repo, capture_output=True, **_NOWND,
+                )
+                if r.returncode != 0:
+                    log.debug("Could not extract %s for merge-file", ref)
+                    return False
+                Path(dest).write_bytes(r.stdout)
+
+            # Run merge-file: exit 0 = clean, 1 = conflicts, <0 = error
+            mf = subprocess.run(
+                ["git", "merge-file", "-p",
+                 tmp_ours.name, tmp_base.name, tmp_theirs.name],
+                capture_output=True, **_NOWND,
+            )
+
+            if mf.returncode < 0:
+                # Signal/error — output is garbage
+                log.debug("merge-file crashed for %s (rc=%d)", filepath, mf.returncode)
+                return False
+
+            if mf.returncode == 0:
+                # Clean merge — write result back
+                target = Path(repo) / filepath
+                target.write_bytes(mf.stdout)
+                subprocess.run(
+                    ["git", "add", "--", filepath],
+                    cwd=repo, capture_output=True, text=True, **_NOWND,
+                )
+                log.info("merge-file resolved %s cleanly", filepath)
+                return True
+
+            # returncode 1 = still has conflicts, fall back to --theirs
+            log.debug("merge-file had remaining conflicts for %s, falling back", filepath)
+            return False
+
+        except Exception:
+            log.debug("merge-file failed for %s", filepath, exc_info=True)
+            return False
+        finally:
+            for tmp in (tmp_base, tmp_ours, tmp_theirs):
+                if tmp is not None:
+                    try:
+                        os.unlink(tmp.name)
+                    except OSError:
+                        pass
+
+    def _checkout_theirs(self, repo: str, filepath: str) -> bool:
+        """Resolve a conflict by accepting the feature branch version."""
+        r1 = subprocess.run(
+            ["git", "checkout", "--theirs", "--", filepath],
+            cwd=repo, capture_output=True, text=True, **_NOWND,
+        )
+        if r1.returncode != 0:
+            log.warning("checkout --theirs failed for %s: %s",
+                        filepath, r1.stderr.strip())
+            return False
+        r2 = subprocess.run(
+            ["git", "add", "--", filepath],
+            cwd=repo, capture_output=True, text=True, **_NOWND,
+        )
+        if r2.returncode != 0:
+            log.warning("git add failed for %s: %s",
+                        filepath, r2.stderr.strip())
+            return False
+        return True
 
     async def discard_branch(self, instance: Instance) -> str:
         """Delete worktree and branch without merging."""
