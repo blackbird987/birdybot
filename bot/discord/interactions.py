@@ -42,11 +42,6 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
 
     custom_id = interaction.data.get("custom_id", "") if interaction.data else ""
 
-    # --- Voice transcription confirm/cancel ---
-    if custom_id.startswith("voice_send:") or custom_id.startswith("voice_cancel:"):
-        await _handle_voice_confirm(bot, interaction, custom_id, btn_access)
-        return
-
     # --- Select menu: repo switch (owner only) ---
     if custom_id == "repo_switch_select":
         await _handle_repo_switch(bot, interaction, btn_access)
@@ -213,83 +208,6 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
 
 
 # --- Individual handlers ---
-
-
-async def _handle_voice_confirm(
-    bot: ClaudeBot, interaction: discord.Interaction,
-    custom_id: str, btn_access: AccessResult,
-) -> None:
-    confirm_msg_id = str(interaction.message.id) if interaction.message else None
-    pending = bot._pending_voice.get(confirm_msg_id) if confirm_msg_id else None
-    if not pending:
-        await interaction.response.edit_message(
-            content="This transcription has expired.", embed=None, view=None,
-        )
-        return
-
-    if str(interaction.user.id) != pending["author_id"]:
-        await interaction.response.send_message(
-            "Only the person who sent the voice message can do this.",
-            ephemeral=True,
-        )
-        return
-
-    if custom_id.startswith("voice_cancel:"):
-        bot._pending_voice.pop(confirm_msg_id, None)
-        await interaction.response.edit_message(
-            content="Voice message cancelled.", embed=None, view=None,
-        )
-        return
-
-    # voice_send — run transcription as a normal message
-    transcription = pending["transcription"]
-    channel_id = str(interaction.channel_id)
-    bot._pending_voice.pop(confirm_msg_id, None)
-
-    if interaction.message and interaction.message.embeds:
-        embed = interaction.message.embeds[0]
-        embed.color = discord.Color.green()
-        embed.set_footer(text="Sent")
-        await interaction.response.edit_message(embed=embed, view=None)
-    else:
-        await interaction.response.edit_message(
-            content=f"Sending: {transcription[:100]}...", view=None,
-        )
-
-    # Feed transcription through the normal message handling pipeline
-    channel = interaction.channel
-    if isinstance(channel, discord.Thread):
-        parent = channel.parent
-        if parent and isinstance(parent, discord.ForumChannel):
-            lookup = bot._forums.thread_to_project(channel_id)
-            if lookup:
-                proj, info = lookup
-                session_id = info.session_id or None
-                repo_name = proj.repo_name if proj.repo_name != "_default" else None
-                bot._cancel_sleep(channel_id)
-                asyncio.create_task(bot._clear_thread_sleeping(channel))
-                asyncio.create_task(bot._set_thread_active_tag(channel, True))
-                asyncio.create_task(bot._refresh_dashboard())
-                ctx = bot._ctx(channel_id, session_id=session_id,
-                               repo_name=repo_name, thread_info=info,
-                               access_result=btn_access)
-                ctx.user_id = str(interaction.user.id)
-                ctx.user_name = interaction.user.display_name
-                bot._forums.attach_session_callbacks(ctx, info, channel_id)
-                try:
-                    await commands.on_text(ctx, transcription)
-                finally:
-                    bot._forums.persist_ctx_settings(ctx)
-                    asyncio.create_task(bot._try_apply_tags_after_run(channel_id))
-                    bot._schedule_sleep(channel_id)
-                    asyncio.create_task(bot._refresh_dashboard())
-                return
-
-    # Fallback: unmapped channel
-    ctx = bot._ctx(channel_id, access_result=btn_access)
-    ctx.user_id = str(interaction.user.id)
-    ctx.user_name = interaction.user.display_name
-    await commands.on_text(ctx, transcription)
 
 
 async def _handle_repo_switch(
