@@ -325,10 +325,13 @@ def action_button_specs(
         rows.append([ButtonSpec("Kill", f"kill:{iid}")])
 
     elif instance.status == InstanceStatus.FAILED:
-        rows.append([
-            ButtonSpec("Retry", f"retry:{iid}"),
-            ButtonSpec("Log", f"log:{iid}"),
-        ])
+        if instance.cooldown_retry_at:
+            rows.append([ButtonSpec("Cancel Auto-Retry", f"cancel_cooldown:{iid}")])
+        else:
+            rows.append([
+                ButtonSpec("Retry", f"retry:{iid}"),
+                ButtonSpec("Log", f"log:{iid}"),
+            ])
 
     elif instance.status == InstanceStatus.KILLED:
         rows.append([ButtonSpec("Retry", f"retry:{iid}")])

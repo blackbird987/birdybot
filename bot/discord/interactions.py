@@ -129,6 +129,24 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
         await interaction.followup.send("Refreshed.", ephemeral=True)
         return
 
+    # --- Cancel cooldown auto-retry (lightweight, no channel lock needed) ---
+    if action == "cancel_cooldown":
+        inst = bot._store.get_instance(instance_id)
+        if inst and inst.cooldown_retry_at:
+            inst.cooldown_retry_at = None
+            inst.cooldown_channel_id = None
+            bot._store.update_instance(inst)
+            # Edit the cooldown message in-place, removing the button
+            try:
+                await interaction.message.edit(
+                    content="Auto-retry cancelled.", view=None,
+                )
+            except Exception:
+                await interaction.followup.send("Auto-retry cancelled.")
+        else:
+            await interaction.followup.send("No pending auto-retry.", ephemeral=True)
+        return
+
     # --- Stop all running instances for a repo (owner-only) ---
     if action == "stop_all":
         await _handle_stop_all(bot, interaction, instance_id, btn_access)

@@ -13,7 +13,7 @@ from bot.claude.types import (
     CODE_CHANGE_TOOLS, PLAN_ORIGINS, Instance, InstanceOrigin, InstanceStatus,
     RunResult,
 )
-from bot.platform.base import MessageHandle, RequestContext
+from bot.platform.base import ButtonSpec, MessageHandle, RequestContext
 from bot.platform.formatting import (
     action_button_specs,
     format_duration,
@@ -29,6 +29,23 @@ from bot.platform.formatting import (
 from bot.store import history as history_mod
 
 log = logging.getLogger(__name__)
+
+MAX_COOLDOWN_RETRIES = 3
+
+
+def _format_reset_time(reset_utc: datetime) -> str:
+    """Format a UTC reset time for display (Europe/Amsterdam local time)."""
+    try:
+        import zoneinfo
+        tz = zoneinfo.ZoneInfo("Europe/Amsterdam")
+        local = reset_utc.astimezone(tz)
+        hour = local.hour % 12 or 12
+        minute = local.strftime("%M")
+        ampm = "AM" if local.hour < 12 else "PM"
+        return f"{hour}:{minute} {ampm}"
+    except Exception:
+        return reset_utc.strftime("%H:%M UTC")
+
 
 # Labels that don't auto-derive well from InstanceOrigin.value
 _ORIGIN_LABEL_OVERRIDES: dict[InstanceOrigin, str] = {
@@ -116,6 +133,28 @@ async def run_instance(
 
         finalize_run(ctx, inst, result)
         finalized = True
+
+        # Usage limit: schedule auto-retry instead of showing normal failure
+        if result.usage_limit_reset and inst.cooldown_retries < MAX_COOLDOWN_RETRIES:
+            inst.cooldown_retry_at = result.usage_limit_reset.isoformat()
+            inst.cooldown_retries += 1
+            inst.cooldown_channel_id = ctx.channel_id
+            ctx.store.update_instance(inst, critical=True)
+
+            reset_str = _format_reset_time(result.usage_limit_reset)
+            msg = (
+                f"⏳ Usage limit hit — auto-retrying at {reset_str}"
+                f" (attempt {inst.cooldown_retries}/{MAX_COOLDOWN_RETRIES})"
+            )
+            buttons = [[ButtonSpec("Cancel Auto-Retry", f"cancel_cooldown:{inst.id}")]]
+            try:
+                await ctx.messenger.send_text(
+                    ctx.channel_id, msg, buttons=buttons, silent=silent,
+                )
+            except Exception:
+                log.exception("Failed to send cooldown message for %s", inst.id)
+            return  # Timer loop in app.py picks this up
+
         await send_result(ctx, inst, result.result_text, silent=silent)
 
         # Check reboot request BEFORE end_task so it's queued when end_task

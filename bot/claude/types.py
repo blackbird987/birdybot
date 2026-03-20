@@ -101,6 +101,9 @@ class Instance:
     is_owner_session: bool = True     # False for granted user sessions
     bash_policy: str = "full"         # "full", "allowlist", "none" — for non-owner explore mode
     effort: str = "high"             # reasoning effort: low/medium/high/max
+    cooldown_retry_at: str | None = None   # ISO datetime — auto-retry after usage limit
+    cooldown_retries: int = 0              # Count of cooldown retries attempted (capped at 3)
+    cooldown_channel_id: str | None = None # Channel to retry in (for cooldown loop)
 
     def display_id(self) -> str:
         if self.name:
@@ -150,6 +153,9 @@ class Instance:
             "is_owner_session": self.is_owner_session,
             "bash_policy": self.bash_policy,
             "effort": self.effort,
+            "cooldown_retry_at": self.cooldown_retry_at,
+            "cooldown_retries": self.cooldown_retries,
+            "cooldown_channel_id": self.cooldown_channel_id,
         }
 
     @classmethod
@@ -196,6 +202,9 @@ class Instance:
             is_owner_session=d.get("is_owner_session", True),
             bash_policy=d.get("bash_policy", "full"),
             effort=d.get("effort", "high"),
+            cooldown_retry_at=d.get("cooldown_retry_at"),
+            cooldown_retries=d.get("cooldown_retries", 0),
+            cooldown_channel_id=d.get("cooldown_channel_id"),
         )
 
 
@@ -214,6 +223,7 @@ class RunResult:
     input_tokens: int = 0
     output_tokens: int = 0
     needs_input: bool = False  # AskUserQuestion detected — waiting for user reply
+    usage_limit_reset: object = None  # datetime | None — when usage limit resets (set by parser)
 
 
 @dataclass

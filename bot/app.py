@@ -483,6 +483,32 @@ async def run() -> None:
             except Exception:
                 log.exception("Failed to send daily digest")
 
+    # Cooldown retry loop — auto-retries instances that hit usage limits
+    _cooldown_retrying: set[str] = set()
+
+    async def cooldown_loop():
+        from datetime import datetime as dt, timezone as tz_mod
+        while True:
+            await asyncio.sleep(60)
+            try:
+                now = dt.now(tz_mod.utc)
+                for inst in store.list_instances(all_=True):
+                    if not inst.cooldown_retry_at or not inst.cooldown_channel_id:
+                        continue
+                    if inst.id in _cooldown_retrying:
+                        continue
+                    try:
+                        retry_at = dt.fromisoformat(inst.cooldown_retry_at)
+                    except (ValueError, TypeError):
+                        continue
+                    if now >= retry_at:
+                        _cooldown_retrying.add(inst.id)
+                        asyncio.create_task(
+                            _do_cooldown_retry(store, runner, inst, discord_bot, _cooldown_retrying)
+                        )
+            except Exception:
+                log.exception("Cooldown loop error")
+
     # Signal handling
     def signal_handler(sig, frame):
         log.info("Received signal %s, shutting down...", sig)
@@ -512,6 +538,7 @@ async def run() -> None:
     _bg_tasks = [
         asyncio.create_task(auto_save_loop()),
         asyncio.create_task(daily_digest_loop()),
+        asyncio.create_task(cooldown_loop()),
     ]
     if config.AUTO_UPDATE:
         _bg_tasks.append(asyncio.create_task(
@@ -670,6 +697,91 @@ async def _cleanup_orphan_messages(notifier: NotificationService, orphans: list)
                         log.debug("Could not edit orphan thinking msg for %s", inst.id)
             except Exception:
                 log.debug("Orphan message cleanup failed for %s", inst.id, exc_info=True)
+
+
+async def _do_cooldown_retry(store, runner, inst, discord_bot, retrying_set):
+    """Auto-retry an instance after usage-limit cooldown expires."""
+    from bot.engine import lifecycle
+    from bot.platform.formatting import running_button_specs
+
+    try:
+        channel_id = inst.cooldown_channel_id
+        if not channel_id or not discord_bot:
+            log.warning("No channel/bot for cooldown retry %s — clearing", inst.id)
+            inst.cooldown_retry_at = None
+            inst.cooldown_channel_id = None
+            store.update_instance(inst)
+            return
+
+        # Build RequestContext from discord bot (like scheduler does)
+        lookup = discord_bot._forums.thread_to_project(channel_id)
+        t_info = lookup[1] if lookup else None
+        repo_name = lookup[0].repo_name if lookup else inst.repo_name
+        ctx = discord_bot._ctx(channel_id, thread_info=t_info, repo_name=repo_name)
+
+        # Wake the thread (cancel sleep, set active tag)
+        discord_bot._cancel_sleep(channel_id)
+        try:
+            ch = discord_bot.get_channel(int(channel_id))
+            if ch:
+                asyncio.create_task(discord_bot._clear_thread_sleeping(ch))
+                asyncio.create_task(discord_bot._set_thread_active_tag(ch, True))
+        except Exception:
+            pass
+
+        # Create new instance from original
+        new_inst = store.create_instance(
+            instance_type=inst.instance_type,
+            prompt=inst.prompt,
+            mode=inst.mode,
+        )
+        new_inst.origin = inst.origin
+        new_inst.origin_platform = inst.origin_platform
+        new_inst.effort = inst.effort
+        new_inst.parent_id = inst.id
+        new_inst.repo_name = inst.repo_name
+        new_inst.repo_path = inst.repo_path
+        new_inst.cooldown_retries = inst.cooldown_retries  # Carry count forward
+        if inst.session_id:
+            new_inst.session_id = inst.session_id
+        if inst.branch:
+            new_inst.branch = inst.branch
+            new_inst.original_branch = inst.original_branch
+            new_inst.worktree_path = inst.worktree_path
+        store.update_instance(new_inst)
+
+        # Clear cooldown on the original instance
+        inst.cooldown_retry_at = None
+        inst.cooldown_channel_id = None
+        store.update_instance(inst)
+
+        escaped = ctx.messenger.escape(new_inst.display_id())
+        handle = await ctx.messenger.send_thinking(
+            channel_id, f"⏳ {escaped} auto-retrying after cooldown...",
+            buttons=running_button_specs(new_inst.id),
+        )
+        if handle.get("message_id"):
+            new_inst.message_ids.setdefault(ctx.platform, []).append(handle.get("message_id"))
+            store.update_instance(new_inst)
+
+        log.info("Cooldown retry: %s → %s in channel %s", inst.id, new_inst.id, channel_id)
+        try:
+            await lifecycle.run_instance(ctx, new_inst, handle=handle)
+        finally:
+            # Post-run cleanup (matches normal query flow in interactions.py)
+            discord_bot._forums.persist_ctx_settings(ctx)
+            discord_bot._schedule_sleep(channel_id)
+            asyncio.create_task(discord_bot._try_apply_tags_after_run(channel_id))
+            asyncio.create_task(discord_bot._refresh_dashboard())
+
+    except Exception:
+        log.exception("Cooldown retry failed for %s", inst.id)
+        # Clear cooldown to prevent infinite retry attempts
+        inst.cooldown_retry_at = None
+        inst.cooldown_channel_id = None
+        store.update_instance(inst)
+    finally:
+        retrying_set.discard(inst.id)
 
 
 async def _start_discord(store, runner, notifier, stop_event):

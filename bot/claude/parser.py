@@ -220,6 +220,84 @@ def extract_summary(text: str, max_len: int = 500) -> str:
     return summary
 
 
+def parse_usage_limit(error_text: str):
+    """Detect Claude subscription usage-limit errors and extract reset time.
+
+    Returns a datetime (UTC) when the limit resets, or None if this isn't a
+    usage-limit error.  Handles patterns like:
+      - "resets 12pm" / "resets 3:00 PM"
+      - "resets Mar 20, 12pm"
+      - "resets in 2 hours"
+    Falls back to 4 hours from now if the limit is detected but the reset
+    time can't be parsed (conservative to avoid retry storms).
+    """
+    from datetime import datetime, timedelta, timezone
+
+    if not error_text:
+        return None
+    lower = error_text.lower()
+    # Must look like a subscription usage cap (NOT a transient 429 rate limit)
+    limit_phrases = ["hit your limit", "usage limit", "plan limit"]
+    if not any(p in lower for p in limit_phrases):
+        return None
+
+    now = datetime.now(timezone.utc)
+
+    # Pattern: "resets in X hours" / "resets in Xh"
+    m = re.search(r'resets?\s+in\s+(\d+)\s*h', lower)
+    if m:
+        return now + timedelta(hours=int(m.group(1)))
+
+    # Pattern: "resets 12pm" / "resets 3:00 PM" / "resets Mar 20, 12pm"
+    m = re.search(
+        r'resets?\s+(?:(\w+)\s+(\d{1,2}),?\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)',
+        lower,
+    )
+    if m:
+        month_str, day_str, hour_str, min_str, ampm = m.groups()
+        hour = int(hour_str)
+        minute = int(min_str) if min_str else 0
+        if ampm == "pm" and hour != 12:
+            hour += 12
+        elif ampm == "am" and hour == 12:
+            hour = 0
+
+        # Try to use the user's timezone (Europe/Amsterdam) for parsing
+        try:
+            import zoneinfo
+            tz = zoneinfo.ZoneInfo("Europe/Amsterdam")
+        except Exception:
+            tz = timezone.utc
+
+        local_now = datetime.now(tz)
+
+        if month_str and day_str:
+            # Explicit date given (e.g., "Mar 20")
+            month_map = {
+                "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+                "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+            }
+            month = month_map.get(month_str[:3], local_now.month)
+            day = int(day_str)
+            reset_local = local_now.replace(
+                month=month, day=day, hour=hour, minute=minute, second=0, microsecond=0,
+            )
+        else:
+            # Time only — assume today, or tomorrow if already past
+            reset_local = local_now.replace(
+                hour=hour, minute=minute, second=0, microsecond=0,
+            )
+            if reset_local <= local_now:
+                reset_local += timedelta(days=1)
+
+        # Convert to UTC
+        return reset_local.astimezone(timezone.utc)
+
+    # Detected limit but couldn't parse reset time — conservative fallback
+    log.warning("Usage limit detected but couldn't parse reset time: %s", error_text[:200])
+    return now + timedelta(hours=4)
+
+
 def is_transient_error(error_text: str) -> bool:
     """Check if an error is transient and worth retrying."""
     if not error_text:
