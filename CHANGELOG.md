@@ -6,6 +6,12 @@
 
 - Voice messages now process immediately (transcribe → run as query) instead of showing Send/Cancel confirmation buttons
 - Voice transcription echo is truncated to 1900 chars to stay within Discord limits
+### Per-Repo Dashboard
+- Move instance lists (running, attention, completed) from global lobby dashboard into each repo's control room embed
+- Add per-repo daily cost display in control room
+- Simplify global lobby dashboard to overview: attention items with repo labels, running count, project links, global cost
+- Add `get_repo_daily_cost()` to StateStore for repo-scoped cost tracking
+- Add field truncation (1024 char limit) to all control room embed fields
 
 ## v0.29.1 — Remove Daily Digest (2026-03-20)
 

@@ -822,29 +822,32 @@ class ForumManager:
             msg = await thread.fetch_message(int(proj.control_message_id))
 
             from bot.claude.types import InstanceStatus
-            instances = self._store.list_instances()
-            active = sum(1 for i in instances if i.repo_name == repo_name
-                         and i.status == InstanceStatus.RUNNING)
-            completed = sum(1 for i in instances if i.repo_name == repo_name
-                            and i.status == InstanceStatus.COMPLETED)
-            failed = sum(1 for i in instances if i.repo_name == repo_name
-                         and i.status == InstanceStatus.FAILED)
+
+            repo_instances = self._store.list_by_repo(repo_name)
+            running = [i for i in repo_instances if i.status == InstanceStatus.RUNNING]
+            attention = [i for i in repo_instances
+                         if i.status == InstanceStatus.FAILED or i.needs_input]
+            completed = [i for i in repo_instances
+                         if i.status == InstanceStatus.COMPLETED and not i.needs_input][:5]
+
+            # Build session->thread map for this repo
+            session_to_thread: dict[str, str] = {
+                ti.session_id: ti.thread_id
+                for ti in proj.threads.values()
+                if ti.session_id
+            }
 
             repos = self._store.list_repos()
             repo_path = repos.get(repo_name, "")
             branch = await self._get_repo_branch(repo_path)
+            today_cost = self._store.get_repo_daily_cost(repo_name)
 
             ds = self._store.get_deploy_state(repo_name)
             # Build instance_id -> thread_id map for deploy state session links.
             # pending_sessions stores instance IDs (e.g. "t-523"), but threads
             # are keyed by session_id (UUID). Bridge via instance lookup.
-            inst_thread_ids: dict[str, str] = {}
+            deploy_thread_ids: dict[str, str] = {}
             if ds and ds.pending_sessions:
-                session_to_thread = {
-                    ti.session_id: ti.thread_id
-                    for ti in proj.threads.values()
-                    if ti.session_id
-                }
                 for inst_id in ds.pending_sessions:
                     inst = self._store.get_instance(inst_id)
                     if inst and inst.session_id and inst.session_id in session_to_thread:
@@ -864,7 +867,7 @@ class ForumManager:
             view = channels.build_control_view(
                 repo_name,
                 current_mode=self._store.mode,
-                active_count=active,
+                active_count=len(running),
                 deploy_state=ds,
             )
             await msg.edit(embed=embed, view=view)

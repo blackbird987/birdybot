@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 import discord
@@ -29,104 +28,58 @@ def build_dashboard_embed(
     forum_projects: dict[str, ForumProject],
     orphan_count: int = 0,
 ) -> discord.Embed:
-    """Build the dashboard embed from current state.
+    """Build the global dashboard embed — lightweight overview.
+
+    Per-instance details (running list, completed list) now live in
+    each repo's control room. This dashboard shows attention items
+    (with repo labels for navigation), global counts, project links,
+    and cost.
 
     Pure function — no side effects, no Discord API calls.
     """
-    from bot.claude.types import InstanceStatus
-
-    instances = store.list_instances()
-    running = [i for i in instances if i.status == InstanceStatus.RUNNING]
     today_cost = store.get_daily_cost()
     total_cost = store.get_total_cost()
     active_repo, _ = store.get_active_repo()
-
-    # Build session_id -> thread_id map for cross-referencing
-    session_to_thread: dict[str, str] = {}
-    for proj in forum_projects.values():
-        for tid, info in proj.threads.items():
-            if info.session_id:
-                session_to_thread[info.session_id] = tid
-
-    # Needs attention: failed + questions
-    attention = store.needs_attention()
-
-    # Recently completed (last 5)
-    completed = [
-        i for i in instances
-        if i.status == InstanceStatus.COMPLETED and not i.needs_input
-    ][:5]
 
     embed = discord.Embed(
         title="Claude Bot Dashboard",
         color=discord.Color.blurple(),
     )
 
-    # Needs Attention section (top priority)
+    # Needs Attention — kept detailed with repo labels + thread links
+    # so user knows which control room to check
+    attention = store.needs_attention()
     if attention:
+        # Build session_id -> thread_id map for attention links
+        session_to_thread: dict[str, str] = {}
+        for proj in forum_projects.values():
+            for tid, info in proj.threads.items():
+                if info.session_id:
+                    session_to_thread[info.session_id] = tid
+
         attn_lines = []
         for inst in attention[:10]:
             icon = "\u2753" if inst.needs_input else "\u274c"
             line = f"{icon} `{inst.display_id()}` \u2014 {inst.prompt[:30]}"
+            if inst.repo_name:
+                line = f"**{inst.repo_name}** {line}"
             thread_id = session_to_thread.get(inst.session_id or "")
             if thread_id:
                 line += f" \u2022 <#{thread_id}>"
             attn_lines.append(line)
-        embed.add_field(
-            name=f"Needs Attention ({len(attention)})",
-            value="\n".join(attn_lines), inline=False,
-        )
-
-    # Running — grouped by repo, no cap
-    if running:
-        by_repo: dict[str, list] = {}
-        for inst in running:
-            by_repo.setdefault(inst.repo_name or "default", []).append(inst)
-        run_lines = []
-        for rname, repo_insts in by_repo.items():
-            if len(by_repo) > 1:
-                run_lines.append(f"**{rname}**")
-            for inst in repo_insts:
-                line = f"`{inst.display_id()}` \u2014 {inst.prompt[:30]}"
-                if inst.user_name and not inst.is_owner_session:
-                    line += f" [{inst.user_name}]"
-                thread_id = session_to_thread.get(inst.session_id or "")
-                if thread_id:
-                    line += f" \u2022 <#{thread_id}>"
-                if inst.created_at:
-                    try:
-                        started = datetime.fromisoformat(inst.created_at)
-                        if started.tzinfo is None:
-                            started = started.replace(tzinfo=timezone.utc)
-                        elapsed = datetime.now(timezone.utc) - started
-                        mins = int(elapsed.total_seconds() // 60)
-                        line += f" \u2022 {'<1' if mins < 1 else str(mins)}m"
-                    except (ValueError, TypeError):
-                        pass
-                run_lines.append(line)
-        # Truncate field value to Discord 1024 limit
-        field_val = "\n".join(run_lines)
+        field_val = "\n".join(attn_lines)
         if len(field_val) > 1024:
             field_val = field_val[:1021] + "..."
-        embed.add_field(name=f"Running ({len(running)})", value=field_val, inline=False)
-    else:
-        embed.add_field(name="Running", value="None", inline=True)
-
-    # Recently Completed
-    if completed:
-        comp_lines = []
-        for inst in completed:
-            line = f"\u2705 `{inst.display_id()}` \u2014 {inst.prompt[:30]}"
-            thread_id = session_to_thread.get(inst.session_id or "")
-            if thread_id:
-                line += f" \u2022 <#{thread_id}>"
-            comp_lines.append(line)
         embed.add_field(
-            name=f"Recently Completed ({len(completed)})",
-            value="\n".join(comp_lines), inline=False,
+            name=f"Needs Attention ({len(attention)})",
+            value=field_val, inline=False,
         )
 
-    # Projects with forum links
+    # Global running count (details in per-repo control rooms)
+    running_count = store.running_count()
+    embed.add_field(name="Running", value=str(running_count), inline=True)
+
+    # Projects with forum links (primary navigation hub)
     if forum_projects:
         proj_lines = []
         for name, proj in forum_projects.items():
@@ -146,7 +99,7 @@ def build_dashboard_embed(
     if usage_text:
         embed.add_field(name="Usage", value=usage_text, inline=False)
 
-    # Cost + Mode
+    # Cost + Mode + PC
     embed.add_field(name="Today", value=f"${today_cost:.4f}", inline=True)
     embed.add_field(name="Total", value=f"${total_cost:.4f}", inline=True)
     embed.add_field(name="Mode", value=mode_label(store.mode), inline=True)

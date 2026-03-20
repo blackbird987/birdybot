@@ -326,6 +326,23 @@ class StateStore:
     def get_total_cost(self) -> float:
         return self._total_cost
 
+    def get_repo_daily_cost(self, repo_name: str) -> float:
+        """Sum today's costs for instances of a specific repo.
+
+        Uses instance-level cost fields filtered to today, not the global
+        accumulator (which can't be split by repo).
+        """
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        total = 0.0
+        for inst in self.list_by_repo(repo_name):
+            if inst.cost_usd and inst.created_at:
+                try:
+                    if inst.created_at[:10] == today:
+                        total += inst.cost_usd
+                except (ValueError, TypeError):
+                    pass
+        return total
+
     def reset_daily_budget(self) -> None:
         self._daily_cost = 0.0
         self._cost_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
