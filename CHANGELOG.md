@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Session Effort Buttons
+- Add effort level buttons (Low/Medium/High/Max) to session welcome embed, updating live alongside mode
+- Add Effort field to session embed (Origin | Mode | Effort)
+- Remove Explore/Plan/Build mode buttons from control rooms (repo + user) — mode is session-scoped
+- Remove Mode field from control room embeds
+- Add `EFFORT_DISPLAY`, `VALID_EFFORTS`, `effort_name()` to `formatting.py` (mirrors mode pattern)
+
 ## v0.34.4 — Fix Cooldown Auto-Retry (2026-03-20)
 
 - Fix auto-retry on usage limit — restore cooldown polling loop accidentally deleted during daily digest removal merge

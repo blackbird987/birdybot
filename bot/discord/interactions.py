@@ -16,7 +16,7 @@ from bot.discord.access import AccessResult, load_access_config, effective_mode 
 from bot.discord.modals import QuickTaskModal
 from bot.engine import commands
 from bot.engine import sessions as sessions_mod
-from bot.platform.formatting import MODE_COLOR, VALID_MODES, mode_name
+from bot.platform.formatting import MODE_COLOR, VALID_EFFORTS, VALID_MODES, effort_name, mode_name
 
 if TYPE_CHECKING:
     from bot.discord.bot import ClaudeBot
@@ -54,16 +54,6 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
     action, instance_id = parts
     log.info("Discord button %s:%s in #%s", action, instance_id[:12], getattr(interaction.channel, "name", "?"))
 
-    # --- Control room mode toggle (repo-scoped default) ---
-    if action == "control_mode":
-        await _handle_control_mode(bot, interaction, instance_id, btn_access)
-        return
-
-    # --- User control room mode toggle ---
-    if action == "user_control_mode":
-        await _handle_user_control_mode(bot, interaction, instance_id, btn_access)
-        return
-
     # --- Quick Task modal (must send modal as initial response, NOT defer) ---
     if action == "quick_task":
         if not btn_access.is_owner:
@@ -76,6 +66,11 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
     # --- Mode selection in new thread welcome embed ---
     if action == "mode_set" and instance_id in VALID_MODES:
         await _handle_mode_set(bot, interaction, instance_id, btn_access)
+        return
+
+    # --- Effort selection in new thread welcome embed ---
+    if action == "effort_set" and instance_id in VALID_EFFORTS:
+        await _handle_effort_set(bot, interaction, instance_id, btn_access)
         return
 
     await interaction.response.defer()
@@ -187,9 +182,12 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
 
     lookup = bot._forums.thread_to_project(channel_id)
     t_info = lookup[1] if lookup else None
-    ctx = bot._ctx(channel_id, thread_info=t_info, access_result=btn_access)
+    ctx = bot._ctx(channel_id, session_id=t_info.session_id if t_info else None,
+                    thread_info=t_info, access_result=btn_access)
     ctx.user_id = str(interaction.user.id)
     ctx.user_name = interaction.user.display_name
+    if t_info:
+        bot._forums.attach_session_callbacks(ctx, t_info, channel_id)
 
     # Acquire channel lock for query actions to prevent concurrent spawns
     # (matches the serialization in _run_query for text messages)
@@ -213,6 +211,7 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
                 await commands.handle_callback(ctx, action, instance_id, source_msg_id)
             finally:
                 bot._forums.persist_ctx_settings(ctx)
+                await bot._forums.update_pending_thread(channel_id)
                 asyncio.create_task(bot._try_apply_tags_after_run(channel_id))
                 bot._schedule_sleep(channel_id)
                 asyncio.create_task(bot._refresh_dashboard())
@@ -253,82 +252,6 @@ async def _handle_repo_switch(
             )
 
 
-async def _handle_control_mode(
-    bot: ClaudeBot, interaction: discord.Interaction,
-    instance_id: str, btn_access: AccessResult,
-) -> None:
-    cr_parts = instance_id.split(":", 1)
-    if len(cr_parts) != 2 or cr_parts[1] not in VALID_MODES:
-        return
-    cr_repo, target_mode = cr_parts
-    if not btn_access.is_owner and btn_access.mode_ceiling:
-        target_mode = access_effective_mode(
-            access_mod.RepoAccess(mode=btn_access.mode_ceiling), target_mode,
-        )
-    if btn_access.is_owner:
-        bot._store.mode = target_mode
-    else:
-        cfg = load_access_config()
-        ua = cfg.users.get(str(interaction.user.id))
-        if ua and cr_repo in ua.repos:
-            ua.repos[cr_repo].mode = target_mode
-            access_mod.save_access_config(cfg)
-    if interaction.message and interaction.message.embeds:
-        embed = interaction.message.embeds[0]
-        for i, field_obj in enumerate(embed.fields):
-            if field_obj.name == "Mode":
-                embed.set_field_at(i, name="Mode", value=mode_name(target_mode), inline=True)
-                break
-        from bot.claude.types import InstanceStatus
-        instances = bot._store.list_instances()
-        active = sum(1 for inst in instances if inst.repo_name == cr_repo
-                     and inst.status == InstanceStatus.RUNNING)
-        ds = bot._store.get_deploy_state(cr_repo)
-        view = channels.build_control_view(cr_repo, current_mode=target_mode, active_count=active, deploy_state=ds)
-        await interaction.response.edit_message(embed=embed, view=view)
-    else:
-        await interaction.response.defer()
-    log.info("Control room mode set to %s for repo %s", target_mode, cr_repo)
-
-
-async def _handle_user_control_mode(
-    bot: ClaudeBot, interaction: discord.Interaction,
-    instance_id: str, btn_access: AccessResult,
-) -> None:
-    cr_parts = instance_id.split(":", 1)
-    if len(cr_parts) != 2 or cr_parts[1] not in VALID_MODES:
-        return
-    cr_repo, target_mode = cr_parts
-    if not btn_access.is_owner and btn_access.mode_ceiling:
-        target_mode = access_effective_mode(
-            access_mod.RepoAccess(mode=btn_access.mode_ceiling), target_mode,
-        )
-    target_user_id = str(interaction.user.id)
-    if btn_access.is_owner:
-        uf = bot._resolve_user_forum_context(interaction)
-        if uf:
-            target_user_id = uf[0]
-    cfg = load_access_config()
-    ua = cfg.users.get(target_user_id)
-    if ua and cr_repo in ua.repos:
-        ua.repos[cr_repo].mode = target_mode
-        access_mod.save_access_config(cfg)
-    elif btn_access.is_owner:
-        bot._store.mode = target_mode
-    if interaction.message and interaction.message.embeds:
-        embed = interaction.message.embeds[0]
-        for i, field_obj in enumerate(embed.fields):
-            if field_obj.name == "Mode":
-                embed.set_field_at(i, name="Mode", value=mode_name(target_mode), inline=True)
-                break
-        repo_names = list(ua.repos.keys()) if ua else [cr_repo]
-        view = channels.build_user_control_view(repo_names, current_mode=target_mode)
-        await interaction.response.edit_message(embed=embed, view=view)
-    else:
-        await interaction.response.defer()
-    log.info("User control room mode set to %s for %s", target_mode, cr_repo)
-
-
 async def _handle_mode_set(
     bot: ClaudeBot, interaction: discord.Interaction,
     target_mode: str, btn_access: AccessResult,
@@ -351,12 +274,53 @@ async def _handle_mode_set(
             if field_obj.name == "Mode":
                 embed.set_field_at(i, name="Mode", value=mode_name(target_mode), inline=True)
                 break
-        view = channels.mode_select_view(target_mode)
+        # Read current effort from embed (default "high" for old embeds)
+        current_effort = "high"
+        for field_obj in embed.fields:
+            if field_obj.name == "Effort":
+                current_effort = field_obj.value.lower()
+                break
+        view = channels.session_controls_view(target_mode, current_effort)
         await interaction.response.edit_message(embed=embed, view=view)
     else:
         await interaction.response.defer()
     log.info("Mode set to %s via welcome button", target_mode)
 
+
+async def _handle_effort_set(
+    bot: ClaudeBot, interaction: discord.Interaction,
+    target_effort: str, btn_access: AccessResult,
+) -> None:
+    thread_id = str(interaction.channel_id)
+    lookup = bot._forums.thread_to_project(thread_id)
+    if lookup:
+        lookup[1].effort = target_effort
+        bot._forums.save_forum_map()
+    if interaction.message and interaction.message.embeds:
+        embed = interaction.message.embeds[0]
+        # Update or add Effort field
+        found = False
+        for i, field_obj in enumerate(embed.fields):
+            if field_obj.name == "Effort":
+                embed.set_field_at(i, name="Effort", value=effort_name(target_effort), inline=True)
+                found = True
+                break
+        if not found:
+            embed.add_field(name="Effort", value=effort_name(target_effort), inline=True)
+        # Read current mode from embed to rebuild view
+        current_mode = "explore"
+        for field_obj in embed.fields:
+            if field_obj.name == "Mode":
+                for m in ("explore", "plan", "build"):
+                    if mode_name(m) == field_obj.value:
+                        current_mode = m
+                        break
+                break
+        view = channels.session_controls_view(current_mode, target_effort)
+        await interaction.response.edit_message(embed=embed, view=view)
+    else:
+        await interaction.response.defer()
+    log.info("Effort set to %s via welcome button", target_effort)
 
 async def _handle_load_history(
     bot: ClaudeBot, interaction: discord.Interaction, cli_session_id: str,

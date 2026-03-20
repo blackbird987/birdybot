@@ -393,6 +393,7 @@ class ForumManager:
                 forum, thread_name, origin=origin,
                 topic_preview=topic,
                 current_mode=self._store.mode,
+                current_effort=self._store.effort,
             )
 
             # Apply repo tag in personal forums
@@ -450,7 +451,7 @@ class ForumManager:
                 latest = await asyncio.to_thread(
                     sessions_mod.find_latest_session_for_repo, repo_path,
                 )
-                if latest and latest["id"] != session_id:
+                if latest and latest["id"] != session_id and not info.session_id:
                     info.session_id = latest["id"]
                     info.origin = "cli"
                     info._synced_msg_count = 0
@@ -615,9 +616,11 @@ class ForumManager:
     async def post_archive_entry(self, channel_id: str) -> None:
         """Post a session summary + link to the archive channel.
 
-        Finds the best instance for the session (prefers DONE/BUILD origins
-        over COMMIT/MERGE for meaningful summaries). All instance resolution
-        is internal — caller only passes channel_id.
+        Uses a waterfall to find the best summary:
+        1. CHANGELOG entries from DONE/COMMIT instance result file
+        2. BUILD instance summary (first paragraph of build output)
+        3. Most recent non-DONE instance summary
+        4. Thread topic fallback
         """
         proj_info = self.thread_to_project(channel_id)
         if not proj_info:
@@ -627,25 +630,56 @@ class ForumManager:
             return
 
         from bot.claude.types import InstanceOrigin
-        ORIGIN_PRIORITY = {
-            InstanceOrigin.DONE: 0,
-            InstanceOrigin.BUILD: 1,
-            InstanceOrigin.COMMIT: 2,
-            InstanceOrigin.DIRECT: 3,
-        }
+        from bot.platform.formatting import parse_finalize_output
+
         candidates = [
             i for i in self._store.list_instances()
             if i.session_id == info.session_id and i.summary
         ]
-        if not candidates:
-            inst = None
-            summary = info.topic or "No summary"
-        else:
-            # Stable two-pass sort: finished_at DESC, then origin priority ASC
+
+        summary = None
+        inst = None  # best instance for metadata (status, mode, duration, cost)
+        finalize_info = None
+
+        if candidates:
             candidates.sort(key=lambda i: i.finished_at or "", reverse=True)
-            candidates.sort(key=lambda i: ORIGIN_PRIORITY.get(i.origin, 99))
-            inst = candidates[0]
-            summary = inst.summary
+
+            # Pass 1: CHANGELOG entries from DONE/COMMIT result file
+            done_origins = {InstanceOrigin.DONE, InstanceOrigin.COMMIT}
+            for c in candidates:
+                if c.origin in done_origins and c.result_file:
+                    try:
+                        full_text = Path(c.result_file).read_text(encoding="utf-8")
+                        fi = parse_finalize_output(full_text)
+                        if fi and fi.changelog_entries:
+                            summary = "\n".join(f"- {e}" for e in fi.changelog_entries)
+                            finalize_info = fi
+                            inst = c
+                            break
+                    except OSError:
+                        pass
+
+            # Pass 2: BUILD instance summary
+            if not summary:
+                for c in candidates:
+                    if c.origin == InstanceOrigin.BUILD:
+                        summary = c.summary
+                        inst = c
+                        break
+
+            # Pass 3: Most recent instance, preferring non-DONE/COMMIT
+            if not summary:
+                for c in candidates:
+                    if c.origin not in done_origins:
+                        summary = c.summary
+                        inst = c
+                        break
+                if not summary:
+                    inst = candidates[0]
+                    summary = inst.summary
+
+        if not summary:
+            summary = info.topic or "No summary"
 
         archive_ch = await self.ensure_archive_channel(proj.repo_name)
         if not archive_ch:
@@ -663,7 +697,11 @@ class ForumManager:
                 extras.append(f"{secs / 60:.0f}m" if secs >= 60 else f"{secs:.0f}s")
             if inst.cost_usd:
                 extras.append(f"${inst.cost_usd:.2f}")
-            if inst.branch:
+            if finalize_info and finalize_info.commit_hash:
+                extras.append(f"`{finalize_info.commit_hash}`")
+            if finalize_info and finalize_info.version:
+                extras.append(finalize_info.version)
+            elif inst.branch:
                 extras.append(f"`{inst.branch}`")
             extra_str = f" \u2014 {', '.join(extras)}" if extras else ""
 
@@ -770,7 +808,7 @@ class ForumManager:
         branch = await self._get_repo_branch(repo_path)
 
         thread, msg = await channels.create_repo_control_post(
-            forum, repo_name, repo_path, branch, self._store.mode,
+            forum, repo_name, repo_path, branch,
         )
         proj.control_thread_id = str(thread.id)
         proj.control_message_id = str(msg.id)
@@ -795,12 +833,9 @@ class ForumManager:
             return
 
         repo_names = list(ua.repos.keys())
-        mode = "explore"
-        if repo_names and repo_names[0] in ua.repos:
-            mode = ua.repos[repo_names[0]].mode
 
         thread, msg = await channels.create_user_control_post(
-            forum, ua.display_name, repo_names, mode,
+            forum, ua.display_name, repo_names,
         )
         ua.control_thread_id = str(thread.id)
         ua.control_message_id = str(msg.id)
@@ -873,7 +908,7 @@ class ForumManager:
             )
             dc = self._store.get_deploy_config(repo_name)
             embed = channels.build_control_embed(
-                repo_name, repo_path, branch, self._store.mode,
+                repo_name, repo_path, branch,
                 running_instances=running,
                 attention_instances=attention,
                 completed_instances=completed,
@@ -885,7 +920,6 @@ class ForumManager:
             )
             view = channels.build_control_view(
                 repo_name,
-                current_mode=self._store.mode,
                 active_count=len(running),
                 deploy_state=ds,
                 deploy_config=dc,
@@ -937,12 +971,9 @@ class ForumManager:
             msg = await thread.fetch_message(int(ua.control_message_id))
 
             repo_names = list(ua.repos.keys())
-            mode = "explore"
-            if repo_names and repo_names[0] in ua.repos:
-                mode = ua.repos[repo_names[0]].mode
 
-            embed = channels.build_user_control_embed(ua.display_name, repo_names, mode)
-            view = channels.build_user_control_view(repo_names, current_mode=mode)
+            embed = channels.build_user_control_embed(ua.display_name, repo_names)
+            view = channels.build_user_control_view(repo_names)
             await msg.edit(embed=embed, view=view)
         except discord.NotFound:
             log.info("Control room message for user %s was deleted, recreating", ua.display_name)

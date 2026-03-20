@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 import discord
 
 from bot.engine.deploy import DeployState
-from bot.platform.formatting import MODE_COLOR, MODE_DISPLAY, mode_name
+from bot.platform.formatting import EFFORT_DISPLAY, MODE_COLOR, MODE_DISPLAY, effort_name, mode_name
 
 log = logging.getLogger(__name__)
 
@@ -208,19 +208,33 @@ _MODE_BUTTON_STYLE: dict[str, discord.ButtonStyle] = {
 }
 
 
-def mode_select_view(current_mode: str = "explore") -> discord.ui.View:
-    """Build a persistent View with mode-selection buttons for new sessions.
+def session_controls_view(
+    current_mode: str = "explore",
+    current_effort: str = "high",
+) -> discord.ui.View:
+    """Build a persistent View with mode + effort buttons for session embeds.
 
-    Active mode button is disabled (standard "already selected" UX).
-    Labels from MODE_DISPLAY; styles from _MODE_BUTTON_STYLE.
+    Active mode/effort button is disabled (standard "already selected" UX).
     """
     view = discord.ui.View(timeout=None)
+    # Row 0: Mode buttons
     for mode, name in MODE_DISPLAY.items():
         btn = discord.ui.Button(
             label=name,
             style=_MODE_BUTTON_STYLE.get(mode, discord.ButtonStyle.secondary),
             custom_id=f"mode_set:{mode}",
             disabled=(mode == current_mode),
+            row=0,
+        )
+        view.add_item(btn)
+    # Row 1: Effort buttons
+    for level in EFFORT_DISPLAY:
+        btn = discord.ui.Button(
+            label=effort_name(level),
+            style=discord.ButtonStyle.primary if level == current_effort else discord.ButtonStyle.secondary,
+            custom_id=f"effort_set:{level}",
+            disabled=(level == current_effort),
+            row=1,
         )
         view.add_item(btn)
     return view
@@ -232,6 +246,7 @@ async def create_forum_post(
     origin: str = "bot",
     topic_preview: str = "",
     current_mode: str = "explore",
+    current_effort: str = "high",
 ) -> tuple[discord.Thread, discord.Message]:
     """Create a new forum post (thread + starter message).
 
@@ -247,8 +262,9 @@ async def create_forum_post(
     )
     embed.add_field(name="Origin", value=origin, inline=True)
     embed.add_field(name="Mode", value=mode_name(current_mode), inline=True)
+    embed.add_field(name="Effort", value=effort_name(current_effort), inline=True)
 
-    view = mode_select_view(current_mode)
+    view = session_controls_view(current_mode, current_effort)
     result = await forum.create_thread(name=name, embed=embed, view=view)
     thread = result.thread
     message = result.message
@@ -408,7 +424,6 @@ def build_control_embed(
     repo_name: str,
     repo_path: str,
     branch: str | None = None,
-    mode: str = "explore",
     *,
     running_instances: list | None = None,
     attention_instances: list | None = None,
@@ -422,7 +437,7 @@ def build_control_embed(
     """Build the embed for a repo control room post.
 
     Instance lists are optional — when omitted (initial creation),
-    the embed shows just branch/mode. When provided (refresh),
+    the embed shows just branch. When provided (refresh),
     it shows full dashboard data for this repo.
     """
     running_instances = running_instances or []
@@ -476,7 +491,6 @@ def build_control_embed(
     # Inline summary fields
     if branch:
         embed.add_field(name="Branch", value=f"`{branch}`", inline=True)
-    embed.add_field(name="Mode", value=mode_name(mode), inline=True)
     if today_cost > 0:
         embed.add_field(name="Today", value=f"${today_cost:.4f}", inline=True)
 
@@ -517,7 +531,6 @@ def build_control_embed(
 
 def build_control_view(
     repo_name: str,
-    current_mode: str = "explore",
     active_count: int = 0,
     deploy_state: DeployState | None = None,
     deploy_config: dict | None = None,
@@ -537,29 +550,20 @@ def build_control_view(
         custom_id=f"resume_latest:{repo_name}",
         row=0,
     ))
-    # Row 1: Mode toggle
-    for mode, name in MODE_DISPLAY.items():
-        view.add_item(discord.ui.Button(
-            label=name,
-            style=_MODE_BUTTON_STYLE.get(mode, discord.ButtonStyle.secondary),
-            custom_id=f"control_mode:{repo_name}:{mode}",
-            disabled=(mode == current_mode),
-            row=1,
-        ))
-    # Row 2: Quick Task + Sync CLI
+    # Row 1: Quick Task + Sync CLI
     view.add_item(discord.ui.Button(
         label="Quick Task",
         style=discord.ButtonStyle.primary,
         custom_id=f"quick_task:{repo_name}",
-        row=2,
+        row=1,
     ))
     view.add_item(discord.ui.Button(
         label="Sync CLI",
         style=discord.ButtonStyle.secondary,
         custom_id=f"sync_repo:{repo_name}",
-        row=2,
+        row=1,
     ))
-    # Row 3: Deploy/Reboot button + Stop All + Refresh
+    # Row 2: Deploy/Reboot button + Stop All + Refresh
     needs_reboot = deploy_state.needs_reboot if deploy_state else False
     if deploy_config:
         if deploy_config.get("approved"):
@@ -579,9 +583,9 @@ def build_control_view(
                 label=f"Approve: {cmd[:30]}",
                 style=discord.ButtonStyle.primary,
                 custom_id=f"approve_deploy:{repo_name}",
-                row=3,
+                row=2,
             ))
-    overflow_row = 3 if not deploy_config else 4
+    overflow_row = 2 if not deploy_config else 3
     if active_count > 0:
         view.add_item(discord.ui.Button(
             label=f"Stop All ({active_count})",
@@ -603,12 +607,11 @@ async def create_repo_control_post(
     repo_name: str,
     repo_path: str,
     branch: str | None = None,
-    mode: str = "explore",
     usage_text: str | None = None,
 ) -> tuple[discord.Thread, discord.Message]:
     """Create a control room post in a repo forum with action buttons."""
-    embed = build_control_embed(repo_name, repo_path, branch, mode, usage_text=usage_text)
-    view = build_control_view(repo_name, current_mode=mode, active_count=0)
+    embed = build_control_embed(repo_name, repo_path, branch, usage_text=usage_text)
+    view = build_control_view(repo_name, active_count=0)
 
     result = await forum.create_thread(name=CONTROL_ROOM_NAME, embed=embed, view=view)
     try:
@@ -623,7 +626,6 @@ async def create_repo_control_post(
 def build_user_control_embed(
     display_name: str,
     repo_names: list[str],
-    mode: str = "explore",
 ) -> discord.Embed:
     """Build the embed for a user's personal control room post."""
     embed = discord.Embed(
@@ -636,13 +638,11 @@ def build_user_control_embed(
             value="\n".join(f"\u2022 {r}" for r in repo_names),
             inline=True,
         )
-    embed.add_field(name="Mode", value=mode_name(mode), inline=True)
     return embed
 
 
 def build_user_control_view(
     repo_names: list[str],
-    current_mode: str = "explore",
 ) -> discord.ui.View:
     """Build the button view for a user's personal control room post."""
     view = discord.ui.View(timeout=None)
@@ -654,24 +654,13 @@ def build_user_control_view(
             custom_id=f"new_repo:{rname}",
             row=0,
         ))
-    # Row 1: Mode toggle (uses first repo name as scope key)
-    # user_control_mode prefix — distinct from repo control_mode so handler
-    # rebuilds the correct view type on click
+    # Row 1: Refresh
     scope = repo_names[0] if repo_names else "_default"
-    for mode, name in MODE_DISPLAY.items():
-        view.add_item(discord.ui.Button(
-            label=name,
-            style=_MODE_BUTTON_STYLE.get(mode, discord.ButtonStyle.secondary),
-            custom_id=f"user_control_mode:{scope}:{mode}",
-            disabled=(mode == current_mode),
-            row=1,
-        ))
-    # Row 2: Refresh
     view.add_item(discord.ui.Button(
         label="Refresh",
         style=discord.ButtonStyle.secondary,
         custom_id=f"refresh_user_control:{scope}",
-        row=2,
+        row=1,
     ))
     return view
 
@@ -680,11 +669,10 @@ async def create_user_control_post(
     forum: discord.ForumChannel,
     display_name: str,
     repo_names: list[str],
-    mode: str = "explore",
 ) -> tuple[discord.Thread, discord.Message]:
     """Create a control room post in a user's personal forum."""
-    embed = build_user_control_embed(display_name, repo_names, mode)
-    view = build_user_control_view(repo_names, current_mode=mode)
+    embed = build_user_control_embed(display_name, repo_names)
+    view = build_user_control_view(repo_names)
 
     result = await forum.create_thread(name=CONTROL_ROOM_NAME, embed=embed, view=view)
     try:

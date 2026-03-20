@@ -209,6 +209,23 @@ def mode_label(mode: str) -> str:
     return mode_name(mode)
 
 
+# --- Effort Display ---
+
+EFFORT_DISPLAY: dict[str, str] = {
+    "low":    "Low",
+    "medium": "Medium",
+    "high":   "High",
+    "max":    "Max",
+}
+
+VALID_EFFORTS = frozenset(EFFORT_DISPLAY)
+
+
+def effort_name(effort: str) -> str:
+    """Human-readable effort name."""
+    return EFFORT_DISPLAY.get(effort, effort.capitalize())
+
+
 # --- Status Icon ---
 
 def status_icon(status: InstanceStatus) -> str:
