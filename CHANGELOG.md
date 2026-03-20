@@ -17,6 +17,15 @@
 ## v0.35.2 — Fix Session Sync Overwrite (2026-03-20)
 
 - Fix sync_single_thread overwriting bot-originated thread sessions with unrelated CLI sessions — guard now checks `origin == "cli"` instead of dead-code `not info.session_id` check
+## v0.37.0 — Real Usage Tracking via ccusage (2026-03-20)
+
+### Usage Tracking
+- Replace homegrown token bucket system with `ccusage` integration for accurate usage data
+- `/usage` now shows real 5h billing block data: cost, burn rate ($/hr), projected cost, time remaining, token breakdown (in/out/cache-write/cache-read), and models used
+- Dashboard and control room embeds show compact usage summary (block cost, burn rate, time left)
+- Adaptive cache TTL: 60s normally, 15s when approaching rate limits (< 30min remaining)
+- Warmup call at bot startup primes the npx cache for instant first response
+- Remove dead bucket infrastructure: `record_tokens`, `backfill_buckets`, hourly bucket storage, `USAGE_5H_TOKEN_LIMIT`/`USAGE_7D_TOKEN_LIMIT` env vars
 
 ## v0.35.1 — Meaningful Archive Summaries (2026-03-20)
 

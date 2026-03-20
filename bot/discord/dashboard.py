@@ -27,6 +27,7 @@ def build_dashboard_embed(
     store: StateStore,
     forum_projects: dict[str, ForumProject],
     orphan_count: int = 0,
+    usage_text: str | None = None,
 ) -> discord.Embed:
     """Build the global dashboard embed — lightweight overview.
 
@@ -90,12 +91,7 @@ def build_dashboard_embed(
         if proj_lines:
             embed.add_field(name="Projects", value="\n".join(proj_lines), inline=False)
 
-    # Usage windows
-    from bot.engine.usage import get_usage_text
-    usage_text = get_usage_text(
-        store.get_token_buckets(),
-        {"5h": config.USAGE_5H_TOKEN_LIMIT, "7d": config.USAGE_7D_TOKEN_LIMIT},
-    )
+    # Usage (pre-fetched by async caller)
     if usage_text:
         embed.add_field(name="Usage", value=usage_text, inline=False)
 
@@ -173,11 +169,17 @@ async def _refresh_dashboard_impl(
         return
 
     # Count orphaned branches/worktrees in a thread (best-effort, don't block dashboard)
+    # Pre-fetch usage text from ccusage (async)
+    from bot.engine.usage import get_usage_text_async
     try:
         orphan_count = await asyncio.to_thread(_count_orphans, store)
     except Exception:
         orphan_count = 0
-    embed = build_dashboard_embed(store, forums.forum_projects, orphan_count)
+    try:
+        usage_text = await get_usage_text_async()
+    except Exception:
+        usage_text = None
+    embed = build_dashboard_embed(store, forums.forum_projects, orphan_count, usage_text=usage_text)
 
     # Get or create dashboard message
     dash_msg_id = store.get_platform_state("discord").get("dashboard_message_id")

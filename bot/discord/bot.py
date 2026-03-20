@@ -394,6 +394,10 @@ class ClaudeBot(discord.Client):
                 log.info("Monitor service started with %d enabled monitors",
                          sum(1 for m in monitors.values() if m.get("enabled")))
 
+        # Warm up ccusage cache (fire-and-forget)
+        from bot.engine.usage import warmup as _usage_warmup
+        asyncio.create_task(_usage_warmup())
+
         # Refresh dashboard on startup
         asyncio.create_task(self._refresh_dashboard())
 
