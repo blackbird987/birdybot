@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Archive Summaries
+- Archive entries now show CHANGELOG entries or build descriptions instead of git housekeeping boilerplate
+- Archive metadata includes commit hash and version when available from finalize output
+
 ### Session Effort Buttons
 - Add effort level buttons (Low/Medium/High/Max) to session welcome embed, updating live alongside mode
 - Add Effort field to session embed (Origin | Mode | Effort)
