@@ -525,9 +525,36 @@ async def run() -> None:
         log.error("No platforms started successfully!")
         return
 
+    # Cooldown retry loop — auto-retries instances that hit usage limits
+    _cooldown_retrying: set[str] = set()
+
+    async def cooldown_loop():
+        from datetime import datetime as dt, timezone as tz_mod
+        while True:
+            await asyncio.sleep(60)
+            try:
+                now = dt.now(tz_mod.utc)
+                for inst in store.list_instances(all_=True):
+                    if not inst.cooldown_retry_at or not inst.cooldown_channel_id:
+                        continue
+                    if inst.id in _cooldown_retrying:
+                        continue
+                    try:
+                        retry_at = dt.fromisoformat(inst.cooldown_retry_at)
+                    except (ValueError, TypeError):
+                        continue
+                    if now >= retry_at:
+                        _cooldown_retrying.add(inst.id)
+                        asyncio.create_task(
+                            _do_cooldown_retry(store, runner, inst, discord_bot, _cooldown_retrying)
+                        )
+            except Exception:
+                log.exception("Cooldown loop error")
+
     # Start background tasks (store refs to prevent GC)
     _bg_tasks = [
         asyncio.create_task(auto_save_loop()),
+        asyncio.create_task(cooldown_loop()),
     ]
     if config.AUTO_UPDATE:
         _bg_tasks.append(asyncio.create_task(
