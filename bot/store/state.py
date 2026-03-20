@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from bot.claude.types import Instance, InstanceStatus, InstanceType, Schedule
+from bot.engine.deploy import DeployState
 
 log = logging.getLogger(__name__)
 
@@ -42,6 +43,7 @@ class StateStore:
         self._platform_state: dict[str, dict] = {}  # platform -> arbitrary state
         self._autopilot_chains: dict[str, list[str]] = {}  # session_id -> remaining steps
         self._chain_deferred: dict[str, list[str]] = {}  # session_id -> deferred revisions
+        self._deploy_state: dict[str, DeployState] = {}  # repo_name -> deploy state
         self._dirty: bool = False  # Dirty flag — mark_dirty() defers save to auto-save loop
         self._last_mtime: float = 0.0  # Track file mtime for external change detection
 
@@ -76,6 +78,10 @@ class StateStore:
             self._platform_state = data.get("platform_state", {})
             self._autopilot_chains = data.get("autopilot_chains", {})
             self._chain_deferred = data.get("chain_deferred", {})
+            self._deploy_state = {
+                k: DeployState.from_dict(v)
+                for k, v in data.get("deploy_state", {}).items()
+            }
             for d in data.get("schedules", []):
                 sched = Schedule.from_dict(d)
                 self._schedules[sched.id] = sched
@@ -136,6 +142,7 @@ class StateStore:
             "platform_state": self._platform_state,
             "autopilot_chains": self._autopilot_chains,
             "chain_deferred": self._chain_deferred,
+            "deploy_state": {k: v.to_dict() for k, v in self._deploy_state.items()},
             "schedules": [s.to_dict() for s in self._schedules.values()],
         }
         try:
@@ -425,6 +432,15 @@ class StateStore:
         self._platform_state[platform] = data
         if persist:
             self.save()
+
+    # --- Deploy State ---
+
+    def get_deploy_state(self, repo_name: str) -> DeployState | None:
+        return self._deploy_state.get(repo_name)
+
+    def set_deploy_state(self, repo_name: str, state: DeployState) -> None:
+        self._deploy_state[repo_name] = state
+        self.mark_dirty()
 
     # --- Aliases ---
 

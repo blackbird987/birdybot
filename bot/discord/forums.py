@@ -722,14 +722,31 @@ class ForumManager:
             repo_path = repos.get(repo_name, "")
             branch = await self._get_repo_branch(repo_path)
 
+            ds = self._store.get_deploy_state(repo_name)
+            # Build instance_id -> thread_id map for deploy state session links.
+            # pending_sessions stores instance IDs (e.g. "t-523"), but threads
+            # are keyed by session_id (UUID). Bridge via instance lookup.
+            inst_thread_ids: dict[str, str] = {}
+            if ds and ds.pending_sessions:
+                session_to_thread = {
+                    ti.session_id: ti.thread_id
+                    for ti in proj.threads.values()
+                    if ti.session_id
+                }
+                for inst_id in ds.pending_sessions:
+                    inst = self._store.get_instance(inst_id)
+                    if inst and inst.session_id and inst.session_id in session_to_thread:
+                        inst_thread_ids[inst_id] = session_to_thread[inst.session_id]
             embed = channels.build_control_embed(
                 repo_name, repo_path, branch, self._store.mode,
                 active, completed, failed,
+                deploy_state=ds, thread_ids=inst_thread_ids,
             )
             view = channels.build_control_view(
                 repo_name,
                 current_mode=self._store.mode,
                 active_count=active,
+                deploy_state=ds,
             )
             await msg.edit(embed=embed, view=view)
         except discord.NotFound:

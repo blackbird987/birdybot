@@ -310,6 +310,10 @@ async def run() -> None:
     # Initialize engine module state
     engine_commands.init(start_time, cli_version, shutdown_fn=lambda: stop_event.set())
 
+    # Capture deploy state baselines for all repos
+    from bot.engine.deploy import capture_boot_baselines
+    capture_boot_baselines(store, str(config._PROJECT_ROOT))
+
     # Emergency signal handler: if the bot is killed (e.g. by a Claude Code instance
     # running taskkill), save context and auto-relaunch so we come back online.
     def _emergency_reboot_handler(signum, frame):

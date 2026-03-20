@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- Add deploy state tracking: detect version drift after merges, show "Reboot/Redeploy Required" in per-repo control room embeds
+- Auto-detect versions from pyproject.toml, package.json, Cargo.toml, *.csproj, or git tags
+- Bot's own repo resets baseline on reboot (reboot = redeploy); other repos use git-tag-based detection that persists across bot reboots
+- Show pending changelog entries and session links in control room embed
+- Add Reboot button to control room for self-managed repo (triggers reboot_request.json flow)
+- Add `on_deploy_state_changed` callback to Messenger protocol for platform-agnostic refresh
+
 ## v0.28.0 — Session Evaluation & Reporting (2026-03-17)
 
 ### Session evaluation & reporting

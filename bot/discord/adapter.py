@@ -383,6 +383,12 @@ class DiscordMessenger:
         # Discord regular messages: 2000 char limit
         return discord_fmt.chunk_message(text, limit=2000)
 
+    async def on_deploy_state_changed(self, repo_name: str) -> None:
+        """Refresh the control room embed for this repo."""
+        forums = getattr(self._bot, "_forums", None)
+        if forums:
+            await forums.refresh_control_room(repo_name)
+
     async def close_conversation(self, channel_id: str) -> None:
         """Mention interacting users, then archive a Discord forum thread.
 

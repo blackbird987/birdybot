@@ -634,6 +634,10 @@ async def on_merge(ctx: RequestContext, text: str) -> None:
 
     msg = await ctx.runner.merge_branch(inst)
     ctx.store.update_instance(inst)
+    if "failed" not in msg.lower():
+        from bot.engine.deploy import update_after_merge
+        update_after_merge(ctx.store, inst)
+        await ctx.messenger.on_deploy_state_changed(inst.repo_name)
     await ctx.messenger.send_text(ctx.channel_id, msg)
 
 
@@ -1489,6 +1493,9 @@ async def handle_callback(
         # Clear stale branch refs on all sibling instances
         if branch_name and "failed" not in msg.lower():
             workflows.clear_stale_branches(ctx.store, branch_name)
+            from bot.engine.deploy import update_after_merge
+            update_after_merge(ctx.store, inst)
+            await ctx.messenger.on_deploy_state_changed(inst.repo_name)
         escaped = ctx.messenger.escape(msg)
         if source_msg_id:
             await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, escaped)

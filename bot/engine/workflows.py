@@ -573,6 +573,9 @@ async def _run_autopilot_chain(
                     log.info("Autopilot auto-merge: %s", merge_msg)
                     if "failed" not in merge_msg.lower():
                         clear_stale_branches(ctx.store, branch_name)
+                        from bot.engine.deploy import update_after_merge
+                        update_after_merge(ctx.store, merge_target)
+                        await ctx.messenger.on_deploy_state_changed(merge_target.repo_name)
                         await ctx.messenger.send_text(
                             ctx.channel_id, f"✅ {merge_msg}", silent=True,
                         )
