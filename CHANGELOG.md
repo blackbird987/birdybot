@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## v0.34.1 — Fix Long Prompt Crash (2026-03-20)
+
+- Fix WinError 206 (command line too long) by piping user prompt via stdin instead of CLI argument
+- Add stdin write guard — clean error on pipe failure instead of unhandled traceback
+- Kill orphaned claude.exe processes on cancellation/unexpected errors
+- Cap session history block at 4K to prevent system prompt bloat
+
 ## v0.30.1 — Direct Voice Processing (2026-03-20)
 
 - Voice messages now process immediately (transcribe → run as query) instead of showing Send/Cancel confirmation buttons
