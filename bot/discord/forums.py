@@ -164,6 +164,8 @@ class ForumManager:
         self._thread_lock = asyncio.Lock()
         # In-memory set of user forum control room thread IDs (O(1) skip check)
         self._user_control_thread_ids: set[str] = set()
+        # In-memory set of archive channel IDs (O(1) skip check)
+        self._archive_channel_ids: set[int] = set()
 
     @property
     def forum_projects(self) -> dict[str, ForumProject]:
@@ -172,6 +174,10 @@ class ForumManager:
     @property
     def user_control_thread_ids(self) -> set[str]:
         return self._user_control_thread_ids
+
+    @property
+    def archive_channel_ids(self) -> set[int]:
+        return self._archive_channel_ids
 
     @property
     def category_id(self) -> int | None:
@@ -189,6 +195,11 @@ class ForumManager:
         raw = state.get("forum_projects", {})
         self._forum_projects = {
             k: ForumProject.from_dict(v) for k, v in raw.items()
+        }
+        self._archive_channel_ids = {
+            int(p.archive_channel_id)
+            for p in self._forum_projects.values()
+            if p.archive_channel_id
         }
         log.info("Loaded %d forum projects", len(self._forum_projects))
 
@@ -592,10 +603,12 @@ class ForumManager:
                 return ch
             log.info("Archive channel %s for %s was deleted, recreating",
                      proj.archive_channel_id, repo_name)
+            self._archive_channel_ids.discard(int(proj.archive_channel_id))
             proj.archive_channel_id = None
 
         ch = await channels.ensure_archive_channel(guild, category, repo_name)
         proj.archive_channel_id = str(ch.id)
+        self._archive_channel_ids.add(ch.id)
         self.save_forum_map()
         return ch
 
