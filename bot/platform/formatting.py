@@ -252,9 +252,9 @@ def action_button_specs(
     rows: list[list[ButtonSpec]] = []
     iid = instance.id
 
-    # Done origin: if branch is pending merge, show Merge/Discard; otherwise terminal
+    # Done origin: if branch is pending merge and no autopilot, show Merge/Discard
     if instance.origin == InstanceOrigin.DONE and instance.status == InstanceStatus.COMPLETED:
-        if instance.branch:
+        if instance.branch and not has_autopilot_chain:
             rows.append([
                 ButtonSpec("Merge", f"merge:{iid}"),
                 ButtonSpec("Discard", f"discard:{iid}"),
@@ -274,17 +274,26 @@ def action_button_specs(
         session_has_plan = instance.plan_active
 
         if instance.branch:
-            # Build bg task with branch — full merge workflow
-            rows.append([
-                ButtonSpec("Diff", f"diff:{iid}"),
-                ButtonSpec("Merge", f"merge:{iid}"),
-                ButtonSpec("Discard", f"discard:{iid}"),
-            ])
-            rows.append([
-                ButtonSpec("Review Code", f"review_code:{iid}"),
-                ButtonSpec("Commit", f"commit:{iid}"),
-                ButtonSpec("Done", f"done:{iid}"),
-            ])
+            if has_autopilot_chain:
+                # Autopilot handles merge — just show review/action buttons
+                rows.append([
+                    ButtonSpec("Diff", f"diff:{iid}"),
+                    ButtonSpec("Review Code", f"review_code:{iid}"),
+                    ButtonSpec("Commit", f"commit:{iid}"),
+                    ButtonSpec("Done", f"done:{iid}"),
+                ])
+            else:
+                # Manual build — keep full merge workflow
+                rows.append([
+                    ButtonSpec("Diff", f"diff:{iid}"),
+                    ButtonSpec("Merge", f"merge:{iid}"),
+                    ButtonSpec("Discard", f"discard:{iid}"),
+                ])
+                rows.append([
+                    ButtonSpec("Review Code", f"review_code:{iid}"),
+                    ButtonSpec("Commit", f"commit:{iid}"),
+                    ButtonSpec("Done", f"done:{iid}"),
+                ])
         elif this_planned:
             # This instance directly produced or reviewed a plan
             if instance.origin == InstanceOrigin.REVIEW_PLAN:
