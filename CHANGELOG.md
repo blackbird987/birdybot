@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Fix sync_single_thread overwriting bot-originated thread sessions with unrelated CLI sessions — guard now checks `origin == "cli"` instead of dead-code `not info.session_id` check
+
 ## v0.35.1 — Meaningful Archive Summaries (2026-03-20)
 
 ### Archive Summaries

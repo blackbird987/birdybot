@@ -451,7 +451,7 @@ class ForumManager:
                 latest = await asyncio.to_thread(
                     sessions_mod.find_latest_session_for_repo, repo_path,
                 )
-                if latest and latest["id"] != session_id and not info.session_id:
+                if latest and latest["id"] != session_id and info.origin == "cli":
                     info.session_id = latest["id"]
                     info.origin = "cli"
                     info._synced_msg_count = 0
