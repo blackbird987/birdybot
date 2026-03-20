@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.37.0 — Real Usage Tracking via ccusage (2026-03-20)
+
 ### Usage Tracking
 - Replace homegrown token bucket system with `ccusage` integration for accurate usage data
 - `/usage` now shows real 5h billing block data: cost, burn rate ($/hr), projected cost, time remaining, token breakdown (in/out/cache-write/cache-read), and models used
