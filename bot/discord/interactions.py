@@ -581,18 +581,37 @@ async def _handle_reboot_repo(
     method = config.get("method", "command")
 
     if method == "self":
-        # Use existing bot reboot mechanism via runner
+        # Guard against duplicate button clicks while already draining
+        if bot._runner.is_draining:
+            await interaction.followup.send(
+                "Reboot already in progress.", ephemeral=True,
+            )
+            return
+
         msg = f"Reboot requested from control room ({repo_name})"
         if ds and ds.pending_changes:
             msg += f" ({len(ds.pending_changes)} pending changes)"
+
+        # Drain active tasks first (same as /reboot slash command)
+        if bot._runner.is_busy:
+            ids = ", ".join(bot._runner.active_ids) or "(between steps)"
+            await interaction.followup.send(
+                f"⏳ Waiting for active work to finish: {ids}",
+            )
+            idle = await bot._runner.wait_until_idle(timeout=300)
+            if not idle:
+                remaining = ", ".join(bot._runner.active_ids)
+                await interaction.followup.send(
+                    f"⚠️ Timed out. Force-rebooting with "
+                    f"{bot._runner.active_count} still running: {remaining}",
+                )
+
         bot._runner.request_reboot({
             "message": msg,
             "channel_id": str(interaction.channel_id),
             "platform": "discord",
         })
-        await interaction.followup.send(
-            "\U0001f504 Reboot requested. Draining active tasks...",
-        )
+        await interaction.followup.send("\U0001f504 Rebooting...")
         # NOTE: Do NOT reset deploy state here — capture_boot_baselines()
         # handles it on the next startup when it detects self_managed=True.
 

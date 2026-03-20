@@ -825,6 +825,10 @@ class ClaudeBot(discord.Client):
 
     # --- Interaction dispatch (delegated) ---
 
+    async def on_error(self, event_method, *args, **kwargs) -> None:
+        """Route event handler exceptions to the log file (not just stderr)."""
+        log.exception("Unhandled exception in %s", event_method)
+
     async def on_interaction(self, interaction: discord.Interaction) -> None:
         """Handle button interactions (persistent views)."""
         if interaction.type != discord.InteractionType.component:

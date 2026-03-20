@@ -415,7 +415,6 @@ async def run() -> None:
         """Called by runner when idle + reboots pending. Runs at most once."""
         import json as _json
         reboots = runner.pending_reboots()
-        runner.clear_reboots()
         if not reboots:
             runner._reboot_executing = False
             return
@@ -466,9 +465,11 @@ async def run() -> None:
                 creationflags=_sp.DETACHED_PROCESS | _sp.CREATE_NEW_PROCESS_GROUP,
                 close_fds=True,
             )
+            runner.clear_reboots()
             stop_event.set()
         except Exception:
             log.exception("Reboot executor failed — resetting for retry")
+            runner.clear_reboots()
             runner._reboot_executing = False
 
     runner.set_on_idle_reboot(_execute_pending_reboots)
