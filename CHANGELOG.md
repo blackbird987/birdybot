@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.37.4 — Fix ccusage Subprocess Flood (2026-03-20)
+
 - Fix: ccusage subprocess flood — timeouts spawned unlimited orphaned processes, killing PC performance
   - Add negative caching: failed ccusage calls now cached for 60s instead of retrying immediately
   - Add process tree kill: `taskkill /T /F` on Windows to reap orphaned node.exe children (not just cmd.exe)
