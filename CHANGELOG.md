@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.37.3 — Fix Subprocess Console Windows on Windows (2026-03-20)
+
 - Fix: subprocess console windows (CMD) popping up on Windows — add `CREATE_NO_WINDOW` to all subprocess calls in usage.py, app.py, deploy.py, lifecycle.py
 - DRY: extract `NOWND` constant to `bot/config.py` (single source, no circular imports); runner.py, titles.py, forums.py now import from config
 
