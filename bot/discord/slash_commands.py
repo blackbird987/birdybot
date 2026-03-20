@@ -16,6 +16,7 @@ from bot.discord.access import (
     AccessResult, load_access_config, check_user_access,
     effective_mode as access_effective_mode,
 )
+from bot.claude.types import InstanceStatus
 from bot.discord.monitoring import monitor_setup
 from bot.engine import commands
 from bot.engine import sessions as sessions_mod
@@ -462,6 +463,94 @@ def setup(bot: ClaudeBot) -> None:
         if isinstance(ch, (discord.TextChannel, discord.Thread)):
             await bot._forums.populate_thread_history(ch, session_id, thread_id, messenger=bot.messenger)
         await interaction.followup.send(f"Synced session `{session_id[:12]}…`", ephemeral=True)
+
+    @bot.tree.command(name="done", description="Wrap up — commit, changelog, release", guild=guild_obj)
+    async def cmd_done(interaction: discord.Interaction):
+        if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
+            await interaction.response.send_message("Unauthorized", ephemeral=True)
+            return
+
+        channel_id = str(interaction.channel_id)
+        lookup = bot._forums.thread_to_project(channel_id)
+        if not lookup:
+            await interaction.response.send_message("Not in a session thread.", ephemeral=True)
+            return
+
+        _, info = lookup
+        if not info.session_id:
+            await interaction.response.send_message("No session found for this thread.", ephemeral=True)
+            return
+
+        # Find the most recent instance for this session
+        source_inst = None
+        for inst in bot._store.list_instances():
+            if inst.session_id == info.session_id:
+                source_inst = inst
+                break
+
+        if not source_inst:
+            await interaction.response.send_message("No recent instance found.", ephemeral=True)
+            return
+
+        # Guard: refuse if the latest instance is still active
+        if source_inst.status in (InstanceStatus.RUNNING, InstanceStatus.QUEUED):
+            await interaction.response.send_message(
+                "Instance is still running — `/kill` it first, then `/done`.",
+                ephemeral=True,
+            )
+            return
+
+        # Log when wrapping up from a non-success state
+        if source_inst.status in (InstanceStatus.FAILED, InstanceStatus.KILLED):
+            log.info("/done wrapping up from %s source instance %s",
+                     source_inst.status.value, source_inst.display_id())
+
+        await interaction.response.defer()
+
+        # Mark thread as active (matches button handler in interactions.py)
+        bot._cancel_sleep(channel_id)
+        asyncio.create_task(bot._clear_thread_sleeping(interaction.channel))
+        asyncio.create_task(bot._set_thread_active_tag(interaction.channel, True))
+        asyncio.create_task(bot._refresh_dashboard())
+
+        ar = bot._check_access(interaction.user.id, channel_id=channel_id)
+        ctx = bot._ctx(channel_id, session_id=info.session_id, thread_info=info, access_result=ar)
+        ctx.user_id = str(interaction.user.id)
+        ctx.user_name = interaction.user.display_name
+        bot._forums.attach_session_callbacks(ctx, info, channel_id)
+
+        # Cancel any pending cooldown auto-retry for this instance
+        if source_inst.cooldown_retry_at:
+            source_inst.cooldown_retry_at = None
+            source_inst.cooldown_channel_id = None
+            bot._store.update_instance(source_inst)
+
+        # Acquire channel lock to prevent concurrent spawns
+        from bot.engine.commands import _get_channel_lock
+        lock = _get_channel_lock(channel_id)
+        async with lock:
+            try:
+                from bot.engine import workflows
+                await workflows.on_done(ctx, source_inst.id)
+            except Exception:
+                log.exception("/done failed for instance %s", source_inst.display_id())
+                try:
+                    await ctx.messenger.send_text(
+                        ctx.channel_id, "Done failed — try `/done` again or wrap up manually.",
+                    )
+                except Exception:
+                    pass
+            finally:
+                bot._forums.persist_ctx_settings(ctx)
+                await bot._forums.update_pending_thread(channel_id)
+                asyncio.create_task(bot._try_apply_tags_after_run(channel_id))
+                bot._schedule_sleep(channel_id)
+                asyncio.create_task(bot._refresh_dashboard())
+
+        try:
+            await interaction.delete_original_response()
+        except Exception:
+            pass
 
     @bot.tree.command(name="help", description="Show available commands", guild=guild_obj)
     async def cmd_help(interaction: discord.Interaction):
