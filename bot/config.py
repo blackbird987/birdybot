@@ -62,9 +62,8 @@ TITLE_TIMEOUT_SECS: int = int(os.getenv("TITLE_TIMEOUT_SECS", "15"))
 INSTANCE_RETENTION_DAYS: int = int(os.getenv("INSTANCE_RETENTION_DAYS", "7"))
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
 
-# Usage window token limits (0 = no limit / display raw only)
-USAGE_5H_TOKEN_LIMIT: int = int(os.getenv("USAGE_5H_TOKEN_LIMIT", "0"))
-USAGE_7D_TOKEN_LIMIT: int = int(os.getenv("USAGE_7D_TOKEN_LIMIT", "0"))
+# ccusage cache TTL in seconds (adaptive: shortened near rate limits)
+CCUSAGE_CACHE_TTL: int = int(os.getenv("CCUSAGE_CACHE_TTL", "60"))
 
 # Session evaluation
 EVAL_ENABLED: bool = os.getenv("EVAL_ENABLED", "1").lower() in ("1", "true", "yes")
