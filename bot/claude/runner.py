@@ -21,6 +21,7 @@ from bot.claude.parser import (
     is_transient_error,
     iter_tool_blocks,
     parse_stream_line,
+    parse_usage_limit,
 )
 from bot.claude.types import (
     CODE_CHANGE_TOOLS, Instance, InstanceOrigin, InstanceStatus, InstanceType,
@@ -158,6 +159,14 @@ class ClaudeRunner:
                 log.warning("Session %s not found for %s, retrying without resume", instance.session_id, instance.id)
                 instance.session_id = None
                 return await self._run_impl(instance, on_progress, on_stall, context, sibling_context)
+
+            # Usage limit: signal to caller for scheduled retry (not a quick retry)
+            if result.is_error:
+                reset_at = parse_usage_limit(error_text)
+                if reset_at:
+                    result.usage_limit_reset = reset_at
+                    log.info("Usage limit for %s, resets at %s", instance.id, reset_at)
+                    return result
 
             # Auto-retry on transient errors
             if result.is_error and is_transient_error(

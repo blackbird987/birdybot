@@ -23,6 +23,13 @@
 - Show pending changelog entries and session links in control room embed
 - Add Reboot button to control room for self-managed repo (triggers reboot_request.json flow)
 - Add `on_deploy_state_changed` callback to Messenger protocol for platform-agnostic refresh
+## v0.31.0 — Usage-Limit Auto-Retry (2026-03-20)
+
+- Auto-retry on usage-limit cooldown: when Claude CLI hits subscription cap ("You've hit your limit"), bot parses reset time and schedules automatic retry
+- 60-second polling loop in app.py with dedup guard (`retrying` set) prevents duplicate retries
+- Cancel Auto-Retry button shown on cooldown-pending failed instances
+- Max 3 cooldown retries per instance to prevent retry storms; 4-hour fallback when reset time can't be parsed
+- Cooldown state persisted to `state.json` — survives bot restarts
 
 ## v0.28.0 — Session Evaluation & Reporting (2026-03-17)
 
