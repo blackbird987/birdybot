@@ -851,7 +851,7 @@ class ForumManager:
                 for inst_id in ds.pending_sessions:
                     inst = self._store.get_instance(inst_id)
                     if inst and inst.session_id and inst.session_id in session_to_thread:
-                        inst_thread_ids[inst_id] = session_to_thread[inst.session_id]
+                        deploy_thread_ids[inst_id] = session_to_thread[inst.session_id]
             from bot.engine.usage import get_usage_text
             from bot import config as _cfg
             _usage_text = get_usage_text(
@@ -861,8 +861,13 @@ class ForumManager:
             dc = self._store.get_deploy_config(repo_name)
             embed = channels.build_control_embed(
                 repo_name, repo_path, branch, self._store.mode,
-                active, completed, failed,
-                deploy_state=ds, thread_ids=inst_thread_ids,
+                running_instances=running,
+                attention_instances=attention,
+                completed_instances=completed,
+                session_to_thread=session_to_thread,
+                today_cost=today_cost,
+                deploy_state=ds,
+                deploy_thread_ids=deploy_thread_ids,
                 usage_text=_usage_text,
             )
             view = channels.build_control_view(
