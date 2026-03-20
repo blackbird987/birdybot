@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.29.1 — Remove Daily Digest (2026-03-20)
+
 - Remove daily digest feature (automated broadcast + `format_digest_md`)
 - `/report` now always uses `full_report()` for all time ranges
 
