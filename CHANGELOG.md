@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.30.0 — Deploy State Tracking (2026-03-20)
+
 - Add deploy state tracking: detect version drift after merges, show "Reboot/Redeploy Required" in per-repo control room embeds
 - Auto-detect versions from pyproject.toml, package.json, Cargo.toml, *.csproj, or git tags
 - Bot's own repo resets baseline on reboot (reboot = redeploy); other repos use git-tag-based detection that persists across bot reboots
