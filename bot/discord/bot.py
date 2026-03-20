@@ -104,8 +104,6 @@ class ClaudeBot(discord.Client):
         self._monitor_started: bool = False
         self._notifier = None  # set by app.py after notifier is created
         self._voice_enabled: bool = bool(config.OPENAI_API_KEY)
-        # Pending voice transcriptions: {confirm_msg_id: {transcription, author_id, channel_id}}
-        self._pending_voice: dict[str, dict] = {}
         self._setup_commands()
 
     @property
@@ -477,8 +475,34 @@ class ClaudeBot(discord.Client):
             ext = Path(att.filename).suffix.lower()
 
             if ext in AUDIO_EXTS and self._voice_enabled and att.size <= 25_000_000:
-                await self._handle_voice_attachment(message, att, msg_access)
-                return
+                try:
+                    file_bytes = await att.read()
+                    from bot.services.audio import transcribe
+                    transcription = await transcribe(file_bytes, filename=att.filename)
+                    cleaned = transcription.strip() if transcription else ""
+                    if cleaned:
+                        text = f"[Voice message] {cleaned}"
+                        log.info("Transcribed voice %s: %s", att.filename, cleaned[:80])
+                        # Echo is non-critical — don't lose the transcription if send fails
+                        try:
+                            echo = cleaned[:1900] + "…" if len(cleaned) > 1900 else cleaned
+                            await message.channel.send(f'🎙️ *"{echo}"*')
+                        except Exception:
+                            log.warning("Failed to send voice echo", exc_info=True)
+                    else:
+                        try:
+                            await message.channel.send("Couldn't detect any speech in that voice message.")
+                        except Exception:
+                            pass
+                        return
+                except Exception:
+                    log.warning("Voice transcription failed for %s", att.filename, exc_info=True)
+                    try:
+                        await message.channel.send("Couldn't transcribe that voice message.")
+                    except Exception:
+                        pass
+                    return
+                break  # voice consumed, skip remaining attachments
 
             if ext == ".txt" and att.size <= 500_000:
                 try:
@@ -641,62 +665,6 @@ class ClaudeBot(discord.Client):
         finally:
             for tmp in _temp_files:
                 Path(tmp).unlink(missing_ok=True)
-
-    async def _handle_voice_attachment(
-        self, message: discord.Message, att: discord.Attachment,
-        msg_access: AccessResult,
-    ) -> None:
-        """Download a voice attachment, transcribe it, and show confirmation buttons."""
-        try:
-            file_bytes = await att.read()
-            log.info("Downloaded voice attachment %s (%d bytes)", att.filename, att.size)
-
-            from bot.services.audio import transcribe
-            transcription = await transcribe(file_bytes, filename=att.filename)
-
-            if not transcription or not transcription.strip():
-                await message.channel.send("Couldn't detect any speech in that voice message.")
-                return
-
-            embed = discord.Embed(
-                description=transcription, color=discord.Color.blurple(),
-            )
-            embed.set_author(name="Voice Transcription")
-            embed.set_footer(text="Send to run as a query, or Cancel to discard.")
-
-            view = discord.ui.View(timeout=120)
-            send_btn = discord.ui.Button(
-                label="Send", style=discord.ButtonStyle.green,
-                custom_id=f"voice_send:{message.author.id}",
-            )
-            cancel_btn = discord.ui.Button(
-                label="Cancel", style=discord.ButtonStyle.secondary,
-                custom_id=f"voice_cancel:{message.author.id}",
-            )
-            view.add_item(send_btn)
-            view.add_item(cancel_btn)
-
-            confirm_msg = await message.channel.send(embed=embed, view=view)
-
-            self._pending_voice[str(confirm_msg.id)] = {
-                "transcription": transcription,
-                "author_id": str(message.author.id),
-                "_ts": _time.monotonic(),
-            }
-            now = _time.monotonic()
-            self._pending_voice = {
-                k: v for k, v in self._pending_voice.items()
-                if now - v.get("_ts", now) < 300
-            }
-            log.info("Voice transcription pending confirmation in #%s: %s",
-                      getattr(message.channel, "name", "?"), transcription[:80])
-
-        except Exception:
-            log.warning("Voice transcription failed for %s", att.filename, exc_info=True)
-            try:
-                await message.channel.send("Couldn't transcribe that voice message.")
-            except Exception:
-                pass
 
     async def _route_lobby_message(
         self, message: discord.Message, text: str, repo_name: str | None,

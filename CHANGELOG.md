@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## v0.30.1 — Direct Voice Processing (2026-03-20)
+
+- Voice messages now process immediately (transcribe → run as query) instead of showing Send/Cancel confirmation buttons
+- Voice transcription echo is truncated to 1900 chars to stay within Discord limits
+
 ## v0.29.1 — Remove Daily Digest (2026-03-20)
 
 - Remove daily digest feature (automated broadcast + `format_digest_md`)
