@@ -1529,6 +1529,7 @@ async def on_help(ctx: RequestContext) -> None:
         "`/kill` — terminate instance\n"
         "`/retry` — re-run instance\n"
         "`/log` — full output\n"
+        "`/done` — wrap up (commit, changelog, release)\n"
         "`/diff` — git diff\n"
         "`/merge` — merge branch\n"
         "`/discard` — delete branch\n"
