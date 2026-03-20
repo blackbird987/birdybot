@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.36.0 — Natural Language Repo Management (2026-03-20)
+
 ### Auto-Create Forum Channels
 - `/repo add` and `/repo create` now automatically create a Discord forum channel + control post for the new repo
 - New `on_repo_added()` messenger hook follows existing `on_deploy_state_changed` pattern
