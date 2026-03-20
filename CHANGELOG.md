@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.38.0 — Live Usage Progress Bar (2026-03-20)
+
 - Replace static cost fields with live usage progress bar in dashboard and control room embeds
 - `/usage` now responds instantly from cache (60s TTL) instead of spawning fresh subprocesses every time
 - Add optional `force` parameter to `/usage` slash command for cache bypass when needed
