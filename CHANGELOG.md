@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.39.0 — Usage Plan Percentages & Instant /usage (2026-03-20)
+
 ### Usage Display Redesign
 - Show daily/weekly plan limit percentages in usage bar and `/usage` command (configurable via `PLAN_DAILY_LIMIT_USD` / `PLAN_WEEKLY_LIMIT_USD`)
 - Add plan savings comparison in `/usage` (API-equivalent cost vs subscription)
