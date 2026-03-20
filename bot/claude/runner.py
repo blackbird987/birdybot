@@ -126,17 +126,20 @@ class ClaudeRunner:
         # Use worktree as cwd if available (file isolation)
         working_dir = instance.worktree_path or instance.repo_path or None
 
-        cmd = self._build_command(instance, context, sibling_context)
-        log.info("Running %s: %s", instance.id, " ".join(cmd))
+        cmd, prompt_text = self._build_command(instance, context, sibling_context)
+        log.info("Running %s (prompt: %d chars via stdin): %s",
+                 instance.id, len(prompt_text), " ".join(cmd)[:500])
 
         # Clear CLAUDE_CODE env var to avoid nested-session error
         env = {**os.environ}
         env.pop("CLAUDE_CODE", None)
         env.pop("CLAUDECODE", None)
 
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=working_dir,
@@ -144,8 +147,24 @@ class ClaudeRunner:
                 limit=1024 * 1024,  # 1MB line buffer (default 64KB too small for stream-json)
                 **_NOWND,
             )
+            # Register immediately so kill/cleanup works even if stdin write fails
             instance.pid = proc.pid
             self._processes[instance.id] = proc
+
+            # Pipe user prompt via stdin — avoids Windows command-line length
+            # limit (WinError 206) for long prompts / system context.
+            try:
+                proc.stdin.write(prompt_text.encode("utf-8"))
+                await proc.stdin.drain()
+                proc.stdin.close()
+                await proc.stdin.wait_closed()
+            except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+                log.error("stdin pipe failed for %s: %s", instance.id, exc)
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                return RunResult(is_error=True, error_message=f"Failed to send prompt: {exc}")
 
             # Activity-based timeout: only times out if no output for
             # inactivity_timeout seconds (not wall-clock total runtime)
@@ -184,6 +203,12 @@ class ClaudeRunner:
             return RunResult(is_error=True, error_message=str(e))
         finally:
             self._processes.pop(instance.id, None)
+            # Kill process on cancellation/unexpected error to avoid orphans
+            if proc is not None and proc.returncode is None:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
             if not self._active_tasks and not self._processes:
                 self._idle_event.set()
 
@@ -370,7 +395,8 @@ class ClaudeRunner:
         self, instance: Instance,
         context: str | None = None,
         sibling_context: str | None = None,
-    ) -> list[str]:
+    ) -> tuple[list[str], str]:
+        """Build CLI command and prompt.  Prompt returned separately for stdin piping."""
         cmd = [config.CLAUDE_BINARY, "-p"]
 
         # Build prompt — never mutated on the instance
@@ -408,10 +434,9 @@ class ClaudeRunner:
         if disallowed:
             cmd.extend(["--disallowed-tools", ",".join(sorted(disallowed))])
 
-        # End-of-options: prevents prompt text starting with dashes (e.g. /ref
-        # context injection) from being parsed as CLI flags by Commander.js.
-        cmd.extend(["--", prompt])
-        return cmd
+        # Prompt piped via stdin (not CLI arg) to avoid Windows command-line
+        # length limit (WinError 206).  No "--" separator needed.
+        return cmd, prompt
 
     def _build_system_prompt(
         self, instance: Instance,
@@ -530,9 +555,13 @@ class ClaudeRunner:
                         line += f"\n  Summary: {summary}"
                     lines.append(line)
 
+                history_block = "\n".join(lines)
+                # Cap to ~4K to keep total command line under Windows limits
+                if len(history_block) > 4000:
+                    history_block = history_block[:4000] + "\n... (truncated)"
                 parts.append(
                     "\n\n--- Recent Sessions (this project) ---\n"
-                    + "\n".join(lines)
+                    + history_block
                 )
 
         # Sibling session awareness — helps Claude avoid file conflicts
