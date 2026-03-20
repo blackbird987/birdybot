@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## v0.29.0 — Per-Repo Archive Channel (2026-03-20)
+
+- Add per-repo archive channel: posts session summary + thread link on close for searchable session history
+
 ## v0.28.0 — Session Evaluation & Reporting (2026-03-17)
 
 ### Session evaluation & reporting

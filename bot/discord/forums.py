@@ -105,6 +105,7 @@ class ForumProject:
     threads: dict[str, ThreadInfo] = field(default_factory=dict)
     control_thread_id: str | None = None
     control_message_id: str | None = None
+    archive_channel_id: str | None = None
 
     def to_dict(self) -> dict:
         d = {
@@ -116,6 +117,8 @@ class ForumProject:
             d["control_thread_id"] = self.control_thread_id
         if self.control_message_id:
             d["control_message_id"] = self.control_message_id
+        if self.archive_channel_id:
+            d["archive_channel_id"] = self.archive_channel_id
         return d
 
     @classmethod
@@ -130,6 +133,7 @@ class ForumProject:
             threads=threads,
             control_thread_id=data.get("control_thread_id"),
             control_message_id=data.get("control_message_id"),
+            archive_channel_id=data.get("archive_channel_id"),
         )
 
 
@@ -546,6 +550,15 @@ class ForumManager:
                 except Exception:
                     log.debug("Failed to create control room for %s", repo_name, exc_info=True)
 
+        # Ensure archive channels exist for all repo forums
+        for repo_name, proj in self._forum_projects.items():
+            if proj.forum_channel_id and not proj.archive_channel_id:
+                try:
+                    await self.ensure_archive_channel(repo_name)
+                except Exception:
+                    log.debug("Failed to create archive channel for %s",
+                              repo_name, exc_info=True)
+
         # Populate user control room thread ID set + create missing control rooms
         cfg = load_access_config()
         for uid, ua in cfg.users.items():
@@ -556,6 +569,105 @@ class ForumManager:
                     await self.ensure_user_control_post(uid)
                 except Exception:
                     log.debug("Failed to create control room for user %s", uid, exc_info=True)
+
+    # --- Archive Channel ---
+
+    async def ensure_archive_channel(self, repo_name: str) -> discord.TextChannel | None:
+        """Get or create the archive text channel for a repo."""
+        guild = self._client.get_guild(self._guild_id)
+        if not guild or not self._category_id:
+            return None
+        category = guild.get_channel(self._category_id)
+        if not category or not isinstance(category, discord.CategoryChannel):
+            return None
+
+        proj = self._forum_projects.get(repo_name)
+        if not proj:
+            return None
+
+        # Check existing — clear stale ID if channel was deleted
+        if proj.archive_channel_id:
+            ch = guild.get_channel(int(proj.archive_channel_id))
+            if ch and isinstance(ch, discord.TextChannel):
+                return ch
+            log.info("Archive channel %s for %s was deleted, recreating",
+                     proj.archive_channel_id, repo_name)
+            proj.archive_channel_id = None
+
+        ch = await channels.ensure_archive_channel(guild, category, repo_name)
+        proj.archive_channel_id = str(ch.id)
+        self.save_forum_map()
+        return ch
+
+    async def post_archive_entry(self, channel_id: str) -> None:
+        """Post a session summary + link to the archive channel.
+
+        Finds the best instance for the session (prefers DONE/BUILD origins
+        over COMMIT/MERGE for meaningful summaries). All instance resolution
+        is internal — caller only passes channel_id.
+        """
+        proj_info = self.thread_to_project(channel_id)
+        if not proj_info:
+            return
+        proj, info = proj_info
+        if not info.session_id:
+            return
+
+        from bot.claude.types import InstanceOrigin
+        ORIGIN_PRIORITY = {
+            InstanceOrigin.DONE: 0,
+            InstanceOrigin.BUILD: 1,
+            InstanceOrigin.COMMIT: 2,
+            InstanceOrigin.DIRECT: 3,
+        }
+        candidates = [
+            i for i in self._store.list_instances()
+            if i.session_id == info.session_id and i.summary
+        ]
+        if not candidates:
+            inst = None
+            summary = info.topic or "No summary"
+        else:
+            # Stable two-pass sort: finished_at DESC, then origin priority ASC
+            candidates.sort(key=lambda i: i.finished_at or "", reverse=True)
+            candidates.sort(key=lambda i: ORIGIN_PRIORITY.get(i.origin, 99))
+            inst = candidates[0]
+            summary = inst.summary
+
+        archive_ch = await self.ensure_archive_channel(proj.repo_name)
+        if not archive_ch:
+            return
+
+        if inst:
+            status_emoji = "\u2705" if inst.status.value == "completed" else "\u274c"
+            mode = inst.mode or "explore"
+            if len(summary) > 200:
+                summary = summary[:197] + "..."
+
+            extras: list[str] = []
+            if inst.duration_ms:
+                secs = inst.duration_ms / 1000
+                extras.append(f"{secs / 60:.0f}m" if secs >= 60 else f"{secs:.0f}s")
+            if inst.cost_usd:
+                extras.append(f"${inst.cost_usd:.2f}")
+            if inst.branch:
+                extras.append(f"`{inst.branch}`")
+            extra_str = f" \u2014 {', '.join(extras)}" if extras else ""
+
+            msg = (
+                f"**Session {inst.status.value} {status_emoji}** \u00b7 "
+                f"{mode.title()}{extra_str}\n"
+                f"{summary}\n"
+                f"\U0001f517 <#{channel_id}>"
+            )
+        else:
+            msg = f"**Session closed**\n{summary}\n\U0001f517 <#{channel_id}>"
+
+        try:
+            await archive_ch.send(msg)
+        except Exception:
+            log.debug("Failed to post archive entry for thread %s",
+                      channel_id, exc_info=True)
 
     async def sync_cli_sessions(self, count: int) -> tuple[list[discord.Thread], list]:
         """Scan CLI sessions and create/populate forum threads.

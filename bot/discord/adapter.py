@@ -407,6 +407,12 @@ class DiscordMessenger:
                     # Wait for Discord to fanout the notification before archiving
                     await asyncio.sleep(1.5)
 
+            # Post to archive channel (isolated — never blocks archiving)
+            try:
+                await self._bot._forums.post_archive_entry(channel_id)
+            except Exception:
+                log.debug("Archive post failed for %s", channel_id, exc_info=True)
+
             await ch.edit(archived=True)
             log.info("Closed (archived) thread %s", channel_id)
         except Exception:

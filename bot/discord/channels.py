@@ -81,6 +81,24 @@ async def ensure_lobby(
     return channel
 
 
+async def ensure_archive_channel(
+    guild: discord.Guild,
+    category: discord.CategoryChannel,
+    repo_name: str,
+) -> discord.TextChannel:
+    """Find or create an archive text channel for a repo (inherits perms)."""
+    name = f"archive-{sanitize_channel_name(repo_name)}"
+
+    for ch in category.text_channels:
+        if ch.name == name:
+            log.info("Found existing archive channel %s (%s)", ch.id, ch.name)
+            return ch
+
+    channel = await guild.create_text_channel(name, category=category)
+    log.info("Created archive channel %s (%s)", channel.id, channel.name)
+    return channel
+
+
 def sanitize_channel_name(text: str, separator: str = "-") -> str:
     """Convert text to a valid Discord channel name."""
     name = text.lower()
