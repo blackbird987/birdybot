@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.31.0 — Usage-Limit Auto-Retry (2026-03-20)
+
 - Auto-retry on usage-limit cooldown: when Claude CLI hits subscription cap ("You've hit your limit"), bot parses reset time and schedules automatic retry
 - 60-second polling loop in app.py with dedup guard (`retrying` set) prevents duplicate retries
 - Cancel Auto-Retry button shown on cooldown-pending failed instances
