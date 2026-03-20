@@ -4,7 +4,9 @@ Shells out to ``npx ccusage`` to read Claude Code's local JSONL session
 files, providing accurate token counts including cache creation/read tokens.
 
 Results are cached with adaptive TTL: 60s normally, 15s when approaching
-rate limits (remainingMinutes < 30).
+rate limits (remainingMinutes < 30).  Failures are negatively cached to
+prevent subprocess storms, and a circuit breaker backs off after repeated
+failures.
 """
 
 from __future__ import annotations
@@ -12,6 +14,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import signal
+import subprocess as _sp
 import sys
 import time
 from dataclasses import dataclass
@@ -20,7 +25,6 @@ from datetime import datetime, timezone
 from bot import config
 
 log = logging.getLogger(__name__)
-_NOWND: dict = config.NOWND
 
 # ---------------------------------------------------------------------------
 # Cache
@@ -29,6 +33,69 @@ _NOWND: dict = config.NOWND
 _cache: dict[str, tuple[float, object]] = {}
 _DEFAULT_TTL = getattr(config, "CCUSAGE_CACHE_TTL", 60)
 _URGENT_TTL = 15  # When approaching rate limits
+
+# ---------------------------------------------------------------------------
+# Concurrency locks (one per cache key, prevents duplicate subprocesses)
+# ---------------------------------------------------------------------------
+
+_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_lock(key: str) -> asyncio.Lock:
+    """Get or create a lock for *key* (sync-safe, no race in asyncio)."""
+    if key not in _locks:
+        _locks[key] = asyncio.Lock()
+    return _locks[key]
+
+
+# ---------------------------------------------------------------------------
+# Circuit breaker
+# ---------------------------------------------------------------------------
+
+_fail_count: int = 0
+_last_fail_time: float = 0
+_MAX_CONSECUTIVE_FAILS = 3
+_BACKOFF_TTL = 300  # 5 min backoff after repeated failures
+
+
+# ---------------------------------------------------------------------------
+# Process tree kill helper
+# ---------------------------------------------------------------------------
+
+
+def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:
+    """Kill *proc* and all its children.
+
+    On Windows ``proc.kill()`` only terminates the immediate ``cmd.exe``
+    wrapper — the child ``node.exe`` spawned by npx survives.  We follow
+    up with ``taskkill /T /F`` to reap the entire tree.
+    """
+    pid = proc.pid
+    if pid is None:
+        return
+
+    # Fast path: kill the immediate process
+    try:
+        proc.kill()
+    except (OSError, ProcessLookupError):
+        pass
+
+    # Kill the full tree
+    if sys.platform == "win32":
+        try:
+            _sp.run(
+                ["taskkill", "/T", "/F", "/PID", str(pid)],
+                capture_output=True,
+                timeout=5,
+                creationflags=_sp.CREATE_NO_WINDOW,
+            )
+        except Exception:
+            pass
+    else:
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -65,7 +132,22 @@ class UsageDaily:
 
 
 # ---------------------------------------------------------------------------
-# ccusage subprocess runner with caching
+# Cache TTL helper
+# ---------------------------------------------------------------------------
+
+
+def _cache_ttl(data: object) -> float:
+    """Return the appropriate TTL for a cached value."""
+    if isinstance(data, dict):
+        for block in data.get("blocks", []):
+            proj = block.get("projection", {})
+            if proj.get("remainingMinutes", 999) < 30:
+                return _URGENT_TTL
+    return _DEFAULT_TTL
+
+
+# ---------------------------------------------------------------------------
+# ccusage subprocess runner with caching, dedup & circuit breaker
 # ---------------------------------------------------------------------------
 
 
@@ -73,51 +155,86 @@ async def _run_ccusage(args: list[str], force: bool = False) -> dict | None:
     """Run ccusage command and return parsed JSON.
 
     Returns None on failure or if response is missing expected keys.
+    Failures are negatively cached so timeouts don't trigger retry storms.
     """
+    global _fail_count, _last_fail_time
+
     cache_key = " ".join(args)
     now = time.monotonic()
 
+    # --- Circuit breaker: stop trying after repeated failures ---
+    if _fail_count >= _MAX_CONSECUTIVE_FAILS and now - _last_fail_time < _BACKOFF_TTL:
+        cached = _cache.get(cache_key)
+        return cached[1] if cached else None
+
+    # --- Pre-lock cache check ---
     if not force and cache_key in _cache:
         ts, data = _cache[cache_key]
-        ttl = _DEFAULT_TTL
-        # Use shorter TTL if last result showed we're near limits
-        if isinstance(data, dict):
-            for block in data.get("blocks", []):
-                proj = block.get("projection", {})
-                if proj.get("remainingMinutes", 999) < 30:
-                    ttl = _URGENT_TTL
-                    break
-        if now - ts < ttl:
+        if now - ts < _cache_ttl(data):
             return data
 
-    try:
-        # On Windows, npx is a .cmd file that create_subprocess_exec can't
-        # find directly — route through cmd.exe.
-        if sys.platform == "win32":
-            cmd = ["cmd", "/c", "npx", "ccusage", *args, "--json", "--offline"]
-        else:
-            cmd = ["npx", "ccusage", *args, "--json", "--offline"]
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            **_NOWND,
-        )
+    # --- Dedup: if another coroutine is already running this command,
+    #     return whatever is in cache (stale or None) rather than pile up ---
+    lock = _get_lock(cache_key)
+    if lock.locked():
+        log.debug("ccusage dedup: %s already running, returning cached", args)
+        cached = _cache.get(cache_key)
+        return cached[1] if cached else None
+
+    async with lock:
+        # --- Double-checked locking: re-check cache after acquiring ---
+        now = time.monotonic()
+        if cache_key in _cache:
+            ts, data = _cache[cache_key]
+            if now - ts < _cache_ttl(data):
+                return data
+
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-        except asyncio.TimeoutError:
-            proc.kill()
-            log.warning("ccusage timed out after 30s: %s", args)
+            # On Windows, npx is a .cmd file that create_subprocess_exec
+            # can't find directly -- route through cmd.exe.
+            if sys.platform == "win32":
+                cmd = ["cmd", "/c", "npx", "ccusage", *args, "--json", "--offline"]
+                # Prevent console window + group the process tree so
+                # taskkill /T can reap child node.exe on timeout.
+                flags = _sp.CREATE_NO_WINDOW | _sp.CREATE_NEW_PROCESS_GROUP
+                extra: dict = {"creationflags": flags}
+            else:
+                cmd = ["npx", "ccusage", *args, "--json", "--offline"]
+                extra = {"start_new_session": True}
+
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                **extra,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+            except asyncio.TimeoutError:
+                _kill_process_tree(proc)
+                _cache[cache_key] = (time.monotonic(), None)
+                _fail_count += 1
+                _last_fail_time = time.monotonic()
+                log.warning("ccusage timed out after 30s: %s", args)
+                return None
+
+            if proc.returncode != 0:
+                _cache[cache_key] = (time.monotonic(), None)
+                _fail_count += 1
+                _last_fail_time = time.monotonic()
+                log.warning("ccusage failed (rc=%d): %s", proc.returncode, stderr.decode()[:200])
+                return None
+
+            data = json.loads(stdout.decode())
+            _cache[cache_key] = (time.monotonic(), data)
+            _fail_count = 0  # Reset circuit breaker on success
+            return data
+        except Exception as e:
+            _cache[cache_key] = (time.monotonic(), None)
+            _fail_count += 1
+            _last_fail_time = time.monotonic()
+            log.warning("ccusage error: %s", e)
             return None
-        if proc.returncode != 0:
-            log.warning("ccusage failed (rc=%d): %s", proc.returncode, stderr.decode()[:200])
-            return None
-        data = json.loads(stdout.decode())
-        _cache[cache_key] = (now, data)
-        return data
-    except Exception as e:
-        log.warning("ccusage error: %s", e)
-        return None
 
 
 # ---------------------------------------------------------------------------
