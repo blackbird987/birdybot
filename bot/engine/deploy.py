@@ -9,7 +9,10 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from bot import config
+
 log = logging.getLogger(__name__)
+_NOWND: dict = config.NOWND
 
 DEPLOY_CONFIG_PATH = ".claude/deploy.json"
 
@@ -97,7 +100,7 @@ def get_head_ref(repo_path: str) -> str:
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
-            cwd=repo_path, capture_output=True, text=True, timeout=10,
+            cwd=repo_path, capture_output=True, text=True, timeout=10, **_NOWND,
         )
         return result.stdout.strip() if result.returncode == 0 else ""
     except Exception:
@@ -117,7 +120,7 @@ def get_latest_version_tag_ref(repo_path: str) -> str:
         # ^{} dereferences annotated tags to the commit object
         result = subprocess.run(
             ["git", "rev-parse", "--short", f"{tag}^{{}}"],
-            cwd=repo_path, capture_output=True, text=True, timeout=10,
+            cwd=repo_path, capture_output=True, text=True, timeout=10, **_NOWND,
         )
         return result.stdout.strip() if result.returncode == 0 else ""
     except Exception:
@@ -129,7 +132,7 @@ def _get_latest_version_tag(repo_path: str) -> str | None:
     try:
         result = subprocess.run(
             ["git", "tag", "--list", "v*", "--sort=-version:refname"],
-            cwd=repo_path, capture_output=True, text=True, timeout=10,
+            cwd=repo_path, capture_output=True, text=True, timeout=10, **_NOWND,
         )
         if result.returncode == 0:
             tags = result.stdout.strip().splitlines()
@@ -173,7 +176,7 @@ def get_recent_commits(repo_path: str, since_ref: str, limit: int = 5) -> list[s
     try:
         result = subprocess.run(
             ["git", "log", "--oneline", f"{since_ref}..HEAD", f"-{limit}"],
-            cwd=repo_path, capture_output=True, text=True, timeout=10,
+            cwd=repo_path, capture_output=True, text=True, timeout=10, **_NOWND,
         )
         if result.returncode == 0:
             return [line.strip() for line in result.stdout.strip().splitlines() if line.strip()]

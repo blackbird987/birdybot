@@ -4,9 +4,16 @@ from __future__ import annotations
 
 import os
 import re as _re
+import subprocess
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+# On Windows, prevent subprocess console windows from popping up
+NOWND: dict = (
+    {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
+)
 
 # Load .env from project root
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent

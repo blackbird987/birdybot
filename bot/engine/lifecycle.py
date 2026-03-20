@@ -29,6 +29,7 @@ from bot.platform.formatting import (
 from bot.store import history as history_mod
 
 log = logging.getLogger(__name__)
+_NOWND: dict = config.NOWND
 
 MAX_COOLDOWN_RETRIES = 3
 
@@ -202,7 +203,7 @@ def _repo_has_changes(repo_path: str) -> bool:
     try:
         r = subprocess.run(
             ["git", "status", "--porcelain"],
-            cwd=repo_path, capture_output=True, timeout=5, text=True,
+            cwd=repo_path, capture_output=True, timeout=5, text=True, **_NOWND,
         )
         return bool(r.stdout.strip())
     except Exception:
