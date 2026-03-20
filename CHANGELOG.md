@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Fix control room Reboot button not draining active tasks before requesting reboot (unlike /reboot which waited)
+- Prevent reboot request loss: defer queue clear until relaunch spawn succeeds; clear on failure to unblock _draining
+- Guard against duplicate reboot button clicks while already draining
+- Log event handler exceptions to file via on_error override (were only printed to stderr)
+
 ## v0.34.1 — Fix Long Prompt Crash (2026-03-20)
 
 - Fix WinError 206 (command line too long) by piping user prompt via stdin instead of CLI argument
