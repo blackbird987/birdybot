@@ -843,7 +843,7 @@ class ForumManager:
         self._user_control_thread_ids.add(str(thread.id))
         log.info("Created control room for user %s (thread=%s)", ua.display_name, thread.id)
 
-    async def refresh_control_room(self, repo_name: str) -> None:
+    async def refresh_control_room(self, repo_name: str, *, usage_bar: str | None = None) -> None:
         """Update the control room embed for a repo forum."""
         proj = self._forum_projects.get(repo_name)
         if not proj or not proj.control_thread_id or not proj.control_message_id:
@@ -900,11 +900,14 @@ class ForumManager:
                     inst = self._store.get_instance(inst_id)
                     if inst and inst.session_id and inst.session_id in session_to_thread:
                         deploy_thread_ids[inst_id] = session_to_thread[inst.session_id]
-            from bot.engine.usage import get_usage_text_async
-            try:
-                _usage_text = await get_usage_text_async()
-            except Exception:
-                _usage_text = None
+            # Use threaded usage_bar if provided (from dashboard cascade),
+            # otherwise fetch independently (standalone refresh).
+            if usage_bar is None:
+                from bot.engine.usage import get_usage_bar_async
+                try:
+                    usage_bar = await get_usage_bar_async()
+                except Exception:
+                    pass
             dc = self._store.get_deploy_config(repo_name)
             embed = channels.build_control_embed(
                 repo_name, repo_path, branch,
@@ -915,7 +918,7 @@ class ForumManager:
                 today_cost=today_cost,
                 deploy_state=ds,
                 deploy_thread_ids=deploy_thread_ids,
-                usage_text=_usage_text,
+                usage_bar=usage_bar,
             )
             view = channels.build_control_view(
                 repo_name,

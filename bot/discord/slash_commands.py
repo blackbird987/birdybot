@@ -58,11 +58,12 @@ def setup(bot: ClaudeBot) -> None:
         await bot._run_slash(interaction, commands.on_cost)
 
     @bot.tree.command(name="usage", description="Token usage & rate limit estimates", guild=guild_obj)
-    async def cmd_usage(interaction: discord.Interaction):
+    @app_commands.describe(force="Force refresh (bypass cache)")
+    async def cmd_usage(interaction: discord.Interaction, force: bool = False):
         if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
             await interaction.response.send_message("Unauthorized", ephemeral=True)
             return
-        await bot._run_slash(interaction, commands.on_usage)
+        await bot._run_slash(interaction, lambda ctx: commands.on_usage(ctx, force=force))
 
     @bot.tree.command(name="list", description="Show instances", guild=guild_obj)
     @app_commands.describe(scope="Show all instances or just recent")

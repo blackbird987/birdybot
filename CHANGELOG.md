@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## v0.38.0 — Live Usage Progress Bar (2026-03-20)
+
+- Replace static cost fields with live usage progress bar in dashboard and control room embeds
+- `/usage` now responds instantly from cache (60s TTL) instead of spawning fresh subprocesses every time
+- Add optional `force` parameter to `/usage` slash command for cache bypass when needed
+- Dashboard/control room falls back to store-based cost fields when ccusage is unavailable
+- Single ccusage fetch in dashboard refresh cascades to all control rooms (no duplicate subprocesses)
+- Handle expired blocks: clamp negative remaining_minutes, show "Block ended" label
+
 ## v0.37.4 — Fix ccusage Subprocess Flood (2026-03-20)
 
 - Fix: ccusage subprocess flood — timeouts spawned unlimited orphaned processes, killing PC performance

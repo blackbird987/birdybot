@@ -836,10 +836,10 @@ async def on_cost(ctx: RequestContext) -> None:
 
 # --- /usage ---
 
-async def on_usage(ctx: RequestContext) -> None:
+async def on_usage(ctx: RequestContext, *, force: bool = False) -> None:
     from bot.engine.usage import get_usage_details
 
-    text = await get_usage_details(force=True)
+    text = await get_usage_details(force=force)
 
     # Append top spenders from bot instances
     top = ctx.store.get_top_spenders()

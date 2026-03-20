@@ -289,31 +289,6 @@ async def get_daily_summary(force: bool = False) -> UsageDaily | None:
     )
 
 
-async def get_usage_text_async() -> str | None:
-    """Compact usage text for embed fields. Returns None if no data.
-
-    Format: ``Block: $X.XX · $Y.YY/hr · Zm left\\nToday: $X.XX``
-    """
-    block, daily = await asyncio.gather(
-        get_current_block(),
-        get_daily_summary(),
-    )
-    if not block and not daily:
-        return None
-
-    lines: list[str] = []
-    if block:
-        lines.append(
-            f"**Block** ${block.cost_usd:.2f}"
-            f" \u00b7 ${block.burn_rate_cost_per_hour:.2f}/hr"
-            f" \u00b7 {block.remaining_minutes}m left"
-        )
-    if daily:
-        lines.append(f"**Today** ${daily.cost_usd:.2f}")
-
-    return "\n".join(lines) if lines else None
-
-
 async def get_usage_details(force: bool = False) -> str:
     """Rich usage text for /usage command."""
     block, daily = await asyncio.gather(
@@ -355,6 +330,40 @@ async def get_usage_details(force: bool = False) -> str:
         lines.append("")
 
     return "\n".join(lines).rstrip()
+
+
+def format_usage_bar(block: UsageBlock | None, daily: UsageDaily | None) -> str | None:
+    """Visual usage bar for dashboard/control-room embeds.
+
+    Returns None when no block data is available.
+    """
+    if not block:
+        return None
+
+    remaining = max(block.remaining_minutes, 0)
+    elapsed = 300 - remaining
+    progress = min(elapsed / 300, 1.0)
+    filled = round(progress * 16)
+    bar = "\u2588" * filled + "\u2591" * (16 - filled)
+
+    time_label = "Block ended" if remaining == 0 else f"{remaining}m left"
+
+    lines = [
+        f"`{bar}` {time_label}",
+        f"${block.cost_usd:.2f} used \u00b7 ${block.projected_cost:.2f} proj \u00b7 ${block.burn_rate_cost_per_hour:.2f}/hr",
+    ]
+    if daily:
+        lines.append(f"Today: ${daily.cost_usd:.2f} \u00b7 {_format_tokens(daily.total_tokens)} tokens")
+    return "\n".join(lines)
+
+
+async def get_usage_bar_async() -> str | None:
+    """Visual usage bar for embeds. Returns None if no data."""
+    block, daily = await asyncio.gather(
+        get_current_block(),
+        get_daily_summary(),
+    )
+    return format_usage_bar(block, daily)
 
 
 async def warmup() -> None:
