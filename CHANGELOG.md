@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.34.0 — Per-Repo Deploy Configs (2026-03-20)
+
 - Add per-repo deploy configs: connect a reboot/deploy command to any repo's control room button
 - Support `.claude/deploy.json` convention — Claude instances can write this to auto-register a deploy sequence (requires user approval)
 - `/repo deploy set <name> <command>` for manual deploy config, `/repo deploy` to list configs
