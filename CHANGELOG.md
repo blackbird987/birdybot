@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- Add per-repo deploy configs: connect a reboot/deploy command to any repo's control room button
+- Support `.claude/deploy.json` convention — Claude instances can write this to auto-register a deploy sequence (requires user approval)
+- `/repo deploy set <name> <command>` for manual deploy config, `/repo deploy` to list configs
+- File-sourced configs start unapproved with "Approve" button; manual and self-managed configs are pre-approved
+- Extend reboot handler: self-managed repos use internal reboot flow, command-based repos run shell command with output capture
+- Guard against file-based config overwriting self-managed or manual configs
+- Add deploy convention hint to system prompt so Claude instances know how to connect deploy sequences
+
 ## v0.29.1 — Remove Daily Digest (2026-03-20)
 
 - Remove daily digest feature (automated broadcast + `format_digest_md`)

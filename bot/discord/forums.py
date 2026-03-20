@@ -849,6 +849,7 @@ class ForumManager:
                     inst = self._store.get_instance(inst_id)
                     if inst and inst.session_id and inst.session_id in session_to_thread:
                         inst_thread_ids[inst_id] = session_to_thread[inst.session_id]
+            dc = self._store.get_deploy_config(repo_name)
             embed = channels.build_control_embed(
                 repo_name, repo_path, branch, self._store.mode,
                 active, completed, failed,
@@ -859,6 +860,7 @@ class ForumManager:
                 current_mode=self._store.mode,
                 active_count=active,
                 deploy_state=ds,
+                deploy_config=dc,
             )
             await msg.edit(embed=embed, view=view)
         except discord.NotFound:

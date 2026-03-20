@@ -440,6 +440,7 @@ def build_control_view(
     current_mode: str = "explore",
     active_count: int = 0,
     deploy_state: DeployState | None = None,
+    deploy_config: dict | None = None,
 ) -> discord.ui.View:
     """Build the button view for a repo control room post."""
     view = discord.ui.View(timeout=None)
@@ -478,27 +479,41 @@ def build_control_view(
         custom_id=f"sync_repo:{repo_name}",
         row=2,
     ))
-    # Row 3: Stop All (only when instances running) + Reboot + Refresh
+    # Row 3: Deploy/Reboot button + Stop All + Refresh
+    needs_reboot = deploy_state.needs_reboot if deploy_state else False
+    if deploy_config:
+        if deploy_config.get("approved"):
+            # Active Reboot/Deploy button
+            label = deploy_config.get("label", "Reboot")
+            style = discord.ButtonStyle.danger if needs_reboot else discord.ButtonStyle.secondary
+            view.add_item(discord.ui.Button(
+                label=label, style=style,
+                custom_id=f"reboot_repo:{repo_name}",
+                emoji="\U0001f504" if needs_reboot else None,
+                row=3,
+            ))
+        else:
+            # Unapproved — show approval button
+            cmd = deploy_config.get("command", "?")
+            view.add_item(discord.ui.Button(
+                label=f"Approve: {cmd[:30]}",
+                style=discord.ButtonStyle.primary,
+                custom_id=f"approve_deploy:{repo_name}",
+                row=3,
+            ))
+    overflow_row = 3 if not deploy_config else 4
     if active_count > 0:
         view.add_item(discord.ui.Button(
             label=f"Stop All ({active_count})",
             style=discord.ButtonStyle.danger,
             custom_id=f"stop_all:{repo_name}",
-            row=3,
-        ))
-    if deploy_state and deploy_state.needs_reboot and deploy_state.self_managed:
-        view.add_item(discord.ui.Button(
-            label="Reboot",
-            style=discord.ButtonStyle.danger,
-            custom_id=f"reboot_repo:{repo_name}",
-            emoji="\U0001f504",
-            row=3,
+            row=overflow_row,
         ))
     view.add_item(discord.ui.Button(
         label="Refresh",
         style=discord.ButtonStyle.secondary,
         custom_id=f"refresh_control:{repo_name}",
-        row=3,
+        row=overflow_row,
     ))
     return view
 

@@ -573,8 +573,20 @@ async def _run_autopilot_chain(
                     log.info("Autopilot auto-merge: %s", merge_msg)
                     if "failed" not in merge_msg.lower():
                         clear_stale_branches(ctx.store, branch_name)
-                        from bot.engine.deploy import update_after_merge
+                        from bot.engine.deploy import update_after_merge, scan_deploy_config, make_deploy_config, is_deploy_protected
                         update_after_merge(ctx.store, merge_target)
+                        # Re-scan deploy config from file — skip protected configs
+                        _existing_cfg = ctx.store.get_deploy_config(merge_target.repo_name)
+                        _ds = ctx.store.get_deploy_state(merge_target.repo_name)
+                        if not is_deploy_protected(_existing_cfg, _ds):
+                            _file_cfg = scan_deploy_config(merge_target.repo_path)
+                            if _file_cfg:
+                                ctx.store.set_deploy_config(merge_target.repo_name, make_deploy_config(
+                                    "command", command=_file_cfg["command"],
+                                    label=_file_cfg.get("label", "Deploy"),
+                                    cwd=_file_cfg.get("cwd"),
+                                    source="file", approved=False,
+                                ))
                         await ctx.messenger.on_deploy_state_changed(merge_target.repo_name)
                         await ctx.messenger.send_text(
                             ctx.channel_id, f"✅ {merge_msg}", silent=True,

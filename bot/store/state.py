@@ -44,6 +44,7 @@ class StateStore:
         self._autopilot_chains: dict[str, list[str]] = {}  # session_id -> remaining steps
         self._chain_deferred: dict[str, list[str]] = {}  # session_id -> deferred revisions
         self._deploy_state: dict[str, DeployState] = {}  # repo_name -> deploy state
+        self._deploy_configs: dict[str, dict] = {}  # repo_name -> deploy config
         self._dirty: bool = False  # Dirty flag — mark_dirty() defers save to auto-save loop
         self._last_mtime: float = 0.0  # Track file mtime for external change detection
 
@@ -82,6 +83,7 @@ class StateStore:
                 k: DeployState.from_dict(v)
                 for k, v in data.get("deploy_state", {}).items()
             }
+            self._deploy_configs = data.get("deploy_configs", {})
             for d in data.get("schedules", []):
                 sched = Schedule.from_dict(d)
                 self._schedules[sched.id] = sched
@@ -143,6 +145,7 @@ class StateStore:
             "autopilot_chains": self._autopilot_chains,
             "chain_deferred": self._chain_deferred,
             "deploy_state": {k: v.to_dict() for k, v in self._deploy_state.items()},
+            "deploy_configs": self._deploy_configs,
             "schedules": [s.to_dict() for s in self._schedules.values()],
         }
         try:
@@ -440,6 +443,19 @@ class StateStore:
 
     def set_deploy_state(self, repo_name: str, state: DeployState) -> None:
         self._deploy_state[repo_name] = state
+        self.mark_dirty()
+
+    # --- Deploy Config ---
+
+    def get_deploy_config(self, repo_name: str) -> dict | None:
+        return self._deploy_configs.get(repo_name)
+
+    def set_deploy_config(self, repo_name: str, config: dict) -> None:
+        self._deploy_configs[repo_name] = config
+        self.mark_dirty()
+
+    def remove_deploy_config(self, repo_name: str) -> None:
+        self._deploy_configs.pop(repo_name, None)
         self.mark_dirty()
 
     # --- Aliases ---
