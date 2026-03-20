@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -215,13 +216,32 @@ class NotificationService:
         self, text: str,
         buttons: list[list[ButtonSpec]] | None = None,
         silent: bool = False,
+        ttl: float | None = None,
     ) -> None:
-        """Send to all registered platforms. Best-effort — one failure doesn't block others."""
+        """Send to all registered platforms. Best-effort — one failure doesn't block others.
+
+        If *ttl* is set (seconds), auto-delete the message after that delay.
+        """
         for platform, (messenger, channel_id) in self._messengers.items():
             try:
-                await messenger.send_text(channel_id, text, buttons, silent)
+                msg_id = await messenger.send_text(channel_id, text, buttons, silent)
+                if ttl and msg_id:
+                    asyncio.create_task(
+                        self._delete_after(messenger, channel_id, msg_id, ttl)
+                    )
             except Exception:
                 log.exception("Failed to broadcast to %s", platform)
+
+    @staticmethod
+    async def _delete_after(
+        messenger: Messenger, channel_id: str, msg_id: str, delay: float,
+    ) -> None:
+        """Sleep then delete — pure async, no call_later."""
+        try:
+            await asyncio.sleep(delay)
+            await messenger.delete_message(channel_id, msg_id)
+        except Exception:
+            pass
 
     async def broadcast_result(
         self, text: str,

@@ -147,7 +147,8 @@ class MonitorService:
             if mon["consecutive_failures"] == 1 and self._notifier:
                 try:
                     await self._notifier.broadcast(
-                        f"\u26a0\ufe0f Monitor **{name}**: authentication failed"
+                        f"\u26a0\ufe0f Monitor **{name}**: authentication failed",
+                        ttl=30,
                     )
                 except Exception:
                     pass
@@ -167,7 +168,8 @@ class MonitorService:
             if failures == 10 and self._notifier:
                 try:
                     await self._notifier.broadcast(
-                        f"\U0001f534 Monitor **{name}**: {failures} consecutive failures"
+                        f"\U0001f534 Monitor **{name}**: {failures} consecutive failures",
+                        ttl=30,
                     )
                 except Exception:
                     pass
@@ -221,7 +223,8 @@ class MonitorService:
             emoji = formatter._ATTENTION_EMOJI.get(attention, "\u26a0\ufe0f")
             try:
                 await self._notifier.broadcast(
-                    f"{emoji} Monitor **{name}** attention level: {prev_attention} \u2192 {attention}"
+                    f"{emoji} Monitor **{name}** attention level: {prev_attention} \u2192 {attention}",
+                    ttl=30,
                 )
             except Exception:
                 pass

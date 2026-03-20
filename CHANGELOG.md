@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## v0.43.0 — Auto-Clean Lobby (2026-03-20)
+
+- Auto-clean lobby: purge all non-pinned messages on startup (two-pass: bulk + individual for >14-day-old messages)
+- Add TTL to transient broadcasts: auto-update notices (10s), scheduled task results (15s), monitor alerts (30s) auto-delete
+- Reboot "back online" announcement uses temp lobby message (auto-deletes after 10s)
+- Slash command responses in the lobby auto-delete after 10s via `_AutoDeleteMessenger` wrapper
+- Add `ttl` parameter to `NotificationService.broadcast()` with async `_delete_after` helper
+
 ## v0.42.0 — Bidirectional Sync Git (2026-03-20)
 
 - Sync Git button now does bidirectional sync: fetches + pulls (ff-only) from remote before pushing. Self-managed repos (the bot itself) skip pull and report "N commits behind — reboot to apply." Dirty worktree detected before pull with clear error message.

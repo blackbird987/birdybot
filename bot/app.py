@@ -174,6 +174,7 @@ async def auto_update_loop(
                         log.warning("Auto-update: git fetch failed — %s", err)
                         await notifier.broadcast(
                             f"⚠️ Auto-update: git fetch failed — {err}",
+                            ttl=10,
                         )
                         failure_notified = True
                     continue
@@ -196,6 +197,7 @@ async def auto_update_loop(
                         log.warning("Auto-update: git rev-parse failed (branch=%s)", branch)
                         await notifier.broadcast(
                             f"⚠️ Auto-update: can't resolve branch `{branch}` — check AUTO_UPDATE_BRANCH",
+                            ttl=10,
                         )
                         failure_notified = True
                     continue
@@ -233,6 +235,7 @@ async def auto_update_loop(
                         log.warning("Auto-update: git pull failed — %s", err)
                         await notifier.broadcast(
                             f"⚠️ Auto-update: pull failed — {err}. Manual intervention needed.",
+                            ttl=10,
                         )
                         failure_notified = True
                     continue
@@ -258,6 +261,7 @@ async def auto_update_loop(
             try:
                 await notifier.broadcast(
                     f"🔄 Auto-update: pulled {n_commits} commit(s) — `{latest_msg}`\nRebooting...",
+                    ttl=10,
                 )
             except Exception:
                 log.warning("Auto-update: notification failed (reboot still queued)")
@@ -268,7 +272,7 @@ async def auto_update_loop(
         except Exception:
             log.exception("Auto-update: unexpected error")
             if not failure_notified:
-                await notifier.broadcast("⚠️ Auto-update: unexpected error — check logs.")
+                await notifier.broadcast("⚠️ Auto-update: unexpected error — check logs.", ttl=10)
                 failure_notified = True
 
 
@@ -463,12 +467,13 @@ async def run() -> None:
             escaped = redact_secrets(instance.error or 'Unknown error')
             await notifier.broadcast(
                 f"⚠️ **Scheduled task failed**\n{instance.display_id()}: {escaped}",
+                ttl=15,
             )
         elif changed:
             escaped = redact_secrets(instance.summary or 'No summary')
             await notifier.broadcast(
                 f"{instance.display_id()} (scheduled)\n{escaped}",
-                silent=True,
+                silent=True, ttl=15,
             )
 
     scheduler = Scheduler(store, runner, on_result=on_schedule_result)

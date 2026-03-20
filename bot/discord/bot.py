@@ -50,6 +50,31 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+class _AutoDeleteMessenger:
+    """Wraps a Messenger to auto-delete messages sent to a specific channel."""
+
+    def __init__(self, inner, lobby_channel_id: str, ttl: float = 10) -> None:
+        self._inner = inner
+        self._lobby_id = lobby_channel_id
+        self._ttl = ttl
+
+    async def send_text(self, channel_id, text, buttons=None, silent=False):
+        msg_id = await self._inner.send_text(channel_id, text, buttons, silent)
+        if channel_id == self._lobby_id and msg_id:
+            asyncio.create_task(self._delete_after(channel_id, msg_id))
+        return msg_id
+
+    async def _delete_after(self, channel_id: str, msg_id: str) -> None:
+        try:
+            await asyncio.sleep(self._ttl)
+            await self._inner.delete_message(channel_id, msg_id)
+        except Exception:
+            pass
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
 class ClaudeBot(discord.Client):
     """Discord bot for Claude Code instance management."""
 
@@ -264,10 +289,7 @@ class ClaudeBot(discord.Client):
             return
 
         if announce:
-            try:
-                await self.messenger.send_text(channel_id, announce)
-            except Exception:
-                log.warning("dispatch_resume: failed to send announcement", exc_info=True)
+            asyncio.create_task(self._send_temp_lobby_msg(announce, delay=10))
 
         try:
             config.REBOOT_MSG_FILE.unlink(missing_ok=True)
@@ -333,6 +355,10 @@ class ClaudeBot(discord.Client):
         ctx = self._ctx(channel_id, thread_info=info, access_result=ar)
         ctx.user_id = str(interaction.user.id)
         ctx.user_name = interaction.user.display_name
+        # Auto-delete responses sent to the lobby (keep it clean)
+        in_lobby = interaction.channel_id == self._lobby_channel_id
+        if in_lobby:
+            ctx.messenger = _AutoDeleteMessenger(ctx.messenger, channel_id)
         try:
             await coro(ctx)
         except Exception:
@@ -412,8 +438,8 @@ class ClaudeBot(discord.Client):
         from bot.engine.usage import warmup as _usage_warmup
         asyncio.create_task(_usage_warmup())
 
-        # Refresh dashboard on startup
-        asyncio.create_task(self._refresh_dashboard())
+        # Refresh dashboard on startup, then clean non-pinned lobby messages
+        asyncio.create_task(self._refresh_and_cleanup_lobby())
 
         # Clean up stale worktrees/branches from interrupted autopilot chains
         asyncio.create_task(self._startup_worktree_cleanup())
@@ -742,6 +768,11 @@ class ClaudeBot(discord.Client):
             self._dashboard_pending_flag,
         )
 
+    async def _refresh_and_cleanup_lobby(self) -> None:
+        """Refresh dashboard first (ensures embed exists/pinned), then purge stale messages."""
+        await self._refresh_dashboard()
+        await self._cleanup_lobby()
+
     async def _generate_smart_title(
         self, thread: discord.Thread, prompt: str, summary: str = "",
     ) -> None:
@@ -844,6 +875,43 @@ class ClaudeBot(discord.Client):
     async def _send_redirect(self, thread: discord.Thread) -> None:
         """Post a redirect link in lobby, auto-delete after 5s."""
         await self._send_temp_lobby_msg(f"\u2192 <#{thread.id}>")
+
+    async def _cleanup_lobby(self) -> None:
+        """Delete all non-pinned messages from lobby on startup."""
+        lobby = self.get_channel(self._lobby_channel_id)
+        if not lobby or not isinstance(lobby, discord.TextChannel):
+            return
+        pinned_ids = {m.id for m in await lobby.pins()}
+        deleted = 0
+
+        # Pass 1: bulk-delete recent messages (<14 days) — fast
+        try:
+            purged = await lobby.purge(
+                limit=100, check=lambda m: m.id not in pinned_ids,
+            )
+            deleted += len(purged)
+        except Exception:
+            log.warning("Lobby purge failed", exc_info=True)
+
+        # Pass 2: individually delete older messages (>14 days)
+        batch = 0
+        try:
+            async for msg in lobby.history(limit=100):
+                if msg.id not in pinned_ids:
+                    try:
+                        await msg.delete()
+                        deleted += 1
+                        batch += 1
+                        if batch >= 5:
+                            await asyncio.sleep(1)
+                            batch = 0
+                    except Exception:
+                        pass
+        except Exception:
+            log.warning("Lobby old-message cleanup failed", exc_info=True)
+
+        if deleted:
+            log.info("Lobby cleanup: deleted %d messages", deleted)
 
     # --- Interaction dispatch (delegated) ---
 
