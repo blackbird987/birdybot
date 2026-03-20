@@ -17,7 +17,7 @@ from bot.claude.runner import ClaudeRunner
 from bot.claude.types import InstanceStatus
 from bot.engine import commands as engine_commands
 from bot.platform.base import NotificationService
-from bot.platform.formatting import format_digest_md, redact_secrets
+from bot.platform.formatting import redact_secrets
 from bot.scheduler import Scheduler
 from bot.store.state import StateStore
 
@@ -455,38 +455,6 @@ async def run() -> None:
             except Exception:
                 log.exception("Auto-save failed")
 
-    async def daily_digest_loop():
-        import datetime as dt
-        while True:
-            now = dt.datetime.now(dt.timezone.utc)
-            target = now.replace(
-                hour=config.DIGEST_HOUR, minute=0, second=0, microsecond=0
-            )
-            if target <= now:
-                target += dt.timedelta(days=1)
-            wait_secs = (target - now).total_seconds()
-            await asyncio.sleep(wait_secs)
-            try:
-                repo_name, _ = store.get_active_repo()
-                text = format_digest_md(
-                    instance_count=store.instance_count_today(),
-                    daily_cost=store.get_daily_cost(),
-                    failures=store.failure_count_today(),
-                    repo_name=repo_name,
-                    mode=store.mode,
-                )
-                # Append eval summary if available
-                try:
-                    from bot.engine.report import daily_digest as eval_digest
-                    eval_text = eval_digest(hours=24)
-                    if eval_text and eval_text != "No sessions to evaluate.":
-                        text += f"\n\n**Eval Summary**\n{eval_text}"
-                except Exception:
-                    log.debug("Eval digest failed for daily digest", exc_info=True)
-                await notifier.broadcast(text, silent=True)
-            except Exception:
-                log.exception("Failed to send daily digest")
-
     # Signal handling
     def signal_handler(sig, frame):
         log.info("Received signal %s, shutting down...", sig)
@@ -515,7 +483,6 @@ async def run() -> None:
     # Start background tasks (store refs to prevent GC)
     _bg_tasks = [
         asyncio.create_task(auto_save_loop()),
-        asyncio.create_task(daily_digest_loop()),
     ]
     if config.AUTO_UPDATE:
         _bg_tasks.append(asyncio.create_task(

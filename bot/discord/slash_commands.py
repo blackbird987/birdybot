@@ -239,9 +239,9 @@ def setup(bot: ClaudeBot) -> None:
             await interaction.response.send_message("Unauthorized", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
-        from bot.engine.report import daily_digest, full_report
+        from bot.engine.report import full_report
         try:
-            text = daily_digest(hours=days * 24) if days <= 1 else full_report(days=days)
+            text = full_report(days=days)
         except Exception as exc:
             log.warning("Report generation failed", exc_info=True)
             text = f"Report generation failed: {exc}"

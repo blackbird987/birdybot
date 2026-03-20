@@ -1,4 +1,4 @@
-"""Generate eval reports and digests for Discord delivery."""
+"""Generate eval reports for Discord delivery."""
 
 from __future__ import annotations
 
@@ -8,83 +8,6 @@ from collections import Counter
 from bot.engine.eval import load_evals, load_chain_evals, SessionEval, ChainEval
 
 log = logging.getLogger(__name__)
-
-
-def daily_digest(hours: int = 24) -> str:
-    """Generate a daily digest string for a Discord embed.
-
-    Returns markdown text summarizing session evals and chain evals
-    from the last *hours*.
-    """
-    evals = load_evals(since_hours=hours)
-    chains = load_chain_evals(since_hours=hours)
-
-    if not evals and not chains:
-        return "No sessions to evaluate."
-
-    # --- Aggregate metrics ---
-    total_sessions = len(evals)
-    total_cost = sum(e.metrics.get("cost", 0) or 0 for e in evals)
-    total_turns = sum(e.metrics.get("turns", 0) or 0 for e in evals)
-
-    # Chain stats
-    merged = sum(1 for c in chains if c.outcome == "merged")
-    failed = sum(1 for c in chains if c.outcome == "failed")
-    abandoned = sum(1 for c in chains if c.outcome == "abandoned")
-
-    # Collect all flags
-    all_flags: list[tuple[str, str, str, str]] = []  # (id, category, severity, message)
-    for e in evals:
-        for f in e.flags:
-            all_flags.append((e.instance_id, f.category, f.severity, f.message))
-    for c in chains:
-        for f in c.flags:
-            all_flags.append((c.chain_id, f.category, f.severity, f.message))
-
-    issues = [(eid, msg) for eid, _, sev, msg in all_flags if sev == "issue"]
-    warnings = [(eid, cat) for eid, cat, sev, _ in all_flags if sev == "warning"]
-
-    # --- Build output ---
-    lines: list[str] = []
-    lines.append(f"**Sessions:** {total_sessions} | **Turns:** {total_turns} | **Cost:** ${total_cost:.2f}")
-
-    if chains:
-        chain_parts = [f"{len(chains)} chains"]
-        if merged:
-            chain_parts.append(f"{merged} merged")
-        if failed:
-            chain_parts.append(f"{failed} failed")
-        if abandoned:
-            chain_parts.append(f"{abandoned} abandoned")
-        lines.append(f"**Chains:** {', '.join(chain_parts)}")
-
-        # Average chain cost
-        chain_costs = [c.total_cost for c in chains if c.total_cost]
-        if chain_costs:
-            avg = sum(chain_costs) / len(chain_costs)
-            lines.append(f"**Avg chain cost:** ${avg:.2f}")
-
-    # Issues (high priority flags)
-    if issues:
-        lines.append("")
-        lines.append("**Issues:**")
-        for eid, msg in issues[:5]:
-            lines.append(f"• `{eid}` — {msg}")
-
-    # Warnings grouped by category
-    if warnings:
-        lines.append("")
-        cat_counts = Counter(cat for _, cat in warnings)
-        warning_parts = [f"{cat}: {count}" for cat, count in cat_counts.most_common(5)]
-        lines.append(f"**Warnings** ({len(warnings)} total): {', '.join(warning_parts)}")
-
-    # Flag-free sessions
-    clean = sum(1 for e in evals if not e.flags)
-    if total_sessions:
-        pct = clean / total_sessions * 100
-        lines.append(f"\n**Clean sessions:** {clean}/{total_sessions} ({pct:.0f}%)")
-
-    return "\n".join(lines)
 
 
 def full_report(days: int = 7) -> str:
