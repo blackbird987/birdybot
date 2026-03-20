@@ -311,7 +311,10 @@ async def run() -> None:
     engine_commands.init(start_time, cli_version, shutdown_fn=lambda: stop_event.set())
 
     # Capture deploy state baselines for all repos
-    from bot.engine.deploy import capture_boot_baselines
+    from bot.engine.deploy import (
+        capture_boot_baselines, make_deploy_config,
+        is_deploy_protected, scan_deploy_config,
+    )
     capture_boot_baselines(store, str(config._PROJECT_ROOT))
 
     # One-time backfill of token usage buckets from existing instances
@@ -332,6 +335,28 @@ async def run() -> None:
             store.set_token_buckets(buckets)
             log.info("Backfilled %d usage buckets from %d instances", len(buckets), len(raw))
         store.mark_buckets_initialized()
+    # Auto-register deploy configs
+    for _rname, _rpath in store.list_repos().items():
+        _ds = store.get_deploy_state(_rname)
+        _existing_cfg = store.get_deploy_config(_rname)
+        # Self-managed repos: auto-register with approved=True
+        if _ds and _ds.self_managed and not _existing_cfg:
+            store.set_deploy_config(_rname, make_deploy_config(
+                "self", source="auto", approved=True,
+            ))
+            log.info("Auto-registered self-managed deploy config for %s", _rname)
+        # File-based configs: register unapproved — skip protected repos
+        elif not is_deploy_protected(_existing_cfg, _ds) and not _existing_cfg:
+            _file_cfg = scan_deploy_config(_rpath)
+            if _file_cfg:
+                store.set_deploy_config(_rname, make_deploy_config(
+                    "command",
+                    command=_file_cfg["command"],
+                    label=_file_cfg.get("label", "Deploy"),
+                    cwd=_file_cfg.get("cwd"),
+                    source="file", approved=False,
+                ))
+                log.info("Auto-registered file-based deploy config for %s (pending approval)", _rname)
 
     # Emergency signal handler: if the bot is killed (e.g. by a Claude Code instance
     # running taskkill), save context and auto-relaunch so we come back online.

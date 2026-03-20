@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import subprocess
@@ -9,6 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 log = logging.getLogger(__name__)
+
+DEPLOY_CONFIG_PATH = ".claude/deploy.json"
 
 # Version file parsers in priority order
 _VERSION_PARSERS: list[tuple[str, str]] = [
@@ -252,3 +255,83 @@ def update_after_merge(store, inst) -> None:
         inst.repo_name, ds.boot_version, ds.current_version,
         len(ds.pending_sessions),
     )
+
+
+# --- Deploy config helpers ---
+
+
+def make_deploy_config(
+    method: str,
+    *,
+    command: str | None = None,
+    label: str = "Reboot",
+    cwd: str | None = None,
+    source: str = "manual",
+    approved: bool = True,
+) -> dict:
+    """Build a deploy config dict with all required fields."""
+    cfg: dict = {
+        "method": method,
+        "label": label,
+        "source": source,
+        "approved": approved,
+    }
+    if command is not None:
+        cfg["command"] = command
+    if cwd is not None:
+        cfg["cwd"] = cwd
+    return cfg
+
+
+def is_deploy_protected(existing_config: dict | None, deploy_state: DeployState | None) -> bool:
+    """Check if a repo's deploy config should not be overwritten by file scan.
+
+    Protected when: self-managed, manually configured, or deploy state is self-managed.
+    """
+    if existing_config and existing_config.get("method") == "self":
+        return True
+    if existing_config and existing_config.get("source") == "manual":
+        return True
+    if deploy_state and deploy_state.self_managed:
+        return True
+    return False
+
+
+def rescan_deploy_config_after_merge(store, repo_name: str, repo_path: str) -> None:
+    """Re-scan .claude/deploy.json after a merge and update config if needed.
+
+    Skips repos with protected configs (self-managed or manually set).
+    """
+    existing = store.get_deploy_config(repo_name)
+    ds = store.get_deploy_state(repo_name)
+    if is_deploy_protected(existing, ds):
+        return
+    file_cfg = scan_deploy_config(repo_path)
+    if file_cfg:
+        store.set_deploy_config(repo_name, make_deploy_config(
+            "command",
+            command=file_cfg["command"],
+            label=file_cfg.get("label", "Deploy"),
+            cwd=file_cfg.get("cwd"),
+            source="file", approved=False,
+        ))
+
+
+def scan_deploy_config(repo_path: str) -> dict | None:
+    """Read .claude/deploy.json from a repo if it exists.
+
+    Returns raw file data with at least a 'command' key, or None.
+    File-based configs are always command-based; 'method: self' is an
+    internal concept handled by auto-detection, not by file convention.
+    """
+    cfg_path = Path(repo_path) / DEPLOY_CONFIG_PATH
+    if not cfg_path.exists():
+        return None
+    try:
+        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+        if "command" not in data:
+            return None
+        return data
+    except Exception:
+        log.debug("Failed to read deploy config from %s", cfg_path, exc_info=True)
+        return None

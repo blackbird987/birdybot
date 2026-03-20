@@ -858,6 +858,7 @@ class ForumManager:
                 self._store.get_token_buckets(),
                 {"5h": _cfg.USAGE_5H_TOKEN_LIMIT, "7d": _cfg.USAGE_7D_TOKEN_LIMIT},
             )
+            dc = self._store.get_deploy_config(repo_name)
             embed = channels.build_control_embed(
                 repo_name, repo_path, branch, self._store.mode,
                 active, completed, failed,
@@ -869,6 +870,7 @@ class ForumManager:
                 current_mode=self._store.mode,
                 active_count=len(running),
                 deploy_state=ds,
+                deploy_config=dc,
             )
             await msg.edit(embed=embed, view=view)
         except discord.NotFound:

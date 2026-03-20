@@ -256,6 +256,8 @@ The user sees: forum sidebar (thread names truncated ~40 chars, tags like active
 
 Build tasks use git worktrees for isolation — each build gets its own directory. After completion, user taps Merge or Discard. Autopilot auto-merges. The main repo always stays on master.
 
+Deploy integration: To connect a reboot/deploy sequence for this repo, create .claude/deploy.json with {"command": "your deploy command", "label": "Deploy"}. After merge, the bot detects it and adds a Deploy button to the repo's control room (requires user approval before first use).
+
 Design for: mobile-first conciseness, maximum throughput, at-a-glance visibility, per-thread state over globals.
 """
 

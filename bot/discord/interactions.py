@@ -113,20 +113,20 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
         await _handle_resume_latest(bot, interaction, instance_id)
         return
 
-    # --- Reboot from control room (self-managed repo only) ---
+    # --- Reboot/Deploy from control room ---
     if action == "reboot_repo":
         if not btn_access.is_owner:
             await interaction.followup.send("Owner only.", ephemeral=True)
             return
-        import json as _json
-        reboot_data = {
-            "message": f"Reboot requested from control room ({instance_id})",
-            "resume_prompt": "Post-reboot: verify health, check deploy state cleared.",
-        }
-        Path("data/reboot_request.json").write_text(
-            _json.dumps(reboot_data), encoding="utf-8",
-        )
-        await interaction.followup.send("\U0001f504 Rebooting...", ephemeral=True)
+        await _handle_reboot_repo(bot, interaction, instance_id)
+        return
+
+    # --- Approve file-sourced deploy config ---
+    if action == "approve_deploy":
+        if not btn_access.is_owner:
+            await interaction.followup.send("Owner only.", ephemeral=True)
+            return
+        await _handle_approve_deploy(bot, interaction, instance_id)
         return
 
     # --- Refresh control room (repo or user) ---
@@ -548,3 +548,112 @@ async def _handle_new_session(
         await interaction.delete_original_response()
     except Exception:
         pass
+
+
+async def _handle_approve_deploy(
+    bot: ClaudeBot, interaction: discord.Interaction, repo_name: str,
+) -> None:
+    """Approve a file-sourced deploy config so the Reboot button becomes active."""
+    config = bot._store.get_deploy_config(repo_name)
+    if not config:
+        await interaction.followup.send("No deploy config found.", ephemeral=True)
+        return
+    config["approved"] = True
+    bot._store.set_deploy_config(repo_name, config)
+    await interaction.followup.send(
+        f"Deploy approved for **{repo_name}**: `{config.get('command', 'self')}`",
+    )
+    asyncio.create_task(bot._forums.refresh_control_room(repo_name))
+
+
+async def _handle_reboot_repo(
+    bot: ClaudeBot, interaction: discord.Interaction, repo_name: str,
+) -> None:
+    """Execute a reboot/deploy for a repo based on its deploy config."""
+    config = bot._store.get_deploy_config(repo_name)
+    if not config or not config.get("approved"):
+        await interaction.followup.send(
+            "Deploy not configured or not approved.", ephemeral=True,
+        )
+        return
+
+    ds = bot._store.get_deploy_state(repo_name)
+    method = config.get("method", "command")
+
+    if method == "self":
+        # Use existing bot reboot mechanism via runner
+        msg = f"Reboot requested from control room ({repo_name})"
+        if ds and ds.pending_changes:
+            msg += f" ({len(ds.pending_changes)} pending changes)"
+        bot._runner.request_reboot({
+            "message": msg,
+            "channel_id": str(interaction.channel_id),
+            "platform": "discord",
+        })
+        await interaction.followup.send(
+            "\U0001f504 Reboot requested. Draining active tasks...",
+        )
+        # NOTE: Do NOT reset deploy state here — capture_boot_baselines()
+        # handles it on the next startup when it detects self_managed=True.
+
+    elif method == "command":
+        command = config["command"]
+        # Resolve cwd: absolute as-is, relative against repo root, default to repo path
+        repo_path = bot._store.list_repos().get(repo_name)
+        if not repo_path:
+            await interaction.followup.send(
+                f"Repo `{repo_name}` not found — deploy config may be stale.",
+                ephemeral=True,
+            )
+            return
+        raw_cwd = config.get("cwd")
+        if raw_cwd:
+            cwd_path = Path(raw_cwd)
+            if not cwd_path.is_absolute():
+                cwd_path = Path(repo_path) / cwd_path
+            cwd = str(cwd_path.resolve())
+        else:
+            cwd = repo_path
+
+        await interaction.followup.send(f"Running: `{command}`...")
+
+        proc = None
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                command, cwd=cwd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
+            output = stdout.decode(errors="replace")[:1500]
+
+            if proc.returncode == 0:
+                # Reset deploy state after successful command-based deploy
+                if ds:
+                    ds.boot_version = ds.current_version
+                    ds.boot_ref = ds.current_ref
+                    ds.pending_sessions.clear()
+                    ds.pending_changes.clear()
+                    bot._store.set_deploy_state(repo_name, ds)
+                await interaction.followup.send(
+                    f"\u2705 Deploy successful.\n```\n{output}\n```"
+                    if output.strip() else "\u2705 Deploy successful.",
+                )
+            else:
+                await interaction.followup.send(
+                    f"\u274c Deploy failed (exit {proc.returncode}).\n```\n{output}\n```"
+                    if output.strip()
+                    else f"\u274c Deploy failed (exit {proc.returncode}).",
+                )
+        except asyncio.TimeoutError:
+            if proc:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+            await interaction.followup.send("\u274c Deploy timed out (60s).")
+        except Exception as e:
+            await interaction.followup.send(f"\u274c Deploy error: {e}")
+
+    asyncio.create_task(bot._forums.refresh_control_room(repo_name))
+    asyncio.create_task(bot._refresh_dashboard())
