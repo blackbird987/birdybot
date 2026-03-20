@@ -716,6 +716,54 @@ async def on_cost(ctx: RequestContext) -> None:
     await ctx.messenger.send_text(ctx.channel_id, markup)
 
 
+# --- /usage ---
+
+async def on_usage(ctx: RequestContext) -> None:
+    from bot.engine.usage import compute_windows, format_bar, format_countdown, _format_tokens
+
+    buckets = ctx.store.get_token_buckets()
+    limits = {"5h": config.USAGE_5H_TOKEN_LIMIT, "7d": config.USAGE_7D_TOKEN_LIMIT}
+    windows = compute_windows(buckets, limits)
+
+    daily = ctx.store.get_daily_cost()
+    budget = config.DAILY_BUDGET_USD
+    budget_pct = min(100, daily / budget * 100) if budget > 0 else 0
+
+    lines = [
+        f"**Budget** `{format_bar(budget_pct)}` ${daily:.2f} / ${budget:.2f} ({budget_pct:.0f}%)",
+        "",
+    ]
+    for key in ("5h", "7d"):
+        w = windows.get(key)
+        if not w:
+            continue
+        tokens_str = _format_tokens(w.tokens_used)
+        reset = format_countdown(w.resets_at)
+
+        if w.token_limit > 0:
+            limit_str = _format_tokens(w.token_limit)
+            lines.append(f"**{w.label}** `{format_bar(w.utilization)}` {w.utilization:.1f}%")
+            lines.append(f"  {tokens_str} / {limit_str} tokens \u00b7 ${w.cost_usd:.2f}")
+            if reset:
+                lines.append(f"  resets in {reset}")
+        else:
+            lines.append(f"**{w.label}** {tokens_str} tokens \u00b7 ${w.cost_usd:.2f}")
+            if reset:
+                lines.append(f"  resets in {reset}")
+        lines.append("")
+
+    top = ctx.store.get_top_spenders()
+    if top:
+        lines.append("**Top spenders today:**")
+        for inst in top:
+            cost = f"${inst.cost_usd:.4f}" if inst.cost_usd else "$0"
+            lines.append(f"  `{inst.id}` {cost} \u2014 {inst.prompt[:30]}")
+
+    text = "\n".join(lines)
+    markup = ctx.messenger.markdown_to_markup(text)
+    await ctx.messenger.send_text(ctx.channel_id, markup)
+
+
 # --- /status ---
 
 async def on_status(ctx: RequestContext) -> None:

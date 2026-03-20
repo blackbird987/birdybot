@@ -137,6 +137,15 @@ def build_dashboard_embed(
         if proj_lines:
             embed.add_field(name="Projects", value="\n".join(proj_lines), inline=False)
 
+    # Usage windows
+    from bot.engine.usage import get_usage_text
+    usage_text = get_usage_text(
+        store.get_token_buckets(),
+        {"5h": config.USAGE_5H_TOKEN_LIMIT, "7d": config.USAGE_7D_TOKEN_LIMIT},
+    )
+    if usage_text:
+        embed.add_field(name="Usage", value=usage_text, inline=False)
+
     # Cost + Mode
     embed.add_field(name="Today", value=f"${today_cost:.4f}", inline=True)
     embed.add_field(name="Total", value=f"${total_cost:.4f}", inline=True)

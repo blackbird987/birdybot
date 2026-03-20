@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- Add estimated usage display: 5-hour session and 7-day weekly token windows with progress bars and reset countdowns (inspired by claude-counter)
+- New `/usage` slash command: budget bar, windowed token usage, cost per window, top spenders
+- Usage bars shown in lobby dashboard and per-repo control room embeds
+- Token usage tracked in hourly buckets (persisted in state.json), keyed by completion time
+- One-time backfill from existing instances on first boot after upgrade
+- Configurable token limits via `USAGE_5H_TOKEN_LIMIT` and `USAGE_7D_TOKEN_LIMIT` env vars
+
 ## v0.29.0 — Per-Repo Archive Channel (2026-03-20)
 
 - Add per-repo archive channel: posts session summary + thread link on close for searchable session history

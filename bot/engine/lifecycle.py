@@ -222,6 +222,13 @@ def finalize_run(ctx: RequestContext, inst: Instance, result: RunResult) -> None
     if result.cost_usd:
         ctx.store.add_cost(result.cost_usd)
 
+    if result.input_tokens or result.output_tokens:
+        ctx.store.record_tokens(
+            result.input_tokens, result.output_tokens,
+            result.cost_usd or 0.0,
+            finished_at=inst.finished_at,
+        )
+
     # Append to persistent session history log (best-effort)
     _log_history(ctx, inst, result.result_text)
 

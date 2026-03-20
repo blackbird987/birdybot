@@ -63,6 +63,10 @@ INSTANCE_RETENTION_DAYS: int = int(os.getenv("INSTANCE_RETENTION_DAYS", "7"))
 DIGEST_HOUR: int = int(os.getenv("DIGEST_HOUR", "20"))
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
 
+# Usage window token limits (0 = no limit / display raw only)
+USAGE_5H_TOKEN_LIMIT: int = int(os.getenv("USAGE_5H_TOKEN_LIMIT", "0"))
+USAGE_7D_TOKEN_LIMIT: int = int(os.getenv("USAGE_7D_TOKEN_LIMIT", "0"))
+
 # Session evaluation
 EVAL_ENABLED: bool = os.getenv("EVAL_ENABLED", "1").lower() in ("1", "true", "yes")
 
