@@ -510,26 +510,6 @@ def format_cost_md(daily: float, total: float, top_spenders: list[Instance]) -> 
     return "\n".join(lines)
 
 
-def format_digest_md(
-    instance_count: int,
-    daily_cost: float,
-    failures: int,
-    repo_name: str | None,
-    mode: str,
-) -> str:
-    """Format daily digest (markdown)."""
-    lines = [
-        "**Daily Digest**",
-        f"Instances: {instance_count}",
-        f"Cost: ${daily_cost:.4f}",
-        f"Failures: {failures}",
-    ]
-    if repo_name:
-        lines.append(f"Repo: `{repo_name}`")
-    lines.append(f"Mode: {mode_label(mode)}")
-    return "\n".join(lines)
-
-
 def format_schedule_list_md(schedules: list[Schedule]) -> str:
     """Format active schedules (markdown)."""
     if not schedules:

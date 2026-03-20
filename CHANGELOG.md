@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Remove daily digest feature (automated broadcast + `format_digest_md`)
+- `/report` now always uses `full_report()` for all time ranges
+
 ## v0.29.0 — Per-Repo Archive Channel (2026-03-20)
 
 - Add per-repo archive channel: posts session summary + thread link on close for searchable session history

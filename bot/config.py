@@ -60,7 +60,6 @@ TASK_TIMEOUT_SECS: int = int(os.getenv("TASK_TIMEOUT_SECS", "600"))
 STALL_TIMEOUT_SECS: int = int(os.getenv("STALL_TIMEOUT_SECS", "60"))
 TITLE_TIMEOUT_SECS: int = int(os.getenv("TITLE_TIMEOUT_SECS", "15"))
 INSTANCE_RETENTION_DAYS: int = int(os.getenv("INSTANCE_RETENTION_DAYS", "7"))
-DIGEST_HOUR: int = int(os.getenv("DIGEST_HOUR", "20"))
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
 
 # Session evaluation
