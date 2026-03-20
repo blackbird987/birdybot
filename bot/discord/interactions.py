@@ -664,6 +664,12 @@ async def _handle_reboot_repo(
         command = config["command"]
         # Resolve cwd: absolute as-is, relative against repo root, default to repo path
         repo_path = bot._store.list_repos().get(repo_name)
+        if not repo_path:
+            await interaction.followup.send(
+                f"Repo `{repo_name}` not found — deploy config may be stale.",
+                ephemeral=True,
+            )
+            return
         raw_cwd = config.get("cwd")
         if raw_cwd:
             cwd_path = Path(raw_cwd)
@@ -675,6 +681,7 @@ async def _handle_reboot_repo(
 
         await interaction.followup.send(f"Running: `{command}`...")
 
+        proc = None
         try:
             proc = await asyncio.create_subprocess_shell(
                 command, cwd=cwd,
@@ -703,6 +710,11 @@ async def _handle_reboot_repo(
                     else f"\u274c Deploy failed (exit {proc.returncode}).",
                 )
         except asyncio.TimeoutError:
+            if proc:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
             await interaction.followup.send("\u274c Deploy timed out (60s).")
         except Exception as e:
             await interaction.followup.send(f"\u274c Deploy error: {e}")

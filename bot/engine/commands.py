@@ -635,20 +635,9 @@ async def on_merge(ctx: RequestContext, text: str) -> None:
     msg = await ctx.runner.merge_branch(inst)
     ctx.store.update_instance(inst)
     if "failed" not in msg.lower():
-        from bot.engine.deploy import update_after_merge, scan_deploy_config, make_deploy_config, is_deploy_protected
+        from bot.engine.deploy import update_after_merge, rescan_deploy_config_after_merge
         update_after_merge(ctx.store, inst)
-        # Re-scan deploy config from file — skip protected configs
-        _existing_cfg = ctx.store.get_deploy_config(inst.repo_name)
-        _ds = ctx.store.get_deploy_state(inst.repo_name)
-        if not is_deploy_protected(_existing_cfg, _ds):
-            _file_cfg = scan_deploy_config(inst.repo_path)
-            if _file_cfg:
-                ctx.store.set_deploy_config(inst.repo_name, make_deploy_config(
-                    "command", command=_file_cfg["command"],
-                    label=_file_cfg.get("label", "Deploy"),
-                    cwd=_file_cfg.get("cwd"),
-                    source="file", approved=False,
-                ))
+        rescan_deploy_config_after_merge(ctx.store, inst.repo_name, inst.repo_path)
         await ctx.messenger.on_deploy_state_changed(inst.repo_name)
     await ctx.messenger.send_text(ctx.channel_id, msg)
 
@@ -1174,8 +1163,8 @@ async def on_repo(ctx: RequestContext, text: str) -> None:
             rname = rest[7:].strip()
             ctx.store.remove_deploy_config(rname)
             await ctx.messenger.send_text(ctx.channel_id, f"Deploy config removed for `{rname}`.")
-        elif rest.startswith("set "):
-            parts = rest[4:].strip().split(None, 1)
+        elif rest == "set" or rest.startswith("set "):
+            parts = rest[4:].strip().split(None, 1) if len(rest) > 3 else []
             if len(parts) < 2:
                 await ctx.messenger.send_text(ctx.channel_id, "Usage: /repo deploy set <name> <command>")
                 return
@@ -1544,20 +1533,9 @@ async def handle_callback(
         # Clear stale branch refs on all sibling instances
         if branch_name and "failed" not in msg.lower():
             workflows.clear_stale_branches(ctx.store, branch_name)
-            from bot.engine.deploy import update_after_merge, scan_deploy_config, make_deploy_config, is_deploy_protected
+            from bot.engine.deploy import update_after_merge, rescan_deploy_config_after_merge
             update_after_merge(ctx.store, inst)
-            # Re-scan deploy config from file — skip protected configs
-            _existing_cfg = ctx.store.get_deploy_config(inst.repo_name)
-            _ds = ctx.store.get_deploy_state(inst.repo_name)
-            if not is_deploy_protected(_existing_cfg, _ds):
-                _file_cfg = scan_deploy_config(inst.repo_path)
-                if _file_cfg:
-                    ctx.store.set_deploy_config(inst.repo_name, make_deploy_config(
-                        "command", command=_file_cfg["command"],
-                        label=_file_cfg.get("label", "Deploy"),
-                        cwd=_file_cfg.get("cwd"),
-                        source="file", approved=False,
-                    ))
+            rescan_deploy_config_after_merge(ctx.store, inst.repo_name, inst.repo_path)
             await ctx.messenger.on_deploy_state_changed(inst.repo_name)
         escaped = ctx.messenger.escape(msg)
         if source_msg_id:

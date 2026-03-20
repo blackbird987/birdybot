@@ -297,17 +297,39 @@ def is_deploy_protected(existing_config: dict | None, deploy_state: DeployState 
     return False
 
 
+def rescan_deploy_config_after_merge(store, repo_name: str, repo_path: str) -> None:
+    """Re-scan .claude/deploy.json after a merge and update config if needed.
+
+    Skips repos with protected configs (self-managed or manually set).
+    """
+    existing = store.get_deploy_config(repo_name)
+    ds = store.get_deploy_state(repo_name)
+    if is_deploy_protected(existing, ds):
+        return
+    file_cfg = scan_deploy_config(repo_path)
+    if file_cfg:
+        store.set_deploy_config(repo_name, make_deploy_config(
+            "command",
+            command=file_cfg["command"],
+            label=file_cfg.get("label", "Deploy"),
+            cwd=file_cfg.get("cwd"),
+            source="file", approved=False,
+        ))
+
+
 def scan_deploy_config(repo_path: str) -> dict | None:
     """Read .claude/deploy.json from a repo if it exists.
 
-    Returns raw file data (with at least 'command' key), or None.
+    Returns raw file data with at least a 'command' key, or None.
+    File-based configs are always command-based; 'method: self' is an
+    internal concept handled by auto-detection, not by file convention.
     """
     cfg_path = Path(repo_path) / DEPLOY_CONFIG_PATH
     if not cfg_path.exists():
         return None
     try:
         data = json.loads(cfg_path.read_text(encoding="utf-8"))
-        if "command" not in data and data.get("method") != "self":
+        if "command" not in data:
             return None
         return data
     except Exception:
