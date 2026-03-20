@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.33.0 — Per-Repo Dashboard (2026-03-20)
+
 ### Per-Repo Dashboard
 - Move instance lists (running, attention, completed) from global lobby dashboard into each repo's control room embed
 - Add per-repo daily cost display in control room
