@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## v0.31.0 — Estimated Usage Display (2026-03-20)
+## v0.32.0 — Estimated Usage Display (2026-03-20)
 
 - Add estimated usage display: 5-hour session and 7-day weekly token windows with progress bars and reset countdowns (inspired by claude-counter)
 - New `/usage` slash command: budget bar, windowed token usage, cost per window, top spenders
