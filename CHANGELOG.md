@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.37.2 — /done Slash Command Fallback (2026-03-20)
+
 - Add `/done` slash command as fallback for the Done button (edge case: button not visible after auto-retry/usage limit)
 
 ## v0.36.0 — Natural Language Repo Management (2026-03-20)
