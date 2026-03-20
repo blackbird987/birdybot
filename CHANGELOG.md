@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.43.0 — Auto-Clean Lobby (2026-03-20)
+
 - Auto-clean lobby: purge all non-pinned messages on startup (two-pass: bulk + individual for >14-day-old messages)
 - Add TTL to transient broadcasts: auto-update notices (10s), scheduled task results (15s), monitor alerts (30s) auto-delete
 - Reboot "back online" announcement uses temp lobby message (auto-deletes after 10s)
