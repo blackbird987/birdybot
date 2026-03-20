@@ -13,6 +13,8 @@
 
 - Voice messages now process immediately (transcribe → run as query) instead of showing Send/Cancel confirmation buttons
 - Voice transcription echo is truncated to 1900 chars to stay within Discord limits
+## v0.33.0 — Per-Repo Dashboard (2026-03-20)
+
 ### Per-Repo Dashboard
 - Move instance lists (running, attention, completed) from global lobby dashboard into each repo's control room embed
 - Add per-repo daily cost display in control room
