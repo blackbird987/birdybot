@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from bot import config
 
 log = logging.getLogger(__name__)
+_NOWND: dict = config.NOWND
 
 # ---------------------------------------------------------------------------
 # Cache
@@ -100,6 +101,7 @@ async def _run_ccusage(args: list[str], force: bool = False) -> dict | None:
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            **_NOWND,
         )
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)

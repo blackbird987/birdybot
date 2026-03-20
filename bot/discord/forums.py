@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING
 import discord
 
 from bot import config
-from bot.claude.runner import _NOWND
 from bot.discord import channels
 from bot.discord import access as access_mod
 from bot.discord.access import load_access_config
@@ -30,6 +29,7 @@ if TYPE_CHECKING:
     from bot.store.state import StateStore
 
 log = logging.getLogger(__name__)
+_NOWND: dict = config.NOWND
 
 
 # --- Data structures ---

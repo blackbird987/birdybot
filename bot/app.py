@@ -22,6 +22,7 @@ from bot.scheduler import Scheduler
 from bot.store.state import StateStore
 
 log = logging.getLogger(__name__)
+_NOWND: dict = config.NOWND
 
 
 def setup_logging() -> None:
@@ -122,7 +123,7 @@ def _detect_update_branch() -> str:
         result = subprocess.run(
             ["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
             cwd=str(config._PROJECT_ROOT),
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=10, **_NOWND,
         )
         if result.returncode == 0:
             # "refs/remotes/origin/main" -> "main"
@@ -165,7 +166,7 @@ async def auto_update_loop(
                     subprocess.run,
                     ["git", "fetch", "origin"],
                     cwd=str(config._PROJECT_ROOT),
-                    capture_output=True, text=True, timeout=30,
+                    capture_output=True, text=True, timeout=30, **_NOWND,
                 )
                 if fetch.returncode != 0:
                     err = fetch.stderr.strip() or "unknown error"
@@ -182,13 +183,13 @@ async def auto_update_loop(
                     subprocess.run,
                     ["git", "rev-parse", "HEAD"],
                     cwd=str(config._PROJECT_ROOT),
-                    capture_output=True, text=True, timeout=10,
+                    capture_output=True, text=True, timeout=10, **_NOWND,
                 )
                 remote_head = await asyncio.to_thread(
                     subprocess.run,
                     ["git", "rev-parse", f"origin/{branch}"],
                     cwd=str(config._PROJECT_ROOT),
-                    capture_output=True, text=True, timeout=10,
+                    capture_output=True, text=True, timeout=10, **_NOWND,
                 )
                 if local_head.returncode != 0 or remote_head.returncode != 0:
                     if not failure_notified:
@@ -211,7 +212,7 @@ async def auto_update_loop(
                     subprocess.run,
                     ["git", "log", "--oneline", f"{local_sha}..{remote_sha}"],
                     cwd=str(config._PROJECT_ROOT),
-                    capture_output=True, text=True, timeout=10,
+                    capture_output=True, text=True, timeout=10, **_NOWND,
                 )
                 commits = log_result.stdout.strip().splitlines()
                 n_commits = len(commits)
@@ -224,7 +225,7 @@ async def auto_update_loop(
                     subprocess.run,
                     ["git", "pull", "--ff-only", "origin", branch],
                     cwd=str(config._PROJECT_ROOT),
-                    capture_output=True, text=True, timeout=30,
+                    capture_output=True, text=True, timeout=30, **_NOWND,
                 )
                 if pull.returncode != 0:
                     err = pull.stderr.strip() or "unknown error"
@@ -242,7 +243,7 @@ async def auto_update_loop(
                     subprocess.run,
                     [sys.executable, "-m", "pip", "install", "-e", ".", "--quiet"],
                     cwd=str(config._PROJECT_ROOT),
-                    capture_output=True, text=True, timeout=120,
+                    capture_output=True, text=True, timeout=120, **_NOWND,
                 )
             except Exception:
                 log.warning("Auto-update: pip install failed (non-fatal)", exc_info=True)

@@ -7,7 +7,6 @@ import logging
 import os
 import shutil
 import subprocess
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -31,9 +30,7 @@ from bot.store import history as history_mod
 log = logging.getLogger(__name__)
 
 # On Windows, prevent subprocess console windows from popping up
-_NOWND: dict = (
-    {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
-)
+_NOWND: dict = config.NOWND
 
 ProgressCallback = Callable  # async callback(message: str, detail: str)
 StallCallback = Callable[[str], None]     # async callback(instance_id)

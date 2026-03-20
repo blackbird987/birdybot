@@ -10,17 +10,13 @@ import asyncio
 import logging
 import os
 import re
-import subprocess
-import sys
 
 from bot import config
 
 log = logging.getLogger(__name__)
 
 # On Windows, prevent subprocess console windows from popping up
-_NOWND: dict = (
-    {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
-)
+_NOWND: dict = config.NOWND
 
 
 async def generate_title_text(prompt: str, summary: str = "") -> str | None:
