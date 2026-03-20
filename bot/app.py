@@ -314,6 +314,25 @@ async def run() -> None:
     from bot.engine.deploy import capture_boot_baselines
     capture_boot_baselines(store, str(config._PROJECT_ROOT))
 
+    # One-time backfill of token usage buckets from existing instances
+    if not store.is_buckets_initialized():
+        from bot.engine.usage import backfill_buckets
+        raw = [
+            {
+                "finished_at": i.finished_at,
+                "input_tokens": i.input_tokens,
+                "output_tokens": i.output_tokens,
+                "cost_usd": i.cost_usd or 0.0,
+            }
+            for i in store.list_instances()
+            if i.finished_at and (i.input_tokens or i.output_tokens)
+        ]
+        if raw:
+            buckets = backfill_buckets(raw)
+            store.set_token_buckets(buckets)
+            log.info("Backfilled %d usage buckets from %d instances", len(buckets), len(raw))
+        store.mark_buckets_initialized()
+
     # Emergency signal handler: if the bot is killed (e.g. by a Claude Code instance
     # running taskkill), save context and auto-relaunch so we come back online.
     def _emergency_reboot_handler(signum, frame):

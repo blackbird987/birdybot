@@ -849,10 +849,17 @@ class ForumManager:
                     inst = self._store.get_instance(inst_id)
                     if inst and inst.session_id and inst.session_id in session_to_thread:
                         inst_thread_ids[inst_id] = session_to_thread[inst.session_id]
+            from bot.engine.usage import get_usage_text
+            from bot import config as _cfg
+            _usage_text = get_usage_text(
+                self._store.get_token_buckets(),
+                {"5h": _cfg.USAGE_5H_TOKEN_LIMIT, "7d": _cfg.USAGE_7D_TOKEN_LIMIT},
+            )
             embed = channels.build_control_embed(
                 repo_name, repo_path, branch, self._store.mode,
                 active, completed, failed,
                 deploy_state=ds, thread_ids=inst_thread_ids,
+                usage_text=_usage_text,
             )
             view = channels.build_control_view(
                 repo_name,

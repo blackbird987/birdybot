@@ -381,6 +381,7 @@ def build_control_embed(
     recent_failed: int = 0,
     deploy_state: DeployState | None = None,
     thread_ids: dict[str, str] | None = None,
+    usage_text: str | None = None,
 ) -> discord.Embed:
     """Build the embed for a repo control room post."""
     embed = discord.Embed(
@@ -431,6 +432,9 @@ def build_control_embed(
     elif deploy_state and not deploy_state.needs_reboot:
         v = deploy_state.boot_version or "unknown"
         embed.add_field(name="\u2705 Up to date", value=f"`{v}`", inline=True)
+
+    if usage_text:
+        embed.add_field(name="Usage", value=usage_text, inline=False)
 
     return embed
 
@@ -509,9 +513,10 @@ async def create_repo_control_post(
     repo_path: str,
     branch: str | None = None,
     mode: str = "explore",
+    usage_text: str | None = None,
 ) -> tuple[discord.Thread, discord.Message]:
     """Create a control room post in a repo forum with action buttons."""
-    embed = build_control_embed(repo_name, repo_path, branch, mode)
+    embed = build_control_embed(repo_name, repo_path, branch, mode, usage_text=usage_text)
     view = build_control_view(repo_name, current_mode=mode)
 
     result = await forum.create_thread(name=CONTROL_ROOM_NAME, embed=embed, view=view)

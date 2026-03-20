@@ -44,6 +44,8 @@ class StateStore:
         self._autopilot_chains: dict[str, list[str]] = {}  # session_id -> remaining steps
         self._chain_deferred: dict[str, list[str]] = {}  # session_id -> deferred revisions
         self._deploy_state: dict[str, DeployState] = {}  # repo_name -> deploy state
+        self._token_buckets: dict[str, dict] = {}  # "YYYY-MM-DDTHH" -> {in, out, cost}
+        self._buckets_initialized: bool = False  # True after first backfill (prevents re-run)
         self._dirty: bool = False  # Dirty flag — mark_dirty() defers save to auto-save loop
         self._last_mtime: float = 0.0  # Track file mtime for external change detection
 
@@ -82,6 +84,8 @@ class StateStore:
                 k: DeployState.from_dict(v)
                 for k, v in data.get("deploy_state", {}).items()
             }
+            self._token_buckets = data.get("token_buckets", {})
+            self._buckets_initialized = data.get("buckets_initialized", False)
             for d in data.get("schedules", []):
                 sched = Schedule.from_dict(d)
                 self._schedules[sched.id] = sched
@@ -143,6 +147,8 @@ class StateStore:
             "autopilot_chains": self._autopilot_chains,
             "chain_deferred": self._chain_deferred,
             "deploy_state": {k: v.to_dict() for k, v in self._deploy_state.items()},
+            "token_buckets": self._token_buckets,
+            "buckets_initialized": self._buckets_initialized,
             "schedules": [s.to_dict() for s in self._schedules.values()],
         }
         try:
@@ -334,6 +340,59 @@ class StateStore:
         ]
         instances.sort(key=lambda i: i.cost_usd or 0, reverse=True)
         return instances[:limit]
+
+    # --- Token Usage Buckets ---
+
+    def record_tokens(
+        self,
+        input_tokens: int,
+        output_tokens: int,
+        cost: float,
+        finished_at: str | None = None,
+    ) -> None:
+        """Record token usage into the appropriate hourly bucket.
+
+        Uses *finished_at* (ISO string) to determine the bucket key so
+        tokens land in the hour they were actually consumed.
+        """
+        if finished_at:
+            try:
+                dt = datetime.fromisoformat(finished_at)
+            except (ValueError, TypeError):
+                dt = datetime.now(timezone.utc)
+        else:
+            dt = datetime.now(timezone.utc)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+
+        key = dt.strftime("%Y-%m-%dT%H")
+        bucket = self._token_buckets.setdefault(key, {"in": 0, "out": 0, "cost": 0.0})
+        bucket["in"] += input_tokens
+        bucket["out"] += output_tokens
+        bucket["cost"] += cost
+
+        # Prune buckets older than 8 days
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=8)).strftime("%Y-%m-%dT%H")
+        self._token_buckets = {k: v for k, v in self._token_buckets.items() if k >= cutoff}
+        self.save()
+
+    def get_token_buckets(self) -> dict[str, dict]:
+        """Return all hourly token buckets (for window computation)."""
+        return dict(self._token_buckets)
+
+    def set_token_buckets(self, buckets: dict[str, dict]) -> None:
+        """Bulk-set token buckets (used by backfill)."""
+        self._token_buckets = buckets
+        self.save()
+
+    def is_buckets_initialized(self) -> bool:
+        """Whether the one-time backfill has already run."""
+        return self._buckets_initialized
+
+    def mark_buckets_initialized(self) -> None:
+        """Mark backfill as done so it never re-runs."""
+        self._buckets_initialized = True
+        self.save()
 
     # --- Repo Registry ---
 
