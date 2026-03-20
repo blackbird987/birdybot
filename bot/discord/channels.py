@@ -371,35 +371,113 @@ async def sync_user_forum_tags(
         log.warning("Failed to sync user forum tags", exc_info=True)
 
 
+def _truncate_field(value: str, limit: int = 1024) -> str:
+    """Truncate a field value to Discord's 1024-char limit."""
+    if len(value) > limit:
+        return value[:limit - 3] + "..."
+    return value
+
+
+def _format_instance_line(
+    inst,
+    session_to_thread: dict[str, str] | None = None,
+    show_elapsed: bool = False,
+) -> str:
+    """Format a single instance as a one-line summary for embed fields."""
+    line = f"`{inst.display_id()}` \u2014 {inst.prompt[:30]}"
+    if inst.user_name and not inst.is_owner_session:
+        line += f" [{inst.user_name}]"
+    if session_to_thread:
+        thread_id = session_to_thread.get(inst.session_id or "")
+        if thread_id:
+            line += f" \u2022 <#{thread_id}>"
+    if show_elapsed and inst.created_at:
+        try:
+            started = datetime.fromisoformat(inst.created_at)
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            elapsed = datetime.now(timezone.utc) - started
+            mins = int(elapsed.total_seconds() // 60)
+            line += f" \u2022 {'<1' if mins < 1 else str(mins)}m"
+        except (ValueError, TypeError):
+            pass
+    return line
+
+
 def build_control_embed(
     repo_name: str,
     repo_path: str,
     branch: str | None = None,
     mode: str = "explore",
-    active_count: int = 0,
-    recent_completed: int = 0,
-    recent_failed: int = 0,
+    *,
+    running_instances: list | None = None,
+    attention_instances: list | None = None,
+    completed_instances: list | None = None,
+    session_to_thread: dict[str, str] | None = None,
+    today_cost: float = 0.0,
     deploy_state: DeployState | None = None,
-    thread_ids: dict[str, str] | None = None,
+    deploy_thread_ids: dict[str, str] | None = None,
 ) -> discord.Embed:
-    """Build the embed for a repo control room post."""
+    """Build the embed for a repo control room post.
+
+    Instance lists are optional — when omitted (initial creation),
+    the embed shows just branch/mode. When provided (refresh),
+    it shows full dashboard data for this repo.
+    """
+    running_instances = running_instances or []
+    attention_instances = attention_instances or []
+    completed_instances = completed_instances or []
+    active_count = len(running_instances)
+
     embed = discord.Embed(
         title=f"{repo_name} \u2014 {CONTROL_ROOM_NAME}",
         description=repo_path or "",
         color=discord.Color.dark_grey(),
     )
+
+    # Needs Attention section (top priority)
+    if attention_instances:
+        attn_lines = []
+        for inst in attention_instances[:10]:
+            icon = "\u2753" if inst.needs_input else "\u274c"
+            line = f"{icon} " + _format_instance_line(inst, session_to_thread)
+            attn_lines.append(line)
+        embed.add_field(
+            name=f"Needs Attention ({len(attention_instances)})",
+            value=_truncate_field("\n".join(attn_lines)),
+            inline=False,
+        )
+
+    # Running instances
+    if running_instances:
+        run_lines = [
+            _format_instance_line(inst, session_to_thread, show_elapsed=True)
+            for inst in running_instances
+        ]
+        embed.add_field(
+            name=f"Running ({active_count})",
+            value=_truncate_field("\n".join(run_lines)),
+            inline=False,
+        )
+
+    # Recently Completed
+    if completed_instances:
+        comp_lines = [
+            "\u2705 " + _format_instance_line(inst, session_to_thread)
+            for inst in completed_instances
+        ]
+        embed.add_field(
+            name=f"Recently Completed ({len(completed_instances)})",
+            value=_truncate_field("\n".join(comp_lines)),
+            inline=False,
+        )
+
+    # Inline summary fields
     if branch:
         embed.add_field(name="Branch", value=f"`{branch}`", inline=True)
     embed.add_field(name="Mode", value=mode_name(mode), inline=True)
-    if active_count:
-        embed.add_field(name="Active", value=str(active_count), inline=True)
-    status_parts = []
-    if recent_completed:
-        status_parts.append(f"\u2705 {recent_completed}")
-    if recent_failed:
-        status_parts.append(f"\u274c {recent_failed}")
-    if status_parts:
-        embed.add_field(name="Recent", value=" ".join(status_parts), inline=True)
+    if today_cost > 0:
+        embed.add_field(name="Today", value=f"${today_cost:.4f}", inline=True)
 
     # Deploy state section
     if deploy_state and deploy_state.needs_reboot:
@@ -413,18 +491,16 @@ def build_control_embed(
             change_lines += f"\n\u2026 and {len(deploy_state.pending_changes) - 5} more"
 
         session_links = ""
-        if deploy_state.pending_sessions and thread_ids:
-            links = [f"<#{thread_ids[s]}>" for s in deploy_state.pending_sessions
-                     if s in thread_ids]
+        if deploy_state.pending_sessions and deploy_thread_ids:
+            links = [f"<#{deploy_thread_ids[s]}>" for s in deploy_state.pending_sessions
+                     if s in deploy_thread_ids]
             if links:
                 session_links = "\n\U0001f4ce " + " \u00b7 ".join(links)
 
         value = f"{version_line}{change_lines}{session_links}".strip()
         if not value:
             value = "Changes detected"
-        # Discord embed field value limit is 1024 chars
-        if len(value) > 1024:
-            value = value[:1021] + "..."
+        value = _truncate_field(value)
 
         label = "\U0001f504 Reboot Required" if deploy_state.self_managed else "\U0001f504 Redeploy Required"
         embed.add_field(name=label, value=value, inline=False)
