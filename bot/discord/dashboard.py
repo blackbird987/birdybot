@@ -91,13 +91,13 @@ def build_dashboard_embed(
         if proj_lines:
             embed.add_field(name="Projects", value="\n".join(proj_lines), inline=False)
 
-    # Usage (pre-fetched by async caller)
+    # Usage bar (pre-fetched by async caller) or fallback cost fields
     if usage_text:
         embed.add_field(name="Usage", value=usage_text, inline=False)
+    else:
+        embed.add_field(name="Today", value=f"${today_cost:.4f}", inline=True)
+        embed.add_field(name="Total", value=f"${total_cost:.4f}", inline=True)
 
-    # Cost + Mode + PC
-    embed.add_field(name="Today", value=f"${today_cost:.4f}", inline=True)
-    embed.add_field(name="Total", value=f"${total_cost:.4f}", inline=True)
     embed.add_field(name="Mode", value=mode_label(store.mode), inline=True)
     embed.add_field(name="PC", value=config.PC_NAME, inline=True)
     if orphan_count:
@@ -169,14 +169,14 @@ async def _refresh_dashboard_impl(
         return
 
     # Count orphaned branches/worktrees in a thread (best-effort, don't block dashboard)
-    # Pre-fetch usage text from ccusage (async)
-    from bot.engine.usage import get_usage_text_async
+    # Pre-fetch usage bar from ccusage (async)
+    from bot.engine.usage import get_usage_bar_async
     try:
         orphan_count = await asyncio.to_thread(_count_orphans, store)
     except Exception:
         orphan_count = 0
     try:
-        usage_text = await get_usage_text_async()
+        usage_text = await get_usage_bar_async()
     except Exception:
         usage_text = None
     embed = build_dashboard_embed(store, forums.forum_projects, orphan_count, usage_text=usage_text)
@@ -214,7 +214,7 @@ async def _refresh_dashboard_impl(
 
     for rname, proj in forums.forum_projects.items():
         if proj.control_thread_id:
-            asyncio.create_task(_safe_refresh(forums.refresh_control_room(rname)))
+            asyncio.create_task(_safe_refresh(forums.refresh_control_room(rname, usage_bar=usage_text)))
 
     # Refresh user forum control rooms
     cfg = load_access_config()
