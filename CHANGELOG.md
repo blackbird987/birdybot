@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.35.1 — Meaningful Archive Summaries (2026-03-20)
+
 ### Archive Summaries
 - Archive entries now show CHANGELOG entries or build descriptions instead of git housekeeping boilerplate
 - Archive metadata includes commit hash and version when available from finalize output
