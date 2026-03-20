@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Usage Display Redesign
+- Show daily/weekly plan limit percentages in usage bar and `/usage` command (configurable via `PLAN_DAILY_LIMIT_USD` / `PLAN_WEEKLY_LIMIT_USD`)
+- Add plan savings comparison in `/usage` (API-equivalent cost vs subscription)
+- Unify daily + weekly into single ccusage subprocess call (7-day fetch, derive both)
+- `/usage` serves stale cache instantly — never blocks on subprocess (only `force=True` triggers live fetch)
+- `/usage` now responds as ephemeral interaction (private, visible only to caller)
+- Fix `/usage` and all slash commands hanging forever on unhandled exceptions (`_run_slash` error handling)
+- Add `PLAN_NAME`, `PLAN_MONTHLY_COST`, `PLAN_DAILY_LIMIT_USD`, `PLAN_WEEKLY_LIMIT_USD` config vars
+- Refactor `on_usage()` to return text (caller sends) instead of sending directly
+
 ## v0.38.0 — Live Usage Progress Bar (2026-03-20)
 
 - Replace static cost fields with live usage progress bar in dashboard and control room embeds

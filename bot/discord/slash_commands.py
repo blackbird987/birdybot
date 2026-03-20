@@ -63,7 +63,29 @@ def setup(bot: ClaudeBot) -> None:
         if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
             await interaction.response.send_message("Unauthorized", ephemeral=True)
             return
-        await bot._run_slash(interaction, lambda ctx: commands.on_usage(ctx, force=force))
+        # Dedicated ephemeral flow — bypasses _run_slash so the response
+        # appears as a private interaction reply, never blocks on subprocess.
+        await interaction.response.defer(ephemeral=True)
+        try:
+            channel_id = str(interaction.channel_id)
+            lookup = bot._forums.thread_to_project(channel_id)
+            info = lookup[1] if lookup else None
+            ar = bot._check_access(interaction.user.id, channel_id=channel_id)
+            ctx = bot._ctx(channel_id, thread_info=info, access_result=ar)
+            ctx.user_id = str(interaction.user.id)
+            ctx.user_name = interaction.user.display_name
+            text = await commands.on_usage(ctx, force=force)
+            if len(text) > 2000:
+                text = text[:1997] + "..."
+            await interaction.followup.send(text, ephemeral=True)
+        except Exception:
+            log.exception("/usage failed")
+            try:
+                await interaction.followup.send(
+                    "Usage data unavailable \u2014 check logs.", ephemeral=True,
+                )
+            except Exception:
+                pass
 
     @bot.tree.command(name="list", description="Show instances", guild=guild_obj)
     @app_commands.describe(scope="Show all instances or just recent")

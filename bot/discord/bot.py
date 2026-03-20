@@ -333,7 +333,21 @@ class ClaudeBot(discord.Client):
         ctx = self._ctx(channel_id, thread_info=info, access_result=ar)
         ctx.user_id = str(interaction.user.id)
         ctx.user_name = interaction.user.display_name
-        await coro(ctx)
+        try:
+            await coro(ctx)
+        except Exception:
+            log.exception("Slash command failed: /%s", cmd_name)
+            try:
+                await interaction.followup.send(
+                    f"/{cmd_name} failed \u2014 check logs.", ephemeral=True,
+                )
+            except Exception:
+                pass
+            try:
+                await interaction.delete_original_response()
+            except Exception:
+                pass
+            return
         self._forums.persist_ctx_settings(ctx)
         try:
             await interaction.delete_original_response()

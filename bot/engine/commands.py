@@ -836,7 +836,8 @@ async def on_cost(ctx: RequestContext) -> None:
 
 # --- /usage ---
 
-async def on_usage(ctx: RequestContext, *, force: bool = False) -> None:
+async def on_usage(ctx: RequestContext, *, force: bool = False) -> str:
+    """Build usage text.  Returns the formatted string (caller sends it)."""
     from bot.engine.usage import get_usage_details
 
     text = await get_usage_details(force=force)
@@ -849,8 +850,7 @@ async def on_usage(ctx: RequestContext, *, force: bool = False) -> None:
             cost = f"${inst.cost_usd:.4f}" if inst.cost_usd else "$0"
             text += f"\n  `{inst.id}` {cost} \u2014 {inst.prompt[:30]}"
 
-    markup = ctx.messenger.markdown_to_markup(text)
-    await ctx.messenger.send_text(ctx.channel_id, markup)
+    return text
 
 
 # --- /status ---
