@@ -103,6 +103,14 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
         )
         return
 
+    # --- Sync Git for a repo (push commits + tags to remote) ---
+    if action == "sync_git":
+        if not btn_access.is_owner:
+            await interaction.followup.send("Owner only.", ephemeral=True)
+            return
+        await _handle_sync_git(bot, interaction, instance_id)
+        return
+
     # --- Resume latest session for a repo (control room button) ---
     if action == "resume_latest":
         await _handle_resume_latest(bot, interaction, instance_id)
@@ -640,3 +648,83 @@ async def _handle_reboot_repo(
 
     asyncio.create_task(bot._forums.refresh_control_room(repo_name))
     asyncio.create_task(bot._refresh_dashboard())
+
+
+async def _handle_sync_git(
+    bot: ClaudeBot, interaction: discord.Interaction, repo_name: str,
+) -> None:
+    """Push local commits and tags to origin for a repo."""
+    import subprocess
+    from bot.config import NOWND
+
+    repos = bot._store.list_repos()
+    repo_path = repos.get(repo_name)
+    if not repo_path:
+        await interaction.followup.send(
+            f"Repo `{repo_name}` not found.", ephemeral=True,
+        )
+        return
+
+    try:
+        # Check how many commits ahead of upstream
+        ahead = await asyncio.to_thread(
+            subprocess.run,
+            ["git", "rev-list", "--count", "@{upstream}..HEAD"],
+            cwd=repo_path, capture_output=True, text=True, timeout=10, **NOWND,
+        )
+
+        if ahead.returncode != 0:
+            await interaction.followup.send(
+                f"`{repo_name}`: No upstream branch configured.", ephemeral=True,
+            )
+            return
+
+        commit_count = int(ahead.stdout.strip())
+        parts = []
+
+        # Push commits
+        if commit_count > 0:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                ["git", "push"],
+                cwd=repo_path, capture_output=True, text=True, timeout=30, **NOWND,
+            )
+            if result.returncode == 0:
+                parts.append(f"{commit_count} commit{'s' if commit_count != 1 else ''}")
+            else:
+                err = (result.stderr or result.stdout or "unknown error")[:200]
+                await interaction.followup.send(
+                    f"`{repo_name}`: Push failed \u2014 `{err}`", ephemeral=True,
+                )
+                return
+
+        # Push tags (best-effort — no pre-count via ls-remote)
+        tag_result = await asyncio.to_thread(
+            subprocess.run,
+            ["git", "push", "--tags"],
+            cwd=repo_path, capture_output=True, text=True, timeout=30, **NOWND,
+        )
+        if tag_result.returncode == 0:
+            tag_lines = [
+                line for line in (tag_result.stderr or "").splitlines()
+                if "new tag" in line.lower()
+            ]
+            if tag_lines:
+                parts.append(f"{len(tag_lines)} tag{'s' if len(tag_lines) != 1 else ''}")
+        else:
+            err = (tag_result.stderr or tag_result.stdout or "")[:200]
+            if err:
+                parts.append(f"tags failed: `{err}`")
+
+        if not parts:
+            await interaction.followup.send(
+                f"`{repo_name}`: Already up to date with remote.", ephemeral=True,
+            )
+        else:
+            await interaction.followup.send(
+                f"`{repo_name}`: Pushed {', '.join(parts)} to remote.", ephemeral=True,
+            )
+    except Exception as exc:
+        await interaction.followup.send(
+            f"`{repo_name}`: Git sync failed \u2014 {exc}", ephemeral=True,
+        )

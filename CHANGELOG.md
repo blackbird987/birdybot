@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Add "Sync Git" button to repo control rooms — pushes local commits and tags to remote with one tap. Only shown when the repo has a git remote configured. Remote detection is cached per repo to avoid subprocess overhead on refresh.
+
 ## v0.40.0 — Auto-Resolve Merge Conflicts (2026-03-20)
 
 ### Added

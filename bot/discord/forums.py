@@ -166,6 +166,8 @@ class ForumManager:
         self._user_control_thread_ids: set[str] = set()
         # In-memory set of archive channel IDs (O(1) skip check)
         self._archive_channel_ids: set[int] = set()
+        # Cache: repo_path -> has git remote (remotes rarely change at runtime)
+        self._remote_cache: dict[str, bool] = {}
 
     @property
     def forum_projects(self) -> dict[str, ForumProject]:
@@ -789,6 +791,24 @@ class ForumManager:
         except Exception:
             return None
 
+    async def _has_git_remote(self, repo_path: str) -> bool:
+        """Check if the repo has any git remotes configured (cached)."""
+        if not repo_path:
+            return False
+        if repo_path in self._remote_cache:
+            return self._remote_cache[repo_path]
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                ["git", "remote"],
+                cwd=repo_path, capture_output=True, text=True, **_NOWND,
+            )
+            has = result.returncode == 0 and bool(result.stdout.strip())
+        except Exception:
+            has = False
+        self._remote_cache[repo_path] = has
+        return has
+
     async def ensure_control_post(self, repo_name: str) -> None:
         """Ensure a control room post exists in the repo's forum.
 
@@ -806,9 +826,10 @@ class ForumManager:
         repos = self._store.list_repos()
         repo_path = repos.get(repo_name, "")
         branch = await self._get_repo_branch(repo_path)
+        has_remote = await self._has_git_remote(repo_path)
 
         thread, msg = await channels.create_repo_control_post(
-            forum, repo_name, repo_path, branch,
+            forum, repo_name, repo_path, branch, has_remote=has_remote,
         )
         proj.control_thread_id = str(thread.id)
         proj.control_message_id = str(msg.id)
@@ -888,6 +909,7 @@ class ForumManager:
             repos = self._store.list_repos()
             repo_path = repos.get(repo_name, "")
             branch = await self._get_repo_branch(repo_path)
+            has_remote = await self._has_git_remote(repo_path)
             today_cost = self._store.get_repo_daily_cost(repo_name)
 
             ds = self._store.get_deploy_state(repo_name)
@@ -925,6 +947,7 @@ class ForumManager:
                 active_count=len(running),
                 deploy_state=ds,
                 deploy_config=dc,
+                has_remote=has_remote,
             )
             await msg.edit(embed=embed, view=view)
         except discord.NotFound:

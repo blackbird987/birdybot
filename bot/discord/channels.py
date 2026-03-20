@@ -534,6 +534,7 @@ def build_control_view(
     active_count: int = 0,
     deploy_state: DeployState | None = None,
     deploy_config: dict | None = None,
+    has_remote: bool = False,
 ) -> discord.ui.View:
     """Build the button view for a repo control room post."""
     view = discord.ui.View(timeout=None)
@@ -550,7 +551,7 @@ def build_control_view(
         custom_id=f"resume_latest:{repo_name}",
         row=0,
     ))
-    # Row 1: Quick Task + Sync CLI
+    # Row 1: Quick Task + Sync CLI + Sync Git
     view.add_item(discord.ui.Button(
         label="Quick Task",
         style=discord.ButtonStyle.primary,
@@ -563,6 +564,13 @@ def build_control_view(
         custom_id=f"sync_repo:{repo_name}",
         row=1,
     ))
+    if has_remote:
+        view.add_item(discord.ui.Button(
+            label="Sync Git",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"sync_git:{repo_name}",
+            row=1,
+        ))
     # Row 2: Deploy/Reboot button + Stop All + Refresh
     needs_reboot = deploy_state.needs_reboot if deploy_state else False
     if deploy_config:
@@ -608,10 +616,11 @@ async def create_repo_control_post(
     repo_path: str,
     branch: str | None = None,
     usage_bar: str | None = None,
+    has_remote: bool = False,
 ) -> tuple[discord.Thread, discord.Message]:
     """Create a control room post in a repo forum with action buttons."""
     embed = build_control_embed(repo_name, repo_path, branch, usage_bar=usage_bar)
-    view = build_control_view(repo_name, active_count=0)
+    view = build_control_view(repo_name, active_count=0, has_remote=has_remote)
 
     result = await forum.create_thread(name=CONTROL_ROOM_NAME, embed=embed, view=view)
     try:
