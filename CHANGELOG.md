@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.34.3 — Silence Archive Channels (2026-03-20)
+
 - Ignore messages in archive channels — bot no longer responds to text posted in `archive-*` channels
 
 ## v0.34.2 — Fix Control Room Reboot Button (2026-03-20)
