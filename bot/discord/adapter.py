@@ -383,6 +383,19 @@ class DiscordMessenger:
         # Discord regular messages: 2000 char limit
         return discord_fmt.chunk_message(text, limit=2000)
 
+    async def on_repo_added(self, repo_name: str) -> None:
+        """Create forum channel + control post for newly added repo."""
+        forums = getattr(self._bot, "_forums", None)
+        if forums:
+            try:
+                await forums.get_or_create_forum(repo_name)
+                asyncio.create_task(forums.ensure_control_post(repo_name))
+            except Exception:
+                log.warning("Failed to auto-create forum for %s", repo_name)
+            refresh = getattr(self._bot, "_refresh_dashboard", None)
+            if refresh:
+                asyncio.create_task(refresh())
+
     async def on_deploy_state_changed(self, repo_name: str) -> None:
         """Refresh the control room embed for this repo."""
         forums = getattr(self._bot, "_forums", None)

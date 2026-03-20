@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Auto-Create Forum Channels
+- `/repo add` and `/repo create` now automatically create a Discord forum channel + control post for the new repo
+- New `on_repo_added()` messenger hook follows existing `on_deploy_state_changed` pattern
+
+### Natural Language Repo Commands
+- Tier 1: conservative regex catches explicit phrases like "add repo X at /path" and "create repo frontend" — executes instantly without spawning Claude
+- Tier 2: Claude instances can output `[BOT_CMD: /repo ...]` directives for conversational repo management ("this is my project", "hook up my repo")
+- BOT_CMD scanner hardened: allowlisted subcommands (add/create/switch), shell metacharacter rejection, path existence validation, quoted-content skip
+- Fast path shares the per-channel asyncio lock to prevent races with active queries
+
 ## v0.35.2 — Fix Session Sync Overwrite (2026-03-20)
 
 - Fix sync_single_thread overwriting bot-originated thread sessions with unrelated CLI sessions — guard now checks `origin == "cli"` instead of dead-code `not info.session_id` check
