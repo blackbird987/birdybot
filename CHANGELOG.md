@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.34.2 — Fix Control Room Reboot Button (2026-03-20)
+
 - Fix control room Reboot button not draining active tasks before requesting reboot (unlike /reboot which waited)
 - Prevent reboot request loss: defer queue clear until relaunch spawn succeeds; clear on failure to unblock _draining
 - Guard against duplicate reboot button clicks while already draining
