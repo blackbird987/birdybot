@@ -2,12 +2,8 @@
 
 ## [Unreleased]
 
-## v0.45.0 — Centralized Deferred Revisions (2026-03-21)
+## v0.45.1 — Chain Exit Reliability (2026-03-21)
 
-- Centralize deferred revisions into each repo's `TODO.md` under `## Deferred Revisions` section instead of hidden `data/deferred/` files
-- Deduplicate items on write (normalize priority suffixes, case-insensitive match)
-- One-time startup migration: reads existing `data/deferred/*.md`, deduplicates, writes unique items to repo TODO.md files, deletes old directory
-- Remove `DEFERRED_DIR`, `safe_repo_slug` from config.py (dead code after migration)
 ### Reliability
 - Extract `_exit_chain()` helper — all three autopilot chain exit paths now consistently evaluate, clean state, and notify user (fixes "break after merge skips chain cleanup" bug)
 - Harden `_notify_user()` with fallback plain-text send when mention fails (was silently swallowed)
@@ -18,9 +14,14 @@
 - Fix Done-without-branch notification: result embed now pings user directly instead of relying on close_conversation mention (which was being silenced)
 
 ### DRY/Cleanup
-- Deduplicate deferred revision items on append — normalized key matching prevents the same item from accumulating 20+ times across sessions
-- Migrate `data/deferred/bot.md` from 237 lines (20+ dupes) down to 28 unique items
-- Remove resolved `on_done failure` item from deferred backlog (fixed in v0.37.2)
+- Upgrade deferred item dedup to tag-aware normalized keys (`[Tag] + first 40 chars`) for better near-duplicate detection
+
+## v0.45.0 — Centralized Deferred Revisions (2026-03-21)
+
+- Centralize deferred revisions into each repo's `TODO.md` under `## Deferred Revisions` section instead of hidden `data/deferred/` files
+- Deduplicate items on write (normalize priority suffixes, case-insensitive match)
+- One-time startup migration: reads existing `data/deferred/*.md`, deduplicates, writes unique items to repo TODO.md files, deletes old directory
+- Remove `DEFERRED_DIR`, `safe_repo_slug` from config.py (dead code after migration)
 
 ## v0.44.0 — Explicit Findings Narration (2026-03-21)
 
