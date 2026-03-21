@@ -24,6 +24,7 @@ _VERSION_PARSERS: list[tuple[str, str]] = [
     ("Cargo.toml", r'version\s*=\s*"([^"]+)"'),
 ]
 
+_CSPROJ_ASM_VERSION_RE = re.compile(r"<AssemblyVersion>([^<]+)</AssemblyVersion>", re.IGNORECASE)
 _CSPROJ_VERSION_RE = re.compile(r"<Version>([^<]+)</Version>", re.IGNORECASE)
 
 
@@ -81,11 +82,13 @@ def detect_version(repo_path: str) -> str | None:
             except Exception:
                 log.debug("Failed to read %s in %s", filename, repo_path, exc_info=True)
 
-    # Check *.csproj files
+    # Check *.csproj files (prefer AssemblyVersion over Version)
     for csproj in root.glob("*.csproj"):
         try:
             text = csproj.read_text(encoding="utf-8")
-            m = _CSPROJ_VERSION_RE.search(text)
+            m = _CSPROJ_ASM_VERSION_RE.search(text)
+            if not m:
+                m = _CSPROJ_VERSION_RE.search(text)
             if m:
                 return m.group(1)
         except Exception:
