@@ -615,7 +615,9 @@ async def _handle_reboot_repo(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
+            raw_timeout = config.get("timeout", 600)
+            deploy_timeout = max(10, min(int(raw_timeout), 3600)) if isinstance(raw_timeout, (int, float)) else 600
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=deploy_timeout)
             output = stdout.decode(errors="replace")[:1500]
 
             if proc.returncode == 0:
@@ -642,7 +644,7 @@ async def _handle_reboot_repo(
                     proc.kill()
                 except ProcessLookupError:
                     pass
-            await interaction.followup.send("\u274c Deploy timed out (60s).")
+            await interaction.followup.send(f"\u274c Deploy timed out ({deploy_timeout}s).")
         except Exception as e:
             await interaction.followup.send(f"\u274c Deploy error: {e}")
 

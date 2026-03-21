@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Raise deploy command timeout from 60s to 600s default, configurable via `"timeout"` in deploy.json (clamped 10–3600s)
+
 ## v0.47.1 — Narration Clarity (2026-03-21)
 
 - Strengthen narration rules: add diagnostic/verification template, "address the user" rule, and second Bad/Good example targeting vague "all good" responses
