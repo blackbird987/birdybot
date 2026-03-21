@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.46.0 — The Ark (2026-03-21)
+
 - Rename top-level dashboard channel from "control-room" to "the-ark" (auto-migrates from "lobby" and "control-room")
 - Dashboard embed title changed from "Claude Bot Dashboard" to "The Ark"
 - Auto-ping owner when The Ark is first created so it appears in their sidebar
