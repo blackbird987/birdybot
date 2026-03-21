@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.48.0 — Auto-Follow, Personal Archives, Repo Monitors (2026-03-21)
+
 ### Features
 - Auto-follow: owner + granted users automatically join control room and archive threads on startup and on grant
 - Personal forum archives: user personal forums now get their own archive thread; session completions dual-post to both repo and personal archives
