@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Features
+- Auto-follow: owner + granted users automatically join control room and archive threads on startup and on grant
+- Personal forum archives: user personal forums now get their own archive thread; session completions dual-post to both repo and personal archives
+- Repo-specific monitoring: `/monitor setup <name> repo:<repo>` creates monitor as pinned thread in repo forum instead of standalone text channel
+- `MONITOR_*_REPO` env var fallback for headless monitor-to-repo association
+
+### Infrastructure
+- `ForumProject.monitor_thread_id` field for repo-scoped monitor threads
+- `UserAccess.archive_thread_id` field for personal forum archives
+- `MonitorConfig.repo_name` field for repo association
+- `_auto_follow_thread()` / `_auto_follow_user_thread()` helpers (batched via asyncio.gather)
+- Monitor service `_refresh_one()` now accepts both TextChannel and Thread
+- Monitor `recover_on_startup()` scans forum threads in addition to text channels
+
 ## v0.47.2 — Configurable Deploy Timeout (2026-03-21)
 
 - Raise deploy command timeout from 60s to 600s default, configurable via `"timeout"` in deploy.json (clamped 10–3600s)

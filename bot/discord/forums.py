@@ -109,6 +109,7 @@ class ForumProject:
     archive_migrated: bool = False
     # Legacy — kept only for migration from text channel to forum thread
     archive_channel_id: str | None = None
+    monitor_thread_id: str | None = None
 
     def to_dict(self) -> dict:
         d = {
@@ -126,6 +127,8 @@ class ForumProject:
             d["archive_migrated"] = self.archive_migrated
         if self.archive_channel_id:
             d["archive_channel_id"] = self.archive_channel_id
+        if self.monitor_thread_id:
+            d["monitor_thread_id"] = self.monitor_thread_id
         return d
 
     @classmethod
@@ -143,6 +146,7 @@ class ForumProject:
             archive_thread_id=data.get("archive_thread_id"),
             archive_migrated=data.get("archive_migrated", False),
             archive_channel_id=data.get("archive_channel_id"),
+            monitor_thread_id=data.get("monitor_thread_id"),
         )
 
 
@@ -197,6 +201,69 @@ class ForumManager:
     @category_id.setter
     def category_id(self, value: int | None) -> None:
         self._category_id = value
+
+    # --- Auto-Follow Helpers ---
+
+    async def _auto_follow_thread(self, thread: discord.Thread, repo_name: str) -> None:
+        """Add owner + granted users to a thread so they auto-follow.
+
+        Batched via asyncio.gather to minimize wall-clock time.
+        add_user is idempotent — no-op if already joined.
+        """
+        guild = self._client.get_guild(self._guild_id)
+        if not guild:
+            return
+
+        targets: list[discord.Member] = []
+
+        # Owner
+        if self._discord_user_id:
+            member = guild.get_member(self._discord_user_id)
+            if member:
+                targets.append(member)
+
+        # Granted users with access to this repo
+        cfg = load_access_config()
+        for uid, ua in cfg.users.items():
+            if ua.global_access or repo_name in ua.repos:
+                member = guild.get_member(int(uid))
+                if member and member not in targets:
+                    targets.append(member)
+
+        if not targets:
+            return
+
+        results = await asyncio.gather(
+            *(thread.add_user(m) for m in targets),
+            return_exceptions=True,
+        )
+        for m, r in zip(targets, results):
+            if isinstance(r, Exception):
+                log.debug("Failed to auto-follow user %s to thread %s: %s", m.id, thread.id, r)
+
+    async def _auto_follow_user_thread(self, thread: discord.Thread, user_id: str) -> None:
+        """Add specific user + owner to a personal forum thread."""
+        guild = self._client.get_guild(self._guild_id)
+        if not guild:
+            return
+        uids = {user_id}
+        if self._discord_user_id:
+            uids.add(str(self._discord_user_id))
+
+        targets = []
+        for uid in uids:
+            try:
+                member = guild.get_member(int(uid))
+            except (ValueError, TypeError):
+                continue
+            if member:
+                targets.append(member)
+
+        if targets:
+            await asyncio.gather(
+                *(thread.add_user(m) for m in targets),
+                return_exceptions=True,
+            )
 
     # --- Forum-Session Mapping ---
 
@@ -600,6 +667,59 @@ class ForumManager:
                 except Exception:
                     log.debug("Failed to create control room for user %s", uid, exc_info=True)
 
+        # Ensure archive threads in personal forums
+        for uid, ua in cfg.users.items():
+            if ua.forum_channel_id and not ua.archive_thread_id:
+                try:
+                    await self.ensure_user_archive_thread(uid)
+                except Exception:
+                    log.debug("Failed to create archive for user %s", uid, exc_info=True)
+            elif ua.archive_thread_id:
+                self._archive_channel_ids.add(int(ua.archive_thread_id))
+
+        # Auto-follow all pinned threads (batched per-repo, 0.5s inter-batch sleep)
+        for repo_name, proj in self._forum_projects.items():
+            tasks: list = []
+            if proj.control_thread_id:
+                try:
+                    ch = await self._client.fetch_channel(int(proj.control_thread_id))
+                    if isinstance(ch, discord.Thread):
+                        tasks.append(self._auto_follow_thread(ch, repo_name))
+                except Exception:
+                    pass
+            if proj.archive_thread_id:
+                try:
+                    ch = await self._client.fetch_channel(int(proj.archive_thread_id))
+                    if isinstance(ch, discord.Thread):
+                        tasks.append(self._auto_follow_thread(ch, repo_name))
+                except Exception:
+                    pass
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+                await asyncio.sleep(0.5)
+
+        # Auto-follow personal forum threads
+        cfg = load_access_config()  # refresh after possible archive creation
+        for uid, ua in cfg.users.items():
+            tasks = []
+            if ua.control_thread_id:
+                try:
+                    ch = await self._client.fetch_channel(int(ua.control_thread_id))
+                    if isinstance(ch, discord.Thread):
+                        tasks.append(self._auto_follow_user_thread(ch, uid))
+                except Exception:
+                    pass
+            if ua.archive_thread_id:
+                try:
+                    ch = await self._client.fetch_channel(int(ua.archive_thread_id))
+                    if isinstance(ch, discord.Thread):
+                        tasks.append(self._auto_follow_user_thread(ch, uid))
+                except Exception:
+                    pass
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+                await asyncio.sleep(0.5)
+
     # --- Archive Thread ---
 
     async def ensure_archive_thread(self, repo_name: str) -> discord.Thread | None:
@@ -630,6 +750,40 @@ class ForumManager:
         proj.archive_thread_id = str(thread.id)
         self._archive_channel_ids.add(thread.id)
         self.save_forum_map()
+        await self._auto_follow_thread(thread, repo_name)
+        return thread
+
+    async def ensure_user_archive_thread(self, user_id: str) -> discord.Thread | None:
+        """Get or create an archive thread in a user's personal forum."""
+        cfg = load_access_config()
+        ua = cfg.users.get(user_id)
+        if not ua or not ua.forum_channel_id:
+            return None
+
+        # Check existing
+        if ua.archive_thread_id:
+            try:
+                ch = await self._client.fetch_channel(int(ua.archive_thread_id))
+                if isinstance(ch, discord.Thread):
+                    if ch.archived:
+                        await ch.edit(archived=False)
+                    return ch
+            except discord.NotFound:
+                log.info("User archive thread %s for %s was deleted, recreating",
+                         ua.archive_thread_id, ua.display_name)
+                self._archive_channel_ids.discard(int(ua.archive_thread_id))
+                ua.archive_thread_id = None
+                access_mod.save_access_config(cfg)
+
+        forum = self._client.get_channel(int(ua.forum_channel_id))
+        if not forum or not isinstance(forum, discord.ForumChannel):
+            return None
+
+        thread, _ = await channels.create_archive_post(forum, ua.display_name)
+        ua.archive_thread_id = str(thread.id)
+        self._archive_channel_ids.add(thread.id)
+        access_mod.save_access_config(cfg)
+        await self._auto_follow_user_thread(thread, user_id)
         return thread
 
     async def _migrate_archive_channel(
@@ -746,8 +900,6 @@ class ForumManager:
             summary = info.topic or "No summary"
 
         archive_thread = await self.ensure_archive_thread(proj.repo_name)
-        if not archive_thread:
-            return
 
         if inst:
             status_emoji = "\u2705" if inst.status.value == "completed" else "\u274c"
@@ -778,16 +930,33 @@ class ForumManager:
         else:
             msg = f"**Session closed**\n{summary}\n\U0001f517 <#{channel_id}>"
 
-        try:
-            await archive_thread.send(msg)
-        except discord.HTTPException:
-            # Thread may have been auto-archived between ensure and send
+        # Collect archive targets: repo archive + personal forum archive if applicable
+        targets: list[discord.Thread] = []
+        if archive_thread:
+            targets.append(archive_thread)
+
+        # Check if thread is in a personal forum — also post to that user's archive
+        thread_ch = self._client.get_channel(int(channel_id))
+        if thread_ch and isinstance(thread_ch, discord.Thread) and thread_ch.parent:
+            user_info = self.is_user_forum(str(thread_ch.parent_id))
+            if user_info:
+                try:
+                    personal_archive = await self.ensure_user_archive_thread(user_info[0])
+                    if personal_archive and personal_archive not in targets:
+                        targets.append(personal_archive)
+                except Exception:
+                    log.debug("Failed to get personal archive for user %s", user_info[0], exc_info=True)
+
+        for target in targets:
             try:
-                await archive_thread.edit(archived=False)
-                await archive_thread.send(msg)
-            except Exception:
-                log.debug("Failed to post archive entry for thread %s",
-                          channel_id, exc_info=True)
+                await target.send(msg)
+            except discord.HTTPException:
+                try:
+                    await target.edit(archived=False)
+                    await target.send(msg)
+                except Exception:
+                    log.debug("Failed to post archive entry to thread %s for session %s",
+                              target.id, channel_id, exc_info=True)
 
     async def sync_cli_sessions(self, count: int) -> tuple[list[discord.Thread], list]:
         """Scan CLI sessions and create/populate forum threads.
@@ -901,6 +1070,7 @@ class ForumManager:
         proj.control_thread_id = str(thread.id)
         proj.control_message_id = str(msg.id)
         self.save_forum_map()
+        await self._auto_follow_thread(thread, repo_name)
         log.info("Created control room for repo %s (thread=%s)", repo_name, thread.id)
 
     async def ensure_user_control_post(
@@ -929,6 +1099,7 @@ class ForumManager:
         ua.control_message_id = str(msg.id)
         access_mod.save_access_config(cfg)
         self._user_control_thread_ids.add(str(thread.id))
+        await self._auto_follow_user_thread(thread, user_id)
         log.info("Created control room for user %s (thread=%s)", ua.display_name, thread.id)
 
     async def refresh_control_room(self, repo_name: str, *, usage_bar: str | None = None) -> None:

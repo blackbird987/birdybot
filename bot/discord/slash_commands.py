@@ -686,13 +686,16 @@ def setup(bot: ClaudeBot) -> None:
     )
 
     @monitor_group.command(name="setup", description="Enable a monitor (reads config from .env)")
-    @app_commands.describe(name="Monitor name (e.g. aiagent)")
-    async def cmd_monitor_setup(interaction: discord.Interaction, name: str):
+    @app_commands.describe(
+        name="Monitor name (e.g. aiagent)",
+        repo="Repo to place monitor in (creates thread in repo forum)",
+    )
+    async def cmd_monitor_setup(interaction: discord.Interaction, name: str, repo: str | None = None):
         if not bot._is_owner(interaction.user.id):
             await interaction.response.send_message("Unauthorized", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
-        result = await monitor_setup(bot, name.lower())
+        result = await monitor_setup(bot, name.lower(), repo_name=repo)
         await interaction.followup.send(result, ephemeral=True)
 
     @monitor_group.command(name="refresh", description="Fetch & update all monitors now")
@@ -796,6 +799,19 @@ def setup(bot: ClaudeBot) -> None:
         if forum:
             ua.forum_channel_id = str(forum.id)
         access_mod.save_access_config(cfg)
+
+        # Auto-follow: add user to repo's control room + archive threads
+        proj = bot._forums.forum_projects.get(repo)
+        if proj:
+            for tid in (proj.control_thread_id, proj.archive_thread_id):
+                if tid:
+                    try:
+                        ch = await bot.fetch_channel(int(tid))
+                        if isinstance(ch, discord.Thread):
+                            await ch.add_user(user)
+                    except Exception:
+                        log.debug("Auto-follow failed for user %s thread %s", user.id, tid)
+
         await interaction.followup.send(
             f"Granted **{user.display_name}** access to `{repo}` "
             f"(mode: {mode})"

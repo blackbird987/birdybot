@@ -67,6 +67,7 @@ class UserAccess:
     welcome_posted: bool = False         # welcome post created in personal forum
     control_thread_id: str | None = None   # control room thread in personal forum
     control_message_id: str | None = None  # control room embed message
+    archive_thread_id: str | None = None   # archive thread in personal forum
 
     def to_dict(self) -> dict:
         d = {
@@ -81,6 +82,8 @@ class UserAccess:
             d["control_thread_id"] = self.control_thread_id
         if self.control_message_id:
             d["control_message_id"] = self.control_message_id
+        if self.archive_thread_id:
+            d["archive_thread_id"] = self.archive_thread_id
         return d
 
     @classmethod
@@ -95,6 +98,7 @@ class UserAccess:
             welcome_posted=d.get("welcome_posted", False),
             control_thread_id=d.get("control_thread_id"),
             control_message_id=d.get("control_message_id"),
+            archive_thread_id=d.get("archive_thread_id"),
         )
 
 

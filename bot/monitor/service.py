@@ -19,11 +19,12 @@ DEFAULT_REFRESH_SECS = 14400  # 4 hours
 class MonitorConfig:
     """Config for a single monitor, read from env vars."""
 
-    def __init__(self, name: str, url: str, auth: str, refresh_secs: int):
+    def __init__(self, name: str, url: str, auth: str, refresh_secs: int, repo_name: str | None = None):
         self.name = name
         self.url = url
         self.auth = auth
         self.refresh_secs = refresh_secs
+        self.repo_name = repo_name  # if set, create thread in repo forum instead of text channel
 
 
 class MonitorService:
@@ -120,8 +121,14 @@ class MonitorService:
         guild = self._bot.get_guild(self._guild_id)
         if not guild:
             return
-        channel = guild.get_channel(int(channel_id))
-        if not channel or not isinstance(channel, discord.TextChannel):
+        # Support both TextChannel (legacy) and Thread (repo-specific)
+        channel = guild.get_channel(int(channel_id)) or guild.get_thread(int(channel_id))
+        if not channel:
+            try:
+                channel = await self._bot.fetch_channel(int(channel_id))
+            except Exception:
+                channel = None
+        if not channel or not isinstance(channel, (discord.TextChannel, discord.Thread)):
             log.error("Monitor %s: channel %s not found, disabling", name, channel_id)
             mon["enabled"] = False
             self._save_monitor_state(name, mon)
@@ -231,7 +238,7 @@ class MonitorService:
 
     async def _edit_or_recreate(
         self,
-        channel: discord.TextChannel,
+        channel: discord.TextChannel | discord.Thread,
         name: str,
         mon: dict,
         msg_key: str,
@@ -446,18 +453,32 @@ class MonitorService:
         self,
         cfg: MonitorConfig,
         category: discord.CategoryChannel,
-    ) -> discord.TextChannel:
-        """Create channel, send initial embeds, enable monitor."""
+        *,
+        forum: discord.ForumChannel | None = None,
+        repo_name: str | None = None,
+    ) -> discord.TextChannel | discord.Thread:
+        """Create channel/thread, send initial embeds, enable monitor.
+
+        If forum is provided, creates a pinned thread in the forum instead
+        of a standalone text channel in the category.
+        """
         self._configs[cfg.name] = cfg
 
-        # Create or find channel
-        channel = await self._ensure_monitor_channel(category, cfg.name)
+        # Create or find channel/thread
+        if forum:
+            channel = await self._ensure_monitor_thread(forum, cfg.name)
+        else:
+            channel = await self._ensure_monitor_channel(category, cfg.name)
 
         # Build initial state
         mon = self._get_monitor_state(cfg.name) or {}
         mon["_name"] = cfg.name
         mon["channel_id"] = str(channel.id)
         mon["enabled"] = True
+        if repo_name:
+            mon["repo_name"] = repo_name
+        if forum:
+            mon["_forum_id"] = str(forum.id)
         mon.setdefault("consecutive_failures", 0)
         mon.setdefault("daily_snapshots", [])
         mon.setdefault("weekly_summaries", [])
@@ -543,7 +564,7 @@ class MonitorService:
 
         monitors = self._get_monitors_state()
 
-        # Scan category channels for monitor:* topics to recover missing channel_ids
+        # Scan category text channels for monitor:* topics (legacy)
         for ch in category.text_channels:
             if ch.topic and ch.topic.startswith("monitor:"):
                 name = ch.topic.split(":", 1)[1]
@@ -552,6 +573,24 @@ class MonitorService:
                     if stored_ch != str(ch.id):
                         monitors[name]["channel_id"] = str(ch.id)
                         log.info("Recovered monitor %s channel from topic: %s", name, ch.id)
+
+        # Scan forum threads for monitor threads (repo-specific)
+        from bot.discord.channels import MONITOR_NAME
+        for ch in category.channels:
+            if not isinstance(ch, discord.ForumChannel):
+                continue
+            for thread in ch.threads:
+                if thread.name == MONITOR_NAME:
+                    # Find which monitor this belongs to by checking state
+                    for name, mon in monitors.items():
+                        if mon.get("channel_id") == str(thread.id):
+                            break
+                        if mon.get("repo_name"):
+                            # Match by repo forum
+                            if str(ch.id) == mon.get("_forum_id", ""):
+                                mon["channel_id"] = str(thread.id)
+                                log.info("Recovered monitor %s thread from forum: %s", name, thread.id)
+                                break
 
         # Re-register configs for enabled monitors
         from bot.monitor.service import _load_monitor_configs
@@ -570,12 +609,31 @@ class MonitorService:
         state["monitors"] = monitors
         self._store._platform_state["discord"] = state
 
+    async def _ensure_monitor_thread(
+        self,
+        forum: discord.ForumChannel,
+        name: str,
+    ) -> discord.Thread:
+        """Find or create a pinned monitor thread in a repo forum."""
+        from bot.discord.channels import MONITOR_NAME
+
+        # Check existing pinned threads
+        for thread in forum.threads:
+            if thread.name == MONITOR_NAME:
+                if thread.archived:
+                    await thread.edit(archived=False)
+                return thread
+
+        from bot.discord.channels import create_monitor_post
+        thread, _ = await create_monitor_post(forum, name)
+        return thread
+
     async def _ensure_monitor_channel(
         self,
         category: discord.CategoryChannel,
         name: str,
     ) -> discord.TextChannel:
-        """Find or create a monitor channel."""
+        """Find or create a monitor channel (legacy — text channel in category)."""
         from bot.discord.channels import sanitize_channel_name
 
         channel_name = f"\U0001f4ca\u2502{sanitize_channel_name(name)}"
@@ -610,6 +668,7 @@ def _load_monitor_configs() -> dict[str, MonitorConfig]:
             url = val
             auth = os.getenv(f"MONITOR_{name.upper()}_AUTH", "")
             refresh = int(os.getenv(f"MONITOR_{name.upper()}_REFRESH", str(default_refresh)))
-            configs[name] = MonitorConfig(name, url, auth, refresh)
+            repo = os.getenv(f"MONITOR_{name.upper()}_REPO") or None
+            configs[name] = MonitorConfig(name, url, auth, refresh, repo_name=repo)
 
     return configs

@@ -15,6 +15,7 @@ log = logging.getLogger(__name__)
 
 CONTROL_ROOM_NAME = "⚙️ Control Room"
 ARCHIVE_NAME = "🗄 Archive"
+MONITOR_NAME = "📊 Monitor"
 
 
 def _private_overwrites(
@@ -99,6 +100,25 @@ async def create_archive_post(
     except Exception:
         log.debug("Could not pin archive thread", exc_info=True)
     log.info("Created archive post %s in forum %s", thread.id, forum.name)
+    return thread, msg
+
+
+async def create_monitor_post(
+    forum: discord.ForumChannel,
+    name: str,
+) -> tuple[discord.Thread, discord.Message]:
+    """Create a pinned monitor thread in a repo forum."""
+    thread_with_msg = await forum.create_thread(
+        name=MONITOR_NAME,
+        content=f"**Usage monitor: {name}**\nAuto-refreshes periodically.",
+    )
+    thread = thread_with_msg.thread
+    msg = thread_with_msg.message
+    try:
+        await thread.edit(pinned=True)
+    except Exception:
+        log.debug("Could not pin monitor thread", exc_info=True)
+    log.info("Created monitor post %s in forum %s", thread.id, forum.name)
     return thread, msg
 
 
