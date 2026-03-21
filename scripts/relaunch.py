@@ -56,7 +56,13 @@ def main():
         except (ValueError, OSError):
             break
 
-    subprocess.Popen([sys.executable, "-m", "bot"], cwd=cwd)
+    kwargs = {}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = (
+            subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        )
+        kwargs["close_fds"] = True
+    subprocess.Popen([sys.executable, "-m", "bot"], cwd=cwd, **kwargs)
 
 
 if __name__ == "__main__":

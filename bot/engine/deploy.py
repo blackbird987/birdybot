@@ -71,18 +71,9 @@ class DeployState:
 def detect_version(repo_path: str) -> str | None:
     """Detect version from standard version files (pyproject.toml, package.json, etc.)."""
     root = Path(repo_path)
-    for filename, pattern in _VERSION_PARSERS:
-        fpath = root / filename
-        if fpath.exists():
-            try:
-                text = fpath.read_text(encoding="utf-8")
-                m = re.search(pattern, text)
-                if m:
-                    return m.group(1)
-            except Exception:
-                log.debug("Failed to read %s in %s", filename, repo_path, exc_info=True)
 
-    # Check *.csproj files (prefer AssemblyVersion over Version)
+    # Check *.csproj first — authoritative for .NET projects, prevents
+    # package.json (often present for tooling) from shadowing the real version.
     for csproj in root.glob("*.csproj"):
         try:
             text = csproj.read_text(encoding="utf-8")
@@ -93,6 +84,17 @@ def detect_version(repo_path: str) -> str | None:
                 return m.group(1)
         except Exception:
             pass
+
+    for filename, pattern in _VERSION_PARSERS:
+        fpath = root / filename
+        if fpath.exists():
+            try:
+                text = fpath.read_text(encoding="utf-8")
+                m = re.search(pattern, text)
+                if m:
+                    return m.group(1)
+            except Exception:
+                log.debug("Failed to read %s in %s", filename, repo_path, exc_info=True)
 
     # Fallback: latest version tag
     return _get_latest_version_tag(repo_path)
@@ -216,6 +218,9 @@ def capture_boot_baselines(store, bot_repo_path: str) -> None:
                 # Tag hasn't changed — preserve accumulated pending state
                 existing.current_ref = head
                 existing.current_version = version
+                # Refresh boot_version in case detection logic improved
+                if version:
+                    existing.boot_version = version
                 ds = existing
             else:
                 # New tag appeared (or first boot) — reset pending state

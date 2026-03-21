@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+- Version detection priority: check .csproj before package.json so .NET repos show the correct version instead of npm tooling version (was showing 1.0.0 instead of 1.2.14.10 in control room)
+- Boot version persistence: refresh boot_version from detect_version on boot so stale persisted values get corrected
+
+### Infrastructure
+- Windows process detachment for relaunch script (DETACHED_PROCESS + CREATE_NEW_PROCESS_GROUP)
+- start.bat uses /MIN instead of /B for cleaner window handling
+- StateStore._normalize_deferred renamed to _dedup_key for clarity
+
 ## v0.48.1 — Fix WinError 206 System Prompt Length (2026-03-21)
 
 - Fix WinError 206: write system prompt to temp file (`--append-system-prompt-file`) instead of CLI arg to avoid Windows command-line length limit; fallback to truncated inline arg if file write fails
