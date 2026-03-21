@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.47.0 — Forum Archive Threads (2026-03-21)
+
 - Move archive from standalone text channels to pinned forum threads (🗄 Archive) inside each repo's forum channel
 - Auto-migrate existing archive channel messages into the new forum thread on startup (with rate-limit throttling)
 - Add retry on auto-archive race in `post_archive_entry` (unarchive + resend)
