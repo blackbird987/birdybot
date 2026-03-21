@@ -29,10 +29,11 @@ python -m bot          # start the bot
 ## Discord Architecture (v0.3.0)
 
 Forum-based: one ForumChannel per project/repo, one thread per session.
-- Bot auto-provisions private category + lobby on startup
-- Messages in lobby → routed to forum thread (lobby msg deleted, redirect posted)
+- Bot auto-provisions private category + The Ark (top-level dashboard channel) on startup
+- Messages in The Ark → informational reply only (no session routing)
 - Messages in forum thread → session auto-resumed
-- Dashboard embed pinned in lobby (auto-updates on instance start/complete)
+- Dashboard embed pinned in The Ark (auto-updates on instance start/complete)
+- Per-repo control rooms live as pinned threads inside each repo's forum
 - Forum tags: active, completed, failed, cli, build
 
 Key data structures in `bot/discord/forums.py`:
@@ -66,7 +67,7 @@ python scripts/discord_test.py <command>
 ```
 
 **Setup (one-time):**
-1. Create lobby webhook: `python scripts/discord_test.py setup-webhook <lobby_channel_id>`
+1. Create Ark webhook: `python scripts/discord_test.py setup-webhook <ark_channel_id>`
    → Add URL to `TEST_LOBBY_WEBHOOK_URL` in `.env`
 2. Create forum webhook: `python scripts/discord_test.py setup-webhook <forum_channel_id>`
    → Add URL to `TEST_WEBHOOK_URL` in `.env`
@@ -77,7 +78,7 @@ python scripts/discord_test.py <command>
 - `list-channels` — show all channels in bot category (verify forums exist)
 - `list-threads <forum_id>` — show active/archived threads + tags
 - `channel-info <id>` — channel type, parent, tags, archive status
-- `send <channel_or_thread_id> <msg>` — send via webhook (auto-picks lobby vs forum webhook)
+- `send <channel_or_thread_id> <msg>` — send via webhook (auto-picks Ark vs forum webhook)
 - `read <channel_or_thread_id> [limit]` — read messages with embeds/buttons
 - `wait-response <channel_id> [timeout]` — poll for bot response after sending
 - `run-suite` — automated test sequence (forum creation, thread resume, archived resume, dedup, tags)
@@ -92,7 +93,7 @@ python scripts/discord_test.py read <thread_id> 5      # bot responding?
 ### Read Discord messages (lightweight)
 
 ```bash
-python scripts/discord_read.py [channel_id] [limit]   # default: lobby, 10
+python scripts/discord_read.py [channel_id] [limit]   # default: The Ark, 10
 ```
 
 ### Manual verification
@@ -101,7 +102,7 @@ python scripts/discord_read.py [channel_id] [limit]   # default: lobby, 10
 - `/new` → fresh thread in project forum
 - `/repo` → select menu dropdown (with 2+ repos)
 - Workflow buttons (Plan/Build/Review/Commit) work inside forum threads
-- Send message in lobby → redirected to forum thread
+- Send message in The Ark → informational reply (no routing)
 - Send message in archived thread → auto-unarchives + resumes session
 
 ### Log monitoring

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- Rename top-level dashboard channel from "control-room" to "the-ark" (auto-migrates from "lobby" and "control-room")
+- Dashboard embed title changed from "Claude Bot Dashboard" to "The Ark"
+- Auto-ping owner when The Ark is first created so it appears in their sidebar
+- Messages in The Ark no longer route to forum threads — replies with guidance instead
+- Update CLAUDE.md docs to reflect new name and behavior
+
 ## v0.45.0 — Centralized Deferred Revisions (2026-03-21)
 
 - Centralize deferred revisions into each repo's `TODO.md` under `## Deferred Revisions` section instead of hidden `data/deferred/` files
