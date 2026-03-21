@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-import re as _re
+
 import subprocess
 import sys
 from pathlib import Path
@@ -104,18 +104,9 @@ if REPOS_BASE_DIR and not REPOS_BASE_DIR.is_dir():
 # Ensure data dirs exist
 REBOOT_MSG_FILE: Path = DATA_DIR / "reboot_message.json"
 REBOOT_REQUEST_FILE: Path = DATA_DIR / "reboot_request.json"
-DEFERRED_DIR: Path = DATA_DIR / "deferred"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
-DEFERRED_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def safe_repo_slug(name: str) -> str:
-    """Sanitize repo name for use as a filename."""
-    slug = _re.sub(r'[^\w\-.]', '-', name.strip())
-    slug = slug.strip('.-')
-    return slug or 'unknown'
 
 # System prompt appended via --append-system-prompt
 MOBILE_HINT = (

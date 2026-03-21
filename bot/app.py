@@ -276,6 +276,64 @@ async def auto_update_loop(
                 failure_notified = True
 
 
+def _migrate_deferred_to_todo(store: StateStore) -> None:
+    """One-time migration: data/deferred/*.md → repo TODO.md files.
+
+    Reads old deferred files directly, deduplicates items, writes them
+    into each repo's TODO.md, then deletes the data/deferred/ directory.
+    """
+    import re
+    import shutil
+
+    deferred_dir = config.DATA_DIR / "deferred"
+    if not deferred_dir.exists():
+        return
+
+    def _slug(name: str) -> str:
+        """Inline slug logic (config.safe_repo_slug is removed)."""
+        s = re.sub(r'[^\w\-.]', '-', name.strip()).strip('.-')
+        return s or 'unknown'
+
+    repos = store.list_repos()
+    # Build slug → repo_name lookup
+    slug_to_repo: dict[str, str] = {}
+    for name in repos:
+        slug_to_repo[_slug(name)] = name
+
+    migrated_total = 0
+    for fpath in deferred_dir.glob("*.md"):
+        slug = fpath.stem
+        repo_name = slug_to_repo.get(slug)
+        if not repo_name:
+            log.warning("Deferred migration: no repo for slug %r, skipping %s", slug, fpath.name)
+            continue
+
+        # Read old file directly
+        text = fpath.read_text(encoding="utf-8")
+        raw_items = [line.strip()[2:] for line in text.splitlines()
+                     if line.strip().startswith("- ")]
+
+        # Deduplicate
+        seen: set[str] = set()
+        unique: list[str] = []
+        for item in raw_items:
+            norm = StateStore._normalize_deferred(item)
+            if norm not in seen:
+                seen.add(norm)
+                unique.append(item)
+
+        if unique:
+            store.append_deferred(repo_name, unique)
+            migrated_total += len(unique)
+            log.info("Migrated %d unique deferred items for %s", len(unique), repo_name)
+
+    shutil.rmtree(deferred_dir, ignore_errors=True)
+    if migrated_total:
+        log.info("Deferred migration complete: %d total unique items → TODO.md files", migrated_total)
+    else:
+        log.info("Deferred migration: no items to migrate, cleaned up empty directory")
+
+
 async def run() -> None:
     """Main async entry point."""
     setup_logging()
@@ -301,6 +359,9 @@ async def run() -> None:
     archive_count = store.archive_old()
     if archive_count:
         log.info("Archived %d old instances", archive_count)
+
+    # One-time migration: data/deferred/*.md → repo TODO.md files
+    _migrate_deferred_to_todo(store)
 
     # Initialize shared runner
     runner = ClaudeRunner()
