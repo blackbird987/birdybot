@@ -124,7 +124,7 @@ class ClaudeRunner:
         # Use worktree as cwd if available (file isolation)
         working_dir = instance.worktree_path or instance.repo_path or None
 
-        cmd, prompt_text = self._build_command(instance, context, sibling_context)
+        cmd, prompt_text, system_prompt_file = self._build_command(instance, context, sibling_context)
         log.info("Running %s (prompt: %d chars via stdin): %s",
                  instance.id, len(prompt_text), " ".join(cmd)[:500])
 
@@ -200,6 +200,12 @@ class ClaudeRunner:
             log.exception("Error running %s", instance.id)
             return RunResult(is_error=True, error_message=str(e))
         finally:
+            # Clean up system prompt temp file on all exit paths
+            if system_prompt_file:
+                try:
+                    os.unlink(system_prompt_file)
+                except OSError:
+                    pass
             self._processes.pop(instance.id, None)
             # Kill process on cancellation/unexpected error to avoid orphans
             if proc is not None and proc.returncode is None:
@@ -393,8 +399,12 @@ class ClaudeRunner:
         self, instance: Instance,
         context: str | None = None,
         sibling_context: str | None = None,
-    ) -> tuple[list[str], str]:
-        """Build CLI command and prompt.  Prompt returned separately for stdin piping."""
+    ) -> tuple[list[str], str, str | None]:
+        """Build CLI command and prompt.  Prompt returned separately for stdin piping.
+
+        Returns (cmd, prompt_text, system_prompt_file) — caller must clean up
+        the temp file via os.unlink when done.
+        """
         cmd = [config.CLAUDE_BINARY, "-p"]
 
         # Build prompt — never mutated on the instance
@@ -407,7 +417,20 @@ class ClaudeRunner:
 
         # Build system prompt: mobile hint + bot context + pinned context + repo CLAUDE.md + projects dir
         system_prompt = self._build_system_prompt(instance, context, sibling_context)
-        cmd.extend(["--append-system-prompt", system_prompt])
+
+        # Write system prompt to temp file to avoid Windows command-line
+        # length limit (WinError 206).  Falls back to truncated inline arg
+        # if the file write fails.
+        sp_file = self._write_system_prompt_file(system_prompt)
+        if sp_file:
+            cmd.extend(["--append-system-prompt-file", sp_file])
+        else:
+            # Fallback: truncate to stay under Windows 32K limit
+            max_inline = 30_000
+            if len(system_prompt) > max_inline:
+                log.warning("System prompt file write failed, truncating to %d chars", max_inline)
+                system_prompt = system_prompt[:max_inline]
+            cmd.extend(["--append-system-prompt", system_prompt])
 
         # Resume session
         if instance.session_id:
@@ -434,7 +457,30 @@ class ClaudeRunner:
 
         # Prompt piped via stdin (not CLI arg) to avoid Windows command-line
         # length limit (WinError 206).  No "--" separator needed.
-        return cmd, prompt
+        return cmd, prompt, sp_file
+
+    @staticmethod
+    def _write_system_prompt_file(content: str) -> str | None:
+        """Write system prompt to a temp file, return path.  Returns None on failure."""
+        path: str | None = None
+        try:
+            f = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".txt", prefix="claude_sysprompt_",
+                delete=False, encoding="utf-8",
+            )
+            path = f.name
+            f.write(content)
+            f.close()
+            return path
+        except OSError:
+            log.warning("Failed to write system prompt temp file, falling back to inline")
+            # Clean up partial file if it was created
+            if path:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+            return None
 
     def _build_system_prompt(
         self, instance: Instance,
