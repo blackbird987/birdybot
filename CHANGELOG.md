@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.45.0 — Centralized Deferred Revisions (2026-03-21)
+
 - Centralize deferred revisions into each repo's `TODO.md` under `## Deferred Revisions` section instead of hidden `data/deferred/` files
 - Deduplicate items on write (normalize priority suffixes, case-insensitive match)
 - One-time startup migration: reads existing `data/deferred/*.md`, deduplicates, writes unique items to repo TODO.md files, deletes old directory
