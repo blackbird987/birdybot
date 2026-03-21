@@ -130,8 +130,12 @@ class Messenger(Protocol):
         Default: no-op.
         """
 
-    async def close_conversation(self, channel_id: str) -> None:
-        """Close/archive a conversation."""
+    async def close_conversation(self, channel_id: str, *, skip_mention: bool = False) -> None:
+        """Close/archive a conversation.
+
+        If *skip_mention* is True, skip the participant mention (e.g., when
+        the result embed already pinged the user).
+        """
         ...
 
 

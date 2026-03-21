@@ -402,9 +402,11 @@ class DiscordMessenger:
         if forums:
             await forums.refresh_control_room(repo_name)
 
-    async def close_conversation(self, channel_id: str) -> None:
-        """Mention interacting users, then archive a Discord forum thread.
+    async def close_conversation(self, channel_id: str, *, skip_mention: bool = False) -> None:
+        """Archive a Discord forum thread, optionally mentioning participants.
 
+        If *skip_mention* is True, the result embed already pinged the user
+        so we skip the redundant mention (avoids double-ping).
         Does not lock — users can reopen by posting (Discord auto-unarchives).
         """
         ch = await self._resolve_channel(channel_id)
@@ -413,18 +415,19 @@ class DiscordMessenger:
         if ch.archived:
             return
         try:
-            # Mention users who interacted with this thread
-            thread_info = self._bot._forums.thread_to_project(channel_id)
-            if thread_info:
-                _, info = thread_info
-                # Filter out the bot's own ID
-                bot_id = str(self._bot.user.id) if self._bot.user else None
-                user_ids = {uid for uid in info.user_ids if uid != bot_id}
-                if user_ids:
-                    mentions = " ".join(f"<@{uid}>" for uid in user_ids)
-                    await ch.send(f"Thread archived. {mentions}")
-                    # Wait for Discord to fanout the notification before archiving
-                    await asyncio.sleep(1.5)
+            # Mention users who interacted with this thread (unless already pinged)
+            if not skip_mention:
+                thread_info = self._bot._forums.thread_to_project(channel_id)
+                if thread_info:
+                    _, info = thread_info
+                    # Filter out the bot's own ID
+                    bot_id = str(self._bot.user.id) if self._bot.user else None
+                    user_ids = {uid for uid in info.user_ids if uid != bot_id}
+                    if user_ids:
+                        mentions = " ".join(f"<@{uid}>" for uid in user_ids)
+                        await ch.send(f"Thread archived. {mentions}")
+                        # Wait for Discord to fanout the notification before archiving
+                        await asyncio.sleep(1.5)
 
             # Post to archive channel (isolated — never blocks archiving)
             try:

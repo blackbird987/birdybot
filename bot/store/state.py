@@ -638,10 +638,10 @@ class StateStore:
             content = "# TODO\n"
 
         existing_items = self._parse_deferred_section(content)
-        existing_normalized = {self._normalize_deferred(i) for i in existing_items}
+        existing_normalized = {self._dedup_key(i) for i in existing_items}
         new_items = [
             item for item in items
-            if self._normalize_deferred(item) not in existing_normalized
+            if self._dedup_key(item) not in existing_normalized
         ]
         if not new_items:
             return
@@ -691,11 +691,19 @@ class StateStore:
         return len(items)
 
     @staticmethod
-    def _normalize_deferred(item: str) -> str:
-        """Normalize a deferred item for dedup (strip priority suffix, lowercase)."""
+    def _dedup_key(item: str) -> str:
+        """Normalize a deferred item to a dedup key.
+
+        Strips severity tag, leading dash, lowercases, then uses
+        [Tag] + first 40 chars of description as the comparison key.
+        """
         import re
-        normalized = re.sub(r'\s*\((?:Medium|Low|High|Critical)\)\s*$', '', item)
-        return normalized.strip().lower()
+        text = re.sub(r'\s*\((Critical|High|Medium|Low)\)\s*$', '', item)
+        text = re.sub(r'^-\s*', '', text).strip().lower()
+        m = re.match(r'(\[[^\]]+\])\s*(.*)', text)
+        if m:
+            return f"{m.group(1)} {m.group(2)[:40]}"
+        return text[:50]
 
     @staticmethod
     def _parse_deferred_section(content: str) -> list[str]:

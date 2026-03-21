@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Reliability
+- Extract `_exit_chain()` helper — all three autopilot chain exit paths now consistently evaluate, clean state, and notify user (fixes "break after merge skips chain cleanup" bug)
+- Harden `_notify_user()` with fallback plain-text send when mention fails (was silently swallowed)
+- Add 24h age gate to startup stale-merge — old branches require manual `/merge` instead of silent auto-merge
+
+### Bug Fixes
+- Fix double-ping on thread close: `close_conversation` now accepts `skip_mention` flag; standalone Done and manual merge/discard skip the redundant archive mention
+- Fix Done-without-branch notification: result embed now pings user directly instead of relying on close_conversation mention (which was being silenced)
+
+### DRY/Cleanup
+- Upgrade deferred item dedup to tag-aware normalized keys (`[Tag] + first 40 chars`) for better near-duplicate detection
+
 ## v0.45.0 — Centralized Deferred Revisions (2026-03-21)
 
 - Centralize deferred revisions into each repo's `TODO.md` under `## Deferred Revisions` section instead of hidden `data/deferred/` files
