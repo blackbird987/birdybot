@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.48.1 — Fix WinError 206 System Prompt Length (2026-03-21)
+
 - Fix WinError 206: write system prompt to temp file (`--append-system-prompt-file`) instead of CLI arg to avoid Windows command-line length limit; fallback to truncated inline arg if file write fails
 
 ## v0.48.0 — Auto-Follow, Personal Archives, Repo Monitors (2026-03-21)
