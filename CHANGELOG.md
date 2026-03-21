@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.44.0 — Explicit Findings Narration (2026-03-21)
+
 - Fix vague/dismissive Claude output: add system prompt rules requiring all subagent findings to be listed explicitly, banning count-without-list patterns ("4 quick wins" with no list)
 - Add `BG` origin to `InstanceOrigin` and dedicated `WORKFLOW_GUIDANCE["bg"]` so `/bg` tasks get tailored guidance instead of falling through to `"direct"`
 
