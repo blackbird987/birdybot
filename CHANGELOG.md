@@ -22,6 +22,12 @@
 - Auto-ping owner when The Ark is first created so it appears in their sidebar
 - Messages in The Ark no longer route to forum threads — replies with guidance instead
 - Update CLAUDE.md docs to reflect new name and behavior
+## v0.47.0 — Forum Archive Threads (2026-03-21)
+
+- Move archive from standalone text channels to pinned forum threads (🗄 Archive) inside each repo's forum channel
+- Auto-migrate existing archive channel messages into the new forum thread on startup (with rate-limit throttling)
+- Add retry on auto-archive race in `post_archive_entry` (unarchive + resend)
+- Old archive text channels deleted after successful migration; kept intact on failure
 
 ## v0.45.0 — Centralized Deferred Revisions (2026-03-21)
 
