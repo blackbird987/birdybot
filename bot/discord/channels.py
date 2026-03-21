@@ -14,6 +14,7 @@ from bot.platform.formatting import EFFORT_DISPLAY, MODE_COLOR, MODE_DISPLAY, ef
 log = logging.getLogger(__name__)
 
 CONTROL_ROOM_NAME = "⚙️ Control Room"
+ARCHIVE_NAME = "🗄 Archive"
 
 
 def _private_overwrites(
@@ -82,22 +83,23 @@ async def ensure_lobby(
     return channel
 
 
-async def ensure_archive_channel(
-    guild: discord.Guild,
-    category: discord.CategoryChannel,
+async def create_archive_post(
+    forum: discord.ForumChannel,
     repo_name: str,
-) -> discord.TextChannel:
-    """Find or create an archive text channel for a repo (inherits perms)."""
-    name = f"archive-{sanitize_channel_name(repo_name)}"
-
-    for ch in category.text_channels:
-        if ch.name == name:
-            log.info("Found existing archive channel %s (%s)", ch.id, ch.name)
-            return ch
-
-    channel = await guild.create_text_channel(name, category=category)
-    log.info("Created archive channel %s (%s)", channel.id, channel.name)
-    return channel
+) -> tuple[discord.Thread, discord.Message]:
+    """Create a pinned archive post inside a repo forum."""
+    thread_with_msg = await forum.create_thread(
+        name=ARCHIVE_NAME,
+        content=f"**Session archive for {repo_name}**\nCompleted sessions are logged here automatically.",
+    )
+    thread = thread_with_msg.thread
+    msg = thread_with_msg.message
+    try:
+        await thread.edit(pinned=True)
+    except Exception:
+        log.debug("Could not pin archive thread", exc_info=True)
+    log.info("Created archive post %s in forum %s", thread.id, forum.name)
+    return thread, msg
 
 
 def sanitize_channel_name(text: str, separator: str = "-") -> str:

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Move archive from standalone text channels to pinned forum threads (🗄 Archive) inside each repo's forum channel
+- Auto-migrate existing archive channel messages into the new forum thread on startup (with rate-limit throttling)
+- Add retry on auto-archive race in `post_archive_entry` (unarchive + resend)
+- Old archive text channels deleted after successful migration; kept intact on failure
+
 ## v0.45.0 — Centralized Deferred Revisions (2026-03-21)
 
 - Centralize deferred revisions into each repo's `TODO.md` under `## Deferred Revisions` section instead of hidden `data/deferred/` files

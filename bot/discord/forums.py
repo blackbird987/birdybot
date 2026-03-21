@@ -105,6 +105,9 @@ class ForumProject:
     threads: dict[str, ThreadInfo] = field(default_factory=dict)
     control_thread_id: str | None = None
     control_message_id: str | None = None
+    archive_thread_id: str | None = None
+    archive_migrated: bool = False
+    # Legacy — kept only for migration from text channel to forum thread
     archive_channel_id: str | None = None
 
     def to_dict(self) -> dict:
@@ -117,6 +120,10 @@ class ForumProject:
             d["control_thread_id"] = self.control_thread_id
         if self.control_message_id:
             d["control_message_id"] = self.control_message_id
+        if self.archive_thread_id:
+            d["archive_thread_id"] = self.archive_thread_id
+        if self.archive_migrated:
+            d["archive_migrated"] = self.archive_migrated
         if self.archive_channel_id:
             d["archive_channel_id"] = self.archive_channel_id
         return d
@@ -133,6 +140,8 @@ class ForumProject:
             threads=threads,
             control_thread_id=data.get("control_thread_id"),
             control_message_id=data.get("control_message_id"),
+            archive_thread_id=data.get("archive_thread_id"),
+            archive_migrated=data.get("archive_migrated", False),
             archive_channel_id=data.get("archive_channel_id"),
         )
 
@@ -198,11 +207,12 @@ class ForumManager:
         self._forum_projects = {
             k: ForumProject.from_dict(v) for k, v in raw.items()
         }
-        self._archive_channel_ids = {
-            int(p.archive_channel_id)
-            for p in self._forum_projects.values()
-            if p.archive_channel_id
-        }
+        self._archive_channel_ids = set()
+        for p in self._forum_projects.values():
+            if p.archive_thread_id:
+                self._archive_channel_ids.add(int(p.archive_thread_id))
+            if p.archive_channel_id:
+                self._archive_channel_ids.add(int(p.archive_channel_id))
         log.info("Loaded %d forum projects", len(self._forum_projects))
 
     def save_forum_map(self) -> None:
@@ -564,14 +574,20 @@ class ForumManager:
                 except Exception:
                     log.debug("Failed to create control room for %s", repo_name, exc_info=True)
 
-        # Ensure archive channels exist for all repo forums
+        # Ensure archive threads exist for all repo forums
         for repo_name, proj in self._forum_projects.items():
-            if proj.forum_channel_id and not proj.archive_channel_id:
+            if proj.forum_channel_id and not proj.archive_thread_id:
                 try:
-                    await self.ensure_archive_channel(repo_name)
+                    await self.ensure_archive_thread(repo_name)
                 except Exception:
-                    log.debug("Failed to create archive channel for %s",
+                    log.debug("Failed to create archive thread for %s",
                               repo_name, exc_info=True)
+
+        # Migrate old archive text channels → forum threads
+        for repo_name, proj in self._forum_projects.items():
+            if proj.archive_channel_id and proj.archive_thread_id and not proj.archive_migrated:
+                async with self._forum_lock:
+                    await self._migrate_archive_channel(repo_name, proj, guild)
 
         # Populate user control room thread ID set + create missing control rooms
         cfg = load_access_config()
@@ -584,39 +600,85 @@ class ForumManager:
                 except Exception:
                     log.debug("Failed to create control room for user %s", uid, exc_info=True)
 
-    # --- Archive Channel ---
+    # --- Archive Thread ---
 
-    async def ensure_archive_channel(self, repo_name: str) -> discord.TextChannel | None:
-        """Get or create the archive text channel for a repo."""
-        guild = self._client.get_guild(self._guild_id)
-        if not guild or not self._category_id:
-            return None
-        category = guild.get_channel(self._category_id)
-        if not category or not isinstance(category, discord.CategoryChannel):
-            return None
-
+    async def ensure_archive_thread(self, repo_name: str) -> discord.Thread | None:
+        """Get or create the archive thread inside a repo's forum."""
         proj = self._forum_projects.get(repo_name)
-        if not proj:
+        if not proj or not proj.forum_channel_id:
             return None
 
-        # Check existing — clear stale ID if channel was deleted
-        if proj.archive_channel_id:
-            ch = guild.get_channel(int(proj.archive_channel_id))
-            if ch and isinstance(ch, discord.TextChannel):
-                return ch
-            log.info("Archive channel %s for %s was deleted, recreating",
-                     proj.archive_channel_id, repo_name)
+        # Check existing — clear stale ID if thread was deleted
+        if proj.archive_thread_id:
+            try:
+                ch = await self._client.fetch_channel(int(proj.archive_thread_id))
+                if isinstance(ch, discord.Thread):
+                    if ch.archived:
+                        await ch.edit(archived=False)
+                    return ch
+            except discord.NotFound:
+                log.info("Archive thread %s for %s was deleted, recreating",
+                         proj.archive_thread_id, repo_name)
+                self._archive_channel_ids.discard(int(proj.archive_thread_id))
+                proj.archive_thread_id = None
+
+        forum = self._client.get_channel(int(proj.forum_channel_id))
+        if not forum or not isinstance(forum, discord.ForumChannel):
+            return None
+
+        thread, _ = await channels.create_archive_post(forum, repo_name)
+        proj.archive_thread_id = str(thread.id)
+        self._archive_channel_ids.add(thread.id)
+        self.save_forum_map()
+        return thread
+
+    async def _migrate_archive_channel(
+        self, repo_name: str, proj: ForumProject, guild: discord.Guild,
+    ) -> None:
+        """Migrate old archive text channel messages into the new forum thread.
+
+        Called under _forum_lock. Copies all messages, deletes old channel on
+        success, keeps it on failure.
+        """
+        old_ch = guild.get_channel(int(proj.archive_channel_id))
+        if not old_ch or not isinstance(old_ch, discord.TextChannel):
+            # Channel already gone — just mark migrated
             self._archive_channel_ids.discard(int(proj.archive_channel_id))
             proj.archive_channel_id = None
+            proj.archive_migrated = True
+            self.save_forum_map()
+            log.info("Archive channel for %s already deleted, marking migrated",
+                     repo_name)
+            return
 
-        ch = await channels.ensure_archive_channel(guild, category, repo_name)
-        proj.archive_channel_id = str(ch.id)
-        self._archive_channel_ids.add(ch.id)
+        try:
+            archive_thread = await self._client.fetch_channel(int(proj.archive_thread_id))
+        except Exception:
+            log.warning("Cannot fetch archive thread for %s, skipping migration", repo_name)
+            proj.archive_migrated = True
+            self.save_forum_map()
+            return
+
+        try:
+            messages = [m async for m in old_ch.history(limit=None, oldest_first=True)]
+            for m in messages:
+                if m.content:
+                    await archive_thread.send(m.content)
+                    await asyncio.sleep(0.5)
+            await old_ch.delete(reason="Migrated to forum archive thread")
+            self._archive_channel_ids.discard(int(proj.archive_channel_id))
+            proj.archive_channel_id = None
+            log.info("Migrated %d archive messages for %s, deleted old channel",
+                     len(messages), repo_name)
+        except Exception:
+            log.warning("Archive migration failed for %s, keeping old channel",
+                        repo_name, exc_info=True)
+
+        proj.archive_migrated = True
         self.save_forum_map()
-        return ch
 
     async def post_archive_entry(self, channel_id: str) -> None:
-        """Post a session summary + link to the archive channel.
+        """Post a session summary + link to the archive thread.
 
         Uses a waterfall to find the best summary:
         1. CHANGELOG entries from DONE/COMMIT instance result file
@@ -683,8 +745,8 @@ class ForumManager:
         if not summary:
             summary = info.topic or "No summary"
 
-        archive_ch = await self.ensure_archive_channel(proj.repo_name)
-        if not archive_ch:
+        archive_thread = await self.ensure_archive_thread(proj.repo_name)
+        if not archive_thread:
             return
 
         if inst:
@@ -717,10 +779,15 @@ class ForumManager:
             msg = f"**Session closed**\n{summary}\n\U0001f517 <#{channel_id}>"
 
         try:
-            await archive_ch.send(msg)
-        except Exception:
-            log.debug("Failed to post archive entry for thread %s",
-                      channel_id, exc_info=True)
+            await archive_thread.send(msg)
+        except discord.HTTPException:
+            # Thread may have been auto-archived between ensure and send
+            try:
+                await archive_thread.edit(archived=False)
+                await archive_thread.send(msg)
+            except Exception:
+                log.debug("Failed to post archive entry for thread %s",
+                          channel_id, exc_info=True)
 
     async def sync_cli_sessions(self, count: int) -> tuple[list[discord.Thread], list]:
         """Scan CLI sessions and create/populate forum threads.
