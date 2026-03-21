@@ -62,16 +62,16 @@ async def ensure_category(
 
 async def ensure_lobby(
     category: discord.CategoryChannel,
-    name: str = "control-room",
+    name: str = "the-ark",
 ) -> discord.TextChannel:
-    """Find or create the lobby channel inside a category (inherits perms)."""
-    # Also match old name "lobby" for migration
+    """Find or create the top-level dashboard channel inside a category."""
+    # Match current name or legacy names for migration
     for ch in category.text_channels:
-        if ch.name in (name, "lobby"):
-            if ch.name == "lobby":
+        if ch.name in (name, "lobby", "control-room"):
+            if ch.name != name:
                 try:
                     await ch.edit(name=name)
-                    log.info("Renamed lobby -> %s (%s)", name, ch.id)
+                    log.info("Renamed %s -> %s (%s)", ch.name, name, ch.id)
                 except Exception:
                     pass
             log.info("Found existing lobby channel %s (%s)", ch.id, ch.name)

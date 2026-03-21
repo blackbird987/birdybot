@@ -400,7 +400,7 @@ class ClaudeBot(discord.Client):
             log.warning("OPENAI_API_KEY not configured — voice messages will be ignored")
             self._voice_warning_logged = True
 
-        # Auto-provision category + lobby if not configured
+        # Auto-provision category + The Ark if not configured
         if self._category_name and not self._lobby_channel_id:
             guild = self.get_guild(self._guild_id)
             if guild and guild.me:
@@ -414,6 +414,16 @@ class ClaudeBot(discord.Client):
                 self._lobby_channel_id = lobby.id
                 self._messenger = None
                 log.info("Auto-provisioned category=%s lobby=%s", category.id, lobby.id)
+
+                # Ping owner in new Ark so it appears in their sidebar
+                if not [m async for m in lobby.history(limit=1)]:
+                    owner = guild.get_member(self._discord_user_id) if self._discord_user_id else None
+                    if owner:
+                        await lobby.send(
+                            f"{owner.mention} The Ark is ready. "
+                            f"Add a repo with `/repo add` to get started.",
+                            delete_after=60,
+                        )
 
         # Load and reconcile forum mapping
         self._forums.load_forum_map()
@@ -585,12 +595,24 @@ class ClaudeBot(discord.Client):
             if message.channel.id in self._forums.archive_channel_ids:
                 return
 
-            # --- Lobby: route to forum thread (owner only) ---
+            # --- The Ark: informational only, no session routing ---
             if message.channel.id == self._lobby_channel_id:
                 if not msg_access.is_owner:
                     return
-                active_repo, _ = self._store.get_active_repo()
-                await self._route_lobby_message(message, text, active_repo)
+                if not self._store.list_repos():
+                    await message.channel.send(
+                        "Add or create a repo to begin \u2014 use `/repo add` or `/repo create`.",
+                        delete_after=15,
+                    )
+                else:
+                    await message.channel.send(
+                        "Please send prompts inside the repo forum channels, not here.",
+                        delete_after=15,
+                    )
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
                 return
 
             # --- Forum thread: auto-resume session ---

@@ -32,9 +32,9 @@ def build_dashboard_embed(
     """Build the global dashboard embed — lightweight overview.
 
     Per-instance details (running list, completed list) now live in
-    each repo's control room. This dashboard shows attention items
-    (with repo labels for navigation), global counts, project links,
-    and cost.
+    each repo's per-repo control room. This dashboard (pinned in The Ark)
+    shows attention items (with repo labels for navigation), global counts,
+    project links, and cost.
 
     Pure function — no side effects, no Discord API calls.
     """
@@ -43,12 +43,12 @@ def build_dashboard_embed(
     active_repo, _ = store.get_active_repo()
 
     embed = discord.Embed(
-        title="Claude Bot Dashboard",
+        title="The Ark",
         color=discord.Color.blurple(),
     )
 
     # Needs Attention — kept detailed with repo labels + thread links
-    # so user knows which control room to check
+    # so user knows which per-repo control room to check
     attention = store.needs_attention()
     if attention:
         # Build session_id -> thread_id map for attention links
@@ -205,7 +205,7 @@ async def _refresh_dashboard_impl(
     except Exception:
         log.debug("Failed to update dashboard", exc_info=True)
 
-    # Always refresh control rooms, independent of dashboard success
+    # Always refresh per-repo control rooms, independent of dashboard success
     async def _safe_refresh(coro):
         try:
             await coro
