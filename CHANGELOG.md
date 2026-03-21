@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Strengthen narration rules: add diagnostic/verification template, "address the user" rule, and second Bad/Good example targeting vague "all good" responses
+
 ## v0.45.1 — Chain Exit Reliability (2026-03-21)
 
 ### Reliability
