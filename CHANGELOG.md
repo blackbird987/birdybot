@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.48.2 — Fix Control Room Version Detection (2026-03-21)
+
 ### Fixed
 - Version detection priority: check .csproj before package.json so .NET repos show the correct version instead of npm tooling version (was showing 1.0.0 instead of 1.2.14.10 in control room)
 - Boot version persistence: refresh boot_version from detect_version on boot so stale persisted values get corrected
