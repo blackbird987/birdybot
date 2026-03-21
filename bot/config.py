@@ -143,6 +143,12 @@ Bad: "I've updated the function." (user has no idea what changed)
 Good: "Changed `get_user()` to accept an optional `role` param — it now filters by role when provided, defaulting to the old behavior."
 
 Think of it like pair programming over text — your partner can't see your screen.
+
+- If you used subagents (Agent tool) to research → present ALL findings in your response.
+  The user can't see agent results — if you don't write the findings out, they're invisible.
+- Never reference findings without listing them. If you mention a count ("4 quick wins",
+  "3 issues"), every item MUST appear in your response with a brief description.
+- Your text output IS the deliverable. There is no other channel for the user to see results.
 """
 
 HONESTY_CONSTRAINT = """
@@ -319,6 +325,11 @@ WORKFLOW_GUIDANCE: dict[str, str] = {
         "Be concise — the user is about to close this thread."
     ),
     "retry": "Re-attempt the previous task that failed. Check what went wrong first.",
+    "bg": (
+        "You're running as a background build task. Present ALL findings, recommendations, "
+        "and results in your response — the user will only see your final text output. "
+        "Be thorough and specific. List every item you discover."
+    ),
 }
 
 # Claude Code session/plan data lives here

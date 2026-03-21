@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Fix vague/dismissive Claude output: add system prompt rules requiring all subagent findings to be listed explicitly, banning count-without-list patterns ("4 quick wins" with no list)
+- Add `BG` origin to `InstanceOrigin` and dedicated `WORKFLOW_GUIDANCE["bg"]` so `/bg` tasks get tailored guidance instead of falling through to `"direct"`
+
 ## v0.43.0 — Auto-Clean Lobby (2026-03-20)
 
 - Auto-clean lobby: purge all non-pinned messages on startup (two-pass: bulk + individual for >14-day-old messages)

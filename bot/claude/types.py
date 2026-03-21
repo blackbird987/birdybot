@@ -37,6 +37,7 @@ class InstanceOrigin(str, Enum):
     RETRY = "retry"             # [Retry] button
     AUTOPILOT = "autopilot"     # [Autopilot] button — full chain
     BUILD_AND_SHIP = "build_and_ship"  # [Build & Ship] button
+    BG = "bg"                       # /bg command — background task
 
 
 # Origins that belong to the plan workflow (used in lifecycle + button selection)

@@ -464,6 +464,7 @@ async def on_bg(ctx: RequestContext, text: str) -> None:
         name=name,
         mode="build",
     )
+    inst.origin = InstanceOrigin.BG
     inst.origin_platform = ctx.platform
     inst.effort = ctx.effective_effort
     inst.branch = f"claude-bot/{inst.id}"
