@@ -272,6 +272,7 @@ def make_deploy_config(
     command: str | None = None,
     label: str = "Reboot",
     cwd: str | None = None,
+    timeout: int | None = None,
     source: str = "manual",
     approved: bool = True,
 ) -> dict:
@@ -286,6 +287,8 @@ def make_deploy_config(
         cfg["command"] = command
     if cwd is not None:
         cfg["cwd"] = cwd
+    if timeout is not None:
+        cfg["timeout"] = timeout
     return cfg
 
 
@@ -319,6 +322,7 @@ def rescan_deploy_config_after_merge(store, repo_name: str, repo_path: str) -> N
             command=file_cfg["command"],
             label=file_cfg.get("label", "Deploy"),
             cwd=file_cfg.get("cwd"),
+            timeout=file_cfg.get("timeout"),
             source="file", approved=False,
         ))
 
