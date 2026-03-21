@@ -30,7 +30,41 @@ async def _notify_user(ctx: RequestContext, suffix: str = "") -> None:
     try:
         await ctx.messenger.send_text(ctx.channel_id, text, silent=False)
     except Exception:
-        log.debug("Failed to send chain completion mention", exc_info=True)
+        log.warning("Failed to send chain mention for %s", ctx.channel_id, exc_info=True)
+        # Fallback: plain text without mention
+        fallback = suffix.strip() if suffix.strip() else "Chain completed"
+        try:
+            await ctx.messenger.send_text(ctx.channel_id, fallback, silent=False)
+        except Exception:
+            log.exception("Fallback notification also failed for %s", ctx.channel_id)
+
+
+async def _exit_chain(
+    ctx: RequestContext,
+    source_id: str,
+    session_id: str | None,
+    steps: list[str],
+    completed_steps: list[str],
+    chain_instances: list[Instance],
+    result: Instance | None,
+    outcome: str,
+    suffix: str,
+    *,
+    clear_state: bool = False,
+    intervention: bool = False,
+) -> None:
+    """Consistent chain exit: evaluate, optionally clear state, notify user.
+
+    Callers MUST return immediately after calling this.
+    """
+    if result:
+        chain_instances.append(result)
+    _eval_chain_safe(ctx.store, source_id, steps, completed_steps,
+                     chain_instances, outcome, intervention=intervention)
+    if clear_state:
+        ctx.store.clear_autopilot_chain(session_id)
+        ctx.store.clear_chain_deferred(session_id)
+    await _notify_user(ctx, suffix)
 
 
 @dataclass
@@ -315,7 +349,7 @@ async def on_done(ctx: RequestContext, source_id: str, source_msg_id: str | None
     # If a branch exists, the user still needs to click Merge/Discard.
     if not result.branch:
         try:
-            await ctx.messenger.close_conversation(ctx.channel_id)
+            await ctx.messenger.close_conversation(ctx.channel_id, skip_mention=True)
         except Exception:
             log.debug("Failed to close conversation for channel %s", ctx.channel_id, exc_info=True)
 
@@ -581,6 +615,8 @@ async def _run_autopilot_chain(
                             ctx.channel_id, f"✅ {merge_msg}", silent=True,
                         )
                         try:
+                            # Don't skip mention — this is the user's notification
+                            # that the autopilot chain completed successfully.
                             await ctx.messenger.close_conversation(ctx.channel_id)
                         except Exception:
                             log.debug("Failed to close conversation after autopilot merge")
@@ -590,7 +626,14 @@ async def _run_autopilot_chain(
                             f"⚠️ Auto-merge failed: {merge_msg}\nUse /merge to resolve.",
                             silent=True,
                         )
-                        await _notify_user(ctx, "Merge failed — needs resolution.")
+                        completed_steps.append(step)
+                        await _exit_chain(
+                            ctx, source_id, session_id, steps, completed_steps,
+                            chain_instances, None, "merge_failed",
+                            "Merge failed — needs resolution.",
+                            clear_state=True,
+                        )
+                        return result
                 completed_steps.append(step)
                 # Break unconditionally — merge is always the final step.
                 # This avoids the status guard running on a non-Instance result.
@@ -598,12 +641,13 @@ async def _run_autopilot_chain(
 
             if not result or result.status != InstanceStatus.COMPLETED or result.needs_input:
                 # Chain paused/failed/question — notify user, state saved for resume
-                if result:
-                    chain_instances.append(result)
                 outcome = "needs_input" if (result and result.needs_input) else "failed"
-                _eval_chain_safe(ctx.store, source_id, steps, completed_steps,
-                                 chain_instances, outcome, intervention=True)
-                await _notify_user(ctx, "Needs your attention.")
+                await _exit_chain(
+                    ctx, source_id, session_id, steps, completed_steps,
+                    chain_instances, result, outcome,
+                    "Needs your attention.",
+                    intervention=True,
+                )
                 return result
 
             # Guard: build produced no code changes — halt chain
@@ -617,12 +661,13 @@ async def _run_autopilot_chain(
                 if result.branch:
                     await ctx.runner.discard_branch(result)
                     ctx.store.update_instance(result)
-                ctx.store.clear_autopilot_chain(session_id)
-                chain_instances.append(result)
                 completed_steps.append(step)
-                _eval_chain_safe(ctx.store, source_id, steps, completed_steps,
-                                 chain_instances, "abandoned")
-                await _notify_user(ctx, "Build had no changes.")
+                await _exit_chain(
+                    ctx, source_id, session_id, steps, completed_steps,
+                    chain_instances, result, "abandoned",
+                    "Build had no changes.",
+                    clear_state=True,
+                )
                 return result
             chain_instances.append(result)
             completed_steps.append(step)

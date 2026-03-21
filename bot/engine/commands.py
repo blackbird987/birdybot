@@ -1686,7 +1686,7 @@ async def handle_callback(
         # Close thread if this was a post-Done merge (branch resolved)
         if inst.origin == InstanceOrigin.DONE and not inst.branch:
             try:
-                await ctx.messenger.close_conversation(ctx.channel_id)
+                await ctx.messenger.close_conversation(ctx.channel_id, skip_mention=True)
             except Exception:
                 pass
 
@@ -1709,7 +1709,7 @@ async def handle_callback(
         # Close thread if this was a post-Done discard (branch resolved)
         if inst.origin == InstanceOrigin.DONE and not inst.branch:
             try:
-                await ctx.messenger.close_conversation(ctx.channel_id)
+                await ctx.messenger.close_conversation(ctx.channel_id, skip_mention=True)
             except Exception:
                 pass
 

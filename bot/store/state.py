@@ -619,11 +619,30 @@ class StateStore:
 
     # --- Persistent Per-Repo Deferred Revisions (stored in repo TODO.md) ---
 
+    @staticmethod
+    def _dedup_key(item: str) -> str:
+        """Normalize a deferred item to a dedup key.
+
+        Strips severity tag, leading dash, lowercases, then uses
+        [Tag] + first 40 chars of description as the comparison key.
+        """
+        import re
+        text = re.sub(r'\s*\((Critical|High|Medium|Low)\)\s*$', '', item)
+        text = re.sub(r'^-\s*', '', text).strip().lower()
+        m = re.match(r'(\[[^\]]+\])\s*(.*)', text)
+        if m:
+            return f"{m.group(1)} {m.group(2)[:40]}"
+        return text[:50]
+
     def append_deferred(
         self, repo_name: str, items: list[str],
         thread_id: str = "", topic: str = "",
     ) -> None:
-        """Append deferred revision items to the repo's TODO.md (deduplicated)."""
+        """Append deferred revision items to the repo's TODO.md (deduplicated).
+
+        Uses normalized key matching to prevent the same item from
+        accumulating across sessions.
+        """
         if not repo_name or not items:
             return
         repo_path = self._repos.get(repo_name)
@@ -637,13 +656,15 @@ class StateStore:
         else:
             content = "# TODO\n"
 
+        # Deduplicate against existing items using normalized keys
         existing_items = self._parse_deferred_section(content)
-        existing_normalized = {self._normalize_deferred(i) for i in existing_items}
+        existing_keys = {self._dedup_key(i) for i in existing_items}
         new_items = [
             item for item in items
-            if self._normalize_deferred(item) not in existing_normalized
+            if self._dedup_key(item) not in existing_keys
         ]
         if not new_items:
+            log.debug("All %d deferred items already tracked for %s", len(items), repo_name)
             return
 
         content = self._update_deferred_section(content, existing_items + new_items)
@@ -689,13 +710,6 @@ class StateStore:
         todo_path.write_text(content, encoding="utf-8")
         log.info("Cleared %d deferred items from %s TODO.md", len(items), repo_name)
         return len(items)
-
-    @staticmethod
-    def _normalize_deferred(item: str) -> str:
-        """Normalize a deferred item for dedup (strip priority suffix, lowercase)."""
-        import re
-        normalized = re.sub(r'\s*\((?:Medium|Low|High|Critical)\)\s*$', '', item)
-        return normalized.strip().lower()
 
     @staticmethod
     def _parse_deferred_section(content: str) -> list[str]:

@@ -415,12 +415,7 @@ async def send_result(
     buttons = action_button_specs(inst, has_autopilot_chain=has_chain)
 
     # Mention user on final result embed (no pending chain steps).
-    # Skip mention for Done-without-branch: close_conversation will ping instead.
     mention_uid = ctx.user_id if not has_chain else None
-    if (mention_uid
-            and inst.origin == InstanceOrigin.DONE
-            and not inst.branch):
-        mention_uid = None
 
     if result_text:
         result_text = redact_secrets(result_text)

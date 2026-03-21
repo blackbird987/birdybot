@@ -1349,6 +1349,10 @@ class ClaudeRunner:
 
         # 2. Merge completed done instances that still have branches
         # (merge_branch already acquires repo lock internally)
+        # Age gate: skip instances older than 24h to avoid silently merging
+        # stale/diverged branches. User can still /merge manually.
+        MAX_STALE_AGE_HOURS = 24
+        now = datetime.now(timezone.utc)
         done_insts = [
             inst for inst in store.list_instances(all_=True)
             if inst.origin == InstanceOrigin.DONE
@@ -1358,6 +1362,21 @@ class ClaudeRunner:
         ]
         for inst in done_insts:
             branch_name = inst.branch
+            # Check age — use finished_at, fall back to created_at
+            age_ref = inst.finished_at or inst.created_at
+            try:
+                ref_dt = datetime.fromisoformat(age_ref) if age_ref else None
+            except (ValueError, TypeError):
+                ref_dt = None
+            if ref_dt is None:
+                messages.append(f"skip {branch_name}: no timestamp — use /merge manually")
+                continue
+            age_hours = (now - ref_dt).total_seconds() / 3600
+            if age_hours > MAX_STALE_AGE_HOURS:
+                messages.append(
+                    f"skip {branch_name}: stale ({age_hours:.0f}h old) — use /merge manually"
+                )
+                continue
             try:
                 msg = await self.merge_branch(inst)
                 store.update_instance(inst)
