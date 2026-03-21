@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.45.1 — Chain Exit Reliability (2026-03-21)
+
 ### Reliability
 - Extract `_exit_chain()` helper — all three autopilot chain exit paths now consistently evaluate, clean state, and notify user (fixes "break after merge skips chain cleanup" bug)
 - Harden `_notify_user()` with fallback plain-text send when mention fails (was silently swallowed)
