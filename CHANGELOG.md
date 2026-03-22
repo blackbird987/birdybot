@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## v0.50.1 — Fix Invisible Intermediate Output (2026-03-22)
+
+- Fix invisible intermediate output: capture per-turn assistant text instead of discarding it when a result event exists
+- Strengthen system prompt to prevent Claude from referencing "analysis shared above" that users can't see
+
 ## v0.49.0 — Auto-Place Monitors in Repo Forums (2026-03-22)
 
 - Auto-place monitors inside repo forums: monitor name auto-matches repo name (no `MONITOR_*_REPO` env var needed)
