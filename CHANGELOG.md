@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.53.0 — Auto-Push After Merge (2026-03-22)
+
 - Auto-push to origin after worktree merge succeeds (with 30s timeout and failure reporting)
 - Pre-deploy safety net: push to origin before running deploy command
 - Push failures are reported to the user, never silently swallowed
