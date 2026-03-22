@@ -98,19 +98,30 @@ def extract_progress(event: dict) -> ProgressEvent | None:
 
 
 def extract_result(events: list[dict]) -> RunResult:
-    """Extract the final result from accumulated stream-json events."""
+    """Extract the final result from accumulated stream-json events.
+
+    Tracks text per assistant turn so intermediate analysis (text between
+    tool calls) is preserved.  The CLI ``result`` event only carries the
+    *last* turn's text — earlier turns would otherwise be invisible.
+    """
     result = RunResult()
 
-    # Single-pass: collect tools and find result event
+    # Single-pass: collect tools, per-turn text, and the result event
     tools_seen: set[str] = set()
     result_event: dict | None = None
-    fallback_parts: list[str] = []
+    # Per-turn text tracking: each assistant event starts a new turn
+    assistant_turns: list[list[str]] = []
+    current_turn: list[str] = []
 
     for event in events:
         etype = event.get("type", "")
 
-        # Collect tool names
         if etype == "assistant":
+            # Each assistant event = new turn — save previous if it had text
+            if current_turn:
+                assistant_turns.append(current_turn)
+            current_turn = []
+
             content = event.get("content", [])
             if not content:
                 message = event.get("message", {})
@@ -128,7 +139,8 @@ def extract_result(events: list[dict]) -> RunResult:
                             if cmd:
                                 result.bash_commands.append(cmd[:200])
                     elif block.get("type") == "text":
-                        fallback_parts.append(block.get("text", ""))
+                        current_turn.append(block.get("text", ""))
+        # content_block_start: tool/bash tracking only — no turn text
         elif etype == "content_block_start":
             cb = event.get("content_block", {})
             if cb.get("type") == "tool_use":
@@ -142,6 +154,10 @@ def extract_result(events: list[dict]) -> RunResult:
                         result.bash_commands.append(cmd[:200])
         elif etype == "result":
             result_event = event
+
+    # Save final turn
+    if current_turn:
+        assistant_turns.append(current_turn)
 
     # Extract result data
     if result_event:
@@ -176,6 +192,20 @@ def extract_result(events: list[dict]) -> RunResult:
         elif isinstance(result_data, dict):
             result.result_text = result_data.get("text", str(result_data))
 
+        # Prepend intermediate turn text that the result event doesn't include.
+        # Skip turns with no text blocks (tool-only turns).
+        if result.result_text and len(assistant_turns) > 1:
+            intermediate_parts: list[str] = []
+            for turn in assistant_turns[:-1]:
+                text = "\n".join(t for t in turn if t.strip())
+                if text.strip():
+                    intermediate_parts.append(text)
+            if intermediate_parts:
+                intermediate = "\n\n---\n\n".join(intermediate_parts)
+                result.result_text = (
+                    intermediate + "\n\n---\n\n" + result.result_text
+                )
+
         if result.is_error and not result.result_text:
             errors_list = result_event.get("errors", [])
             if errors_list:
@@ -183,9 +213,10 @@ def extract_result(events: list[dict]) -> RunResult:
             else:
                 result.error_message = result_event.get("error", "Unknown error")
 
-    # Fallback: use text collected during the single pass
-    if not result.result_text and fallback_parts:
-        result.result_text = "\n".join(fallback_parts)
+    # Fallback: no result event — combine all turn text
+    if not result.result_text and assistant_turns:
+        all_parts = [t for turn in assistant_turns for t in turn if t.strip()]
+        result.result_text = "\n".join(all_parts)
 
     return result
 
