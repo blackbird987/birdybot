@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.54.0 — Auto-Push Tags After Merge (2026-03-22)
+
 - Auto-push tags to origin after merge when the merged branch's tip has tags
 - Only pushes the specific detected tags, not all local tags
 - Tag push failures are reported to the user but don't roll back the merge
