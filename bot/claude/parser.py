@@ -100,9 +100,10 @@ def extract_progress(event: dict) -> ProgressEvent | None:
 def extract_result(events: list[dict]) -> RunResult:
     """Extract the final result from accumulated stream-json events.
 
-    Tracks text per assistant turn so intermediate analysis (text between
-    tool calls) is preserved.  The CLI ``result`` event only carries the
-    *last* turn's text — earlier turns would otherwise be invisible.
+    Tracks text per assistant turn.  The CLI ``result`` event only carries
+    the *last* turn's text — earlier turns are prepended only when the
+    final result is suspiciously short (suggesting the real answer was
+    delivered in an earlier turn).
     """
     result = RunResult()
 
@@ -192,8 +193,9 @@ def extract_result(events: list[dict]) -> RunResult:
         elif isinstance(result_data, dict):
             result.result_text = result_data.get("text", str(result_data))
 
-        # Prepend intermediate turn text that the result event doesn't include.
-        # Skip turns with no text blocks (tool-only turns).
+        # Prepend intermediate turn text only when the final result is
+        # suspiciously short — suggesting the real answer was in an earlier
+        # turn.  Uses a proportional gate so it scales with session length.
         if result.result_text and len(assistant_turns) > 1:
             intermediate_parts: list[str] = []
             for turn in assistant_turns[:-1]:
@@ -202,9 +204,12 @@ def extract_result(events: list[dict]) -> RunResult:
                     intermediate_parts.append(text)
             if intermediate_parts:
                 intermediate = "\n\n---\n\n".join(intermediate_parts)
-                result.result_text = (
-                    intermediate + "\n\n---\n\n" + result.result_text
-                )
+                final_len = len(result.result_text)
+                inter_len = len(intermediate)
+                if final_len < inter_len * 0.15:
+                    result.result_text = (
+                        intermediate + "\n\n---\n\n" + result.result_text
+                    )
 
         if result.is_error and not result.result_text:
             errors_list = result_event.get("errors", [])
@@ -213,10 +218,17 @@ def extract_result(events: list[dict]) -> RunResult:
             else:
                 result.error_message = result_event.get("error", "Unknown error")
 
-    # Fallback: no result event — combine all turn text
+    # Fallback: no result event — prefer last substantial turn over
+    # joining everything (avoids wall-of-text from narration turns).
     if not result.result_text and assistant_turns:
-        all_parts = [t for turn in assistant_turns for t in turn if t.strip()]
-        result.result_text = "\n".join(all_parts)
+        for turn in reversed(assistant_turns):
+            text = "\n".join(t for t in turn if t.strip())
+            if len(text) >= 100:
+                result.result_text = text
+                break
+        if not result.result_text:
+            all_parts = [t for turn in assistant_turns for t in turn if t.strip()]
+            result.result_text = "\n".join(all_parts)
 
     return result
 
