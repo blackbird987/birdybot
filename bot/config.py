@@ -96,6 +96,10 @@ LOG_FILE: Path = LOGS_DIR / "bot.log"
 # Base directory for new repos (optional — falls back to sibling of active repo)
 REPOS_BASE_DIR: Path | None = Path(v).resolve() if (v := os.getenv("REPOS_BASE_DIR")) else None
 
+# Workspace roots for repo wizard directory browser (comma-separated paths)
+# Falls back to parent directories of registered repos when empty
+WORKSPACE_ROOTS: str = os.getenv("WORKSPACE_ROOTS", "")
+
 if REPOS_BASE_DIR and not REPOS_BASE_DIR.is_dir():
     import warnings
     warnings.warn(f"REPOS_BASE_DIR does not exist: {REPOS_BASE_DIR}")

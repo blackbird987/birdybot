@@ -23,6 +23,42 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Persistent Ark button view
+# ---------------------------------------------------------------------------
+
+class ArkView(discord.ui.View):
+    """Button view for The Ark dashboard.
+
+    NOT registered via ``add_view()`` — this bot uses centralized
+    ``on_interaction`` dispatch (interactions.handle), not per-view callbacks.
+    Buttons stay interactive because ``timeout=None``.
+    """
+
+    def __init__(self, running_count: int = 0):
+        super().__init__(timeout=None)
+        self.add_item(discord.ui.Button(
+            label="New Repo",
+            style=discord.ButtonStyle.green,
+            custom_id="ark:new_repo",
+            emoji="\u2795",
+            row=0,
+        ))
+        if running_count > 0:
+            self.add_item(discord.ui.Button(
+                label=f"Stop All ({running_count})",
+                style=discord.ButtonStyle.danger,
+                custom_id="ark:stop_all",
+                row=0,
+            ))
+        self.add_item(discord.ui.Button(
+            label="Refresh",
+            style=discord.ButtonStyle.secondary,
+            custom_id="ark:refresh",
+            row=0,
+        ))
+
+
 def build_dashboard_embed(
     store: StateStore,
     forum_projects: dict[str, ForumProject],
@@ -91,12 +127,17 @@ def build_dashboard_embed(
         if proj_lines:
             embed.add_field(name="Projects", value="\n".join(proj_lines), inline=False)
 
-    # Usage bar (pre-fetched by async caller) or fallback cost fields
+    # Usage bar (pre-fetched by async caller) or richer fallback
     if usage_text:
         embed.add_field(name="Usage", value=usage_text, inline=False)
     else:
-        embed.add_field(name="Today", value=f"${today_cost:.4f}", inline=True)
-        embed.add_field(name="Total", value=f"${total_cost:.4f}", inline=True)
+        fallback = f"**Today** ${today_cost:.2f} \u00b7 **Total** ${total_cost:.2f}"
+        repo_costs = _repo_cost_breakdown(store, forum_projects)
+        if repo_costs:
+            fallback += "\n" + "\n".join(
+                f"  {name}: ${cost:.2f}" for name, cost in repo_costs
+            )
+        embed.add_field(name="Usage", value=fallback, inline=False)
 
     embed.add_field(name="Mode", value=mode_label(store.mode), inline=True)
     embed.add_field(name="PC", value=config.PC_NAME, inline=True)
@@ -127,6 +168,22 @@ def _count_orphans(store: StateStore) -> int:
         total += len(ClaudeRunner.scan_orphan_branches(rpath, active_branches))
         total += len(ClaudeRunner.scan_orphan_worktrees(rpath, active_worktrees))
     return total
+
+
+def _repo_cost_breakdown(
+    store: StateStore,
+    forum_projects: dict[str, ForumProject],
+) -> list[tuple[str, float]]:
+    """Return [(repo_name, today_cost)] for repos with non-zero cost today."""
+    costs = []
+    for name in forum_projects:
+        if name == "_default":
+            continue
+        cost = store.get_repo_daily_cost(name)
+        if cost > 0:
+            costs.append((name, cost))
+    costs.sort(key=lambda x: x[1], reverse=True)
+    return costs
 
 
 async def refresh_dashboard(
@@ -180,6 +237,7 @@ async def _refresh_dashboard_impl(
     except Exception:
         usage_text = None
     embed = build_dashboard_embed(store, forums.forum_projects, orphan_count, usage_text=usage_text)
+    view = ArkView(running_count=store.running_count())
 
     # Get or create dashboard message
     dash_msg_id = store.get_platform_state("discord").get("dashboard_message_id")
@@ -188,12 +246,12 @@ async def _refresh_dashboard_impl(
         if dash_msg_id:
             try:
                 msg = await lobby.fetch_message(int(dash_msg_id))
-                await msg.edit(embed=embed)
+                await msg.edit(embed=embed, view=view)
             except (discord.NotFound, discord.HTTPException):
                 dash_msg_id = None  # Message gone, create new one
 
         if not dash_msg_id:
-            msg = await lobby.send(embed=embed)
+            msg = await lobby.send(embed=embed, view=view)
             try:
                 await msg.pin()
             except Exception:
@@ -221,3 +279,24 @@ async def _refresh_dashboard_impl(
     for uid, ua in cfg.users.items():
         if ua.control_thread_id:
             asyncio.create_task(_safe_refresh(forums.refresh_user_control_room(uid)))
+
+
+async def start_periodic_refresh(
+    client: discord.Client,
+    store: StateStore,
+    forums: ForumManager,
+    lobby_channel_id: int | None,
+    dashboard_lock: asyncio.Lock,
+    dashboard_pending: list[bool],
+    interval_seconds: int = 300,
+) -> None:
+    """Refresh dashboard periodically to keep usage data current."""
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            await refresh_dashboard(
+                client, store, forums,
+                lobby_channel_id, dashboard_lock, dashboard_pending,
+            )
+        except Exception:
+            log.debug("Periodic dashboard refresh failed", exc_info=True)
