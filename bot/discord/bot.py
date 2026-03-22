@@ -449,12 +449,9 @@ class ClaudeBot(discord.Client):
                 log.info("Monitor service started with %d enabled monitors",
                          sum(1 for m in monitors.values() if m.get("enabled")))
 
-        # Warm up ccusage cache (fire-and-forget)
-        from bot.engine.usage import warmup as _usage_warmup
-        asyncio.create_task(_usage_warmup())
-
-        # Refresh dashboard on startup, then clean non-pinned lobby messages
-        asyncio.create_task(self._refresh_and_cleanup_lobby())
+        # Warm up ccusage cache, then refresh dashboard (sequential so
+        # the first dashboard render always has cached usage data)
+        asyncio.create_task(self._warmup_then_refresh_lobby())
 
         # Periodic dashboard refresh (keeps usage data current)
         # Guard: on_ready fires on every reconnect — don't create duplicates
@@ -810,8 +807,14 @@ class ClaudeBot(discord.Client):
             self._dashboard_pending_flag,
         )
 
-    async def _refresh_and_cleanup_lobby(self) -> None:
-        """Refresh dashboard first (ensures embed exists/pinned), then purge stale messages."""
+    async def _warmup_then_refresh_lobby(self) -> None:
+        """Warm ccusage cache, then refresh dashboard + clean lobby.
+
+        Sequential ordering guarantees the first dashboard render has
+        cached usage data instead of racing the warmup task.
+        """
+        from bot.engine.usage import warmup as _usage_warmup
+        await _usage_warmup()
         await self._refresh_dashboard()
         await self._cleanup_lobby()
 

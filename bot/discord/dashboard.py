@@ -346,8 +346,7 @@ async def _refresh_dashboard_impl(
     if not lobby or not isinstance(lobby, discord.TextChannel):
         return
 
-    # Count orphaned branches/worktrees in a thread (best-effort, don't block dashboard)
-    # Pre-fetch usage bar from ccusage (async)
+    # Fetch orphan count and usage bar in parallel (both are independent read-only ops)
     from bot.engine.usage import get_usage_bar_async
     try:
         orphan_count = await asyncio.to_thread(_count_orphans, store)

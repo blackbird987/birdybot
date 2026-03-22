@@ -12,6 +12,16 @@
 - Add `format_relative_time()` shared helper in formatting module
 - Add `get_start_time()` public API in engine commands (replaces private var access)
 - Robust version detection: tries installed package metadata, falls back to pyproject.toml
+## v0.52.1 — Fix Dashboard Usage Display (2026-03-22)
+
+### ccusage reliability
+- Auto-detect `ccusage` on PATH for fast invocation (~1-2s); fall back to `npx ccusage` (18-30s) with startup warning
+- Show daily/weekly cost in dashboard even when no active billing block exists (compact single-line fallback)
+- Gate dashboard refresh on ccusage warmup so first render always has cached data
+- Warm both `blocks` and `daily` caches at startup (previously only `daily`)
+- Parallelize orphan count and usage bar fetch in dashboard refresh (saves 3-5s per cycle)
+- Bump ccusage subprocess timeout from 30s to 45s (handles cold Windows boot)
+- Fix misleading "warmup complete" log when ccusage returned no data
 
 ## v0.50.3 — Fix Auto-Update Messaging (2026-03-22)
 
