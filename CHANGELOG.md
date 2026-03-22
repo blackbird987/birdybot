@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.49.0 — Auto-Place Monitors in Repo Forums (2026-03-22)
+
 - Auto-place monitors inside repo forums: monitor name auto-matches repo name (no `MONITOR_*_REPO` env var needed)
 - Migrate legacy text-channel monitors to forum threads on startup (deletes old channel, populates embeds immediately)
 - Archived forum thread recovery in monitor thread lookup (prevents duplicates)
