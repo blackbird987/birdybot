@@ -222,11 +222,22 @@ async def auto_update_loop(
                     # Strip the short SHA prefix from the first commit message
                     latest_msg = commits[0].split(" ", 1)[1] if " " in commits[0] else commits[0]
                 else:
-                    n_commits = None  # unknown count
-                    latest_msg = None
+                    # No new commits on remote — local is ahead or diverged
+                    if not failure_notified:
+                        log.warning(
+                            "Auto-update: HEAD differs from origin/%s but no new "
+                            "remote commits — local may be ahead/diverged", branch,
+                        )
+                        await notifier.broadcast(
+                            f"⚠️ Auto-update: local HEAD differs from `origin/{branch}` "
+                            "but remote has no new commits. Manual sync may be needed.",
+                            ttl=10,
+                        )
+                        failure_notified = True
+                    continue
 
-                log.info("Auto-update: %s new commit(s) on origin/%s",
-                         n_commits if n_commits is not None else "unknown", branch)
+                log.info("Auto-update: %d new commit(s) on origin/%s",
+                         n_commits, branch)
 
                 # 4. Pull (ff-only)
                 pull = await asyncio.to_thread(
@@ -246,6 +257,21 @@ async def auto_update_loop(
                         failure_notified = True
                     continue
 
+                # 4b. Verify HEAD actually moved (defensive — Fix 1 should
+                # catch the no-op case, but guard against edge cases)
+                post_pull = await asyncio.to_thread(
+                    subprocess.run,
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=str(config._PROJECT_ROOT),
+                    capture_output=True, text=True, timeout=10, **_NOWND,
+                )
+                if post_pull.returncode == 0 and post_pull.stdout.strip() == local_sha:
+                    log.error(
+                        "Auto-update: pull reported success but HEAD unchanged "
+                        "— skipping reboot (local likely diverged)"
+                    )
+                    continue
+
             # 5. pip install (non-fatal)
             try:
                 await asyncio.to_thread(
@@ -259,8 +285,8 @@ async def auto_update_loop(
 
             # 6. Build human-friendly strings (reused in reboot request + broadcast)
             failure_notified = False
-            count_str = f"pulled {n_commits} commit(s)" if n_commits is not None else "pulled new changes"
-            detail = f"`{latest_msg}`" if latest_msg else f"on `{branch}`"
+            count_str = f"pulled {n_commits} commit(s)"
+            detail = f"`{latest_msg}`"
 
             runner.request_reboot({
                 "message": f"Auto-update: {count_str}",

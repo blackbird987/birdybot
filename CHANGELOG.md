@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Fix auto-update reboot loop when local HEAD is ahead/diverged from origin (skip pull + warn user)
+- Add post-pull HEAD guard to prevent reboot when pull was a no-op
+
 ## v0.53.0 — Auto-Push After Merge (2026-03-22)
 
 - Auto-push to origin after worktree merge succeeds (with 30s timeout and failure reporting)
