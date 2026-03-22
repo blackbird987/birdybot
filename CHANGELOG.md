@@ -7,6 +7,11 @@
 - Fix auto-update showing "0 commits — unknown" by checking git log returncode and building fallback strings
 - Persist reboot reason in reboot message file so "back online" can show context
 - Broadcast "back online" to The Ark after every reboot (not just thread-specific ones), with notifier readiness wait
+## v0.51.0 — Auto-Follow All Bot-Created Threads (2026-03-22)
+
+- Auto-follow all bot-created threads: session threads, monitor posts, and welcome posts now automatically add relevant users
+- Add monitor threads to startup recovery scan so users granted access while bot was down get followed on next boot
+- Move session thread auto-follow outside thread lock to avoid blocking concurrent session creation
 
 ## v0.50.2 — Reduce Verbose Intermediate Output (2026-03-22)
 
