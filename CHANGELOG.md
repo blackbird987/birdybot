@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.54.2 — Friendly Push Warning for No-Remote Repos (2026-03-23)
+
 - Improve merge push warning: repos with no remote show "ℹ️ No remote configured" instead of cryptic error
 
 ## v0.54.1 — Fix /cost to Use Real Usage Data (2026-03-22)
