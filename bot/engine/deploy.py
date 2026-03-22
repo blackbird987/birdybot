@@ -69,8 +69,20 @@ class DeployState:
 
 
 def detect_version(repo_path: str) -> str | None:
-    """Detect version from standard version files (pyproject.toml, package.json, etc.)."""
+    """Detect version string for a repo.
+
+    Repos with .claude/deploy.json use git tags first (tag-based workflow).
+    Falls back to standard version files (pyproject.toml, package.json, etc.).
+    """
     root = Path(repo_path)
+
+    # Repos with deploy config use tag-based workflows — prefer git tags
+    if (root / DEPLOY_CONFIG_PATH).exists():
+        tag_version = _get_latest_version_tag(repo_path)
+        if tag_version:
+            return tag_version.lstrip("v")  # normalize v1.8.2 → 1.8.2
+        # No tags yet — fall through to file-based detection
+
     for filename, pattern in _VERSION_PARSERS:
         fpath = root / filename
         if fpath.exists():
