@@ -2,6 +2,89 @@
 
 ## [Unreleased]
 
+## v0.53.1 — Fix Auto-Update Reboot Loop (2026-03-22)
+
+- Fix auto-update reboot loop when local HEAD is ahead/diverged from origin (skip pull + warn user)
+- Add post-pull HEAD guard to prevent reboot when pull was a no-op
+
+## v0.53.0 — Auto-Push After Merge (2026-03-22)
+
+- Auto-push to origin after worktree merge succeeds (with 30s timeout and failure reporting)
+- Pre-deploy safety net: push to origin before running deploy command
+- Push failures are reported to the user, never silently swallowed
+
+## v0.52.0 — Ark Dashboard Redesign (2026-03-22)
+
+- Redesign Ark dashboard: remove per-repo Mode field, add Idle Sessions, Failed Recently, Scheduled count, Today's Sessions, Last Activity, Uptime, and version footer
+- All actionable items (attention, idle, failed) now show clickable thread links
+- Enhance Projects field with per-repo running instance counts
+- Add combined item cap (12) across list sections for mobile readability
+- Deduplicate idle sessions against attention items to avoid double-listing
+- Add `format_relative_time()` shared helper in formatting module
+- Add `get_start_time()` public API in engine commands (replaces private var access)
+- Robust version detection: tries installed package metadata, falls back to pyproject.toml
+## v0.52.1 — Fix Dashboard Usage Display (2026-03-22)
+
+### ccusage reliability
+- Auto-detect `ccusage` on PATH for fast invocation (~1-2s); fall back to `npx ccusage` (18-30s) with startup warning
+- Show daily/weekly cost in dashboard even when no active billing block exists (compact single-line fallback)
+- Gate dashboard refresh on ccusage warmup so first render always has cached data
+- Warm both `blocks` and `daily` caches at startup (previously only `daily`)
+- Parallelize orphan count and usage bar fetch in dashboard refresh (saves 3-5s per cycle)
+- Bump ccusage subprocess timeout from 30s to 45s (handles cold Windows boot)
+- Fix misleading "warmup complete" log when ccusage returned no data
+
+## v0.50.3 — Fix Auto-Update Messaging (2026-03-22)
+
+- Fix auto-update showing "0 commits — unknown" by checking git log returncode and building fallback strings
+- Persist reboot reason in reboot message file so "back online" can show context
+- Broadcast "back online" to The Ark after every reboot (not just thread-specific ones), with notifier readiness wait
+## v0.51.0 — Auto-Follow All Bot-Created Threads (2026-03-22)
+
+- Auto-follow all bot-created threads: session threads, monitor posts, and welcome posts now automatically add relevant users
+- Add monitor threads to startup recovery scan so users granted access while bot was down get followed on next boot
+- Move session thread auto-follow outside thread lock to avoid blocking concurrent session creation
+
+## v0.50.2 — Reduce Verbose Intermediate Output (2026-03-22)
+
+- Reduce verbose intermediate output: only prepend earlier turns when final result is suspiciously short (proportional gate)
+- Fallback path prefers last substantial turn over joining all narration
+
+## v0.50.1 — Fix Invisible Intermediate Output (2026-03-22)
+
+- Fix invisible intermediate output: capture per-turn assistant text instead of discarding it when a result event exists
+- Strengthen system prompt to prevent Claude from referencing "analysis shared above" that users can't see
+
+## v0.49.0 — Auto-Place Monitors in Repo Forums (2026-03-22)
+
+- Auto-place monitors inside repo forums: monitor name auto-matches repo name (no `MONITOR_*_REPO` env var needed)
+- Migrate legacy text-channel monitors to forum threads on startup (deletes old channel, populates embeds immediately)
+- Archived forum thread recovery in monitor thread lookup (prevents duplicates)
+- Forum channel fetch fallback when guild cache misses during migration
+## v0.50.0 — Interactive Ark Dashboard (2026-03-22)
+
+### The Ark Upgrade
+- Interactive Ark dashboard: New Repo, Stop All, and Refresh buttons (persistent — survive bot restarts)
+- New Repo wizard: tap-through setup flow with directory browser, works entirely from mobile via ephemeral messages
+- Richer usage fallback: when ccusage unavailable, show per-repo cost breakdown instead of `$0.0000`
+- Periodic dashboard refresh every 5 minutes keeps usage data current even when idle
+- `WORKSPACE_ROOTS` env var: configure wizard directory browser roots (comma-separated paths)
+
+## v0.48.2 — Fix Control Room Version Detection (2026-03-21)
+
+### Fixed
+- Version detection priority: check .csproj before package.json so .NET repos show the correct version instead of npm tooling version (was showing 1.0.0 instead of 1.2.14.10 in control room)
+- Boot version persistence: refresh boot_version from detect_version on boot so stale persisted values get corrected
+
+### Infrastructure
+- Windows process detachment for relaunch script (DETACHED_PROCESS + CREATE_NEW_PROCESS_GROUP)
+- start.bat uses /MIN instead of /B for cleaner window handling
+- StateStore._normalize_deferred renamed to _dedup_key for clarity
+
+## v0.48.1 — Fix WinError 206 System Prompt Length (2026-03-21)
+
+- Fix WinError 206: write system prompt to temp file (`--append-system-prompt-file`) instead of CLI arg to avoid Windows command-line length limit; fallback to truncated inline arg if file write fails
+
 ## v0.48.0 — Auto-Follow, Personal Archives, Repo Monitors (2026-03-21)
 
 ### Features

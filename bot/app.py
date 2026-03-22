@@ -216,11 +216,28 @@ async def auto_update_loop(
                     cwd=str(config._PROJECT_ROOT),
                     capture_output=True, text=True, timeout=10, **_NOWND,
                 )
-                commits = log_result.stdout.strip().splitlines()
-                n_commits = len(commits)
-                latest_msg = commits[0] if commits else "unknown"
+                if log_result.returncode == 0 and log_result.stdout.strip():
+                    commits = log_result.stdout.strip().splitlines()
+                    n_commits = len(commits)
+                    # Strip the short SHA prefix from the first commit message
+                    latest_msg = commits[0].split(" ", 1)[1] if " " in commits[0] else commits[0]
+                else:
+                    # No new commits on remote — local is ahead or diverged
+                    if not failure_notified:
+                        log.warning(
+                            "Auto-update: HEAD differs from origin/%s but no new "
+                            "remote commits — local may be ahead/diverged", branch,
+                        )
+                        await notifier.broadcast(
+                            f"⚠️ Auto-update: local HEAD differs from `origin/{branch}` "
+                            "but remote has no new commits. Manual sync may be needed.",
+                            ttl=10,
+                        )
+                        failure_notified = True
+                    continue
 
-                log.info("Auto-update: %d new commit(s) on origin/%s", n_commits, branch)
+                log.info("Auto-update: %d new commit(s) on origin/%s",
+                         n_commits, branch)
 
                 # 4. Pull (ff-only)
                 pull = await asyncio.to_thread(
@@ -240,6 +257,21 @@ async def auto_update_loop(
                         failure_notified = True
                     continue
 
+                # 4b. Verify HEAD actually moved (defensive — Fix 1 should
+                # catch the no-op case, but guard against edge cases)
+                post_pull = await asyncio.to_thread(
+                    subprocess.run,
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=str(config._PROJECT_ROOT),
+                    capture_output=True, text=True, timeout=10, **_NOWND,
+                )
+                if post_pull.returncode == 0 and post_pull.stdout.strip() == local_sha:
+                    log.error(
+                        "Auto-update: pull reported success but HEAD unchanged "
+                        "— skipping reboot (local likely diverged)"
+                    )
+                    continue
+
             # 5. pip install (non-fatal)
             try:
                 await asyncio.to_thread(
@@ -251,16 +283,19 @@ async def auto_update_loop(
             except Exception:
                 log.warning("Auto-update: pip install failed (non-fatal)", exc_info=True)
 
-            # 6. Request reboot first (just a list append — can't fail)
+            # 6. Build human-friendly strings (reused in reboot request + broadcast)
             failure_notified = False
+            count_str = f"pulled {n_commits} commit(s)"
+            detail = f"`{latest_msg}`"
+
             runner.request_reboot({
-                "message": f"Auto-update: pulled {n_commits} commits",
+                "message": f"Auto-update: {count_str}",
             })
 
             # 7. Notify (best-effort — reboot already queued)
             try:
                 await notifier.broadcast(
-                    f"🔄 Auto-update: pulled {n_commits} commit(s) — `{latest_msg}`\nRebooting...",
+                    f"🔄 Auto-update: {count_str} — {detail}\nRebooting...",
                     ttl=10,
                 )
             except Exception:
@@ -317,7 +352,7 @@ def _migrate_deferred_to_todo(store: StateStore) -> None:
         seen: set[str] = set()
         unique: list[str] = []
         for item in raw_items:
-            norm = StateStore._normalize_deferred(item)
+            norm = StateStore._dedup_key(item)
             if norm not in seen:
                 seen.add(norm)
                 unique.append(item)
@@ -492,6 +527,7 @@ async def run() -> None:
             reboot_data = {
                 "channel_id": last.get("channel_id", ""),
                 "platform": last.get("platform", ""),
+                "message": reason,
             }
             if merged_prompt:
                 reboot_data["resume_prompt"] = merged_prompt
@@ -642,17 +678,35 @@ async def run() -> None:
     reboot_data = await _send_reboot_announcement(notifier)
 
     if reboot_data:
+        # Wait for notifier to have at least one messenger registered
+        for _ in range(60):
+            if notifier._messengers:
+                break
+            await asyncio.sleep(1)
+
+        # Always broadcast "back online" to The Ark (persistent — no TTL)
+        reason = reboot_data.get("message", "")
+        back_msg = f"✅ {config.PC_NAME} back online."
+        if reason:
+            back_msg += f" ({reason})"
+        await notifier.broadcast(back_msg)
+
+        # Additionally resume a specific thread if channel_id was set
         _resume_channel = reboot_data.get("channel_id")
         _resume_platform = reboot_data.get("platform")
         _resume_prompt = reboot_data.get("resume_prompt")
 
         if _resume_channel and _resume_platform == "discord" and discord_bot:
-            # dispatch_resume waits for Discord ready, sends announcement, and runs query
-            announce = f"✅ {config.PC_NAME} back online."
             asyncio.create_task(discord_bot.dispatch_resume(
-                _resume_channel, _resume_prompt or "", announce=announce,
+                _resume_channel, _resume_prompt or "", announce=None,
             ))
             log.info("Dispatched post-reboot resume to discord channel %s", _resume_channel)
+
+        # Clean up reboot file (dispatch_resume also tries via unlink(missing_ok=True))
+        try:
+            config.REBOOT_MSG_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
 
     # Update thinking messages for orphaned instances (interrupted by restart)
     await _cleanup_orphan_messages(notifier, orphans)
@@ -697,8 +751,7 @@ async def run() -> None:
 async def _send_reboot_announcement(notifier: NotificationService) -> dict | None:
     """If a reboot_message.json was left by a previous process, read and return it.
 
-    The announcement is deferred to dispatch_resume (which waits for the bot
-    to be ready and handles file cleanup).
+    The caller handles broadcasting, optional thread resume, and file cleanup.
     """
     import json
     try:

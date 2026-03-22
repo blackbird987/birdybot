@@ -96,6 +96,10 @@ LOG_FILE: Path = LOGS_DIR / "bot.log"
 # Base directory for new repos (optional — falls back to sibling of active repo)
 REPOS_BASE_DIR: Path | None = Path(v).resolve() if (v := os.getenv("REPOS_BASE_DIR")) else None
 
+# Workspace roots for repo wizard directory browser (comma-separated paths)
+# Falls back to parent directories of registered repos when empty
+WORKSPACE_ROOTS: str = os.getenv("WORKSPACE_ROOTS", "")
+
 if REPOS_BASE_DIR and not REPOS_BASE_DIR.is_dir():
     import warnings
     warnings.warn(f"REPOS_BASE_DIR does not exist: {REPOS_BASE_DIR}")
@@ -147,6 +151,9 @@ Think of it like pair programming over text — your partner can't see your scre
 - Never reference findings without listing them. If you mention a count ("4 quick wins",
   "3 issues"), every item MUST appear in your response with a brief description.
 - Your text output IS the deliverable. There is no other channel for the user to see results.
+- CRITICAL: If you write text between tool calls, the user MAY NOT see it. Never say
+  "as shown above" or "the analysis I shared earlier" — always include the full content
+  in your final response. If it's important, it must be in your last message.
 """
 
 HONESTY_CONSTRAINT = """

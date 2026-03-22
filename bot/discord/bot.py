@@ -393,6 +393,11 @@ class ClaudeBot(discord.Client):
         await self.tree.sync(guild=guild)
         log.info("Synced slash commands to guild %s", self._guild_id)
 
+        # Note: ArkView is NOT registered via add_view() — this bot uses
+        # centralized on_interaction dispatch (interactions.handle) instead of
+        # per-view callbacks.  Registering would intercept custom_ids and
+        # raise NotImplementedError (no callback on plain Button items).
+
     async def on_ready(self) -> None:
         log.info("Discord bot ready as %s", self.user)
 
@@ -444,12 +449,22 @@ class ClaudeBot(discord.Client):
                 log.info("Monitor service started with %d enabled monitors",
                          sum(1 for m in monitors.values() if m.get("enabled")))
 
-        # Warm up ccusage cache (fire-and-forget)
-        from bot.engine.usage import warmup as _usage_warmup
-        asyncio.create_task(_usage_warmup())
+        # Warm up ccusage cache, then refresh dashboard (sequential so
+        # the first dashboard render always has cached usage data)
+        asyncio.create_task(self._warmup_then_refresh_lobby())
 
-        # Refresh dashboard on startup, then clean non-pinned lobby messages
-        asyncio.create_task(self._refresh_and_cleanup_lobby())
+        # Periodic dashboard refresh (keeps usage data current)
+        # Guard: on_ready fires on every reconnect — don't create duplicates
+        existing = getattr(self, '_periodic_refresh_task', None)
+        if not existing or existing.done():
+            from bot.discord.dashboard import start_periodic_refresh
+            self._periodic_refresh_task = asyncio.create_task(
+                start_periodic_refresh(
+                    self, self._store, self._forums,
+                    self._lobby_channel_id, self._dashboard_lock,
+                    self._dashboard_pending_flag,
+                )
+            )
 
         # Clean up stale worktrees/branches from interrupted autopilot chains
         asyncio.create_task(self._startup_worktree_cleanup())
@@ -485,6 +500,8 @@ class ClaudeBot(discord.Client):
         return True
 
     async def close(self) -> None:
+        if hasattr(self, '_periodic_refresh_task') and self._periodic_refresh_task:
+            self._periodic_refresh_task.cancel()
         if self._monitor_service:
             self._monitor_service.stop()
         await super().close()
@@ -790,8 +807,14 @@ class ClaudeBot(discord.Client):
             self._dashboard_pending_flag,
         )
 
-    async def _refresh_and_cleanup_lobby(self) -> None:
-        """Refresh dashboard first (ensures embed exists/pinned), then purge stale messages."""
+    async def _warmup_then_refresh_lobby(self) -> None:
+        """Warm ccusage cache, then refresh dashboard + clean lobby.
+
+        Sequential ordering guarantees the first dashboard render has
+        cached usage data instead of racing the warmup task.
+        """
+        from bot.engine.usage import warmup as _usage_warmup
+        await _usage_warmup()
         await self._refresh_dashboard()
         await self._cleanup_lobby()
 

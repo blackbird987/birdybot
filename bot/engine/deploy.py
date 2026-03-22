@@ -69,19 +69,21 @@ class DeployState:
 
 
 def detect_version(repo_path: str) -> str | None:
-    """Detect version string for a repo.
-
-    Repos with .claude/deploy.json use git tags first (tag-based workflow).
-    Falls back to standard version files (pyproject.toml, package.json, etc.).
-    """
+    """Detect version from standard version files (pyproject.toml, package.json, etc.)."""
     root = Path(repo_path)
 
-    # Repos with deploy config use tag-based workflows — prefer git tags
-    if (root / DEPLOY_CONFIG_PATH).exists():
-        tag_version = _get_latest_version_tag(repo_path)
-        if tag_version:
-            return tag_version.lstrip("v")  # normalize v1.8.2 → 1.8.2
-        # No tags yet — fall through to file-based detection
+    # Check *.csproj first — authoritative for .NET projects, prevents
+    # package.json (often present for tooling) from shadowing the real version.
+    for csproj in root.glob("*.csproj"):
+        try:
+            text = csproj.read_text(encoding="utf-8")
+            m = _CSPROJ_ASM_VERSION_RE.search(text)
+            if not m:
+                m = _CSPROJ_VERSION_RE.search(text)
+            if m:
+                return m.group(1)
+        except Exception:
+            pass
 
     for filename, pattern in _VERSION_PARSERS:
         fpath = root / filename
@@ -93,18 +95,6 @@ def detect_version(repo_path: str) -> str | None:
                     return m.group(1)
             except Exception:
                 log.debug("Failed to read %s in %s", filename, repo_path, exc_info=True)
-
-    # Check *.csproj files (prefer AssemblyVersion over Version)
-    for csproj in root.glob("*.csproj"):
-        try:
-            text = csproj.read_text(encoding="utf-8")
-            m = _CSPROJ_ASM_VERSION_RE.search(text)
-            if not m:
-                m = _CSPROJ_VERSION_RE.search(text)
-            if m:
-                return m.group(1)
-        except Exception:
-            pass
 
     # Fallback: latest version tag
     return _get_latest_version_tag(repo_path)
@@ -228,6 +218,9 @@ def capture_boot_baselines(store, bot_repo_path: str) -> None:
                 # Tag hasn't changed — preserve accumulated pending state
                 existing.current_ref = head
                 existing.current_version = version
+                # Refresh boot_version in case detection logic improved
+                if version:
+                    existing.boot_version = version
                 ds = existing
             else:
                 # New tag appeared (or first boot) — reset pending state

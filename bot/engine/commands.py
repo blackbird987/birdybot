@@ -63,6 +63,11 @@ def init(start_time: float, cli_version: str, shutdown_fn=None) -> None:
     _shutdown_fn = shutdown_fn
 
 
+def get_start_time() -> float:
+    """Return bot start timestamp (epoch seconds)."""
+    return _start_time
+
+
 def check_budget(ctx: RequestContext) -> bool:
     daily = ctx.store.get_daily_cost()
     return daily < config.DAILY_BUDGET_USD

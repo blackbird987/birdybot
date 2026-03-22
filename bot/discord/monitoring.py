@@ -41,8 +41,10 @@ async def monitor_setup(bot: ClaudeBot, name: str, repo_name: str | None = None)
 
     cfg = configs[name]
 
-    # Use repo_name from command, config, or env var (priority order)
+    # Use repo_name from command, config, or auto-match by name
     effective_repo = repo_name or cfg.repo_name
+    if not effective_repo and name in bot._forums.forum_projects:
+        effective_repo = name
     forum = None
     if effective_repo:
         proj = bot._forums.forum_projects.get(effective_repo)
@@ -63,6 +65,10 @@ async def monitor_setup(bot: ClaudeBot, name: str, repo_name: str | None = None)
         if proj:
             proj.monitor_thread_id = str(channel.id)
             bot._forums.save_forum_map()
+        try:
+            await bot._forums._auto_follow_thread(channel, effective_repo)
+        except Exception:
+            log.warning("Failed to auto-follow monitor thread %s", channel.id)
 
     if not bot._monitor_started:
         bot._monitor_service.start()

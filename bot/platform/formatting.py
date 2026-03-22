@@ -169,6 +169,25 @@ def strip_summary_block(text: str) -> str:
     return _SUMMARY_BLOCK_RE.sub('', text).rstrip()
 
 
+# --- Relative Time ---
+
+
+def format_relative_time(seconds: float) -> str:
+    """Format seconds into a human-readable relative string like '3m' or '2h 14m'."""
+    if seconds < 60:
+        return "just now"
+    elif seconds < 3600:
+        return f"{int(seconds // 60)}m"
+    elif seconds < 86400:
+        h = int(seconds // 3600)
+        m = int((seconds % 3600) // 60)
+        return f"{h}h {m}m" if m else f"{h}h"
+    else:
+        d = int(seconds // 86400)
+        h = int((seconds % 86400) // 3600)
+        return f"{d}d {h}h" if h else f"{d}d"
+
+
 # --- Mode Display ---
 
 MODE_DISPLAY: dict[str, str] = {

@@ -352,12 +352,18 @@ class ForumManager:
             ua = cfg.users.get(str(user_id))
             if ua and not ua.welcome_posted:
                 try:
-                    await channels.create_user_welcome_post(forum, display_name, repo_names)
+                    welcome_thread, _ = await channels.create_user_welcome_post(forum, display_name, repo_names)
                     ua.welcome_posted = True
                     access_mod.save_access_config(cfg)
                 except Exception:
                     log.warning("Failed to create welcome post in forum %s for user %s, will retry next startup",
                                 forum.id, user_id, exc_info=True)
+                    welcome_thread = None
+                if welcome_thread:
+                    try:
+                        await self._auto_follow_user_thread(welcome_thread, str(user_id))
+                    except Exception:
+                        log.warning("Failed to auto-follow welcome thread %s for user %s", welcome_thread.id, user_id)
             # Create control room post
             try:
                 await self.ensure_user_control_post(str(user_id), forum)
@@ -454,6 +460,7 @@ class ForumManager:
         if not forum:
             return None
 
+        thread = None
         async with self._thread_lock:
             # Double-check after lock (another message may have created it)
             if session_id:
@@ -463,7 +470,7 @@ class ForumManager:
                     try:
                         ch = await self._client.fetch_channel(int(tid))
                         if isinstance(ch, discord.Thread):
-                            return ch
+                            return ch  # existing thread — no follow needed
                     except (discord.NotFound, discord.Forbidden):
                         pass
 
@@ -499,7 +506,18 @@ class ForumManager:
                 self.save_forum_map()
             else:
                 log.warning("No ForumProject for repo %s — thread %s created but unmapped", repo_name, thread.id)
-            return thread
+
+        # Auto-follow outside the lock — don't block other session creation
+        if thread:
+            try:
+                if forum_channel_id and user_id:
+                    await self._auto_follow_user_thread(thread, str(user_id))
+                else:
+                    await self._auto_follow_thread(thread, repo_name)
+            except Exception:
+                log.warning("Failed to auto-follow session thread %s", thread.id)
+
+        return thread
 
     # --- Thread Sync ---
 
@@ -690,6 +708,13 @@ class ForumManager:
             if proj.archive_thread_id:
                 try:
                     ch = await self._client.fetch_channel(int(proj.archive_thread_id))
+                    if isinstance(ch, discord.Thread):
+                        tasks.append(self._auto_follow_thread(ch, repo_name))
+                except Exception:
+                    pass
+            if proj.monitor_thread_id:
+                try:
+                    ch = await self._client.fetch_channel(int(proj.monitor_thread_id))
                     if isinstance(ch, discord.Thread):
                         tasks.append(self._auto_follow_thread(ch, repo_name))
                 except Exception:

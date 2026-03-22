@@ -47,6 +47,18 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
         await _handle_repo_switch(bot, interaction, btn_access)
         return
 
+    # --- Ark dashboard buttons (ark:new_repo, ark:refresh, ark:stop_all) ---
+    if custom_id.startswith("ark:"):
+        from bot.discord.wizard import handle_ark_button
+        await handle_ark_button(bot, interaction, custom_id)
+        return
+
+    # --- Repo setup wizard buttons (wizard:add:*, wizard:create:*) ---
+    if custom_id.startswith("wizard:"):
+        from bot.discord.wizard import handle_wizard_button
+        await handle_wizard_button(bot, interaction, custom_id)
+        return
+
     parts = custom_id.split(":", 1)
     if len(parts) != 2:
         return
@@ -605,6 +617,32 @@ async def _handle_reboot_repo(
             cwd = str(cwd_path.resolve())
         else:
             cwd = repo_path
+
+        # Push to origin before deploying (safety net)
+        try:
+            push_proc = await asyncio.create_subprocess_exec(
+                "git", "-C", repo_path, "push", "origin", "HEAD",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            push_out, _ = await asyncio.wait_for(
+                push_proc.communicate(), timeout=30,
+            )
+            if push_proc.returncode != 0:
+                push_output = push_out.decode(errors="replace")[:1500]
+                await interaction.followup.send(
+                    f"⚠️ Pre-deploy push failed (exit {push_proc.returncode}).\n```\n{push_output}\n```"
+                )
+        except asyncio.TimeoutError:
+            try:
+                push_proc.kill()
+            except ProcessLookupError:
+                pass
+            await interaction.followup.send(
+                "⚠️ Pre-deploy push timed out (30s). Proceeding with deploy."
+            )
+        except Exception as e:
+            await interaction.followup.send(f"⚠️ Pre-deploy push error: {e}")
 
         await interaction.followup.send(f"Running: `{command}`...")
 
