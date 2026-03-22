@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.52.0 — Ark Dashboard Redesign (2026-03-22)
+
 - Redesign Ark dashboard: remove per-repo Mode field, add Idle Sessions, Failed Recently, Scheduled count, Today's Sessions, Last Activity, Uptime, and version footer
 - All actionable items (attention, idle, failed) now show clickable thread links
 - Enhance Projects field with per-repo running instance counts
