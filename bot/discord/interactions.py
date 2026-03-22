@@ -618,6 +618,32 @@ async def _handle_reboot_repo(
         else:
             cwd = repo_path
 
+        # Push to origin before deploying (safety net)
+        try:
+            push_proc = await asyncio.create_subprocess_exec(
+                "git", "-C", repo_path, "push", "origin", "HEAD",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            push_out, _ = await asyncio.wait_for(
+                push_proc.communicate(), timeout=30,
+            )
+            if push_proc.returncode != 0:
+                push_output = push_out.decode(errors="replace")[:1500]
+                await interaction.followup.send(
+                    f"⚠️ Pre-deploy push failed (exit {push_proc.returncode}).\n```\n{push_output}\n```"
+                )
+        except asyncio.TimeoutError:
+            try:
+                push_proc.kill()
+            except ProcessLookupError:
+                pass
+            await interaction.followup.send(
+                "⚠️ Pre-deploy push timed out (30s). Proceeding with deploy."
+            )
+        except Exception as e:
+            await interaction.followup.send(f"⚠️ Pre-deploy push error: {e}")
+
         await interaction.followup.send(f"Running: `{command}`...")
 
         proc = None

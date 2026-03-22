@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## v0.53.0 — Auto-Push After Merge (2026-03-22)
+
+- Auto-push to origin after worktree merge succeeds (with 30s timeout and failure reporting)
+- Pre-deploy safety net: push to origin before running deploy command
+- Push failures are reported to the user, never silently swallowed
+
 ## v0.52.0 — Ark Dashboard Redesign (2026-03-22)
 
 - Redesign Ark dashboard: remove per-repo Mode field, add Idle Sessions, Failed Recently, Scheduled count, Today's Sessions, Last Activity, Uptime, and version footer
