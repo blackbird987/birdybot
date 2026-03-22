@@ -543,21 +543,6 @@ def format_status_md(
     return "\n".join(parts)
 
 
-def format_cost_md(daily: float, total: float, top_spenders: list[Instance]) -> str:
-    """Format /cost breakdown (markdown)."""
-    lines = [
-        "**Cost**",
-        f"Today: ${daily:.4f}",
-        f"Total: ${total:.4f}",
-    ]
-    if top_spenders:
-        lines.append("\n**Top spenders today:**")
-        for inst in top_spenders:
-            cost = f"${inst.cost_usd:.4f}" if inst.cost_usd else "$0"
-            lines.append(f"  `{inst.id}` {cost} — {inst.prompt[:30]}")
-    return "\n".join(lines)
-
-
 def format_schedule_list_md(schedules: list[Schedule]) -> str:
     """Format active schedules (markdown)."""
     if not schedules:

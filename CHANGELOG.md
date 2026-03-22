@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Fix `/cost` to use ccusage data instead of broken store accumulator (was always $0.00)
+- Remove dead top-spenders section from `/cost` and `/usage` (instance cost_usd never populated)
+- Dashboard fallback shows "Usage data unavailable" instead of misleading "$0.00"
+- Remove dead `format_cost_md()` and `_repo_cost_breakdown()` functions
+
 ## v0.54.0 — Auto-Push Tags After Merge (2026-03-22)
 
 - Auto-push tags to origin after merge when the merged branch's tip has tags
