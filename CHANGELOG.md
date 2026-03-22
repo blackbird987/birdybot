@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.50.3 — Fix Auto-Update Messaging (2026-03-22)
+
 - Fix auto-update showing "0 commits — unknown" by checking git log returncode and building fallback strings
 - Persist reboot reason in reboot message file so "back online" can show context
 - Broadcast "back online" to The Ark after every reboot (not just thread-specific ones), with notifier readiness wait
