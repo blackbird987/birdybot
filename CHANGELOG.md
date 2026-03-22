@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## v0.50.2 — Reduce Verbose Intermediate Output (2026-03-22)
+
+- Reduce verbose intermediate output: only prepend earlier turns when final result is suspiciously short (proportional gate)
+- Fallback path prefers last substantial turn over joining all narration
+
 ## v0.50.1 — Fix Invisible Intermediate Output (2026-03-22)
 
 - Fix invisible intermediate output: capture per-turn assistant text instead of discarding it when a result event exists
