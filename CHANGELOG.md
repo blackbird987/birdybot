@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Improve merge push warning: repos with no remote show "ℹ️ No remote configured" instead of cryptic error
+
 ## v0.54.1 — Fix /cost to Use Real Usage Data (2026-03-22)
 
 - Fix `/cost` to use ccusage data instead of broken store accumulator (was always $0.00)

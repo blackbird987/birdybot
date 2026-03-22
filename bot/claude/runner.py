@@ -1101,12 +1101,20 @@ class ClaudeRunner:
             # Push merged result to origin
             push_note = ""
             try:
-                push_r = subprocess.run(
+                # Check if remote exists before attempting push
+                has_remote = subprocess.run(
+                    ["git", "remote", "get-url", "origin"],
+                    cwd=repo, capture_output=True, text=True, **_NOWND,
+                ).returncode == 0
+
+                if not has_remote:
+                    log.info("No remote 'origin' in %s — skipping push", repo)
+                    push_note = "\nℹ️ No remote configured — local merge is fine"
+                elif (push_r := subprocess.run(
                     ["git", "push", "origin", target],
                     cwd=repo, capture_output=True, text=True,
                     timeout=30, **_NOWND,
-                )
-                if push_r.returncode != 0:
+                )).returncode != 0:
                     push_detail = (push_r.stderr or push_r.stdout or "").strip()
                     log.error("Push to origin after merge in %s: %s",
                               repo, push_detail)
