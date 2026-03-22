@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Auto-push tags to origin after merge when the merged branch's tip has tags
+- Only pushes the specific detected tags, not all local tags
+- Tag push failures are reported to the user but don't roll back the merge
+
 ## v0.53.1 — Fix Auto-Update Reboot Loop (2026-03-22)
 
 - Fix auto-update reboot loop when local HEAD is ahead/diverged from origin (skip pull + warn user)

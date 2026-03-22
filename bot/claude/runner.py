@@ -1113,6 +1113,38 @@ class ClaudeRunner:
                     push_note = f"\n⚠️ Could not push to origin (exit {push_r.returncode})"
                 else:
                     log.info("Pushed %s to origin after merge in %s", target, repo)
+                    # Push tags if the merged branch's tip had any
+                    try:
+                        tag_r = subprocess.run(
+                            ["git", "tag", "--points-at", "HEAD^2"],
+                            cwd=repo, capture_output=True, text=True, **_NOWND,
+                        )
+                        if tag_r.returncode != 0:
+                            log.debug("git tag --points-at HEAD^2 failed in %s (rc=%d), skipping tag push",
+                                      repo, tag_r.returncode)
+                        else:
+                            tags = tag_r.stdout.strip()
+                            if tags:
+                                tag_names = tags.splitlines()
+                                tag_push_r = subprocess.run(
+                                    ["git", "push", "origin"] + tag_names,
+                                    cwd=repo, capture_output=True, text=True,
+                                    timeout=30, **_NOWND,
+                                )
+                                if tag_push_r.returncode != 0:
+                                    tag_detail = (tag_push_r.stderr or tag_push_r.stdout or "").strip()
+                                    log.error("Tag push to origin in %s: %s", repo, tag_detail)
+                                    push_note += f"\n⚠️ Tags not pushed (exit {tag_push_r.returncode})"
+                                else:
+                                    tag_list = ", ".join(tag_names)
+                                    log.info("Pushed tags [%s] to origin in %s", tag_list, repo)
+                                    push_note += f"\nTags pushed: {tag_list}"
+                    except subprocess.TimeoutExpired:
+                        log.error("Tag push to origin timed out (30s) in %s", repo)
+                        push_note += "\n⚠️ Tag push timed out (30s)"
+                    except Exception as e:
+                        log.error("Tag push error in %s: %s", repo, e)
+                        push_note += f"\n⚠️ Tag push error: {type(e).__name__}"
             except subprocess.TimeoutExpired:
                 log.error("Push to origin timed out (30s) in %s", repo)
                 push_note = "\n⚠️ Push to origin timed out (30s)"
