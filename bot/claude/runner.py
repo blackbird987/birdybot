@@ -1098,12 +1098,34 @@ class ClaudeRunner:
             # Clean up worktree project dir
             self._cleanup_worktree_session_dir(instance)
 
+            # Push merged result to origin
+            push_note = ""
+            try:
+                push_r = subprocess.run(
+                    ["git", "push", "origin", target],
+                    cwd=repo, capture_output=True, text=True,
+                    timeout=30, **_NOWND,
+                )
+                if push_r.returncode != 0:
+                    push_detail = (push_r.stderr or push_r.stdout or "").strip()
+                    log.error("Push to origin after merge in %s: %s",
+                              repo, push_detail)
+                    push_note = f"\n⚠️ Could not push to origin (exit {push_r.returncode})"
+                else:
+                    log.info("Pushed %s to origin after merge in %s", target, repo)
+            except subprocess.TimeoutExpired:
+                log.error("Push to origin timed out (30s) in %s", repo)
+                push_note = "\n⚠️ Push to origin timed out (30s)"
+            except Exception as e:
+                log.error("Push to origin error in %s: %s", repo, e)
+                push_note = f"\n⚠️ Push to origin error: {type(e).__name__}"
+
             instance.branch = None
             instance.worktree_path = None
             suffix = ""
             if auto_resolved > 0:
                 suffix = f" (auto-resolved {auto_resolved} conflict{'s' if auto_resolved != 1 else ''})"
-            return f"Merged into {target}{suffix}"
+            return f"Merged into {target}{suffix}{push_note}"
         except subprocess.CalledProcessError as e:
             # Abort any in-progress merge to keep main repo clean for other sessions
             subprocess.run(
