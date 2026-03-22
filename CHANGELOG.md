@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### The Ark Upgrade
+- Interactive Ark dashboard: New Repo, Stop All, and Refresh buttons (persistent — survive bot restarts)
+- New Repo wizard: tap-through setup flow with directory browser, works entirely from mobile via ephemeral messages
+- Richer usage fallback: when ccusage unavailable, show per-repo cost breakdown instead of `$0.0000`
+- Periodic dashboard refresh every 5 minutes keeps usage data current even when idle
+- `WORKSPACE_ROOTS` env var: configure wizard directory browser roots (comma-separated paths)
+
 ## v0.48.2 — Fix Control Room Version Detection (2026-03-21)
 
 ### Fixed

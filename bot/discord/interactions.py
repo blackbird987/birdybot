@@ -47,6 +47,18 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
         await _handle_repo_switch(bot, interaction, btn_access)
         return
 
+    # --- Ark dashboard buttons (ark:new_repo, ark:refresh, ark:stop_all) ---
+    if custom_id.startswith("ark:"):
+        from bot.discord.wizard import handle_ark_button
+        await handle_ark_button(bot, interaction, custom_id)
+        return
+
+    # --- Repo setup wizard buttons (wizard:add:*, wizard:create:*) ---
+    if custom_id.startswith("wizard:"):
+        from bot.discord.wizard import handle_wizard_button
+        await handle_wizard_button(bot, interaction, custom_id)
+        return
+
     parts = custom_id.split(":", 1)
     if len(parts) != 2:
         return

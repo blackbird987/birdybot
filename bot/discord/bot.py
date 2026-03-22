@@ -393,6 +393,11 @@ class ClaudeBot(discord.Client):
         await self.tree.sync(guild=guild)
         log.info("Synced slash commands to guild %s", self._guild_id)
 
+        # Note: ArkView is NOT registered via add_view() — this bot uses
+        # centralized on_interaction dispatch (interactions.handle) instead of
+        # per-view callbacks.  Registering would intercept custom_ids and
+        # raise NotImplementedError (no callback on plain Button items).
+
     async def on_ready(self) -> None:
         log.info("Discord bot ready as %s", self.user)
 
@@ -451,6 +456,19 @@ class ClaudeBot(discord.Client):
         # Refresh dashboard on startup, then clean non-pinned lobby messages
         asyncio.create_task(self._refresh_and_cleanup_lobby())
 
+        # Periodic dashboard refresh (keeps usage data current)
+        # Guard: on_ready fires on every reconnect — don't create duplicates
+        existing = getattr(self, '_periodic_refresh_task', None)
+        if not existing or existing.done():
+            from bot.discord.dashboard import start_periodic_refresh
+            self._periodic_refresh_task = asyncio.create_task(
+                start_periodic_refresh(
+                    self, self._store, self._forums,
+                    self._lobby_channel_id, self._dashboard_lock,
+                    self._dashboard_pending_flag,
+                )
+            )
+
         # Clean up stale worktrees/branches from interrupted autopilot chains
         asyncio.create_task(self._startup_worktree_cleanup())
 
@@ -485,6 +503,8 @@ class ClaudeBot(discord.Client):
         return True
 
     async def close(self) -> None:
+        if hasattr(self, '_periodic_refresh_task') and self._periodic_refresh_task:
+            self._periodic_refresh_task.cancel()
         if self._monitor_service:
             self._monitor_service.stop()
         await super().close()
