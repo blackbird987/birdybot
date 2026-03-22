@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- Redesign Ark dashboard: remove per-repo Mode field, add Idle Sessions, Failed Recently, Scheduled count, Today's Sessions, Last Activity, Uptime, and version footer
+- All actionable items (attention, idle, failed) now show clickable thread links
+- Enhance Projects field with per-repo running instance counts
+- Add combined item cap (12) across list sections for mobile readability
+- Deduplicate idle sessions against attention items to avoid double-listing
+- Add `format_relative_time()` shared helper in formatting module
+- Add `get_start_time()` public API in engine commands (replaces private var access)
+- Robust version detection: tries installed package metadata, falls back to pyproject.toml
+
 ## v0.50.3 — Fix Auto-Update Messaging (2026-03-22)
 
 - Fix auto-update showing "0 commits — unknown" by checking git log returncode and building fallback strings

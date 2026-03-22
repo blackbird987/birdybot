@@ -573,6 +573,45 @@ class StateStore:
             if i.status == InstanceStatus.FAILED or i.needs_input
         ]
 
+    def idle_sessions(self, max_age_hours: int = 2) -> list[Instance]:
+        """Return recently completed instances with sessions not currently running.
+
+        These represent threads the user can tap to resume — idle but alive.
+        The *max_age_hours* window keeps the list fresh; older completed
+        sessions are presumed done with.
+        """
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
+        running_sessions = {
+            i.session_id for i in self._instances.values()
+            if i.status == InstanceStatus.RUNNING and i.session_id
+        }
+        seen: set[str] = set()
+        idle: list[Instance] = []
+        for i in self.list_instances():
+            if (i.session_id
+                    and i.session_id not in running_sessions
+                    and i.session_id not in seen
+                    and i.status == InstanceStatus.COMPLETED
+                    and not i.needs_input
+                    and i.finished_at and i.finished_at >= cutoff):
+                seen.add(i.session_id)
+                idle.append(i)
+        return idle
+
+    def recent_failures(self, hours: int = 6) -> list[Instance]:
+        """Return instances that failed in the last *hours* hours."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        return [
+            i for i in self.list_instances()
+            if i.status == InstanceStatus.FAILED
+            and i.finished_at and i.finished_at >= cutoff
+        ]
+
+    def last_activity(self) -> Instance | None:
+        """Return the most recently created instance."""
+        instances = self.list_instances()
+        return instances[0] if instances else None
+
     # --- Autopilot Chain State ---
 
     def get_autopilot_chain(self, session_id: str | None) -> list[str] | None:
