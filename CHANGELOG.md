@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.53.1 — Fix Auto-Update Reboot Loop (2026-03-22)
+
 - Fix auto-update reboot loop when local HEAD is ahead/diverged from origin (skip pull + warn user)
 - Add post-pull HEAD guard to prevent reboot when pull was a no-op
 
