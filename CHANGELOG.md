@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.50.2 — Reduce Verbose Intermediate Output (2026-03-22)
+
 - Reduce verbose intermediate output: only prepend earlier turns when final result is suspiciously short (proportional gate)
 - Fallback path prefers last substantial turn over joining all narration
 
