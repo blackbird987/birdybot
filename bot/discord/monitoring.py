@@ -41,8 +41,10 @@ async def monitor_setup(bot: ClaudeBot, name: str, repo_name: str | None = None)
 
     cfg = configs[name]
 
-    # Use repo_name from command, config, or env var (priority order)
+    # Use repo_name from command, config, or auto-match by name
     effective_repo = repo_name or cfg.repo_name
+    if not effective_repo and name in bot._forums.forum_projects:
+        effective_repo = name
     forum = None
     if effective_repo:
         proj = bot._forums.forum_projects.get(effective_repo)

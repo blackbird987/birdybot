@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Auto-place monitors inside repo forums: monitor name auto-matches repo name (no `MONITOR_*_REPO` env var needed)
+- Migrate legacy text-channel monitors to forum threads on startup (deletes old channel, populates embeds immediately)
+- Archived forum thread recovery in monitor thread lookup (prevents duplicates)
+- Forum channel fetch fallback when guild cache misses during migration
+
 ## v0.48.2 — Fix Control Room Version Detection (2026-03-21)
 
 ### Fixed

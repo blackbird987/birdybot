@@ -592,11 +592,91 @@ class MonitorService:
                                 log.info("Recovered monitor %s thread from forum: %s", name, thread.id)
                                 break
 
+        # Load configs once for re-registration and migration
+        all_configs = _load_monitor_configs()
+
+        # --- Migrate legacy text-channel monitors to forum threads ---
+        for name, mon in list(monitors.items()):
+            if not mon.get("enabled", False):
+                continue
+
+            ch_id = mon.get("channel_id")
+            if not ch_id:
+                continue
+
+            # Check if current channel is a text channel (legacy)
+            ch = guild.get_channel(int(ch_id))
+            if not isinstance(ch, discord.TextChannel):
+                continue  # Already a thread or not found — skip
+
+            # Determine target repo: explicit config, or name-match
+            cfg = all_configs.get(name)
+            if not cfg:
+                continue  # No env config — don't migrate without a valid config
+            target_repo = cfg.repo_name or None
+            if not target_repo and hasattr(self._bot, '_forums'):
+                if name in self._bot._forums.forum_projects:
+                    target_repo = name
+
+            if not target_repo:
+                continue  # No matching repo — keep as text channel
+
+            # Find the repo's forum (with fetch fallback for cache misses)
+            forum = None
+            if hasattr(self._bot, '_forums'):
+                proj = self._bot._forums.forum_projects.get(target_repo)
+                if proj and proj.forum_channel_id:
+                    forum = guild.get_channel(int(proj.forum_channel_id))
+                    if not forum:
+                        try:
+                            forum = await self._bot.fetch_channel(int(proj.forum_channel_id))
+                        except Exception:
+                            log.warning("Could not fetch forum %s for monitor %s", proj.forum_channel_id, name)
+                    if not isinstance(forum, discord.ForumChannel):
+                        forum = None
+
+            if not forum:
+                continue
+
+            log.info("Migrating monitor %s from text channel to forum %s", name, forum.id)
+            try:
+                thread = await self._ensure_monitor_thread(forum, name)
+
+                # Clear old message IDs — fresh embeds on next refresh
+                mon.pop("dashboard_msg_id", None)
+                mon.pop("history_msg_id", None)
+                mon["channel_id"] = str(thread.id)
+                mon["_forum_id"] = str(forum.id)
+                mon["repo_name"] = target_repo
+
+                # Update ForumProject
+                if hasattr(self._bot, '_forums'):
+                    proj = self._bot._forums.forum_projects.get(target_repo)
+                    if proj:
+                        proj.monitor_thread_id = str(thread.id)
+                        self._bot._forums.save_forum_map()
+
+                # Delete old text channel
+                try:
+                    await ch.delete(reason=f"Monitor {name} migrated to forum thread")
+                    log.info("Deleted legacy monitor channel %s", ch_id)
+                except Exception:
+                    log.warning("Could not delete legacy channel %s", ch_id, exc_info=True)
+
+                # Immediate refresh so thread isn't empty until next cycle
+                self._configs[name] = cfg
+                try:
+                    await self._refresh_one(name, cfg)
+                except Exception:
+                    log.exception("Post-migration refresh failed for %s", name)
+
+            except Exception:
+                log.exception("Failed to migrate monitor %s", name)
+
         # Re-register configs for enabled monitors
-        from bot.monitor.service import _load_monitor_configs
         for name, mon in monitors.items():
             if mon.get("enabled", False):
-                cfg = _load_monitor_configs().get(name)
+                cfg = all_configs.get(name)
                 if cfg:
                     self._configs[name] = cfg
                     mon["_name"] = name
@@ -617,11 +697,17 @@ class MonitorService:
         """Find or create a pinned monitor thread in a repo forum."""
         from bot.discord.channels import MONITOR_NAME
 
-        # Check existing pinned threads
+        # Check active threads
         for thread in forum.threads:
             if thread.name == MONITOR_NAME:
                 if thread.archived:
                     await thread.edit(archived=False)
+                return thread
+
+        # Check archived threads before creating a duplicate
+        async for thread in forum.archived_threads(limit=50):
+            if thread.name == MONITOR_NAME:
+                await thread.edit(archived=False)
                 return thread
 
         from bot.discord.channels import create_monitor_post
