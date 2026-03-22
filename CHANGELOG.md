@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.52.1 — Fix Dashboard Usage Display (2026-03-22)
+
 ### ccusage reliability
 - Auto-detect `ccusage` on PATH for fast invocation (~1-2s); fall back to `npx ccusage` (18-30s) with startup warning
 - Show daily/weekly cost in dashboard even when no active billing block exists (compact single-line fallback)
