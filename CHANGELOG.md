@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### ccusage reliability
+- Auto-detect `ccusage` on PATH for fast invocation (~1-2s); fall back to `npx ccusage` (18-30s) with startup warning
+- Show daily/weekly cost in dashboard even when no active billing block exists (compact single-line fallback)
+- Gate dashboard refresh on ccusage warmup so first render always has cached data
+- Warm both `blocks` and `daily` caches at startup (previously only `daily`)
+- Parallelize orphan count and usage bar fetch in dashboard refresh (saves 3-5s per cycle)
+- Bump ccusage subprocess timeout from 30s to 45s (handles cold Windows boot)
+- Fix misleading "warmup complete" log when ccusage returned no data
+
 ## v0.50.3 — Fix Auto-Update Messaging (2026-03-22)
 
 - Fix auto-update showing "0 commits — unknown" by checking git log returncode and building fallback strings

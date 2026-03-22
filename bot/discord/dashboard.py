@@ -225,17 +225,24 @@ async def _refresh_dashboard_impl(
     if not lobby or not isinstance(lobby, discord.TextChannel):
         return
 
-    # Count orphaned branches/worktrees in a thread (best-effort, don't block dashboard)
-    # Pre-fetch usage bar from ccusage (async)
+    # Fetch orphan count and usage bar in parallel (both are independent read-only ops)
     from bot.engine.usage import get_usage_bar_async
-    try:
-        orphan_count = await asyncio.to_thread(_count_orphans, store)
-    except Exception:
-        orphan_count = 0
-    try:
-        usage_text = await get_usage_bar_async()
-    except Exception:
-        usage_text = None
+
+    async def _safe_orphan_count():
+        try:
+            return await asyncio.to_thread(_count_orphans, store)
+        except Exception:
+            return 0
+
+    async def _safe_usage_bar():
+        try:
+            return await get_usage_bar_async()
+        except Exception:
+            return None
+
+    orphan_count, usage_text = await asyncio.gather(
+        _safe_orphan_count(), _safe_usage_bar(),
+    )
     embed = build_dashboard_embed(store, forums.forum_projects, orphan_count, usage_text=usage_text)
     view = ArkView(running_count=store.running_count())
 

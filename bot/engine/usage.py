@@ -1,7 +1,8 @@
 """Usage tracking via ccusage CLI tool.
 
-Shells out to ``npx ccusage`` to read Claude Code's local JSONL session
-files, providing accurate token counts including cache creation/read tokens.
+Shells out to ``ccusage`` (or ``npx ccusage`` as fallback) to read Claude
+Code's local JSONL session files, providing accurate token counts including
+cache creation/read tokens.
 
 Results are cached with adaptive TTL: 60s normally, 15s when approaching
 rate limits (remainingMinutes < 30).  Failures are negatively cached to
@@ -18,6 +19,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import signal
 import subprocess as _sp
 import sys
@@ -28,6 +30,30 @@ from datetime import datetime, timedelta, timezone
 from bot import config
 
 log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# ccusage command detection — prefer global install over npx (much faster)
+# ---------------------------------------------------------------------------
+
+def _detect_ccusage_cmd() -> list[str]:
+    """Build the base command for invoking ccusage.
+
+    Prefers a global ``ccusage`` binary on PATH (fast, ~1-2s).
+    Falls back to ``npx ccusage`` if not found (slow, 18-30s on Windows).
+    """
+    found = shutil.which("ccusage")
+    if sys.platform == "win32":
+        if found:
+            return ["cmd", "/c", "ccusage"]
+        log.warning("ccusage not on PATH, using npx (slow) — run 'npm i -g ccusage' to fix")
+        return ["cmd", "/c", "npx", "ccusage"]
+    else:
+        if found:
+            return ["ccusage"]
+        log.warning("ccusage not on PATH, using npx (slow) — run 'npm i -g ccusage' to fix")
+        return ["npx", "ccusage"]
+
+_CCUSAGE_CMD: list[str] = _detect_ccusage_cmd()
 
 # ---------------------------------------------------------------------------
 # Cache
@@ -221,16 +247,13 @@ async def _run_ccusage(args: list[str], force: bool = False) -> dict | None:
                 return data
 
         try:
-            # On Windows, npx is a .cmd file that create_subprocess_exec
-            # can't find directly -- route through cmd.exe.
+            cmd = [*_CCUSAGE_CMD, *args, "--json", "--offline"]
             if sys.platform == "win32":
-                cmd = ["cmd", "/c", "npx", "ccusage", *args, "--json", "--offline"]
                 # Prevent console window + group the process tree so
                 # taskkill /T can reap child node.exe on timeout.
                 flags = _sp.CREATE_NO_WINDOW | _sp.CREATE_NEW_PROCESS_GROUP
                 extra: dict = {"creationflags": flags}
             else:
-                cmd = ["npx", "ccusage", *args, "--json", "--offline"]
                 extra = {"start_new_session": True}
 
             proc = await asyncio.create_subprocess_exec(
@@ -240,13 +263,13 @@ async def _run_ccusage(args: list[str], force: bool = False) -> dict | None:
                 **extra,
             )
             try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=45)
             except asyncio.TimeoutError:
                 _kill_process_tree(proc)
                 _cache[cache_key] = (time.monotonic(), None)
                 _fail_count += 1
                 _last_fail_time = time.monotonic()
-                log.warning("ccusage timed out after 30s: %s", args)
+                log.warning("ccusage timed out after 45s: %s", args)
                 return None
 
             if proc.returncode != 0:
@@ -508,25 +531,30 @@ def format_usage_bar(
 ) -> str | None:
     """Visual usage bar for dashboard/control-room embeds.
 
-    Returns None when no block data is available.
+    Returns None only when no data at all is available.
+    When block is missing but daily/weekly exist, returns a compact cost line.
     """
-    if not block:
+    if not block and not daily and not weekly:
         return None
 
-    remaining = max(block.remaining_minutes, 0)
-    elapsed = 300 - remaining
-    progress = min(elapsed / 300, 1.0)
-    filled = round(progress * 16)
-    bar = "\u2588" * filled + "\u2591" * (16 - filled)
+    lines: list[str] = []
 
-    time_label = "Block ended" if remaining == 0 else f"{remaining}m left"
+    # Full progress bar when block data is available
+    if block:
+        remaining = max(block.remaining_minutes, 0)
+        elapsed = 300 - remaining
+        progress = min(elapsed / 300, 1.0)
+        filled = round(progress * 16)
+        bar = "\u2588" * filled + "\u2591" * (16 - filled)
 
-    lines = [
-        f"`{bar}` {time_label}",
-        f"${block.cost_usd:.2f} used \u00b7 ${block.projected_cost:.2f} proj \u00b7 ${block.burn_rate_cost_per_hour:.2f}/hr",
-    ]
+        time_label = "Block ended" if remaining == 0 else f"{remaining}m left"
 
-    # Today + weekly with plan percentages
+        lines.append(f"`{bar}` {time_label}")
+        lines.append(
+            f"${block.cost_usd:.2f} used \u00b7 ${block.projected_cost:.2f} proj \u00b7 ${block.burn_rate_cost_per_hour:.2f}/hr"
+        )
+
+    # Today + weekly with plan percentages (shown with or without block)
     parts: list[str] = []
     if daily:
         parts.append(
@@ -552,11 +580,21 @@ async def get_usage_bar_async() -> str | None:
 
 
 async def warmup() -> None:
-    """Prime the npx/ccusage cache. Fire-and-forget at startup."""
+    """Prime the ccusage cache for both daily and blocks data."""
     try:
         since = _daily_range_since()
-        await _run_ccusage(["daily", "--since", since])
-        log.info("ccusage warmup complete")
+        today = datetime.now(timezone.utc).strftime("%Y%m%d")
+        daily_data, block_data = await asyncio.gather(
+            _run_ccusage(["daily", "--since", since]),
+            _run_ccusage(["blocks", "--since", today]),
+        )
+        if daily_data and block_data:
+            log.info("ccusage warmup complete (daily + blocks)")
+        elif daily_data or block_data:
+            missing = "blocks" if not block_data else "daily"
+            log.warning("ccusage warmup partial: %s returned no data", missing)
+        else:
+            log.warning("ccusage warmup: no data returned")
     except Exception:
         log.debug("ccusage warmup failed", exc_info=True)
 
