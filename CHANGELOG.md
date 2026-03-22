@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Auto-follow all bot-created threads: session threads, monitor posts, and welcome posts now automatically add relevant users
+- Add monitor threads to startup recovery scan so users granted access while bot was down get followed on next boot
+- Move session thread auto-follow outside thread lock to avoid blocking concurrent session creation
+
 ## v0.50.2 — Reduce Verbose Intermediate Output (2026-03-22)
 
 - Reduce verbose intermediate output: only prepend earlier turns when final result is suspiciously short (proportional gate)

@@ -65,6 +65,10 @@ async def monitor_setup(bot: ClaudeBot, name: str, repo_name: str | None = None)
         if proj:
             proj.monitor_thread_id = str(channel.id)
             bot._forums.save_forum_map()
+        try:
+            await bot._forums._auto_follow_thread(channel, effective_repo)
+        except Exception:
+            log.warning("Failed to auto-follow monitor thread %s", channel.id)
 
     if not bot._monitor_started:
         bot._monitor_service.start()
