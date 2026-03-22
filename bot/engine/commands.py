@@ -21,7 +21,6 @@ from bot.platform.formatting import (
     VALID_MODES,
     action_button_specs,
     expanded_button_specs,
-    format_cost_md,
     format_expanded_result_md,
     format_instance_list_md,
     format_result_md,
@@ -832,10 +831,28 @@ async def on_branches(ctx: RequestContext) -> None:
 # --- /cost ---
 
 async def on_cost(ctx: RequestContext) -> None:
-    daily = ctx.store.get_daily_cost()
-    total = ctx.store.get_total_cost()
-    top = ctx.store.get_top_spenders()
-    text = format_cost_md(daily, total, top)
+    from bot.engine.usage import _fetch_daily_range, _pct_label
+
+    daily, weekly = await _fetch_daily_range()
+
+    if not daily and not weekly:
+        await ctx.messenger.send_text(
+            ctx.channel_id, "Cost data unavailable \u2014 is `ccusage` installed?"
+        )
+        return
+
+    lines: list[str] = ["**Cost**"]
+    if daily:
+        lines.append(
+            f"Today: {_pct_label(daily.cost_usd, config.PLAN_DAILY_LIMIT_USD, 'daily limit')}"
+        )
+    if weekly:
+        lines.append(
+            f"This Week: {_pct_label(weekly.cost_usd, config.PLAN_WEEKLY_LIMIT_USD, 'weekly limit')}"
+            f" ({weekly.days}d)"
+        )
+
+    text = "\n".join(lines)
     markup = ctx.messenger.markdown_to_markup(text)
     await ctx.messenger.send_text(ctx.channel_id, markup)
 
@@ -846,17 +863,7 @@ async def on_usage(ctx: RequestContext, *, force: bool = False) -> str:
     """Build usage text.  Returns the formatted string (caller sends it)."""
     from bot.engine.usage import get_usage_details
 
-    text = await get_usage_details(force=force)
-
-    # Append top spenders from bot instances
-    top = ctx.store.get_top_spenders()
-    if top:
-        text += "\n\n**Top spenders today:**"
-        for inst in top:
-            cost = f"${inst.cost_usd:.4f}" if inst.cost_usd else "$0"
-            text += f"\n  `{inst.id}` {cost} \u2014 {inst.prompt[:30]}"
-
-    return text
+    return await get_usage_details(force=force)
 
 
 # --- /status ---
