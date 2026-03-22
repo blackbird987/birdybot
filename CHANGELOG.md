@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.50.0 — Interactive Ark Dashboard (2026-03-22)
+
 ### The Ark Upgrade
 - Interactive Ark dashboard: New Repo, Stop All, and Refresh buttons (persistent — survive bot restarts)
 - New Repo wizard: tap-through setup flow with directory browser, works entirely from mobile via ephemeral messages
