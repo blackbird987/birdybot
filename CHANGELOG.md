@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.57.3 — Fix StreamReader Buffer Overflow Crash (2026-03-23)
+
 - Fix StreamReader buffer overflow crash when Claude CLI emits lines >1MB (increase limit to 10MB, graceful fallback on overrun)
 
 ## v0.57.2 — Fix Dashboard Usage Data Fallback (2026-03-23)
