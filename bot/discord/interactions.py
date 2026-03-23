@@ -731,6 +731,7 @@ async def _handle_reboot_repo(
             if proc.returncode == 0:
                 # Reset deploy state after successful command-based deploy
                 if ds:
+                    ds.last_deploy_error = None
                     ds.boot_version = ds.current_version
                     ds.boot_ref = ds.current_ref
                     ds.pending_sessions.clear()
@@ -741,6 +742,17 @@ async def _handle_reboot_repo(
                     if output.strip() else "\u2705 Deploy successful.",
                 )
             else:
+                # Persist failure reason for control room display
+                if ds:
+                    err_summary = ""
+                    if output.strip():
+                        for line in reversed(output.strip().splitlines()):
+                            line = line.strip()
+                            if line and not line.startswith("---"):
+                                err_summary = line[:200]
+                                break
+                    ds.last_deploy_error = err_summary or f"Exit code {proc.returncode}"
+                    bot._store.set_deploy_state(repo_name, ds)
                 await status.update(
                     f"\u274c Deploy failed (exit {proc.returncode}).\n```\n{output}\n```"
                     if output.strip()
@@ -752,8 +764,14 @@ async def _handle_reboot_repo(
                     proc.kill()
                 except ProcessLookupError:
                     pass
+            if ds:
+                ds.last_deploy_error = f"Timed out ({deploy_timeout}s)"
+                bot._store.set_deploy_state(repo_name, ds)
             await status.update(f"\u274c Deploy timed out ({deploy_timeout}s).")
         except Exception as e:
+            if ds:
+                ds.last_deploy_error = str(e)[:200]
+                bot._store.set_deploy_state(repo_name, ds)
             await status.update(f"\u274c Deploy error: {e}")
 
     asyncio.create_task(bot._forums.refresh_control_room(repo_name))

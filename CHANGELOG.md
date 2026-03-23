@@ -8,6 +8,11 @@
 - Graceful degradation: disabled by default (`OUTLOOK_ENABLED=1` to opt in), no-op when pywin32 is missing or Outlook unavailable
 - System prompt auto-injects Outlook commands (absolute paths) when enabled, so Claude sessions in any repo can use it
 - COM connection cached as singleton with stale-handle retry; calendar uses Restrict with locale-safe fallback
+## v0.57.4 — Deploy Failure Visibility (2026-03-23)
+
+- Surface deploy failures in control room embed: add `last_deploy_error` to DeployState, persist error on all failure paths (exit code, timeout, exception), show error in "Redeploy Required" embed field, clear on next successful deploy
+- Fix server update.sh to exit non-zero on dotnet publish failure (previously silent, causing false "Up to date" status)
+
 ## v0.57.3 — Fix StreamReader Buffer Overflow Crash (2026-03-23)
 
 - Fix StreamReader buffer overflow crash when Claude CLI emits lines >1MB (increase limit to 10MB, graceful fallback on overrun)

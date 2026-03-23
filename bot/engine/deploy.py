@@ -39,6 +39,7 @@ class DeployState:
     self_managed: bool = False
     pending_sessions: list[str] = field(default_factory=list)
     pending_changes: list[str] = field(default_factory=list)
+    last_deploy_error: str | None = None
 
     @property
     def needs_reboot(self) -> bool:
@@ -53,6 +54,7 @@ class DeployState:
             "self_managed": self.self_managed,
             "pending_sessions": self.pending_sessions,
             "pending_changes": self.pending_changes,
+            "last_deploy_error": self.last_deploy_error,
         }
 
     @classmethod
@@ -65,6 +67,7 @@ class DeployState:
             self_managed=data.get("self_managed", False),
             pending_sessions=data.get("pending_sessions", []),
             pending_changes=data.get("pending_changes", []),
+            last_deploy_error=data.get("last_deploy_error"),
         )
 
 
