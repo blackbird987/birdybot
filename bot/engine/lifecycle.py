@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from bot import config
 from bot.claude.types import (
@@ -46,6 +46,44 @@ def _format_reset_time(reset_utc: datetime) -> str:
         return f"{hour}:{minute} {ampm}"
     except Exception:
         return reset_utc.strftime("%H:%M UTC")
+
+
+async def schedule_cooldown_retry(
+    ctx: RequestContext,
+    inst: Instance,
+    result: RunResult,
+    silent: bool = False,
+) -> bool:
+    """Schedule auto-retry if usage limit detected. Returns True if scheduled."""
+    if not result.usage_limit_reset or inst.cooldown_retries >= MAX_COOLDOWN_RETRIES:
+        return False
+
+    # Clamp retry time to at least 60s from now so the cooldown loop
+    # picks it up on the next tick (avoids silent skip when parsed time
+    # is already in the past due to timezone edge cases or slow runs).
+    now = datetime.now(timezone.utc)
+    retry_at = max(result.usage_limit_reset, now + timedelta(seconds=60))
+
+    inst.cooldown_retry_at = retry_at.isoformat()
+    inst.cooldown_retries += 1
+    inst.cooldown_channel_id = ctx.channel_id
+    ctx.store.update_instance(inst, critical=True)
+
+    # Display the original reset time (not the clamped time) so the
+    # user sees "retrying at 4:00 AM" matching the limit message.
+    reset_str = _format_reset_time(result.usage_limit_reset)
+    msg = (
+        f"⏳ Usage limit hit — auto-retrying at {reset_str}"
+        f" (attempt {inst.cooldown_retries}/{MAX_COOLDOWN_RETRIES})"
+    )
+    buttons = [[ButtonSpec("Cancel Auto-Retry", f"cancel_cooldown:{inst.id}")]]
+    try:
+        await ctx.messenger.send_text(
+            ctx.channel_id, msg, buttons=buttons, silent=silent,
+        )
+    except Exception:
+        log.exception("Failed to send cooldown message for %s", inst.id)
+    return True
 
 
 # Labels that don't auto-derive well from InstanceOrigin.value
@@ -136,24 +174,7 @@ async def run_instance(
         finalized = True
 
         # Usage limit: schedule auto-retry instead of showing normal failure
-        if result.usage_limit_reset and inst.cooldown_retries < MAX_COOLDOWN_RETRIES:
-            inst.cooldown_retry_at = result.usage_limit_reset.isoformat()
-            inst.cooldown_retries += 1
-            inst.cooldown_channel_id = ctx.channel_id
-            ctx.store.update_instance(inst, critical=True)
-
-            reset_str = _format_reset_time(result.usage_limit_reset)
-            msg = (
-                f"⏳ Usage limit hit — auto-retrying at {reset_str}"
-                f" (attempt {inst.cooldown_retries}/{MAX_COOLDOWN_RETRIES})"
-            )
-            buttons = [[ButtonSpec("Cancel Auto-Retry", f"cancel_cooldown:{inst.id}")]]
-            try:
-                await ctx.messenger.send_text(
-                    ctx.channel_id, msg, buttons=buttons, silent=silent,
-                )
-            except Exception:
-                log.exception("Failed to send cooldown message for %s", inst.id)
+        if await schedule_cooldown_retry(ctx, inst, result, silent=silent):
             return  # Timer loop in app.py picks this up
 
         await send_result(ctx, inst, result.result_text, silent=silent)
@@ -385,7 +406,7 @@ def make_progress_callbacks(
         is_stalled[0] = True
         escaped = ctx.messenger.escape(inst.display_id())
         await _edit(
-            f"⚠️ {escaped} stalled (no output for {config.STALL_TIMEOUT_SECS}s) ({_elapsed()})",
+            f"⚠️ {escaped} quiet for {config.STALL_TIMEOUT_SECS}s — /kill if stuck ({_elapsed()})",
             buttons=stall_button_specs(instance_id),
         )
 

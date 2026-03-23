@@ -76,8 +76,6 @@ def build_dashboard_embed(
 
     Pure function — no side effects, no Discord API calls.
     """
-    today_cost = store.get_daily_cost()
-    total_cost = store.get_total_cost()
     active_repo, _ = store.get_active_repo()
 
     embed = discord.Embed(
@@ -207,13 +205,7 @@ def build_dashboard_embed(
     if usage_text:
         embed.add_field(name="Usage", value=usage_text, inline=False)
     else:
-        fallback = f"**Today** ${today_cost:.2f} \u00b7 **Total** ${total_cost:.2f}"
-        repo_costs = _repo_cost_breakdown(store, forum_projects)
-        if repo_costs:
-            fallback += "\n" + "\n".join(
-                f"  {name}: ${cost:.2f}" for name, cost in repo_costs
-            )
-        embed.add_field(name="Usage", value=fallback, inline=False)
+        embed.add_field(name="Usage", value="Usage data unavailable", inline=False)
 
     # --- Last Activity ---
     last = store.last_activity()
@@ -291,21 +283,6 @@ def _count_orphans(store: StateStore) -> int:
     return total
 
 
-def _repo_cost_breakdown(
-    store: StateStore,
-    forum_projects: dict[str, ForumProject],
-) -> list[tuple[str, float]]:
-    """Return [(repo_name, today_cost)] for repos with non-zero cost today."""
-    costs = []
-    for name in forum_projects:
-        if name == "_default":
-            continue
-        cost = store.get_repo_daily_cost(name)
-        if cost > 0:
-            costs.append((name, cost))
-    costs.sort(key=lambda x: x[1], reverse=True)
-    return costs
-
 
 async def refresh_dashboard(
     client: discord.Client,
@@ -355,6 +332,7 @@ async def _refresh_dashboard_impl(
     try:
         usage_text = await get_usage_bar_async()
     except Exception:
+        log.warning("Usage bar fetch failed", exc_info=True)
         usage_text = None
     from bot.engine.commands import get_start_time
     embed = build_dashboard_embed(
@@ -423,4 +401,4 @@ async def start_periodic_refresh(
                 lobby_channel_id, dashboard_lock, dashboard_pending,
             )
         except Exception:
-            log.debug("Periodic dashboard refresh failed", exc_info=True)
+            log.warning("Periodic dashboard refresh failed", exc_info=True)

@@ -8,6 +8,57 @@
 - Graceful degradation: disabled by default (`OUTLOOK_ENABLED=1` to opt in), no-op when pywin32 is missing or Outlook unavailable
 - System prompt auto-injects Outlook commands (absolute paths) when enabled, so Claude sessions in any repo can use it
 - COM connection cached as singleton with stale-handle retry; calendar uses Restrict with locale-safe fallback
+## v0.57.2 — Fix Dashboard Usage Data Fallback (2026-03-23)
+
+- Fix dashboard "Usage data unavailable" by falling back to last-known-good ccusage data when live fetch fails
+- Add WARNING-level logging for ccusage circuit breaker, usage fetch failures, and periodic dashboard refresh errors
+
+## v0.57.1 — Remove Inactivity Timeout (2026-03-23)
+
+- Remove inactivity timeout that killed long-running queries/tasks after 5-10 min of silence
+- Add 4-hour safety-net lifetime limit to catch truly orphaned processes
+- Update stall warning to tell user to `/kill` if stuck (no auto-kill)
+
+## v0.57.0 — Discord-Friendly Formatting (2026-03-23)
+
+- Add Discord formatting rules to WORKING_CONTEXT: ban pipe tables, nested bullets, image syntax, horizontal rules
+- Replace pipe-delimited summary table in plan review prompt with Discord-friendly bullet list format
+- Remove `---` separator from review prompt to match formatting rules
+## v0.56.1 — Fix Usage Limit Auto-Retry (2026-03-23)
+
+- Fix auto-retry not triggering for direct queries and background tasks (only worked for workflow-spawned instances)
+- Fix double retry when autopilot triage step hits usage limit (chain now pauses instead of spawning build)
+- Extract `schedule_cooldown_retry` helper to deduplicate cooldown scheduling across all code paths
+- Clamp cooldown retry time to at least 60s from now to avoid edge cases with past reset times
+
+## v0.56.0 — Visual Budget Spending Bar (2026-03-23)
+
+- Visual budget spending bar in dashboard/control rooms when `PLAN_DAILY_LIMIT_USD` is configured
+- Compact spending summary (Today/Week) when no limits are set
+- Block burn rate shown as supplementary line instead of primary bar
+
+## v0.55.0 — Clean Control Room Deploy Messages (2026-03-23)
+
+- Control room: deploy/reboot messages now use a single editable status message instead of flooding the thread
+- Control room: previous deploy status message is auto-deleted when a new deploy starts
+- Control room: "Deploy approved" message is now ephemeral (only visible to clicker)
+
+## v0.54.2 — Friendly Push Warning for No-Remote Repos (2026-03-23)
+
+- Improve merge push warning: repos with no remote show "ℹ️ No remote configured" instead of cryptic error
+
+## v0.54.1 — Fix /cost to Use Real Usage Data (2026-03-22)
+
+- Fix `/cost` to use ccusage data instead of broken store accumulator (was always $0.00)
+- Remove dead top-spenders section from `/cost` and `/usage` (instance cost_usd never populated)
+- Dashboard fallback shows "Usage data unavailable" instead of misleading "$0.00"
+- Remove dead `format_cost_md()` and `_repo_cost_breakdown()` functions
+
+## v0.54.0 — Auto-Push Tags After Merge (2026-03-22)
+
+- Auto-push tags to origin after merge when the merged branch's tip has tags
+- Only pushes the specific detected tags, not all local tags
+- Tag push failures are reported to the user but don't roll back the merge
 
 ## v0.53.1 — Fix Auto-Update Reboot Loop (2026-03-22)
 

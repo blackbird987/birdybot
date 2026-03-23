@@ -60,6 +60,7 @@ _CCUSAGE_CMD: list[str] = _detect_ccusage_cmd()
 # ---------------------------------------------------------------------------
 
 _cache: dict[str, tuple[float, object]] = {}
+_last_good: dict[str, object] = {}  # Survives negative caching
 _DEFAULT_TTL = getattr(config, "CCUSAGE_CACHE_TTL", 60)
 _URGENT_TTL = 15  # When approaching rate limits
 
@@ -221,6 +222,8 @@ async def _run_ccusage(args: list[str], force: bool = False) -> dict | None:
 
     # --- Circuit breaker: stop trying after repeated failures ---
     if _fail_count >= _MAX_CONSECUTIVE_FAILS and now - _last_fail_time < _BACKOFF_TTL:
+        remaining = int(_BACKOFF_TTL - (now - _last_fail_time))
+        log.warning("ccusage circuit breaker: skipping %s (%ds remaining)", args, remaining)
         cached = _cache.get(cache_key)
         return cached[1] if cached else None
 
@@ -281,6 +284,7 @@ async def _run_ccusage(args: list[str], force: bool = False) -> dict | None:
 
             data = json.loads(stdout.decode())
             _cache[cache_key] = (time.monotonic(), data)
+            _last_good[cache_key] = data
             _fail_count = 0  # Reset circuit breaker on success
             return data
         except Exception as e:
@@ -446,14 +450,6 @@ def _pct_label(used: float, limit: float, period: str) -> str:
     return f"${used:,.2f}"
 
 
-def _pct_short(used: float, limit: float, period: str) -> str:
-    """Compact percentage for bar: '60% daily' or '$287'."""
-    if limit > 0:
-        pct = min(used / limit * 100, 999)
-        return f"${used:,.0f} ({pct:.0f}% {period})"
-    return f"${used:,.0f}"
-
-
 # ---------------------------------------------------------------------------
 # Text builders
 # ---------------------------------------------------------------------------
@@ -532,51 +528,84 @@ def format_usage_bar(
     """Visual usage bar for dashboard/control-room embeds.
 
     Returns None only when no data at all is available.
-    When block is missing but daily/weekly exist, returns a compact cost line.
+
+    When a daily budget limit is configured, renders a spending progress bar
+    as the primary visual (driven by daily cost / limit).  When no limits are
+    configured, shows a compact spending summary without a bar.
+
+    Block data (5-hour billing window) is shown as a supplementary line when
+    available, but the spending bar is independent of it.
     """
     if not block and not daily and not weekly:
         return None
 
     lines: list[str] = []
+    daily_limit = config.PLAN_DAILY_LIMIT_USD
+    weekly_limit = config.PLAN_WEEKLY_LIMIT_USD
 
-    # Full progress bar when block data is available
+    # --- Primary: spending progress bar (when daily limit configured) ---
+    if daily and daily_limit > 0:
+        ratio = min(daily.cost_usd / daily_limit, 1.0)
+        filled = round(ratio * 16)
+        bar = "\u2588" * filled + "\u2591" * (16 - filled)
+        pct = daily.cost_usd / daily_limit * 100  # unclamped for text
+        lines.append(f"`{bar}` ${daily.cost_usd:,.0f} / ${daily_limit:,.0f} daily ({pct:.0f}%)")
+
+        # Weekly as compact text below
+        if weekly and weekly_limit > 0:
+            wpct = weekly.cost_usd / weekly_limit * 100
+            lines.append(f"Week: ${weekly.cost_usd:,.0f} / ${weekly_limit:,.0f} ({wpct:.0f}%)")
+        elif weekly:
+            lines.append(f"Week: ${weekly.cost_usd:,.0f}")
+
+    # --- Fallback: compact summary (no daily limit configured) ---
+    elif daily or weekly:
+        parts: list[str] = []
+        if daily:
+            parts.append(f"Today: ${daily.cost_usd:,.0f}")
+        if weekly and weekly_limit > 0:
+            wpct = weekly.cost_usd / weekly_limit * 100
+            parts.append(f"Week: ${weekly.cost_usd:,.0f} / ${weekly_limit:,.0f} ({wpct:.0f}%)")
+        elif weekly:
+            parts.append(f"Week: ${weekly.cost_usd:,.0f}")
+        lines.append(" \u00b7 ".join(parts))
+
+    # --- Supplementary: block burn rate (when available) ---
     if block:
         remaining = max(block.remaining_minutes, 0)
-        elapsed = 300 - remaining
-        progress = min(elapsed / 300, 1.0)
-        filled = round(progress * 16)
-        bar = "\u2588" * filled + "\u2591" * (16 - filled)
-
-        time_label = "Block ended" if remaining == 0 else f"{remaining}m left"
-
-        lines.append(f"`{bar}` {time_label}")
+        time_label = "block ended" if remaining == 0 else f"{remaining}m left"
         lines.append(
-            f"${block.cost_usd:.2f} used \u00b7 ${block.projected_cost:.2f} proj \u00b7 ${block.burn_rate_cost_per_hour:.2f}/hr"
+            f"${block.burn_rate_cost_per_hour:.2f}/hr \u00b7 {time_label}"
         )
-
-    # Today + weekly with plan percentages (shown with or without block)
-    parts: list[str] = []
-    if daily:
-        parts.append(
-            f"Today: {_pct_short(daily.cost_usd, config.PLAN_DAILY_LIMIT_USD, 'daily')}"
-        )
-    if weekly:
-        parts.append(
-            f"Week: {_pct_short(weekly.cost_usd, config.PLAN_WEEKLY_LIMIT_USD, 'weekly')}"
-        )
-    if parts:
-        lines.append(" \u00b7 ".join(parts))
 
     return "\n".join(lines)
 
 
 async def get_usage_bar_async() -> str | None:
-    """Visual usage bar for embeds. Returns None if no data."""
+    """Visual usage bar for embeds. Returns None only if no data ever existed."""
+    since = _daily_range_since()
+    daily_key = f"daily --since {since}"
+    today_str = datetime.now(timezone.utc).strftime("%Y%m%d")
+    block_key = f"blocks --since {today_str}"
+
+    # Try live fetch
     block, (daily, weekly) = await asyncio.gather(
         get_current_block(),
         _fetch_daily_range(),
     )
-    return format_usage_bar(block, daily, weekly)
+    result = format_usage_bar(block, daily, weekly)
+    if result:
+        return result
+
+    # Live fetch returned nothing — try last-known-good data
+    good_daily = _last_good.get(daily_key)
+    good_block = _last_good.get(block_key)
+    if good_daily or good_block:
+        block = _parse_block(good_block) if good_block else None
+        daily, weekly = _parse_daily_range(good_daily)
+        return format_usage_bar(block, daily, weekly)
+
+    return None
 
 
 async def warmup() -> None:

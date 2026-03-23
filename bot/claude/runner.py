@@ -107,10 +107,6 @@ class ClaudeRunner:
         context: str | None = None,
         sibling_context: str | None = None,
     ) -> RunResult:
-        inactivity_timeout = (config.TASK_TIMEOUT_SECS
-                              if instance.instance_type == InstanceType.TASK
-                              else config.QUERY_TIMEOUT_SECS)
-
         # Git worktree isolation for build tasks
         if instance.branch:
             await self._ensure_worktree(instance)
@@ -164,10 +160,8 @@ class ClaudeRunner:
                     pass
                 return RunResult(is_error=True, error_message=f"Failed to send prompt: {exc}")
 
-            # Activity-based timeout: only times out if no output for
-            # inactivity_timeout seconds (not wall-clock total runtime)
             result = await self._stream_output(
-                proc, instance, on_progress, on_stall, inactivity_timeout,
+                proc, instance, on_progress, on_stall,
             )
 
             # Dead session: clear session_id and retry without --resume
@@ -222,40 +216,42 @@ class ClaudeRunner:
         instance: Instance,
         on_progress: ProgressCallback | None,
         on_stall: StallCallback | None,
-        inactivity_timeout: int = 300,
     ) -> RunResult:
         """Read stdout line-by-line, parse stream-json, detect stalls.
 
-        Uses an activity-based timeout: the process is only killed if no
-        output is received for ``inactivity_timeout`` seconds.  This lets
-        long-running but actively-streaming sessions continue indefinitely.
+        No inactivity timeout — processes run until they finish or the user
+        kills them.  A safety-net lifetime limit (default 4h) catches truly
+        orphaned processes.
         """
         events: list[dict] = []
         captured_session_id: str | None = None
         ask_question: str | None = None  # Set when AskUserQuestion detected
         last_output_time = asyncio.get_event_loop().time()
+        process_start_time = last_output_time
         stall_warned = False
-        timed_out = False
+        lifetime_exceeded = False
         stall_check_task: asyncio.Task | None = None
 
         async def check_stall():
-            nonlocal stall_warned, timed_out
+            nonlocal stall_warned, lifetime_exceeded
             while True:
                 await asyncio.sleep(10)
-                elapsed = asyncio.get_event_loop().time() - last_output_time
+                now = asyncio.get_event_loop().time()
+                elapsed_since_output = now - last_output_time
+                elapsed_since_start = now - process_start_time
 
-                # Hard inactivity timeout — kill the process
-                if elapsed > inactivity_timeout:
-                    timed_out = True
+                # Safety-net: kill truly orphaned processes
+                if elapsed_since_start > config.MAX_PROCESS_LIFETIME_SECS:
+                    lifetime_exceeded = True
                     log.warning(
-                        "Inactivity timeout for %s — no output for %ds",
-                        instance.id, inactivity_timeout,
+                        "Lifetime limit for %s — running for %ds",
+                        instance.id, int(elapsed_since_start),
                     )
                     proc.terminate()
                     return
 
-                # Early stall warning
-                if elapsed > config.STALL_TIMEOUT_SECS and not stall_warned:
+                # Stall warning (no auto-kill)
+                if elapsed_since_output > config.STALL_TIMEOUT_SECS and not stall_warned:
                     stall_warned = True
                     if on_stall:
                         try:
@@ -287,7 +283,7 @@ class ClaudeRunner:
                 event = parse_stream_line(decoded)
                 if event:
                     events.append(event)
-                    # Eagerly capture session_id so it survives a timeout kill
+                    # Eagerly capture session_id so it survives early termination
                     if not captured_session_id and event.get("session_id"):
                         captured_session_id = event["session_id"]
                     if on_progress:
@@ -344,11 +340,11 @@ class ClaudeRunner:
 
         await proc.wait()
 
-        if timed_out:
+        if lifetime_exceeded:
             return RunResult(
                 session_id=captured_session_id,
                 is_error=True,
-                error_message=f"No output for {inactivity_timeout}s — timed out",
+                error_message=f"Process exceeded {config.MAX_PROCESS_LIFETIME_SECS // 3600}h lifetime limit",
             )
 
         # Capture stderr for error info
@@ -1121,18 +1117,58 @@ class ClaudeRunner:
             # Push merged result to origin
             push_note = ""
             try:
-                push_r = subprocess.run(
+                # Check if remote exists before attempting push
+                has_remote = subprocess.run(
+                    ["git", "remote", "get-url", "origin"],
+                    cwd=repo, capture_output=True, text=True, **_NOWND,
+                ).returncode == 0
+
+                if not has_remote:
+                    log.info("No remote 'origin' in %s — skipping push", repo)
+                    push_note = "\nℹ️ No remote configured — local merge is fine"
+                elif (push_r := subprocess.run(
                     ["git", "push", "origin", target],
                     cwd=repo, capture_output=True, text=True,
                     timeout=30, **_NOWND,
-                )
-                if push_r.returncode != 0:
+                )).returncode != 0:
                     push_detail = (push_r.stderr or push_r.stdout or "").strip()
                     log.error("Push to origin after merge in %s: %s",
                               repo, push_detail)
                     push_note = f"\n⚠️ Could not push to origin (exit {push_r.returncode})"
                 else:
                     log.info("Pushed %s to origin after merge in %s", target, repo)
+                    # Push tags if the merged branch's tip had any
+                    try:
+                        tag_r = subprocess.run(
+                            ["git", "tag", "--points-at", "HEAD^2"],
+                            cwd=repo, capture_output=True, text=True, **_NOWND,
+                        )
+                        if tag_r.returncode != 0:
+                            log.debug("git tag --points-at HEAD^2 failed in %s (rc=%d), skipping tag push",
+                                      repo, tag_r.returncode)
+                        else:
+                            tags = tag_r.stdout.strip()
+                            if tags:
+                                tag_names = tags.splitlines()
+                                tag_push_r = subprocess.run(
+                                    ["git", "push", "origin"] + tag_names,
+                                    cwd=repo, capture_output=True, text=True,
+                                    timeout=30, **_NOWND,
+                                )
+                                if tag_push_r.returncode != 0:
+                                    tag_detail = (tag_push_r.stderr or tag_push_r.stdout or "").strip()
+                                    log.error("Tag push to origin in %s: %s", repo, tag_detail)
+                                    push_note += f"\n⚠️ Tags not pushed (exit {tag_push_r.returncode})"
+                                else:
+                                    tag_list = ", ".join(tag_names)
+                                    log.info("Pushed tags [%s] to origin in %s", tag_list, repo)
+                                    push_note += f"\nTags pushed: {tag_list}"
+                    except subprocess.TimeoutExpired:
+                        log.error("Tag push to origin timed out (30s) in %s", repo)
+                        push_note += "\n⚠️ Tag push timed out (30s)"
+                    except Exception as e:
+                        log.error("Tag push error in %s: %s", repo, e)
+                        push_note += f"\n⚠️ Tag push error: {type(e).__name__}"
             except subprocess.TimeoutExpired:
                 log.error("Push to origin timed out (30s) in %s", repo)
                 push_note = "\n⚠️ Push to origin timed out (30s)"

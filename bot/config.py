@@ -62,9 +62,8 @@ CLAUDE_BINARY: str = os.getenv("CLAUDE_BINARY", "claude")
 MAX_CONCURRENT: int = int(os.getenv("MAX_CONCURRENT", "5"))
 DAILY_BUDGET_USD: float = float(os.getenv("DAILY_BUDGET_USD", "20.0"))
 PC_NAME: str = os.getenv("PC_NAME", "") or __import__("platform").node()
-QUERY_TIMEOUT_SECS: int = int(os.getenv("QUERY_TIMEOUT_SECS", "300"))
-TASK_TIMEOUT_SECS: int = int(os.getenv("TASK_TIMEOUT_SECS", "600"))
 STALL_TIMEOUT_SECS: int = int(os.getenv("STALL_TIMEOUT_SECS", "60"))
+MAX_PROCESS_LIFETIME_SECS: int = int(os.getenv("MAX_PROCESS_LIFETIME_SECS", "14400"))
 TITLE_TIMEOUT_SECS: int = int(os.getenv("TITLE_TIMEOUT_SECS", "15"))
 INSTANCE_RETENTION_DAYS: int = int(os.getenv("INSTANCE_RETENTION_DAYS", "7"))
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -290,6 +289,14 @@ Build tasks use git worktrees for isolation — each build gets its own director
 Deploy integration: To connect a reboot/deploy sequence for this repo, create .claude/deploy.json with {"command": "your deploy command", "label": "Deploy"}. After merge, the bot detects it and adds a Deploy button to the repo's control room (requires user approval before first use).
 
 Design for: mobile-first conciseness, maximum throughput, at-a-glance visibility, per-thread state over globals.
+
+--- Discord Formatting ---
+Discord does NOT support these markdown features — never use them:
+- Pipe tables (| col | col |) — render as raw text with visible pipes
+- Nested/indented bullet lists — indentation is ignored, everything flattens
+- Image syntax (![alt](url)) — not rendered
+- Horizontal rules (---) — render as empty space
+For structured data use: bullet lists with **bold** and `inline code`, or padded monospace inside ```code blocks```.
 """
 
 # Per-step behavioral guidance — tells Claude what its role is in the current workflow step.
@@ -368,14 +375,13 @@ PLAN_REVIEW_PROMPT = (
     '1-2 sentences: how many revisions, their priorities, general theme. '
     'Example: "Found 5 revisions across architecture and reliability. '
     '2 are high-priority structural changes, 3 are cleanup improvements."\n\n'
-    'Then a compact summary table (one per line):\n'
-    'Priority | Tag | Short title\n\n'
+    'Then a compact summary list (one bullet per revision):\n'
+    '- **Priority** `Tag` — Short title\n\n'
     'Then list each revision using this EXACT format (do NOT deviate):\n\n'
     '### Tag \u2014 Short title\n'
     'Priority \u00b7 Impact: Low/Medium/High\n\n'
     'One or two sentences max describing the change, why it matters, '
     'and any tradeoffs.\n\n'
-    '---\n\n'
     'Priority levels (use these exact words): '
     'Critical (do first), High (should do), Medium (worthwhile), '
     'Low (nice to have)\n\n'
