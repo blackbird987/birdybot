@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Visual budget spending bar in dashboard/control rooms when `PLAN_DAILY_LIMIT_USD` is configured
+- Compact spending summary (Today/Week) when no limits are set
+- Block burn rate shown as supplementary line instead of primary bar
+
 ## v0.55.0 — Clean Control Room Deploy Messages (2026-03-23)
 
 - Control room: deploy/reboot messages now use a single editable status message instead of flooding the thread
