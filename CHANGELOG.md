@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.58.1 — Fix Usage Visualization Crash (2026-03-23)
+
 - Fix usage visualization crash when ccusage returns `null` projection/burnRate fields
 - Deduplicate prior-deferred review items before injection into review prompts
 
