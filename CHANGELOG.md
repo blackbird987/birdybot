@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.58.0 — API Billing Fallback (2026-03-23)
+
 ### API Billing Fallback
 - Add API billing fallback with Haiku when subscription limits are hit — immediate retry instead of hours-long cooldown
 - Add `--fallback-model haiku` for transient 429/overload errors (CLI-native)
