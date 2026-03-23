@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## v0.55.0 — Clean Control Room Deploy Messages (2026-03-23)
+
+- Control room: deploy/reboot messages now use a single editable status message instead of flooding the thread
+- Control room: previous deploy status message is auto-deleted when a new deploy starts
+- Control room: "Deploy approved" message is now ephemeral (only visible to clicker)
+
 ## v0.54.2 — Friendly Push Warning for No-Remote Repos (2026-03-23)
 
 - Improve merge push warning: repos with no remote show "ℹ️ No remote configured" instead of cryptic error

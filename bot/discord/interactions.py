@@ -30,6 +30,64 @@ _QUERY_ACTIONS: frozenset[str] = frozenset({
     "continue_autopilot",
 })
 
+# --- Deploy status message management (keeps control rooms clean) ---
+
+_deploy_status_msgs: dict[str, int] = {}  # repo_name → message_id
+
+
+class DeployStatus:
+    """Manages a single editable deploy status message in a control room.
+
+    Uses the bot token (channel.fetch_message) instead of the interaction
+    webhook token for edits, avoiding the 15-minute expiry on long deploys.
+    """
+
+    def __init__(self, channel: discord.abc.Messageable, msg: discord.Message,
+                 repo_name: str):
+        self._channel = channel
+        self._msg = msg
+        self._repo_name = repo_name
+        self.id = msg.id
+
+    async def update(self, content: str) -> None:
+        """Edit the status message. Cached object first, fetch fallback."""
+        # Truncate to safe limit (leave room for formatting overhead)
+        if len(content) > 1900:
+            lines = content[:1850].rsplit("\n", 1)[0]
+            if "```" in content and not lines.endswith("```"):
+                lines += "\n```"
+            content = lines
+        try:
+            await self._msg.edit(content=content)
+        except (discord.NotFound, discord.HTTPException):
+            try:
+                self._msg = await self._channel.fetch_message(self.id)
+                await self._msg.edit(content=content)
+            except (discord.NotFound, discord.HTTPException):
+                # Message gone — send new one as fallback
+                self._msg = await self._channel.send(content)
+                self.id = self._msg.id
+                _deploy_status_msgs[self._repo_name] = self.id
+
+
+async def _start_deploy_status(
+    interaction: discord.Interaction, repo_name: str, initial_text: str,
+) -> DeployStatus:
+    """Send initial deploy status message, cleaning up the previous one."""
+    # Delete previous status message for this repo
+    old_msg_id = _deploy_status_msgs.pop(repo_name, None)
+    if old_msg_id:
+        try:
+            old_msg = await interaction.channel.fetch_message(old_msg_id)
+            await old_msg.delete()
+        except (discord.NotFound, discord.HTTPException):
+            pass  # Already gone — dict entry already cleared by .pop()
+
+    # Send initial message via interaction (one-time use of webhook token)
+    msg = await interaction.followup.send(initial_text, wait=True)
+    _deploy_status_msgs[repo_name] = msg.id
+    return DeployStatus(interaction.channel, msg, repo_name)
+
 
 async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
     """Handle button/select/modal interactions (persistent views)."""
@@ -546,6 +604,7 @@ async def _handle_approve_deploy(
     bot._store.set_deploy_config(repo_name, config)
     await interaction.followup.send(
         f"Deploy approved for **{repo_name}**: `{config.get('command', 'self')}`",
+        ephemeral=True,
     )
     asyncio.create_task(bot._forums.refresh_control_room(repo_name))
 
@@ -553,7 +612,12 @@ async def _handle_approve_deploy(
 async def _handle_reboot_repo(
     bot: ClaudeBot, interaction: discord.Interaction, repo_name: str,
 ) -> None:
-    """Execute a reboot/deploy for a repo based on its deploy config."""
+    """Execute a reboot/deploy for a repo based on its deploy config.
+
+    Uses a single editable status message to keep the control room clean.
+    All edits after the initial send use the bot token (channel-based) to
+    avoid the 15-minute interaction webhook token expiry.
+    """
     config = bot._store.get_deploy_config(repo_name)
     if not config or not config.get("approved"):
         await interaction.followup.send(
@@ -576,18 +640,21 @@ async def _handle_reboot_repo(
         if ds and ds.pending_changes:
             msg += f" ({len(ds.pending_changes)} pending changes)"
 
+        # Single status message for the entire reboot cycle
+        status = await _start_deploy_status(
+            interaction, repo_name, "\U0001f504 Rebooting...",
+        )
+
         # Drain active tasks first (same as /reboot slash command)
         if bot._runner.is_busy:
             ids = ", ".join(bot._runner.active_ids) or "(between steps)"
-            await interaction.followup.send(
-                f"⏳ Waiting for active work to finish: {ids}",
-            )
+            await status.update(f"⏳ Waiting for active work to finish: {ids}")
             idle = await bot._runner.wait_until_idle(timeout=300)
             if not idle:
                 remaining = ", ".join(bot._runner.active_ids)
-                await interaction.followup.send(
+                await status.update(
                     f"⚠️ Timed out. Force-rebooting with "
-                    f"{bot._runner.active_count} still running: {remaining}",
+                    f"{bot._runner.active_count} still running: {remaining}"
                 )
 
         bot._runner.request_reboot({
@@ -595,7 +662,7 @@ async def _handle_reboot_repo(
             "channel_id": str(interaction.channel_id),
             "platform": "discord",
         })
-        await interaction.followup.send("\U0001f504 Rebooting...")
+        await status.update("\U0001f504 Rebooting...")
         # NOTE: Do NOT reset deploy state here — capture_boot_baselines()
         # handles it on the next startup when it detects self_managed=True.
 
@@ -618,6 +685,11 @@ async def _handle_reboot_repo(
         else:
             cwd = repo_path
 
+        # Single status message for the entire deploy cycle
+        status = await _start_deploy_status(
+            interaction, repo_name, "\U0001f680 Pushing to origin...",
+        )
+
         # Push to origin before deploying (safety net)
         try:
             push_proc = await asyncio.create_subprocess_exec(
@@ -630,21 +702,19 @@ async def _handle_reboot_repo(
             )
             if push_proc.returncode != 0:
                 push_output = push_out.decode(errors="replace")[:1500]
-                await interaction.followup.send(
-                    f"⚠️ Pre-deploy push failed (exit {push_proc.returncode}).\n```\n{push_output}\n```"
+                await status.update(
+                    f"⚠️ Push failed (exit {push_proc.returncode}), deploying anyway...\n```\n{push_output}\n```"
                 )
         except asyncio.TimeoutError:
             try:
                 push_proc.kill()
             except ProcessLookupError:
                 pass
-            await interaction.followup.send(
-                "⚠️ Pre-deploy push timed out (30s). Proceeding with deploy."
-            )
+            await status.update("⚠️ Push timed out (30s). Proceeding with deploy...")
         except Exception as e:
-            await interaction.followup.send(f"⚠️ Pre-deploy push error: {e}")
+            await status.update(f"⚠️ Push error: {e}. Proceeding with deploy...")
 
-        await interaction.followup.send(f"Running: `{command}`...")
+        await status.update(f"\U0001f680 Running: `{command}`...")
 
         proc = None
         try:
@@ -666,12 +736,12 @@ async def _handle_reboot_repo(
                     ds.pending_sessions.clear()
                     ds.pending_changes.clear()
                     bot._store.set_deploy_state(repo_name, ds)
-                await interaction.followup.send(
+                await status.update(
                     f"\u2705 Deploy successful.\n```\n{output}\n```"
                     if output.strip() else "\u2705 Deploy successful.",
                 )
             else:
-                await interaction.followup.send(
+                await status.update(
                     f"\u274c Deploy failed (exit {proc.returncode}).\n```\n{output}\n```"
                     if output.strip()
                     else f"\u274c Deploy failed (exit {proc.returncode}).",
@@ -682,9 +752,9 @@ async def _handle_reboot_repo(
                     proc.kill()
                 except ProcessLookupError:
                     pass
-            await interaction.followup.send(f"\u274c Deploy timed out ({deploy_timeout}s).")
+            await status.update(f"\u274c Deploy timed out ({deploy_timeout}s).")
         except Exception as e:
-            await interaction.followup.send(f"\u274c Deploy error: {e}")
+            await status.update(f"\u274c Deploy error: {e}")
 
     asyncio.create_task(bot._forums.refresh_control_room(repo_name))
     asyncio.create_task(bot._refresh_dashboard())
