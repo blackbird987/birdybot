@@ -60,6 +60,7 @@ _CCUSAGE_CMD: list[str] = _detect_ccusage_cmd()
 # ---------------------------------------------------------------------------
 
 _cache: dict[str, tuple[float, object]] = {}
+_last_good: dict[str, object] = {}  # Survives negative caching
 _DEFAULT_TTL = getattr(config, "CCUSAGE_CACHE_TTL", 60)
 _URGENT_TTL = 15  # When approaching rate limits
 
@@ -221,6 +222,8 @@ async def _run_ccusage(args: list[str], force: bool = False) -> dict | None:
 
     # --- Circuit breaker: stop trying after repeated failures ---
     if _fail_count >= _MAX_CONSECUTIVE_FAILS and now - _last_fail_time < _BACKOFF_TTL:
+        remaining = int(_BACKOFF_TTL - (now - _last_fail_time))
+        log.warning("ccusage circuit breaker: skipping %s (%ds remaining)", args, remaining)
         cached = _cache.get(cache_key)
         return cached[1] if cached else None
 
@@ -281,6 +284,7 @@ async def _run_ccusage(args: list[str], force: bool = False) -> dict | None:
 
             data = json.loads(stdout.decode())
             _cache[cache_key] = (time.monotonic(), data)
+            _last_good[cache_key] = data
             _fail_count = 0  # Reset circuit breaker on success
             return data
         except Exception as e:
@@ -578,12 +582,30 @@ def format_usage_bar(
 
 
 async def get_usage_bar_async() -> str | None:
-    """Visual usage bar for embeds. Returns None if no data."""
+    """Visual usage bar for embeds. Returns None only if no data ever existed."""
+    since = _daily_range_since()
+    daily_key = f"daily --since {since}"
+    today_str = datetime.now(timezone.utc).strftime("%Y%m%d")
+    block_key = f"blocks --since {today_str}"
+
+    # Try live fetch
     block, (daily, weekly) = await asyncio.gather(
         get_current_block(),
         _fetch_daily_range(),
     )
-    return format_usage_bar(block, daily, weekly)
+    result = format_usage_bar(block, daily, weekly)
+    if result:
+        return result
+
+    # Live fetch returned nothing — try last-known-good data
+    good_daily = _last_good.get(daily_key)
+    good_block = _last_good.get(block_key)
+    if good_daily or good_block:
+        block = _parse_block(good_block) if good_block else None
+        daily, weekly = _parse_daily_range(good_daily)
+        return format_usage_bar(block, daily, weekly)
+
+    return None
 
 
 async def warmup() -> None:

@@ -332,6 +332,7 @@ async def _refresh_dashboard_impl(
     try:
         usage_text = await get_usage_bar_async()
     except Exception:
+        log.warning("Usage bar fetch failed", exc_info=True)
         usage_text = None
     from bot.engine.commands import get_start_time
     embed = build_dashboard_embed(
@@ -400,4 +401,4 @@ async def start_periodic_refresh(
                 lobby_channel_id, dashboard_lock, dashboard_pending,
             )
         except Exception:
-            log.debug("Periodic dashboard refresh failed", exc_info=True)
+            log.warning("Periodic dashboard refresh failed", exc_info=True)
