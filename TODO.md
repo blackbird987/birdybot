@@ -41,3 +41,4 @@
 - [ ] [UX/UI] Drop moot deferred item about archive channel topics (Low)
 - [ ] [Performance] Skip auto-follow for owner-only repos (Low)
 - [ ] [Reliability] Startup merge could auto-push diverged branches (Medium)
+- [ ] [Dependencies] Document pywin32 as optional dep in pyproject.toml (Medium)
