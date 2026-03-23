@@ -179,7 +179,7 @@ def _cache_ttl(data: object) -> float:
     """Return the appropriate TTL for a cached value."""
     if isinstance(data, dict):
         for block in data.get("blocks", []):
-            proj = block.get("projection", {})
+            proj = block.get("projection") or {}
             if proj.get("remainingMinutes", 999) < 30:
                 return _URGENT_TTL
     return _DEFAULT_TTL
@@ -362,8 +362,8 @@ def _parse_block(data: dict | None) -> UsageBlock | None:
         tc = block.get("tokenCounts")
         if not isinstance(tc, dict):
             continue
-        br = block.get("burnRate", {})
-        proj = block.get("projection", {})
+        br = block.get("burnRate") or {}
+        proj = block.get("projection") or {}
         return UsageBlock(
             start_time=block.get("startTime", ""),
             end_time=block.get("endTime", ""),

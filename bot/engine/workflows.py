@@ -378,7 +378,7 @@ async def _review_plan_loop(
     source = ctx.store.get_instance(source_id)
     prior_deferred: list[str] = []
     if source and source.repo_name:
-        prior_deferred = ctx.store.get_deferred_items(source.repo_name)
+        prior_deferred = list(dict.fromkeys(ctx.store.get_deferred_items(source.repo_name)))
 
     review_prompt = config.PLAN_REVIEW_PROMPT
     if prior_deferred:

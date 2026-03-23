@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Fix usage visualization crash when ccusage returns `null` projection/burnRate fields
+- Deduplicate prior-deferred review items before injection into review prompts
+
 ## v0.58.0 — API Billing Fallback (2026-03-23)
 
 ### API Billing Fallback
