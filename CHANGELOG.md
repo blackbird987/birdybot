@@ -7,6 +7,12 @@
 - Add Discord formatting rules to WORKING_CONTEXT: ban pipe tables, nested bullets, image syntax, horizontal rules
 - Replace pipe-delimited summary table in plan review prompt with Discord-friendly bullet list format
 - Remove `---` separator from review prompt to match formatting rules
+## v0.56.1 — Fix Usage Limit Auto-Retry (2026-03-23)
+
+- Fix auto-retry not triggering for direct queries and background tasks (only worked for workflow-spawned instances)
+- Fix double retry when autopilot triage step hits usage limit (chain now pauses instead of spawning build)
+- Extract `schedule_cooldown_retry` helper to deduplicate cooldown scheduling across all code paths
+- Clamp cooldown retry time to at least 60s from now to avoid edge cases with past reset times
 
 ## v0.56.0 — Visual Budget Spending Bar (2026-03-23)
 
