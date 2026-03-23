@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Add optional Outlook integration module (`bot/services/outlook.py`) for reading email and calendar via Windows COM automation
+- Graceful degradation: disabled by default (`OUTLOOK_ENABLED=1` to opt in), no-op when pywin32 is missing or Outlook unavailable
+- System prompt auto-injects Outlook commands (absolute paths) when enabled, so Claude sessions in any repo can use it
+- COM connection cached as singleton with stale-handle retry; calendar uses Restrict with locale-safe fallback
+
 ## v0.53.1 — Fix Auto-Update Reboot Loop (2026-03-22)
 
 - Fix auto-update reboot loop when local HEAD is ahead/diverged from origin (skip pull + warn user)

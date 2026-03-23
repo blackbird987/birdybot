@@ -81,6 +81,9 @@ PLAN_WEEKLY_LIMIT_USD: float = float(os.getenv("PLAN_WEEKLY_LIMIT_USD", "0"))
 # Session evaluation
 EVAL_ENABLED: bool = os.getenv("EVAL_ENABLED", "1").lower() in ("1", "true", "yes")
 
+# Outlook integration (optional — Windows only, requires pywin32 + Outlook installed)
+OUTLOOK_ENABLED: bool = os.getenv("OUTLOOK_ENABLED", "").lower() in ("1", "true", "yes")
+
 # Auto-update: secondary devices auto-pull and reboot when code changes
 AUTO_UPDATE: bool = os.getenv("AUTO_UPDATE", "").lower() in ("1", "true", "yes")
 AUTO_UPDATE_INTERVAL_SECS: int = int(os.getenv("AUTO_UPDATE_INTERVAL_SECS", "300"))

@@ -502,6 +502,26 @@ class ClaudeRunner:
         # Universal working context — workflow, Discord UI, branch model, design principles
         parts.append(config.WORKING_CONTEXT)
 
+        # Outlook integration (optional — only when enabled + pywin32 present)
+        if config.OUTLOOK_ENABLED:
+            try:
+                from bot.services.outlook import COM_AVAILABLE
+
+                if COM_AVAILABLE:
+                    script = config._PROJECT_ROOT / "bot" / "services" / "outlook.py"
+                    parts.append(
+                        f"\n\n--- Outlook Integration ---\n"
+                        f"You can read the user's Outlook email and calendar. Commands:\n"
+                        f'  python "{script}" inbox [count]      — recent emails\n'
+                        f'  python "{script}" calendar [days]     — upcoming events\n'
+                        f'  python "{script}" search "query" [count] — search by subject/sender\n'
+                        f'  python "{script}" unread              — unread count\n'
+                        f'  python "{script}" read "subject"      — full email by subject\n'
+                        f"Run these via the Bash tool when the user asks about their email or calendar."
+                    )
+            except ImportError:
+                pass
+
         # Per-step behavioral guidance based on workflow origin
         origin_key = instance.origin.value if instance.origin else "direct"
         guidance = config.WORKFLOW_GUIDANCE.get(origin_key)
