@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.54.0 — Outlook Integration (2026-03-23)
+
 - Add optional Outlook integration module (`bot/services/outlook.py`) for reading email and calendar via Windows COM automation
 - Graceful degradation: disabled by default (`OUTLOOK_ENABLED=1` to opt in), no-op when pywin32 is missing or Outlook unavailable
 - System prompt auto-injects Outlook commands (absolute paths) when enabled, so Claude sessions in any repo can use it
