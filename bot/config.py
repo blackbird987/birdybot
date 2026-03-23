@@ -287,6 +287,14 @@ Build tasks use git worktrees for isolation — each build gets its own director
 Deploy integration: To connect a reboot/deploy sequence for this repo, create .claude/deploy.json with {"command": "your deploy command", "label": "Deploy"}. After merge, the bot detects it and adds a Deploy button to the repo's control room (requires user approval before first use).
 
 Design for: mobile-first conciseness, maximum throughput, at-a-glance visibility, per-thread state over globals.
+
+--- Discord Formatting ---
+Discord does NOT support these markdown features — never use them:
+- Pipe tables (| col | col |) — render as raw text with visible pipes
+- Nested/indented bullet lists — indentation is ignored, everything flattens
+- Image syntax (![alt](url)) — not rendered
+- Horizontal rules (---) — render as empty space
+For structured data use: bullet lists with **bold** and `inline code`, or padded monospace inside ```code blocks```.
 """
 
 # Per-step behavioral guidance — tells Claude what its role is in the current workflow step.
@@ -365,14 +373,13 @@ PLAN_REVIEW_PROMPT = (
     '1-2 sentences: how many revisions, their priorities, general theme. '
     'Example: "Found 5 revisions across architecture and reliability. '
     '2 are high-priority structural changes, 3 are cleanup improvements."\n\n'
-    'Then a compact summary table (one per line):\n'
-    'Priority | Tag | Short title\n\n'
+    'Then a compact summary list (one bullet per revision):\n'
+    '- **Priority** `Tag` — Short title\n\n'
     'Then list each revision using this EXACT format (do NOT deviate):\n\n'
     '### Tag \u2014 Short title\n'
     'Priority \u00b7 Impact: Low/Medium/High\n\n'
     'One or two sentences max describing the change, why it matters, '
     'and any tradeoffs.\n\n'
-    '---\n\n'
     'Priority levels (use these exact words): '
     'Critical (do first), High (should do), Medium (worthwhile), '
     'Low (nice to have)\n\n'

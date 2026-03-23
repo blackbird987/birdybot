@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Add Discord formatting rules to WORKING_CONTEXT: ban pipe tables, nested bullets, image syntax, horizontal rules
+- Replace pipe-delimited summary table in plan review prompt with Discord-friendly bullet list format
+- Remove `---` separator from review prompt to match formatting rules
+
 ## v0.56.0 — Visual Budget Spending Bar (2026-03-23)
 
 - Visual budget spending bar in dashboard/control rooms when `PLAN_DAILY_LIMIT_USD` is configured
