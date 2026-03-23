@@ -440,6 +440,10 @@ async def _review_plan_loop(
                 if triage_result and triage_result.needs_input:
                     return triage_result
 
+                # Triage hit usage limit — pause chain, let cooldown retry handle it
+                if triage_result and triage_result.cooldown_retry_at:
+                    return triage_result
+
                 # Triage failed — log, notify, fall back to pre-triage review
                 log.warning(
                     "Triage step failed (status=%s), falling back to pre-triage review",

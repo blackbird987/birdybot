@@ -392,6 +392,10 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
 
         lifecycle.finalize_run(ctx, inst, result)
 
+        # Usage limit: schedule auto-retry instead of showing normal failure
+        if await lifecycle.schedule_cooldown_retry(ctx, inst, result):
+            return  # Timer loop picks this up — finally: end_task still fires
+
         if not result.is_error and result.session_id:
             # For Discord channels, update the per-request session_id (caller reads inst.session_id)
             # For non-Discord platforms, update the store's global active_session_id
@@ -496,6 +500,13 @@ async def _run_bg_task(ctx: RequestContext, inst: Instance) -> None:
 
         result = await ctx.runner.run(inst, context=ctx.effective_context)
         lifecycle.finalize_run(ctx, inst, result)
+
+        # Usage limit: schedule auto-retry instead of showing normal failure
+        if await lifecycle.schedule_cooldown_retry(
+            ctx, inst, result,
+            silent=inst.status == InstanceStatus.COMPLETED,
+        ):
+            return  # Timer loop picks this up
 
         await lifecycle.send_result(
             ctx, inst, result.result_text,
