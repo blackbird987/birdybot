@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Fix dashboard "Usage data unavailable" by falling back to last-known-good ccusage data when live fetch fails
+- Add WARNING-level logging for ccusage circuit breaker, usage fetch failures, and periodic dashboard refresh errors
+
 ## v0.57.1 — Remove Inactivity Timeout (2026-03-23)
 
 - Remove inactivity timeout that killed long-running queries/tasks after 5-10 min of silence
