@@ -525,6 +525,10 @@ def build_control_embed(
         if len(deploy_state.pending_changes) > 5:
             change_lines += f"\n\u2026 and {len(deploy_state.pending_changes) - 5} more"
 
+        error_line = ""
+        if deploy_state.last_deploy_error:
+            error_line = f"\u274c **Last deploy failed:** {deploy_state.last_deploy_error}\n"
+
         session_links = ""
         if deploy_state.pending_sessions and deploy_thread_ids:
             links = [f"<#{deploy_thread_ids[s]}>" for s in deploy_state.pending_sessions
@@ -532,7 +536,7 @@ def build_control_embed(
             if links:
                 session_links = "\n\U0001f4ce " + " \u00b7 ".join(links)
 
-        value = f"{version_line}{change_lines}{session_links}".strip()
+        value = f"{error_line}{version_line}{change_lines}{session_links}".strip()
         if not value:
             value = "Changes detected"
         value = _truncate_field(value)
