@@ -406,7 +406,7 @@ def make_progress_callbacks(
         is_stalled[0] = True
         escaped = ctx.messenger.escape(inst.display_id())
         await _edit(
-            f"⚠️ {escaped} stalled (no output for {config.STALL_TIMEOUT_SECS}s) ({_elapsed()})",
+            f"⚠️ {escaped} quiet for {config.STALL_TIMEOUT_SECS}s — /kill if stuck ({_elapsed()})",
             buttons=stall_button_specs(instance_id),
         )
 
