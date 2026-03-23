@@ -225,6 +225,7 @@ class RunResult:
     output_tokens: int = 0
     needs_input: bool = False  # AskUserQuestion detected — waiting for user reply
     usage_limit_reset: object = None  # datetime | None — when usage limit resets (set by parser)
+    api_fallback_used: bool = False   # True if result came from API billing fallback
 
 
 @dataclass

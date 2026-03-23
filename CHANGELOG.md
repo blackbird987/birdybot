@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### API Billing Fallback
+- Add API billing fallback with Haiku when subscription limits are hit — immediate retry instead of hours-long cooldown
+- Add `--fallback-model haiku` for transient 429/overload errors (CLI-native)
+- Secure API key passing via temp file + `apiKeyHelper` (never exposed in subprocess env)
+- Per-instance spending cap via `--max-budget-usd` (default $1.00, configurable)
+- Fallback footer on results shows model used and cost
+- New config: `ANTHROPIC_API_KEY`, `API_FALLBACK_MODEL`, `API_FALLBACK_MAX_USD`
+
 ## v0.54.0 — Outlook Integration (2026-03-23)
 
 - Add optional Outlook integration module (`bot/services/outlook.py`) for reading email and calendar via Windows COM automation

@@ -34,6 +34,14 @@ _NOWND: dict = config.NOWND
 MAX_COOLDOWN_RETRIES = 3
 
 
+def _with_fallback_footer(text: str, result: RunResult) -> str:
+    """Append API billing fallback notice to result text if applicable."""
+    if not result.api_fallback_used:
+        return text
+    cost_note = f" · ~${result.cost_usd:.2f}" if result.cost_usd else ""
+    return text + f"\n\n`⚡ Responded via API billing ({config.API_FALLBACK_MODEL}){cost_note}`"
+
+
 def _format_reset_time(reset_utc: datetime) -> str:
     """Format a UTC reset time for display (Europe/Amsterdam local time)."""
     try:
@@ -177,7 +185,7 @@ async def run_instance(
         if await schedule_cooldown_retry(ctx, inst, result, silent=silent):
             return  # Timer loop in app.py picks this up
 
-        await send_result(ctx, inst, result.result_text, silent=silent)
+        await send_result(ctx, inst, _with_fallback_footer(result.result_text, result), silent=silent)
 
         # Check reboot request BEFORE end_task so it's queued when end_task
         # checks for pending reboots on idle.  Safe because check_reboot_request
@@ -195,7 +203,7 @@ async def run_instance(
             try:
                 if not finalized:
                     finalize_run(ctx, inst, result)
-                await send_result(ctx, inst, result.result_text, silent=silent)
+                await send_result(ctx, inst, _with_fallback_footer(result.result_text, result), silent=silent)
                 delivered = True
             except (asyncio.CancelledError, Exception):
                 pass

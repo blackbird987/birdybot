@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json as _json_mod
 import logging
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -106,6 +108,7 @@ class ClaudeRunner:
         on_stall: StallCallback | None,
         context: str | None = None,
         sibling_context: str | None = None,
+        api_fallback: bool = False,
     ) -> RunResult:
         # Git worktree isolation for build tasks
         if instance.branch:
@@ -120,7 +123,9 @@ class ClaudeRunner:
         # Use worktree as cwd if available (file isolation)
         working_dir = instance.worktree_path or instance.repo_path or None
 
-        cmd, prompt_text, system_prompt_file = self._build_command(instance, context, sibling_context)
+        cmd, prompt_text, system_prompt_file, api_key_file = self._build_command(
+            instance, context, sibling_context, api_fallback=api_fallback,
+        )
         log.info("Running %s (prompt: %d chars via stdin): %s",
                  instance.id, len(prompt_text), " ".join(cmd)[:500])
 
@@ -169,24 +174,36 @@ class ClaudeRunner:
             if result.is_error and "No conversation found" in error_text and instance.session_id:
                 log.warning("Session %s not found for %s, retrying without resume", instance.session_id, instance.id)
                 instance.session_id = None
-                return await self._run_impl(instance, on_progress, on_stall, context, sibling_context)
+                return await self._run_impl(instance, on_progress, on_stall, context, sibling_context, api_fallback=api_fallback)
 
-            # Usage limit: signal to caller for scheduled retry (not a quick retry)
+            # Usage limit: try API billing fallback before scheduling hours-long cooldown
             if result.is_error:
                 reset_at = parse_usage_limit(error_text)
                 if reset_at:
+                    if config.API_FALLBACK_ENABLED and not api_fallback:
+                        log.info("Usage limit for %s, retrying with API billing (%s)",
+                                 instance.id, config.API_FALLBACK_MODEL)
+                        return await self._run_impl(
+                            instance, on_progress, on_stall, context, sibling_context,
+                            api_fallback=True,
+                        )
+                    # No API key or API fallback also failed — schedule cooldown
                     result.usage_limit_reset = reset_at
                     log.info("Usage limit for %s, resets at %s", instance.id, reset_at)
                     return result
 
-            # Auto-retry on transient errors
-            if result.is_error and is_transient_error(
-                result.error_message or result.result_text
-            ) and instance.retry_count == 0:
+            # Auto-retry on transient errors (skip if already in API fallback to prevent loops)
+            if (result.is_error
+                and not api_fallback
+                and is_transient_error(result.error_message or result.result_text)
+                and instance.retry_count == 0):
                 log.info("Transient error for %s, retrying in 30s", instance.id)
                 instance.retry_count = 1
                 await asyncio.sleep(30)
-                return await self._run_impl(instance, on_progress, on_stall, context, sibling_context)
+                return await self._run_impl(instance, on_progress, on_stall, context, sibling_context, api_fallback=False)
+
+            # Tag result if it came from API billing fallback
+            result.api_fallback_used = api_fallback
 
             return result
 
@@ -194,12 +211,13 @@ class ClaudeRunner:
             log.exception("Error running %s", instance.id)
             return RunResult(is_error=True, error_message=str(e))
         finally:
-            # Clean up system prompt temp file on all exit paths
-            if system_prompt_file:
-                try:
-                    os.unlink(system_prompt_file)
-                except OSError:
-                    pass
+            # Clean up temp files on all exit paths
+            for tmp in (system_prompt_file, api_key_file):
+                if tmp:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
             self._processes.pop(instance.id, None)
             # Kill process on cancellation/unexpected error to avoid orphans
             if proc is not None and proc.returncode is None:
@@ -399,12 +417,14 @@ class ClaudeRunner:
         self, instance: Instance,
         context: str | None = None,
         sibling_context: str | None = None,
-    ) -> tuple[list[str], str, str | None]:
+        api_fallback: bool = False,
+    ) -> tuple[list[str], str, str | None, str | None]:
         """Build CLI command and prompt.  Prompt returned separately for stdin piping.
 
-        Returns (cmd, prompt_text, system_prompt_file) — caller must clean up
-        the temp file via os.unlink when done.
+        Returns (cmd, prompt_text, system_prompt_file, api_key_file) — caller
+        must clean up the temp files via os.unlink when done.
         """
+        api_key_file: str | None = None
         cmd = [config.CLAUDE_BINARY, "-p"]
 
         # Build prompt — never mutated on the instance
@@ -414,6 +434,22 @@ class ClaudeRunner:
 
         cmd.extend(["--output-format", "stream-json", "--verbose"])
         cmd.extend(["--effort", instance.effort])
+
+        # API billing fallback: use --bare + apiKeyHelper for secure key passing
+        if api_fallback and config.ANTHROPIC_API_KEY:
+            api_key_file = self._write_api_key_file(config.ANTHROPIC_API_KEY)
+            if api_key_file:
+                # Use repr() for safe path escaping across platforms
+                helper_cmd = f'{sys.executable} -c "print(open({repr(api_key_file)}).read().strip())"'
+                cmd.extend(["--bare"])
+                cmd.extend(["--settings", _json_mod.dumps({"apiKeyHelper": helper_cmd})])
+                cmd.extend(["--model", config.API_FALLBACK_MODEL])
+                cmd.extend(["--max-budget-usd", str(config.API_FALLBACK_MAX_USD)])
+            else:
+                log.warning("API key file write failed for %s, skipping API fallback", instance.id)
+        elif config.API_FALLBACK_ENABLED:
+            # Auto-fallback for transient overload (429s) — CLI handles internally
+            cmd.extend(["--fallback-model", config.API_FALLBACK_MODEL])
 
         # Build system prompt: mobile hint + bot context + pinned context + repo CLAUDE.md + projects dir
         system_prompt = self._build_system_prompt(instance, context, sibling_context)
@@ -457,7 +493,7 @@ class ClaudeRunner:
 
         # Prompt piped via stdin (not CLI arg) to avoid Windows command-line
         # length limit (WinError 206).  No "--" separator needed.
-        return cmd, prompt, sp_file
+        return cmd, prompt, sp_file, api_key_file
 
     @staticmethod
     def _write_system_prompt_file(content: str) -> str | None:
@@ -475,6 +511,28 @@ class ClaudeRunner:
         except OSError:
             log.warning("Failed to write system prompt temp file, falling back to inline")
             # Clean up partial file if it was created
+            if path:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+            return None
+
+    @staticmethod
+    def _write_api_key_file(api_key: str) -> str | None:
+        """Write API key to a temp file for apiKeyHelper. Returns path or None."""
+        path: str | None = None
+        try:
+            f = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".key", prefix="claude_apikey_",
+                delete=False, encoding="utf-8",
+            )
+            path = f.name
+            f.write(api_key)
+            f.close()
+            return path
+        except OSError:
+            log.warning("Failed to write API key temp file")
             if path:
                 try:
                     os.unlink(path)

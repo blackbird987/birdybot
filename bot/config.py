@@ -66,6 +66,12 @@ STALL_TIMEOUT_SECS: int = int(os.getenv("STALL_TIMEOUT_SECS", "60"))
 MAX_PROCESS_LIFETIME_SECS: int = int(os.getenv("MAX_PROCESS_LIFETIME_SECS", "14400"))
 TITLE_TIMEOUT_SECS: int = int(os.getenv("TITLE_TIMEOUT_SECS", "15"))
 INSTANCE_RETENTION_DAYS: int = int(os.getenv("INSTANCE_RETENTION_DAYS", "7"))
+
+# API billing fallback (used when subscription limits are hit)
+ANTHROPIC_API_KEY: str | None = os.getenv("ANTHROPIC_API_KEY")
+API_FALLBACK_MODEL: str = os.getenv("API_FALLBACK_MODEL", "haiku")
+API_FALLBACK_MAX_USD: float = float(os.getenv("API_FALLBACK_MAX_USD", "1.0"))
+API_FALLBACK_ENABLED: bool = bool(ANTHROPIC_API_KEY)
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
 
 # ccusage cache TTL in seconds (adaptive: shortened near rate limits)
