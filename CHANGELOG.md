@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.56.0 — Visual Budget Spending Bar (2026-03-23)
+
 - Visual budget spending bar in dashboard/control rooms when `PLAN_DAILY_LIMIT_USD` is configured
 - Compact spending summary (Today/Week) when no limits are set
 - Block burn rate shown as supplementary line instead of primary bar
