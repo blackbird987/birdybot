@@ -105,7 +105,6 @@ All settings via `.env` (see `.env.example`):
 | `CLAUDE_BINARY` | `claude` | Path to Claude CLI |
 | `MAX_CONCURRENT` | `5` | Max parallel instances |
 | `DAILY_BUDGET_USD` | `20.0` | Daily spending limit |
-| `QUERY_TIMEOUT_SECS` | `300` | Explore mode timeout |
-| `TASK_TIMEOUT_SECS` | `600` | Build mode timeout |
+| `MAX_PROCESS_LIFETIME_SECS` | `14400` | Safety-net lifetime limit (4h) |
 | `PC_NAME` | hostname | Label for this PC (shown in notifications) |
 | `LOG_LEVEL` | `INFO` | Logging level |

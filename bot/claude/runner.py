@@ -107,10 +107,6 @@ class ClaudeRunner:
         context: str | None = None,
         sibling_context: str | None = None,
     ) -> RunResult:
-        inactivity_timeout = (config.TASK_TIMEOUT_SECS
-                              if instance.instance_type == InstanceType.TASK
-                              else config.QUERY_TIMEOUT_SECS)
-
         # Git worktree isolation for build tasks
         if instance.branch:
             await self._ensure_worktree(instance)
@@ -164,10 +160,8 @@ class ClaudeRunner:
                     pass
                 return RunResult(is_error=True, error_message=f"Failed to send prompt: {exc}")
 
-            # Activity-based timeout: only times out if no output for
-            # inactivity_timeout seconds (not wall-clock total runtime)
             result = await self._stream_output(
-                proc, instance, on_progress, on_stall, inactivity_timeout,
+                proc, instance, on_progress, on_stall,
             )
 
             # Dead session: clear session_id and retry without --resume
@@ -222,40 +216,42 @@ class ClaudeRunner:
         instance: Instance,
         on_progress: ProgressCallback | None,
         on_stall: StallCallback | None,
-        inactivity_timeout: int = 300,
     ) -> RunResult:
         """Read stdout line-by-line, parse stream-json, detect stalls.
 
-        Uses an activity-based timeout: the process is only killed if no
-        output is received for ``inactivity_timeout`` seconds.  This lets
-        long-running but actively-streaming sessions continue indefinitely.
+        No inactivity timeout — processes run until they finish or the user
+        kills them.  A safety-net lifetime limit (default 4h) catches truly
+        orphaned processes.
         """
         events: list[dict] = []
         captured_session_id: str | None = None
         ask_question: str | None = None  # Set when AskUserQuestion detected
         last_output_time = asyncio.get_event_loop().time()
+        process_start_time = last_output_time
         stall_warned = False
-        timed_out = False
+        lifetime_exceeded = False
         stall_check_task: asyncio.Task | None = None
 
         async def check_stall():
-            nonlocal stall_warned, timed_out
+            nonlocal stall_warned, lifetime_exceeded
             while True:
                 await asyncio.sleep(10)
-                elapsed = asyncio.get_event_loop().time() - last_output_time
+                now = asyncio.get_event_loop().time()
+                elapsed_since_output = now - last_output_time
+                elapsed_since_start = now - process_start_time
 
-                # Hard inactivity timeout — kill the process
-                if elapsed > inactivity_timeout:
-                    timed_out = True
+                # Safety-net: kill truly orphaned processes
+                if elapsed_since_start > config.MAX_PROCESS_LIFETIME_SECS:
+                    lifetime_exceeded = True
                     log.warning(
-                        "Inactivity timeout for %s — no output for %ds",
-                        instance.id, inactivity_timeout,
+                        "Lifetime limit for %s — running for %ds",
+                        instance.id, int(elapsed_since_start),
                     )
                     proc.terminate()
                     return
 
-                # Early stall warning
-                if elapsed > config.STALL_TIMEOUT_SECS and not stall_warned:
+                # Stall warning (no auto-kill)
+                if elapsed_since_output > config.STALL_TIMEOUT_SECS and not stall_warned:
                     stall_warned = True
                     if on_stall:
                         try:
@@ -287,7 +283,7 @@ class ClaudeRunner:
                 event = parse_stream_line(decoded)
                 if event:
                     events.append(event)
-                    # Eagerly capture session_id so it survives a timeout kill
+                    # Eagerly capture session_id so it survives early termination
                     if not captured_session_id and event.get("session_id"):
                         captured_session_id = event["session_id"]
                     if on_progress:
@@ -344,11 +340,11 @@ class ClaudeRunner:
 
         await proc.wait()
 
-        if timed_out:
+        if lifetime_exceeded:
             return RunResult(
                 session_id=captured_session_id,
                 is_error=True,
-                error_message=f"No output for {inactivity_timeout}s — timed out",
+                error_message=f"Process exceeded {config.MAX_PROCESS_LIFETIME_SECS // 3600}h lifetime limit",
             )
 
         # Capture stderr for error info

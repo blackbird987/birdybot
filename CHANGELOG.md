@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## v0.57.1 — Remove Inactivity Timeout (2026-03-23)
+
+- Remove inactivity timeout that killed long-running queries/tasks after 5-10 min of silence
+- Add 4-hour safety-net lifetime limit to catch truly orphaned processes
+- Update stall warning to tell user to `/kill` if stuck (no auto-kill)
+
 ## v0.57.0 — Discord-Friendly Formatting (2026-03-23)
 
 - Add Discord formatting rules to WORKING_CONTEXT: ban pipe tables, nested bullets, image syntax, horizontal rules
