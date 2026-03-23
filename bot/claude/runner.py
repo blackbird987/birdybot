@@ -138,7 +138,7 @@ class ClaudeRunner:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=working_dir,
                 env=env,
-                limit=1024 * 1024,  # 1MB line buffer (default 64KB too small for stream-json)
+                limit=10 * 1024 * 1024,  # 10MB line buffer (default 64KB too small for stream-json)
                 **_NOWND,
             )
             # Register immediately so kill/cleanup works even if stdin write fails
@@ -272,6 +272,10 @@ class ClaudeRunner:
                     if proc.returncode is not None:
                         break
                     continue
+                except (ValueError, asyncio.LimitOverrunError):
+                    log.warning("Oversized line from %s (>10MB), skipping", instance.id)
+                    proc.terminate()
+                    break
 
                 if not line:
                     break
