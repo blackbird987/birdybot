@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.57.0 — Discord-Friendly Formatting (2026-03-23)
+
 - Add Discord formatting rules to WORKING_CONTEXT: ban pipe tables, nested bullets, image syntax, horizontal rules
 - Replace pipe-delimited summary table in plan review prompt with Discord-friendly bullet list format
 - Remove `---` separator from review prompt to match formatting rules
