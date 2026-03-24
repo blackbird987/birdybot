@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Auto-derive usage progress bar from rolling 7-day average (no config needed, requires 3+ days of data)
+
 ## v0.58.2 — Reboot Drain Timeout (2026-03-24)
 
 - Add reboot drain timeout (120s default) — force-kills hung processes so reboots no longer hang indefinitely

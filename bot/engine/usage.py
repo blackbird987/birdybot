@@ -529,9 +529,10 @@ def format_usage_bar(
 
     Returns None only when no data at all is available.
 
-    When a daily budget limit is configured, renders a spending progress bar
-    as the primary visual (driven by daily cost / limit).  When no limits are
-    configured, shows a compact spending summary without a bar.
+    Renders a spending progress bar when a daily limit is available — either
+    from explicit config (PLAN_DAILY_LIMIT_USD) or auto-derived from the
+    rolling 7-day average (requires 3+ days of history).  Falls back to a
+    compact text summary when neither source is available.
 
     Block data (5-hour billing window) is shown as a supplementary line when
     available, but the spending bar is independent of it.
@@ -543,13 +544,21 @@ def format_usage_bar(
     daily_limit = config.PLAN_DAILY_LIMIT_USD
     weekly_limit = config.PLAN_WEEKLY_LIMIT_USD
 
-    # --- Primary: spending progress bar (when daily limit configured) ---
+    # Auto-derive daily limit from rolling average when no explicit limit set.
+    # Require 3+ days of history so the average is meaningful.
+    auto_derived = False
+    if daily_limit == 0 and weekly and weekly.cost_usd > 0 and weekly.days >= 3:
+        daily_limit = weekly.cost_usd / weekly.days
+        auto_derived = True
+
+    # --- Primary: spending progress bar (when daily limit available) ---
     if daily and daily_limit > 0:
         ratio = min(daily.cost_usd / daily_limit, 1.0)
         filled = round(ratio * 16)
         bar = "\u2588" * filled + "\u2591" * (16 - filled)
-        pct = daily.cost_usd / daily_limit * 100  # unclamped for text
-        lines.append(f"`{bar}` ${daily.cost_usd:,.0f} / ${daily_limit:,.0f} daily ({pct:.0f}%)")
+        pct = min(daily.cost_usd / daily_limit * 100, 999)  # cap display
+        label = "avg" if auto_derived else "daily"
+        lines.append(f"`{bar}` ${daily.cost_usd:,.0f} / ${daily_limit:,.0f} {label} ({pct:.0f}%)")
 
         # Weekly as compact text below
         if weekly and weekly_limit > 0:
@@ -558,7 +567,7 @@ def format_usage_bar(
         elif weekly:
             lines.append(f"Week: ${weekly.cost_usd:,.0f}")
 
-    # --- Fallback: compact summary (no daily limit configured) ---
+    # --- Fallback: compact summary (no limit and <3 days of data) ---
     elif daily or weekly:
         parts: list[str] = []
         if daily:
