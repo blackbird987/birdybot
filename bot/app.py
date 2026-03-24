@@ -554,6 +554,7 @@ async def run() -> None:
         except Exception:
             log.exception("Reboot executor failed — resetting for retry")
             runner.clear_reboots()
+            runner.purge_drain_queue()  # discard stale queued messages
             runner._reboot_executing = False
 
     runner.set_on_idle_reboot(_execute_pending_reboots)
@@ -707,6 +708,12 @@ async def run() -> None:
             config.REBOOT_MSG_FILE.unlink(missing_ok=True)
         except Exception:
             pass
+
+    # Replay messages that were queued during reboot drain
+    drain_queue = runner.read_drain_queue()
+    if drain_queue and discord_bot:
+        asyncio.create_task(discord_bot.dispatch_drain_queue(drain_queue))
+        log.info("Dispatched %d drain-queued messages for replay", len(drain_queue))
 
     # Update thinking messages for orphaned instances (interrupted by restart)
     await _cleanup_orphan_messages(notifier, orphans)

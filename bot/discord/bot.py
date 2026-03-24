@@ -276,16 +276,45 @@ class ClaudeBot(discord.Client):
 
     # --- Resume after reboot ---
 
+    async def _replay_to_thread(
+        self, channel_id: str, prompt: str, repo_name: str | None = None,
+    ) -> bool:
+        """Look up a thread, build context, and dispatch a prompt through on_text.
+
+        Returns True on success, False if the thread wasn't found.
+        """
+        lookup = self._forums.thread_to_project(channel_id)
+        if not lookup:
+            log.warning("replay_to_thread: no thread mapping for %s", channel_id)
+            return False
+        proj, info = lookup
+        session_id = info.session_id or None
+        resolved_repo = repo_name or (
+            proj.repo_name if proj.repo_name != "_default" else None
+        )
+        self._cancel_sleep(channel_id)
+        ctx = self._ctx(channel_id, session_id=session_id, repo_name=resolved_repo,
+                        thread_info=info)
+        await commands.on_text(ctx, prompt)
+        self._forums.persist_ctx_settings(ctx)
+        asyncio.create_task(self._try_apply_tags_after_run(channel_id))
+        self._schedule_sleep(channel_id)
+        return True
+
+    async def _wait_for_ready(self, label: str) -> bool:
+        """Wait up to 60s for bot + forum map. Returns False on timeout."""
+        for _ in range(60):
+            if self._ready_event.is_set() and self._forums.forum_projects:
+                return True
+            await asyncio.sleep(1)
+        log.warning("%s: timed out waiting for bot ready + forum map", label)
+        return False
+
     async def dispatch_resume(
         self, channel_id: str, prompt: str, announce: str | None = None,
     ) -> None:
         """Dispatch a query to a forum thread after reboot, resuming the session."""
-        for attempt in range(60):
-            if self._ready_event.is_set() and self._forums.forum_projects:
-                break
-            await asyncio.sleep(1)
-        else:
-            log.warning("dispatch_resume: timed out waiting for bot ready + forum map")
+        if not await self._wait_for_ready("dispatch_resume"):
             return
 
         if announce:
@@ -299,23 +328,31 @@ class ClaudeBot(discord.Client):
         if not prompt:
             return
 
-        lookup = self._forums.thread_to_project(channel_id)
-        if not lookup:
-            log.warning("dispatch_resume: no thread mapping for %s (have %d projects)",
-                        channel_id, len(self._forums.forum_projects))
+        log.info("Resuming post-reboot in thread %s: %s", channel_id, prompt[:80])
+        if await self._replay_to_thread(channel_id, prompt):
+            asyncio.create_task(self._refresh_dashboard())
+
+    async def dispatch_drain_queue(self, queue: list[dict]) -> None:
+        """Replay messages that were queued during a reboot drain."""
+        if not queue:
             return
-        proj, info = lookup
-        session_id = info.session_id or None
-        repo_name = proj.repo_name if proj.repo_name != "_default" else None
-        log.info("Resuming post-reboot in thread %s session=%s: %s",
-                 channel_id, session_id and session_id[:12], prompt[:80])
-        self._cancel_sleep(channel_id)
-        ctx = self._ctx(channel_id, session_id=session_id, repo_name=repo_name,
-                        thread_info=info)
-        await commands.on_text(ctx, prompt)
-        self._forums.persist_ctx_settings(ctx)
-        asyncio.create_task(self._try_apply_tags_after_run(channel_id))
-        self._schedule_sleep(channel_id)
+        if not await self._wait_for_ready("dispatch_drain_queue"):
+            return
+
+        log.info("Replaying %d drain-queued messages", len(queue))
+        for entry in queue:
+            channel_id = entry.get("channel_id")
+            prompt = entry.get("prompt")
+            if not channel_id or not prompt:
+                continue
+            try:
+                log.info("Replaying queued message in thread %s: %s",
+                         channel_id, prompt[:60])
+                await self._replay_to_thread(
+                    channel_id, prompt, repo_name=entry.get("repo_name"),
+                )
+            except Exception:
+                log.exception("Failed to replay queued message in thread %s", channel_id)
         asyncio.create_task(self._refresh_dashboard())
 
     def _resolve_user_forum_context(

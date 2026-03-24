@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Queue user messages during reboot drain and auto-replay them after restart (prevents lost prompts)
+
 ## v0.58.3 — Auto-Derive Usage Progress Bar (2026-03-24)
 
 - Auto-derive usage progress bar from rolling 7-day average (no config needed, requires 3+ days of data)
