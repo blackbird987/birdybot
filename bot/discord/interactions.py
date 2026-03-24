@@ -38,15 +38,17 @@ _deploy_status_msgs: dict[str, int] = {}  # repo_name → message_id
 class DeployStatus:
     """Manages a single editable deploy status message in a control room.
 
+    Used only for command-based deploys (not self-managed reboots).
     Uses the bot token (channel.fetch_message) instead of the interaction
     webhook token for edits, avoiding the 15-minute expiry on long deploys.
     """
 
     def __init__(self, channel: discord.abc.Messageable, msg: discord.Message,
-                 repo_name: str):
+                 repo_name: str, store: object | None = None):
         self._channel = channel
         self._msg = msg
         self._repo_name = repo_name
+        self._store = store
         self.id = msg.id
 
     async def update(self, content: str) -> None:
@@ -69,11 +71,46 @@ class DeployStatus:
                 self.id = self._msg.id
                 _deploy_status_msgs[self._repo_name] = self.id
 
+    async def delete(self) -> None:
+        """Delete the status message. Persist ID to state on failure for startup cleanup."""
+        _deploy_status_msgs.pop(self._repo_name, None)
+        try:
+            await self._msg.delete()
+        except discord.NotFound:
+            pass  # Already gone
+        except Exception:
+            # Rate limit, network error, etc. — try fetch fallback
+            try:
+                msg = await self._channel.fetch_message(self.id)
+                await msg.delete()
+            except discord.NotFound:
+                pass  # Already gone
+            except Exception:
+                self._persist_for_cleanup()
+
+    def _persist_for_cleanup(self) -> None:
+        """Persist message ID to state.json for startup cleanup."""
+        if not self._store:
+            return
+        try:
+            state = self._store.get_platform_state("discord")
+            pending = state.get("deploy_status_msgs", {})
+            pending[self._repo_name] = self.id
+            state["deploy_status_msgs"] = pending
+            self._store.set_platform_state("discord", state, persist=True)
+            log.warning("Persisted orphaned deploy status msg %s for cleanup", self.id)
+        except Exception:
+            log.debug("Failed to persist deploy status msg for cleanup", exc_info=True)
+
 
 async def _start_deploy_status(
     interaction: discord.Interaction, repo_name: str, initial_text: str,
+    store: object | None = None,
 ) -> DeployStatus:
-    """Send initial deploy status message, cleaning up the previous one."""
+    """Send initial deploy status message, cleaning up the previous one.
+
+    Used only for command-based deploys (self-managed reboots use the embed).
+    """
     # Delete previous status message for this repo
     old_msg_id = _deploy_status_msgs.pop(repo_name, None)
     if old_msg_id:
@@ -86,7 +123,7 @@ async def _start_deploy_status(
     # Send initial message via interaction (one-time use of webhook token)
     msg = await interaction.followup.send(initial_text, wait=True)
     _deploy_status_msgs[repo_name] = msg.id
-    return DeployStatus(interaction.channel, msg, repo_name)
+    return DeployStatus(interaction.channel, msg, repo_name, store=store)
 
 
 async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
@@ -614,9 +651,8 @@ async def _handle_reboot_repo(
 ) -> None:
     """Execute a reboot/deploy for a repo based on its deploy config.
 
-    Uses a single editable status message to keep the control room clean.
-    All edits after the initial send use the bot token (channel-based) to
-    avoid the 15-minute interaction webhook token expiry.
+    Self-managed reboots show drain status in the control room embed.
+    Command-based deploys use a temporary status message (deleted after).
     """
     config = bot._store.get_deploy_config(repo_name)
     if not config or not config.get("approved"):
@@ -640,29 +676,33 @@ async def _handle_reboot_repo(
         if ds and ds.pending_changes:
             msg += f" ({len(ds.pending_changes)} pending changes)"
 
-        # Single status message for the entire reboot cycle
-        status = await _start_deploy_status(
-            interaction, repo_name, "\U0001f504 Rebooting...",
-        )
+        # Ephemeral ack — only the user who tapped Reboot sees this
+        await interaction.followup.send("Reboot initiated.", ephemeral=True)
 
-        # Drain active tasks first (same as /reboot slash command)
+        # Drain active tasks — show status in the control room embed
         if bot._runner.is_busy:
             ids = ", ".join(bot._runner.active_ids) or "(between steps)"
-            await status.update(f"⏳ Waiting for active work to finish: {ids}")
+            drain_text = f"Waiting for active work: {ids}"
+            await bot._forums.refresh_control_room(
+                repo_name, drain_status=drain_text,
+            )
             idle = await bot._runner.wait_until_idle(timeout=300)
             if not idle:
                 remaining = ", ".join(bot._runner.active_ids)
-                await status.update(
-                    f"⚠️ Timed out. Force-rebooting with "
+                drain_text = (
+                    f"⚠️ Timed out — force-rebooting with "
                     f"{bot._runner.active_count} still running: {remaining}"
                 )
+                await bot._forums.refresh_control_room(
+                    repo_name, drain_status=drain_text,
+                )
 
+        # Embed edit confirmed above — safe to request reboot now
         bot._runner.request_reboot({
             "message": msg,
             "channel_id": str(interaction.channel_id),
             "platform": "discord",
         })
-        await status.update("\U0001f504 Rebooting...")
         # NOTE: Do NOT reset deploy state here — capture_boot_baselines()
         # handles it on the next startup when it detects self_managed=True.
 
@@ -685,9 +725,10 @@ async def _handle_reboot_repo(
         else:
             cwd = repo_path
 
-        # Single status message for the entire deploy cycle
+        # Single status message for the deploy cycle (deleted after completion)
         status = await _start_deploy_status(
             interaction, repo_name, "\U0001f680 Pushing to origin...",
+            store=bot._store,
         )
 
         # Push to origin before deploying (safety net)
@@ -773,6 +814,10 @@ async def _handle_reboot_repo(
                 ds.last_deploy_error = str(e)[:200]
                 bot._store.set_deploy_state(repo_name, ds)
             await status.update(f"\u274c Deploy error: {e}")
+
+    # For command deploys, delete the status message — result is in the embed
+    if method == "command":
+        await status.delete()
 
     asyncio.create_task(bot._forums.refresh_control_room(repo_name))
     asyncio.create_task(bot._refresh_dashboard())

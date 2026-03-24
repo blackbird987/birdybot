@@ -1127,7 +1127,78 @@ class ForumManager:
         await self._auto_follow_user_thread(thread, user_id)
         log.info("Created control room for user %s (thread=%s)", ua.display_name, thread.id)
 
-    async def refresh_control_room(self, repo_name: str, *, usage_bar: str | None = None) -> None:
+    async def cleanup_all_control_rooms(self) -> None:
+        """Delete orphaned messages from all control room threads on startup.
+
+        Runs as a fire-and-forget task — must not block bot readiness.
+        Deletes any message that isn't the pinned control embed, plus any
+        persisted deploy status message IDs from failed deletions.
+        """
+        # First, clean up any persisted deploy status msg IDs
+        state = self._store.get_platform_state("discord")
+        pending_msgs = state.pop("deploy_status_msgs", {})
+        if pending_msgs:
+            self._store.set_platform_state("discord", state, persist=True)
+            for repo_name, msg_id in pending_msgs.items():
+                await self._delete_message_safe(repo_name, msg_id)
+
+        # Then purge non-embed messages from each control room thread
+        # Snapshot to avoid RuntimeError if dict is mutated during async iteration
+        for repo_name, proj in list(self._forum_projects.items()):
+            if not proj.control_thread_id or not proj.control_message_id:
+                continue
+            try:
+                await self._cleanup_control_room(
+                    proj.control_thread_id, proj.control_message_id,
+                )
+            except Exception:
+                log.debug("Control room cleanup failed for %s", repo_name, exc_info=True)
+
+    async def _cleanup_control_room(self, thread_id: str, embed_msg_id: str) -> None:
+        """Delete all messages in a control room thread except the embed."""
+        try:
+            thread = self._client.get_channel(int(thread_id))
+            if not thread:
+                thread = await self._client.fetch_channel(int(thread_id))
+        except (discord.NotFound, discord.HTTPException):
+            return
+        if not isinstance(thread, discord.Thread):
+            return
+
+        embed_id = int(embed_msg_id)
+        deleted = 0
+        async for message in thread.history(limit=50):
+            if message.id == embed_id:
+                continue
+            try:
+                await message.delete()
+                deleted += 1
+            except (discord.NotFound, discord.HTTPException):
+                pass  # Already gone or too old (>14 days)
+            except Exception:
+                log.debug("Failed to delete msg %s in control room", message.id, exc_info=True)
+        if deleted:
+            log.info("Cleaned up %d orphaned messages from control room %s", deleted, thread_id)
+
+    async def _delete_message_safe(self, repo_name: str, msg_id: int) -> None:
+        """Best-effort delete a single message by ID from a repo's control room."""
+        proj = self._forum_projects.get(repo_name)
+        if not proj or not proj.control_thread_id:
+            return
+        try:
+            thread = self._client.get_channel(int(proj.control_thread_id))
+            if not thread:
+                thread = await self._client.fetch_channel(int(proj.control_thread_id))
+            msg = await thread.fetch_message(msg_id)
+            await msg.delete()
+            log.info("Deleted persisted deploy status msg %s for %s", msg_id, repo_name)
+        except (discord.NotFound, discord.HTTPException):
+            pass  # Already gone
+        except Exception:
+            log.debug("Failed to delete persisted msg %s", msg_id, exc_info=True)
+
+    async def refresh_control_room(self, repo_name: str, *, usage_bar: str | None = None,
+                                   drain_status: str | None = None) -> None:
         """Update the control room embed for a repo forum."""
         proj = self._forum_projects.get(repo_name)
         if not proj or not proj.control_thread_id or not proj.control_message_id:
@@ -1204,6 +1275,7 @@ class ForumManager:
                 deploy_state=ds,
                 deploy_thread_ids=deploy_thread_ids,
                 usage_bar=usage_bar,
+                drain_status=drain_status,
             )
             view = channels.build_control_view(
                 repo_name,

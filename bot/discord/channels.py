@@ -455,6 +455,7 @@ def build_control_embed(
     deploy_state: DeployState | None = None,
     deploy_thread_ids: dict[str, str] | None = None,
     usage_bar: str | None = None,
+    drain_status: str | None = None,
 ) -> discord.Embed:
     """Build the embed for a repo control room post.
 
@@ -513,6 +514,10 @@ def build_control_embed(
     # Inline summary fields
     if branch:
         embed.add_field(name="Branch", value=f"`{branch}`", inline=True)
+
+    # Transient drain status (shown during reboot drain, cleared on next refresh)
+    if drain_status:
+        embed.add_field(name="⏳ Draining", value=drain_status, inline=False)
 
     # Deploy state section
     if deploy_state and deploy_state.needs_reboot:
