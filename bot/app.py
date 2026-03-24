@@ -734,7 +734,9 @@ async def run() -> None:
             )
             await runner.kill_all()
             # Give run_instance coroutines time to finalize + deliver results
-            await runner.wait_until_idle(timeout=10)
+            drained = await runner.wait_until_idle(timeout=10)
+            if not drained:
+                runner.force_clear_tasks()
 
     store.save()
 

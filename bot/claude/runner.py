@@ -62,6 +62,7 @@ class ClaudeRunner:
         self._reboot_executing = False
         self._on_idle_callback: Callable[[], Awaitable[None]] | None = None
         self._idle_loop: asyncio.AbstractEventLoop | None = None
+        self._drain_timer_task: asyncio.Task | None = None
 
         # Per-repo lock: serializes git-metadata-mutating operations
         # (worktree add/remove, merge, branch delete) to prevent lock file races
@@ -792,6 +793,7 @@ class ClaudeRunner:
         self._draining = True
         self._reboot_requests.append(data)
         self._maybe_fire_idle_reboot()
+        self._start_drain_timer()
 
     def pending_reboots(self) -> list[dict]:
         """Return a copy of pending reboot requests."""
@@ -801,6 +803,9 @@ class ClaudeRunner:
         """Clear all pending reboot requests and reset draining flag."""
         self._reboot_requests.clear()
         self._draining = False
+        if self._drain_timer_task and not self._drain_timer_task.done():
+            self._drain_timer_task.cancel()
+            self._drain_timer_task = None
 
     def set_on_idle_reboot(self, callback: Callable[[], Awaitable[None]]) -> None:
         """Register async callback invoked when last task ends and reboots are pending.
@@ -823,6 +828,57 @@ class ClaudeRunner:
             self._idle_loop.call_soon(
                 lambda: self._idle_loop.create_task(self._on_idle_callback())
             )
+
+    def _start_drain_timer(self) -> None:
+        """Start a background timer that force-kills processes after drain timeout."""
+        if self._drain_timer_task and not self._drain_timer_task.done():
+            return  # Timer already running
+        if not self._idle_loop:
+            log.warning("No event loop for drain timer — reboot may hang")
+            return
+        log.info(
+            "Reboot drain started — will force-kill in %ds if not idle",
+            config.REBOOT_DRAIN_TIMEOUT_SECS,
+        )
+        self._drain_timer_task = self._idle_loop.create_task(self._drain_timeout())
+
+    async def _drain_timeout(self) -> None:
+        """Wait for drain timeout, then force-kill remaining processes and tasks."""
+        try:
+            await asyncio.sleep(config.REBOOT_DRAIN_TIMEOUT_SECS)
+            if not self._reboot_requests:
+                return  # Reboot already executed normally
+            if not self._active_tasks and not self._processes:
+                return  # Already idle
+            log.warning(
+                "Reboot drain timed out after %ds — killing %d tasks, %d processes",
+                config.REBOOT_DRAIN_TIMEOUT_SECS,
+                len(self._active_tasks),
+                len(self._processes),
+            )
+            await self.kill_all()
+            self.force_clear_tasks()
+            self._maybe_fire_idle_reboot()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            log.exception("Drain timeout error")
+
+    def force_clear_tasks(self) -> int:
+        """Clear all active tasks regardless of process state. Returns count cleared.
+
+        Use after kill_all() to unstick orphaned chain tasks.
+        """
+        count = len(self._active_tasks)
+        if count:
+            log.warning(
+                "Force-clearing %d orphaned tasks: %s",
+                count, list(self._active_tasks),
+            )
+        self._active_tasks.clear()
+        self._active_sessions.clear()
+        self._idle_event.set()
+        return count
 
     async def kill(self, instance_id: str) -> bool:
         """Terminate a running Claude process."""
