@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Add reboot drain timeout (120s default) — force-kills hung processes so reboots no longer hang indefinitely
+- Fix shutdown drain to clear orphaned chain tasks after kill_all
+
 ## v0.58.1 — Fix Usage Visualization Crash (2026-03-23)
 
 - Fix usage visualization crash when ccusage returns `null` projection/burnRate fields
