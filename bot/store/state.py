@@ -369,6 +369,13 @@ class StateStore:
         del self._repos[name]
         if self._active_repo == name:
             self._active_repo = next(iter(self._repos), None)
+        # Clean up any persisted deploy status msg IDs for this repo
+        discord_state = self._platform_state.get("discord", {})
+        pending = discord_state.get("deploy_status_msgs", {})
+        if name in pending:
+            del pending[name]
+            if not pending:
+                discord_state.pop("deploy_status_msgs", None)
         self.save()
         return True
 

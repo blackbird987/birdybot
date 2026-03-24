@@ -506,19 +506,10 @@ async def run() -> None:
             last = reboots[-1]
             reason = last.get("message", "reboot requested")
 
-            # Notify all distinct channels that requested reboots
-            channels_seen: set[tuple[str, str]] = set()
-            for r in reboots:
-                ch = r.get("channel_id")
-                plat = r.get("platform")
-                if ch and plat and (ch, plat) not in channels_seen:
-                    channels_seen.add((ch, plat))
-                    if plat in notifier._messengers:
-                        messenger, _ = notifier._messengers[plat]
-                        try:
-                            await messenger.send_text(ch, f"🔄 Rebooting: {reason}")
-                        except Exception:
-                            log.warning("Failed to notify %s:%s about reboot", plat, ch)
+            # Reboot notification removed — control room embed already shows
+            # drain/reboot state, and ephemeral ack is sent by the button handler.
+            # Sending messages here created orphaned clutter in control rooms
+            # since _deploy_status_msgs is lost on restart.
 
             # Merge resume prompts from all requesters
             resume_parts = [r["resume_prompt"] for r in reboots if r.get("resume_prompt")]

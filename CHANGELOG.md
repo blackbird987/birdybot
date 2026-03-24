@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Clean control rooms: remove orphaned reboot/deploy status messages, show drain state in embed instead of separate messages
+- Startup cleanup: auto-purge non-embed messages from control room threads on boot
+- Command deploys: delete status message after completion, persist for cleanup on failure
+- Remove duplicate reboot notification from app.py that created second orphaned message per reboot
+
 ## v0.58.4 — Reboot Drain Message Queue (2026-03-24)
 
 - Queue user messages during reboot drain and auto-replay them after restart (prevents lost prompts)

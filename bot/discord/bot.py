@@ -471,6 +471,11 @@ class ClaudeBot(discord.Client):
         self._forums.load_forum_map()
         await self._forums.reconcile_forums()
 
+        # Clean up orphaned messages in control rooms (one-time, non-blocking)
+        if not getattr(self, '_control_rooms_cleaned', False):
+            self._control_rooms_cleaned = True
+            asyncio.create_task(self._forums.cleanup_all_control_rooms())
+
         self._ready_event.set()
 
         # Start monitor service if there are enabled monitors
