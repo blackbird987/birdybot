@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.58.5 — Clean Control Rooms (2026-03-24)
+
 - Clean control rooms: remove orphaned reboot/deploy status messages, show drain state in embed instead of separate messages
 - Startup cleanup: auto-purge non-embed messages from control room threads on boot
 - Command deploys: delete status message after completion, persist for cleanup on failure
