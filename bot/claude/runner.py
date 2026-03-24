@@ -800,12 +800,51 @@ class ClaudeRunner:
         return list(self._reboot_requests)
 
     def clear_reboots(self) -> None:
-        """Clear all pending reboot requests and reset draining flag."""
+        """Clear all pending reboot requests and reset draining flag.
+
+        Does NOT delete drain_queue.json — the new process needs it after
+        a successful reboot.  Call purge_drain_queue() explicitly when a
+        reboot is *aborted* and queued messages should be discarded.
+        """
         self._reboot_requests.clear()
         self._draining = False
         if self._drain_timer_task and not self._drain_timer_task.done():
             self._drain_timer_task.cancel()
             self._drain_timer_task = None
+
+    @staticmethod
+    def purge_drain_queue() -> None:
+        """Delete the drain queue file (e.g. when reboot is aborted)."""
+        try:
+            config.DRAIN_QUEUE_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    def queue_for_replay(self, entry: dict) -> None:
+        """Persist a user request to be replayed after reboot completes."""
+        queue: list[dict] = []
+        try:
+            data = _json_mod.loads(config.DRAIN_QUEUE_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                queue = data
+        except (FileNotFoundError, _json_mod.JSONDecodeError):
+            pass
+        queue.append(entry)
+        config.DRAIN_QUEUE_FILE.write_text(
+            _json_mod.dumps(queue, indent=2), encoding="utf-8",
+        )
+        log.info("Queued message for post-reboot replay: channel=%s prompt=%s",
+                 entry.get("channel_id"), (entry.get("prompt") or "")[:60])
+
+    @staticmethod
+    def read_drain_queue() -> list[dict]:
+        """Read and delete the drain queue file. Returns [] if absent."""
+        try:
+            data = _json_mod.loads(config.DRAIN_QUEUE_FILE.read_text(encoding="utf-8"))
+            config.DRAIN_QUEUE_FILE.unlink(missing_ok=True)
+            return data if isinstance(data, list) else []
+        except (FileNotFoundError, _json_mod.JSONDecodeError):
+            return []
 
     def set_on_idle_reboot(self, callback: Callable[[], Awaitable[None]]) -> None:
         """Register async callback invoked when last task ends and reboots are pending.

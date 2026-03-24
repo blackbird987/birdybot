@@ -167,7 +167,13 @@ async def spawn_from(
     check_session = source.session_id if cfg.resume_session else None
     spawn_err = ctx.runner.check_spawn_allowed(check_session)
     if spawn_err:
-        await ctx.messenger.send_text(ctx.channel_id, spawn_err)
+        if ctx.runner.is_draining:
+            await ctx.messenger.send_text(
+                ctx.channel_id,
+                "Reboot in progress — retry this action after restart.",
+            )
+        else:
+            await ctx.messenger.send_text(ctx.channel_id, spawn_err)
         return None
 
     # Budget guard (lazy import to avoid circular: commands -> workflows -> commands)

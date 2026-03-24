@@ -250,7 +250,22 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
     # Block spawns during reboot drain or if session already has a running task
     spawn_err = ctx.runner.check_spawn_allowed(ctx.session_id)
     if spawn_err:
-        await ctx.messenger.send_text(ctx.channel_id, spawn_err)
+        if ctx.runner.is_draining:
+            ctx.runner.queue_for_replay({
+                "channel_id": ctx.channel_id,
+                "platform": ctx.platform,
+                "prompt": prompt,
+                "repo_name": ctx.repo_name,
+                "user_id": ctx.user_id,
+                "user_name": ctx.user_name,
+                "is_owner": ctx.is_owner,
+            })
+            await ctx.messenger.send_text(
+                ctx.channel_id,
+                "Reboot in progress — your message will be replayed after restart.",
+            )
+        else:
+            await ctx.messenger.send_text(ctx.channel_id, spawn_err)
         return
 
     if not check_budget(ctx):
