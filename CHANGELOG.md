@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## v0.61.1 — Fix Silent API Auto-Billing (2026-03-27)
+
+- Fix silent API billing: remove `--fallback-model` from normal (non-PPU) CLI runs and strip `ANTHROPIC_API_KEY` from non-PPU subprocess env — CLI can no longer auto-spend without explicit user opt-in
+
 ## v0.61.0 — Usage-Limit DM Notifier (2026-03-27)
 
 - Native usage-limit notifier: DMs owner at 5am PT (limits active) and 11am PT (limits lifted) on weekdays — DST-aware, survives restarts, no expiry

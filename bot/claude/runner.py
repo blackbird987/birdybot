@@ -133,10 +133,14 @@ class ClaudeRunner:
         log.info("Running %s (prompt: %d chars via stdin): %s",
                  instance.id, len(prompt_text), " ".join(cmd)[:500])
 
-        # Clear CLAUDE_CODE env var to avoid nested-session error
+        # Clear CLAUDE_CODE env var to avoid nested-session error.
+        # Strip ANTHROPIC_API_KEY on non-PPU runs so the CLI can never
+        # silently bill via API; PPU runs keep it as backup for apiKeyHelper.
         env = {**os.environ}
         env.pop("CLAUDE_CODE", None)
         env.pop("CLAUDECODE", None)
+        if not api_fallback:
+            env.pop("ANTHROPIC_API_KEY", None)
 
         proc = None
         try:
@@ -443,9 +447,6 @@ class ClaudeRunner:
                 cmd.extend(["--max-budget-usd", str(config.API_FALLBACK_MAX_USD)])
             else:
                 log.warning("API key file write failed for %s, skipping API fallback", instance.id)
-        elif config.API_FALLBACK_ENABLED:
-            # Auto-fallback for transient overload (429s) — CLI handles internally
-            cmd.extend(["--fallback-model", config.API_FALLBACK_MODEL])
 
         # Build system prompt: mobile hint + bot context + pinned context + repo CLAUDE.md + projects dir
         system_prompt = self._build_system_prompt(instance, context, sibling_context)
