@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.61.0 — Usage-Limit DM Notifier (2026-03-27)
+
 - Native usage-limit notifier: DMs owner at 5am PT (limits active) and 11am PT (limits lifted) on weekdays — DST-aware, survives restarts, no expiry
 - Add `tzdata` as Windows dependency (required by `zoneinfo` for IANA timezone data)
 
