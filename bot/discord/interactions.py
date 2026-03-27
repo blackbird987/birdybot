@@ -27,7 +27,7 @@ log = logging.getLogger(__name__)
 _QUERY_ACTIONS: frozenset[str] = frozenset({
     "retry", "plan", "build", "review_plan", "apply_revisions",
     "review_code", "commit", "done", "autopilot", "build_and_ship",
-    "continue_autopilot",
+    "continue_autopilot", "continue_ppu",
 })
 
 # --- Deploy status message management (keeps control rooms clean) ---

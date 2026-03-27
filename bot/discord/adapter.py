@@ -32,6 +32,7 @@ _STYLE_MAP = {
     "autopilot:": discord.ButtonStyle.success,     # Green
     "build_and_ship:": discord.ButtonStyle.success, # Green
     "continue_autopilot:": discord.ButtonStyle.success,  # Green
+    "continue_ppu:": discord.ButtonStyle.danger,           # Red — signals cost
 }
 
 

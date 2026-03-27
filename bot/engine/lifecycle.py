@@ -97,7 +97,19 @@ async def schedule_cooldown_retry(
         f"⏳ Usage limit hit — auto-retrying at {reset_str}"
         f" (attempt {inst.cooldown_retries}/{MAX_COOLDOWN_RETRIES})"
     )
-    buttons = [[ButtonSpec("Cancel Auto-Retry", f"cancel_cooldown:{inst.id}")]]
+    buttons = []
+    # Offer pay-per-use opt-in if API key configured, budget not exhausted,
+    # and this isn't an unattended autopilot chain.
+    has_chain = bool(ctx.store.get_autopilot_chain(inst.session_id))
+    if config.API_FALLBACK_ENABLED and not has_chain:
+        daily_spend = ctx.store.get_fallback_spend_today()
+        if daily_spend < config.API_FALLBACK_DAILY_MAX_USD:
+            cap = config.API_FALLBACK_MAX_USD
+            buttons.append([ButtonSpec(
+                f"Continue with {config.API_FALLBACK_MODEL} (≤${cap:.2f})",
+                f"continue_ppu:{inst.id}",
+            )])
+    buttons.append([ButtonSpec("Cancel Auto-Retry", f"cancel_cooldown:{inst.id}")])
     try:
         await ctx.messenger.send_text(
             ctx.channel_id, msg, buttons=buttons, silent=silent,
@@ -199,6 +211,10 @@ async def run_instance(
             return  # Timer loop in app.py picks this up
 
         await send_result(ctx, inst, _with_fallback_footer(result.result_text, result), silent=silent)
+
+        # Track API fallback spending for daily budget cap
+        if result.api_fallback_used and result.cost_usd:
+            ctx.store.add_fallback_cost(result.cost_usd)
 
         # Check reboot request BEFORE end_task so it's queued when end_task
         # checks for pending reboots on idle.  Safe because check_reboot_request

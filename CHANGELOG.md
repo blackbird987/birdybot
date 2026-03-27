@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- Usage limit now stops and shows opt-in button instead of auto-retrying with paid API
+- Pay-per-use button: "Continue with haiku (≤$1.00)" — red, requires explicit tap
+- Daily API fallback budget cap (`API_FALLBACK_DAILY_MAX_USD`, default $5) prevents runaway bills
+- Autopilot chains skip PPU button entirely — auto-retry at reset time only (no unattended spend)
+- Fallback spend tracked separately in state for daily budget enforcement
+
 ## v0.58.6 — Auto-Resume Autopilot After Cooldown (2026-03-27)
 
 - Auto-resume autopilot chain after cooldown retry succeeds (previously only retried the single step, leaving the chain paused)

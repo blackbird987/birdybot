@@ -42,3 +42,4 @@
 - [ ] [Performance] Skip auto-follow for owner-only repos (Low)
 - [ ] [Reliability] Startup merge could auto-push diverged branches (Medium)
 - [ ] [UX/UI] Show cache age when serving stale fallback data (Low)
+- [ ] [DRY/Cleanup] Extract chain resume logic into shared helper (Low)

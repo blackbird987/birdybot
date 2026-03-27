@@ -105,6 +105,7 @@ class Instance:
     cooldown_retry_at: str | None = None   # ISO datetime — auto-retry after usage limit
     cooldown_retries: int = 0              # Count of cooldown retries attempted (capped at 3)
     cooldown_channel_id: str | None = None # Channel to retry in (for cooldown loop)
+    api_fallback: bool = False            # Force API billing fallback on next run
 
     def display_id(self) -> str:
         if self.name:
@@ -157,6 +158,7 @@ class Instance:
             "cooldown_retry_at": self.cooldown_retry_at,
             "cooldown_retries": self.cooldown_retries,
             "cooldown_channel_id": self.cooldown_channel_id,
+            "api_fallback": self.api_fallback,
         }
 
     @classmethod
@@ -206,6 +208,7 @@ class Instance:
             cooldown_retry_at=d.get("cooldown_retry_at"),
             cooldown_retries=d.get("cooldown_retries", 0),
             cooldown_channel_id=d.get("cooldown_channel_id"),
+            api_fallback=d.get("api_fallback", False),
         )
 
 

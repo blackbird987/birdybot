@@ -100,7 +100,10 @@ class ClaudeRunner:
     ) -> RunResult:
         """Run Claude CLI for an instance. Blocks until completion or timeout."""
         async with self._semaphore:
-            return await self._run_impl(instance, on_progress, on_stall, context, sibling_context)
+            return await self._run_impl(
+                instance, on_progress, on_stall, context, sibling_context,
+                api_fallback=instance.api_fallback,
+            )
 
     async def _run_impl(
         self,
@@ -170,6 +173,9 @@ class ClaudeRunner:
                 proc, instance, on_progress, on_stall,
             )
 
+            # Tag result now — before any early returns — so all exit paths carry the flag.
+            result.api_fallback_used = api_fallback
+
             # Dead session: clear session_id and retry without --resume
             error_text = result.error_message or result.result_text or ""
             if result.is_error and "No conversation found" in error_text and instance.session_id:
@@ -177,18 +183,10 @@ class ClaudeRunner:
                 instance.session_id = None
                 return await self._run_impl(instance, on_progress, on_stall, context, sibling_context, api_fallback=api_fallback)
 
-            # Usage limit: try API billing fallback before scheduling hours-long cooldown
+            # Usage limit: let UI offer pay-per-use opt-in instead of auto-retrying
             if result.is_error:
                 reset_at = parse_usage_limit(error_text)
                 if reset_at:
-                    if config.API_FALLBACK_ENABLED and not api_fallback:
-                        log.info("Usage limit for %s, retrying with API billing (%s)",
-                                 instance.id, config.API_FALLBACK_MODEL)
-                        return await self._run_impl(
-                            instance, on_progress, on_stall, context, sibling_context,
-                            api_fallback=True,
-                        )
-                    # No API key or API fallback also failed — schedule cooldown
                     result.usage_limit_reset = reset_at
                     log.info("Usage limit for %s, resets at %s", instance.id, reset_at)
                     return result
@@ -202,9 +200,6 @@ class ClaudeRunner:
                 instance.retry_count = 1
                 await asyncio.sleep(30)
                 return await self._run_impl(instance, on_progress, on_stall, context, sibling_context, api_fallback=False)
-
-            # Tag result if it came from API billing fallback
-            result.api_fallback_used = api_fallback
 
             return result
 

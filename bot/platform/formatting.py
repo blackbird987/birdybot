@@ -7,6 +7,7 @@ from datetime import timedelta
 
 from dataclasses import dataclass, field
 
+from bot import config
 from bot.claude.types import CODE_CHANGE_TOOLS, PLAN_ORIGINS, Instance, InstanceOrigin, InstanceStatus, Schedule
 from bot.platform.base import ButtonSpec
 
@@ -371,7 +372,14 @@ def action_button_specs(
 
     elif instance.status == InstanceStatus.FAILED:
         if instance.cooldown_retry_at:
-            rows.append([ButtonSpec("Cancel Auto-Retry", f"cancel_cooldown:{iid}")])
+            row = [ButtonSpec("Cancel Auto-Retry", f"cancel_cooldown:{iid}")]
+            if config.API_FALLBACK_ENABLED:
+                cap = config.API_FALLBACK_MAX_USD
+                row.insert(0, ButtonSpec(
+                    f"Continue with {config.API_FALLBACK_MODEL} (≤${cap:.2f})",
+                    f"continue_ppu:{iid}",
+                ))
+            rows.append(row)
         else:
             rows.append([
                 ButtonSpec("Retry", f"retry:{iid}"),

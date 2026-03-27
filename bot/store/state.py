@@ -45,6 +45,8 @@ class StateStore:
         self._chain_deferred: dict[str, list[str]] = {}  # session_id -> deferred revisions
         self._deploy_state: dict[str, DeployState] = {}  # repo_name -> deploy state
         self._deploy_configs: dict[str, dict] = {}  # repo_name -> deploy config
+        self._fallback_cost: float = 0.0     # Rolling daily API fallback spend
+        self._fallback_cost_date: str = ""   # YYYY-MM-DD for fallback cost reset
         self._dirty: bool = False  # Dirty flag — mark_dirty() defers save to auto-save loop
         self._last_mtime: float = 0.0  # Track file mtime for external change detection
 
@@ -84,6 +86,8 @@ class StateStore:
                 for k, v in data.get("deploy_state", {}).items()
             }
             self._deploy_configs = data.get("deploy_configs", {})
+            self._fallback_cost = data.get("fallback_cost", 0.0)
+            self._fallback_cost_date = data.get("fallback_cost_date", "")
             for d in data.get("schedules", []):
                 sched = Schedule.from_dict(d)
                 self._schedules[sched.id] = sched
@@ -146,6 +150,8 @@ class StateStore:
             "chain_deferred": self._chain_deferred,
             "deploy_state": {k: v.to_dict() for k, v in self._deploy_state.items()},
             "deploy_configs": self._deploy_configs,
+            "fallback_cost": self._fallback_cost,
+            "fallback_cost_date": self._fallback_cost_date,
             "schedules": [s.to_dict() for s in self._schedules.values()],
         }
         try:
@@ -344,6 +350,22 @@ class StateStore:
         self._daily_cost = 0.0
         self._cost_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         self.save()
+
+    def add_fallback_cost(self, amount: float) -> None:
+        """Track API fallback (pay-per-use) spending separately."""
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if self._fallback_cost_date != today:
+            self._fallback_cost = 0.0
+            self._fallback_cost_date = today
+        self._fallback_cost += amount
+        self.save()
+
+    def get_fallback_spend_today(self) -> float:
+        """Return total API fallback spend in the last 24h."""
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if self._fallback_cost_date != today:
+            return 0.0
+        return self._fallback_cost
 
     def get_top_spenders(self, limit: int = 5) -> list[Instance]:
         """Return top-spending instances today."""

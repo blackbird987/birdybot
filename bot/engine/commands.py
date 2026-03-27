@@ -1827,6 +1827,66 @@ async def handle_callback(
     elif action == "sess_resume":
         await workflows.on_sess_resume(ctx, instance_id, source_msg_id)
 
+    elif action == "continue_ppu":
+        inst = ctx.store.get_instance(instance_id)
+        if not inst:
+            await ctx.messenger.send_text(ctx.channel_id, "Instance not found.")
+            return
+        if not config.API_FALLBACK_ENABLED:
+            await ctx.messenger.send_text(ctx.channel_id, "API fallback not configured.")
+            return
+        # Budget gate — refuse if daily cap exhausted
+        daily_spend = ctx.store.get_fallback_spend_today()
+        if daily_spend >= config.API_FALLBACK_DAILY_MAX_USD:
+            await ctx.messenger.send_text(
+                ctx.channel_id,
+                f"API fallback budget exhausted "
+                f"(${daily_spend:.2f}/${config.API_FALLBACK_DAILY_MAX_USD:.2f} today). "
+                "Waiting for free auto-retry instead.",
+            )
+            return
+        # Cancel pending cooldown auto-retry
+        inst.cooldown_retry_at = None
+        inst.cooldown_channel_id = None
+        ctx.store.update_instance(inst)
+        # Create new instance with api_fallback flag
+        new_inst = ctx.store.create_instance(
+            instance_type=inst.instance_type,
+            prompt=inst.prompt,
+            name=f"{inst.name}-ppu" if inst.name else None,
+            mode=inst.mode,
+        )
+        new_inst.origin = inst.origin
+        new_inst.origin_platform = ctx.platform
+        new_inst.effort = ctx.effective_effort
+        new_inst.parent_id = inst.id
+        new_inst.repo_name = inst.repo_name
+        new_inst.repo_path = inst.repo_path
+        new_inst.api_fallback = True
+        new_inst.cooldown_retries = 0
+        if inst.session_id:
+            new_inst.session_id = inst.session_id
+        if inst.branch:
+            new_inst.branch = inst.branch
+            new_inst.original_branch = inst.original_branch
+            new_inst.worktree_path = inst.worktree_path
+        ctx.store.update_instance(new_inst)
+        if source_msg_id:
+            try:
+                await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, None)
+            except Exception:
+                pass
+        escaped = ctx.messenger.escape(new_inst.display_id())
+        handle = await ctx.messenger.send_thinking(
+            ctx.channel_id,
+            f"⚡ {escaped} continuing with {config.API_FALLBACK_MODEL} (pay-per-use)...",
+            buttons=running_button_specs(new_inst.id),
+        )
+        if handle.get("message_id"):
+            new_inst.message_ids.setdefault(ctx.platform, []).append(handle.get("message_id"))
+            ctx.store.update_instance(new_inst)
+        await lifecycle.run_instance(ctx, new_inst, handle=handle)
+
     elif action in ("mode_explore", "mode_plan", "mode_build"):
         target = action.split("_", 1)[1]  # "explore", "plan", or "build"
         current = ctx.effective_mode
