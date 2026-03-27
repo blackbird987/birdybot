@@ -43,3 +43,5 @@
 - [ ] [Reliability] Startup merge could auto-push diverged branches (Medium)
 - [ ] [UX/UI] Show cache age when serving stale fallback data (Low)
 - [ ] [DRY/Cleanup] Extract chain resume logic into shared helper (Low)
+- [ ] [Bug Risk] formatting.py PPU button shown without budget check can mislead (Medium)
+- [ ] [DRY/Cleanup] Extract instance-cloning helper shared by retry and PPU (Low)
