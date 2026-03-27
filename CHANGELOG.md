@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.60.0 — Pay-Per-Use Opt-In for Usage Limits (2026-03-27)
+
 - Usage limit now stops and shows opt-in button instead of auto-retrying with paid API
 - Pay-per-use button: "Continue with haiku (≤$1.00)" — red, requires explicit tap
 - Daily API fallback budget cap (`API_FALLBACK_DAILY_MAX_USD`, default $5) prevents runaway bills
