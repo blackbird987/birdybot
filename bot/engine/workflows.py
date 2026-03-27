@@ -710,6 +710,25 @@ async def _run_autopilot_chain(
         ctx.runner.end_task(chain_task_id)
 
 
+async def resume_autopilot_chain(
+    ctx: RequestContext,
+    source_id: str,
+    source_msg_id: str | None,
+    session_id: str,
+) -> Instance | None:
+    """Resume a paused autopilot chain from stored state.
+
+    Skips the first stored step (already completed) and runs the rest.
+    Returns None if no chain to resume.
+    """
+    chain = ctx.store.get_autopilot_chain(session_id)
+    if not chain or len(chain) < 2:
+        return None
+    return await _run_autopilot_chain(
+        ctx, source_id, source_msg_id, chain[1:], session_id,
+    )
+
+
 async def on_autopilot(
     ctx: RequestContext,
     source_id: str,
