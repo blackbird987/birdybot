@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.59.0 — Smart Dual Usage Bars (2026-03-27)
+
 - Dual usage bars: session (5h block) + weekly in dashboard/control room embeds
 - Smart limit learning: auto-derive block budget from observed usage limit hits (median of last 10, 30-day TTL)
 - Record both ccusage block cost and instance cost at limit hit for accuracy (takes higher value)
