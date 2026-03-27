@@ -508,6 +508,18 @@ class ClaudeBot(discord.Client):
                 )
             )
 
+        # Start usage limit notifier (DMs owner at 5am/11am PT on weekdays)
+        if self._discord_user_id:
+            existing_notifier = getattr(self, '_usage_notifier_task', None)
+            if not existing_notifier or existing_notifier.done():
+                from bot.discord import usage_notifier as _usage_notifier
+                self._usage_notifier_task = asyncio.create_task(
+                    _usage_notifier.usage_limit_notifier_loop(self, self._discord_user_id)
+                )
+        elif not getattr(self, '_notifier_warning_logged', False):
+            log.warning("Usage limit notifier disabled — DISCORD_USER_ID not set in .env")
+            self._notifier_warning_logged = True
+
         # Clean up stale worktrees/branches from interrupted autopilot chains
         asyncio.create_task(self._startup_worktree_cleanup())
 
