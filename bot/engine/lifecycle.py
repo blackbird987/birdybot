@@ -66,6 +66,19 @@ async def schedule_cooldown_retry(
     if not result.usage_limit_reset or inst.cooldown_retries >= MAX_COOLDOWN_RETRIES:
         return False
 
+    # Record limit observation for smart usage bar.
+    # Use both ccusage block cost and the instance's own tracked cost —
+    # ccusage may be stale (60s cache) or the block may have rolled over.
+    try:
+        from bot.engine.usage import get_current_block, record_block_limit_hit
+        block = await get_current_block()
+        block_cost = block.cost_usd if block else 0
+        instance_cost = inst.cost_usd or 0
+        if block_cost > 0 or instance_cost > 0:
+            record_block_limit_hit(block_cost, instance_cost)
+    except Exception:
+        log.debug("Failed to record limit observation", exc_info=True)
+
     # Clamp retry time to at least 60s from now so the cooldown loop
     # picks it up on the next tick (avoids silent skip when parsed time
     # is already in the past due to timezone edge cases or slow runs).

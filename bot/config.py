@@ -83,6 +83,7 @@ PLAN_NAME: str = os.getenv("PLAN_NAME", "Max 20x")
 PLAN_MONTHLY_COST: float = float(os.getenv("PLAN_MONTHLY_COST", "200.0"))
 PLAN_DAILY_LIMIT_USD: float = float(os.getenv("PLAN_DAILY_LIMIT_USD", "0"))
 PLAN_WEEKLY_LIMIT_USD: float = float(os.getenv("PLAN_WEEKLY_LIMIT_USD", "0"))
+PLAN_BLOCK_LIMIT_USD: float = float(os.getenv("PLAN_BLOCK_LIMIT_USD", "0"))
 
 # Session evaluation
 EVAL_ENABLED: bool = os.getenv("EVAL_ENABLED", "1").lower() in ("1", "true", "yes")

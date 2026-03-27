@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- Dual usage bars: session (5h block) + weekly in dashboard/control room embeds
+- Smart limit learning: auto-derive block budget from observed usage limit hits (median of last 10, 30-day TTL)
+- Record both ccusage block cost and instance cost at limit hit for accuracy (takes higher value)
+- Atomic persistence of learned limits to `data/usage_limits.json`
+- Block/weekly limits auto-derive from learned data — zero config needed after first limit hit
+- Source labels on bars: `learned` (from observations), `est` (derived), or no label (explicit config)
+- `/usage` command updated to show session framing and learned limit context
+
 ## v0.58.5 — Clean Control Rooms (2026-03-24)
 
 - Clean control rooms: remove orphaned reboot/deploy status messages, show drain state in embed instead of separate messages

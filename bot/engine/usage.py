@@ -23,9 +23,11 @@ import shutil
 import signal
 import subprocess as _sp
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from bot import config
 
@@ -86,6 +88,106 @@ _fail_count: int = 0
 _last_fail_time: float = 0
 _MAX_CONSECUTIVE_FAILS = 3
 _BACKOFF_TTL = 300  # 5 min backoff after repeated failures
+
+
+# ---------------------------------------------------------------------------
+# Limit learning — observe limit hits and estimate block budget
+# ---------------------------------------------------------------------------
+
+_LIMITS_FILE = Path("data/usage_limits.json")
+_OBSERVATION_MAX_AGE_DAYS = 30
+
+
+def _load_limits() -> dict:
+    """Load learned limit observations from disk.
+
+    Always returns a dict with ``block_observations`` (list) and
+    ``block_estimate`` (float), even if the file is missing or corrupt.
+    """
+    default = {"block_observations": [], "block_estimate": 0}
+    try:
+        if _LIMITS_FILE.exists():
+            data = json.loads(_LIMITS_FILE.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return default
+            if not isinstance(data.get("block_observations"), list):
+                data["block_observations"] = []
+            if not isinstance(data.get("block_estimate"), (int, float)):
+                data["block_estimate"] = 0
+            return data
+    except Exception:
+        log.debug("Failed to load usage limits", exc_info=True)
+    return default
+
+
+def _save_limits(data: dict) -> None:
+    """Atomic save: write to temp then rename (survives crashes)."""
+    try:
+        _LIMITS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(_LIMITS_FILE.parent), suffix=".tmp",
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp_path, _LIMITS_FILE)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+    except Exception:
+        log.warning("Failed to save usage limits", exc_info=True)
+
+
+def _prune_observations(observations: list[dict]) -> list[dict]:
+    """Remove observations older than _OBSERVATION_MAX_AGE_DAYS."""
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(days=_OBSERVATION_MAX_AGE_DAYS)
+    ).isoformat()
+    return [o for o in observations if o.get("timestamp", "") >= cutoff]
+
+
+def record_block_limit_hit(block_cost: float, instance_cost: float = 0) -> None:
+    """Record that a usage limit was hit.
+
+    Takes both the ccusage block cost and the instance's own tracked cost.
+    Uses the higher value since ccusage data may be stale (up to 60s cache)
+    or the block may have rolled over.
+    """
+    cost = max(block_cost, instance_cost)
+    if cost <= 0:
+        return
+    data = _load_limits()
+    data["block_observations"].append({
+        "cost_usd": cost,
+        "block_cost": block_cost,
+        "instance_cost": instance_cost,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+    # Prune stale + keep last 10
+    data["block_observations"] = _prune_observations(
+        data["block_observations"]
+    )[-10:]
+    costs = sorted(o["cost_usd"] for o in data["block_observations"])
+    data["block_estimate"] = costs[len(costs) // 2]  # median
+    _save_limits(data)
+    log.info(
+        "Recorded block limit hit: block=$%.2f, instance=$%.2f, "
+        "used=$%.2f, estimate now $%.2f",
+        block_cost, instance_cost, cost, data["block_estimate"],
+    )
+
+
+def get_block_limit_estimate() -> float:
+    """Get learned block limit estimate, or 0 if no recent observations."""
+    data = _load_limits()
+    obs = _prune_observations(data.get("block_observations", []))
+    if obs:
+        costs = sorted(o["cost_usd"] for o in obs)
+        return costs[len(costs) // 2]
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -438,6 +540,46 @@ async def get_usage_details(force: bool = False) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Limit resolution (shared by bar + rich text)
+# ---------------------------------------------------------------------------
+
+
+def _resolve_limits(
+    weekly: UsageWeekly | None,
+) -> tuple[float, str, float, str]:
+    """Resolve block and weekly limits from config / learned / derived.
+
+    Returns (block_limit, block_source, weekly_limit, weekly_source).
+    Source strings: "" (explicit config), " learned", " est".
+    """
+    # Block limit: config > learned > derived from daily average
+    block_limit = config.PLAN_BLOCK_LIMIT_USD
+    block_source = ""
+    learned = 0.0
+    if block_limit == 0:
+        learned = get_block_limit_estimate()
+        if learned > 0:
+            block_limit = learned
+            block_source = " learned"
+    if block_limit == 0 and weekly and weekly.cost_usd > 0 and weekly.days >= 3:
+        block_limit = (weekly.cost_usd / weekly.days) / 4.8
+        block_source = " est"
+
+    # Weekly limit: config > derived from learned block limit
+    weekly_limit = config.PLAN_WEEKLY_LIMIT_USD
+    weekly_source = ""
+    if weekly_limit == 0:
+        # Reuse already-fetched learned value to avoid a second file read
+        if learned == 0 and block_source != " learned":
+            learned = get_block_limit_estimate()
+        if learned > 0:
+            weekly_limit = learned * 33.6  # 4.8 blocks/day * 7 days
+            weekly_source = " est"
+
+    return block_limit, block_source, weekly_limit, weekly_source
+
+
+# ---------------------------------------------------------------------------
 # Plan percentage helpers
 # ---------------------------------------------------------------------------
 
@@ -468,12 +610,23 @@ def _build_usage_text(
 
     lines: list[str] = []
 
+    block_limit, block_limit_label, weekly_limit, weekly_src = _resolve_limits(weekly)
+    weekly_limit_label = f"weekly{weekly_src}" if weekly_src else "weekly limit"
+
     if block:
-        lines.append("**Current Block (5h)**")
-        lines.append(
-            f"  ${block.cost_usd:.2f}"
-            f" \u00b7 projected ${block.projected_cost:.2f}"
-        )
+        lines.append("**Session (5h block)**")
+        if block_limit > 0:
+            pct = min(block.cost_usd / block_limit * 100, 999)
+            lines.append(
+                f"  ${block.cost_usd:.2f} / ~${block_limit:.2f}"
+                f" ({pct:.0f}%{block_limit_label})"
+                f" \u00b7 projected ${block.projected_cost:.2f}"
+            )
+        else:
+            lines.append(
+                f"  ${block.cost_usd:.2f}"
+                f" \u00b7 projected ${block.projected_cost:.2f}"
+            )
         lines.append(
             f"  Burn: ${block.burn_rate_cost_per_hour:.2f}/hr"
             f" \u00b7 {block.remaining_minutes}m remaining"
@@ -490,14 +643,11 @@ def _build_usage_text(
         lines.append("")
 
     if daily:
-        daily_label = _pct_label(
-            daily.cost_usd, config.PLAN_DAILY_LIMIT_USD, "daily limit"
-        )
-        lines.append(f"**Today** {daily_label}")
+        lines.append(f"**Today** ${daily.cost_usd:,.2f}")
 
     if weekly:
         weekly_label = _pct_label(
-            weekly.cost_usd, config.PLAN_WEEKLY_LIMIT_USD, "weekly limit"
+            weekly.cost_usd, weekly_limit, weekly_limit_label,
         )
         lines.append(f"**This Week** {weekly_label} ({weekly.days}d)")
 
@@ -525,67 +675,67 @@ def format_usage_bar(
     daily: UsageDaily | None,
     weekly: UsageWeekly | None = None,
 ) -> str | None:
-    """Visual usage bar for dashboard/control-room embeds.
+    """Dual usage bars: session (block) + weekly.
 
     Returns None only when no data at all is available.
 
-    Renders a spending progress bar when a daily limit is available — either
-    from explicit config (PLAN_DAILY_LIMIT_USD) or auto-derived from the
-    rolling 7-day average (requires 3+ days of history).  Falls back to a
-    compact text summary when neither source is available.
+    Bar 1 — Session/block: shows current 5h block spend vs learned or
+    estimated limit.  Limit source indicated by suffix: (learned) from
+    observed limit hits, (est) derived from daily average, or no label
+    when set via PLAN_BLOCK_LIMIT_USD config.
 
-    Block data (5-hour billing window) is shown as a supplementary line when
-    available, but the spending bar is independent of it.
+    Bar 2 — Weekly: shows 7-day spend vs configured or estimated weekly
+    limit.  Falls back to text-only when no limit is available.
     """
     if not block and not daily and not weekly:
         return None
 
     lines: list[str] = []
-    daily_limit = config.PLAN_DAILY_LIMIT_USD
-    weekly_limit = config.PLAN_WEEKLY_LIMIT_USD
+    block_limit, block_source, weekly_limit, weekly_source = _resolve_limits(weekly)
 
-    # Auto-derive daily limit from rolling average when no explicit limit set.
-    # Require 3+ days of history so the average is meaningful.
-    auto_derived = False
-    if daily_limit == 0 and weekly and weekly.cost_usd > 0 and weekly.days >= 3:
-        daily_limit = weekly.cost_usd / weekly.days
-        auto_derived = True
-
-    # --- Primary: spending progress bar (when daily limit available) ---
-    if daily and daily_limit > 0:
-        ratio = min(daily.cost_usd / daily_limit, 1.0)
-        filled = round(ratio * 16)
-        bar = "\u2588" * filled + "\u2591" * (16 - filled)
-        pct = min(daily.cost_usd / daily_limit * 100, 999)  # cap display
-        label = "avg" if auto_derived else "daily"
-        lines.append(f"`{bar}` ${daily.cost_usd:,.0f} / ${daily_limit:,.0f} {label} ({pct:.0f}%)")
-
-        # Weekly as compact text below
-        if weekly and weekly_limit > 0:
-            wpct = weekly.cost_usd / weekly_limit * 100
-            lines.append(f"Week: ${weekly.cost_usd:,.0f} / ${weekly_limit:,.0f} ({wpct:.0f}%)")
-        elif weekly:
-            lines.append(f"Week: ${weekly.cost_usd:,.0f}")
-
-    # --- Fallback: compact summary (no limit and <3 days of data) ---
-    elif daily or weekly:
-        parts: list[str] = []
-        if daily:
-            parts.append(f"Today: ${daily.cost_usd:,.0f}")
-        if weekly and weekly_limit > 0:
-            wpct = weekly.cost_usd / weekly_limit * 100
-            parts.append(f"Week: ${weekly.cost_usd:,.0f} / ${weekly_limit:,.0f} ({wpct:.0f}%)")
-        elif weekly:
-            parts.append(f"Week: ${weekly.cost_usd:,.0f}")
-        lines.append(" \u00b7 ".join(parts))
-
-    # --- Supplementary: block burn rate (when available) ---
+    # --- Bar 1: Session / Block ---
     if block:
         remaining = max(block.remaining_minutes, 0)
-        time_label = "block ended" if remaining == 0 else f"{remaining}m left"
+        if remaining >= 60:
+            time_left = f"{remaining // 60}h{remaining % 60:02d}m"
+        else:
+            time_left = f"{remaining}m"
+
+        if block_limit > 0:
+            ratio = min(block.cost_usd / block_limit, 1.0)
+            filled = round(ratio * 16)
+            bar = "\u2588" * filled + "\u2591" * (16 - filled)
+            pct = min(block.cost_usd / block_limit * 100, 999)
+            lines.append(
+                f"`{bar}` ${block.cost_usd:.2f} session"
+                f" ({pct:.0f}%{block_source})"
+                f" \u00b7 ${block.burn_rate_cost_per_hour:.2f}/hr"
+                f" \u00b7 {time_left} left"
+            )
+        else:
+            # No limit known yet — compact text
+            lines.append(
+                f"Session: ${block.cost_usd:.2f}"
+                f" \u00b7 ${block.burn_rate_cost_per_hour:.2f}/hr"
+                f" \u00b7 {time_left} left"
+            )
+
+    # --- Bar 2: Weekly ---
+    if weekly and weekly_limit > 0:
+        ratio = min(weekly.cost_usd / weekly_limit, 1.0)
+        filled = round(ratio * 16)
+        bar = "\u2588" * filled + "\u2591" * (16 - filled)
+        pct = min(weekly.cost_usd / weekly_limit * 100, 999)
         lines.append(
-            f"${block.burn_rate_cost_per_hour:.2f}/hr \u00b7 {time_label}"
+            f"`{bar}` ${weekly.cost_usd:,.0f} / ${weekly_limit:,.0f}"
+            f" week ({pct:.0f}%{weekly_source})"
         )
+    elif weekly:
+        lines.append(f"Week: ${weekly.cost_usd:,.0f}")
+
+    # Fallback: today's cost if no block data at all
+    if not block and daily:
+        lines.insert(0, f"Today: ${daily.cost_usd:,.0f}")
 
     return "\n".join(lines)
 
