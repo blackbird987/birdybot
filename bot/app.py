@@ -885,6 +885,31 @@ async def _do_cooldown_retry(store, runner, inst, discord_bot, retrying_set):
         log.info("Cooldown retry: %s → %s in channel %s", inst.id, new_inst.id, channel_id)
         try:
             await lifecycle.run_instance(ctx, new_inst, handle=handle)
+
+            # Resume autopilot chain if this retry was mid-chain
+            if (new_inst.status == InstanceStatus.COMPLETED
+                    and not new_inst.needs_input
+                    and not new_inst.cooldown_retry_at
+                    and new_inst.session_id):
+                chain = store.get_autopilot_chain(new_inst.session_id)
+                if chain and len(chain) > 1:
+                    last_msgs = new_inst.message_ids.get("discord", [])
+                    last_msg = last_msgs[-1] if last_msgs else None
+                    log.info("Cooldown retry resuming autopilot chain: %s → step %s",
+                             new_inst.id, chain[1])
+                    try:
+                        await ctx.messenger.send_text(
+                            channel_id,
+                            "⏳ Autopilot resuming after cooldown...",
+                            silent=True,
+                        )
+                        from bot.engine import workflows
+                        await workflows.resume_autopilot_chain(
+                            ctx, new_inst.id, last_msg, new_inst.session_id,
+                        )
+                    except Exception:
+                        log.exception("Autopilot chain resume failed after cooldown retry %s",
+                                      new_inst.id)
         finally:
             # Post-run cleanup (matches normal query flow in interactions.py)
             discord_bot._forums.persist_ctx_settings(ctx)

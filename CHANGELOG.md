@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Auto-resume autopilot chain after cooldown retry succeeds (previously only retried the single step, leaving the chain paused)
+
 ## v0.58.5 — Clean Control Rooms (2026-03-24)
 
 - Clean control rooms: remove orphaned reboot/deploy status messages, show drain state in embed instead of separate messages
