@@ -60,6 +60,13 @@ class ArkView(discord.ui.View):
             custom_id="ark:refresh",
             row=0,
         ))
+        self.add_item(discord.ui.Button(
+            label="Claude Login",
+            style=discord.ButtonStyle.primary,
+            custom_id="ark:claude_login",
+            emoji="\U0001f511",
+            row=1,
+        ))
 
 
 def build_dashboard_embed(

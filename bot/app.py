@@ -963,4 +963,11 @@ async def _start_discord(store, runner, notifier, stop_event):
     # Give bot access to notifier for monitor alerts
     bot._notifier = notifier
 
+    # Startup auth sync — pull credentials from Discord if local auth is broken
+    try:
+        from bot.services.auth_sync import startup_auth_check
+        await startup_auth_check(bot)
+    except Exception:
+        log.exception("Startup auth check failed (non-fatal)")
+
     return bot

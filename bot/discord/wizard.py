@@ -187,8 +187,72 @@ async def handle_ark_button(
             bot._dashboard_lock, bot._dashboard_pending_flag,
         ))
 
+    elif action == "claude_login":
+        await _handle_claude_login(bot, interaction)
+
     else:
         await interaction.response.send_message("Unknown action.", ephemeral=True)
+
+
+async def _handle_claude_login(
+    bot: ClaudeBot, interaction: discord.Interaction,
+) -> None:
+    """Smart auth sync: pull if credentials are waiting, push otherwise."""
+    await interaction.response.defer(ephemeral=True)
+
+    from bot.services.auth_sync import (
+        credentials_look_valid,
+        pull_credentials,
+        push_credentials,
+        verify_cli,
+    )
+
+    lobby_id = bot._lobby_channel_id
+    if not lobby_id:
+        await interaction.followup.send("No lobby channel configured.", ephemeral=True)
+        return
+
+    # Step 1: Try to pull (scan for AUTH_SYNC messages from other PCs)
+    source = await pull_credentials(bot, lobby_id)
+    if source:
+        ok = verify_cli()
+        if ok:
+            msg = (
+                f"\U0001f511 Auth restored on **{config.PC_NAME}** "
+                f"from {source} — CLI verified!"
+            )
+        else:
+            msg = (
+                f"\u26a0\ufe0f Credentials written on **{config.PC_NAME}** "
+                f"from {source}, but CLI verify failed — tokens may be revoked."
+            )
+        await interaction.followup.send(msg, ephemeral=True)
+        # Also broadcast to lobby so it's visible
+        if hasattr(bot, "_notifier") and bot._notifier:
+            await bot._notifier.broadcast(msg)
+        return
+
+    # Step 2: Nothing to pull — try to push this machine's credentials
+    if not credentials_look_valid():
+        await interaction.followup.send(
+            f"\u274c **{config.PC_NAME}**: No valid local credentials and "
+            "no AUTH_SYNC messages found.\n"
+            "Push from a working machine first.",
+            ephemeral=True,
+        )
+        return
+
+    result = await push_credentials(bot, lobby_id)
+    if result:
+        await interaction.followup.send(
+            f"\U0001f4e4 Credentials pushed from **{config.PC_NAME}**.\n"
+            "Tap **Claude Login** on the other machine to pull.",
+            ephemeral=True,
+        )
+    else:
+        await interaction.followup.send(
+            "Failed to push credentials — check logs.", ephemeral=True,
+        )
 
 
 # ---------------------------------------------------------------------------
