@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.62.0 — Cross-Instance Auth Sync (2026-03-29)
+
 - **Claude Login button**: Ark dashboard button for cross-instance CLI auth sync — push credentials from a working machine, pull on a broken one, two taps from Discord
 - **Auth sync module** (`bot/services/auth_sync.py`): Fernet-encrypted credential transfer via Discord messages with automatic startup hook
 - **Standalone push script** (`scripts/auth_push.py`): zero-dependency credential push for use before bot reboots
