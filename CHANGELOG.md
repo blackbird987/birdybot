@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- **Claude Login button**: Ark dashboard button for cross-instance CLI auth sync — push credentials from a working machine, pull on a broken one, two taps from Discord
+- **Auth sync module** (`bot/services/auth_sync.py`): Fernet-encrypted credential transfer via Discord messages with automatic startup hook
+- **Standalone push script** (`scripts/auth_push.py`): zero-dependency credential push for use before bot reboots
+- **Sync Git now pulls for self-managed repos**: removes the `is_self` guard that blocked pulling the bot's own code, auto-queues reboot after pull
+
 ## v0.61.1 — Fix Silent API Auto-Billing (2026-03-27)
 
 - Fix silent API billing: remove `--fallback-model` from normal (non-PPU) CLI runs and strip `ANTHROPIC_API_KEY` from non-PPU subprocess env — CLI can no longer auto-spend without explicit user opt-in
