@@ -879,50 +879,51 @@ async def _handle_sync_git(
 
         # Step 3: Pull if behind (fast-forward only)
         if behind > 0:
+            # Check for dirty worktree before attempting pull
+            status = await asyncio.to_thread(
+                subprocess.run,
+                ["git", "status", "--porcelain"],
+                cwd=repo_path, capture_output=True, text=True, timeout=10, **NOWND,
+            )
+            if status.returncode == 0 and status.stdout.strip():
+                await interaction.followup.send(
+                    f"`{repo_name}`: Working tree has uncommitted changes \u2014 commit or stash first.",
+                    ephemeral=True,
+                )
+                return
+
+            pull = await asyncio.to_thread(
+                subprocess.run,
+                ["git", "pull", "--ff-only"],
+                cwd=repo_path, capture_output=True, text=True, timeout=30, **NOWND,
+            )
+            if pull.returncode != 0:
+                err = (pull.stderr or pull.stdout or "unknown error")[:200]
+                await interaction.followup.send(
+                    f"`{repo_name}`: Pull failed (histories diverged?) \u2014 `{err}`",
+                    ephemeral=True,
+                )
+                return
+            parts.append(f"pulled {behind} commit{'s' if behind != 1 else ''}")
+
+            # Update deploy state — HEAD moved forward
+            from bot.engine.deploy import (
+                get_head_ref, detect_version, get_unreleased_changes,
+            )
+            if ds:
+                ds.current_ref = get_head_ref(repo_path)
+                ds.current_version = detect_version(repo_path)
+                changes = get_unreleased_changes(repo_path)
+                if changes:
+                    ds.pending_changes = changes
+                bot._store.set_deploy_state(repo_name, ds)
+
+            # Self-managed repo pulled new code — queue reboot
             if is_self:
-                # Don't pull into a running bot — just report
-                parts.append(
-                    f"**{behind} commit{'s' if behind != 1 else ''} behind** \u2014 reboot to apply"
-                )
-            else:
-                # Check for dirty worktree before attempting pull
-                status = await asyncio.to_thread(
-                    subprocess.run,
-                    ["git", "status", "--porcelain"],
-                    cwd=repo_path, capture_output=True, text=True, timeout=10, **NOWND,
-                )
-                if status.returncode == 0 and status.stdout.strip():
-                    await interaction.followup.send(
-                        f"`{repo_name}`: Working tree has uncommitted changes \u2014 commit or stash first.",
-                        ephemeral=True,
-                    )
-                    return
-
-                pull = await asyncio.to_thread(
-                    subprocess.run,
-                    ["git", "pull", "--ff-only"],
-                    cwd=repo_path, capture_output=True, text=True, timeout=30, **NOWND,
-                )
-                if pull.returncode != 0:
-                    err = (pull.stderr or pull.stdout or "unknown error")[:200]
-                    await interaction.followup.send(
-                        f"`{repo_name}`: Pull failed (histories diverged?) \u2014 `{err}`",
-                        ephemeral=True,
-                    )
-                    return
-                parts.append(f"pulled {behind} commit{'s' if behind != 1 else ''}")
-
-                # Update deploy state — HEAD moved forward
-                from bot.engine.deploy import (
-                    get_head_ref, detect_version, get_unreleased_changes,
-                )
-                if ds:
-                    ds.current_ref = get_head_ref(repo_path)
-                    ds.current_version = detect_version(repo_path)
-                    changes = get_unreleased_changes(repo_path)
-                    if changes:
-                        ds.pending_changes = changes
-                    bot._store.set_deploy_state(repo_name, ds)
+                parts.append("reboot queued")
+                bot._runner.request_reboot({
+                    "message": f"Sync Git: pulled {behind} commit(s)",
+                })
 
         # Step 4: Push if ahead
         if ahead > 0:
