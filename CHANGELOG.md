@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Auto-fetch Twitter/X tweet content when user messages contain tweet URLs — prepends `[Tweet by @handle (Name): "text"]` context to Claude prompt via DegenAI API
+
 ## v0.61.1 — Fix Silent API Auto-Billing (2026-03-27)
 
 - Fix silent API billing: remove `--fallback-model` from normal (non-PPU) CLI runs and strip `ANTHROPIC_API_KEY` from non-PPU subprocess env — CLI can no longer auto-spend without explicit user opt-in

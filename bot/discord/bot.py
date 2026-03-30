@@ -41,6 +41,7 @@ from bot.discord.forums import ForumManager, ThreadInfo
 from bot.discord.titles import generate_title_text
 from bot.engine import commands
 from bot.platform.base import RequestContext
+from bot.services.twitter import enrich_with_tweets
 
 if TYPE_CHECKING:
     from bot.claude.runner import ClaudeRunner
@@ -783,16 +784,21 @@ class ClaudeBot(discord.Client):
                         ctx.user_id = str(message.author.id)
                         ctx.user_name = message.author.display_name
                         self._forums.attach_session_callbacks(ctx, info, channel_id)
+                        user_text = text  # preserve before tweet enrichment for title/topic
                         try:
+                            try:
+                                text = await enrich_with_tweets(text)
+                            except Exception:
+                                log.warning("Tweet enrichment failed, continuing with original text", exc_info=True)
                             await commands.on_text(ctx, text)
                         finally:
                             self._forums.persist_ctx_settings(ctx)
                             if was_pending:
-                                await self._forums.finalize_pending_thread(channel_id, message.channel, text)
+                                await self._forums.finalize_pending_thread(channel_id, message.channel, user_text)
                             if not info._title_generated:
                                 summary = self._forums.get_latest_summary(channel_id)
                                 asyncio.create_task(self._generate_smart_title(
-                                    message.channel, text, summary))
+                                    message.channel, user_text, summary))
                             asyncio.create_task(self._try_apply_tags_after_run(channel_id))
                             self._schedule_sleep(channel_id)
                             asyncio.create_task(self._refresh_dashboard())
@@ -802,6 +808,10 @@ class ClaudeBot(discord.Client):
             ctx = self._ctx(channel_id, access_result=msg_access)
             ctx.user_id = str(message.author.id)
             ctx.user_name = message.author.display_name
+            try:
+                text = await enrich_with_tweets(text)
+            except Exception:
+                log.warning("Tweet enrichment failed, continuing with original text", exc_info=True)
             await commands.on_text(ctx, text)
         finally:
             for tmp in _temp_files:
