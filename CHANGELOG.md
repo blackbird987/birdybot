@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.62.0 — Twitter/X Tweet Auto-Fetch (2026-03-31)
+
 - Auto-fetch Twitter/X tweet content when user messages contain tweet URLs — prepends `[Tweet by @handle (Name): "text"]` context to Claude prompt via DegenAI API
 
 ## v0.61.1 — Fix Silent API Auto-Billing (2026-03-27)
