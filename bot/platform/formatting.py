@@ -401,7 +401,10 @@ def action_button_specs(
         rows.append([ButtonSpec(f"Mode: {label}", f"mode_{target}:{iid}")])
 
     if show_expand:
-        rows.append([ButtonSpec("Expand \u25bc", f"expand:{iid}")])
+        rows.append([
+            ButtonSpec("Expand \u25bc", f"expand:{iid}"),
+            ButtonSpec("Full Log", f"log:{iid}"),
+        ])
 
     return rows
 
@@ -409,7 +412,10 @@ def action_button_specs(
 def expanded_button_specs(instance: Instance) -> list[list[ButtonSpec]]:
     """Action buttons + Collapse for expanded view."""
     rows = action_button_specs(instance)
-    rows.append([ButtonSpec("Collapse \u25b2", f"collapse:{instance.id}")])
+    rows.append([
+        ButtonSpec("Collapse \u25b2", f"collapse:{instance.id}"),
+        ButtonSpec("Full Log", f"log:{instance.id}"),
+    ])
     return rows
 
 

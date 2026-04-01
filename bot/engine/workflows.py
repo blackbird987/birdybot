@@ -14,7 +14,7 @@ from bot.claude.types import (
 )
 from bot.engine import lifecycle, sessions as sessions_mod
 from bot.platform.base import RequestContext
-from bot.platform.formatting import running_button_specs
+from bot.platform.formatting import action_button_specs, running_button_specs
 
 log = logging.getLogger(__name__)
 
@@ -230,10 +230,25 @@ async def spawn_from(
 
     ctx.store.update_instance(new_inst)
 
-    # Strip buttons from source message
+    # Strip workflow buttons from source message, keep expand/log if truncated
     if strip_source_buttons and source_msg_id:
         try:
-            await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, None)
+            preserve = None
+            if source.result_file and Path(source.result_file).exists():
+                try:
+                    size = Path(source.result_file).stat().st_size
+                    if size >= 2000:
+                        full = action_button_specs(source, show_expand=True)
+                        preserve = [
+                            row for row in full
+                            if any(b.callback_data.startswith(("expand:", "log:"))
+                                   for b in row)
+                        ]
+                        if not preserve:
+                            preserve = None
+                except OSError:
+                    pass
+            await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, None, buttons=preserve)
         except Exception:
             pass
 
