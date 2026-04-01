@@ -8,6 +8,8 @@
 - **Auth sync module** (`bot/services/auth_sync.py`): Fernet-encrypted credential transfer via Discord messages with automatic startup hook
 - **Standalone push script** (`scripts/auth_push.py`): zero-dependency credential push for use before bot reboots
 - **Sync Git now pulls for self-managed repos**: removes the `is_self` guard that blocked pulling the bot's own code, auto-queues reboot after pull
+## v0.62.1 — Persistent Expand + Full Log Buttons (2026-04-01)
+
 - Preserve Expand + Full Log buttons on truncated results when workflow buttons are clicked (previously all buttons were stripped)
 - Add "Full Log" button next to Expand/Collapse on truncated results — sends full output as file attachment, no need to type `/log`
 - Wire up `log:` button action to reuse existing `/log` handler
