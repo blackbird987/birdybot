@@ -1762,6 +1762,9 @@ async def handle_callback(
     elif action == "new":
         await on_new(ctx)
 
+    elif action == "log":
+        await on_log(ctx, instance_id)
+
     elif action == "expand":
         inst = ctx.store.get_instance(instance_id)
         if not inst:
@@ -1898,7 +1901,15 @@ async def handle_callback(
         if inst and source_msg_id:
             inst.mode = actual
             ctx.store.update_instance(inst)
-            buttons = action_button_specs(inst)
+            try:
+                show_expand = bool(
+                    inst.result_file
+                    and Path(inst.result_file).exists()
+                    and Path(inst.result_file).stat().st_size >= 2000
+                )
+            except OSError:
+                show_expand = False
+            buttons = action_button_specs(inst, show_expand=show_expand)
             await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, None, buttons)
 
         if actual == current:
