@@ -8,6 +8,8 @@
 - **Auth sync module** (`bot/services/auth_sync.py`): Fernet-encrypted credential transfer via Discord messages with automatic startup hook
 - **Standalone push script** (`scripts/auth_push.py`): zero-dependency credential push for use before bot reboots
 - **Sync Git now pulls for self-managed repos**: removes the `is_self` guard that blocked pulling the bot's own code, auto-queues reboot after pull
+## v0.63.0 — Auto-Fix on Deploy Failure (2026-04-04)
+
 ### Auto-Fix on Deploy Failure
 - Auto-spawn a Claude fix session when a command-based deploy fails — configurable via `auto_fix: true` in `.claude/deploy.json`
 - Fix sessions run the full autopilot chain (plan → review → build → commit → merge) in their own forum thread
