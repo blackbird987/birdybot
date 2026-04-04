@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.63.0 — Auto-Fix on Deploy Failure (2026-04-04)
+
 ### Auto-Fix on Deploy Failure
 - Auto-spawn a Claude fix session when a command-based deploy fails — configurable via `auto_fix: true` in `.claude/deploy.json`
 - Fix sessions run the full autopilot chain (plan → review → build → commit → merge) in their own forum thread
