@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Auto-Fix on Deploy Failure
+- Auto-spawn a Claude fix session when a command-based deploy fails — configurable via `auto_fix: true` in `.claude/deploy.json`
+- Fix sessions run the full autopilot chain (plan → review → build → commit → merge) in their own forum thread
+- Optional `auto_fix_redeploy: true` to auto-trigger the deploy again after fix merges
+- Loop protection via `auto_fix_retries` (default 1) — prevents infinite fix-deploy cycles
+- Control room embed shows auto-fix progress with thread link, or "exhausted" state
+- Owner gets @mentioned when auto-fix spawns
+- Extract `execute_deploy()` as standalone coroutine, decoupled from `discord.Interaction` for programmatic use
+
 ## v0.62.1 — Persistent Expand + Full Log Buttons (2026-04-01)
 
 - Preserve Expand + Full Log buttons on truncated results when workflow buttons are clicked (previously all buttons were stripped)
