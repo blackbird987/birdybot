@@ -646,6 +646,349 @@ async def _handle_approve_deploy(
     asyncio.create_task(bot._forums.refresh_control_room(repo_name))
 
 
+async def execute_deploy(
+    bot: ClaudeBot,
+    repo_name: str,
+    deploy_config: dict,
+    *,
+    status_callback=None,
+) -> tuple[bool, str, str]:
+    """Run a command-based deploy for a repo.
+
+    Decoupled from discord.Interaction so it can be called from both
+    button handlers and programmatic triggers (auto-fix redeploy).
+
+    Returns (success, output, error_summary).
+    """
+    command = deploy_config["command"]
+    repo_path = bot._store.list_repos().get(repo_name)
+    if not repo_path:
+        return False, "", f"Repo `{repo_name}` not found"
+
+    raw_cwd = deploy_config.get("cwd")
+    if raw_cwd:
+        cwd_path = Path(raw_cwd)
+        if not cwd_path.is_absolute():
+            cwd_path = Path(repo_path) / cwd_path
+        cwd = str(cwd_path.resolve())
+    else:
+        cwd = repo_path
+
+    async def _status(msg: str) -> None:
+        if status_callback:
+            await status_callback(msg)
+
+    # Push to origin before deploying (safety net)
+    await _status("\U0001f680 Pushing to origin...")
+    try:
+        push_proc = await asyncio.create_subprocess_exec(
+            "git", "-C", repo_path, "push", "origin", "HEAD",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        push_out, _ = await asyncio.wait_for(
+            push_proc.communicate(), timeout=30,
+        )
+        if push_proc.returncode != 0:
+            push_output = push_out.decode(errors="replace")[:1500]
+            await _status(
+                f"⚠️ Push failed (exit {push_proc.returncode}), deploying anyway...\n```\n{push_output}\n```"
+            )
+    except asyncio.TimeoutError:
+        try:
+            push_proc.kill()
+        except ProcessLookupError:
+            pass
+        await _status("⚠️ Push timed out (30s). Proceeding with deploy...")
+    except Exception as e:
+        await _status(f"⚠️ Push error: {e}. Proceeding with deploy...")
+
+    await _status(f"\U0001f680 Running: `{command}`...")
+
+    ds = bot._store.get_deploy_state(repo_name)
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            command, cwd=cwd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        raw_timeout = deploy_config.get("timeout", 600)
+        deploy_timeout = max(10, min(int(raw_timeout), 3600)) if isinstance(raw_timeout, (int, float)) else 600
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=deploy_timeout)
+        output = stdout.decode(errors="replace")[:1500]
+
+        if proc.returncode == 0:
+            if ds:
+                ds.last_deploy_error = None
+                ds.boot_version = ds.current_version
+                ds.boot_ref = ds.current_ref
+                ds.pending_sessions.clear()
+                ds.pending_changes.clear()
+                ds.auto_fix_attempt = 0
+                ds.auto_fix_thread_id = None
+                bot._store.set_deploy_state(repo_name, ds)
+            return True, output, ""
+        else:
+            err_summary = ""
+            if output.strip():
+                for line in reversed(output.strip().splitlines()):
+                    line = line.strip()
+                    if line and not line.startswith("---"):
+                        err_summary = line[:200]
+                        break
+            err_summary = err_summary or f"Exit code {proc.returncode}"
+            if ds:
+                ds.last_deploy_error = err_summary
+                bot._store.set_deploy_state(repo_name, ds)
+            return False, output, err_summary
+    except asyncio.TimeoutError:
+        if proc:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+        err = f"Timed out ({deploy_timeout}s)"
+        if ds:
+            ds.last_deploy_error = err
+            bot._store.set_deploy_state(repo_name, ds)
+        return False, "", err
+    except Exception as e:
+        err = str(e)[:200]
+        if ds:
+            ds.last_deploy_error = err
+            bot._store.set_deploy_state(repo_name, ds)
+        return False, "", err
+
+
+async def _spawn_deploy_fix(
+    bot: ClaudeBot,
+    repo_name: str,
+    deploy_config: dict,
+    error_output: str,
+    error_summary: str,
+) -> None:
+    """Auto-spawn a fix session after deploy failure.
+
+    Creates a forum thread, runs the fix prompt, then chains into autopilot.
+    If auto_fix_redeploy is enabled, re-runs the deploy after a successful merge.
+    """
+    from bot.claude.types import InstanceStatus
+    from bot.engine import commands as engine_commands
+    from bot.engine import workflows
+
+    ds = bot._store.get_deploy_state(repo_name)
+    max_retries = deploy_config.get("auto_fix_retries", 1)
+
+    if not ds:
+        log.warning("No deploy state for %s — skipping auto-fix", repo_name)
+        return
+
+    if ds.auto_fix_attempt >= max_retries:
+        log.info("Auto-fix exhausted for %s (%d/%d)", repo_name, ds.auto_fix_attempt, max_retries)
+        return
+
+    ds.auto_fix_attempt += 1
+    bot._store.set_deploy_state(repo_name, ds)
+
+    # Create fix thread
+    thread = await bot._forums.get_or_create_session_thread(
+        repo_name, None, f"deploy-fix-{ds.auto_fix_attempt}",
+    )
+    if not thread:
+        log.warning("Could not create auto-fix thread for %s", repo_name)
+        return
+
+    channel_id = str(thread.id)
+    ds.auto_fix_thread_id = channel_id
+    bot._store.set_deploy_state(repo_name, ds)
+    asyncio.create_task(bot._forums.refresh_control_room(repo_name))
+
+    # Follow the owner
+    try:
+        if bot._discord_user_id:
+            owner = bot.get_user(bot._discord_user_id)
+            if owner:
+                await thread.add_user(owner)
+    except Exception:
+        log.debug("Failed to add owner to auto-fix thread", exc_info=True)
+
+    # Build context — owner-level, plan mode for initial query
+    lookup = bot._forums.thread_to_project(channel_id)
+    t_info = lookup[1] if lookup else None
+    ctx = bot._ctx(channel_id, repo_name=repo_name, thread_info=t_info)
+    ctx.is_owner = True
+    if t_info:
+        bot._forums.attach_session_callbacks(ctx, t_info, channel_id)
+
+    # Notify owner in the thread
+    command = deploy_config.get("command", "?")
+    owner_id_str = str(bot._discord_user_id) if bot._discord_user_id else ""
+    mention = ctx.messenger.format_mention(owner_id_str) if owner_id_str else ""
+    notify_text = f"{mention} Deploy failed — auto-fix session started." if mention else "Deploy failed — auto-fix session started."
+    try:
+        await ctx.messenger.send_text(channel_id, notify_text, silent=False)
+    except Exception:
+        log.debug("Failed to send auto-fix notification", exc_info=True)
+
+    # Build the fix prompt
+    prompt = (
+        f"The deploy command `{command}` failed.\n\n"
+        f"**Error:** {error_summary}\n\n"
+    )
+    if error_output.strip():
+        prompt += f"**Full output:**\n```\n{error_output}\n```\n\n"
+    prompt += (
+        "Diagnose the issue and fix it. The deploy command runs in the repo root. "
+        "Focus on what would cause this specific error."
+    )
+
+    # Run initial query (produces plan instance)
+    try:
+        await engine_commands.on_text(ctx, prompt)
+    except Exception:
+        log.exception("Auto-fix on_text failed for %s", repo_name)
+        try:
+            await ctx.messenger.send_text(
+                channel_id, "❌ Auto-fix could not start — query failed.",
+            )
+        except Exception:
+            pass
+        ds = bot._store.get_deploy_state(repo_name)
+        if ds:
+            ds.auto_fix_thread_id = None
+            bot._store.set_deploy_state(repo_name, ds)
+        asyncio.create_task(bot._forums.refresh_control_room(repo_name))
+        return
+
+    # Find the instance that was just created
+    if t_info:
+        # Re-read in case callback resolved it
+        lookup = bot._forums.thread_to_project(channel_id)
+        if lookup:
+            t_info = lookup[1]
+    session_id = t_info.session_id if t_info else None
+    if not session_id:
+        log.warning("No session_id after auto-fix query for %s", repo_name)
+        ds = bot._store.get_deploy_state(repo_name)
+        if ds:
+            ds.auto_fix_thread_id = None
+            bot._store.set_deploy_state(repo_name, ds)
+        asyncio.create_task(bot._forums.refresh_control_room(repo_name))
+        return
+
+    # Find the latest instance for this session to chain from
+    all_instances = bot._store.list_instances()
+    session_instances = [i for i in all_instances if i.session_id == session_id]
+    if not session_instances:
+        log.warning("No instances found for auto-fix session %s", session_id)
+        ds = bot._store.get_deploy_state(repo_name)
+        if ds:
+            ds.auto_fix_thread_id = None
+            bot._store.set_deploy_state(repo_name, ds)
+        asyncio.create_task(bot._forums.refresh_control_room(repo_name))
+        return
+
+    source_inst = session_instances[-1]
+    source_msg_id = None
+    platform_msgs = source_inst.message_ids.get("discord", [])
+    if platform_msgs:
+        source_msg_id = platform_msgs[-1]
+
+    # Chain into autopilot: review_loop → build → review_code → done → merge
+    try:
+        result = await workflows.on_autopilot(
+            ctx, source_inst.id, source_msg_id, start_from="review_loop",
+        )
+    except Exception:
+        log.exception("Auto-fix autopilot chain failed for %s", repo_name)
+        try:
+            await ctx.messenger.send_text(
+                channel_id, "❌ Auto-fix chain failed unexpectedly.",
+            )
+        except Exception:
+            pass
+        ds = bot._store.get_deploy_state(repo_name)
+        if ds:
+            ds.auto_fix_thread_id = None
+            bot._store.set_deploy_state(repo_name, ds)
+        asyncio.create_task(bot._forums.refresh_control_room(repo_name))
+        return
+
+    # Check if chain completed successfully (merge happened)
+    ds = bot._store.get_deploy_state(repo_name)
+    if not ds:
+        return
+
+    # branch is cleared by merge_branch; status check prevents false positives
+    # from early chain exits (e.g. review instances that never created a branch)
+    chain_succeeded = (
+        result
+        and result.status == InstanceStatus.COMPLETED
+        and result.branch is None
+    )
+
+    if not chain_succeeded:
+        # Chain didn't complete (failed step, needs input, etc.)
+        try:
+            await ctx.messenger.send_text(
+                channel_id,
+                "⚠️ Auto-fix chain did not complete — manual intervention needed.",
+            )
+        except Exception:
+            pass
+        ds.auto_fix_thread_id = None
+        bot._store.set_deploy_state(repo_name, ds)
+        asyncio.create_task(bot._forums.refresh_control_room(repo_name))
+        return
+
+    # Chain succeeded — optionally redeploy
+    if deploy_config.get("auto_fix_redeploy"):
+        async def _redeploy_status(msg: str) -> None:
+            try:
+                await ctx.messenger.send_text(channel_id, msg, silent=True)
+            except Exception:
+                pass
+
+        success, output, err = await execute_deploy(
+            bot, repo_name, deploy_config, status_callback=_redeploy_status,
+        )
+        if success:
+            try:
+                await ctx.messenger.send_text(
+                    channel_id,
+                    f"✅ Redeploy successful.\n```\n{output}\n```" if output.strip()
+                    else "✅ Redeploy successful.",
+                    silent=True,
+                )
+            except Exception:
+                pass
+        else:
+            try:
+                await ctx.messenger.send_text(
+                    channel_id,
+                    f"❌ Redeploy also failed: {err}",
+                )
+            except Exception:
+                pass
+    else:
+        try:
+            await ctx.messenger.send_text(
+                channel_id,
+                "✅ Fix merged. Deploy button is ready — tap it when you're ready to redeploy.",
+                silent=True,
+            )
+        except Exception:
+            pass
+
+    # Clean up thread tracking
+    ds = bot._store.get_deploy_state(repo_name)
+    if ds:
+        ds.auto_fix_thread_id = None
+        bot._store.set_deploy_state(repo_name, ds)
+    asyncio.create_task(bot._forums.refresh_control_room(repo_name))
+
+
 async def _handle_reboot_repo(
     bot: ClaudeBot, interaction: discord.Interaction, repo_name: str,
 ) -> None:
@@ -707,8 +1050,6 @@ async def _handle_reboot_repo(
         # handles it on the next startup when it detects self_managed=True.
 
     elif method == "command":
-        command = config["command"]
-        # Resolve cwd: absolute as-is, relative against repo root, default to repo path
         repo_path = bot._store.list_repos().get(repo_name)
         if not repo_path:
             await interaction.followup.send(
@@ -716,14 +1057,6 @@ async def _handle_reboot_repo(
                 ephemeral=True,
             )
             return
-        raw_cwd = config.get("cwd")
-        if raw_cwd:
-            cwd_path = Path(raw_cwd)
-            if not cwd_path.is_absolute():
-                cwd_path = Path(repo_path) / cwd_path
-            cwd = str(cwd_path.resolve())
-        else:
-            cwd = repo_path
 
         # Single status message for the deploy cycle (deleted after completion)
         status = await _start_deploy_status(
@@ -731,92 +1064,30 @@ async def _handle_reboot_repo(
             store=bot._store,
         )
 
-        # Push to origin before deploying (safety net)
-        try:
-            push_proc = await asyncio.create_subprocess_exec(
-                "git", "-C", repo_path, "push", "origin", "HEAD",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
+        success, output, err_summary = await execute_deploy(
+            bot, repo_name, config,
+            status_callback=status.update,
+        )
+
+        if success:
+            await status.update(
+                f"\u2705 Deploy successful.\n```\n{output}\n```"
+                if output.strip() else "\u2705 Deploy successful.",
             )
-            push_out, _ = await asyncio.wait_for(
-                push_proc.communicate(), timeout=30,
-            )
-            if push_proc.returncode != 0:
-                push_output = push_out.decode(errors="replace")[:1500]
+        else:
+            if output.strip():
                 await status.update(
-                    f"⚠️ Push failed (exit {push_proc.returncode}), deploying anyway...\n```\n{push_output}\n```"
-                )
-        except asyncio.TimeoutError:
-            try:
-                push_proc.kill()
-            except ProcessLookupError:
-                pass
-            await status.update("⚠️ Push timed out (30s). Proceeding with deploy...")
-        except Exception as e:
-            await status.update(f"⚠️ Push error: {e}. Proceeding with deploy...")
-
-        await status.update(f"\U0001f680 Running: `{command}`...")
-
-        proc = None
-        try:
-            proc = await asyncio.create_subprocess_shell(
-                command, cwd=cwd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-            raw_timeout = config.get("timeout", 600)
-            deploy_timeout = max(10, min(int(raw_timeout), 3600)) if isinstance(raw_timeout, (int, float)) else 600
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=deploy_timeout)
-            output = stdout.decode(errors="replace")[:1500]
-
-            if proc.returncode == 0:
-                # Reset deploy state after successful command-based deploy
-                if ds:
-                    ds.last_deploy_error = None
-                    ds.boot_version = ds.current_version
-                    ds.boot_ref = ds.current_ref
-                    ds.pending_sessions.clear()
-                    ds.pending_changes.clear()
-                    bot._store.set_deploy_state(repo_name, ds)
-                await status.update(
-                    f"\u2705 Deploy successful.\n```\n{output}\n```"
-                    if output.strip() else "\u2705 Deploy successful.",
+                    f"\u274c Deploy failed.\n```\n{output}\n```",
                 )
             else:
-                # Persist failure reason for control room display
-                if ds:
-                    err_summary = ""
-                    if output.strip():
-                        for line in reversed(output.strip().splitlines()):
-                            line = line.strip()
-                            if line and not line.startswith("---"):
-                                err_summary = line[:200]
-                                break
-                    ds.last_deploy_error = err_summary or f"Exit code {proc.returncode}"
-                    bot._store.set_deploy_state(repo_name, ds)
-                await status.update(
-                    f"\u274c Deploy failed (exit {proc.returncode}).\n```\n{output}\n```"
-                    if output.strip()
-                    else f"\u274c Deploy failed (exit {proc.returncode}).",
-                )
-        except asyncio.TimeoutError:
-            if proc:
-                try:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
-            if ds:
-                ds.last_deploy_error = f"Timed out ({deploy_timeout}s)"
-                bot._store.set_deploy_state(repo_name, ds)
-            await status.update(f"\u274c Deploy timed out ({deploy_timeout}s).")
-        except Exception as e:
-            if ds:
-                ds.last_deploy_error = str(e)[:200]
-                bot._store.set_deploy_state(repo_name, ds)
-            await status.update(f"\u274c Deploy error: {e}")
+                await status.update(f"\u274c Deploy failed: {err_summary}")
 
-    # For command deploys, delete the status message — result is in the embed
-    if method == "command":
+            # Auto-fix: spawn a fix session if enabled
+            if config.get("auto_fix"):
+                asyncio.create_task(_spawn_deploy_fix(
+                    bot, repo_name, config, output, err_summary,
+                ))
+
         await status.delete()
 
     asyncio.create_task(bot._forums.refresh_control_room(repo_name))

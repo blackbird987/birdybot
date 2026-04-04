@@ -414,7 +414,7 @@ async def run() -> None:
     # Capture deploy state baselines for all repos
     from bot.engine.deploy import (
         capture_boot_baselines, make_deploy_config,
-        is_deploy_protected, scan_deploy_config,
+        is_deploy_protected, scan_deploy_config, _safe_int,
     )
     capture_boot_baselines(store, str(config._PROJECT_ROOT))
 
@@ -438,6 +438,9 @@ async def run() -> None:
                     label=_file_cfg.get("label", "Deploy"),
                     cwd=_file_cfg.get("cwd"),
                     source="file", approved=False,
+                    auto_fix=bool(_file_cfg.get("auto_fix")),
+                    auto_fix_redeploy=bool(_file_cfg.get("auto_fix_redeploy")),
+                    auto_fix_retries=_safe_int(_file_cfg.get("auto_fix_retries"), 1),
                 ))
                 log.info("Auto-registered file-based deploy config for %s (pending approval)", _rname)
 

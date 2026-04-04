@@ -16,6 +16,15 @@ _NOWND: dict = config.NOWND
 
 DEPLOY_CONFIG_PATH = ".claude/deploy.json"
 
+
+def _safe_int(value, default: int) -> int:
+    """Convert value to int, returning default on failure."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 # Version file parsers in priority order
 _VERSION_PARSERS: list[tuple[str, str]] = [
     ("pyproject.toml", r'version\s*=\s*"([^"]+)"'),
@@ -40,6 +49,8 @@ class DeployState:
     pending_sessions: list[str] = field(default_factory=list)
     pending_changes: list[str] = field(default_factory=list)
     last_deploy_error: str | None = None
+    auto_fix_attempt: int = 0
+    auto_fix_thread_id: str | None = None
 
     @property
     def needs_reboot(self) -> bool:
@@ -55,6 +66,8 @@ class DeployState:
             "pending_sessions": self.pending_sessions,
             "pending_changes": self.pending_changes,
             "last_deploy_error": self.last_deploy_error,
+            "auto_fix_attempt": self.auto_fix_attempt,
+            "auto_fix_thread_id": self.auto_fix_thread_id,
         }
 
     @classmethod
@@ -68,6 +81,8 @@ class DeployState:
             pending_sessions=data.get("pending_sessions", []),
             pending_changes=data.get("pending_changes", []),
             last_deploy_error=data.get("last_deploy_error"),
+            auto_fix_attempt=data.get("auto_fix_attempt", 0),
+            auto_fix_thread_id=data.get("auto_fix_thread_id"),
         )
 
 
@@ -283,6 +298,9 @@ def make_deploy_config(
     timeout: int | None = None,
     source: str = "manual",
     approved: bool = True,
+    auto_fix: bool = False,
+    auto_fix_redeploy: bool = False,
+    auto_fix_retries: int = 1,
 ) -> dict:
     """Build a deploy config dict with all required fields."""
     cfg: dict = {
@@ -297,6 +315,12 @@ def make_deploy_config(
         cfg["cwd"] = cwd
     if timeout is not None:
         cfg["timeout"] = timeout
+    if auto_fix:
+        cfg["auto_fix"] = True
+    if auto_fix_redeploy:
+        cfg["auto_fix_redeploy"] = True
+    if auto_fix_retries != 1:
+        cfg["auto_fix_retries"] = auto_fix_retries
     return cfg
 
 
@@ -332,6 +356,9 @@ def rescan_deploy_config_after_merge(store, repo_name: str, repo_path: str) -> N
             cwd=file_cfg.get("cwd"),
             timeout=file_cfg.get("timeout"),
             source="file", approved=False,
+            auto_fix=bool(file_cfg.get("auto_fix")),
+            auto_fix_redeploy=bool(file_cfg.get("auto_fix_redeploy")),
+            auto_fix_retries=_safe_int(file_cfg.get("auto_fix_retries"), 1),
         ))
 
 
