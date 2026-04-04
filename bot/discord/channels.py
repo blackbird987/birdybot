@@ -534,6 +534,12 @@ def build_control_embed(
         if deploy_state.last_deploy_error:
             error_line = f"\u274c **Last deploy failed:** {deploy_state.last_deploy_error}\n"
 
+        # Auto-fix status
+        if deploy_state.auto_fix_thread_id:
+            error_line += f"\U0001f527 **Auto-fix in progress:** <#{deploy_state.auto_fix_thread_id}>\n"
+        elif deploy_state.auto_fix_attempt > 0 and not deploy_state.auto_fix_thread_id:
+            error_line += f"\U0001f527 **Auto-fix exhausted** ({deploy_state.auto_fix_attempt} attempt{'s' if deploy_state.auto_fix_attempt != 1 else ''}) — manual intervention needed\n"
+
         session_links = ""
         if deploy_state.pending_sessions and deploy_thread_ids:
             links = [f"<#{deploy_thread_ids[s]}>" for s in deploy_state.pending_sessions
