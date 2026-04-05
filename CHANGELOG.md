@@ -8,6 +8,8 @@
 - **Auth sync module** (`bot/services/auth_sync.py`): Fernet-encrypted credential transfer via Discord messages with automatic startup hook
 - **Standalone push script** (`scripts/auth_push.py`): zero-dependency credential push for use before bot reboots
 - **Sync Git now pulls for self-managed repos**: removes the `is_self` guard that blocked pulling the bot's own code, auto-queues reboot after pull
+## v0.63.3 — Fix Git Fetch Tag Clobber (2026-04-05)
+
 - Fix deploy/sync fetch failing when local tags diverge from remote (tag clobber)
 - Add `--tags --force` to auto-update fetch to prevent same issue
 
