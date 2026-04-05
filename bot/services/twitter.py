@@ -1,9 +1,8 @@
-"""Twitter/X URL detection and tweet fetching via DegenAI API."""
+"""Twitter/X URL detection and tweet fetching via Twitter API v2."""
 
 from __future__ import annotations
 
 import asyncio
-import base64
 import logging
 import re
 
@@ -17,16 +16,9 @@ _TWEET_URL_RE = re.compile(
     r"(?:https?://)?(?:twitter\.com|x\.com)/(?:\w+/)?status/(\d+)"
 )
 
-_API_BASE = "https://degenai.dev/api/twitter/admin/tweet"
-
-
-def _auth_header() -> str | None:
-    """Build Basic auth header from config, or None if not configured."""
-    user = config.TWITTER_API_USER
-    pw = config.TWITTER_API_PASS
-    if not user or not pw:
-        return None
-    return "Basic " + base64.b64encode(f"{user}:{pw}".encode()).decode()
+_API_BASE = "https://api.twitter.com/2"
+_TWEET_FIELDS = "text,author_id,created_at"
+_USER_FIELDS = "username,name"
 
 
 def extract_tweet_ids(text: str) -> list[str]:
@@ -34,28 +26,49 @@ def extract_tweet_ids(text: str) -> list[str]:
     return _TWEET_URL_RE.findall(text)
 
 
-async def fetch_tweet(tweet_id: str, timeout: float = 5.0) -> str | None:
-    """Fetch tweet content, return formatted string or None on failure."""
-    auth = _auth_header()
-    if not auth:
+async def fetch_tweet(tweet_id: str, timeout: float = 10.0) -> str | None:
+    """Fetch tweet content via Twitter API v2, return formatted string or None."""
+    token = config.TWITTER_BEARER_TOKEN
+    if not token:
         return None
+    url = (
+        f"{_API_BASE}/tweets/{tweet_id}"
+        f"?tweet.fields={_TWEET_FIELDS}"
+        f"&expansions=author_id&user.fields={_USER_FIELDS}"
+    )
+    headers = {"Authorization": f"Bearer {token}"}
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(
-                f"{_API_BASE}/{tweet_id}",
-                headers={"Authorization": auth},
+                url,
+                headers=headers,
                 timeout=aiohttp.ClientTimeout(total=timeout),
             ) as resp:
+                if resp.status == 429:
+                    log.warning("Twitter rate limited for tweet %s", tweet_id)
+                    return None
                 if resp.status != 200:
-                    log.warning("Tweet fetch %s returned %d", tweet_id, resp.status)
+                    log.warning("Twitter API %d for tweet %s", resp.status, tweet_id)
                     return None
                 data = await resp.json()
-                handle = data.get("authorHandle", "unknown")
-                name = data.get("authorName", "")
-                text = data.get("text", "")
-                if not text:
-                    return None
-                return f'[Tweet by @{handle} ({name}): "{text}"]'
+
+        tweet = data.get("data")
+        if not tweet:
+            return None
+
+        # Resolve author from includes
+        handle = "unknown"
+        name = ""
+        includes = data.get("includes", {})
+        users = includes.get("users", [])
+        if users:
+            handle = users[0].get("username", "unknown")
+            name = users[0].get("name", "")
+
+        text = tweet.get("text", "")
+        if not text:
+            return None
+        return f'[Tweet by @{handle} ({name}): "{text}"]'
     except Exception:
         log.warning("Tweet fetch failed for %s", tweet_id, exc_info=True)
         return None

@@ -50,9 +50,8 @@ TEST_WEBHOOK_IDS: set[str] = set(filter(None, os.getenv("TEST_WEBHOOK_IDS", "").
 # --- OpenAI (voice transcription) ---
 OPENAI_API_KEY: str | None = os.getenv("OPENAI_API_KEY")
 
-# --- Twitter/X (tweet fetching via DegenAI) ---
-TWITTER_API_USER: str = os.getenv("TWITTER_API_USER", "")
-TWITTER_API_PASS: str = os.getenv("TWITTER_API_PASS", "")
+# --- Twitter/X (direct API v2) ---
+TWITTER_BEARER_TOKEN: str = os.getenv("TWITTER_BEARER_TOKEN", "")
 
 # Validate: Discord must be configured
 if not DISCORD_ENABLED:
