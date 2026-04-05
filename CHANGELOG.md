@@ -8,6 +8,8 @@
 - **Auth sync module** (`bot/services/auth_sync.py`): Fernet-encrypted credential transfer via Discord messages with automatic startup hook
 - **Standalone push script** (`scripts/auth_push.py`): zero-dependency credential push for use before bot reboots
 - **Sync Git now pulls for self-managed repos**: removes the `is_self` guard that blocked pulling the bot's own code, auto-queues reboot after pull
+## v0.63.1 — Fix Tweet Fetch via Twitter API v2 (2026-04-05)
+
 - Switch tweet auto-fetch from DegenAI proxy to Twitter API v2 direct (fixes route mismatch that caused all fetches to 404)
 
 ## v0.63.0 — Auto-Fix on Deploy Failure (2026-04-04)
