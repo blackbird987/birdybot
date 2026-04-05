@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.63.2 — Tweet Fetch Retry on Transient Failures (2026-04-05)
+
 - Add single retry with 1s delay for Twitter API 429/503 transient failures
 
 ## v0.63.1 — Fix Tweet Fetch via Twitter API v2 (2026-04-05)
