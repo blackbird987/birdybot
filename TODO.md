@@ -45,3 +45,4 @@
 - [ ] [DRY/Cleanup] Extract chain resume logic into shared helper (Low)
 - [ ] [Bug Risk] formatting.py PPU button shown without budget check can mislead (Medium)
 - [ ] [DRY/Cleanup] Extract instance-cloning helper shared by retry and PPU (Low)
+- [ ] [DRY/Cleanup] status_callback pattern duplicates messenger.send_text (Low)
