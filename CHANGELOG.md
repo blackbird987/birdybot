@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## v0.63.3 — Fix Git Fetch Tag Clobber (2026-04-05)
+
+- Fix deploy/sync fetch failing when local tags diverge from remote (tag clobber)
+- Add `--tags --force` to auto-update fetch to prevent same issue
+
 ## v0.63.2 — Tweet Fetch Retry on Transient Failures (2026-04-05)
 
 - Add single retry with 1s delay for Twitter API 429/503 transient failures

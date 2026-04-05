@@ -1113,10 +1113,10 @@ async def _handle_sync_git(
     is_self = ds.self_managed if ds else False
 
     try:
-        # Step 1: Fetch latest remote state (including tags)
+        # Step 1a: Fetch branches (must succeed)
         fetch = await asyncio.to_thread(
             subprocess.run,
-            ["git", "fetch", "--tags"],
+            ["git", "fetch", "origin"],
             cwd=repo_path, capture_output=True, text=True, timeout=30, **NOWND,
         )
         if fetch.returncode != 0:
@@ -1125,6 +1125,16 @@ async def _handle_sync_git(
                 f"`{repo_name}`: Fetch failed \u2014 `{err}`", ephemeral=True,
             )
             return
+
+        # Step 1b: Fetch tags with --force (non-fatal if it fails)
+        tag_fetch = await asyncio.to_thread(
+            subprocess.run,
+            ["git", "fetch", "origin", "--tags", "--force"],
+            cwd=repo_path, capture_output=True, text=True, timeout=15, **NOWND,
+        )
+        if tag_fetch.returncode != 0:
+            log.warning("Tag fetch failed for %s: %s", repo_name,
+                        (tag_fetch.stderr or "")[:200])
 
         # Step 2: Check ahead/behind counts
         ahead_result = await asyncio.to_thread(
