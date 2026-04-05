@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Add single retry with 1s delay for Twitter API 429/503 transient failures
+
 ## v0.63.1 — Fix Tweet Fetch via Twitter API v2 (2026-04-05)
 
 - Switch tweet auto-fetch from DegenAI proxy to Twitter API v2 direct (bearer token auth, no longer depends on DegenAI being online)

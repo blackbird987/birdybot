@@ -39,18 +39,21 @@ async def fetch_tweet(tweet_id: str, timeout: float = 10.0) -> str | None:
     headers = {"Authorization": f"Bearer {token}"}
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(
-                url,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=timeout),
-            ) as resp:
-                if resp.status == 429:
-                    log.warning("Twitter rate limited for tweet %s", tweet_id)
-                    return None
-                if resp.status != 200:
-                    log.warning("Twitter API %d for tweet %s", resp.status, tweet_id)
-                    return None
-                data = await resp.json()
+            for attempt in range(2):
+                async with session.get(
+                    url,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                ) as resp:
+                    if resp.status in (429, 503) and attempt == 0:
+                        log.info("Twitter %d for tweet %s, retrying in 1s", resp.status, tweet_id)
+                        await asyncio.sleep(1)
+                        continue
+                    if resp.status != 200:
+                        log.warning("Twitter API %d for tweet %s", resp.status, tweet_id)
+                        return None
+                    data = await resp.json()
+                break  # success, exit retry loop
 
         tweet = data.get("data")
         if not tweet:
