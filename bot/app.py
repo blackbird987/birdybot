@@ -164,7 +164,7 @@ async def auto_update_loop(
                 # 1. Fetch
                 fetch = await asyncio.to_thread(
                     subprocess.run,
-                    ["git", "fetch", "origin"],
+                    ["git", "fetch", "origin", "--tags", "--force"],
                     cwd=str(config._PROJECT_ROOT),
                     capture_output=True, text=True, timeout=30, **_NOWND,
                 )
