@@ -10,6 +10,7 @@ import asyncio
 import logging
 import os
 import re
+import tempfile
 
 from bot import config
 
@@ -38,7 +39,7 @@ async def generate_title_text(prompt: str, summary: str = "") -> str | None:
 
     cmd = [
         config.CLAUDE_BINARY, "-p", title_prompt,
-        "--output-format", "stream-json", "--verbose",
+        "--output-format", "stream-json",
         "--permission-mode", "plan",
         "--max-turns", "1",
     ]
@@ -54,6 +55,7 @@ async def generate_title_text(prompt: str, summary: str = "") -> str | None:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
             env=env,
+            cwd=tempfile.gettempdir(),
             **_NOWND,
         )
         stdout, _ = await asyncio.wait_for(
