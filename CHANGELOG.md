@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Fix title generation picking up bot's own git context — run subprocess in temp dir, remove `--verbose`
+
 ## v0.62.0 — Cross-Instance Auth Sync (2026-03-29)
 
 - **Claude Login button**: Ark dashboard button for cross-instance CLI auth sync — push credentials from a working machine, pull on a broken one, two taps from Discord
