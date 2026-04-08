@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.63.4 — Fix Title Context Bleed (2026-04-08)
+
 - Fix title generation picking up bot's own git context — run subprocess in temp dir, remove `--verbose`
 
 ## v0.62.0 — Cross-Instance Auth Sync (2026-03-29)
