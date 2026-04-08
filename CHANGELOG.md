@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Fix `.env` values not overriding stale env vars — add `override=True` to `load_dotenv`
+- Add long-form Twitter article extraction to tweet fetcher (capped at 1500 chars)
+
 ## v0.63.5 — Fix Stale Merge/Discard Buttons (2026-04-08)
 
 - Fix merge/discard buttons persisting after successful merge — re-renders result embed without Merge/Discard buttons

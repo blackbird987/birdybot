@@ -17,7 +17,7 @@ _TWEET_URL_RE = re.compile(
 )
 
 _API_BASE = "https://api.twitter.com/2"
-_TWEET_FIELDS = "text,author_id,created_at"
+_TWEET_FIELDS = "text,author_id,created_at,article"
 _USER_FIELDS = "username,name"
 
 
@@ -67,6 +67,16 @@ async def fetch_tweet(tweet_id: str, timeout: float = 10.0) -> str | None:
         if users:
             handle = users[0].get("username", "unknown")
             name = users[0].get("name", "")
+
+        # Check for article (long-form Twitter post)
+        article = tweet.get("article")
+        if article:
+            title = article.get("title", "").strip()
+            plain = article.get("plain_text", "")
+            # Cap article text to keep prompt budget reasonable
+            if len(plain) > 1500:
+                plain = plain[:1500] + "\u2026"
+            return f'[Article by @{handle} ({name}) — "{title}":\n{plain}]'
 
         text = tweet.get("text", "")
         if not text:

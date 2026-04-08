@@ -46,3 +46,4 @@
 - [ ] [Bug Risk] formatting.py PPU button shown without budget check can mislead (Medium)
 - [ ] [DRY/Cleanup] Extract instance-cloning helper shared by retry and PPU (Low)
 - [ ] [DRY/Cleanup] status_callback pattern duplicates messenger.send_text (Low)
+- [ ] [Bug Risk] Title text posted as visible message in thread (Medium)
