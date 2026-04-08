@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.63.6 — Env Override + Twitter Articles (2026-04-08)
+
 - Fix `.env` values not overriding stale env vars — add `override=True` to `load_dotenv`
 - Add long-form Twitter article extraction to tweet fetcher (capped at 1500 chars)
 
