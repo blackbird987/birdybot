@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## v0.63.5 — Fix Stale Merge/Discard Buttons (2026-04-08)
+
+- Fix merge/discard buttons persisting after successful merge — re-renders result embed without Merge/Discard buttons
+- Add early-return guard on merge/discard handlers to short-circuit double-clicks
+- Improve error messages: "Already merged (branch → target)" instead of confusing "No branch to merge"
+
 ## v0.63.4 — Fix Title Context Bleed (2026-04-08)
 
 - Fix title generation picking up bot's own git context — run subprocess in temp dir, remove `--verbose`

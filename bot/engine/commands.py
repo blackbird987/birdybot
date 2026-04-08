@@ -1593,6 +1593,31 @@ async def on_help(ctx: RequestContext) -> None:
     await ctx.messenger.send_text(ctx.channel_id, markup)
 
 
+# --- Post-merge/discard button cleanup ---
+
+async def _strip_post_merge_buttons(
+    ctx: RequestContext, inst: Instance, skip_msg_id: str | None = None,
+) -> None:
+    """Edit the result embed to remove Merge/Discard buttons after branch resolution.
+
+    skip_msg_id: if the caller already edited this message (e.g. source_msg_id
+    from a button click), skip it to avoid a double-edit race.
+    """
+    msg_ids = inst.message_ids.get(ctx.platform, [])
+    if not msg_ids:
+        return
+    result_msg_id = msg_ids[-1]
+    if result_msg_id == skip_msg_id:
+        return  # Already handled by the caller's edit
+    try:
+        formatted = format_result_md(inst)
+        markup = ctx.messenger.markdown_to_markup(formatted)
+        buttons = action_button_specs(inst)
+        await ctx.messenger.edit_text(ctx.channel_id, result_msg_id, markup, buttons)
+    except Exception:
+        log.debug("Failed to strip buttons from %s result message", inst.id)
+
+
 # --- Callback dispatch ---
 
 async def handle_callback(
@@ -1706,6 +1731,15 @@ async def handle_callback(
         if not inst:
             await ctx.messenger.send_text(ctx.channel_id, "Instance not found.")
             return
+        # Early guard: branch already cleared by a prior merge/discard
+        if not inst.branch:
+            msg = await ctx.runner.merge_branch(inst)  # returns "Already merged (...)"
+            escaped = ctx.messenger.escape(msg)
+            if source_msg_id:
+                await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, escaped)
+            else:
+                await ctx.messenger.send_text(ctx.channel_id, escaped)
+            return
         branch_name = inst.branch  # Save before merge clears it
         msg = await ctx.runner.merge_branch(inst)
         ctx.store.update_instance(inst)
@@ -1717,10 +1751,15 @@ async def handle_callback(
             rescan_deploy_config_after_merge(ctx.store, inst.repo_name, inst.repo_path)
             await ctx.messenger.on_deploy_state_changed(inst.repo_name)
         escaped = ctx.messenger.escape(msg)
+        # Pass updated buttons when branch was resolved (strips Merge/Discard)
+        buttons = action_button_specs(inst) if not inst.branch else None
         if source_msg_id:
-            await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, escaped)
+            await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, escaped, buttons)
         else:
             await ctx.messenger.send_text(ctx.channel_id, escaped)
+        # Also strip buttons from the result embed if it's a different message
+        if not inst.branch:
+            await _strip_post_merge_buttons(ctx, inst, skip_msg_id=source_msg_id)
         # Close thread if this was a post-Done merge (branch resolved)
         if inst.origin == InstanceOrigin.DONE and not inst.branch:
             try:
@@ -1733,6 +1772,15 @@ async def handle_callback(
         if not inst:
             await ctx.messenger.send_text(ctx.channel_id, "Instance not found.")
             return
+        # Early guard: branch already cleared by a prior merge/discard
+        if not inst.branch:
+            msg = await ctx.runner.discard_branch(inst)  # returns "Already discarded (...)"
+            escaped = ctx.messenger.escape(msg)
+            if source_msg_id:
+                await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, escaped)
+            else:
+                await ctx.messenger.send_text(ctx.channel_id, escaped)
+            return
         branch_name = inst.branch  # Save before discard clears it
         msg = await ctx.runner.discard_branch(inst)
         ctx.store.update_instance(inst)
@@ -1740,10 +1788,15 @@ async def handle_callback(
         if branch_name:
             workflows.clear_stale_branches(ctx.store, branch_name)
         escaped = ctx.messenger.escape(msg)
+        # Pass updated buttons when branch was resolved (strips Merge/Discard)
+        buttons = action_button_specs(inst) if not inst.branch else None
         if source_msg_id:
-            await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, escaped)
+            await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, escaped, buttons)
         else:
             await ctx.messenger.send_text(ctx.channel_id, escaped)
+        # Also strip buttons from the result embed if it's a different message
+        if not inst.branch:
+            await _strip_post_merge_buttons(ctx, inst, skip_msg_id=source_msg_id)
         # Close thread if this was a post-Done discard (branch resolved)
         if inst.origin == InstanceOrigin.DONE and not inst.branch:
             try:

@@ -1146,6 +1146,8 @@ class ClaudeRunner:
     async def merge_branch(self, instance: Instance) -> str:
         """Merge worktree branch into master. Returns status message."""
         if not instance.branch or not instance.original_branch:
+            if instance.original_branch and not instance.branch:
+                return f"Already merged (claude-bot/{instance.id} → {instance.original_branch})"
             return "No branch to merge"
         if not instance.repo_path:
             return "No repo path"
@@ -1525,6 +1527,8 @@ class ClaudeRunner:
     async def discard_branch(self, instance: Instance) -> str:
         """Delete worktree and branch without merging."""
         if not instance.branch or not instance.original_branch:
+            if instance.original_branch and not instance.branch:
+                return f"Already discarded (claude-bot/{instance.id})"
             return "No branch to discard"
         if not instance.repo_path:
             return "No repo path"
