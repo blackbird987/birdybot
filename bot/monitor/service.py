@@ -46,6 +46,7 @@ class MonitorService:
         self._guild_id = guild_id
         self._category_id = category_id
         self._notifier = notifier
+        self._on_critical: Any | None = None  # async callback(name, repo_name, snap_data)
         self._task: asyncio.Task | None = None
         self._configs: dict[str, MonitorConfig] = {}
 
@@ -222,11 +223,11 @@ class MonitorService:
         await self._edit_or_recreate(channel, name, mon, "history_msg_id", history_embed)
 
         # Alert if attention worsened
-        if (
+        attention_worsened = (
             formatter._ATTENTION_ORDER.get(attention, 0)
             > formatter._ATTENTION_ORDER.get(prev_attention, 0)
-            and self._notifier
-        ):
+        )
+        if attention_worsened and self._notifier:
             emoji = formatter._ATTENTION_EMOJI.get(attention, "\u26a0\ufe0f")
             try:
                 await self._notifier.broadcast(
@@ -235,6 +236,13 @@ class MonitorService:
                 )
             except Exception:
                 pass
+
+        # Trigger auto-fix diagnostic on critical (independent of notifier)
+        if attention_worsened and attention == "critical" and prev_attention != "critical" and self._on_critical:
+            try:
+                await self._on_critical(name, cfg.repo_name, snap_data)
+            except Exception:
+                log.exception("on_critical callback failed for %s", name)
 
     async def _edit_or_recreate(
         self,

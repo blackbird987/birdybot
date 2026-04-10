@@ -352,6 +352,9 @@ def evaluate_chain(
     code_review_rounds = sum(
         1 for i in all_session_insts if i.origin == InstanceOrigin.REVIEW_CODE
     )
+    verify_rounds = sum(
+        1 for i in all_session_insts if i.origin == InstanceOrigin.VERIFY
+    )
 
     deferred_count = 0
     if instances:
@@ -394,6 +397,11 @@ def evaluate_chain(
         ev.flags.append(EvalFlag(
             category="efficiency", severity="issue",
             message=f"Chain cost ${total_cost:.2f} — unusually expensive",
+        ))
+    if verify_rounds >= 2:
+        ev.flags.append(EvalFlag(
+            category="test_failure", severity="warning",
+            message=f"Verification needed {verify_rounds} rounds — code had runtime issues",
         ))
 
     _save_chain_eval(ev)

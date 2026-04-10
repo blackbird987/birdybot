@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -345,6 +346,97 @@ async def on_review_code(ctx: RequestContext, source_id: str, source_msg_id: str
     return result
 
 
+# --- Verify ---
+
+_VERIFY_RESULT_RE = re.compile(r'```verify\s*\nRESULT:\s*(pass|fail)', re.IGNORECASE)
+
+
+def _verify_passed(inst: Instance) -> bool:
+    """Check if verify step reported pass (fail-safe: missing block = fail)."""
+    if not inst.result_file:
+        return False
+    try:
+        text = Path(inst.result_file).read_text(encoding="utf-8")
+    except OSError:
+        return False
+    m = _VERIFY_RESULT_RE.search(text)
+    if not m:
+        return False
+    return m.group(1).lower() == "pass"
+
+
+def _load_verify_policy(source_inst: Instance | None) -> str:
+    """Read verify_policy from .claude/test.json. Default: 'warn'."""
+    if not source_inst or not source_inst.repo_path:
+        return "warn"
+    test_json = Path(source_inst.repo_path) / ".claude" / "test.json"
+    if test_json.exists():
+        try:
+            cfg = json.loads(test_json.read_text(encoding="utf-8"))
+            return cfg.get("verify_policy", "warn")
+        except Exception:
+            pass
+    return "warn"
+
+
+async def on_verify(ctx: RequestContext, source_id: str, source_msg_id: str | None = None) -> Instance | None:
+    """Run verification. Auto-fix loop if tests fail (max 2 rounds).
+
+    Respects verify_policy from .claude/test.json:
+      "block"  — halt chain on failure (wait for user)
+      "warn"   — flag failure but proceed (default)
+    """
+    MAX_FIX_ROUNDS = 2
+    current_source = source_id
+    current_msg = source_msg_id
+    source_inst = ctx.store.get_instance(source_id)
+    verify_policy = _load_verify_policy(source_inst)
+
+    result: Instance | None = None
+    for round_num in range(MAX_FIX_ROUNDS + 1):
+        status = "Verifying..." if round_num == 0 else f"Re-verifying (fix {round_num})..."
+        result = await spawn_from(ctx, current_source, SpawnConfig(
+            instance_type=InstanceType.TASK,
+            prompt=config.VERIFY_PROMPT,
+            mode="build",
+            origin=InstanceOrigin.VERIFY,
+            status_text=status,
+            resume_session=True,
+            copy_branch=True,
+            silent=True,
+        ), source_msg_id=current_msg)
+
+        if not result:
+            break
+
+        passed = _verify_passed(result)
+        if passed:
+            break
+
+        # Last round — can't fix further
+        if round_num >= MAX_FIX_ROUNDS:
+            if verify_policy == "warn" and result.status == InstanceStatus.COMPLETED:
+                # Instance ran fine but tests reported fail — proceed with warning
+                await ctx.messenger.send_text(
+                    ctx.channel_id,
+                    f"⚠️ Verification failed after {round_num + 1} rounds — proceeding anyway. Check results.",
+                    silent=True,
+                )
+                break
+            # "block" policy or genuine instance failure — halt the chain.
+            # Set needs_input so the chain guard pauses and pings the user.
+            if result.status == InstanceStatus.COMPLETED:
+                result.needs_input = True
+                ctx.store.update_instance(result)
+            break
+
+        # Tests failed — Claude already tried to fix inline. Re-verify.
+        current_source = result.id
+        current_msg = _last_msg_id(result, ctx.platform)
+
+    return result
+
+
 async def on_commit(ctx: RequestContext, source_id: str, source_msg_id: str | None = None) -> Instance | None:
     return await spawn_from(ctx, source_id, SpawnConfig(
         instance_type=InstanceType.TASK, prompt=config.COMMIT_PROMPT,
@@ -379,8 +471,8 @@ async def on_done(ctx: RequestContext, source_id: str, source_msg_id: str | None
 
 # --- Autopilot chains ---
 
-_AUTOPILOT_STEPS = ["review_loop", "build", "review_code", "done", "merge"]
-_BUILD_AND_SHIP_STEPS = ["build", "review_code", "done", "merge"]
+_AUTOPILOT_STEPS = ["review_loop", "build", "review_code", "verify", "done", "merge"]
+_BUILD_AND_SHIP_STEPS = ["build", "review_code", "verify", "done", "merge"]
 
 
 async def _review_plan_loop(
@@ -562,6 +654,7 @@ async def _run_autopilot_chain(
     source_msg_id: str | None,
     steps: list[str],
     session_id: str | None,
+    cost_budget_usd: float | None = None,
 ) -> Instance | None:
     """Execute a sequence of autopilot steps. Pauses on failure/needs_input."""
     current_id = source_id
@@ -588,6 +681,23 @@ async def _run_autopilot_chain(
             remaining = steps[steps.index(step):]
             ctx.store.set_autopilot_chain(session_id, remaining)
 
+            # Cost budget guard (used by auto-fix sessions)
+            if cost_budget_usd is not None and chain_instances:
+                chain_cost = sum(i.cost_usd or 0 for i in chain_instances)
+                if chain_cost >= cost_budget_usd:
+                    await ctx.messenger.send_text(
+                        ctx.channel_id,
+                        f"⚠️ Cost budget exhausted (${chain_cost:.2f} / ${cost_budget_usd:.2f}). Pausing chain.",
+                        silent=True,
+                    )
+                    await _exit_chain(
+                        ctx, source_id, session_id, steps, completed_steps,
+                        chain_instances, result, "budget_exhausted",
+                        "Cost budget reached.",
+                        clear_state=True,
+                    )
+                    return result
+
             if step == "review_loop":
                 result = await _review_plan_loop(ctx, current_id, current_msg)
                 # Post deferred revisions summary if any
@@ -613,6 +723,8 @@ async def _run_autopilot_chain(
                 ), source_msg_id=current_msg)
             elif step == "review_code":
                 result = await on_review_code(ctx, current_id, current_msg)
+            elif step == "verify":
+                result = await on_verify(ctx, current_id, current_msg)
             elif step == "done":
                 result = await on_done(ctx, current_id, current_msg)
             elif step == "merge":
@@ -749,8 +861,9 @@ async def on_autopilot(
     source_id: str,
     source_msg_id: str | None = None,
     start_from: str = "review_loop",
+    cost_budget_usd: float | None = None,
 ) -> Instance | None:
-    """Full autopilot: Review Plan loop → Build → Review Code → Done."""
+    """Full autopilot: Review Plan loop → Build → Review Code → Verify → Done."""
     source = ctx.store.get_instance(source_id)
     if not source:
         await ctx.messenger.send_text(ctx.channel_id, "Instance not found.")
@@ -764,6 +877,7 @@ async def on_autopilot(
     return await _run_autopilot_chain(
         ctx, source_id, source_msg_id,
         steps[idx:], source.session_id,
+        cost_budget_usd=cost_budget_usd,
     )
 
 

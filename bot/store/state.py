@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from bot.claude.types import Instance, InstanceStatus, InstanceType, Schedule
+from bot.engine.auto_fix import AutoFixState
 from bot.engine.deploy import DeployState
 
 log = logging.getLogger(__name__)
@@ -45,6 +46,7 @@ class StateStore:
         self._chain_deferred: dict[str, list[str]] = {}  # session_id -> deferred revisions
         self._deploy_state: dict[str, DeployState] = {}  # repo_name -> deploy state
         self._deploy_configs: dict[str, dict] = {}  # repo_name -> deploy config
+        self._auto_fix_state: dict[str, AutoFixState] = {}  # "repo:trigger" -> state
         self._fallback_cost: float = 0.0     # Rolling daily API fallback spend
         self._fallback_cost_date: str = ""   # YYYY-MM-DD for fallback cost reset
         self._dirty: bool = False  # Dirty flag — mark_dirty() defers save to auto-save loop
@@ -86,6 +88,10 @@ class StateStore:
                 for k, v in data.get("deploy_state", {}).items()
             }
             self._deploy_configs = data.get("deploy_configs", {})
+            self._auto_fix_state = {
+                k: AutoFixState.from_dict(v)
+                for k, v in data.get("auto_fix_state", {}).items()
+            }
             self._fallback_cost = data.get("fallback_cost", 0.0)
             self._fallback_cost_date = data.get("fallback_cost_date", "")
             for d in data.get("schedules", []):
@@ -150,6 +156,7 @@ class StateStore:
             "chain_deferred": self._chain_deferred,
             "deploy_state": {k: v.to_dict() for k, v in self._deploy_state.items()},
             "deploy_configs": self._deploy_configs,
+            "auto_fix_state": {k: v.to_dict() for k, v in self._auto_fix_state.items()},
             "fallback_cost": self._fallback_cost,
             "fallback_cost_date": self._fallback_cost_date,
             "schedules": [s.to_dict() for s in self._schedules.values()],
@@ -502,6 +509,17 @@ class StateStore:
 
     def remove_deploy_config(self, repo_name: str) -> None:
         self._deploy_configs.pop(repo_name, None)
+        self.mark_dirty()
+
+    # --- Auto-Fix State ---
+
+    def get_auto_fix_state(self, repo_name: str, trigger: str) -> AutoFixState:
+        key = f"{repo_name}:{trigger}"
+        return self._auto_fix_state.get(key, AutoFixState())
+
+    def set_auto_fix_state(self, repo_name: str, trigger: str, state: AutoFixState) -> None:
+        key = f"{repo_name}:{trigger}"
+        self._auto_fix_state[key] = state
         self.mark_dirty()
 
     # --- Aliases ---

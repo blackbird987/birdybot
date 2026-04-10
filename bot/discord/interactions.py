@@ -728,6 +728,9 @@ async def execute_deploy(
                 ds.auto_fix_attempt = 0
                 ds.auto_fix_thread_id = None
                 bot._store.set_deploy_state(repo_name, ds)
+                # Also reset generic auto-fix state for deploy trigger
+                from bot.engine.auto_fix import AutoFixState
+                bot._store.set_auto_fix_state(repo_name, "deploy", AutoFixState())
             return True, output, ""
         else:
             err_summary = ""
@@ -770,68 +773,13 @@ async def _spawn_deploy_fix(
 ) -> None:
     """Auto-spawn a fix session after deploy failure.
 
-    Creates a forum thread, runs the fix prompt, then chains into autopilot.
-    If auto_fix_redeploy is enabled, re-runs the deploy after a successful merge.
+    Delegates to the generic auto-fix primitive. If auto_fix_redeploy is
+    enabled, re-runs the deploy after a successful merge.
+    Syncs AutoFixState back to DeployState for control room display.
     """
-    from bot.claude.types import InstanceStatus
-    from bot.engine import commands as engine_commands
-    from bot.engine import workflows
+    from bot.engine.auto_fix import spawn_fix_session
 
-    ds = bot._store.get_deploy_state(repo_name)
-    max_retries = deploy_config.get("auto_fix_retries", 1)
-
-    if not ds:
-        log.warning("No deploy state for %s — skipping auto-fix", repo_name)
-        return
-
-    if ds.auto_fix_attempt >= max_retries:
-        log.info("Auto-fix exhausted for %s (%d/%d)", repo_name, ds.auto_fix_attempt, max_retries)
-        return
-
-    ds.auto_fix_attempt += 1
-    bot._store.set_deploy_state(repo_name, ds)
-
-    # Create fix thread
-    thread = await bot._forums.get_or_create_session_thread(
-        repo_name, None, f"deploy-fix-{ds.auto_fix_attempt}",
-    )
-    if not thread:
-        log.warning("Could not create auto-fix thread for %s", repo_name)
-        return
-
-    channel_id = str(thread.id)
-    ds.auto_fix_thread_id = channel_id
-    bot._store.set_deploy_state(repo_name, ds)
-    asyncio.create_task(bot._forums.refresh_control_room(repo_name))
-
-    # Follow the owner
-    try:
-        if bot._discord_user_id:
-            owner = bot.get_user(bot._discord_user_id)
-            if owner:
-                await thread.add_user(owner)
-    except Exception:
-        log.debug("Failed to add owner to auto-fix thread", exc_info=True)
-
-    # Build context — owner-level, plan mode for initial query
-    lookup = bot._forums.thread_to_project(channel_id)
-    t_info = lookup[1] if lookup else None
-    ctx = bot._ctx(channel_id, repo_name=repo_name, thread_info=t_info)
-    ctx.is_owner = True
-    if t_info:
-        bot._forums.attach_session_callbacks(ctx, t_info, channel_id)
-
-    # Notify owner in the thread
     command = deploy_config.get("command", "?")
-    owner_id_str = str(bot._discord_user_id) if bot._discord_user_id else ""
-    mention = ctx.messenger.format_mention(owner_id_str) if owner_id_str else ""
-    notify_text = f"{mention} Deploy failed — auto-fix session started." if mention else "Deploy failed — auto-fix session started."
-    try:
-        await ctx.messenger.send_text(channel_id, notify_text, silent=False)
-    except Exception:
-        log.debug("Failed to send auto-fix notification", exc_info=True)
-
-    # Build the fix prompt
     prompt = (
         f"The deploy command `{command}` failed.\n\n"
         f"**Error:** {error_summary}\n\n"
@@ -843,150 +791,101 @@ async def _spawn_deploy_fix(
         "Focus on what would cause this specific error."
     )
 
-    # Run initial query (produces plan instance)
-    try:
-        await engine_commands.on_text(ctx, prompt)
-    except Exception:
-        log.exception("Auto-fix on_text failed for %s", repo_name)
-        try:
-            await ctx.messenger.send_text(
-                channel_id, "❌ Auto-fix could not start — query failed.",
-            )
-        except Exception:
-            pass
+    # Build redeploy callback if enabled
+    on_success = None
+    if deploy_config.get("auto_fix_redeploy"):
+        async def _redeploy() -> None:
+            await execute_deploy(bot, repo_name, deploy_config)
+        on_success = _redeploy
+
+    # Sync AutoFixState → DeployState for control room display
+    def _sync_deploy_state(channel_id: str) -> None:
         ds = bot._store.get_deploy_state(repo_name)
         if ds:
-            ds.auto_fix_thread_id = None
+            afs = bot._store.get_auto_fix_state(repo_name, "deploy")
+            ds.auto_fix_attempt = afs.attempt
+            ds.auto_fix_thread_id = afs.thread_id
             bot._store.set_deploy_state(repo_name, ds)
-        asyncio.create_task(bot._forums.refresh_control_room(repo_name))
-        return
 
-    # Find the instance that was just created
-    if t_info:
-        # Re-read in case callback resolved it
-        lookup = bot._forums.thread_to_project(channel_id)
-        if lookup:
-            t_info = lookup[1]
-    session_id = t_info.session_id if t_info else None
-    if not session_id:
-        log.warning("No session_id after auto-fix query for %s", repo_name)
-        ds = bot._store.get_deploy_state(repo_name)
-        if ds:
-            ds.auto_fix_thread_id = None
-            bot._store.set_deploy_state(repo_name, ds)
-        asyncio.create_task(bot._forums.refresh_control_room(repo_name))
-        return
-
-    # Find the latest instance for this session to chain from
-    all_instances = bot._store.list_instances()
-    session_instances = [i for i in all_instances if i.session_id == session_id]
-    if not session_instances:
-        log.warning("No instances found for auto-fix session %s", session_id)
-        ds = bot._store.get_deploy_state(repo_name)
-        if ds:
-            ds.auto_fix_thread_id = None
-            bot._store.set_deploy_state(repo_name, ds)
-        asyncio.create_task(bot._forums.refresh_control_room(repo_name))
-        return
-
-    source_inst = session_instances[-1]
-    source_msg_id = None
-    platform_msgs = source_inst.message_ids.get("discord", [])
-    if platform_msgs:
-        source_msg_id = platform_msgs[-1]
-
-    # Chain into autopilot: review_loop → build → review_code → done → merge
-    try:
-        result = await workflows.on_autopilot(
-            ctx, source_inst.id, source_msg_id, start_from="review_loop",
-        )
-    except Exception:
-        log.exception("Auto-fix autopilot chain failed for %s", repo_name)
-        try:
-            await ctx.messenger.send_text(
-                channel_id, "❌ Auto-fix chain failed unexpectedly.",
-            )
-        except Exception:
-            pass
-        ds = bot._store.get_deploy_state(repo_name)
-        if ds:
-            ds.auto_fix_thread_id = None
-            bot._store.set_deploy_state(repo_name, ds)
-        asyncio.create_task(bot._forums.refresh_control_room(repo_name))
-        return
-
-    # Check if chain completed successfully (merge happened)
-    ds = bot._store.get_deploy_state(repo_name)
-    if not ds:
-        return
-
-    # branch is cleared by merge_branch; status check prevents false positives
-    # from early chain exits (e.g. review instances that never created a branch)
-    chain_succeeded = (
-        result
-        and result.status == InstanceStatus.COMPLETED
-        and result.branch is None
+    await spawn_fix_session(
+        bot, repo_name,
+        trigger="deploy",
+        error_summary=error_summary,
+        error_output=error_output,
+        fix_prompt=prompt,
+        max_retries=deploy_config.get("auto_fix_retries", 1),
+        max_cost_usd=2.0,
+        on_success=on_success,
+        on_started=_sync_deploy_state,
     )
 
-    if not chain_succeeded:
-        # Chain didn't complete (failed step, needs input, etc.)
-        try:
-            await ctx.messenger.send_text(
-                channel_id,
-                "⚠️ Auto-fix chain did not complete — manual intervention needed.",
-            )
-        except Exception:
-            pass
-        ds.auto_fix_thread_id = None
-        bot._store.set_deploy_state(repo_name, ds)
-        asyncio.create_task(bot._forums.refresh_control_room(repo_name))
+    # Final sync after chain completes (thread_id now None)
+    _sync_deploy_state("")
+
+
+async def _post_deploy_healthcheck(
+    bot: ClaudeBot,
+    repo_name: str,
+    deploy_config: dict,
+    healthcheck: dict,
+) -> None:
+    """Wait, then run health check commands. Trigger auto-fix if unhealthy."""
+    from bot.engine.auto_fix import spawn_fix_session
+
+    delay = healthcheck.get("delay_secs", 30)
+    commands = healthcheck.get("commands", [])
+    if not commands:
         return
 
-    # Chain succeeded — optionally redeploy
-    if deploy_config.get("auto_fix_redeploy"):
-        async def _redeploy_status(msg: str) -> None:
-            try:
-                await ctx.messenger.send_text(channel_id, msg, silent=True)
-            except Exception:
-                pass
+    await asyncio.sleep(delay)
 
-        success, output, err = await execute_deploy(
-            bot, repo_name, deploy_config, status_callback=_redeploy_status,
-        )
-        if success:
-            try:
-                await ctx.messenger.send_text(
-                    channel_id,
-                    f"✅ Redeploy successful.\n```\n{output}\n```" if output.strip()
-                    else "✅ Redeploy successful.",
-                    silent=True,
-                )
-            except Exception:
-                pass
-        else:
-            try:
-                await ctx.messenger.send_text(
-                    channel_id,
-                    f"❌ Redeploy also failed: {err}",
-                )
-            except Exception:
-                pass
-    else:
+    repo_path = bot._store.list_repos().get(repo_name, "")
+
+    for cmd in commands:
         try:
-            await ctx.messenger.send_text(
-                channel_id,
-                "✅ Fix merged. Deploy button is ready — tap it when you're ready to redeploy.",
-                silent=True,
+            proc = await asyncio.create_subprocess_shell(
+                cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+                cwd=repo_path or None,
             )
-        except Exception:
-            pass
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+            if proc.returncode != 0:
+                error_output = stdout.decode(errors="replace")[:1500]
+                log.warning("Health check failed for %s: %s (exit %d)",
+                            repo_name, cmd, proc.returncode)
 
-    # Clean up thread tracking
-    ds = bot._store.get_deploy_state(repo_name)
-    if ds:
-        ds.auto_fix_thread_id = None
-        bot._store.set_deploy_state(repo_name, ds)
-    asyncio.create_task(bot._forums.refresh_control_room(repo_name))
+                if deploy_config.get("auto_fix"):
+                    prompt = (
+                        f"Post-deploy health check `{cmd}` failed (exit {proc.returncode}).\n\n"
+                    )
+                    if error_output.strip():
+                        prompt += f"**Output:**\n```\n{error_output}\n```\n\n"
+                    prompt += (
+                        "Diagnose why this health check fails after a successful deploy. "
+                        "Focus on recent changes that could cause this."
+                    )
+
+                    async def _redeploy() -> None:
+                        await execute_deploy(bot, repo_name, deploy_config)
+
+                    await spawn_fix_session(
+                        bot, repo_name,
+                        trigger="healthcheck",
+                        error_summary=f"Health check failed: {cmd}",
+                        error_output=error_output,
+                        fix_prompt=prompt,
+                        max_retries=1,
+                        max_cost_usd=1.5,
+                        on_success=_redeploy if deploy_config.get("auto_fix_redeploy") else None,
+                    )
+                return
+        except asyncio.TimeoutError:
+            log.warning("Health check timed out for %s: %s", repo_name, cmd)
+            return
+        except Exception:
+            log.exception("Health check error for %s: %s", repo_name, cmd)
+            return
+
+    log.info("All health checks passed for %s", repo_name)
 
 
 async def _handle_reboot_repo(
@@ -1074,6 +973,12 @@ async def _handle_reboot_repo(
                 f"\u2705 Deploy successful.\n```\n{output}\n```"
                 if output.strip() else "\u2705 Deploy successful.",
             )
+            # Post-deploy health gate
+            healthcheck = config.get("healthcheck")
+            if healthcheck:
+                asyncio.create_task(_post_deploy_healthcheck(
+                    bot, repo_name, config, healthcheck,
+                ))
         else:
             if output.strip():
                 await status.update(
