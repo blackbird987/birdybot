@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.64.0 — Automated Verification & Auto-Fix (2026-04-10)
+
 ### Automated Verification & Auto-Fix
 - Add "verify" step to autopilot chain — Claude tests its own changes before commit (supports `.claude/test.json` per repo)
 - Verify policy: `"warn"` (default, proceed with flag) or `"block"` (halt chain) per repo
