@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Automated Verification & Auto-Fix
+- Add "verify" step to autopilot chain — Claude tests its own changes before commit (supports `.claude/test.json` per repo)
+- Verify policy: `"warn"` (default, proceed with flag) or `"block"` (halt chain) per repo
+- Auto-fix loop: if verification fails, Claude retries fix up to 2 rounds before proceeding/halting
+- Extract generic auto-fix primitive (`bot/engine/auto_fix.py`) — shared by deploy, test, and monitoring failures
+- Refactor `_spawn_deploy_fix` to use generic auto-fix (225 lines → 30)
+- Add cost budget guard on autopilot chains — auto-fix sessions capped to prevent runaway spend
+- Post-deploy health gate: run health check commands after successful deploy, auto-fix on failure (`.claude/deploy.json` `healthcheck` field)
+- Monitoring → diagnose bridge: critical attention level triggers diagnostic auto-fix session (diagnose only, no auto-deploy)
+- Add verify round stats to chain evaluation and weekly reports
+
 ## v0.63.6 — Env Override + Twitter Articles (2026-04-08)
 
 - Fix `.env` values not overriding stale env vars — add `override=True` to `load_dotenv`

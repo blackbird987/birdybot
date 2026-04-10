@@ -88,3 +88,38 @@ def init_monitor_service(bot: ClaudeBot) -> None:
         category_id=bot._category_id,
         notifier=bot._notifier,
     )
+    bot._monitor_service._on_critical = lambda name, repo, data: _on_monitor_critical(bot, name, repo, data)
+
+
+async def _on_monitor_critical(
+    bot: ClaudeBot,
+    monitor_name: str,
+    repo_name: str | None,
+    snap_data: dict,
+) -> None:
+    """Monitoring detected critical — spawn diagnostic session (no auto-deploy)."""
+    import json as _json
+    from bot.engine.auto_fix import spawn_fix_session
+
+    if not repo_name:
+        log.warning("Monitor %s has no repo_name — cannot auto-fix", monitor_name)
+        return
+
+    snap_text = _json.dumps(snap_data, indent=2, default=str)[:2000]
+    prompt = (
+        f"The monitoring system detected a **critical** issue with **{monitor_name}**.\n\n"
+        f"**Snapshot data:**\n```json\n{snap_text}\n```\n\n"
+        "Investigate the issue. Check logs, recent changes, and application state. "
+        "Diagnose the root cause and propose a fix plan."
+    )
+
+    await spawn_fix_session(
+        bot, repo_name,
+        trigger="monitor",
+        error_summary=f"Critical attention level on {monitor_name}",
+        error_output=snap_text[:1500],
+        fix_prompt=prompt,
+        max_retries=1,
+        max_cost_usd=1.0,
+        on_success=None,  # Diagnose only — no auto-deploy
+    )

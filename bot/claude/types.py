@@ -35,7 +35,7 @@ class InstanceOrigin(str, Enum):
     DONE = "done"               # [Done] button — commit + close thread
     RELEASE = "release"         # /release command
     RETRY = "retry"             # [Retry] button
-    AUTOPILOT = "autopilot"     # [Autopilot] button — full chain
+    VERIFY = "verify"           # [Verify] step — test/validate changes
     BUILD_AND_SHIP = "build_and_ship"  # [Build & Ship] button
     BG = "bg"                       # /bg command — background task
 

@@ -465,6 +465,23 @@ CODE_REVIEW_PROMPT = (
     'Review if this is DRY, scalable, maintainable and modular.'
 )
 
+VERIFY_PROMPT = (
+    'You just wrote code. Now verify it actually works.\n\n'
+    '1. Check for a .claude/test.json in the repo root. If it exists, '
+    'run each command listed in "commands" and report results.\n'
+    '2. If no test config exists, verify your changes manually:\n'
+    '   - Try to build/compile the project\n'
+    '   - Run the app briefly if possible and check for startup errors\n'
+    '   - Test the specific functionality you changed\n'
+    '3. If tests fail, fix the issues and re-run until they pass.\n\n'
+    'Output a structured block at the end:\n'
+    '```verify\n'
+    'RESULT: pass | fail\n'
+    'TESTS_RUN: <count or "manual">\n'
+    'SUMMARY: <one line>\n'
+    '```'
+)
+
 COMMIT_PROMPT = (
     'Review all uncommitted changes on this branch. '
     'Commit them with a clear, descriptive commit message. '
