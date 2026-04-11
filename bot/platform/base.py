@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
@@ -167,6 +167,8 @@ class RequestContext:
     max_daily_queries: int | None = None     # None = no limit
     check_rate_limit: Callable[[], bool] | None = None    # Returns True if allowed
     increment_query_count: Callable[[], None] | None = None
+    # Platform callbacks (set by platform layer, called by engine)
+    on_merged: Callable[[], Awaitable[None]] | None = None  # Apply "merged" tag after branch merge
 
     @property
     def effective_mode(self) -> str:

@@ -748,6 +748,9 @@ async def _run_autopilot_chain(
                         update_after_merge(ctx.store, merge_target)
                         rescan_deploy_config_after_merge(ctx.store, merge_target.repo_name, merge_target.repo_path)
                         await ctx.messenger.on_deploy_state_changed(merge_target.repo_name)
+                        # Apply "merged" tag before close (tag must land before archive)
+                        if ctx.on_merged:
+                            await ctx.on_merged()
                         await ctx.messenger.send_text(
                             ctx.channel_id, f"✅ {merge_msg}", silent=True,
                         )

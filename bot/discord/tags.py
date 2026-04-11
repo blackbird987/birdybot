@@ -17,7 +17,8 @@ log = logging.getLogger(__name__)
 
 
 async def apply_thread_tags(
-    thread: discord.Thread, status: str, origin: str = "bot", mode: str | None = None,
+    thread: discord.Thread, status: str, origin: str = "bot",
+    mode: str | None = None, *, merged: bool = False,
 ) -> None:
     """Apply forum tags to a thread based on status + mode. Fire-and-forget safe."""
     try:
@@ -25,11 +26,13 @@ async def apply_thread_tags(
             return
         forum = thread.parent
         tag_map = {t.name: t for t in forum.available_tags}
-        if not tag_map:
+        if not tag_map or (merged and "merged" not in tag_map):
             tag_map = await channels.ensure_forum_tags(forum)
 
         desired_tags = []
-        if status == "completed" and "completed" in tag_map:
+        if merged and "merged" in tag_map:
+            desired_tags.append(tag_map["merged"])
+        elif status == "completed" and "completed" in tag_map:
             desired_tags.append(tag_map["completed"])
         elif status == "failed" and "failed" in tag_map:
             desired_tags.append(tag_map["failed"])

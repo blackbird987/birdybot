@@ -1750,6 +1750,9 @@ async def handle_callback(
             update_after_merge(ctx.store, inst)
             rescan_deploy_config_after_merge(ctx.store, inst.repo_name, inst.repo_path)
             await ctx.messenger.on_deploy_state_changed(inst.repo_name)
+            # Apply "merged" tag before close (tag must land before archive)
+            if ctx.on_merged:
+                await ctx.on_merged()
         escaped = ctx.messenger.escape(msg)
         # Pass updated buttons when branch was resolved (strips Merge/Discard)
         buttons = action_button_specs(inst) if not inst.branch else None

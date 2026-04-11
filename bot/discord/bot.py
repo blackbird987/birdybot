@@ -244,6 +244,17 @@ class ClaudeBot(discord.Client):
                 ctx.check_rate_limit, ctx.increment_query_count = _make_rate_callbacks(
                     ctx.user_id or "", ctx.repo_name, access_result.max_daily_queries,
                 )
+        # Wire up merged-tag callback (covers all ctx creation paths)
+        _cid = channel_id
+        _bot = self
+
+        async def _apply_merged_tag():
+            ch = _bot.get_channel(int(_cid))
+            if isinstance(ch, discord.Thread):
+                from bot.discord.tags import apply_thread_tags
+                await apply_thread_tags(ch, "completed", merged=True)
+
+        ctx.on_merged = _apply_merged_tag
         return ctx
 
     # --- Delegation to extracted modules ---
@@ -775,7 +786,7 @@ class ClaudeBot(discord.Client):
                                 log.info("Injected /ref context into prompt in thread %s", ch_name)
 
                         self._cancel_sleep(channel_id)
-                        asyncio.create_task(self._clear_thread_sleeping(message.channel))
+                        await self._clear_thread_sleeping(message.channel)
                         asyncio.create_task(self._set_thread_active_tag(message.channel, True))
                         asyncio.create_task(self._refresh_dashboard())
                         ctx = self._ctx(channel_id, session_id=session_id,
@@ -841,7 +852,7 @@ class ClaudeBot(discord.Client):
             asyncio.create_task(self._send_redirect(thread))
             tid = str(thread.id)
             self._cancel_sleep(tid)
-            asyncio.create_task(self._clear_thread_sleeping(thread))
+            await self._clear_thread_sleeping(thread)
             asyncio.create_task(self._set_thread_active_tag(thread, True))
             asyncio.create_task(self._refresh_dashboard())
             lookup = self._forums.thread_to_project(tid)

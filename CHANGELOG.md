@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## v0.65.0 — Sleep Fix & Merged Tag (2026-04-11)
+
+### Zzz Sleep Indicator Fix
+- Fix inconsistent 💤 sleep icon — remove premature running-task check in `schedule_sleep()` that raced with async status updates, causing threads to never show the sleep indicator
+- Await `clear_thread_sleeping()` instead of fire-and-forget — ensures Zzz is fully removed before the next sleep timer is scheduled
+
+### Merged Tag
+- Add "merged" (📦) forum tag — applied when a build branch is merged (manual or autopilot), visible in the forum sidebar for at-a-glance merge status
+- Tag applied before thread close/archive so it persists on archived threads
+- Tag auto-replaced by "active" when user prompts again in a merged thread (natural lifecycle, no manual cleanup)
+- Uses `on_merged` callback on RequestContext — set in `_ctx()` factory so it covers all merge paths including `/merge` from The Ark
+
 ## v0.64.0 — Automated Verification & Auto-Fix (2026-04-10)
 
 ### Automated Verification & Auto-Fix
