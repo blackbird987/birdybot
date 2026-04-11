@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.65.0 — Sleep Fix & Merged Tag (2026-04-11)
+
 ### Zzz Sleep Indicator Fix
 - Fix inconsistent 💤 sleep icon — remove premature running-task check in `schedule_sleep()` that raced with async status updates, causing threads to never show the sleep indicator
 - Await `clear_thread_sleeping()` instead of fire-and-forget — ensures Zzz is fully removed before the next sleep timer is scheduled
