@@ -35,14 +35,13 @@ def _channel_has_running_task(bot: ClaudeBot, channel_id: str) -> bool:
 def schedule_sleep(bot: ClaudeBot, channel_id: str) -> None:
     """Schedule 💤 after 5 min idle. Cancel any existing timer first.
 
-    Skips scheduling if an instance is actively running on this channel's
-    session — the timer will be rescheduled when the task finishes.
+    Always schedules the timer — the callback (_apply_sleep) re-checks
+    whether a task is still running before applying.  We intentionally
+    do NOT early-return here because the instance status update is async
+    and often still shows RUNNING when this is called from the message
+    handler's ``finally`` block.
     """
     cancel_sleep(bot, channel_id)
-
-    # Don't schedule sleep if a task is running on this channel's session
-    if _channel_has_running_task(bot, channel_id):
-        return
 
     gen = bot._sleep_gen.get(channel_id, 0) + 1
     bot._sleep_gen[channel_id] = gen

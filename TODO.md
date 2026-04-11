@@ -47,3 +47,6 @@
 - [ ] [DRY/Cleanup] Extract instance-cloning helper shared by retry and PPU (Low)
 - [ ] [DRY/Cleanup] status_callback pattern duplicates messenger.send_text (Low)
 - [ ] [Bug Risk] Title text posted as visible message in thread (Medium)
+- [ ] [Bug Risk] Discard path leaves stale completed tag on archived thread (Medium)
+- [ ] [Reliability] apply_thread_tags silently swallows tag-creation failures (Low)
+- [ ] [DRY/Cleanup] Merged check duplicated across two call sites (Low)
