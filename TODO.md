@@ -50,3 +50,4 @@
 - [ ] [Bug Risk] Discard path leaves stale completed tag on archived thread (Medium)
 - [ ] [Reliability] apply_thread_tags silently swallows tag-creation failures (Low)
 - [ ] [DRY/Cleanup] Merged check duplicated across two call sites (Low)
+- [ ] [DRY/Cleanup] Setup steps should be a one-shot script (Low)

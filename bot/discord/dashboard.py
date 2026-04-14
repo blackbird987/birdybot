@@ -209,10 +209,13 @@ def build_dashboard_embed(
             embed.add_field(name="Projects", value="\n".join(proj_lines), inline=False)
 
     # --- Usage ---
+    usage_label = f"Usage · {config.PLAN_NAME}"
+    if len(config.CLAUDE_ACCOUNTS) > 1:
+        usage_label += f" · {len(config.CLAUDE_ACCOUNTS)} accts"
     if usage_text:
-        embed.add_field(name="Usage", value=usage_text, inline=False)
+        embed.add_field(name=usage_label, value=usage_text, inline=False)
     else:
-        embed.add_field(name="Usage", value="Usage data unavailable", inline=False)
+        embed.add_field(name=usage_label, value="Usage data unavailable", inline=False)
 
     # --- Last Activity ---
     last = store.last_activity()
