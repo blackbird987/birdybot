@@ -44,16 +44,27 @@ def _with_fallback_footer(text: str, result: RunResult) -> str:
 
 def _format_reset_time(reset_utc: datetime) -> str:
     """Format a UTC reset time for display (Europe/Amsterdam local time)."""
+    # Guard against naive datetimes — assume UTC if no tzinfo
+    if reset_utc.tzinfo is None:
+        reset_utc = reset_utc.replace(tzinfo=timezone.utc)
     try:
         import zoneinfo
         tz = zoneinfo.ZoneInfo("Europe/Amsterdam")
         local = reset_utc.astimezone(tz)
+        now_local = datetime.now(tz)
         hour = local.hour % 12 or 12
         minute = local.strftime("%M")
         ampm = "AM" if local.hour < 12 else "PM"
-        return f"{hour}:{minute} {ampm}"
+        time_str = f"{hour}:{minute} {ampm}"
+        if local.date() != now_local.date():
+            time_str = f"{local.strftime('%b %d')}, {time_str}"
+        return time_str
     except Exception:
-        return reset_utc.strftime("%H:%M UTC")
+        now_utc = datetime.now(timezone.utc)
+        time_str = reset_utc.strftime("%H:%M UTC")
+        if reset_utc.date() != now_utc.date():
+            time_str = f"{reset_utc.strftime('%b %d')}, {time_str}"
+        return time_str
 
 
 async def schedule_cooldown_retry(
