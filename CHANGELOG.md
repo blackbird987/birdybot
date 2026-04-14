@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.66.0 — Multi-Account Failover (2026-04-14)
+
 ### Multi-Account Failover
 - Add `CLAUDE_ACCOUNTS` env var — comma-separated list of Claude config dirs for automatic failover
 - When the active account hits its usage limit, the bot instantly retries on the next available account (no cooldown wait)
