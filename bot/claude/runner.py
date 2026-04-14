@@ -68,6 +68,9 @@ class ClaudeRunner:
         # (worktree add/remove, merge, branch delete) to prevent lock file races
         self._repo_locks: dict[str, asyncio.Lock] = {}
 
+        # Multi-account failover: tracks when each account's usage limit resets
+        self._account_cooldowns: dict[str, datetime] = {}
+
     async def check_cli(self) -> str:
         """Verify Claude CLI is available. Returns version string."""
         try:
@@ -89,6 +92,23 @@ class ClaudeRunner:
             )
         except asyncio.TimeoutError:
             raise RuntimeError("Claude CLI --version timed out")
+
+    def _pick_account(self, exclude: set[str] | None = None) -> str | None:
+        """Return the first configured account not on cooldown/excluded, or None."""
+        if not config.CLAUDE_ACCOUNTS:
+            return None
+        now = datetime.now(timezone.utc)
+        # Purge expired cooldowns
+        self._account_cooldowns = {
+            k: v for k, v in self._account_cooldowns.items() if v > now
+        }
+        exclude = exclude or set()
+        for acct in config.CLAUDE_ACCOUNTS:
+            if acct in exclude:
+                continue
+            if acct not in self._account_cooldowns:
+                return acct
+        return None
 
     async def run(
         self,
@@ -142,6 +162,11 @@ class ClaudeRunner:
         if not api_fallback:
             env.pop("ANTHROPIC_API_KEY", None)
 
+        # Multi-account failover: pick the best available account
+        account_dir = self._pick_account(exclude=instance._accounts_tried)
+        if account_dir:
+            env["CLAUDE_CONFIG_DIR"] = account_dir
+
         proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -187,12 +212,37 @@ class ClaudeRunner:
                 instance.session_id = None
                 return await self._run_impl(instance, on_progress, on_stall, context, sibling_context, api_fallback=api_fallback)
 
-            # Usage limit: let UI offer pay-per-use opt-in instead of auto-retrying
+            # Usage limit: try next account before falling through to cooldown/PPU
             if result.is_error:
                 reset_at = parse_usage_limit(error_text)
                 if reset_at:
-                    result.usage_limit_reset = reset_at
                     log.info("Usage limit for %s, resets at %s", instance.id, reset_at)
+                    # Mark this account as on cooldown
+                    if account_dir:
+                        self._account_cooldowns[account_dir] = reset_at
+                        instance._accounts_tried.add(account_dir)
+                    # Try next account before giving up
+                    next_account = self._pick_account(exclude=instance._accounts_tried)
+                    if next_account:
+                        log.info("Failing over from %s to %s for %s",
+                                 account_dir, next_account, instance.id)
+                        # Clear session — it belongs to the exhausted account
+                        instance.session_id = None
+                        if on_progress:
+                            try:
+                                await on_progress(
+                                    "Switching to backup account",
+                                    "Primary account hit usage limit",
+                                )
+                            except Exception:
+                                log.exception("Progress callback error during failover")
+                        return await self._run_impl(
+                            instance, on_progress, on_stall,
+                            context, sibling_context,
+                            api_fallback=api_fallback,
+                        )
+                    # All accounts exhausted — fall through to cooldown/PPU
+                    result.usage_limit_reset = reset_at
                     return result
 
             # Auto-retry on transient errors (skip if already in API fallback to prevent loops)

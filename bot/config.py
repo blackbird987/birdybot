@@ -77,6 +77,15 @@ API_FALLBACK_MODEL: str = os.getenv("API_FALLBACK_MODEL", "haiku")
 API_FALLBACK_MAX_USD: float = float(os.getenv("API_FALLBACK_MAX_USD", "1.0"))
 API_FALLBACK_DAILY_MAX_USD: float = float(os.getenv("API_FALLBACK_DAILY_MAX_USD", "5.0"))
 API_FALLBACK_ENABLED: bool = bool(ANTHROPIC_API_KEY)
+
+# Multi-account failover: comma-separated list of Claude config dirs.
+# When the active account hits its usage limit, the bot automatically
+# retries on the next available account.
+# e.g. "C:/Users/Quincy/.claude,C:/Users/Quincy/.claude-account2"
+CLAUDE_ACCOUNTS: list[str] = [
+    p.strip() for p in os.getenv("CLAUDE_ACCOUNTS", "").split(",") if p.strip()
+]
+
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
 
 # ccusage cache TTL in seconds (adaptive: shortened near rate limits)

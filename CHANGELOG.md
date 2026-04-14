@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Multi-Account Failover
+- Add `CLAUDE_ACCOUNTS` env var — comma-separated list of Claude config dirs for automatic failover
+- When the active account hits its usage limit, the bot instantly retries on the next available account (no cooldown wait)
+- Session is cleared on failover since conversations are per-account — user sees "Switching to backup account" progress message
+- Recursion-safe: tracks tried accounts per run, falls through to existing cooldown/PPU logic when all accounts are exhausted
+- Backward compatible — no behavior change if `CLAUDE_ACCOUNTS` is unset
+
 ## v0.65.0 — Sleep Fix & Merged Tag (2026-04-11)
 
 ### Zzz Sleep Indicator Fix

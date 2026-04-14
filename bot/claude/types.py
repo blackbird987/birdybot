@@ -106,6 +106,7 @@ class Instance:
     cooldown_retries: int = 0              # Count of cooldown retries attempted (capped at 3)
     cooldown_channel_id: str | None = None # Channel to retry in (for cooldown loop)
     api_fallback: bool = False            # Force API billing fallback on next run
+    _accounts_tried: set[str] = field(default_factory=set)  # Ephemeral: tracks accounts tried this run (not persisted)
 
     def display_id(self) -> str:
         if self.name:
