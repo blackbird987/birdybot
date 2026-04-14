@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Show date in usage-limit retry message when reset time is on a different day
+
 ## v0.66.1 — Dashboard Plan Label (2026-04-14)
 
 - Show plan name and account count in dashboard Usage header
