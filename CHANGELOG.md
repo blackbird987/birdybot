@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.66.1 — Dashboard Plan Label (2026-04-14)
+
 - Show plan name and account count in dashboard Usage header
 
 ## v0.66.0 — Multi-Account Failover (2026-04-14)
