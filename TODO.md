@@ -51,3 +51,4 @@
 - [ ] [Reliability] apply_thread_tags silently swallows tag-creation failures (Low)
 - [ ] [DRY/Cleanup] Merged check duplicated across two call sites (Low)
 - [ ] [DRY/Cleanup] Setup steps should be a one-shot script (Low)
+- [ ] [Bug Risk] send_text fallback for chain exits also looks empty (Medium)
