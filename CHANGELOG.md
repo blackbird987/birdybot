@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.67.0 — Multi-Provider Support (2026-04-16)
+
 ### Multi-Provider Support
 - Add `PROVIDER` env var to select coding CLI backend (`claude` default, `cursor` supported, `codex` stubbed)
 - Add `ProviderConfig` abstraction in `bot/claude/provider.py` — encapsulates CLI command building, usage limit parsing, and provider-specific feature flags
