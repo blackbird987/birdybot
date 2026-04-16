@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.69.0 — Auto-Resume After Reboot (2026-04-16)
+
 ### Auto-Resume After Reboot
 - Auto-resume interrupted workflow actions (Plan/Build/Review/etc.) after bot reboot via drain queue callbacks
 - Auto-resume interrupted autopilot chains on startup — re-runs the interrupted step, not the next one
