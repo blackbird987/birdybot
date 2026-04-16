@@ -354,18 +354,78 @@ class ClaudeBot(discord.Client):
         log.info("Replaying %d drain-queued messages", len(queue))
         for entry in queue:
             channel_id = entry.get("channel_id")
-            prompt = entry.get("prompt")
-            if not channel_id or not prompt:
+            if not channel_id:
                 continue
+
+            entry_type = entry.get("type", "text")
+            if entry_type == "callback":
+                await self._replay_callback(entry)
+            else:
+                prompt = entry.get("prompt")
+                if not prompt:
+                    continue
+                try:
+                    log.info("Replaying queued message in thread %s: %s",
+                             channel_id, prompt[:60])
+                    await self._replay_to_thread(
+                        channel_id, prompt, repo_name=entry.get("repo_name"),
+                    )
+                except Exception:
+                    log.exception("Failed to replay queued message in thread %s", channel_id)
+        asyncio.create_task(self._refresh_dashboard())
+
+    async def _replay_callback(self, entry: dict) -> None:
+        """Replay a button callback action that was interrupted by reboot."""
+        channel_id = entry.get("channel_id")
+        action = entry.get("action")
+        instance_id = entry.get("instance_id")
+        if not channel_id or not action or not instance_id:
+            log.warning("Incomplete callback replay entry: %s", entry)
+            return
+
+        lookup = self._forums.thread_to_project(channel_id)
+        if not lookup:
+            log.warning("replay_callback: no thread mapping for %s", channel_id)
+            return
+
+        proj, info = lookup
+        ctx = self._ctx(channel_id, session_id=info.session_id,
+                        thread_info=info)
+        ctx.user_id = entry.get("user_id", "")
+        ctx.user_name = entry.get("user_name", "")
+        self._forums.attach_session_callbacks(ctx, info, channel_id)
+
+        # Map origin values back to button action names
+        _ORIGIN_TO_ACTION = {
+            "plan": "plan",
+            "build": "build",
+            "review_plan": "review_plan",
+            "apply_revisions": "apply_revisions",
+            "review_code": "review_code",
+            "commit": "commit",
+            "done": "done",
+            "verify": "verify",
+        }
+        button_action = _ORIGIN_TO_ACTION.get(action, action)
+
+        log.info("Replaying callback %s:%s in thread %s",
+                 button_action, instance_id[:12], channel_id)
+
+        # Acquire channel lock — same as normal button path in interactions.py
+        from bot.engine.commands import _get_channel_lock
+        lock = _get_channel_lock(channel_id)
+        async with lock:
             try:
-                log.info("Replaying queued message in thread %s: %s",
-                         channel_id, prompt[:60])
-                await self._replay_to_thread(
-                    channel_id, prompt, repo_name=entry.get("repo_name"),
+                await commands.handle_callback(
+                    ctx, button_action, instance_id, source_msg_id=None,
                 )
             except Exception:
-                log.exception("Failed to replay queued message in thread %s", channel_id)
-        asyncio.create_task(self._refresh_dashboard())
+                log.exception("Failed to replay callback %s in thread %s",
+                              button_action, channel_id)
+            finally:
+                self._forums.persist_ctx_settings(ctx)
+                asyncio.create_task(self._try_apply_tags_after_run(channel_id))
+                self._schedule_sleep(channel_id)
 
     def _resolve_user_forum_context(
         self, interaction: discord.Interaction,

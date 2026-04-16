@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## v0.69.0 — Auto-Resume After Reboot (2026-04-16)
+
+### Auto-Resume After Reboot
+- Auto-resume interrupted workflow actions (Plan/Build/Review/etc.) after bot reboot via drain queue callbacks
+- Auto-resume interrupted autopilot chains on startup — re-runs the interrupted step, not the next one
+- Skip individual callback queuing when session has an active autopilot chain (chain state handles full resume)
+- Orphan message cleanup skips threads that will auto-resume, avoiding confusing "interrupted" → restart sequence
+- Send "Resuming interrupted chain..." notification before auto-resume starts
+
 ## v0.68.0 — Runtime Provider Switching (2026-04-16)
 
 ### Runtime Provider Switching

@@ -713,12 +713,35 @@ async def run() -> None:
 
     # Replay messages that were queued during reboot drain
     drain_queue = runner.read_drain_queue()
+    # Only callback entries substitute for chain work — text messages in a
+    # thread don't resume the autopilot chain, so exclude them from dedup
+    drain_callback_channel_ids: set[str] = {
+        e.get("channel_id") for e in drain_queue
+        if e.get("type") == "callback" and e.get("channel_id")
+    } if drain_queue else set()
     if drain_queue and discord_bot:
         asyncio.create_task(discord_bot.dispatch_drain_queue(drain_queue))
         log.info("Dispatched %d drain-queued messages for replay", len(drain_queue))
 
-    # Update thinking messages for orphaned instances (interrupted by restart)
-    await _cleanup_orphan_messages(notifier, orphans)
+    # Collect session_ids that will be auto-resumed (chain resume or drain
+    # callback) so orphan cleanup can skip those threads
+    auto_resuming_sessions: set[str] = set()
+    all_chains = store.get_all_autopilot_chains()
+    if all_chains:
+        auto_resuming_sessions.update(all_chains.keys())
+
+    # Resume autopilot chains that were interrupted by the restart
+    if discord_bot:
+        asyncio.create_task(
+            _resume_interrupted_chains(store, discord_bot, drain_callback_channel_ids)
+        )
+
+    # Update thinking messages for orphaned instances (interrupted by restart).
+    # Skips instances that will be auto-resumed to avoid confusing
+    # "interrupted" → immediate restart sequence.
+    await _cleanup_orphan_messages(
+        notifier, orphans, auto_resuming_sessions, drain_callback_channel_ids,
+    )
 
     # Wait for shutdown
     await stop_event.wait()
@@ -777,44 +800,49 @@ async def _send_reboot_announcement(notifier: NotificationService) -> dict | Non
     return data
 
 
-async def _cleanup_orphan_messages(notifier: NotificationService, orphans: list) -> None:
+async def _cleanup_orphan_messages(
+    notifier: NotificationService,
+    orphans: list,
+    auto_resuming_sessions: set[str] | None = None,
+    drain_callback_channel_ids: set[str] | None = None,
+) -> None:
     """Update thinking messages for instances that were interrupted by a restart.
 
     Finds the last message sent by each orphaned instance and edits it to show
     the interrupted status, so users see a clean resolution instead of a stale
     'processing...' indicator.
+
+    Skips instances that will be auto-resumed (via chain resume or drain queue
+    callback) to avoid the confusing "interrupted" → immediate restart sequence.
     """
     if not orphans:
         return
+    _resuming = auto_resuming_sessions or set()
+    _drain_cbs = drain_callback_channel_ids or set()
     from bot.platform.base import MessageHandle
     for inst in orphans:
+        # Skip instances that will auto-resume via chain or drain callback
+        if inst.session_id and inst.session_id in _resuming:
+            continue
+
         for platform, msg_ids in inst.message_ids.items():
             if not msg_ids or platform not in notifier._messengers:
                 continue
             messenger, _ = notifier._messengers[platform]
             # The last message_id is typically the thinking/progress message
             last_msg_id = msg_ids[-1]
-            # Find the channel — use the first msg_id's channel context
-            # For Discord, message_ids are sent to the thread/channel the instance ran in
-            # We need to figure out the channel_id. The thinking message handle stores it,
-            # but that's lost on restart. We can try editing via the message directly.
-            handle = MessageHandle(
-                platform=platform,
-                _data={"message_id": last_msg_id},
-            )
-            # Try to update — for Discord we need channel_id in the handle.
-            # Since we don't have it, send a follow-up to the channel instead.
-            # Find channel from instance's message context
             try:
-                # For each platform, try to send a status update to the channel
-                # where the instance was running. We check all msg_ids.
-                # Discord adapter needs channel_id — we'll extract it from
-                # the instance's origin platform data if available.
                 channel_id = None
                 if inst.session_id and hasattr(messenger, 'find_channel_for_session'):
                     channel_id = messenger.find_channel_for_session(inst.session_id)
+                # Also skip if channel is in drain callback set
+                if channel_id and channel_id in _drain_cbs:
+                    continue
                 if channel_id:
-                    handle._data["channel_id"] = channel_id
+                    handle = MessageHandle(
+                        platform=platform,
+                        _data={"message_id": last_msg_id, "channel_id": channel_id},
+                    )
                     try:
                         await messenger.edit_thinking(
                             handle,
@@ -826,6 +854,113 @@ async def _cleanup_orphan_messages(notifier: NotificationService, orphans: list)
                         log.debug("Could not edit orphan thinking msg for %s", inst.id)
             except Exception:
                 log.debug("Orphan message cleanup failed for %s", inst.id, exc_info=True)
+
+
+def _find_last_completed_instance(store, session_id: str):
+    """Find the most recent COMPLETED instance for a session.
+
+    Returns the last successfully completed step — the one whose output
+    the next chain step should build upon.  Skips FAILED instances
+    (which include the interrupted step marked by mark_orphans).
+    """
+    for inst in store.list_instances(all_=True):
+        if inst.session_id == session_id and inst.status == InstanceStatus.COMPLETED:
+            return inst
+    return None
+
+
+async def _resume_interrupted_chains(
+    store, discord_bot, drain_callback_channel_ids: set[str],
+) -> None:
+    """Find autopilot chains that were interrupted by restart and resume them.
+
+    Skips sessions whose thread already has a callback entry in the drain queue
+    (that callback will replay the equivalent work).  Text-only drain entries
+    do NOT suppress chain resume — they answer a user message but don't
+    continue the autopilot chain.
+
+    Brief delay lets drain queue dispatch start first and acquire its locks.
+    """
+    from bot.engine import workflows
+    from bot.engine.commands import _get_channel_lock
+
+    if not await discord_bot._wait_for_ready("resume_interrupted_chains"):
+        return
+
+    # Brief delay to let drain queue dispatch start and acquire channel locks
+    await asyncio.sleep(5)
+
+    all_chains = store.get_all_autopilot_chains()
+    if not all_chains:
+        return
+
+    log.info("Found %d interrupted autopilot chains to resume", len(all_chains))
+    for session_id, steps in all_chains.items():
+        # Find the thread for this session
+        lookup = discord_bot._forums.session_to_thread(session_id)
+        if not lookup:
+            log.warning(
+                "No thread found for interrupted chain session %s — clearing",
+                session_id,
+            )
+            store.clear_autopilot_chain(session_id)
+            continue
+
+        thread_id, info = lookup
+
+        # Skip sessions whose thread has a callback in the drain queue
+        if thread_id in drain_callback_channel_ids:
+            log.info(
+                "Skipping chain resume for session %s — thread %s covered by drain queue callback",
+                session_id, thread_id,
+            )
+            continue
+
+        # Find the last COMPLETED instance to use as source
+        source = _find_last_completed_instance(store, session_id)
+        if not source:
+            log.warning(
+                "No completed instance for interrupted chain session %s — clearing",
+                session_id,
+            )
+            store.clear_autopilot_chain(session_id)
+            continue
+
+        log.info(
+            "Resuming autopilot chain for session %s in thread %s (steps: %s)",
+            session_id, thread_id, steps,
+        )
+
+        ctx = discord_bot._ctx(thread_id, session_id=session_id, thread_info=info)
+        discord_bot._forums.attach_session_callbacks(ctx, info, thread_id)
+
+        # Notify user that chain is resuming
+        try:
+            await ctx.messenger.send_text(
+                thread_id, "Resuming interrupted chain...", silent=True,
+            )
+        except Exception:
+            log.debug("Could not send chain resume notice to %s", thread_id)
+
+        # Acquire channel lock to prevent racing with user messages
+        lock = _get_channel_lock(thread_id)
+        async with lock:
+            try:
+                # Re-run from chain[0] — the interrupted step that never
+                # completed.  This differs from resume_autopilot_chain()
+                # which skips [0] (designed for needs_input pauses where
+                # [0] DID complete).
+                await workflows._run_autopilot_chain(
+                    ctx, source.id, None, steps, session_id,
+                )
+            except Exception:
+                log.exception(
+                    "Failed to resume autopilot chain for session %s", session_id,
+                )
+            finally:
+                discord_bot._forums.persist_ctx_settings(ctx)
+                asyncio.create_task(discord_bot._try_apply_tags_after_run(thread_id))
+                discord_bot._schedule_sleep(thread_id)
 
 
 async def _do_cooldown_retry(store, runner, inst, discord_bot, retrying_set):

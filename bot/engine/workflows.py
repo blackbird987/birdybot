@@ -169,9 +169,27 @@ async def spawn_from(
     spawn_err = ctx.runner.check_spawn_allowed(check_session)
     if spawn_err:
         if ctx.runner.is_draining:
+            # If this session has an active autopilot chain, don't queue the
+            # individual step — chain state in state.json handles full resume.
+            # Queuing here would put the thread in drain_callback_channel_ids,
+            # causing chain resume to skip it (replaying one step, not the chain).
+            has_chain = check_session and ctx.store.get_autopilot_chain(check_session)
+            if not has_chain:
+                ctx.runner.queue_for_replay({
+                    "channel_id": ctx.channel_id,
+                    "platform": ctx.platform,
+                    "type": "callback",
+                    "action": cfg.origin.value,
+                    "instance_id": source_id,
+                    "source_msg_id": source_msg_id,
+                    "repo_name": source.repo_name,
+                    "user_id": source.user_id or (ctx.user_id or ""),
+                    "user_name": source.user_name or (ctx.user_name or ""),
+                    "is_owner": source.is_owner_session,
+                })
             await ctx.messenger.send_text(
                 ctx.channel_id,
-                "Reboot in progress — retry this action after restart.",
+                "Reboot in progress — this action will auto-resume after restart.",
             )
         else:
             await ctx.messenger.send_text(ctx.channel_id, spawn_err)
