@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.68.0 — Runtime Provider Switching (2026-04-16)
+
 ### Runtime Provider Switching
 - Add `/provider` slash command and Ark dashboard button to switch CLI provider at runtime (claude/cursor) without restart
 - Rewrite Cursor CLI integration: use correct flags (`--force --trust`, `--mode plan|ask`, `--model auto`), binary name `agent`
