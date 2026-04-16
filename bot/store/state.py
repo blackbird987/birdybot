@@ -675,6 +675,10 @@ class StateStore:
 
     # --- Autopilot Chain State ---
 
+    def get_all_autopilot_chains(self) -> dict[str, list[str]]:
+        """Return all active autopilot chains (session_id -> remaining steps)."""
+        return dict(self._autopilot_chains)
+
     def get_autopilot_chain(self, session_id: str | None) -> list[str] | None:
         """Get remaining autopilot steps for a session."""
         if not session_id:
