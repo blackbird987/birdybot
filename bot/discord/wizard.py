@@ -187,6 +187,34 @@ async def handle_ark_button(
             bot._dashboard_lock, bot._dashboard_pending_flag,
         ))
 
+    elif action == "switch_provider":
+        await interaction.response.defer(ephemeral=True)
+        from bot.claude.provider import PROVIDERS
+        from bot import config as _cfg
+        available = [k for k, v in PROVIDERS.items() if v is not None]
+        if len(available) < 2:
+            await interaction.followup.send("Only one provider available.", ephemeral=True)
+            return
+        # Cycle to next provider
+        idx = available.index(_cfg.PROVIDER) if _cfg.PROVIDER in available else 0
+        next_p = available[(idx + 1) % len(available)]
+        try:
+            _cfg.set_provider(next_p)
+        except RuntimeError as exc:
+            await interaction.followup.send(f"Switch failed: {exc}", ephemeral=True)
+            return
+        bot._store.active_provider = next_p
+        await interaction.followup.send(
+            f"Switched to **{next_p}**\nBinary: `{_cfg.CLAUDE_BINARY}`",
+            ephemeral=True,
+        )
+        from bot.discord.dashboard import refresh_dashboard
+        asyncio.create_task(refresh_dashboard(
+            bot, bot._store, bot._forums,
+            bot._lobby_channel_id,
+            bot._dashboard_lock, bot._dashboard_pending_flag,
+        ))
+
     elif action == "claude_login":
         await _handle_claude_login(bot, interaction)
 

@@ -398,6 +398,14 @@ async def run() -> None:
     # One-time migration: data/deferred/*.md → repo TODO.md files
     _migrate_deferred_to_todo(store)
 
+    # Restore provider from state (overrides env var if explicitly switched at runtime)
+    if store.active_provider and store.active_provider != config.PROVIDER:
+        try:
+            config.set_provider(store.active_provider)
+            log.info("Restored provider from state: %s", store.active_provider)
+        except RuntimeError as exc:
+            log.warning("Could not restore provider '%s': %s", store.active_provider, exc)
+
     # Initialize shared runner
     runner = ClaudeRunner()
 

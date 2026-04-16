@@ -67,6 +67,14 @@ class ArkView(discord.ui.View):
             emoji="\U0001f511",
             row=1,
         ))
+        # Provider switch button — label shows current provider
+        from bot import config as _cfg
+        self.add_item(discord.ui.Button(
+            label=f"Provider: {_cfg.PROVIDER}",
+            style=discord.ButtonStyle.secondary,
+            custom_id="ark:switch_provider",
+            row=1,
+        ))
 
 
 def build_dashboard_embed(

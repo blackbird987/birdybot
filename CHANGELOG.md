@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Runtime Provider Switching
+- Add `/provider` slash command and Ark dashboard button to switch CLI provider at runtime (claude/cursor) without restart
+- Rewrite Cursor CLI integration: use correct flags (`--force --trust`, `--mode plan|ask`, `--model auto`), binary name `agent`
+- Write system prompt via `.cursor/rules/_bot_system.mdc` (Cursor has no `--append-system-prompt` flag)
+- Add `config.set_provider()` for atomic runtime switching — resolves binary path via `shutil.which`, validates before switching
+- Persist active provider in state.json — survives reboots, restored at startup
+- Add `CURSOR_MODEL` env var (default `auto` for free tier, configurable for paid plans)
+- Runner snapshots provider at session entry — in-flight sessions keep their provider during a switch
+
 ## v0.67.0 — Multi-Provider Support (2026-04-16)
 
 ### Multi-Provider Support

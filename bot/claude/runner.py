@@ -43,7 +43,6 @@ class ClaudeRunner:
     """Manages coding CLI subprocesses (Claude Code, Cursor, etc.)."""
 
     def __init__(self) -> None:
-        self.provider: ProviderConfig = get_provider(config.PROVIDER)
         self._semaphore = asyncio.Semaphore(config.MAX_CONCURRENT)
         self._processes: dict[str, asyncio.subprocess.Process] = {}
         # Task-level tracking: covers the full lifecycle of a query/workflow,
@@ -71,6 +70,11 @@ class ClaudeRunner:
 
         # Multi-account failover: tracks when each account's usage limit resets
         self._account_cooldowns: dict[str, datetime] = {}
+
+    @property
+    def provider(self) -> ProviderConfig:
+        """Current provider — re-reads config for runtime switching."""
+        return get_provider(config.PROVIDER)
 
     async def check_cli(self) -> str:
         """Verify CLI is available. Returns version string."""
@@ -134,10 +138,18 @@ class ClaudeRunner:
         context: str | None = None,
         sibling_context: str | None = None,
         api_fallback: bool = False,
+        _provider: ProviderConfig | None = None,
+        _binary: str | None = None,
     ) -> RunResult:
+        # Snapshot provider + binary at entry — in-flight sessions keep their
+        # provider even if a runtime switch happens mid-run.
+        # On recursive retries, the caller passes the original snapshot.
+        provider = _provider or self.provider
+        binary = _binary or config.CLAUDE_BINARY
+
         # Git worktree isolation for build tasks
         if instance.branch:
-            await self._ensure_worktree(instance)
+            await self._ensure_worktree(instance, provider=provider)
 
         # Copy session file to worktree's project dir so --resume works
         if instance.worktree_path and instance.session_id:
@@ -148,8 +160,11 @@ class ClaudeRunner:
         # Use worktree as cwd if available (file isolation)
         working_dir = instance.worktree_path or instance.repo_path or None
 
-        cmd, prompt_text, system_prompt_file, api_key_file = self._build_command(
-            instance, context, sibling_context, api_fallback=api_fallback,
+        cmd, prompt_text, system_prompt_file, api_key_file, rules_file = (
+            self._build_command(
+                instance, context, sibling_context,
+                api_fallback=api_fallback, provider=provider, binary=binary,
+            )
         )
         log.info("Running %s (prompt: %d chars via stdin): %s",
                  instance.id, len(prompt_text), " ".join(cmd)[:500])
@@ -158,17 +173,17 @@ class ClaudeRunner:
         # Strip ANTHROPIC_API_KEY on non-PPU runs so the CLI can never
         # silently bill via API; PPU runs keep it as backup for apiKeyHelper.
         env = {**os.environ}
-        for var in self.provider.nested_env_vars:
+        for var in provider.nested_env_vars:
             env.pop(var, None)
         if not api_fallback:
             env.pop("ANTHROPIC_API_KEY", None)
 
         # Multi-account failover (Claude-only: other providers use single account)
         account_dir: str | None = None
-        if self.provider.supports_account_failover:
+        if provider.supports_account_failover:
             account_dir = self._pick_account(exclude=instance._accounts_tried)
             if account_dir:
-                env[self.provider.config_dir_env] = account_dir
+                env[provider.config_dir_env] = account_dir
 
         proc = None
         try:
@@ -213,11 +228,11 @@ class ClaudeRunner:
             if result.is_error and "No conversation found" in error_text and instance.session_id:
                 log.warning("Session %s not found for %s, retrying without resume", instance.session_id, instance.id)
                 instance.session_id = None
-                return await self._run_impl(instance, on_progress, on_stall, context, sibling_context, api_fallback=api_fallback)
+                return await self._run_impl(instance, on_progress, on_stall, context, sibling_context, api_fallback=api_fallback, _provider=provider, _binary=binary)
 
             # Usage limit: try next account before falling through to cooldown/PPU
             if result.is_error:
-                reset_at = self.provider.parse_usage_limit(error_text)
+                reset_at = provider.parse_usage_limit(error_text)
                 if reset_at:
                     log.info("Usage limit for %s, resets at %s", instance.id, reset_at)
                     # Mark this account as on cooldown
@@ -243,6 +258,7 @@ class ClaudeRunner:
                             instance, on_progress, on_stall,
                             context, sibling_context,
                             api_fallback=api_fallback,
+                            _provider=provider, _binary=binary,
                         )
                     # All accounts exhausted — fall through to cooldown/PPU
                     result.usage_limit_reset = reset_at
@@ -256,7 +272,7 @@ class ClaudeRunner:
                 log.info("Transient error for %s, retrying in 30s", instance.id)
                 instance.retry_count = 1
                 await asyncio.sleep(30)
-                return await self._run_impl(instance, on_progress, on_stall, context, sibling_context, api_fallback=False)
+                return await self._run_impl(instance, on_progress, on_stall, context, sibling_context, api_fallback=False, _provider=provider, _binary=binary)
 
             return result
 
@@ -271,6 +287,12 @@ class ClaudeRunner:
                         os.unlink(tmp)
                     except OSError:
                         pass
+            # Clean up Cursor rules file if created
+            if rules_file:
+                try:
+                    os.unlink(rules_file)
+                except OSError:
+                    pass
             self._processes.pop(instance.id, None)
             # Kill process on cancellation/unexpected error to avoid orphans
             if proc is not None and proc.returncode is None:
@@ -471,12 +493,16 @@ class ClaudeRunner:
         context: str | None = None,
         sibling_context: str | None = None,
         api_fallback: bool = False,
-    ) -> tuple[list[str], str, str | None, str | None]:
+        provider: ProviderConfig | None = None,
+        binary: str | None = None,
+    ) -> tuple[list[str], str, str | None, str | None, str | None]:
         """Build CLI command and prompt.  Prompt returned separately for stdin piping.
 
-        Returns (cmd, prompt_text, system_prompt_file, api_key_file) — caller
-        must clean up the temp files via os.unlink when done.
+        Returns (cmd, prompt_text, system_prompt_file, api_key_file, rules_file)
+        — caller must clean up the temp files via os.unlink when done.
         """
+        provider = provider or self.provider
+
         # Build prompt — never mutated on the instance
         prompt = instance.prompt
         if not prompt:
@@ -484,28 +510,48 @@ class ClaudeRunner:
 
         # API key file (only for providers that support API fallback)
         api_key_file: str | None = None
-        if api_fallback and self.provider.supports_api_fallback and config.ANTHROPIC_API_KEY:
+        if api_fallback and provider.supports_api_fallback and config.ANTHROPIC_API_KEY:
             api_key_file = self._write_api_key_file(config.ANTHROPIC_API_KEY)
             if not api_key_file:
                 log.warning("API key file write failed for %s, skipping API fallback", instance.id)
 
         # Build system prompt: mobile hint + bot context + pinned context + repo instruction file + projects dir
-        system_prompt = self._build_system_prompt(instance, context, sibling_context)
+        system_prompt = self._build_system_prompt(instance, context, sibling_context, provider=provider)
 
-        # Write system prompt to temp file to avoid Windows command-line
-        # length limit (WinError 206).  Falls back to truncated inline arg.
-        sp_file = self._write_system_prompt_file(system_prompt)
+        # Dispatch system prompt delivery based on provider method
+        sp_file: str | None = None
         system_prompt_inline: str | None = None
-        if not sp_file:
-            max_inline = 30_000
-            if len(system_prompt) > max_inline:
-                log.warning("System prompt file write failed, truncating to %d chars", max_inline)
-                system_prompt = system_prompt[:max_inline]
-            system_prompt_inline = system_prompt
+        rules_file: str | None = None
+
+        if provider.system_prompt_method == "rules_dir":
+            # Write to workspace .cursor/rules/_bot_system.mdc — Cursor loads
+            # all files in this dir automatically.
+            working_dir = instance.worktree_path or instance.repo_path
+            if working_dir and system_prompt:
+                rules_dir = Path(working_dir) / provider.config_dir_name / "rules"
+                rules_dir.mkdir(parents=True, exist_ok=True)
+                rf = rules_dir / "_bot_system.mdc"
+                try:
+                    rf.write_text(system_prompt, encoding="utf-8")
+                    rules_file = str(rf)
+                    log.debug("Wrote system prompt to %s", rf)
+                except OSError:
+                    log.warning("Failed to write rules file %s, system prompt skipped", rf)
+            # sp_file and system_prompt_inline stay None — not passed to build_command
+        else:
+            # Claude path: write to temp file, fall back to inline arg
+            sp_file = self._write_system_prompt_file(system_prompt)
+            if not sp_file:
+                max_inline = 30_000
+                if len(system_prompt) > max_inline:
+                    log.warning("System prompt file write failed, truncating to %d chars", max_inline)
+                    system_prompt = system_prompt[:max_inline]
+                system_prompt_inline = system_prompt
 
         # Delegate CLI arg assembly to the provider
-        cmd = self.provider.build_command(
+        cmd = provider.build_command(
             instance,
+            binary=binary,
             system_prompt_file=sp_file,
             system_prompt_inline=system_prompt_inline,
             api_fallback=api_fallback,
@@ -514,7 +560,7 @@ class ClaudeRunner:
 
         # Prompt piped via stdin (not CLI arg) to avoid Windows command-line
         # length limit (WinError 206).  No "--" separator needed.
-        return cmd, prompt, sp_file, api_key_file
+        return cmd, prompt, sp_file, api_key_file, rules_file
 
     @staticmethod
     def _write_system_prompt_file(content: str) -> str | None:
@@ -565,8 +611,10 @@ class ClaudeRunner:
         self, instance: Instance,
         context: str | None = None,
         sibling_context: str | None = None,
+        provider: ProviderConfig | None = None,
     ) -> str:
         """Build the system prompt with mobile hint, bot context, pinned context, repo CLAUDE.md, and projects dir."""
+        provider = provider or self.provider
         parts = [config.MOBILE_HINT]
 
         # Explain that user can only see text output (critical for good responses)
@@ -617,17 +665,18 @@ class ClaudeRunner:
 
         repo_path = instance.repo_path
         if repo_path:
-            # Include repo instruction file if it exists (e.g. .claude/CLAUDE.md, .cursor/rules)
-            instruction_path = Path(repo_path) / self.provider.instruction_file
-            if instruction_path.exists():
+            # Include repo instruction file if it exists (e.g. .claude/CLAUDE.md)
+            # Skip if path is a directory (e.g. .cursor/rules — handled via rules_dir)
+            instruction_path = Path(repo_path) / provider.instruction_file
+            if instruction_path.is_file():
                 try:
                     content = instruction_path.read_text(encoding="utf-8")
                     parts.append(
-                        f"\n\n--- Repository Instructions (from {self.provider.instruction_file}) ---\n"
+                        f"\n\n--- Repository Instructions (from {provider.instruction_file}) ---\n"
                         f"{content}"
                     )
                 except Exception:
-                    log.warning("Failed to read %s from %s", self.provider.instruction_file, instruction_path)
+                    log.warning("Failed to read %s from %s", provider.instruction_file, instruction_path)
 
             # Point to the projects directory for plans/sessions
             projects_dir = self._get_projects_dir(repo_path)
@@ -985,7 +1034,7 @@ class ClaudeRunner:
 
     # --- Git worktree management ---
 
-    async def _ensure_worktree(self, instance: Instance) -> None:
+    async def _ensure_worktree(self, instance: Instance, provider: ProviderConfig | None = None) -> None:
         """Create a git worktree for build isolation (idempotent)."""
         if not instance.repo_path:
             return
@@ -1000,9 +1049,10 @@ class ClaudeRunner:
             instance.worktree_path = None
         repo_lock = self._get_repo_lock(instance.repo_path)
         async with repo_lock:
-            await asyncio.to_thread(self._create_worktree_sync, instance)
+            await asyncio.to_thread(self._create_worktree_sync, instance, provider)
 
-    def _create_worktree_sync(self, instance: Instance) -> None:
+    def _create_worktree_sync(self, instance: Instance, provider: ProviderConfig | None = None) -> None:
+        provider = provider or self.provider
         repo = instance.repo_path
         wt_dir = str(Path(repo) / ".worktrees" / instance.id)
         branch = instance.branch
@@ -1036,7 +1086,7 @@ class ClaudeRunner:
             # Copy provider config dir into worktree so CLI finds
             # instruction files and project settings (worktrees have a .git
             # file, not directory — some tools may not follow it correctly)
-            cfg_dir = self.provider.config_dir_name
+            cfg_dir = provider.config_dir_name
             try:
                 src_cfg_dir = Path(repo) / cfg_dir
                 dst_cfg_dir = Path(wt_dir) / cfg_dir

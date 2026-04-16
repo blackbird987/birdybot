@@ -21,16 +21,18 @@ class ProviderConfig:
     config_dir_name: str              # Dir copied into worktrees (".claude")
     code_change_tools: frozenset[str] # Tool names that indicate file edits
 
-    # Feature flags — controls which Claude-specific code paths are active
+    # Feature flags — controls which provider-specific code paths are active
     supports_account_failover: bool = False
     supports_api_fallback: bool = False
     supports_effort: bool = True
     supports_resume: bool = True
+    system_prompt_method: str = "cli_flag"  # "cli_flag" or "rules_dir"
 
     def build_command(
         self,
         instance: object,  # Instance (avoid circular import)
         *,
+        binary: str | None = None,
         system_prompt_file: str | None,
         system_prompt_inline: str | None,
         api_fallback: bool,
@@ -38,44 +40,11 @@ class ProviderConfig:
     ) -> list[str]:
         """Build the CLI command args. Subclass-style dispatch via provider name.
 
+        *binary* overrides config.CLAUDE_BINARY — use when the caller has
+        snapshotted the binary path for in-flight session safety.
         Returns the command list.  Prompt is always piped via stdin by the caller.
         """
         raise NotImplementedError(f"build_command not implemented for {self.name}")
-
-    def _build_common_args(
-        self,
-        instance: object,
-        *,
-        system_prompt_file: str | None,
-        system_prompt_inline: str | None,
-    ) -> list[str]:
-        """Shared CLI args: system prompt, resume, permissions, disallowed tools."""
-        args: list[str] = []
-
-        # System prompt
-        if system_prompt_file:
-            args.extend(["--append-system-prompt-file", system_prompt_file])
-        elif system_prompt_inline:
-            args.extend(["--append-system-prompt", system_prompt_inline])
-
-        # Resume session
-        if instance.session_id:  # type: ignore[attr-defined]
-            args.extend(["--resume", instance.session_id])  # type: ignore[attr-defined]
-
-        # Permissions: always bypass (non-interactive bot can't approve prompts)
-        args.extend(["--permission-mode", "bypassPermissions"])
-
-        # Disallowed tools (uses per-provider code_change_tools field)
-        disallowed: set[str] = set()
-        if instance.mode != "build":  # type: ignore[attr-defined]
-            disallowed.update(self.code_change_tools)
-        if not instance.is_owner_session:  # type: ignore[attr-defined]
-            if instance.bash_policy == "none":  # type: ignore[attr-defined]
-                disallowed.add("Bash")
-        if disallowed:
-            args.extend(["--disallowed-tools", ",".join(sorted(disallowed))])
-
-        return args
 
     def parse_usage_limit(self, error_text: str) -> object | None:
         """Detect subscription usage-limit errors.  Returns datetime or None."""
@@ -89,6 +58,7 @@ class _ClaudeProvider(ProviderConfig):
         self,
         instance: object,
         *,
+        binary: str | None = None,
         system_prompt_file: str | None,
         system_prompt_inline: str | None,
         api_fallback: bool,
@@ -99,7 +69,7 @@ class _ClaudeProvider(ProviderConfig):
 
         from bot import config
 
-        cmd = [config.CLAUDE_BINARY, "-p"]
+        cmd = [binary or config.CLAUDE_BINARY, "-p"]
         cmd.extend(["--output-format", "stream-json", "--verbose"])
 
         if self.supports_effort:
@@ -120,11 +90,31 @@ class _ClaudeProvider(ProviderConfig):
             cmd.extend(["--model", config.API_FALLBACK_MODEL])
             cmd.extend(["--max-budget-usd", str(config.API_FALLBACK_MAX_USD)])
 
-        cmd.extend(self._build_common_args(
-            instance,
-            system_prompt_file=system_prompt_file,
-            system_prompt_inline=system_prompt_inline,
-        ))
+        # --- Claude-specific CLI args (inlined from former _build_common_args) ---
+
+        # System prompt
+        if system_prompt_file:
+            cmd.extend(["--append-system-prompt-file", system_prompt_file])
+        elif system_prompt_inline:
+            cmd.extend(["--append-system-prompt", system_prompt_inline])
+
+        # Resume session
+        if instance.session_id:  # type: ignore[attr-defined]
+            cmd.extend(["--resume", instance.session_id])  # type: ignore[attr-defined]
+
+        # Permissions: always bypass (non-interactive bot can't approve prompts)
+        cmd.extend(["--permission-mode", "bypassPermissions"])
+
+        # Disallowed tools (uses per-provider code_change_tools field)
+        disallowed: set[str] = set()
+        if instance.mode != "build":  # type: ignore[attr-defined]
+            disallowed.update(self.code_change_tools)
+        if not instance.is_owner_session:  # type: ignore[attr-defined]
+            if instance.bash_policy == "none":  # type: ignore[attr-defined]
+                disallowed.add("Bash")
+        if disallowed:
+            cmd.extend(["--disallowed-tools", ",".join(sorted(disallowed))])
+
         return cmd
 
     def parse_usage_limit(self, error_text: str) -> object | None:
@@ -132,12 +122,13 @@ class _ClaudeProvider(ProviderConfig):
 
 
 class _CursorProvider(ProviderConfig):
-    """Cursor CLI provider — nearly identical to Claude Code."""
+    """Cursor CLI provider (agent binary)."""
 
     def build_command(
         self,
         instance: object,
         *,
+        binary: str | None = None,
         system_prompt_file: str | None,
         system_prompt_inline: str | None,
         api_fallback: bool,
@@ -145,23 +136,30 @@ class _CursorProvider(ProviderConfig):
     ) -> list[str]:
         from bot import config
 
-        cmd = [config.CLAUDE_BINARY, "-p"]
-        cmd.extend(["--output-format", "stream-json", "--verbose"])
+        cmd = [binary or config.CLAUDE_BINARY, "-p"]
+        cmd.extend(["--output-format", "stream-json"])
 
-        # Cursor --effort support unverified — skip if not confirmed
-        if self.supports_effort:
-            cmd.extend(["--effort", instance.effort])  # type: ignore[attr-defined]
+        # Permissions: Cursor uses --force --trust (no --permission-mode)
+        cmd.extend(["--force", "--trust"])
 
-        if instance.model and not api_fallback:  # type: ignore[attr-defined]
-            cmd.extend(["--model", instance.model])  # type: ignore[attr-defined]
+        # Model: env-configurable default (free tier = "auto", paid = specific model)
+        model = instance.model if not api_fallback else None  # type: ignore[attr-defined]
+        if not model:
+            model = config.CURSOR_MODEL
+        cmd.extend(["--model", model])
 
-        # Cursor has no --bare API fallback mode — skip
+        # Mode-based access control (no --disallowed-tools):
+        # build → full agent (no flag), plan origin → --mode plan, explore → --mode ask
+        if instance.mode == "plan":  # type: ignore[attr-defined]
+            cmd.extend(["--mode", "plan"])
+        elif instance.mode != "build":  # type: ignore[attr-defined]
+            cmd.extend(["--mode", "ask"])
 
-        cmd.extend(self._build_common_args(
-            instance,
-            system_prompt_file=system_prompt_file,
-            system_prompt_inline=system_prompt_inline,
-        ))
+        # Resume
+        if self.supports_resume and instance.session_id:  # type: ignore[attr-defined]
+            cmd.extend(["--resume", instance.session_id])  # type: ignore[attr-defined]
+
+        # System prompt handled by runner via rules dir — not passed as CLI args
         return cmd
 
 
@@ -183,22 +181,24 @@ _CLAUDE = _ClaudeProvider(
     supports_api_fallback=True,
     supports_effort=True,
     supports_resume=True,
+    system_prompt_method="cli_flag",
 )
 
 _CURSOR = _CursorProvider(
     name="cursor",
-    binary="cursor",
+    binary="agent",
     projects_dir_name=".cursor",
     branch_prefix="cursor-bot",
     config_dir_env="CURSOR_CONFIG_DIR",
     nested_env_vars=(),
-    instruction_file=".cursor/rules",     # TBD — may be .cursorrules
+    instruction_file=".cursor/rules",
     config_dir_name=".cursor",
     code_change_tools=frozenset({"Edit", "Write", "NotebookEdit"}),
     supports_account_failover=False,
     supports_api_fallback=False,
-    supports_effort=False,                # Unverified — disabled until confirmed
-    supports_resume=True,
+    supports_effort=False,
+    supports_resume=False,  # disabled until confirmed
+    system_prompt_method="rules_dir",
 )
 
 PROVIDERS: dict[str, ProviderConfig | None] = {
