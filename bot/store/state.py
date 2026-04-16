@@ -47,6 +47,7 @@ class StateStore:
         self._deploy_state: dict[str, DeployState] = {}  # repo_name -> deploy state
         self._deploy_configs: dict[str, dict] = {}  # repo_name -> deploy config
         self._auto_fix_state: dict[str, AutoFixState] = {}  # "repo:trigger" -> state
+        self._active_provider: str | None = None  # Runtime provider override
         self._fallback_cost: float = 0.0     # Rolling daily API fallback spend
         self._fallback_cost_date: str = ""   # YYYY-MM-DD for fallback cost reset
         self._dirty: bool = False  # Dirty flag — mark_dirty() defers save to auto-save loop
@@ -92,6 +93,7 @@ class StateStore:
                 k: AutoFixState.from_dict(v)
                 for k, v in data.get("auto_fix_state", {}).items()
             }
+            self._active_provider = data.get("active_provider")
             self._fallback_cost = data.get("fallback_cost", 0.0)
             self._fallback_cost_date = data.get("fallback_cost_date", "")
             for d in data.get("schedules", []):
@@ -157,6 +159,7 @@ class StateStore:
             "deploy_state": {k: v.to_dict() for k, v in self._deploy_state.items()},
             "deploy_configs": self._deploy_configs,
             "auto_fix_state": {k: v.to_dict() for k, v in self._auto_fix_state.items()},
+            "active_provider": self._active_provider,
             "fallback_cost": self._fallback_cost,
             "fallback_cost_date": self._fallback_cost_date,
             "schedules": [s.to_dict() for s in self._schedules.values()],
@@ -478,6 +481,17 @@ class StateStore:
     def effort(self, value: str) -> None:
         self._effort = value
         self.save()
+
+    # --- Active Provider ---
+
+    @property
+    def active_provider(self) -> str | None:
+        return self._active_provider
+
+    @active_provider.setter
+    def active_provider(self, value: str | None) -> None:
+        self._active_provider = value
+        self.mark_dirty()
 
     # --- Platform State ---
 

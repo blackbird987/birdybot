@@ -1019,6 +1019,64 @@ async def on_effort(ctx: RequestContext, text: str) -> None:
         )
 
 
+# --- /provider ---
+
+async def on_provider(ctx: RequestContext, text: str) -> None:
+    """View or switch the active CLI provider."""
+    from bot.claude.provider import PROVIDERS
+
+    text = text.strip().lower()
+    available = [k for k, v in PROVIDERS.items() if v is not None]
+
+    if not text:
+        await ctx.messenger.send_text(
+            ctx.channel_id,
+            f"Provider: **{config.PROVIDER}**\n"
+            f"Binary: `{config.CLAUDE_BINARY}`\n"
+            f"Available: {', '.join(available)}\n"
+            f"Switch: `/provider claude` or `/provider cursor`",
+        )
+        return
+
+    if text not in available:
+        await ctx.messenger.send_text(
+            ctx.channel_id,
+            f"Unknown provider `{text}`. Available: {', '.join(available)}",
+        )
+        return
+
+    if text == config.PROVIDER:
+        await ctx.messenger.send_text(
+            ctx.channel_id, f"Already using **{text}**.",
+        )
+        return
+
+    old = config.PROVIDER
+    try:
+        config.set_provider(text)
+    except RuntimeError as exc:
+        await ctx.messenger.send_text(ctx.channel_id, f"Switch failed: {exc}")
+        return
+
+    # Persist so it survives reboots
+    ctx.store.active_provider = text
+
+    busy_note = ""
+    if ctx.runner.is_busy:
+        busy_note = (
+            f"\n⚠️ {ctx.runner.active_task_count} session(s) still running — "
+            f"they will finish with **{old}**."
+        )
+
+    await ctx.messenger.send_text(
+        ctx.channel_id,
+        f"Switched: **{old}** → **{text}**\n"
+        f"Binary: `{config.CLAUDE_BINARY}`\n"
+        f"Prefix: `{config.BRANCH_PREFIX}`"
+        + busy_note,
+    )
+
+
 # --- /context ---
 
 async def on_context(ctx: RequestContext, text: str) -> None:
@@ -1579,6 +1637,7 @@ async def on_help(ctx: RequestContext) -> None:
         "`/mode` — explore|plan|build\n"
         "`/verbose` — progress detail (0|1|2)\n"
         "`/effort` — reasoning effort (low|medium|high|max)\n"
+        "`/provider` — switch CLI provider (claude|cursor)\n"
         "`/context` — pinned context\n"
         "`/alias` — command shortcuts\n"
         "`/schedule` — recurring tasks\n"

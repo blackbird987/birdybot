@@ -71,6 +71,9 @@ _PROVIDER_CFG = _get_provider(PROVIDER)
 # Binary and branch prefix — derived from provider, overridable via env.
 CLAUDE_BINARY: str = os.getenv("CLAUDE_BINARY") or _PROVIDER_CFG.binary
 BRANCH_PREFIX: str = os.getenv("BRANCH_PREFIX") or _PROVIDER_CFG.branch_prefix
+
+# Cursor-specific: default model (free tier = "auto", paid = specific model)
+CURSOR_MODEL: str = os.getenv("CURSOR_MODEL", "auto")
 MAX_CONCURRENT: int = int(os.getenv("MAX_CONCURRENT", "5"))
 DAILY_BUDGET_USD: float = float(os.getenv("DAILY_BUDGET_USD", "20.0"))
 PC_NAME: str = os.getenv("PC_NAME", "") or __import__("platform").node()
@@ -240,6 +243,7 @@ Settings:
 - /repo add|remove|create|switch|list — manage repos
 - /repo create <name> [path] [--github] [--public] — create new repo (git init + register)
 - /repo remove <name> — unregister a repo (does not delete files)
+- /provider claude|cursor — switch CLI provider
 - /alias set|list|delete — saved command shortcuts
 - /new — start a fresh conversation
 - /cost — spending breakdown
@@ -387,6 +391,51 @@ PROVIDER_DIR_NAME: str = _PROVIDER_CFG.projects_dir_name
 
 # Session/plan data directory — derived from provider (e.g. ~/.claude/projects/)
 CLAUDE_PROJECTS_DIR: Path = Path.home() / PROVIDER_DIR_NAME / "projects"
+
+
+def set_provider(name: str) -> None:
+    """Switch the active provider at runtime.
+
+    Atomically reassigns all provider-derived module globals.
+    Validates the binary exists on PATH (raises RuntimeError if not found).
+    """
+    import logging as _logging
+    import shutil as _shutil
+
+    global PROVIDER, _PROVIDER_CFG, CLAUDE_BINARY, BRANCH_PREFIX
+    global PROVIDER_DIR_NAME, CLAUDE_PROJECTS_DIR, CURSOR_MODEL
+
+    new_cfg = _get_provider(name)
+
+    # Resolve binary to full path — critical on Windows where PATH may not
+    # include the provider install dir in the inherited subprocess env.
+    # Only use CLAUDE_BINARY env override if it matches the target provider
+    # (otherwise switching from claude→cursor would still use claude.exe).
+    env_binary = os.getenv("CLAUDE_BINARY")
+    if env_binary and name == PROVIDER:
+        # Keep env override when re-confirming current provider
+        binary_name = env_binary
+    else:
+        binary_name = new_cfg.binary
+    resolved = _shutil.which(binary_name)
+    if not resolved and sys.platform == "win32" and not binary_name.endswith(".cmd"):
+        resolved = _shutil.which(binary_name + ".cmd")
+    if not resolved:
+        raise RuntimeError(
+            f"Binary '{binary_name}' not found on PATH. "
+            f"Install the {name} CLI or set CLAUDE_BINARY to the full path."
+        )
+
+    PROVIDER = name
+    _PROVIDER_CFG = new_cfg
+    CLAUDE_BINARY = resolved
+    BRANCH_PREFIX = os.getenv("BRANCH_PREFIX") or new_cfg.branch_prefix
+    PROVIDER_DIR_NAME = new_cfg.projects_dir_name
+    CLAUDE_PROJECTS_DIR = Path.home() / PROVIDER_DIR_NAME / "projects"
+    CURSOR_MODEL = os.getenv("CURSOR_MODEL", "auto")
+    _logging.getLogger(__name__).info(
+        "Provider switched to %s (binary=%s)", name, CLAUDE_BINARY,
+    )
 
 
 # --- Canned prompts for contextual action buttons ---

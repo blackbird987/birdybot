@@ -190,6 +190,14 @@ def setup(bot: ClaudeBot) -> None:
             return
         await bot._run_slash(interaction, lambda ctx: commands.on_effort(ctx, level))
 
+    @bot.tree.command(name="provider", description="View or switch CLI provider", guild=guild_obj)
+    @app_commands.describe(name="Provider: claude, cursor")
+    async def cmd_provider(interaction: discord.Interaction, name: str = ""):
+        if not bot._is_owner(interaction.user.id):
+            await interaction.response.send_message("Owner only", ephemeral=True)
+            return
+        await bot._run_slash(interaction, lambda ctx: commands.on_provider(ctx, name))
+
     @bot.tree.command(name="context", description="Pinned context", guild=guild_obj)
     @app_commands.describe(args="set <text> | clear")
     async def cmd_context(interaction: discord.Interaction, args: str = ""):
