@@ -87,6 +87,10 @@ API_FALLBACK_MAX_USD: float = float(os.getenv("API_FALLBACK_MAX_USD", "1.0"))
 API_FALLBACK_DAILY_MAX_USD: float = float(os.getenv("API_FALLBACK_DAILY_MAX_USD", "5.0"))
 API_FALLBACK_ENABLED: bool = bool(ANTHROPIC_API_KEY)
 
+# Model routing: use a lighter model for exploration/plan steps to save cost.
+# Set to e.g. "sonnet" to route plan/review_plan/apply_revisions to Sonnet.
+EXPLORE_MODEL: str | None = os.getenv("EXPLORE_MODEL")
+
 # Multi-account failover: comma-separated list of Claude config dirs.
 # When the active account hits its usage limit, the bot automatically
 # retries on the next available account.

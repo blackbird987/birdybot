@@ -12,6 +12,7 @@
 - Make branch prefix configurable via `BRANCH_PREFIX` env var (default: `claude-bot` for Claude, `cursor-bot` for Cursor)
 - Derive session projects directory from provider config (`~/.claude/projects/` or `~/.cursor/projects/`)
 - Use provider-specific instruction file path (`.claude/CLAUDE.md` vs `.cursor/rules`) and config directory for worktree copies
+- Add model routing: exploration steps (plan, review plan, apply revisions) use `EXPLORE_MODEL` env var when set, saving cost by routing research to a lighter model (e.g. Sonnet) while keeping builds on Opus
 
 ## v0.66.2 — Retry Date Display (2026-04-14)
 

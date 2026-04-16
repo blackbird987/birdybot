@@ -210,6 +210,11 @@ async def spawn_from(
     new_inst.origin = cfg.origin
     new_inst.origin_platform = ctx.platform
     new_inst.effort = ctx.effective_effort
+    # Route mechanical explore steps to a lighter model if configured.
+    # Plan stays on Opus (core architectural thinking); review/apply are structured follow-ups.
+    _EXPLORE_MODEL_ORIGINS = frozenset({InstanceOrigin.REVIEW_PLAN, InstanceOrigin.APPLY_REVISIONS})
+    if cfg.origin in _EXPLORE_MODEL_ORIGINS and config.EXPLORE_MODEL:
+        new_inst.model = config.EXPLORE_MODEL
     new_inst.parent_id = source.id
     new_inst.repo_name = source.repo_name
     new_inst.repo_path = source.repo_path

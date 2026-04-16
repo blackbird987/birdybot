@@ -52,3 +52,4 @@
 - [ ] [DRY/Cleanup] Merged check duplicated across two call sites (Low)
 - [ ] [DRY/Cleanup] Setup steps should be a one-shot script (Low)
 - [ ] [Bug Risk] send_text fallback for chain exits also looks empty (Medium)
+- [ ] [Integration] Verification plan assumes Cursor CLI is free to test (Low)
