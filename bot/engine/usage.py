@@ -316,7 +316,11 @@ async def _run_ccusage(args: list[str], force: bool = False) -> dict | None:
 
     Returns None on failure or if response is missing expected keys.
     Failures are negatively cached so timeouts don't trigger retry storms.
+    ccusage is Claude-ecosystem-specific — returns None for other providers.
     """
+    if config.PROVIDER != "claude":
+        return None
+
     global _fail_count, _last_fail_time
 
     cache_key = " ".join(args)

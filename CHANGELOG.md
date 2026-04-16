@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## v0.67.0 — Multi-Provider Support (2026-04-16)
+
+### Multi-Provider Support
+- Add `PROVIDER` env var to select coding CLI backend (`claude` default, `cursor` supported, `codex` stubbed)
+- Add `ProviderConfig` abstraction in `bot/claude/provider.py` — encapsulates CLI command building, usage limit parsing, and provider-specific feature flags
+- Delegate CLI command assembly from `runner.py` to provider `build_command()` method
+- Gate Claude-only features (multi-account failover, API billing fallback, ccusage, auth sync) behind provider feature flags — safely no-op for other providers
+- Make branch prefix configurable via `BRANCH_PREFIX` env var (default: `claude-bot` for Claude, `cursor-bot` for Cursor)
+- Derive session projects directory from provider config (`~/.claude/projects/` or `~/.cursor/projects/`)
+- Use provider-specific instruction file path (`.claude/CLAUDE.md` vs `.cursor/rules`) and config directory for worktree copies
+
 ## v0.66.2 — Retry Date Display (2026-04-14)
 
 - Show date in usage-limit retry message when reset time is on a different day
