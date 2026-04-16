@@ -60,8 +60,17 @@ if not DISCORD_ENABLED:
         "+ DISCORD_LOBBY_CHANNEL_ID in .env."
     )
 
-# Optional with defaults
-CLAUDE_BINARY: str = os.getenv("CLAUDE_BINARY", "claude")
+# --- Provider selection ---
+# "claude" (default), "cursor". "codex" reserved but not yet supported.
+PROVIDER: str = os.getenv("PROVIDER", "claude").lower()
+
+# Lazy-loaded at module level — validates provider name immediately.
+from bot.claude.provider import get_provider as _get_provider  # noqa: E402
+_PROVIDER_CFG = _get_provider(PROVIDER)
+
+# Binary and branch prefix — derived from provider, overridable via env.
+CLAUDE_BINARY: str = os.getenv("CLAUDE_BINARY") or _PROVIDER_CFG.binary
+BRANCH_PREFIX: str = os.getenv("BRANCH_PREFIX") or _PROVIDER_CFG.branch_prefix
 MAX_CONCURRENT: int = int(os.getenv("MAX_CONCURRENT", "5"))
 DAILY_BUDGET_USD: float = float(os.getenv("DAILY_BUDGET_USD", "20.0"))
 PC_NAME: str = os.getenv("PC_NAME", "") or __import__("platform").node()
@@ -369,8 +378,11 @@ WORKFLOW_GUIDANCE: dict[str, str] = {
     ),
 }
 
-# Claude Code session/plan data lives here
-CLAUDE_PROJECTS_DIR: Path = Path.home() / ".claude" / "projects"
+# Provider's base directory name (e.g. ".claude", ".cursor")
+PROVIDER_DIR_NAME: str = _PROVIDER_CFG.projects_dir_name
+
+# Session/plan data directory — derived from provider (e.g. ~/.claude/projects/)
+CLAUDE_PROJECTS_DIR: Path = Path.home() / PROVIDER_DIR_NAME / "projects"
 
 
 # --- Canned prompts for contextual action buttons ---

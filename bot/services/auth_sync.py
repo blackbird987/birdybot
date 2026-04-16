@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
+CREDENTIALS_PATH = Path.home() / config.PROVIDER_DIR_NAME / ".credentials.json"
 AUTH_PREFIX = "[AUTH_SYNC:from="
 
 # ---------------------------------------------------------------------------
@@ -230,7 +230,12 @@ async def startup_auth_check(bot: ClaudeBot) -> None:
 
     Called once during bot startup, after Discord is ready.
     Non-fatal — exceptions are caught by the caller.
+    Claude-specific — skipped for other providers.
     """
+    if config.PROVIDER != "claude":
+        log.debug("Auth sync skipped — not using Claude provider")
+        return
+
     if credentials_look_valid():
         log.debug("Local CLI credentials look valid — skipping auth sync")
         return

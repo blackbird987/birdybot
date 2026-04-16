@@ -1,4 +1,4 @@
-"""Claude Code subprocess management — streaming, kill, semaphore, stall detection, git worktrees."""
+"""Coding CLI subprocess management — streaming, kill, semaphore, stall detection, git worktrees."""
 
 from __future__ import annotations
 
@@ -23,10 +23,10 @@ from bot.claude.parser import (
     is_transient_error,
     iter_tool_blocks,
     parse_stream_line,
-    parse_usage_limit,
 )
+from bot.claude.provider import ProviderConfig, get_provider
 from bot.claude.types import (
-    CODE_CHANGE_TOOLS, Instance, InstanceOrigin, InstanceStatus, InstanceType,
+    Instance, InstanceOrigin, InstanceStatus, InstanceType,
 )
 from bot.store import history as history_mod
 
@@ -40,9 +40,10 @@ StallCallback = Callable[[str], None]     # async callback(instance_id)
 
 
 class ClaudeRunner:
-    """Manages Claude Code CLI subprocesses."""
+    """Manages coding CLI subprocesses (Claude Code, Cursor, etc.)."""
 
     def __init__(self) -> None:
+        self.provider: ProviderConfig = get_provider(config.PROVIDER)
         self._semaphore = asyncio.Semaphore(config.MAX_CONCURRENT)
         self._processes: dict[str, asyncio.subprocess.Process] = {}
         # Task-level tracking: covers the full lifecycle of a query/workflow,
@@ -72,7 +73,7 @@ class ClaudeRunner:
         self._account_cooldowns: dict[str, datetime] = {}
 
     async def check_cli(self) -> str:
-        """Verify Claude CLI is available. Returns version string."""
+        """Verify CLI is available. Returns version string."""
         try:
             proc = await asyncio.create_subprocess_exec(
                 config.CLAUDE_BINARY, "--version",
@@ -83,15 +84,15 @@ class ClaudeRunner:
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
             version = stdout.decode().strip()
             if not version:
-                raise RuntimeError("Claude CLI returned empty version")
+                raise RuntimeError(f"{self.provider.name} CLI returned empty version")
             return version
         except FileNotFoundError:
             raise RuntimeError(
-                f"Claude CLI not found: {config.CLAUDE_BINARY}. "
+                f"{self.provider.name} CLI not found: {config.CLAUDE_BINARY}. "
                 "Ensure it's installed and in PATH."
             )
         except asyncio.TimeoutError:
-            raise RuntimeError("Claude CLI --version timed out")
+            raise RuntimeError(f"{self.provider.name} CLI --version timed out")
 
     def _pick_account(self, exclude: set[str] | None = None) -> str | None:
         """Return the first configured account not on cooldown/excluded, or None."""
@@ -118,7 +119,7 @@ class ClaudeRunner:
         context: str | None = None,
         sibling_context: str | None = None,
     ) -> RunResult:
-        """Run Claude CLI for an instance. Blocks until completion or timeout."""
+        """Run CLI for an instance. Blocks until completion or timeout."""
         async with self._semaphore:
             return await self._run_impl(
                 instance, on_progress, on_stall, context, sibling_context,
@@ -153,19 +154,21 @@ class ClaudeRunner:
         log.info("Running %s (prompt: %d chars via stdin): %s",
                  instance.id, len(prompt_text), " ".join(cmd)[:500])
 
-        # Clear CLAUDE_CODE env var to avoid nested-session error.
+        # Strip provider-specific env vars to prevent nested-session errors.
         # Strip ANTHROPIC_API_KEY on non-PPU runs so the CLI can never
         # silently bill via API; PPU runs keep it as backup for apiKeyHelper.
         env = {**os.environ}
-        env.pop("CLAUDE_CODE", None)
-        env.pop("CLAUDECODE", None)
+        for var in self.provider.nested_env_vars:
+            env.pop(var, None)
         if not api_fallback:
             env.pop("ANTHROPIC_API_KEY", None)
 
-        # Multi-account failover: pick the best available account
-        account_dir = self._pick_account(exclude=instance._accounts_tried)
-        if account_dir:
-            env["CLAUDE_CONFIG_DIR"] = account_dir
+        # Multi-account failover (Claude-only: other providers use single account)
+        account_dir: str | None = None
+        if self.provider.supports_account_failover:
+            account_dir = self._pick_account(exclude=instance._accounts_tried)
+            if account_dir:
+                env[self.provider.config_dir_env] = account_dir
 
         proc = None
         try:
@@ -214,7 +217,7 @@ class ClaudeRunner:
 
             # Usage limit: try next account before falling through to cooldown/PPU
             if result.is_error:
-                reset_at = parse_usage_limit(error_text)
+                reset_at = self.provider.parse_usage_limit(error_text)
                 if reset_at:
                     log.info("Usage limit for %s, resets at %s", instance.id, reset_at)
                     # Mark this account as on cooldown
@@ -474,69 +477,40 @@ class ClaudeRunner:
         Returns (cmd, prompt_text, system_prompt_file, api_key_file) — caller
         must clean up the temp files via os.unlink when done.
         """
-        api_key_file: str | None = None
-        cmd = [config.CLAUDE_BINARY, "-p"]
-
         # Build prompt — never mutated on the instance
         prompt = instance.prompt
         if not prompt:
             prompt = "Continue the previous conversation."
 
-        cmd.extend(["--output-format", "stream-json", "--verbose"])
-        cmd.extend(["--effort", instance.effort])
-
-        # API billing fallback: use --bare + apiKeyHelper for secure key passing
-        if api_fallback and config.ANTHROPIC_API_KEY:
+        # API key file (only for providers that support API fallback)
+        api_key_file: str | None = None
+        if api_fallback and self.provider.supports_api_fallback and config.ANTHROPIC_API_KEY:
             api_key_file = self._write_api_key_file(config.ANTHROPIC_API_KEY)
-            if api_key_file:
-                # Use repr() for safe path escaping across platforms
-                helper_cmd = f'{sys.executable} -c "print(open({repr(api_key_file)}).read().strip())"'
-                cmd.extend(["--bare"])
-                cmd.extend(["--settings", _json_mod.dumps({"apiKeyHelper": helper_cmd})])
-                cmd.extend(["--model", config.API_FALLBACK_MODEL])
-                cmd.extend(["--max-budget-usd", str(config.API_FALLBACK_MAX_USD)])
-            else:
+            if not api_key_file:
                 log.warning("API key file write failed for %s, skipping API fallback", instance.id)
 
-        # Build system prompt: mobile hint + bot context + pinned context + repo CLAUDE.md + projects dir
+        # Build system prompt: mobile hint + bot context + pinned context + repo instruction file + projects dir
         system_prompt = self._build_system_prompt(instance, context, sibling_context)
 
         # Write system prompt to temp file to avoid Windows command-line
-        # length limit (WinError 206).  Falls back to truncated inline arg
-        # if the file write fails.
+        # length limit (WinError 206).  Falls back to truncated inline arg.
         sp_file = self._write_system_prompt_file(system_prompt)
-        if sp_file:
-            cmd.extend(["--append-system-prompt-file", sp_file])
-        else:
-            # Fallback: truncate to stay under Windows 32K limit
+        system_prompt_inline: str | None = None
+        if not sp_file:
             max_inline = 30_000
             if len(system_prompt) > max_inline:
                 log.warning("System prompt file write failed, truncating to %d chars", max_inline)
                 system_prompt = system_prompt[:max_inline]
-            cmd.extend(["--append-system-prompt", system_prompt])
+            system_prompt_inline = system_prompt
 
-        # Resume session
-        if instance.session_id:
-            cmd.extend(["--resume", instance.session_id])
-
-        # Permissions: always bypass (non-interactive bot can't approve prompts).
-        # In explore/plan, block file-modification tools to enforce read-only.
-        cmd.extend(["--permission-mode", "bypassPermissions"])
-
-        disallowed = set()
-        if instance.mode != "build":
-            disallowed.update(CODE_CHANGE_TOOLS)
-
-        # Defense-in-depth: non-owner sessions enforce code change tools
-        # even if mode somehow got set to "build" incorrectly
-        if not instance.is_owner_session:
-            if instance.mode != "build":
-                disallowed.update(CODE_CHANGE_TOOLS)  # redundant with above, but safe
-                if instance.bash_policy == "none":
-                    disallowed.add("Bash")
-
-        if disallowed:
-            cmd.extend(["--disallowed-tools", ",".join(sorted(disallowed))])
+        # Delegate CLI arg assembly to the provider
+        cmd = self.provider.build_command(
+            instance,
+            system_prompt_file=sp_file,
+            system_prompt_inline=system_prompt_inline,
+            api_fallback=api_fallback,
+            api_key_file=api_key_file,
+        )
 
         # Prompt piped via stdin (not CLI arg) to avoid Windows command-line
         # length limit (WinError 206).  No "--" separator needed.
@@ -643,23 +617,23 @@ class ClaudeRunner:
 
         repo_path = instance.repo_path
         if repo_path:
-            # Include CLAUDE.md from the repo if it exists
-            claude_md = Path(repo_path) / ".claude" / "CLAUDE.md"
-            if claude_md.exists():
+            # Include repo instruction file if it exists (e.g. .claude/CLAUDE.md, .cursor/rules)
+            instruction_path = Path(repo_path) / self.provider.instruction_file
+            if instruction_path.exists():
                 try:
-                    content = claude_md.read_text(encoding="utf-8")
+                    content = instruction_path.read_text(encoding="utf-8")
                     parts.append(
-                        f"\n\n--- Repository Instructions (from .claude/CLAUDE.md) ---\n"
+                        f"\n\n--- Repository Instructions (from {self.provider.instruction_file}) ---\n"
                         f"{content}"
                     )
                 except Exception:
-                    log.warning("Failed to read CLAUDE.md from %s", claude_md)
+                    log.warning("Failed to read %s from %s", self.provider.instruction_file, instruction_path)
 
-            # Point Claude to the projects directory for plans/sessions
+            # Point to the projects directory for plans/sessions
             projects_dir = self._get_projects_dir(repo_path)
             if projects_dir and projects_dir.exists():
                 parts.append(
-                    f"\n\nClaude Code session history and plans for this repo "
+                    f"\n\nCLI session history and plans for this repo "
                     f"are stored in: {projects_dir}"
                 )
 
@@ -744,9 +718,9 @@ class ClaudeRunner:
 
     @staticmethod
     def _get_projects_dir(repo_path: str) -> Path | None:
-        """Get the Claude projects directory for a repo path.
+        """Get the CLI projects directory for a repo path.
 
-        Claude Code stores session data in ~/.claude/projects/<sanitized-path>/
+        Session data is stored in ~/<provider_dir>/projects/<sanitized-path>/
         where the path has : and separators replaced with dashes.
         """
         try:
@@ -792,7 +766,7 @@ class ClaudeRunner:
 
     @property
     def active_count(self) -> int:
-        """Number of currently running Claude processes."""
+        """Number of currently running CLI processes."""
         return len(self._processes)
 
     @property
@@ -966,7 +940,7 @@ class ClaudeRunner:
         return count
 
     async def kill(self, instance_id: str) -> bool:
-        """Terminate a running Claude process."""
+        """Terminate a running CLI process."""
         proc = self._processes.get(instance_id)
         if not proc:
             return False
@@ -1059,18 +1033,19 @@ class ClaudeRunner:
             instance.worktree_path = wt_dir
             instance.original_branch = default_branch
 
-            # Copy .claude/ directory into worktree so Claude CLI finds
-            # CLAUDE.md and project settings (worktrees have a .git file,
-            # not directory — some tools may not follow it correctly)
+            # Copy provider config dir into worktree so CLI finds
+            # instruction files and project settings (worktrees have a .git
+            # file, not directory — some tools may not follow it correctly)
+            cfg_dir = self.provider.config_dir_name
             try:
-                src_claude_dir = Path(repo) / ".claude"
-                dst_claude_dir = Path(wt_dir) / ".claude"
-                if src_claude_dir.is_dir() and not dst_claude_dir.exists():
-                    shutil.copytree(str(src_claude_dir), str(dst_claude_dir),
+                src_cfg_dir = Path(repo) / cfg_dir
+                dst_cfg_dir = Path(wt_dir) / cfg_dir
+                if src_cfg_dir.is_dir() and not dst_cfg_dir.exists():
+                    shutil.copytree(str(src_cfg_dir), str(dst_cfg_dir),
                                     ignore=shutil.ignore_patterns("*.jsonl"))
-                    log.debug("Copied .claude/ into worktree %s", wt_dir)
+                    log.debug("Copied %s/ into worktree %s", cfg_dir, wt_dir)
             except Exception:
-                log.warning("Failed to copy .claude/ into worktree %s", wt_dir, exc_info=True)
+                log.warning("Failed to copy %s/ into worktree %s", cfg_dir, wt_dir, exc_info=True)
 
             log.info("Created worktree %s (branch %s) in %s", wt_dir, branch, repo)
         except subprocess.CalledProcessError as e:
@@ -1088,15 +1063,16 @@ class ClaudeRunner:
             if r.returncode == 0:
                 return candidate
         # Fallback: use HEAD if it's not a bot-managed branch
+        _prefix = f"{config.BRANCH_PREFIX}/"
         r = subprocess.run(
             ["git", "symbolic-ref", "--short", "HEAD"],
             cwd=repo_path, capture_output=True, text=True, **_NOWND,
         )
         if r.returncode == 0:
             head = r.stdout.strip()
-            if head and not head.startswith("claude-bot/"):
+            if head and not head.startswith(_prefix):
                 return head
-        # Last resort: find any non-claude-bot branch
+        # Last resort: find any non-bot-managed branch
         r = subprocess.run(
             ["git", "branch", "--format=%(refname:short)"],
             cwd=repo_path, capture_output=True, text=True, **_NOWND,
@@ -1104,7 +1080,7 @@ class ClaudeRunner:
         if r.returncode == 0:
             for line in r.stdout.strip().splitlines():
                 branch = line.strip()
-                if branch and not branch.startswith("claude-bot/"):
+                if branch and not branch.startswith(_prefix):
                     return branch
         log.warning("No default branch in %s — every branch is bot-managed",
                      repo_path)
@@ -1114,7 +1090,7 @@ class ClaudeRunner:
 
     @staticmethod
     def _encode_project_path(path: str) -> str:
-        """Encode path the same way Claude Code does for project dirs."""
+        """Encode path the same way the CLI does for project dirs."""
         path = path.replace("\\", "/").rstrip("/")
         return path.replace("/", "-").replace(":", "-").replace(".", "-")
 
@@ -1143,7 +1119,7 @@ class ClaudeRunner:
     def _copy_session_from_worktree(self, instance: Instance) -> None:
         """Copy session JSONL back from worktree's project dir to main repo's project dir.
 
-        Also handles the case where Claude created a NEW session (different ID).
+        Also handles the case where the CLI created a NEW session (different ID).
         """
         if not instance.repo_path or not instance.worktree_path:
             return
@@ -1197,7 +1173,7 @@ class ClaudeRunner:
         """Merge worktree branch into master. Returns status message."""
         if not instance.branch or not instance.original_branch:
             if instance.original_branch and not instance.branch:
-                return f"Already merged (claude-bot/{instance.id} → {instance.original_branch})"
+                return f"Already merged ({config.BRANCH_PREFIX}/{instance.id} → {instance.original_branch})"
             return "No branch to merge"
         if not instance.repo_path:
             return "No repo path"
@@ -1578,7 +1554,7 @@ class ClaudeRunner:
         """Delete worktree and branch without merging."""
         if not instance.branch or not instance.original_branch:
             if instance.original_branch and not instance.branch:
-                return f"Already discarded (claude-bot/{instance.id})"
+                return f"Already discarded ({config.BRANCH_PREFIX}/{instance.id})"
             return "No branch to discard"
         if not instance.repo_path:
             return "No repo path"
@@ -1617,7 +1593,7 @@ class ClaudeRunner:
         return f"Discarded branch, back on {instance.original_branch}"
 
     def _cleanup_worktree_session_dir(self, instance: Instance) -> None:
-        """Remove the worktree's Claude project directory (session files already copied back)."""
+        """Remove the worktree's CLI project directory (session files already copied back)."""
         if not instance.worktree_path:
             return
         wt_encoded = self._encode_project_path(instance.worktree_path)
@@ -1629,10 +1605,10 @@ class ClaudeRunner:
 
     @staticmethod
     def scan_orphan_branches(repo_path: str, active_branches: set[str]) -> list[str]:
-        """Find claude-bot/* branches not associated with active instances."""
+        """Find bot-managed branches not associated with active instances."""
         try:
             result = subprocess.run(
-                ["git", "branch", "--list", "claude-bot/*"],
+                ["git", "branch", "--list", f"{config.BRANCH_PREFIX}/*"],
                 cwd=repo_path, capture_output=True, text=True, **_NOWND,
             )
             branches = [b.strip().lstrip("* ") for b in result.stdout.splitlines() if b.strip()]
@@ -1665,7 +1641,7 @@ class ClaudeRunner:
         """
         messages: list[str] = []
 
-        # 1. Fix repos stuck on claude-bot/* branches (under repo lock)
+        # 1. Fix repos stuck on bot-managed branches (under repo lock)
         for name, path in repos.items():
             if not Path(path).is_dir():
                 continue
@@ -1734,13 +1710,13 @@ class ClaudeRunner:
         return messages
 
     def _fix_repo_head(self, repo_path: str) -> str | None:
-        """If repo HEAD is on a claude-bot/* branch, checkout default branch."""
+        """If repo HEAD is on a bot-managed branch, checkout default branch."""
         r = subprocess.run(
             ["git", "symbolic-ref", "--short", "HEAD"],
             cwd=repo_path, capture_output=True, text=True, **_NOWND,
         )
         current = r.stdout.strip() if r.returncode == 0 else ""
-        if not current.startswith("claude-bot/"):
+        if not current.startswith(f"{config.BRANCH_PREFIX}/"):
             return None
         target = self._get_default_branch(repo_path)
         r = subprocess.run(
@@ -1765,7 +1741,7 @@ class ClaudeRunner:
 
         orphan_branches = self.scan_orphan_branches(repo_path, active_branches)
         for branch in orphan_branches:
-            # Infer worktree dir from branch name (claude-bot/t-xxx → .worktrees/t-xxx)
+            # Infer worktree dir from branch name (prefix/t-xxx → .worktrees/t-xxx)
             wt_name = branch.split("/")[-1] if "/" in branch else branch
             wt_dir = Path(repo_path) / ".worktrees" / wt_name
             if wt_dir.exists():

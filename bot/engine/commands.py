@@ -490,7 +490,7 @@ async def on_bg(ctx: RequestContext, text: str) -> None:
     inst.origin = InstanceOrigin.BG
     inst.origin_platform = ctx.platform
     inst.effort = ctx.effective_effort
-    inst.branch = f"claude-bot/{inst.id}"
+    inst.branch = f"{config.BRANCH_PREFIX}/{inst.id}"
     inst.status = InstanceStatus.QUEUED
     ctx.store.update_instance(inst)
 
@@ -811,7 +811,7 @@ async def on_discard(ctx: RequestContext, text: str) -> None:
 # --- /branches ---
 
 async def on_branches(ctx: RequestContext) -> None:
-    """List unmerged claude-bot/* branches across all repos."""
+    """List unmerged bot-managed branches across all repos."""
     repos = ctx.store.list_repos()
     if not repos:
         await ctx.messenger.send_text(ctx.channel_id, "No repos configured.")

@@ -227,7 +227,7 @@ async def spawn_from(
         new_inst.original_branch = source.original_branch
         new_inst.worktree_path = source.worktree_path
     elif cfg.auto_branch:
-        new_inst.branch = f"claude-bot/{new_inst.id}"
+        new_inst.branch = f"{config.BRANCH_PREFIX}/{new_inst.id}"
 
     ctx.store.update_instance(new_inst)
 
