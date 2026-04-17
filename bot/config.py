@@ -317,7 +317,8 @@ WORKING_CONTEXT = """
 --- Working Context ---
 The user manages development from Discord on their phone, running 10+ sessions in parallel across multiple repos.
 
-Standard workflow: Plan → Review Plan (auto-loops) → Build → Review Code → Commit → Done.
+Standard workflow: Plan → Review Plan (auto-loops) → Build → Review Code → Verify → Commit → Done.
+"Verify" starts the app and tests the feature through diagnostic endpoints — not just linting or type checks.
 "Autopilot" automates this full loop. Individual steps are also available as buttons below each response.
 When proposing changes, always design to fit this workflow. All settings are per-thread — never assume single-session.
 
@@ -352,7 +353,9 @@ WORKFLOW_GUIDANCE: dict[str, str] = {
     ),
     "plan": (
         "You're creating an implementation plan. Research thoroughly, do NOT implement. "
-        "The user will review your plan and then click Build."
+        "The user will review your plan and then click Build. "
+        "If the repo has no .claude/test.json or no diagnostic endpoints yet, "
+        "the plan may note that the build step will scaffold them as a prerequisite."
     ),
     "build": (
         "You're implementing a plan that was already reviewed. Follow the plan above — "
@@ -369,6 +372,15 @@ WORKFLOW_GUIDANCE: dict[str, str] = {
     "review_code": (
         "You're reviewing code with fresh eyes. Look for bugs, edge cases, and missed "
         "requirements. If you find issues, fix them directly."
+    ),
+    "verify": (
+        "You're verifying that the code just built actually works. "
+        "Do NOT just read the code, run linters, or check types — that's not verification. "
+        "START the app, PERFORM actions through its endpoints, and CHECK the results. "
+        "You must interact with the running application like a user would.\n\n"
+        "If .claude/test.json has auth config, use it to authenticate your requests. "
+        "If the app lacks diagnostic endpoints, note that as a gap in your report "
+        "but still try to verify by other means (build, start, check logs, curl health)."
     ),
     "commit": (
         "Commit all changes with a clear message. Update CHANGELOG.md under [Unreleased]. "
@@ -540,21 +552,169 @@ CODE_REVIEW_PROMPT = (
 )
 
 VERIFY_PROMPT = (
-    'You just wrote code. Now verify it actually works.\n\n'
-    '1. Check for a .claude/test.json in the repo root. If it exists, '
-    'run each command listed in "commands" and report results.\n'
-    '2. If no test config exists, verify your changes manually:\n'
-    '   - Try to build/compile the project\n'
-    '   - Run the app briefly if possible and check for startup errors\n'
-    '   - Test the specific functionality you changed\n'
-    '3. If tests fail, fix the issues and re-run until they pass.\n\n'
+    'You just wrote code. Now verify it actually works by USING the app.\n\n'
+
+    '## Step 0: Load config and clean up stale processes\n'
+    'Read .claude/test.json in the repo root for all config fields.\n'
+    'Then determine the expected port (from "health" URL or "interact.base_url").\n'
+    'If a port is known, kill any stale process on it BEFORE starting the app:\n'
+    '- Detect the platform first. Use the right tool:\n'
+    '  - Linux/macOS: lsof -t -i:<port> | xargs kill -9\n'
+    '  - Windows (bash/Git Bash): netstat -ano | grep :<port> | '
+    "awk '{print $5}' | xargs -I{} taskkill /PID {} /F\n"
+    '  - Windows (PowerShell): Get-NetTCPConnection -LocalPort <port> '
+    '| Stop-Process -Force\n'
+    '  - Or check for a PID file left by a previous run\n'
+    'This prevents "port in use" failures from previous crashed verify runs.\n\n'
+
+    '## Step 1: Run test commands\n'
+    'If "commands" exist in test.json, run each one. Report pass/fail per command.\n\n'
+
+    '## Step 2: Start the app\n'
+    'If "start" exists, run it in the background.\n'
+    'Poll "health" until ready (timeout 30s). If health never responds, '
+    'check the process output for startup errors — report and fail.\n'
+    'If no "start" exists, try to build and start the app yourself.\n\n'
+
+    '## Step 3: Authenticate\n'
+    'If "interact.auth" exists, use it:\n'
+    '- {"type": "api_key", "header": "X-Dev-Api-Key", "env": "DEV_API_KEY"} '
+    '→ read the key from that env var and send it as a header\n'
+    '- {"type": "basic", "env_user": "...", "env_pass": "..."} '
+    '→ read credentials from env vars\n'
+    '- {"type": "none"} or missing → no auth needed (dev mode)\n\n'
+
+    '## Step 4: Interactive verification (CRITICAL)\n'
+    'This is the most important step. Use the diagnostic endpoints to test '
+    'the feature you just built:\n'
+    '- Call action endpoints to PERFORM the operation (POST/PUT/DELETE)\n'
+    '- Call state endpoints to READ the result and confirm it worked\n'
+    '- Don\'t just check "no error" — verify the actual outcome matches intent\n'
+    '- If "interact.endpoints" lists available routes, use the relevant ones\n'
+    '- If no interact config exists, test manually: curl URLs, check logs, '
+    'run the CLI, inspect output files\n\n'
+    'Example verification flow:\n'
+    '  POST /_dev/actions/create-widget {"name": "test"} → 200\n'
+    '  GET /_dev/state/widgets → should contain "test" widget\n'
+    '  POST /_dev/actions/delete-widget {"id": "..."} → 200\n'
+    '  GET /_dev/state/widgets → should be empty\n\n'
+
+    '## Step 5: Check logs\n'
+    'Tail the app\'s log file (if known) for errors, warnings, or unexpected '
+    'behavior.\n\n'
+
+    '## Step 6: Cleanup (ALWAYS run this — even if earlier steps failed)\n'
+    'This is a finally block — it must execute regardless of pass/fail:\n'
+    '- If "stop" exists in test.json, run it\n'
+    '- Kill any background processes you started (by PID or port)\n'
+    '- Use the same platform-appropriate kill method from Step 0\n'
+    '- Verify the port is free after cleanup\n'
+    'Do NOT skip cleanup on failure — orphan processes break the next '
+    'verify run.\n\n'
+
+    '## Step 7: Report\n'
+    'If anything failed, fix the issues and re-run from Step 1.\n\n'
     'Output a structured block at the end:\n'
     '```verify\n'
     'RESULT: pass | fail\n'
     'TESTS_RUN: <count or "manual">\n'
+    'ACTIONS_TESTED: <what you did — e.g. "created user, verified in state, deleted">\n'
+    'ENDPOINTS_USED: <which diagnostic endpoints you hit>\n'
     'SUMMARY: <one line>\n'
     '```'
 )
+
+DIAGNOSTIC_GUIDANCE = """\
+
+--- Self-Verification Requirement ---
+Before implementing the feature, check: can you verify your own work after building it?
+
+Read .claude/test.json in the repo root. If it has an "interact" section with endpoints, \
+you already have diagnostic access. If not, you MUST add diagnostic infrastructure first, \
+then build the feature.
+
+NOTE: Adding diagnostic infrastructure is a prerequisite, not a deviation from the plan. \
+You may scaffold diagnostic endpoints even if the reviewed plan doesn't mention them. \
+This is the one exception to "follow the plan, don't re-plan" — verification access \
+is always allowed as a first step before implementing the planned changes.
+
+The pattern (based on proven production apps):
+
+1. ADMIN API ROUTES — not just read-only, but full action + inspect:
+
+   Health (no auth):
+   - GET /health — basic liveness ("ok")
+   - GET /api/<module>/health — per-module health with DB/service checks
+
+   State inspection (auth required):
+   - GET /_dev/state — dump relevant app state as JSON
+   - GET /_dev/state/<module> — module-specific state
+   - GET /_dev/logs?limit=50 — recent structured log entries
+
+   Actions (auth required):
+   - POST /_dev/actions/<name> — trigger any app behavior
+   - POST /_dev/actions/reset — reset test state
+   - POST /_dev/actions/seed — create test data
+
+   The endpoints must let you DO things, not just READ things.
+   Example: to verify a "create user" feature, you need:
+   - POST /_dev/actions/create-user {"name": "test"} — do the action
+   - GET /_dev/state/users — verify the user exists
+
+2. PRODUCTION GUARD — these routes must NEVER exist in production:
+   - Do NOT rely on auth alone. The routes must not even register in prod.
+   - Use the framework's environment check to conditionally mount the entire route group:
+     - Node/Express: if (process.env.NODE_ENV !== 'production') app.use('/_dev', devRouter)
+     - ASP.NET: if (app.Environment.IsDevelopment()) app.MapGroup("/_dev")...
+     - Python/Flask: if app.debug: app.register_blueprint(dev_bp)
+     - Python/FastAPI: if settings.DEBUG: app.include_router(dev_router)
+     - Go: if os.Getenv("ENV") != "production" { mux.Handle("/_dev/", devHandler) }
+   - In production, requests to /_dev should return 404 (not found), not 403 (forbidden).
+   - This is non-negotiable. Debug endpoints that leak to prod are a security incident.
+
+3. AUTH — guard admin routes behind a dev-only mechanism:
+   - API key header (X-Dev-Api-Key) or basic auth
+   - Bypass auth entirely when DEBUG/development mode is active
+   - Store the key in .env so .claude/test.json can reference it
+   - Auth is a second layer — the production guard above is the primary defense
+
+4. ADAPT TO THE APP TYPE:
+
+   Web app / API (Express, Flask, ASP.NET, etc.):
+   - Add /_dev route group as described above
+   - Ensure dev server is startable from a single command
+
+   Bot (Discord, Telegram, Slack):
+   - Add admin HTTP server alongside the bot (even a simple one)
+   - Or: add test/debug commands the bot responds to
+   - Expose internal state via the HTTP endpoint
+
+   CLI tool:
+   - Add --json output flag for machine-readable output
+   - Add --self-test subcommand that exercises core paths
+   - Ensure meaningful exit codes
+
+   Static site / frontend-only:
+   - Add a dev server with a /_dev/state endpoint that returns config
+   - Or: use Playwright/browser automation for verification
+
+5. UPDATE .claude/test.json after adding endpoints:
+   - Add start, health, stop, and interact fields
+   - The "stop" command MUST work on the current platform. Detect the OS:
+     - Unix/macOS: kill $(lsof -t -i:<port>)
+     - Windows: for /f "tokens=5" %a in ('netstat -ano | findstr :<port>') do taskkill /PID %a /F
+     - Or use a cross-platform approach: write the PID to a file on start, read and kill on stop
+   - Include auth config so the verify step can authenticate
+   - List example interactions so verify knows what's available
+
+6. STRUCTURED LOGGING:
+   - Use structured logs (JSON or key=value), not bare print()
+   - Log to a file at a known path, not just stdout
+   - Include request/response details for diagnostic endpoints
+
+These endpoints are for YOU — the AI — to verify your own work in the next step. \
+If the app already has admin endpoints, use those instead of adding new ones.
+"""
 
 COMMIT_PROMPT = (
     'Review all uncommitted changes on this branch. '

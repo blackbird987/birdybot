@@ -607,6 +607,20 @@ class ClaudeRunner:
                     pass
             return None
 
+    @staticmethod
+    def _diagnostics_enabled(instance: Instance) -> bool:
+        """Check if diagnostic scaffolding is enabled for this repo."""
+        if not instance.repo_path:
+            return True  # default on
+        test_json = Path(instance.repo_path) / ".claude" / "test.json"
+        if not test_json.exists():
+            return True  # no config = default on
+        try:
+            cfg = _json_mod.loads(test_json.read_text(encoding="utf-8"))
+            return cfg.get("diagnostics", True)
+        except Exception:
+            return True
+
     def _build_system_prompt(
         self, instance: Instance,
         context: str | None = None,
@@ -654,6 +668,10 @@ class ClaudeRunner:
         guidance = config.WORKFLOW_GUIDANCE.get(origin_key)
         if guidance:
             parts.append(f"\n\n--- Your Role in This Step ---\n{guidance}")
+
+        # Inject diagnostic scaffolding guidance for build steps
+        if origin_key == "build" and self._diagnostics_enabled(instance):
+            parts.append(config.DIAGNOSTIC_GUIDANCE)
 
         # Plan mode: instruct Claude not to modify files, output a plan instead
         if instance.mode == "plan":

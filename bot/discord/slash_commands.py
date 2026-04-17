@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json as _json
 import logging
 import time as _time
+from pathlib import Path as _Path
 from typing import TYPE_CHECKING
 
 import discord
@@ -941,3 +943,79 @@ def setup(bot: ClaudeBot) -> None:
         )
 
     bot.tree.add_command(access_group)
+
+    # --- Diagnostics toggle ---
+    @bot.tree.command(
+        name="diagnostics",
+        description="Toggle diagnostic scaffolding for this repo",
+        guild=guild_obj,
+    )
+    @app_commands.describe(toggle="on, off, or status")
+    @app_commands.choices(toggle=[
+        app_commands.Choice(name="on", value="on"),
+        app_commands.Choice(name="off", value="off"),
+        app_commands.Choice(name="status", value="status"),
+    ])
+    async def cmd_diagnostics(interaction: discord.Interaction, toggle: str = "status"):
+        if not bot._is_owner(interaction.user.id) and not bot._check_access(
+            interaction.user.id, channel_id=str(interaction.channel_id)
+        ).allowed:
+            await interaction.response.send_message("Unauthorized", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+
+        # Resolve repo from current thread/forum
+        repo_name: str | None = None
+        channel_id = str(interaction.channel_id)
+        lookup = bot._forums.thread_to_project(channel_id)
+        if lookup:
+            repo_name = lookup[0].repo_name
+        elif isinstance(interaction.channel, discord.Thread):
+            parent = interaction.channel.parent
+            if parent and isinstance(parent, discord.ForumChannel):
+                proj = bot._forums.forum_by_channel_id(str(parent.id))
+                if proj:
+                    repo_name = proj.repo_name
+
+        if not repo_name:
+            await interaction.followup.send("No repo linked to this channel.", ephemeral=True)
+            return
+
+        repo_path = bot._store.list_repos().get(repo_name, "")
+        if not repo_path:
+            await interaction.followup.send(f"Repo **{repo_name}** not found.", ephemeral=True)
+            return
+
+        test_json = _Path(repo_path) / ".claude" / "test.json"
+
+        # Load existing config
+        cfg: dict = {}
+        if test_json.exists():
+            try:
+                raw = _json.loads(test_json.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    cfg = raw
+            except Exception:
+                pass
+
+        if toggle == "status":
+            enabled = cfg.get("diagnostics", True)
+            status = "**on**" if enabled else "**off**"
+            await interaction.followup.send(
+                f"Diagnostics: {status} for **{repo_name}**", ephemeral=True,
+            )
+            return
+
+        # Update
+        cfg["diagnostics"] = (toggle == "on")
+        test_json.parent.mkdir(parents=True, exist_ok=True)
+        test_json.write_text(_json.dumps(cfg, indent=2), encoding="utf-8")
+
+        msg = (
+            "build steps will scaffold diagnostic endpoints"
+            if toggle == "on"
+            else "build steps skip endpoint scaffolding"
+        )
+        await interaction.followup.send(
+            f"Diagnostics **{toggle}** for **{repo_name}** — {msg}", ephemeral=True,
+        )
