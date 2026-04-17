@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Skip cooldown retries when session already has completed work (prevents zombie retries reviving finished threads after account switch)
+
 ## v0.70.0 — Autonomous Self-Verification (2026-04-17)
 
 ### Autonomous Self-Verification

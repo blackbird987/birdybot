@@ -622,7 +622,8 @@ async def run() -> None:
             await asyncio.sleep(60)
             try:
                 now = dt.now(tz_mod.utc)
-                for inst in store.list_instances(all_=True):
+                all_instances = store.list_instances(all_=True)
+                for inst in all_instances:
                     if not inst.cooldown_retry_at or not inst.cooldown_channel_id:
                         continue
                     if inst.id in _cooldown_retrying:
@@ -632,6 +633,21 @@ async def run() -> None:
                     except (ValueError, TypeError):
                         continue
                     if now >= retry_at:
+                        # Skip if session already has completed work after this instance
+                        # (e.g. user switched accounts and finished the task manually)
+                        if inst.session_id and any(
+                            s.session_id == inst.session_id
+                            and s.status == InstanceStatus.COMPLETED
+                            and s.created_at > inst.created_at
+                            for s in all_instances
+                        ):
+                            log.info("Skipping stale cooldown retry for %s — session %s already completed",
+                                     inst.id, inst.session_id)
+                            inst.cooldown_retry_at = None
+                            inst.cooldown_channel_id = None
+                            store.update_instance(inst)
+                            continue
+
                         _cooldown_retrying.add(inst.id)
                         asyncio.create_task(
                             _do_cooldown_retry(store, runner, inst, discord_bot, _cooldown_retrying)
