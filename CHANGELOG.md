@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## v0.70.0 — Autonomous Self-Verification (2026-04-17)
+
+### Autonomous Self-Verification
+- Replace basic `VERIFY_PROMPT` with interactive 8-step verification flow: cleanup stale processes, start app, authenticate, perform actions through endpoints, check results, cleanup
+- Add `DIAGNOSTIC_GUIDANCE` constant — injected into build steps, teaches Claude to scaffold `/_dev` action+inspect endpoints with production guards and platform-aware stop commands
+- Add `WORKFLOW_GUIDANCE["verify"]` entry so verify instances get role-specific guidance
+- Update `WORKFLOW_GUIDANCE["plan"]` with diagnostics awareness so plans can account for endpoint scaffolding
+- Add `WORKING_CONTEXT` reference to the Verify step in the standard workflow
+- Add `_diagnostics_enabled()` helper in `runner.py` — reads `.claude/test.json` `diagnostics` field, defaults to `true`
+- Conditionally inject `DIAGNOSTIC_GUIDANCE` into build system prompts (only when `diagnostics` is enabled for the repo)
+- Add `ACTIONS_TESTED` and `ENDPOINTS_USED` parsing to `_verify_passed()` with structured logging
+- Add `/diagnostics on|off|status` slash command to toggle diagnostic scaffolding per repo
+
 ## v0.69.0 — Auto-Resume After Reboot (2026-04-16)
 
 ### Auto-Resume After Reboot

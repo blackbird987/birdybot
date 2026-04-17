@@ -372,6 +372,8 @@ async def on_review_code(ctx: RequestContext, source_id: str, source_msg_id: str
 # --- Verify ---
 
 _VERIFY_RESULT_RE = re.compile(r'```verify\s*\nRESULT:\s*(pass|fail)', re.IGNORECASE)
+_VERIFY_ACTIONS_RE = re.compile(r'ACTIONS_TESTED:\s*(.+)', re.IGNORECASE)
+_VERIFY_ENDPOINTS_RE = re.compile(r'ENDPOINTS_USED:\s*(.+)', re.IGNORECASE)
 
 
 def _verify_passed(inst: Instance) -> bool:
@@ -385,6 +387,13 @@ def _verify_passed(inst: Instance) -> bool:
     m = _VERIFY_RESULT_RE.search(text)
     if not m:
         return False
+    # Log what was actually tested for observability
+    actions = _VERIFY_ACTIONS_RE.search(text)
+    endpoints = _VERIFY_ENDPOINTS_RE.search(text)
+    if actions:
+        log.info("Verify actions: %s", actions.group(1).strip())
+    if endpoints:
+        log.info("Verify endpoints: %s", endpoints.group(1).strip())
     return m.group(1).lower() == "pass"
 
 
