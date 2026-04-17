@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.70.0 — Autonomous Self-Verification (2026-04-17)
+
 ### Autonomous Self-Verification
 - Replace basic `VERIFY_PROMPT` with interactive 8-step verification flow: cleanup stale processes, start app, authenticate, perform actions through endpoints, check results, cleanup
 - Add `DIAGNOSTIC_GUIDANCE` constant — injected into build steps, teaches Claude to scaffold `/_dev` action+inspect endpoints with production guards and platform-aware stop commands
