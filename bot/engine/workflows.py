@@ -654,6 +654,9 @@ def _find_mergeable_instance(store, session_id: str | None) -> Instance | None:
 def clear_stale_branches(store, branch_name: str) -> int:
     """Clear branch/worktree_path on ALL instances sharing a branch name.
 
+    Also nulls the branch field in history.jsonl so resumed sessions don't
+    see stale branch refs in their system prompt.
+
     Returns the number of instances updated.
     """
     count = 0
@@ -663,6 +666,11 @@ def clear_stale_branches(store, branch_name: str) -> int:
             inst.worktree_path = None
             store.update_instance(inst)
             count += 1
+    try:
+        from bot.store import history as history_mod
+        history_mod.clear_branch(branch_name)
+    except Exception:
+        pass
     return count
 
 

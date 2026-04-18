@@ -1835,7 +1835,11 @@ class ClaudeRunner:
 
     @staticmethod
     def _clear_stale_branches_static(store, branch_name: str) -> int:
-        """Clear branch/worktree_path on ALL instances sharing a branch name."""
+        """Clear branch/worktree_path on ALL instances sharing a branch name.
+
+        Also nulls the branch field in history.jsonl so resumed sessions don't
+        see stale branch refs in their system prompt.
+        """
         count = 0
         for inst in store.list_instances(all_=True):
             if inst.branch == branch_name:
@@ -1843,4 +1847,9 @@ class ClaudeRunner:
                 inst.worktree_path = None
                 store.update_instance(inst)
                 count += 1
+        try:
+            from bot.store import history as history_mod
+            history_mod.clear_branch(branch_name)
+        except Exception:
+            pass
         return count

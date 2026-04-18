@@ -27,6 +27,74 @@ def append_entry(entry: dict) -> None:
         log.warning("Failed to write history entry", exc_info=True)
 
 
+def clear_branch(branch_name: str) -> int:
+    """Null the `branch` field on all history entries matching branch_name.
+
+    Called after a branch is merged or discarded so stale refs don't leak
+    into future sessions' system prompts. Best-effort — never raises.
+    Returns the number of entries updated.
+    """
+    if not branch_name or not HISTORY_FILE.exists():
+        return 0
+    try:
+        lines = HISTORY_FILE.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        log.warning("Failed to read history for clear_branch", exc_info=True)
+        return 0
+
+    updated: list[str] = []
+    count = 0
+    for line in lines:
+        if not line.strip():
+            updated.append(line)
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            updated.append(line)
+            continue
+        if entry.get("branch") == branch_name:
+            entry["branch"] = None
+            count += 1
+            updated.append(json.dumps(entry, ensure_ascii=False, default=str))
+        else:
+            updated.append(line)
+
+    if count == 0:
+        return 0
+    try:
+        HISTORY_FILE.write_text("\n".join(updated) + "\n", encoding="utf-8")
+    except Exception:
+        log.warning("Failed to write history for clear_branch", exc_info=True)
+        return 0
+    return count
+
+
+def get_branch_for_instance(instance_id: str) -> str | None:
+    """Return the recorded branch for a history entry by instance id, or None.
+
+    Used in "already resolved" early-return paths where the live instance has
+    `branch = None` but the history file may still record the original branch
+    name. Scans newest-first and returns the first match.
+    """
+    if not instance_id or not HISTORY_FILE.exists():
+        return None
+    try:
+        lines = HISTORY_FILE.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return None
+    for line in reversed(lines):
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if entry.get("id") == instance_id:
+            return entry.get("branch")
+    return None
+
+
 def load_recent(
     repo: str | None = None,
     limit: int = 50,

@@ -53,3 +53,8 @@
 - [ ] [DRY/Cleanup] Setup steps should be a one-shot script (Low)
 - [ ] [Bug Risk] send_text fallback for chain exits also looks empty (Medium)
 - [ ] [Integration] Verification plan assumes Cursor CLI is free to test (Low)
+- [ ] [Reliability] ci_watch_state wired up or removed (Medium)
+- [ ] [UX/UI] Failed CI should tag thread for visibility (Medium)
+- [ ] [DRY/Cleanup] Deferred "break after merge" item resolved by this plan (Low)
+- [ ] [Performance] Sequential chain processing blocks independent threads unnecessarily (Medium)
+- [ ] [Reliability] Archived thread guard for chain resume (Medium)

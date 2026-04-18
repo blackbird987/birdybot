@@ -780,9 +780,16 @@ async def on_merge(ctx: RequestContext, text: str) -> None:
         await ctx.messenger.send_text(ctx.channel_id, f"Instance '{text}' not found.")
         return
 
+    branch_name = inst.branch  # Save before merge clears it
     msg = await ctx.runner.merge_branch(inst)
     ctx.store.update_instance(inst)
     if "failed" not in msg.lower():
+        # Resolve branch name for history cleanup (None when "already merged")
+        if not branch_name:
+            from bot.store import history as history_mod
+            branch_name = history_mod.get_branch_for_instance(inst.id)
+        if branch_name:
+            workflows.clear_stale_branches(ctx.store, branch_name)
         from bot.engine.deploy import update_after_merge, rescan_deploy_config_after_merge
         update_after_merge(ctx.store, inst)
         rescan_deploy_config_after_merge(ctx.store, inst.repo_name, inst.repo_path)
@@ -803,8 +810,15 @@ async def on_discard(ctx: RequestContext, text: str) -> None:
         await ctx.messenger.send_text(ctx.channel_id, f"Instance '{text}' not found.")
         return
 
+    branch_name = inst.branch  # Save before discard clears it
     msg = await ctx.runner.discard_branch(inst)
     ctx.store.update_instance(inst)
+    if "failed" not in msg.lower():
+        if not branch_name:
+            from bot.store import history as history_mod
+            branch_name = history_mod.get_branch_for_instance(inst.id)
+        if branch_name:
+            workflows.clear_stale_branches(ctx.store, branch_name)
     await ctx.messenger.send_text(ctx.channel_id, msg)
 
 
@@ -1793,6 +1807,15 @@ async def handle_callback(
         # Early guard: branch already cleared by a prior merge/discard
         if not inst.branch:
             msg = await ctx.runner.merge_branch(inst)  # returns "Already merged (...)"
+            # History may still record the original branch — clean it up so
+            # future sessions don't see a stale "(branch: X)" line.
+            try:
+                from bot.store import history as history_mod
+                stale = history_mod.get_branch_for_instance(inst.id)
+                if stale:
+                    history_mod.clear_branch(stale)
+            except Exception:
+                pass
             escaped = ctx.messenger.escape(msg)
             if source_msg_id:
                 await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, escaped)
@@ -1837,6 +1860,13 @@ async def handle_callback(
         # Early guard: branch already cleared by a prior merge/discard
         if not inst.branch:
             msg = await ctx.runner.discard_branch(inst)  # returns "Already discarded (...)"
+            try:
+                from bot.store import history as history_mod
+                stale = history_mod.get_branch_for_instance(inst.id)
+                if stale:
+                    history_mod.clear_branch(stale)
+            except Exception:
+                pass
             escaped = ctx.messenger.escape(msg)
             if source_msg_id:
                 await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, escaped)
