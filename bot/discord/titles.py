@@ -40,6 +40,7 @@ async def generate_title_text(prompt: str, summary: str = "") -> str | None:
     cmd = [
         config.CLAUDE_BINARY, "-p", title_prompt,
         "--output-format", "stream-json",
+        "--verbose",
         "--permission-mode", "plan",
         "--max-turns", "1",
     ]

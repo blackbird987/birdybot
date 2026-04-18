@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Fix thread title generation — restore `--verbose` flag on title subprocess so stream-json emits assistant events (regression from `bbdf144`); new threads were stuck as "new session"
+
 ## v0.70.1 — Fix Zombie Cooldown Retries (2026-04-17)
 
 - Skip cooldown retries when session already has completed work (prevents zombie retries reviving finished threads after account switch)
