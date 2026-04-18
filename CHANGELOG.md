@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.70.2 — Fix Stale Branch Refs in History (2026-04-18)
+
 - Clear `branch` field in `history.jsonl` after merge/discard so resumed sessions don't see stale branch refs in their system prompt (fixes bot incorrectly claiming work is "on branch X" when the branch was already merged days ago)
 - Add `history.clear_branch()` and `history.get_branch_for_instance()` helpers; wire into both `clear_stale_branches` functions (workflows + runner startup) and all merge/discard call sites including slash commands and early-return "already merged/discarded" paths
 
