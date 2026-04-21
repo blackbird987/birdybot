@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.71.0 — Log Triage Service (2026-04-21)
+
 - Add opt-in log triage service (`LOG_TRIAGE_ENABLED`). Periodically pipes new bot.log content to `claude -p` on Haiku; anomalies post to a dedicated "🔍 Triage" thread inside The Ark, with rate-limited @mention on high-severity findings. Uses stdin piping (Windows arg-length safe), `--permission-mode plan`, per-platform-state offset tracking with rotation detection, and `redact_secrets` + env-value stripping before sending logs out.
 
 ## v0.70.2 — Fix Stale Branch Refs in History (2026-04-18)
