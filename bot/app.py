@@ -664,6 +664,11 @@ async def run() -> None:
         _bg_tasks.append(asyncio.create_task(
             auto_update_loop(stop_event, runner, notifier),
         ))
+    if config.LOG_TRIAGE_ENABLED and discord_bot:
+        from bot.discord.log_triage import run_triage_service
+        _bg_tasks.append(asyncio.create_task(
+            run_triage_service(discord_bot, stop_event),
+        ))
     scheduler.start()
 
     # Scan for orphaned branches and worktrees across all repos
