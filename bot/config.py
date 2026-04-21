@@ -125,6 +125,13 @@ AUTO_UPDATE: bool = os.getenv("AUTO_UPDATE", "").lower() in ("1", "true", "yes")
 AUTO_UPDATE_INTERVAL_SECS: int = int(os.getenv("AUTO_UPDATE_INTERVAL_SECS", "300"))
 AUTO_UPDATE_BRANCH: str | None = os.getenv("AUTO_UPDATE_BRANCH")
 
+# Log triage: periodic `claude -p` scan of bot.log, posts anomalies to The Ark.
+LOG_TRIAGE_ENABLED: bool = os.getenv("LOG_TRIAGE_ENABLED", "").lower() in ("1", "true", "yes")
+LOG_TRIAGE_INTERVAL_SECS: int = int(os.getenv("LOG_TRIAGE_INTERVAL_SECS", "21600"))  # 6h
+LOG_TRIAGE_MAX_LINES: int = int(os.getenv("LOG_TRIAGE_MAX_LINES", "500"))
+LOG_TRIAGE_TIMEOUT_SECS: int = int(os.getenv("LOG_TRIAGE_TIMEOUT_SECS", "60"))
+LOG_TRIAGE_MODEL: str = os.getenv("LOG_TRIAGE_MODEL", "claude-haiku-4-5-20251001")
+
 # Data directory
 DATA_DIR: Path = Path(os.getenv("DATA_DIR", str(_PROJECT_ROOT / "data")))
 RESULTS_DIR: Path = DATA_DIR / "results"

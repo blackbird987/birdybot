@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Add opt-in log triage service (`LOG_TRIAGE_ENABLED`). Periodically pipes new bot.log content to `claude -p` on Haiku; anomalies post to a dedicated "🔍 Triage" thread inside The Ark, with rate-limited @mention on high-severity findings. Uses stdin piping (Windows arg-length safe), `--permission-mode plan`, per-platform-state offset tracking with rotation detection, and `redact_secrets` + env-value stripping before sending logs out.
+
 ## v0.70.2 — Fix Stale Branch Refs in History (2026-04-18)
 
 - Clear `branch` field in `history.jsonl` after merge/discard so resumed sessions don't see stale branch refs in their system prompt (fixes bot incorrectly claiming work is "on branch X" when the branch was already merged days ago)
