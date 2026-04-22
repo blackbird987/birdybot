@@ -2,7 +2,10 @@
 
 ## [Unreleased]
 
+## v0.73.1 — Parked Alias Substitution Design (2026-04-22)
+
 - Document deferred `/alias` positional-arg substitution design (`$1 $2 $N`, `$$` escape, missing-arg error, extra-arg append) in `TODO.md → Features` and as inline `# TODO` notes at the two expansion sites in `bot/engine/commands.py` (`on_unknown_command`, `on_bg`). Not implemented — user doesn't currently use `/alias`.
+- Resync `pyproject.toml` version to match tag (was reverted to `0.72.0` by a concurrent merge).
 
 ## v0.72.0 — Branch From Here (2026-04-22)
 
