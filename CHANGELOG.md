@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.72.0 — Branch From Here (2026-04-22)
+
 - Add "🌿 Branch from here" button on completed result messages. Forks the session JSONL truncated through the chosen assistant message (snapshot-copied to dodge active-write races, walks the `parentUuid` chain backward, rewrites `sessionId`), drops the fork into the main repo's project dir under a fresh session id, opens a new forum thread, and replays recent context via `on_sess_resume`. Stores the Discord-msg-id → JSONL-uuid mapping on each instance so the button knows where to fork.
 
 ## v0.71.0 — Log Triage Service (2026-04-21)
