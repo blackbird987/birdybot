@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.76.0 — Live Context + Spend Footer (2026-04-22)
+
 ### Live context + spend footer
 - Surface per-session context usage on working/result embeds: `"72k / 200k · 36%"` in the embed footer, auto-refreshed every progress tick without flicker between the 5s throttle and 10s heartbeat (usage cached at closure scope, both paths render from the same slot)
 - Cost stays on the result embed only — live cost estimates would drift
