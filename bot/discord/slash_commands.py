@@ -137,6 +137,14 @@ def setup(bot: ClaudeBot) -> None:
             return
         await bot._run_slash(interaction, lambda ctx: commands.on_log(ctx, target))
 
+    @bot.tree.command(name="export", description="Export session as HTML transcript", guild=guild_obj)
+    @app_commands.describe(target="Instance ID or name")
+    async def cmd_export(interaction: discord.Interaction, target: str):
+        if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
+            await interaction.response.send_message("Unauthorized", ephemeral=True)
+            return
+        await bot._run_slash(interaction, lambda ctx: commands.on_share(ctx, target))
+
     @bot.tree.command(name="diff", description="Git diff", guild=guild_obj)
     @app_commands.describe(target="Instance ID or name")
     async def cmd_diff(interaction: discord.Interaction, target: str):

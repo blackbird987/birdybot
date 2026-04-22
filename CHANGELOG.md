@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Add `📎 Share` button and `/export` slash command that render the current session's JSONL as a self-contained styled HTML transcript and post it as a Discord file attachment. Pure renderer in `bot/engine/transcript.py` walks the full content arrays (text, thinking, tool_use, tool_result pairing) and runs every text block through `redact_secrets` before emission — known token shapes (`sk-ant-*`, JWTs, bearer tokens, connection strings, mnemonics) are scrubbed; shell/env-var content is best-effort and called out in the in-document redaction notice plus amber accent on Bash tool blocks. Share button co-locates on the Branch row (no new rows added) and on the Expand/Collapse rows; slash command available at `/export <id|name>`. Size handling: ≤9 MB silent, 9-25 MB warn caption ("may fail on unboosted servers"), >25 MB refuse with size report (truncation/gzip fallback deferred).
+
 ## v0.73.1 — Parked Alias Substitution Design (2026-04-22)
 
 - Document deferred `/alias` positional-arg substitution design (`$1 $2 $N`, `$$` escape, missing-arg error, extra-arg append) in `TODO.md → Features` and as inline `# TODO` notes at the two expansion sites in `bot/engine/commands.py` (`on_unknown_command`, `on_bg`). Not implemented — user doesn't currently use `/alias`.

@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import secrets
 import subprocess
+import tempfile
 import time as _time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -835,6 +837,104 @@ async def on_diff(ctx: RequestContext, text: str) -> None:
         )
     else:
         await ctx.messenger.send_text(ctx.channel_id, "No diff available for this instance.")
+
+
+# --- /export (Share HTML transcript) ---
+
+# Discord non-Nitro upload ceiling. Most guilds are actually 10 MB unless
+# boost tier 2+, but we size against the hard ceiling and let Discord reject
+# with a cleanly-caught error if a specific server is stricter.
+_DISCORD_UPLOAD_MAX = 25 * 1024 * 1024
+_SAFE_UPLOAD = 9 * 1024 * 1024
+
+
+async def on_share(ctx: RequestContext, text: str) -> None:
+    """Render the instance's session JSONL as a self-contained HTML transcript
+    and post it as a Discord file attachment.
+    """
+    from bot.engine import transcript as transcript_mod
+
+    text = (text or "").strip()
+    if not text:
+        await ctx.messenger.send_text(ctx.channel_id, "Usage: /export <id|name>")
+        return
+
+    inst = ctx.store.get_instance(text)
+    if not inst:
+        await ctx.messenger.send_text(ctx.channel_id, f"Instance '{text}' not found.")
+        return
+
+    if not inst.session_id:
+        await ctx.messenger.send_text(
+            ctx.channel_id,
+            f"No session to share for {inst.display_id()} — instance has no session id yet.",
+        )
+        return
+
+    session_file = sessions_mod.find_session_file(inst.session_id)
+    if not session_file:
+        await ctx.messenger.send_text(
+            ctx.channel_id,
+            f"Session file missing for {inst.display_id()} ({inst.session_id}).",
+        )
+        return
+
+    try:
+        html_doc = transcript_mod.render_transcript_html(
+            session_file,
+            title=inst.display_id(),
+            instance_summary={
+                "session_id": inst.session_id,
+                "prompt": inst.prompt,
+                "repo": inst.repo_name or inst.repo_path,
+                "mode": inst.mode,
+                "effort": inst.effort,
+                "cost_usd": inst.cost_usd,
+                "duration_ms": inst.duration_ms,
+                "num_turns": inst.num_turns,
+            },
+        )
+    except Exception as e:
+        log.exception("Transcript render failed for %s", inst.id)
+        await ctx.messenger.send_text(
+            ctx.channel_id, f"Failed to render transcript: {e}",
+        )
+        return
+
+    tmp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            suffix=".html", delete=False, mode="w", encoding="utf-8",
+        ) as f:
+            f.write(html_doc)
+            tmp_path = f.name
+
+        size = os.path.getsize(tmp_path)
+        size_mb = size // (1024 * 1024)
+        filename = f"transcript-{inst.id}.html"
+
+        if size > _DISCORD_UPLOAD_MAX:
+            # Too big to upload. TODO: gzip/truncation fallback.
+            await ctx.messenger.send_text(
+                ctx.channel_id,
+                f"Transcript too large ({size_mb} MB) — "
+                f"exceeds Discord's {_DISCORD_UPLOAD_MAX // (1024 * 1024)} MB limit.",
+            )
+            return
+
+        caption = f"Transcript for {inst.display_id()}"
+        if size > _SAFE_UPLOAD:
+            caption += f" ({size_mb} MB — may fail on unboosted servers)"
+
+        await ctx.messenger.send_file(
+            ctx.channel_id, tmp_path, filename, caption=caption,
+        )
+    finally:
+        if tmp_path:
+            try:
+                Path(tmp_path).unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 # --- /merge ---
@@ -1874,6 +1974,9 @@ async def handle_callback(
             )
         else:
             await ctx.messenger.send_text(ctx.channel_id, "No diff available.")
+
+    elif action == "share":
+        await on_share(ctx, instance_id)
 
     elif action == "merge":
         inst = ctx.store.get_instance(instance_id)

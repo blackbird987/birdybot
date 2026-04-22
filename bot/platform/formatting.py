@@ -406,17 +406,27 @@ def action_button_specs(
     # (e.g. the first render, before send_result stamps message ids).
     # Reserve a row for Expand when show_expand=True so long-result messages
     # keep their Expand button even with a crowded set of action buttons.
+    # Branch+Share row takes priority; when it fires, omit Share from the
+    # Expand row below to avoid showing two Share buttons on the same message.
     branch_cap = 4 if show_expand else 5
+    share_added = False
     if (instance.status == InstanceStatus.COMPLETED
             and instance.session_id
             and len(rows) < branch_cap):
-        rows.append([ButtonSpec("\U0001f33f Branch", f"branch:{iid}")])
+        rows.append([
+            ButtonSpec("\U0001f33f Branch", f"branch:{iid}"),
+            ButtonSpec("\U0001f4ce Share", f"share:{iid}"),
+        ])
+        share_added = True
 
     if show_expand:
-        rows.append([
+        expand_row = [
             ButtonSpec("Expand \u25bc", f"expand:{iid}"),
             ButtonSpec("Full Log", f"log:{iid}"),
-        ])
+        ]
+        if instance.session_id and not share_added:
+            expand_row.append(ButtonSpec("\U0001f4ce Share", f"share:{iid}"))
+        rows.append(expand_row)
 
     return rows
 
@@ -424,10 +434,17 @@ def action_button_specs(
 def expanded_button_specs(instance: Instance) -> list[list[ButtonSpec]]:
     """Action buttons + Collapse for expanded view."""
     rows = action_button_specs(instance)
-    rows.append([
+    collapse_row = [
         ButtonSpec("Collapse \u25b2", f"collapse:{instance.id}"),
         ButtonSpec("Full Log", f"log:{instance.id}"),
-    ])
+    ]
+    # Share fallback: skip if action_button_specs already placed it (Branch row)
+    already_has_share = any(
+        b.callback_data.startswith("share:") for row in rows for b in row
+    )
+    if instance.session_id and not already_has_share:
+        collapse_row.append(ButtonSpec("\U0001f4ce Share", f"share:{instance.id}"))
+    rows.append(collapse_row)
     return rows
 
 
