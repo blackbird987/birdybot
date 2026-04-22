@@ -182,6 +182,13 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
 
     await interaction.response.defer()
 
+    # --- Pending-prompt interactions (Steer / Cancel on Queued embed) ---
+    # Here the trailing portion of the custom_id is a pending_id, not an
+    # instance_id, but we reuse the same ``parts`` split for consistency.
+    if action in ("steer", "cancel_pending"):
+        await _handle_pending_action(bot, interaction, action, instance_id, btn_access)
+        return
+
     # --- Load CLI history into thread ---
     if action == "load_history":
         await _handle_load_history(bot, interaction, instance_id)
@@ -310,23 +317,27 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
         bot._forums.attach_session_callbacks(ctx, t_info, channel_id)
 
     # Acquire channel lock for query actions to prevent concurrent spawns
-    # (matches the serialization in _run_query for text messages)
+    # (matches the serialization in _run_query for text messages).
+    # Mid-run button taps register an interactive Queued entry with Steer/Cancel.
     if is_query:
-        from bot.engine.commands import _get_channel_lock
+        from bot.engine.commands import (
+            _finish_pending_on_acquire, _get_channel_lock,
+            _enqueue_with_pending_ui,
+        )
         lock = _get_channel_lock(channel_id)
-        queued_msg_id = None
-        if lock.locked():
-            queued_msg_id = await ctx.messenger.send_text(
-                ctx.channel_id,
-                "📋 Queued — waiting for current query to finish.",
-                silent=True,
-            )
+        # Buttons trigger callbacks rather than raw prompts — capture the
+        # callback args in structured fields so Steer can re-dispatch without
+        # string encoding.  ``_enqueue_with_pending_ui`` no-ops when the lock
+        # is free.
+        pending = await _enqueue_with_pending_ui(
+            ctx, "",
+            callback_action=action,
+            callback_instance_id=instance_id,
+            callback_source_msg_id=source_msg_id,
+        )
         async with lock:
-            if queued_msg_id:
-                try:
-                    await ctx.messenger.delete_message(ctx.channel_id, queued_msg_id)
-                except Exception:
-                    pass
+            if await _finish_pending_on_acquire(ctx, pending):
+                return
             try:
                 await commands.handle_callback(ctx, action, instance_id, source_msg_id)
             finally:
@@ -345,6 +356,148 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
 
 
 # --- Individual handlers ---
+
+
+async def _handle_pending_action(
+    bot: ClaudeBot,
+    interaction: discord.Interaction,
+    action: str,
+    pending_id: str,
+    btn_access: AccessResult,
+) -> None:
+    """Dispatch Steer / Cancel taps on a Queued embed.
+
+    Steer: kill the currently-running instance, wait for finalize, then
+    re-spawn the pending prompt (or re-invoke the pending callback) with
+    a steering header prepended so Claude knows the prior turn was
+    interrupted.  Idempotent: second taps no-op via handled_by_steer.
+
+    Cancel: mark as cancelled and delete the embed.  The lock-holder's
+    post-lock path sees ``cancelled`` and skips execution.
+    """
+    from bot.engine import commands as commands_mod
+    from bot.engine import pending as pending_mod
+    from bot.engine.commands import _get_channel_lock, _execute_query
+
+    pending = pending_mod.get(pending_id)
+    if not pending:
+        # Already processed (e.g., prior run finished and lock-holder dequeued
+        # it before the tap arrived). Best-effort clean-up of the embed.
+        try:
+            msg = interaction.message
+            if msg:
+                await msg.delete()
+        except Exception:
+            pass
+        await interaction.followup.send(
+            "This pending prompt is no longer active.", ephemeral=True,
+        )
+        return
+
+    if action == "cancel_pending":
+        pending.cancelled = True
+        try:
+            if pending.message_id:
+                await bot.messenger.delete_message(
+                    pending.channel_id, pending.message_id,
+                )
+        except Exception:
+            pass
+        pending_mod.clear(pending_id)
+        return
+
+    # --- Steer ---
+    if pending.handled_by_steer:
+        return  # second tap
+    if not bot._runner.provider.supports_steer:
+        await interaction.followup.send(
+            "Steer isn't supported by the current provider.", ephemeral=True,
+        )
+        return
+
+    pending.handled_by_steer = True
+    # Update the embed to show progress
+    try:
+        if pending.message_id:
+            await bot.messenger.edit_text(
+                pending.channel_id, pending.message_id,
+                "⚡ Steering current run...", None,
+            )
+    except Exception:
+        pass
+
+    # Resolve the live active instance at tap-time rather than trusting the
+    # snapshot taken when pending was enqueued.  With queue depth > 1, the
+    # original lock-holder may have already finished and a newer run (from an
+    # earlier-queued pending) could be holding the lock now — we want to kill
+    # whoever is running right now, not the stale reference.
+    live_active = (
+        bot._runner.active_instance_for_session(pending.session_id)
+        or pending.active_instance_id
+    )
+    if live_active:
+        try:
+            await bot._runner.kill_and_wait(live_active)
+        except Exception:
+            log.exception("kill_and_wait failed during Steer")
+
+    # Delete the "Steering..." message so the real run can render clean progress
+    try:
+        if pending.message_id:
+            await bot.messenger.delete_message(
+                pending.channel_id, pending.message_id,
+            )
+    except Exception:
+        pass
+
+    channel_id = pending.channel_id
+    lookup = bot._forums.thread_to_project(channel_id)
+    t_info = lookup[1] if lookup else None
+    ctx = bot._ctx(channel_id,
+                   session_id=t_info.session_id if t_info else pending.session_id,
+                   thread_info=t_info, access_result=btn_access)
+    ctx.user_id = pending.user_id or str(interaction.user.id)
+    ctx.user_name = pending.user_name or interaction.user.display_name
+    if t_info:
+        bot._forums.attach_session_callbacks(ctx, t_info, channel_id)
+
+    # Dispatch: re-run the pending payload. Two flavors:
+    #   1. Raw user prompt → prepend STEER_HEADER and run as a query
+    #   2. Structured callback → re-invoke the original button handler
+    #      (can't easily steer a callback — just rerun it)
+    lock = _get_channel_lock(channel_id)
+    async with lock:
+        try:
+            pending_mod.clear(pending_id)
+            # Last-chance cancel check: user may have tapped Cancel during
+            # kill_and_wait.  Once Steer fires we've already killed the prior
+            # run, but we can still honor the cancel by not dispatching.
+            if pending.cancelled:
+                return
+            if pending.callback_action and pending.callback_instance_id:
+                await commands_mod.handle_callback(
+                    ctx,
+                    pending.callback_action,
+                    pending.callback_instance_id,
+                    pending.callback_source_msg_id,
+                )
+            else:
+                steered = f"{pending_mod.STEER_HEADER}\n\n{pending.prompt_text}"
+                # Double-checked locking mirror from commands._run_query
+                if not ctx.session_id and ctx.resolve_session_id is not None:
+                    fresh = ctx.resolve_session_id()
+                    if fresh:
+                        ctx.session_id = fresh
+                await _execute_query(ctx, steered)
+        finally:
+            # Always run cleanup, including after cancel-early-return: the
+            # prior task was killed so the thread is idle and needs its sleep
+            # timer (re)scheduled and tags refreshed.
+            bot._forums.persist_ctx_settings(ctx)
+            await bot._forums.update_pending_thread(channel_id)
+            asyncio.create_task(bot._try_apply_tags_after_run(channel_id))
+            bot._schedule_sleep(channel_id)
+            asyncio.create_task(bot._refresh_dashboard())
 
 
 async def _handle_repo_switch(

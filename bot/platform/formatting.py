@@ -443,6 +443,20 @@ def stall_button_specs(instance_id: str) -> list[list[ButtonSpec]]:
     ]]
 
 
+def queued_button_specs(
+    pending_id: str, supports_steer: bool,
+) -> list[list[ButtonSpec]]:
+    """Buttons on a 'Queued' message while a run holds the channel lock.
+
+    Steer button is omitted when the provider can't resume a killed session.
+    """
+    row: list[ButtonSpec] = []
+    if supports_steer:
+        row.append(ButtonSpec("⚡ Steer now", f"steer:{pending_id}"))
+    row.append(ButtonSpec("✖ Cancel", f"cancel_pending:{pending_id}"))
+    return [row]
+
+
 # --- Formatting Functions (markdown — platform adapters convert as needed) ---
 
 def format_result_md(instance: Instance) -> str:

@@ -868,12 +868,22 @@ class ClaudeRunner:
             return False
         return session_id in self._active_sessions
 
+    def active_instance_for_session(self, session_id: str | None) -> str | None:
+        """Return instance_id of the currently-running task for a session, or None."""
+        if not session_id:
+            return None
+        return self._active_sessions.get(session_id)
+
     def check_spawn_allowed(self, session_id: str | None = None) -> str | None:
-        """Return an error message if spawning is blocked, or None if OK."""
+        """Return an error message if spawning is blocked, or None if OK.
+
+        Active-session case is no longer rejected here — the per-channel lock
+        in ``bot.engine.commands._get_channel_lock`` serializes same-channel
+        spawns cleanly and the Queued-embed UX handles it visibly.  We only
+        reject during reboot drain.
+        """
         if self._draining:
             return "Reboot in progress — try again shortly."
-        if session_id and self.is_session_active(session_id):
-            return "Session is busy — please wait for the current task to finish."
         return None
 
     async def wait_until_idle(self, timeout: float = 300) -> bool:
@@ -1041,6 +1051,47 @@ class ClaudeRunner:
             self._processes.pop(instance_id, None)
             if not self._active_tasks and not self._processes:
                 self._idle_event.set()
+
+    async def kill_and_wait(
+        self, instance_id: str, timeout: float = 10.0,
+    ) -> bool:
+        """Kill an instance and wait for its lifecycle task to fully finish.
+
+        Used by Steer: the caller needs the channel lock released (finalize
+        done, session file copied back, progress edit applied) before spawning
+        a replacement run.  ``kill()`` alone only handles the subprocess —
+        it doesn't wait for the surrounding ``run_instance`` coroutine.
+
+        Escalation path: after the inner ``kill()`` returns (which already
+        does terminate → 5s wait → SIGKILL), poll for ``_active_tasks`` to
+        drop the instance_id for up to *timeout* seconds.  On timeout,
+        force-clear the task so the channel lock never stays wedged.
+        """
+        if instance_id not in self._active_tasks and instance_id not in self._processes:
+            return False
+        await self.kill(instance_id)
+        # Wait for the lifecycle coroutine to finish its finally block
+        # (end_task fires there and removes the instance from _active_tasks).
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while instance_id in self._active_tasks:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                log.warning(
+                    "kill_and_wait timed out after %.1fs for %s — force-clearing",
+                    timeout, instance_id,
+                )
+                self._active_tasks.discard(instance_id)
+                stale = [
+                    s for s, t in self._active_sessions.items() if t == instance_id
+                ]
+                for s in stale:
+                    del self._active_sessions[s]
+                if not self._active_tasks and not self._processes:
+                    self._idle_event.set()
+                return True
+            await asyncio.sleep(min(0.1, remaining))
+        return True
 
     async def kill_all(self) -> int:
         """Terminate all running processes. Returns count killed."""

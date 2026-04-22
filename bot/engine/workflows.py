@@ -164,7 +164,8 @@ async def spawn_from(
         await ctx.messenger.send_text(ctx.channel_id, "Instance not found.")
         return None
 
-    # Block spawns during reboot drain or if session already has a running task
+    # Block spawns during reboot drain. Same-session overlap is allowed —
+    # the channel lock + Queued embed serialize it visibly.
     check_session = source.session_id if cfg.resume_session else None
     spawn_err = ctx.runner.check_spawn_allowed(check_session)
     if spawn_err:

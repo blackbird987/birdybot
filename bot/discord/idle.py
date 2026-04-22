@@ -32,6 +32,18 @@ def _channel_has_running_task(bot: ClaudeBot, channel_id: str) -> bool:
     return False
 
 
+def _channel_has_pending_prompt(channel_id: str) -> bool:
+    """True if an interactive Queued embed with live buttons exists.
+
+    Archiving the thread would break those buttons — idle sleep must wait.
+    """
+    try:
+        from bot.engine import pending as pending_mod
+        return pending_mod.channel_has_pending(channel_id)
+    except Exception:
+        return False
+
+
 def schedule_sleep(bot: ClaudeBot, channel_id: str) -> None:
     """Schedule 💤 after 5 min idle. Cancel any existing timer first.
 
@@ -65,8 +77,12 @@ async def _apply_sleep(bot: ClaudeBot, channel_id: str, gen: int) -> None:
     """Called by timer — set the thread to sleeping."""
     if bot._sleep_gen.get(channel_id) != gen:
         return  # Stale: timer was cancelled or rescheduled
-    # Double-check: don't sleep if a task is running on this channel
+    # Don't sleep if a task is running, OR a pending-prompt embed has live
+    # buttons the user might tap (archived threads reject interactions).
     if _channel_has_running_task(bot, channel_id):
+        bot._idle_timers.pop(channel_id, None)
+        return
+    if _channel_has_pending_prompt(channel_id):
         bot._idle_timers.pop(channel_id, None)
         return
     bot._idle_timers.pop(channel_id, None)
