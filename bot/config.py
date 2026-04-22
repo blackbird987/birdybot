@@ -562,6 +562,33 @@ CODE_REVIEW_PROMPT = (
 VERIFY_PROMPT = (
     'You just wrote code. Now verify it actually works by USING the app.\n\n'
 
+    '## Pre-check: Skip verification if it is not needed\n'
+    'Before Step 0, check whether verification applies:\n'
+    '- If the change does not affect runtime behavior (docs, comments, '
+    'formatting, renames, dead code removal, type hints, config-only edits) '
+    '— skip.\n'
+    '- If the previous build step stated it skipped diagnostic scaffolding '
+    'for one of these reasons — honor that and skip verification too: '
+    '"library/notebook covered by existing tests" or "no runtime change". '
+    'If build skipped because "existing diagnostic surface" was already '
+    'present, do NOT skip verify — proceed to Step 0 and USE that surface.\n'
+    '- If the project has no diagnostic surface AND no .claude/test.json '
+    '"start" or "interact" config — report the gap briefly and skip. '
+    'Do NOT fabricate a setup from scratch just to satisfy verification.\n\n'
+    'When skipping, state the reason at the top of your response, then emit '
+    'the structured block below so downstream consumers (autopilot, parsers) '
+    'still have something to read. Do NOT run any of the steps below.\n'
+    '```verify\n'
+    'RESULT: skip\n'
+    'TESTS_RUN: 0\n'
+    'ACTIONS_TESTED: none\n'
+    'ENDPOINTS_USED: none\n'
+    'SUMMARY: <one-line reason — e.g. "docs-only change", '
+    '"build skipped scaffolding (tests cover)", '
+    '"no diagnostic surface available">\n'
+    '```\n'
+    'Otherwise continue to Step 0.\n\n'
+
     '## Step 0: Load config and clean up stale processes\n'
     'Read .claude/test.json in the repo root for all config fields.\n'
     'Then determine the expected port (from "health" URL or "interact.base_url").\n'
@@ -635,93 +662,101 @@ VERIFY_PROMPT = (
 DIAGNOSTIC_GUIDANCE = """\
 
 --- Self-Verification Requirement ---
-Before implementing the feature, check: can you verify your own work after building it?
+Before implementing the feature, check: can you verify your own work afterward?
 
-Read .claude/test.json in the repo root. If it has an "interact" section with endpoints, \
-you already have diagnostic access. If not, you MUST add diagnostic infrastructure first, \
-then build the feature.
+FIRST — skip this whole section if any of these apply:
+- The change doesn't affect runtime behavior (docs, comments, formatting, \
+renames, dead code removal, type hints, config-only edits)
+- The project type is library or research/notebook AND an existing test suite, \
+runnable demo, or re-run workflow already covers the changed behavior
+- The app already has usable RUNTIME diagnostic surface — admin routes, debug \
+commands, --self-test or dev-inspection flags, runnable demos. A unit test \
+suite alone does NOT qualify.
 
-NOTE: Adding diagnostic infrastructure is a prerequisite, not a deviation from the plan. \
-You may scaffold diagnostic endpoints even if the reviewed plan doesn't mention them. \
-This is the one exception to "follow the plan, don't re-plan" — verification access \
-is always allowed as a first step before implementing the planned changes.
+If skipping, state which reason applies before building. Otherwise continue.
 
-The pattern (based on proven production apps):
+Read .claude/test.json. If it has an "interact" section, you have diagnostic \
+access — proceed to implementation. If not, scaffold diagnostic infrastructure \
+FIRST, then build the feature.
 
-1. ADMIN API ROUTES — not just read-only, but full action + inspect:
+NOTE: Adding diagnostics is a prerequisite, not scope creep. You may scaffold \
+even if the reviewed plan doesn't mention it — this is the one exception to \
+"follow the plan, don't re-plan." Don't extend beyond what's needed to verify \
+the planned feature.
 
-   Health (no auth):
-   - GET /health — basic liveness ("ok")
-   - GET /api/<module>/health — per-module health with DB/service checks
+## Step 1: Classify the project
 
-   State inspection (auth required):
-   - GET /_dev/state — dump relevant app state as JSON
-   - GET /_dev/state/<module> — module-specific state
-   - GET /_dev/logs?limit=50 — recent structured log entries
+Look at entry points, dependencies, and structure. Hints:
+- `fastapi`, `flask`, `express`, `asp.net`, `gin` → Web API / HTTP service
+- `discord.py`, `telegram`, `slack-bolt`, long-running `asyncio.run()` → Bot / worker
+- `[project.scripts]`, `bin/`, single-command entry, no server → CLI tool
+- `electron`, `tauri`, `tkinter`, desktop framework → Local app
+- `.ipynb`, `jupyter`, script-heavy + data files → Research / notebook
+- `pytest` + no entry point, package-only `setup.py` → Library
+- `next`, `vite`, `webpack`, `index.html`, no backend → Static site / frontend
 
-   Actions (auth required):
-   - POST /_dev/actions/<name> — trigger any app behavior
-   - POST /_dev/actions/reset — reset test state
-   - POST /_dev/actions/seed — create test data
+## Step 2: Scaffold the pattern for that type
 
-   The endpoints must let you DO things, not just READ things.
-   Example: to verify a "create user" feature, you need:
-   - POST /_dev/actions/create-user {"name": "test"} — do the action
-   - GET /_dev/state/users — verify the user exists
+Web API / HTTP service:
+- Admin route group at /_dev with action POST + state GET endpoints
+- Must let you DO things, not just READ (e.g. POST /_dev/actions/create-user, \
+  then GET /_dev/state/users to verify)
+- Auth: API key header (X-Dev-Api-Key) from .env, or bypass in DEBUG mode
 
-2. PRODUCTION GUARD — these routes must NEVER exist in production:
-   - Do NOT rely on auth alone. The routes must not even register in prod.
-   - Use the framework's environment check to conditionally mount the entire route group:
-     - Node/Express: if (process.env.NODE_ENV !== 'production') app.use('/_dev', devRouter)
-     - ASP.NET: if (app.Environment.IsDevelopment()) app.MapGroup("/_dev")...
-     - Python/Flask: if app.debug: app.register_blueprint(dev_bp)
-     - Python/FastAPI: if settings.DEBUG: app.include_router(dev_router)
-     - Go: if os.Getenv("ENV") != "production" { mux.Handle("/_dev/", devHandler) }
-   - In production, requests to /_dev should return 404 (not found), not 403 (forbidden).
-   - This is non-negotiable. Debug endpoints that leak to prod are a security incident.
+Bot / worker:
+- Admin HTTP sidecar (even trivial) exposing state + action triggers
+- OR internal debug commands the bot responds to
+- Structured state snapshots writable to a known file on demand
 
-3. AUTH — guard admin routes behind a dev-only mechanism:
-   - API key header (X-Dev-Api-Key) or basic auth
-   - Bypass auth entirely when DEBUG/development mode is active
-   - Store the key in .env so .claude/test.json can reference it
-   - Auth is a second layer — the production guard above is the primary defense
+CLI tool:
+- `--json` flag for machine-readable output
+- `--self-test` subcommand exercising core paths
+- Meaningful exit codes (0 ok, non-zero per failure type)
 
-4. ADAPT TO THE APP TYPE:
+Local / desktop app:
+- Action scripts driving the app (subprocess, IPC, or framework API)
+- State-dump command writing current state to a known file
+- Structured log file you can tail
 
-   Web app / API (Express, Flask, ASP.NET, etc.):
-   - Add /_dev route group as described above
-   - Ensure dev server is startable from a single command
+Research / notebook:
+- Export key state/results to a known file path after each run
+- Structured checkpoint prints at each major step (not bare print)
+- Runnable .py equivalent if the notebook is the source of truth
 
-   Bot (Discord, Telegram, Slack):
-   - Add admin HTTP server alongside the bot (even a simple one)
-   - Or: add test/debug commands the bot responds to
-   - Expose internal state via the HTTP endpoint
+Library / module:
+- Dedicated harness script (scripts/verify.py) that imports the library, \
+  runs representative scenarios, prints pass/fail
+- Not the test suite — a lightweight runner for diagnostic inspection
 
-   CLI tool:
-   - Add --json output flag for machine-readable output
-   - Add --self-test subcommand that exercises core paths
-   - Ensure meaningful exit codes
+Static site / frontend:
+- Dev server with /_dev/state endpoint returning config + app state
+- OR Playwright automation script driving the UI and asserting outcomes
 
-   Static site / frontend-only:
-   - Add a dev server with a /_dev/state endpoint that returns config
-   - Or: use Playwright/browser automation for verification
+## Step 3: Universal contract (every type)
 
-5. UPDATE .claude/test.json after adding endpoints:
-   - Add start, health, stop, and interact fields
-   - The "stop" command MUST work on the current platform. Detect the OS:
-     - Unix/macOS: kill $(lsof -t -i:<port>)
-     - Windows: for /f "tokens=5" %a in ('netstat -ano | findstr :<port>') do taskkill /PID %a /F
-     - Or use a cross-platform approach: write the PID to a file on start, read and kill on stop
-   - Include auth config so the verify step can authenticate
-   - List example interactions so verify knows what's available
+- Write .claude/test.json with the fields that apply to this project type:
+  - `start`: command to launch the app (skip for libraries, notebooks that auto-run)
+  - `health`: liveness check (servers only — skip for CLI/library/notebook)
+  - `stop`: shutdown command — see stop-command guidance below
+  - `interact`: endpoints/commands/flags the verify step can invoke
+- Production guard where applicable: debug surface must not REGISTER in prod \
+  (conditional mount based on env var), not just rely on auth. Leaking debug \
+  endpoints to prod is a security incident.
+- Structured logs to a known file path (JSON or key=value), not bare print
+- Include auth config in .claude/test.json if servers with admin auth apply
 
-6. STRUCTURED LOGGING:
-   - Use structured logs (JSON or key=value), not bare print()
-   - Log to a file at a known path, not just stdout
-   - Include request/response details for diagnostic endpoints
+Stop-command guidance (pick by project type):
+- Port-based (web API, bot with HTTP sidecar, static dev server):
+  - Unix/macOS: kill $(lsof -t -i:<port>)
+  - Windows: netstat -ano | findstr :<port> → taskkill /PID <pid> /F
+  - Or: write PID to file on start, read/kill on stop (cross-platform)
+- Process-based (bot without HTTP, desktop app, long-running CLI):
+  - Write PID to a known file on start; stop reads and kills it
+  - Or: pkill/taskkill matching the process name, if unique
+- No-op (CLI tool, library, notebook that exits on its own):
+  - Omit `stop` entirely, or set it to `true` (no action needed)
 
-These endpoints are for YOU — the AI — to verify your own work in the next step. \
-If the app already has admin endpoints, use those instead of adding new ones.
+This diagnostic surface is for YOU — the AI — to verify your own work next step.
 """
 
 COMMIT_PROMPT = (
