@@ -100,6 +100,7 @@ class Instance:
     code_active: bool = False  # Session has uncommitted code changes (for button context)
     needs_input: bool = False  # AskUserQuestion detected — waiting for user reply
     deferred_revisions: list[str] = field(default_factory=list)  # Medium/Low revisions from plan review
+    jsonl_uuid_by_msg_id: dict[str, str] = field(default_factory=dict)  # Discord msg_id -> JSONL assistant uuid (for "Branch from here")
     # Access control fields (non-owner sessions)
     is_owner_session: bool = True     # False for granted user sessions
     bash_policy: str = "full"         # "full", "allowlist", "none" — for non-owner explore mode
@@ -156,6 +157,7 @@ class Instance:
             "code_active": self.code_active,
             "needs_input": self.needs_input,
             "deferred_revisions": self.deferred_revisions,
+            "jsonl_uuid_by_msg_id": self.jsonl_uuid_by_msg_id,
             "is_owner_session": self.is_owner_session,
             "bash_policy": self.bash_policy,
             "effort": self.effort,
@@ -207,6 +209,7 @@ class Instance:
             code_active=d.get("code_active", False),
             needs_input=d.get("needs_input", False),
             deferred_revisions=d.get("deferred_revisions", []),
+            jsonl_uuid_by_msg_id=d.get("jsonl_uuid_by_msg_id", {}),
             is_owner_session=d.get("is_owner_session", True),
             bash_policy=d.get("bash_policy", "full"),
             effort=d.get("effort", "high"),
@@ -235,6 +238,7 @@ class RunResult:
     needs_input: bool = False  # AskUserQuestion detected — waiting for user reply
     usage_limit_reset: object = None  # datetime | None — when usage limit resets (set by parser)
     api_fallback_used: bool = False   # True if result came from API billing fallback
+    last_assistant_uuid: str | None = None  # JSONL uuid of final assistant message (for "Branch from here")
 
 
 @dataclass

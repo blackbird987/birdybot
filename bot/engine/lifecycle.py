@@ -221,7 +221,7 @@ async def run_instance(
         if await schedule_cooldown_retry(ctx, inst, result, silent=silent):
             return  # Timer loop in app.py picks this up
 
-        await send_result(ctx, inst, _with_fallback_footer(result.result_text, result), silent=silent)
+        await send_result(ctx, inst, _with_fallback_footer(result.result_text, result), silent=silent, result=result)
 
         # Track API fallback spending for daily budget cap
         if result.api_fallback_used and result.cost_usd:
@@ -243,7 +243,7 @@ async def run_instance(
             try:
                 if not finalized:
                     finalize_run(ctx, inst, result)
-                await send_result(ctx, inst, _with_fallback_footer(result.result_text, result), silent=silent)
+                await send_result(ctx, inst, _with_fallback_footer(result.result_text, result), silent=silent, result=result)
                 delivered = True
             except (asyncio.CancelledError, Exception):
                 pass
@@ -478,9 +478,20 @@ async def send_result(
     inst: Instance,
     result_text: str,
     silent: bool = False,
+    result: RunResult | None = None,
 ) -> None:
     """Send result to channel — short inline, long as summary + file."""
     has_chain = bool(ctx.store.get_autopilot_chain(inst.session_id))
+    # Stamp the JSONL uuid on every chunk we send so the Branch button can
+    # locate the fork point.  Only the last chunk renders the button (buttons
+    # are gated to is_last below), but stamping all chunks is harmless.
+    last_uuid = result.last_assistant_uuid if result else None
+
+    def _record_msg(msg_id: str) -> None:
+        inst.message_ids.setdefault(ctx.platform, []).append(msg_id)
+        if last_uuid and msg_id:
+            inst.jsonl_uuid_by_msg_id[str(msg_id)] = last_uuid
+
     buttons = action_button_specs(inst, has_autopilot_chain=has_chain)
 
     # Mention user on final result embed (no pending chain steps).
@@ -529,7 +540,7 @@ async def send_result(
                 buttons=buttons, silent=silent,
                 mention_user_id=mention_uid,
             )
-            inst.message_ids.setdefault(ctx.platform, []).append(msg_id)
+            _record_msg(msg_id)
 
         elif len(result_text) < 2000:
             markup = ctx.messenger.markdown_to_markup(result_text)
@@ -551,7 +562,7 @@ async def send_result(
                     ctx.channel_id, text,
                     buttons if is_last else None, chunk_silent,
                 )
-                inst.message_ids.setdefault(ctx.platform, []).append(msg_id)
+                _record_msg(msg_id)
             # Mention didn't fit in chunk — send separately
             if mention:
                 await ctx.messenger.send_text(
@@ -567,7 +578,7 @@ async def send_result(
                 buttons=expand_buttons, silent=silent,
                 mention_user_id=mention_uid,
             )
-            inst.message_ids.setdefault(ctx.platform, []).append(msg_id)
+            _record_msg(msg_id)
 
     except Exception:
         log.exception("Failed to send result for %s", inst.id)
@@ -578,7 +589,7 @@ async def send_result(
                 f"{inst.display_id()}: {error_text[:500]}",
                 silent=silent,
             )
-            inst.message_ids.setdefault(ctx.platform, []).append(msg_id)
+            _record_msg(msg_id)
         except Exception:
             log.exception("Last-resort notification also failed for %s", inst.id)
 

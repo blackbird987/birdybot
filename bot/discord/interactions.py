@@ -284,6 +284,11 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
         await _handle_new_session(bot, interaction, btn_access)
         return
 
+    # --- Branch from here: fork the JSONL at this message and open new thread ---
+    if action == "branch":
+        await _handle_branch(bot, interaction, instance_id, btn_access)
+        return
+
     # --- Generic query button dispatch (plan, build, review, etc.) ---
     channel_id = str(interaction.channel_id)
     source_msg_id = str(interaction.message.id) if interaction.message else None
@@ -591,6 +596,116 @@ async def _handle_sess_resume(
         ctx.user_name = interaction.user.display_name
         source_msg_id = str(interaction.message.id) if interaction.message else None
         await workflows.on_sess_resume(ctx, session_id, source_msg_id)
+
+
+async def _handle_branch(
+    bot: ClaudeBot, interaction: discord.Interaction,
+    instance_id: str, btn_access: AccessResult,
+) -> None:
+    """Fork the session JSONL at this message and open a new thread there.
+
+    The fork lives in the destination project dir keyed by the repo's CURRENT
+    path (looked up via ``store.list_repos()``), so ``--resume`` works even if
+    the instance's frozen ``repo_path`` has since been moved or renamed.
+    """
+    from bot import config
+    from bot.engine import workflows
+    from bot.engine.session_fork import (
+        encode_project_path, fork_session, get_last_assistant_uuid,
+    )
+
+    inst = bot._store.get_instance(instance_id)
+    if not inst:
+        await interaction.followup.send("Instance not found.", ephemeral=True)
+        return
+    if not inst.session_id:
+        await interaction.followup.send(
+            "Can't branch — this instance has no session.", ephemeral=True,
+        )
+        return
+
+    # Resolve the CURRENT repo path (instance.repo_path is frozen at creation
+    # and may be stale if the user moved/re-registered the repo).
+    repo_name = inst.repo_name or ""
+    current_repo_path = bot._store.list_repos().get(repo_name) if repo_name else None
+    repo_path = current_repo_path or inst.repo_path
+    if not repo_path:
+        await interaction.followup.send(
+            "Can't branch — no repo path for this session.", ephemeral=True,
+        )
+        return
+
+    dest_dir = config.CLAUDE_PROJECTS_DIR / encode_project_path(repo_path)
+    src_path = dest_dir / f"{inst.session_id}.jsonl"
+    if not src_path.exists():
+        # Fall back to a global search (handles encoding mismatches).
+        found = await asyncio.to_thread(sessions_mod.find_session_file, inst.session_id)
+        if not found:
+            await interaction.followup.send(
+                "Can't branch — source session file not found.", ephemeral=True,
+            )
+            return
+        src_path = found
+
+    source_msg_id = str(interaction.message.id) if interaction.message else None
+    target_uuid = inst.jsonl_uuid_by_msg_id.get(source_msg_id) if source_msg_id else None
+    if not target_uuid:
+        # Fallback: anchor at the most recent assistant uuid in the source.
+        target_uuid = await asyncio.to_thread(get_last_assistant_uuid, src_path)
+        if not target_uuid:
+            await interaction.followup.send(
+                "Can't branch — no fork point recorded.", ephemeral=True,
+            )
+            return
+
+    fork_result = await asyncio.to_thread(fork_session, src_path, target_uuid, dest_dir)
+    if not fork_result:
+        await interaction.followup.send(
+            "Branch failed — see bot logs for details.", ephemeral=True,
+        )
+        return
+    new_session_id, _new_path = fork_result
+    log.info(
+        "Branched session %s -> %s at uuid %s",
+        inst.session_id[:8], new_session_id[:8], target_uuid[:8],
+    )
+
+    # Build a topic for the new thread (60-char cap; emoji prefix stays well
+    # under Discord's 100-char channel-name limit).
+    base = (inst.summary or inst.prompt or "branched session").strip()
+    first_line = base.splitlines()[0] if base else "branched"
+    topic = f"\U0001f33f {first_line[:60]}"
+
+    forum_repo_name = repo_name or "_default"
+    thread = await bot._forums.get_or_create_session_thread(
+        forum_repo_name, new_session_id, topic, origin="branch",
+    )
+    if not thread:
+        await interaction.followup.send(
+            "Branch failed — couldn't create thread.", ephemeral=True,
+        )
+        return
+
+    asyncio.create_task(bot._send_redirect(thread))
+    lookup_info = bot._forums.thread_to_project(str(thread.id))
+    ti = lookup_info[1] if lookup_info else None
+    ctx = bot._ctx(
+        str(thread.id), session_id=new_session_id,
+        repo_name=repo_name if repo_name else None,
+        thread_info=ti,
+        access_result=btn_access,
+    )
+    ctx.user_id = str(interaction.user.id)
+    ctx.user_name = interaction.user.display_name
+
+    try:
+        await interaction.followup.send(
+            f"\U0001f33f Branched into <#{thread.id}>.", ephemeral=True,
+        )
+    except Exception:
+        pass
+
+    await workflows.on_sess_resume(ctx, new_session_id, source_msg_id=None)
 
 
 async def _handle_new_session(

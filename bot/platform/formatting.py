@@ -400,6 +400,18 @@ def action_button_specs(
         label = mode_name(target)
         rows.append([ButtonSpec(f"Mode: {label}", f"mode_{target}:{iid}")])
 
+    # Branch from here — fork the session at the message this button is on.
+    # Gated on session_id only; the click handler falls back to the last
+    # assistant uuid in the JSONL when the per-message map has no entry
+    # (e.g. the first render, before send_result stamps message ids).
+    # Reserve a row for Expand when show_expand=True so long-result messages
+    # keep their Expand button even with a crowded set of action buttons.
+    branch_cap = 4 if show_expand else 5
+    if (instance.status == InstanceStatus.COMPLETED
+            and instance.session_id
+            and len(rows) < branch_cap):
+        rows.append([ButtonSpec("\U0001f33f Branch", f"branch:{iid}")])
+
     if show_expand:
         rows.append([
             ButtonSpec("Expand \u25bc", f"expand:{iid}"),

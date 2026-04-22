@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## v0.72.0 — Branch From Here (2026-04-22)
+
+- Add "🌿 Branch from here" button on completed result messages. Forks the session JSONL truncated through the chosen assistant message (snapshot-copied to dodge active-write races, walks the `parentUuid` chain backward, rewrites `sessionId`), drops the fork into the main repo's project dir under a fresh session id, opens a new forum thread, and replays recent context via `on_sess_resume`. Stores the Discord-msg-id → JSONL-uuid mapping on each instance so the button knows where to fork.
+
 ## v0.71.0 — Log Triage Service (2026-04-21)
 
 - Add opt-in log triage service (`LOG_TRIAGE_ENABLED`). Periodically pipes new bot.log content to `claude -p` on Haiku; anomalies post to a dedicated "🔍 Triage" thread inside The Ark, with rate-limited @mention on high-severity findings. Uses stdin piping (Windows arg-length safe), `--permission-mode plan`, per-platform-state offset tracking with rotation detection, and `redact_secrets` + env-value stripping before sending logs out.
