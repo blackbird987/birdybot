@@ -8,6 +8,12 @@
 - Add `## Pre-check` section to `VERIFY_PROMPT` with 3 skip conditions (docs-only, library/notebook covered by tests, no diagnostic surface) and a structured `RESULT: skip` block so downstream parsers still get a readable report when verification legitimately has nothing to exercise
 - Extend verify-output parser in `bot/engine/workflows.py` to recognize `RESULT: skip` (treated like pass for chain advancement) and log the skip reason via a new `_VERIFY_SUMMARY_RE`
 - Harden `_verify_passed` parser: extract the ```verify fenced block first then parse fields inside it (prevents prose like "Summary: I fixed the bug" from contaminating logged fields), use `findall[-1]` to take the final block (prevents a pre-announced placeholder block from being picked over the real verdict when the model narrates before emitting), anchor field regexes with `^\s*…$` + `MULTILINE` for strict line matching
+## v0.75.0 — Share HTML Transcripts (2026-04-22)
+
+- Bump to v0.75.0 (v0.74.0 tag taken by concurrent branch).
+
+
+- Add `📎 Share` button and `/export` slash command that render the current session's JSONL as a self-contained styled HTML transcript and post it as a Discord file attachment. Pure renderer in `bot/engine/transcript.py` walks the full content arrays (text, thinking, tool_use, tool_result pairing) and runs every text block through `redact_secrets` before emission — known token shapes (`sk-ant-*`, JWTs, bearer tokens, connection strings, mnemonics) are scrubbed; shell/env-var content is best-effort and called out in the in-document redaction notice plus amber accent on Bash tool blocks. Share button co-locates on the Branch row (no new rows added) and on the Expand/Collapse rows; slash command available at `/export <id|name>`. Size handling: ≤9 MB silent, 9-25 MB warn caption ("may fail on unboosted servers"), >25 MB refuse with size report (truncation/gzip fallback deferred).
 
 ## v0.73.1 — Parked Alias Substitution Design (2026-04-22)
 
