@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## v0.72.0 — Steer vs Queue (2026-04-22)
+## v0.73.0 — Steer vs Queue (2026-04-22)
 
 ### Steer vs Queue (mid-run messages)
 - Replace silent auto-queue with an interactive "Queued" message carrying `⚡ Steer now` and `✖ Cancel` buttons whenever a new prompt arrives while another run holds the channel lock
