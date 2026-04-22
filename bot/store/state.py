@@ -627,11 +627,28 @@ class StateStore:
         status_set = set(statuses)
         return [i for i in self.list_instances() if i.status in status_set]
 
-    def needs_attention(self) -> list[Instance]:
-        """Return instances that need user attention (failed + needs_input)."""
+    def needs_attention(self, recent_fail_minutes: int = 30) -> list[Instance]:
+        """Return instances actively waiting on the user, newest first.
+
+        Includes any ``needs_input`` instance (Claude is paused on a question)
+        and FAILED instances whose ``finished_at`` falls within the last
+        ``recent_fail_minutes``. Stale failures fall through to
+        :meth:`recent_failures` so the dashboard doesn't accumulate them.
+
+        Inherits the 24h window from :meth:`list_instances`: a session the
+        user hasn't touched in over a day is treated as abandoned and will
+        not reappear here even if it was paused on a question.
+        """
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(minutes=recent_fail_minutes)
+        ).isoformat()
         return [
             i for i in self.list_instances()
-            if i.status == InstanceStatus.FAILED or i.needs_input
+            if i.needs_input
+            or (
+                i.status == InstanceStatus.FAILED
+                and i.finished_at and i.finished_at >= cutoff
+            )
         ]
 
     def idle_sessions(self, max_age_hours: int = 2) -> list[Instance]:
