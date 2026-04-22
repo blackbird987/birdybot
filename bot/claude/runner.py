@@ -486,6 +486,22 @@ class ClaudeRunner:
         # Extract summary
         instance.summary = extract_summary(result.result_text)
 
+        # Capture the JSONL uuid of the final assistant message so the
+        # "Branch from here" button can fork the session at this point.
+        session_id = result.session_id or captured_session_id
+        if session_id and instance.repo_path:
+            try:
+                from bot.engine.session_fork import (
+                    encode_project_path, get_last_assistant_uuid,
+                )
+                proj = config.CLAUDE_PROJECTS_DIR / encode_project_path(instance.repo_path)
+                jsonl = proj / f"{session_id}.jsonl"
+                last_uuid = await asyncio.to_thread(get_last_assistant_uuid, jsonl)
+                if last_uuid:
+                    result.last_assistant_uuid = last_uuid
+            except Exception:
+                log.exception("last_assistant_uuid capture failed for %s", instance.id)
+
         return result
 
     def _build_command(
@@ -1158,9 +1174,13 @@ class ClaudeRunner:
 
     @staticmethod
     def _encode_project_path(path: str) -> str:
-        """Encode path the same way the CLI does for project dirs."""
-        path = path.replace("\\", "/").rstrip("/")
-        return path.replace("/", "-").replace(":", "-").replace(".", "-")
+        """Encode path the same way the CLI does for project dirs.
+
+        Delegates to the shared implementation in ``bot.engine.session_fork``
+        so both the runner and the JSONL forker agree on project-dir names.
+        """
+        from bot.engine.session_fork import encode_project_path
+        return encode_project_path(path)
 
     def _copy_session_to_worktree(self, instance: Instance) -> None:
         """Copy session JSONL from main repo's project dir to worktree's project dir."""

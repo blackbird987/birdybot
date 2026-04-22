@@ -420,7 +420,7 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
             if ctx.on_session_resolved:
                 ctx.on_session_resolved(result.session_id)
 
-        await lifecycle.send_result(ctx, inst, result.result_text)
+        await lifecycle.send_result(ctx, inst, result.result_text, result=result)
 
         # Tier 2: scan Claude's response for [BOT_CMD: /repo ...] directives
         if result.result_text and not result.is_error:
