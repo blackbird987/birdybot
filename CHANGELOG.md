@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.77.0 — Autopilot (Hold) (2026-04-22)
+
 ### Added
 - `Autopilot (Hold)` — second autopilot button that runs the full chain (Plan → Review → Build → Review → Verify → Done) but stops before merge, so you can `cd` into the worktree and test the branch before manually clicking Merge or Discard. Rendered next to `Autopilot` in the plan/revision button rows; blue to distinguish from the green auto-merge variant. Manual Merge preserves the thread (does not archive) so you can keep testing notes in the same conversation.
 
