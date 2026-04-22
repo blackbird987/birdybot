@@ -346,9 +346,15 @@ def action_button_specs(
                     ButtonSpec("Done", f"done:{iid}"),
                 ])
             else:
-                # Plan created or revisions applied
+                # Plan created or revisions applied. Hide Autopilot starters
+                # when a chain is already paused — Continue Autopilot below
+                # is the correct resumption path.
+                if not has_autopilot_chain:
+                    rows.append([
+                        ButtonSpec("Autopilot", f"autopilot:{iid}"),
+                        ButtonSpec("Autopilot (Hold)", f"autopilot_hold:{iid}"),
+                    ])
                 rows.append([
-                    ButtonSpec("Autopilot", f"autopilot:{iid}"),
                     ButtonSpec("Review Plan", f"review_plan:{iid}"),
                     ButtonSpec("Build It", f"build:{iid}"),
                     ButtonSpec("Done", f"done:{iid}"),
@@ -369,9 +375,14 @@ def action_button_specs(
             ])
         elif session_has_plan:
             # Fallback: session has a plan from a prior instance, and this
-            # instance didn't do anything code-related — offer plan actions
+            # instance didn't do anything code-related — offer plan actions.
+            # Skip Autopilot starters when a chain is already paused.
+            if not has_autopilot_chain:
+                rows.append([
+                    ButtonSpec("Autopilot", f"autopilot:{iid}"),
+                    ButtonSpec("Autopilot (Hold)", f"autopilot_hold:{iid}"),
+                ])
             rows.append([
-                ButtonSpec("Autopilot", f"autopilot:{iid}"),
                 ButtonSpec("Review Plan", f"review_plan:{iid}"),
                 ButtonSpec("Build It", f"build:{iid}"),
                 ButtonSpec("Done", f"done:{iid}"),

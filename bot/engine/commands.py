@@ -2135,20 +2135,22 @@ async def handle_callback(
         await workflows.on_done(ctx, instance_id, source_msg_id)
     elif action == "autopilot":
         await workflows.on_autopilot(ctx, instance_id, source_msg_id)
+    elif action == "autopilot_hold":
+        await workflows.on_autopilot_hold(ctx, instance_id, source_msg_id)
     elif action == "build_and_ship":
         await workflows.on_build_and_ship(ctx, instance_id, source_msg_id)
     elif action == "continue_autopilot":
         inst = ctx.store.get_instance(instance_id)
         if inst:
-            chain = ctx.store.get_autopilot_chain(inst.session_id)
-            if chain and len(chain) > 1:
-                # Skip the step that triggered the question (it's been answered)
-                start = chain[1]
-            elif chain:
-                start = chain[0]
-            else:
-                start = "build"
-            await workflows.on_autopilot(ctx, instance_id, source_msg_id, start_from=start)
+            # Resume the stored chain verbatim — do NOT re-slice from a
+            # default step list, which would re-inject "merge" into Hold chains.
+            resumed = await workflows.resume_autopilot_chain(
+                ctx, instance_id, source_msg_id, inst.session_id,
+            )
+            if resumed is None:
+                await ctx.messenger.send_text(
+                    ctx.channel_id, "No paused chain to continue.",
+                )
         else:
             await ctx.messenger.send_text(ctx.channel_id, "Instance not found.")
     elif action == "sess_resume":

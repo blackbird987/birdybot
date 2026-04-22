@@ -32,6 +32,7 @@ _STYLE_MAP = {
     "mode_plan:": discord.ButtonStyle.primary,     # Blue
     "mode_explore:": discord.ButtonStyle.primary,  # Blue
     "autopilot:": discord.ButtonStyle.success,     # Green
+    "autopilot_hold:": discord.ButtonStyle.primary,  # Blue — test before merge
     "build_and_ship:": discord.ButtonStyle.success, # Green
     "continue_autopilot:": discord.ButtonStyle.success,  # Green
     "continue_ppu:": discord.ButtonStyle.danger,           # Red — signals cost
