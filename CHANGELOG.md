@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.74.0 — Classify-First Diagnostic Guidance (2026-04-22)
+
 - Restructure `DIAGNOSTIC_GUIDANCE` (build-stage system prompt) from web-API-centric to classify-first: skip gate (3 conditions), Step 1 project-type classification hints covering web API / bot / CLI / desktop / notebook / library / static site, Step 2 per-type scaffold patterns, Step 3 universal `.claude/test.json` contract + stop-command guidance (port-based / process-based / no-op)
 - Add `## Pre-check` section to `VERIFY_PROMPT` with 3 skip conditions (docs-only, library/notebook covered by tests, no diagnostic surface) and a structured `RESULT: skip` block so downstream parsers still get a readable report when verification legitimately has nothing to exercise
 - Extend verify-output parser in `bot/engine/workflows.py` to recognize `RESULT: skip` (treated like pass for chain advancement) and log the skip reason via a new `_VERIFY_SUMMARY_RE`
