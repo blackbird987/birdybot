@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## v0.76.1 — Decay Stale Failures (2026-04-22)
+
+- Declutter The Ark dashboard: `needs_attention()` no longer accumulates stale failures. It now surfaces `needs_input` sessions (where Claude is actively paused on a question) plus FAILED sessions from the last 30 minutes. Older failures decay into the existing `Failed Recently (6h)` section instead of piling up forever. Same rule applied to the per-repo control-room attention list in `forums.py`.
+
 ## v0.74.0 — Classify-First Diagnostic Guidance (2026-04-22)
 
 - Restructure `DIAGNOSTIC_GUIDANCE` (build-stage system prompt) from web-API-centric to classify-first: skip gate (3 conditions), Step 1 project-type classification hints covering web API / bot / CLI / desktop / notebook / library / static site, Step 2 per-type scaffold patterns, Step 3 universal `.claude/test.json` contract + stop-command guidance (port-based / process-based / no-op)

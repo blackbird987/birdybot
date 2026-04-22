@@ -1228,8 +1228,7 @@ class ForumManager:
 
             repo_instances = self._store.list_by_repo(repo_name)
             running = [i for i in repo_instances if i.status == InstanceStatus.RUNNING]
-            attention = [i for i in repo_instances
-                         if i.status == InstanceStatus.FAILED or i.needs_input]
+            attention = [i for i in self._store.needs_attention() if i.repo_name == repo_name]
             completed = [i for i in repo_instances
                          if i.status == InstanceStatus.COMPLETED and not i.needs_input][:5]
 

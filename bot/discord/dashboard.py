@@ -109,7 +109,7 @@ def build_dashboard_embed(
     MAX_LINKED_ITEMS = 12
     items_remaining = MAX_LINKED_ITEMS
 
-    # --- Needs Attention (failed + needs_input) — clickable links ---
+    # --- Needs Attention (needs_input + freshly failed) — clickable links ---
     attention = store.needs_attention()
     attention_session_ids: set[str] = set()
     if attention:
