@@ -7,6 +7,7 @@ import logging
 import re
 from dataclasses import dataclass
 
+from .models import context_tokens_from_usage
 from .types import RunResult
 
 log = logging.getLogger(__name__)
@@ -97,6 +98,28 @@ def extract_progress(event: dict) -> ProgressEvent | None:
     return None
 
 
+def extract_usage(event: dict) -> dict | None:
+    """Return the ``message.usage`` dict from an assistant event (with model).
+
+    Returns None when the event is not an assistant turn or when usage is
+    missing/malformed.  The ``model`` name is folded into the returned dict
+    so downstream code can resolve the context-window size.
+    """
+    if not isinstance(event, dict) or event.get("type") != "assistant":
+        return None
+    msg = event.get("message")
+    if not isinstance(msg, dict):
+        return None
+    usage = msg.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    out = dict(usage)
+    model = msg.get("model")
+    if model:
+        out["model"] = model
+    return out
+
+
 def extract_result(events: list[dict]) -> RunResult:
     """Extract the final result from accumulated stream-json events.
 
@@ -110,6 +133,7 @@ def extract_result(events: list[dict]) -> RunResult:
     # Single-pass: collect tools, per-turn text, and the result event
     tools_seen: set[str] = set()
     result_event: dict | None = None
+    latest_usage: dict | None = None
     # Per-turn text tracking: each assistant event starts a new turn
     assistant_turns: list[list[str]] = []
     current_turn: list[str] = []
@@ -122,6 +146,9 @@ def extract_result(events: list[dict]) -> RunResult:
             if current_turn:
                 assistant_turns.append(current_turn)
             current_turn = []
+            usage = extract_usage(event)
+            if usage:
+                latest_usage = usage
 
             content = event.get("content", [])
             if not content:
@@ -159,6 +186,16 @@ def extract_result(events: list[dict]) -> RunResult:
     # Save final turn
     if current_turn:
         assistant_turns.append(current_turn)
+
+    # Propagate the last observed assistant usage so lifecycle code can
+    # compute the final context-footer without replaying events.
+    if latest_usage:
+        result.cache_read_tokens = int(latest_usage.get("cache_read_input_tokens") or 0)
+        result.cache_creation_tokens = int(latest_usage.get("cache_creation_input_tokens") or 0)
+        result.context_tokens = context_tokens_from_usage(latest_usage)
+        model = latest_usage.get("model")
+        if isinstance(model, str):
+            result.model = model
 
     # Extract result data
     if result_event:

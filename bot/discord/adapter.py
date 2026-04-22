@@ -155,8 +155,13 @@ class DiscordMessenger:
     async def edit_thinking(
         self, handle: MessageHandle, text: str,
         buttons: list[list[ButtonSpec]] | None = None,
+        *, footer: str | None = None, severity: str | None = None,
     ) -> None:
-        """Edit a thinking/progress embed."""
+        """Edit a thinking/progress embed.
+
+        *severity* controls color: None=blurple, "warn"=gold, "crit"=red.
+        *footer* is rendered in the embed footer slot when provided.
+        """
         channel_id = handle.get("channel_id")
         message_id = handle.get("message_id")
         if not channel_id or not message_id:
@@ -166,12 +171,21 @@ class DiscordMessenger:
         if not channel:
             return
 
+        if severity == "crit":
+            color = discord.Color.red()
+        elif severity == "warn":
+            color = discord.Color.gold()
+        else:
+            color = discord.Color.blurple()
+
         try:
             msg = await channel.fetch_message(int(message_id))
             embed = discord.Embed(
                 description=text[:4096],
-                color=discord.Color.blurple(),
+                color=color,
             )
+            if footer:
+                embed.set_footer(text=footer[:2048])
             view = _buttons_to_view(buttons)
             await msg.edit(embed=embed, view=view)
         except Exception:

@@ -301,6 +301,7 @@ async def ensure_forum_tags(forum: discord.ForumChannel) -> dict[str, discord.Fo
         "completed": "\u2705",       # ✅  (status)
         "failed": "\u274c",          # ❌  (status)
         "merged": "\U0001f4e6",      # 📦  (status)
+        "near-limit": "⚠",      # ⚠  (context ≥85%)
         "cli": None,
     }
     # Mode tags (explore/plan/build)

@@ -73,6 +73,49 @@ async def try_apply_tags_after_run(bot: ClaudeBot, channel_id: str) -> None:
     await set_thread_active_tag(bot, ch, False)
 
 
+async def set_thread_near_limit_tag(
+    bot: ClaudeBot,
+    channel_or_id: "discord.abc.GuildChannel | discord.Thread | str | None",
+    apply: bool,
+) -> None:
+    """Add or remove the `near-limit` forum tag on a thread.
+
+    Fire-and-forget safe; silently no-ops on wrong channel type, missing
+    permission, or tag cap exhaustion.
+    """
+    if isinstance(channel_or_id, str):
+        channel = bot.get_channel(int(channel_or_id))
+    else:
+        channel = channel_or_id
+    if not isinstance(channel, discord.Thread):
+        return
+    if not isinstance(channel.parent, discord.ForumChannel):
+        return
+    try:
+        tag_map = {t.name: t for t in channel.parent.available_tags}
+        if "near-limit" not in tag_map:
+            tag_map = await channels.ensure_forum_tags(channel.parent)
+        tag = tag_map.get("near-limit")
+        if not tag:
+            return
+
+        current = list(channel.applied_tags)
+        if apply and tag not in current:
+            current.append(tag)
+        elif not apply and tag in current:
+            current.remove(tag)
+        else:
+            return  # no change needed
+
+        await channel.edit(applied_tags=current[:5])
+        log.debug("Set near-limit=%s on thread %s", apply, channel.id)
+    except Exception:
+        log.debug(
+            "Failed to toggle near-limit on thread %s",
+            getattr(channel, "id", "?"), exc_info=True,
+        )
+
+
 async def set_thread_active_tag(
     bot: ClaudeBot,
     channel: discord.abc.GuildChannel | discord.Thread | None,

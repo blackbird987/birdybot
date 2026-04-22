@@ -29,6 +29,9 @@ class ProviderConfig:
     # Steer = kill the in-flight run and re-spawn with --resume + new prompt.
     # Requires supports_resume + ability to kill and re-spawn cleanly.
     supports_steer: bool = False
+    # True when the provider streams per-turn `message.usage` in stream-json.
+    # Gates live context-window footer rendering (Claude yes, Cursor no).
+    supports_live_usage: bool = False
     system_prompt_method: str = "cli_flag"  # "cli_flag" or "rules_dir"
 
     def build_command(
@@ -185,6 +188,7 @@ _CLAUDE = _ClaudeProvider(
     supports_effort=True,
     supports_resume=True,
     supports_steer=True,
+    supports_live_usage=True,
     system_prompt_method="cli_flag",
 )
 

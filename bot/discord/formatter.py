@@ -7,7 +7,9 @@ import re
 import discord
 
 from bot.claude.types import Instance, InstanceStatus
-from bot.platform.formatting import format_duration, redact_secrets, status_icon
+from bot.platform.formatting import (
+    format_context_footer, format_duration, redact_secrets, status_icon,
+)
 
 
 def escape_discord(text: str) -> str:
@@ -82,6 +84,13 @@ def build_result_embed(
         footer_parts.append("build")
     if instance.branch:
         footer_parts.append(f"branch: {instance.branch}")
+    # Context usage snapshot from the last assistant event
+    if instance.context_tokens > 0:
+        ctx_text, _ = format_context_footer(
+            instance.context_tokens, instance.context_model, instance.repo_path,
+        )
+        if ctx_text:
+            footer_parts.append(ctx_text)
 
     if footer_parts:
         embed.set_footer(text=" | ".join(footer_parts))

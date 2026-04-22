@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Live context + spend footer
+- Surface per-session context usage on working/result embeds: `"72k / 200k · 36%"` in the embed footer, auto-refreshed every progress tick without flicker between the 5s throttle and 10s heartbeat (usage cached at closure scope, both paths render from the same slot)
+- Cost stays on the result embed only — live cost estimates would drift
+- Gold footer at ≥85% context, red + pinned one-shot `≥95%` warning at critical; `warning_pinned` on `Instance` makes the pin idempotent per session
+- New `near-limit` forum tag applied at ≥85% and cleared at the start of every new run — provisioned automatically alongside `active`/`completed`/`failed` in `ensure_forum_tags`
+- New `bot/claude/models.py` resolver merges the `env` block across all four Claude Code `settings.json` layers (managed > project > local > user, Windows-correct `%ProgramData%\ClaudeCode\...` path) and honours `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` (Sonnet → 200k, else 1M); cached 60s
+- New `extract_usage()` parser helper + `message.usage` tracking in `extract_result`; `RunResult` + `Instance` carry `context_tokens`, `cache_read_tokens`, `cache_creation_tokens`, `context_model`
+- New `supports_live_usage` provider flag gates live rendering (Claude=True, Cursor=False — no per-turn usage in its stream-json)
+- `Messenger.edit_thinking` gains `footer=` and `severity=` kwargs; Discord adapter escalates embed color (blurple → gold → red) and renders footer text
+
 ## v0.73.1 — Parked Alias Substitution Design (2026-04-22)
 
 - Document deferred `/alias` positional-arg substitution design (`$1 $2 $N`, `$$` escape, missing-arg error, extra-arg append) in `TODO.md → Features` and as inline `# TODO` notes at the two expansion sites in `bot/engine/commands.py` (`on_unknown_command`, `on_bg`). Not implemented — user doesn't currently use `/alias`.

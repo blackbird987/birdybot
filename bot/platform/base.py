@@ -61,8 +61,14 @@ class Messenger(Protocol):
     async def edit_thinking(
         self, handle: MessageHandle, text: str,
         buttons: list[list[ButtonSpec]] | None = None,
+        *, footer: str | None = None, severity: str | None = None,
     ) -> None:
-        """Edit a thinking message identified by handle."""
+        """Edit a thinking message identified by handle.
+
+        *footer* — optional short status line (e.g. context usage).  Adapters
+        that support embeds render it in the footer slot; others may ignore.
+        *severity* — None/"warn"/"crit" for color escalation.
+        """
         ...
 
     async def send_text(
