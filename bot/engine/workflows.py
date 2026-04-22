@@ -14,7 +14,7 @@ from bot.claude.types import (
     CODE_CHANGE_TOOLS, Instance, InstanceOrigin, InstanceStatus, InstanceType,
 )
 from bot.engine import lifecycle, sessions as sessions_mod
-from bot.platform.base import RequestContext
+from bot.platform.base import ButtonSpec, RequestContext
 from bot.platform.formatting import action_button_specs, running_button_specs
 
 log = logging.getLogger(__name__)
@@ -537,6 +537,7 @@ async def on_done(ctx: RequestContext, source_id: str, source_msg_id: str | None
 
 _AUTOPILOT_STEPS = ["review_loop", "build", "review_code", "verify", "done", "merge"]
 _BUILD_AND_SHIP_STEPS = ["build", "review_code", "verify", "done", "merge"]
+_AUTOPILOT_HOLD_STEPS = ["review_loop", "build", "review_code", "verify", "done"]
 
 
 async def _review_plan_loop(
@@ -905,6 +906,26 @@ async def _run_autopilot_chain(
         _eval_chain_safe(ctx.store, source_id, steps, completed_steps,
                          chain_instances, outcome)
 
+        # Chain finished without a merge step — prompt the user to test
+        # the worktree and decide. Wrapped in try/except so a transient
+        # Discord failure never leaves the chain state stuck in the store.
+        if "merge" not in steps and result and result.branch and result.original_branch:
+            try:
+                iid = result.id
+                await ctx.messenger.send_text(
+                    ctx.channel_id,
+                    f"\U0001f6ec Chain complete on branch `{result.branch}`.\n"
+                    f"Test the worktree, then merge or discard.",
+                    buttons=[[
+                        ButtonSpec("Merge", f"merge:{iid}"),
+                        ButtonSpec("Discard", f"discard:{iid}"),
+                        ButtonSpec("Diff", f"diff:{iid}"),
+                    ]],
+                    silent=False,
+                )
+            except Exception:
+                log.exception("Hold chain handoff message failed to send")
+
         ctx.store.clear_autopilot_chain(session_id)
         ctx.store.clear_chain_deferred(session_id)
         return result
@@ -916,35 +937,37 @@ async def resume_autopilot_chain(
     ctx: RequestContext,
     source_id: str,
     source_msg_id: str | None,
-    session_id: str,
+    session_id: str | None,
 ) -> Instance | None:
     """Resume a paused autopilot chain from stored state.
 
-    Skips the first stored step (already completed) and runs the rest.
-    Returns None if no chain to resume.
+    For chains with >=2 remaining steps, skip the first (the answered step)
+    and run the rest. For a single remaining step, re-run it (the user's
+    answer feeds into the respawn). Returns None only when no chain exists.
     """
     chain = ctx.store.get_autopilot_chain(session_id)
-    if not chain or len(chain) < 2:
+    if not chain:
         return None
+    remaining = chain[1:] if len(chain) >= 2 else chain
     return await _run_autopilot_chain(
-        ctx, source_id, source_msg_id, chain[1:], session_id,
+        ctx, source_id, source_msg_id, remaining, session_id,
     )
 
 
-async def on_autopilot(
+async def _launch_chain(
     ctx: RequestContext,
     source_id: str,
-    source_msg_id: str | None = None,
-    start_from: str = "review_loop",
+    source_msg_id: str | None,
+    steps: list[str],
+    start_from: str,
     cost_budget_usd: float | None = None,
 ) -> Instance | None:
-    """Full autopilot: Review Plan loop → Build → Review Code → Verify → Done."""
+    """Shared setup for chain entry points: look up source, slice steps, dispatch."""
     source = ctx.store.get_instance(source_id)
     if not source:
         await ctx.messenger.send_text(ctx.channel_id, "Instance not found.")
         return None
 
-    steps = _AUTOPILOT_STEPS
     try:
         idx = steps.index(start_from)
     except ValueError:
@@ -956,26 +979,43 @@ async def on_autopilot(
     )
 
 
+async def on_autopilot(
+    ctx: RequestContext,
+    source_id: str,
+    source_msg_id: str | None = None,
+    start_from: str = "review_loop",
+    cost_budget_usd: float | None = None,
+) -> Instance | None:
+    """Full autopilot: Review Plan loop → Build → Review Code → Verify → Done → Merge."""
+    return await _launch_chain(
+        ctx, source_id, source_msg_id,
+        _AUTOPILOT_STEPS, start_from, cost_budget_usd=cost_budget_usd,
+    )
+
+
 async def on_build_and_ship(
     ctx: RequestContext,
     source_id: str,
     source_msg_id: str | None = None,
     start_from: str = "build",
 ) -> Instance | None:
-    """Build → Review Code → Done."""
-    source = ctx.store.get_instance(source_id)
-    if not source:
-        await ctx.messenger.send_text(ctx.channel_id, "Instance not found.")
-        return None
-
-    steps = _BUILD_AND_SHIP_STEPS
-    try:
-        idx = steps.index(start_from)
-    except ValueError:
-        idx = 0
-    return await _run_autopilot_chain(
+    """Build → Review Code → Verify → Done → Merge."""
+    return await _launch_chain(
         ctx, source_id, source_msg_id,
-        steps[idx:], source.session_id,
+        _BUILD_AND_SHIP_STEPS, start_from,
+    )
+
+
+async def on_autopilot_hold(
+    ctx: RequestContext,
+    source_id: str,
+    source_msg_id: str | None = None,
+    start_from: str = "review_loop",
+) -> Instance | None:
+    """Autopilot that stops before merge — leaves Merge/Discard for manual review."""
+    return await _launch_chain(
+        ctx, source_id, source_msg_id,
+        _AUTOPILOT_HOLD_STEPS, start_from,
     )
 
 

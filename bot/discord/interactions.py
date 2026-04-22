@@ -26,8 +26,8 @@ log = logging.getLogger(__name__)
 # Button callback actions that trigger long-running LLM queries
 _QUERY_ACTIONS: frozenset[str] = frozenset({
     "retry", "plan", "build", "review_plan", "apply_revisions",
-    "review_code", "commit", "done", "autopilot", "build_and_ship",
-    "continue_autopilot", "continue_ppu",
+    "review_code", "commit", "done", "autopilot", "autopilot_hold",
+    "build_and_ship", "continue_autopilot", "continue_ppu",
 })
 
 # --- Deploy status message management (keeps control rooms clean) ---

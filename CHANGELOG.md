@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+- `Autopilot (Hold)` — second autopilot button that runs the full chain (Plan → Review → Build → Review → Verify → Done) but stops before merge, so you can `cd` into the worktree and test the branch before manually clicking Merge or Discard. Rendered next to `Autopilot` in the plan/revision button rows; blue to distinguish from the green auto-merge variant. Manual Merge preserves the thread (does not archive) so you can keep testing notes in the same conversation.
+
+### Changed
+- `Continue Autopilot` with no paused chain now returns a clear "No paused chain to continue." message instead of silently starting a default build chain.
+
+### Fixed
+- `Continue Autopilot` now resumes the stored chain verbatim instead of re-slicing the default step list, so Hold chains don't accidentally merge on resume.
+- `Continue Autopilot` now correctly resumes chains paused on their final step (previously returned "no paused chain" when only one step remained).
+- `Autopilot` and `Autopilot (Hold)` starter buttons are hidden when a chain is already paused on that session — previously clicking either would overwrite the paused chain state. `Continue Autopilot` remains the correct resumption path.
+
+### Internal
+- Extract `_launch_chain` helper in `workflows.py` to deduplicate the three chain entry points (`on_autopilot`, `on_build_and_ship`, `on_autopilot_hold`); tighten `resume_autopilot_chain`'s `session_id` type to `str | None` to match the store signatures.
+
 ## v0.76.1 — Decay Stale Failures (2026-04-22)
 
 - Declutter The Ark dashboard: `needs_attention()` no longer accumulates stale failures. It now surfaces `needs_input` sessions (where Claude is actively paused on a question) plus FAILED sessions from the last 30 minutes. Older failures decay into the existing `Failed Recently (6h)` section instead of piling up forever. Same rule applied to the per-repo control-room attention list in `forums.py`.
