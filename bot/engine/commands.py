@@ -282,6 +282,7 @@ async def on_text(ctx: RequestContext, text: str) -> None:
 
 async def on_unknown_command(ctx: RequestContext, text: str) -> None:
     """Handle unregistered /commands — check aliases first."""
+    # TODO: alias $N substitution — see note above on_alias.
     alias_match = re.match(r'^/(\w+)(?:\s+(.*))?$', text, re.DOTALL)
     if alias_match:
         alias_name = alias_match.group(1)
@@ -542,6 +543,7 @@ async def on_bg(ctx: RequestContext, text: str) -> None:
         name = name_match.group(1)
         text = name_match.group(2).strip()
 
+    # TODO: alias $N substitution — see note above on_alias.
     alias_match = re.match(r'^/(\w+)(?:\s+(.*))?$', text, re.DOTALL)
     if alias_match:
         alias_prompt = ctx.store.get_alias(alias_match.group(1))
@@ -1179,6 +1181,12 @@ async def on_context(ctx: RequestContext, text: str) -> None:
 
 
 # --- /alias ---
+# TODO: deferred — positional var substitution ($1 $2 $N, $$ for literal $).
+# Expansion happens at on_unknown_command (~line 285) and on_bg (~line 545).
+# Both sites currently do `f"{alias_prompt} {extra}".strip()` — swap for a
+# shared _expand_alias(template, extra) helper. Missing args = error; extra
+# args append (keeps current non-placeholder aliases working unchanged).
+# See TODO.md → Features for full design. Not built because user doesn't use /alias.
 
 async def on_alias(ctx: RequestContext, text: str) -> None:
     text = text.strip()

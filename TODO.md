@@ -4,6 +4,8 @@
 
 - [ ] **Structured actions framework for multi-user** — Instead of giving non-owners raw Claude Code access (Edit/Write/Bash), expose pre-built actions (update spreadsheet, search products, generate report) as tools. Claude orchestrates between them but can't run arbitrary commands. Basically an MCP-style tool layer between the user and the filesystem. Needed when more people get access to different projects.
 
+- [ ] **Positional variable substitution in /alias** — Extend alias templates with `$1 $2 $N` placeholders, `$$` for literal `$`. Missing args → error with template echoed back; extra args → appended (preserves current concat behavior, so no migration). Split invocation args via `shlex.split` (quoted args containing spaces). Two expansion sites share the same 2-line pattern — `bot/engine/commands.py:285-293` (unknown command) and `bot/engine/commands.py:545-550` (inside `/bg`) — so add one `_expand_alias(template, extra)` helper and call from both. Deferred: user does not currently use /alias. See inline note at top of the alias handler in `bot/engine/commands.py`.
+
 ## Tech Debt
 
 - [ ] **Deduplicate mode-handling logic** — 3 near-identical `_handle_control_mode` blocks in `bot/discord/interactions.py` (owner control room, user control room, inline mode select). Extract a shared helper.
@@ -58,3 +60,4 @@
 - [ ] [DRY/Cleanup] Deferred "break after merge" item resolved by this plan (Low)
 - [ ] [Performance] Sequential chain processing blocks independent threads unnecessarily (Medium)
 - [ ] [Reliability] Archived thread guard for chain resume (Medium)
+- [ ] [Reliability] Mid-file JSONL corruption disables branching (Low)
