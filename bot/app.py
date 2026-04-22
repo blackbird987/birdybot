@@ -764,6 +764,12 @@ async def run() -> None:
         notifier, orphans, auto_resuming_sessions, drain_callback_channel_ids,
     )
 
+    # Restore interactive pending-prompt entries (Steer/Queue embeds) from
+    # before the reboot.  Instances they reference are dead — we edit the
+    # embed to "Lost on restart" so the user knows to resend.
+    if discord_bot:
+        asyncio.create_task(_restore_pending_prompts(discord_bot))
+
     # Wait for shutdown
     await stop_event.wait()
 
@@ -819,6 +825,35 @@ async def _send_reboot_announcement(notifier: NotificationService) -> dict | Non
         data.get("platform"), data.get("channel_id"),
     )
     return data
+
+
+async def _restore_pending_prompts(discord_bot) -> None:
+    """Reconcile persisted pending-prompt entries after a reboot.
+
+    At reboot all instances are gone — so every persisted pending entry is
+    stale (the run it was queued behind is dead).  For each entry: edit the
+    Queued embed to say "Lost on restart — please resend", then drop it from
+    disk.  If a live replacement is needed later, the user sends again.
+    """
+    from bot.engine import pending as pending_mod
+
+    if not await discord_bot._wait_for_ready("restore_pending_prompts"):
+        return
+    entries = pending_mod.load_from_disk()
+    if not entries:
+        return
+    log.info("Reconciling %d pending-prompt entries from prior run", len(entries))
+    for p in entries:
+        if not p.message_id:
+            continue
+        try:
+            await discord_bot.messenger.edit_text(
+                p.channel_id, p.message_id,
+                "⚠ Lost on restart — please resend your message.", None,
+            )
+        except Exception:
+            log.debug("Could not edit stale pending embed %s", p.message_id)
+    pending_mod.clear_persisted_file()
 
 
 async def _cleanup_orphan_messages(

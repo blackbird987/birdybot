@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Steer vs Queue (mid-run messages)
+- Replace silent auto-queue with an interactive "Queued" message carrying `⚡ Steer now` and `✖ Cancel` buttons whenever a new prompt arrives while another run holds the channel lock
+- Steer: kills the in-flight instance via new `ClaudeRunner.kill_and_wait` (awaits finalize with 10s timeout + force-clear escalation), then re-spawns the queued prompt with a one-line steering header prepended so Claude knows the prior turn was interrupted
+- Cancel: drops the pending prompt entirely
+- Add `supports_steer` feature flag on `ProviderConfig` — Claude=True, Cursor=False (no `--resume`); providers without steer get Cancel-only
+- Add `ClaudeRunner.active_instance_for_session` helper and remove the active-session rejection from `check_spawn_allowed` (the channel lock + Queued embed replaces it; reboot-drain rejection retained)
+- New `bot/engine/pending.py` module with persistent registry (`data/pending_prompts.json`) — survives reboot and reconciles stale entries to `⚠ Lost on restart` on startup (separate from drain-queue replay semantics)
+- Idle sleep timer defers archiving a thread while a pending-prompt embed has live buttons, preventing archived-thread interaction rejection
+- Same interactive flow applied to the button-triggered (Plan/Build/Review/Commit) query path in `bot/discord/interactions.py`
+- Button-callback queueing uses structured `callback_action` / `callback_instance_id` / `callback_source_msg_id` fields on `PendingPrompt` rather than string-encoding into `prompt_text` (eliminates a user-text collision + privilege-coupling risk)
+- Steer re-resolves the live active instance at tap-time via `active_instance_for_session` rather than trusting the snapshot taken when the pending was enqueued, so Steer kills the *current* lock-holder even when FIFO has advanced
+- Steer honors a late Cancel tapped during `kill_and_wait`, skips re-dispatch on cancel, and always runs `_schedule_sleep` + dashboard refresh in its finally block so a cancelled-mid-steer thread still arms its idle timer
+
 ## v0.71.0 — Log Triage Service (2026-04-21)
 
 - Add opt-in log triage service (`LOG_TRIAGE_ENABLED`). Periodically pipes new bot.log content to `claude -p` on Haiku; anomalies post to a dedicated "🔍 Triage" thread inside The Ark, with rate-limited @mention on high-severity findings. Uses stdin piping (Windows arg-length safe), `--permission-mode plan`, per-platform-state offset tracking with rotation detection, and `redact_secrets` + env-value stripping before sending logs out.

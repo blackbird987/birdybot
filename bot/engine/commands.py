@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import secrets
 import subprocess
 import time as _time
 from datetime import datetime, timedelta, timezone
@@ -15,7 +16,7 @@ from pathlib import Path
 
 from bot import config
 from bot.claude.types import Instance, InstanceOrigin, InstanceStatus, InstanceType
-from bot.engine import lifecycle, sessions as sessions_mod, workflows
+from bot.engine import lifecycle, pending as pending_mod, sessions as sessions_mod, workflows
 from bot.platform.base import ButtonSpec, RequestContext
 from bot.platform.formatting import (
     VALID_MODES,
@@ -27,6 +28,7 @@ from bot.platform.formatting import (
     format_schedule_list_md,
     format_status_md,
     mode_label,
+    queued_button_specs,
     redact_secrets,
     running_button_specs,
     strip_markdown,
@@ -174,25 +176,100 @@ async def _execute_bot_commands(ctx: RequestContext, result_text: str) -> None:
 
 # --- Query ---
 
+async def _enqueue_with_pending_ui(
+    ctx: RequestContext, prompt: str,
+    *,
+    callback_action: str | None = None,
+    callback_instance_id: str | None = None,
+    callback_source_msg_id: str | None = None,
+) -> pending_mod.PendingPrompt | None:
+    """Register an interactive 'Queued' entry if the channel lock is held.
+
+    Returns the PendingPrompt on success (caller must skip normal run
+    if ``pending.handled_by_steer`` is set after acquiring the lock), or
+    None if no pending UI was needed (lock was free).
+
+    When ``callback_action`` is set, the pending represents a button-callback
+    dispatch instead of a raw user prompt — Steer re-invokes the callback
+    rather than prepending the steering header to text.
+    """
+    lock = _get_channel_lock(ctx.channel_id)
+    if not lock.locked():
+        return None
+    active_iid = ctx.runner.active_instance_for_session(ctx.session_id)
+    supports_steer = (
+        ctx.runner.provider.supports_steer and active_iid is not None
+    )
+    pending_id = secrets.token_hex(4)
+    msg_id = await ctx.messenger.send_text(
+        ctx.channel_id,
+        "📋 Queued — will run after current task.",
+        buttons=queued_button_specs(pending_id, supports_steer),
+        silent=True,
+    )
+    # Without a visible embed there are no buttons to click — fall back to
+    # the old silent-queue behavior rather than register a ghost entry.
+    if not msg_id:
+        return None
+    return pending_mod.register(
+        channel_id=ctx.channel_id,
+        session_id=ctx.session_id,
+        prompt_text=prompt if callback_action is None else "",
+        message_id=str(msg_id),
+        active_instance_id=active_iid,
+        pending_id=pending_id,
+        platform=ctx.platform,
+        repo_name=ctx.repo_name,
+        user_id=ctx.user_id,
+        user_name=ctx.user_name,
+        is_owner=ctx.is_owner,
+        callback_action=callback_action,
+        callback_instance_id=callback_instance_id,
+        callback_source_msg_id=callback_source_msg_id,
+    )
+
+
+async def _finish_pending_on_acquire(
+    ctx: RequestContext, pending: pending_mod.PendingPrompt | None,
+) -> bool:
+    """Called after acquiring the channel lock. Returns True if the caller
+    should skip executing (because Steer handled it or it was cancelled).
+    """
+    if pending is None:
+        return False
+    # Steer already triggered — it kills the prior run, spawns the new one
+    # itself, and marks handled_by_steer. Normal lock-holder path bails out.
+    if pending.handled_by_steer:
+        return True
+    if pending.cancelled:
+        pending_mod.clear(pending.id)
+        return True
+    # Normal path: delete the embed, run the prompt
+    if pending.message_id:
+        try:
+            await ctx.messenger.delete_message(
+                ctx.channel_id, pending.message_id,
+            )
+        except Exception:
+            pass
+    # Re-check after the await — Cancel/Steer can fire during delete_message
+    # and flip these flags.  Honor the user's click rather than racing past it.
+    if pending.handled_by_steer or pending.cancelled:
+        pending_mod.clear(pending.id)
+        return True
+    pending_mod.clear(pending.id)
+    return False
+
+
 async def on_text(ctx: RequestContext, text: str) -> None:
     """Handle a plain text message — run as query."""
     if not text.strip():
         return
-    # Check for natural-language repo commands (shares channel lock to prevent races)
     lock = _get_channel_lock(ctx.channel_id)
-    queued_msg_id = None
-    if lock.locked():
-        queued_msg_id = await ctx.messenger.send_text(
-            ctx.channel_id,
-            "📋 Queued — waiting for current query to finish.",
-            silent=True,
-        )
+    pending = await _enqueue_with_pending_ui(ctx, text)
     async with lock:
-        if queued_msg_id:
-            try:
-                await ctx.messenger.delete_message(ctx.channel_id, queued_msg_id)
-            except Exception:
-                pass
+        if await _finish_pending_on_acquire(ctx, pending):
+            return
         if await _try_fast_repo_command(ctx, text):
             return
         # Double-checked locking: re-read session_id after acquiring lock
@@ -224,20 +301,10 @@ async def on_unknown_command(ctx: RequestContext, text: str) -> None:
 
 async def _run_query(ctx: RequestContext, prompt: str) -> None:
     lock = _get_channel_lock(ctx.channel_id)
-    queued_msg_id = None
-    if lock.locked():
-        queued_msg_id = await ctx.messenger.send_text(
-            ctx.channel_id,
-            "📋 Queued — waiting for current query to finish.",
-            silent=True,
-        )
+    pending = await _enqueue_with_pending_ui(ctx, prompt)
     async with lock:
-        # Clean up the "queued" notice now that we're running
-        if queued_msg_id:
-            try:
-                await ctx.messenger.delete_message(ctx.channel_id, queued_msg_id)
-            except Exception:
-                pass
+        if await _finish_pending_on_acquire(ctx, pending):
+            return
         # Double-checked locking: re-read session_id after acquiring lock
         if not ctx.session_id and ctx.resolve_session_id is not None:
             fresh = ctx.resolve_session_id()
@@ -247,7 +314,8 @@ async def _run_query(ctx: RequestContext, prompt: str) -> None:
 
 
 async def _execute_query(ctx: RequestContext, prompt: str) -> None:
-    # Block spawns during reboot drain or if session already has a running task
+    # Block spawns during reboot drain. Active-session overlap is no longer
+    # rejected here — the per-channel lock + Queued embed handle it visibly.
     spawn_err = ctx.runner.check_spawn_allowed(ctx.session_id)
     if spawn_err:
         if ctx.runner.is_draining:

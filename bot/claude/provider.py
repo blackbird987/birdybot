@@ -26,6 +26,9 @@ class ProviderConfig:
     supports_api_fallback: bool = False
     supports_effort: bool = True
     supports_resume: bool = True
+    # Steer = kill the in-flight run and re-spawn with --resume + new prompt.
+    # Requires supports_resume + ability to kill and re-spawn cleanly.
+    supports_steer: bool = False
     system_prompt_method: str = "cli_flag"  # "cli_flag" or "rules_dir"
 
     def build_command(
@@ -181,6 +184,7 @@ _CLAUDE = _ClaudeProvider(
     supports_api_fallback=True,
     supports_effort=True,
     supports_resume=True,
+    supports_steer=True,
     system_prompt_method="cli_flag",
 )
 
@@ -198,6 +202,7 @@ _CURSOR = _CursorProvider(
     supports_api_fallback=False,
     supports_effort=False,
     supports_resume=False,  # disabled until confirmed
+    supports_steer=False,   # requires supports_resume
     system_prompt_method="rules_dir",
 )
 

@@ -21,6 +21,8 @@ _STYLE_MAP = {
     "done:": discord.ButtonStyle.success,
     "kill:": discord.ButtonStyle.danger,       # Red
     "discard:": discord.ButtonStyle.danger,
+    "cancel_pending:": discord.ButtonStyle.danger,  # Red — matches Cancel intent
+    "steer:": discord.ButtonStyle.primary,     # Blue — matches other action buttons
     "retry:": discord.ButtonStyle.primary,     # Blue
     "plan:": discord.ButtonStyle.primary,        # Blue
     "review_plan:": discord.ButtonStyle.primary,

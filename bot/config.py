@@ -155,6 +155,7 @@ if REPOS_BASE_DIR and not REPOS_BASE_DIR.is_dir():
 REBOOT_MSG_FILE: Path = DATA_DIR / "reboot_message.json"
 REBOOT_REQUEST_FILE: Path = DATA_DIR / "reboot_request.json"
 DRAIN_QUEUE_FILE: Path = DATA_DIR / "drain_queue.json"
+PENDING_PROMPTS_FILE: Path = DATA_DIR / "pending_prompts.json"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
