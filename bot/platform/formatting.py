@@ -34,6 +34,28 @@ def format_tokens(count: int) -> str:
     return str(count)
 
 
+def format_context_footer(
+    context_tokens: int,
+    model: str | None,
+    repo_path: str | None = None,
+) -> tuple[str, float]:
+    """Render a `"72k / 200k · 36%"` style footer string + percent (0..1).
+
+    Returns ("", 0.0) when there is nothing to show.  Model and repo are
+    used to resolve the effective window (Sonnet can be 1M or 200k).
+    """
+    if not context_tokens or context_tokens <= 0:
+        return "", 0.0
+    # Lazy import — avoids a cycle with bot.claude.models at module load.
+    from bot.claude.models import context_window_for
+    window = context_window_for(model, repo_path)
+    if window <= 0:
+        return "", 0.0
+    percent = min(context_tokens / window, 1.0)
+    text = f"{format_tokens(context_tokens)} / {format_tokens(window)} · {int(round(percent * 100))}%"
+    return text, percent
+
+
 def format_age(delta: timedelta) -> str:
     """Format a timedelta as a human-readable age string (e.g. '3h ago')."""
     if delta.days > 0:

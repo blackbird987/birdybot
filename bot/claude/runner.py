@@ -20,6 +20,7 @@ from bot.claude.parser import (
     extract_progress,
     extract_result,
     extract_summary,
+    extract_usage,
     is_transient_error,
     iter_tool_blocks,
     parse_stream_line,
@@ -218,6 +219,7 @@ class ClaudeRunner:
 
             result = await self._stream_output(
                 proc, instance, on_progress, on_stall,
+                supports_live_usage=provider.supports_live_usage,
             )
 
             # Tag result now — before any early returns — so all exit paths carry the flag.
@@ -309,6 +311,8 @@ class ClaudeRunner:
         instance: Instance,
         on_progress: ProgressCallback | None,
         on_stall: StallCallback | None,
+        *,
+        supports_live_usage: bool = False,
     ) -> RunResult:
         """Read stdout line-by-line, parse stream-json, detect stalls.
 
@@ -383,13 +387,38 @@ class ClaudeRunner:
                     # Eagerly capture session_id so it survives early termination
                     if not captured_session_id and event.get("session_id"):
                         captured_session_id = event["session_id"]
+                    # Per-turn usage (Claude only) — fed to progress callback
+                    # so the lifecycle layer can keep the context footer live.
+                    usage = extract_usage(event) if supports_live_usage else None
+
                     if on_progress:
                         progress = extract_progress(event)
                         if progress and progress.message:
                             try:
-                                await on_progress(progress.message, progress.detail)
+                                if usage is not None:
+                                    try:
+                                        await on_progress(
+                                            progress.message, progress.detail,
+                                            usage=usage,
+                                        )
+                                    except TypeError:
+                                        # Older callback signature — fall back.
+                                        await on_progress(
+                                            progress.message, progress.detail,
+                                        )
+                                else:
+                                    await on_progress(progress.message, progress.detail)
                             except Exception:
                                 log.exception("Progress callback error")
+                        elif usage is not None:
+                            # No visible progress, but refresh the cached usage
+                            # so the heartbeat renders the latest context count.
+                            try:
+                                await on_progress("", "", usage=usage)
+                            except TypeError:
+                                pass
+                            except Exception:
+                                log.exception("Progress callback error (usage-only)")
 
                     # Detect AskUserQuestion — Claude is blocking on stdin
                     if ask_question is None:

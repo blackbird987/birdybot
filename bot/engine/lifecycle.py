@@ -9,6 +9,7 @@ import subprocess
 from datetime import datetime, timedelta, timezone
 
 from bot import config
+from bot.claude.models import context_tokens_from_usage
 from bot.claude.types import (
     CODE_CHANGE_TOOLS, PLAN_ORIGINS, Instance, InstanceOrigin, InstanceStatus,
     RunResult,
@@ -16,6 +17,7 @@ from bot.claude.types import (
 from bot.platform.base import ButtonSpec, MessageHandle, RequestContext
 from bot.platform.formatting import (
     action_button_specs,
+    format_context_footer,
     format_duration,
     format_tokens,
     format_result_md,
@@ -168,6 +170,11 @@ async def run_instance(
 ) -> None:
     """Run an instance with optional live progress via handle."""
     inst.status = InstanceStatus.RUNNING
+    # Reset per-run context warning flag + clear any leftover near-limit tag
+    # from a previous run in the same thread.  Fire-and-forget on tag clear —
+    # the thread may not be a forum thread.
+    inst.warning_pinned = False
+    asyncio.create_task(_try_apply_near_limit(ctx, inst, False))
     ctx.store.update_instance(inst, critical=True)
 
     on_progress = None
@@ -290,6 +297,14 @@ def finalize_run(ctx: RequestContext, inst: Instance, result: RunResult) -> None
     inst.num_turns = result.num_turns
     inst.input_tokens = result.input_tokens
     inst.output_tokens = result.output_tokens
+    # Prefer the final streamed usage — falls back to anything the live
+    # callbacks already wrote when the result event omits usage.
+    if result.context_tokens:
+        inst.context_tokens = result.context_tokens
+        inst.cache_read_tokens = result.cache_read_tokens
+        inst.cache_creation_tokens = result.cache_creation_tokens
+    if result.model:
+        inst.context_model = result.model
     inst.needs_input = result.needs_input
     inst.finished_at = datetime.now(timezone.utc).isoformat()
 
@@ -407,12 +422,21 @@ def make_progress_callbacks(
     handle: MessageHandle,
     verbose: int = 1,
 ):
-    """Create on_progress, on_stall, and heartbeat closures."""
+    """Create on_progress, on_stall, and heartbeat closures.
+
+    The latest ``message.usage`` is cached at closure scope so the context
+    footer persists across the 5s throttle on_progress and the 10s heartbeat
+    without flickering.
+    """
     last_update = [0.0]
     start_time = asyncio.get_event_loop().time()
     last_text = [None]
+    last_footer = [None]
+    last_severity = [None]
     is_stalled = [False]
     last_activity = ["processing..."]  # tracks last known tool activity
+    latest_usage: list[dict | None] = [None]
+    near_limit_applied = [False]  # tracks current near-limit tag state
     mode_tag = f"[{inst.mode}] " if inst.mode and inst.mode != "explore" else ""
 
     def _elapsed() -> str:
@@ -421,22 +445,103 @@ def make_progress_callbacks(
             return f"{elapsed / 60:.1f}m"
         return f"{elapsed:.0f}s"
 
+    def _compute_footer() -> tuple[str | None, str | None]:
+        """Render footer text + severity from cached usage. (None, None) if empty.
+
+        Side effect: mirrors the latest token counts onto ``inst`` so the result
+        embed and persisted state reflect the last live value even if no result
+        event arrives (e.g. killed run).
+        """
+        usage = latest_usage[0]
+        if not usage:
+            return None, None
+        tokens = context_tokens_from_usage(usage)
+        if tokens <= 0:
+            return None, None
+        model = usage.get("model") if isinstance(usage, dict) else None
+        text, pct = format_context_footer(tokens, model, inst.repo_path)
+        if not text:
+            return None, None
+        severity = None
+        if pct >= 0.95:
+            severity = "crit"
+        elif pct >= 0.85:
+            severity = "warn"
+        # Persist into the instance so result embed + session state reflect it.
+        inst.context_tokens = tokens
+        inst.cache_read_tokens = int(usage.get("cache_read_input_tokens") or 0)
+        inst.cache_creation_tokens = int(usage.get("cache_creation_input_tokens") or 0)
+        if isinstance(model, str):
+            inst.context_model = model
+        return text, severity
+
     stop_buttons = running_button_specs(inst.id)
 
-    async def _edit(text: str, buttons=None):
-        if text == last_text[0] and not buttons:
+    async def _edit(text: str, buttons=None, *, footer=None, severity=None):
+        # Skip no-op edits only when text/footer/severity/buttons all match.
+        if (
+            text == last_text[0]
+            and footer == last_footer[0]
+            and severity == last_severity[0]
+            and not buttons
+        ):
             return
         last_text[0] = text
+        last_footer[0] = footer
+        last_severity[0] = severity
         try:
-            await ctx.messenger.edit_thinking(handle, text, buttons)
+            await ctx.messenger.edit_thinking(
+                handle, text, buttons, footer=footer, severity=severity,
+            )
         except Exception:
             pass
 
-    async def on_progress(message: str, detail: str = ""):
+    async def _maybe_pin_warning() -> None:
+        """Fire once per session when context first crosses 95%."""
+        if inst.warning_pinned:
+            return
+        inst.warning_pinned = True
+        try:
+            ctx.store.update_instance(inst)
+        except Exception:
+            log.debug("Failed to persist warning_pinned for %s", inst.id, exc_info=True)
+        try:
+            await ctx.messenger.send_text(
+                ctx.channel_id,
+                (
+                    f"⚠️ `{inst.display_id()}` context is ≥95% — consider wrapping up "
+                    "or starting a fresh session before the model degrades."
+                ),
+            )
+        except Exception:
+            log.debug("Failed to send 95%% warning for %s", inst.id, exc_info=True)
+
+    async def _dispatch_severity(severity: str | None) -> None:
+        """Fire time-critical severity signals — runs outside the 5s edit throttle
+        so tag + pinned-warning never lag behind a rapid context spike, and the
+        tag clears immediately if context drops (e.g. after compaction)."""
+        want = severity in ("warn", "crit")
+        if want != near_limit_applied[0]:
+            near_limit_applied[0] = want
+            asyncio.create_task(_try_apply_near_limit(ctx, inst, want))
+        if severity == "crit":
+            await _maybe_pin_warning()
+
+    async def on_progress(message: str, detail: str = "", *, usage: dict | None = None):
         is_stalled[0] = False
-        # Always track latest activity (even if throttled)
-        display = detail if verbose >= 2 and detail else message
-        last_activity[0] = display
+        if usage is not None:
+            latest_usage[0] = usage
+        # Always track latest activity (even if throttled); empty message is a
+        # usage-only refresh — keep prior activity.
+        if message:
+            display = detail if verbose >= 2 and detail else message
+            last_activity[0] = display
+        # Compute footer + dispatch severity BEFORE both the verbose gate and
+        # the visible-edit throttle — safety signals (near-limit tag, 95%
+        # warning) must fire regardless of display preference and must not
+        # lag by up to 5s behind a rapid context spike.
+        footer, severity = _compute_footer()
+        await _dispatch_severity(severity)
         if verbose == 0:
             return
         now = asyncio.get_event_loop().time()
@@ -444,18 +549,24 @@ def make_progress_callbacks(
             return
         last_update[0] = now
         escaped = ctx.messenger.escape(inst.display_id())
-        escaped_display = ctx.messenger.escape(display)
+        escaped_display = ctx.messenger.escape(last_activity[0])
         await _edit(
             f"🔄 {mode_tag}{escaped} {escaped_display} ({_elapsed()})",
             buttons=stop_buttons,
+            footer=footer,
+            severity=severity,
         )
 
     async def on_stall(instance_id: str):
         is_stalled[0] = True
         escaped = ctx.messenger.escape(inst.display_id())
+        footer, severity = _compute_footer()
+        await _dispatch_severity(severity)
         await _edit(
             f"⚠️ {escaped} quiet for {config.STALL_TIMEOUT_SECS}s — /kill if stuck ({_elapsed()})",
             buttons=stall_button_specs(instance_id),
+            footer=footer,
+            severity=severity,
         )
 
     async def heartbeat():
@@ -464,13 +575,33 @@ def make_progress_callbacks(
             if not is_stalled[0]:
                 escaped = ctx.messenger.escape(inst.display_id())
                 activity = ctx.messenger.escape(last_activity[0])
+                footer, severity = _compute_footer()
+                await _dispatch_severity(severity)
                 await _edit(
                     f"🔄 {mode_tag}{escaped} {activity} ({_elapsed()})",
                     buttons=stop_buttons,
+                    footer=footer,
+                    severity=severity,
                 )
             await asyncio.sleep(10)
 
     return on_progress, on_stall, heartbeat
+
+
+async def _try_apply_near_limit(
+    ctx: RequestContext, inst: Instance, apply: bool,
+) -> None:
+    """Fire-and-forget: apply or clear the `near-limit` Discord forum tag."""
+    if ctx.platform != "discord":
+        return
+    bot = getattr(ctx.messenger, "_bot", None)
+    if bot is None:
+        return
+    try:
+        from bot.discord.tags import set_thread_near_limit_tag
+        await set_thread_near_limit_tag(bot, ctx.channel_id, apply)
+    except Exception:
+        log.debug("near-limit tag update failed for %s", inst.id, exc_info=True)
 
 
 async def send_result(

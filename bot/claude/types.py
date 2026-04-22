@@ -96,6 +96,12 @@ class Instance:
     num_turns: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    # Live-context footer — populated from the latest assistant `message.usage`.
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
+    context_tokens: int = 0       # input + cache_read + cache_creation
+    context_model: str | None = None  # Model name reported in usage (for window lookup)
+    warning_pinned: bool = False      # 95% context warning already fired (idempotent)
     plan_active: bool = False  # Session has an active plan (for button context)
     code_active: bool = False  # Session has uncommitted code changes (for button context)
     needs_input: bool = False  # AskUserQuestion detected — waiting for user reply
@@ -153,6 +159,11 @@ class Instance:
             "num_turns": self.num_turns,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
+            "cache_read_tokens": self.cache_read_tokens,
+            "cache_creation_tokens": self.cache_creation_tokens,
+            "context_tokens": self.context_tokens,
+            "context_model": self.context_model,
+            "warning_pinned": self.warning_pinned,
             "plan_active": self.plan_active,
             "code_active": self.code_active,
             "needs_input": self.needs_input,
@@ -205,6 +216,11 @@ class Instance:
             num_turns=d.get("num_turns", 0),
             input_tokens=d.get("input_tokens", 0),
             output_tokens=d.get("output_tokens", 0),
+            cache_read_tokens=d.get("cache_read_tokens", 0),
+            cache_creation_tokens=d.get("cache_creation_tokens", 0),
+            context_tokens=d.get("context_tokens", 0),
+            context_model=d.get("context_model"),
+            warning_pinned=d.get("warning_pinned", False),
             plan_active=d.get("plan_active", False),
             code_active=d.get("code_active", False),
             needs_input=d.get("needs_input", False),
@@ -235,6 +251,11 @@ class RunResult:
     num_turns: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    # Usage snapshot from the last assistant event — used by the context footer
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
+    context_tokens: int = 0          # input + cache_read + cache_creation
+    model: str | None = None         # Model name reported in usage
     needs_input: bool = False  # AskUserQuestion detected — waiting for user reply
     usage_limit_reset: object = None  # datetime | None — when usage limit resets (set by parser)
     api_fallback_used: bool = False   # True if result came from API billing fallback
