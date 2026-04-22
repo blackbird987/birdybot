@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.76.1 — Decay Stale Failures (2026-04-22)
+
 - Declutter The Ark dashboard: `needs_attention()` no longer accumulates stale failures. It now surfaces `needs_input` sessions (where Claude is actively paused on a question) plus FAILED sessions from the last 30 minutes. Older failures decay into the existing `Failed Recently (6h)` section instead of piling up forever. Same rule applied to the per-repo control-room attention list in `forums.py`.
 
 ## v0.74.0 — Classify-First Diagnostic Guidance (2026-04-22)
