@@ -372,30 +372,61 @@ async def on_review_code(ctx: RequestContext, source_id: str, source_msg_id: str
 
 # --- Verify ---
 
-_VERIFY_RESULT_RE = re.compile(r'```verify\s*\nRESULT:\s*(pass|fail)', re.IGNORECASE)
-_VERIFY_ACTIONS_RE = re.compile(r'ACTIONS_TESTED:\s*(.+)', re.IGNORECASE)
-_VERIFY_ENDPOINTS_RE = re.compile(r'ENDPOINTS_USED:\s*(.+)', re.IGNORECASE)
+_VERIFY_BLOCK_RE = re.compile(
+    r'```verify\s*\n(.*?)\n```', re.IGNORECASE | re.DOTALL
+)
+_VERIFY_RESULT_RE = re.compile(
+    r'^\s*RESULT:\s*(pass|fail|skip)\s*$', re.IGNORECASE | re.MULTILINE
+)
+_VERIFY_ACTIONS_RE = re.compile(
+    r'^\s*ACTIONS_TESTED:\s*(.+)$', re.IGNORECASE | re.MULTILINE
+)
+_VERIFY_ENDPOINTS_RE = re.compile(
+    r'^\s*ENDPOINTS_USED:\s*(.+)$', re.IGNORECASE | re.MULTILINE
+)
+_VERIFY_SUMMARY_RE = re.compile(
+    r'^\s*SUMMARY:\s*(.+)$', re.IGNORECASE | re.MULTILINE
+)
 
 
 def _verify_passed(inst: Instance) -> bool:
-    """Check if verify step reported pass (fail-safe: missing block = fail)."""
+    """Check if verify step reported pass or skip (fail-safe: missing block = fail).
+
+    Treats skip like pass for chain advancement — if verify legitimately had
+    nothing to run (docs-only change, library covered by tests, etc.), advance
+    the chain rather than block on a false failure.
+    """
     if not inst.result_file:
         return False
     try:
         text = Path(inst.result_file).read_text(encoding="utf-8")
     except OSError:
         return False
-    m = _VERIFY_RESULT_RE.search(text)
-    if not m:
+    # Take the LAST block — if the model narrates/pre-quotes the template
+    # before the real output, the final block is the authoritative verdict.
+    blocks = _VERIFY_BLOCK_RE.findall(text)
+    if not blocks:
         return False
-    # Log what was actually tested for observability
-    actions = _VERIFY_ACTIONS_RE.search(text)
-    endpoints = _VERIFY_ENDPOINTS_RE.search(text)
+    block = blocks[-1]
+    result_m = _VERIFY_RESULT_RE.search(block)
+    if not result_m:
+        return False
+    result = result_m.group(1).lower()
+    if result == "skip":
+        summary = _VERIFY_SUMMARY_RE.search(block)
+        log.info(
+            "Verify skipped: %s",
+            summary.group(1).strip() if summary else "no reason given",
+        )
+        return True
+    # pass/fail path — log what was actually tested for observability
+    actions = _VERIFY_ACTIONS_RE.search(block)
+    endpoints = _VERIFY_ENDPOINTS_RE.search(block)
     if actions:
         log.info("Verify actions: %s", actions.group(1).strip())
     if endpoints:
         log.info("Verify endpoints: %s", endpoints.group(1).strip())
-    return m.group(1).lower() == "pass"
+    return result == "pass"
 
 
 def _load_verify_policy(source_inst: Instance | None) -> str:
