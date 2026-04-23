@@ -189,6 +189,12 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
         await _handle_pending_action(bot, interaction, action, instance_id, btn_access)
         return
 
+    # --- Usage-limit gate interactions (Run now / Queue / Cancel) ---
+    # The trailing portion is a qid assigned by _offer_usage_limit_choice.
+    if action in ("usage_run", "usage_queue", "usage_cancel"):
+        await _handle_usage_action(bot, interaction, action, instance_id)
+        return
+
     # --- Load CLI history into thread ---
     if action == "load_history":
         await _handle_load_history(bot, interaction, instance_id)
@@ -498,6 +504,76 @@ async def _handle_pending_action(
             asyncio.create_task(bot._try_apply_tags_after_run(channel_id))
             bot._schedule_sleep(channel_id)
             asyncio.create_task(bot._refresh_dashboard())
+
+
+async def _handle_usage_action(
+    bot: ClaudeBot,
+    interaction: discord.Interaction,
+    action: str,
+    qid: str,
+) -> None:
+    """Dispatch Run / Queue / Cancel clicks from the usage-limit gate."""
+    msg = interaction.message
+
+    # "Already resolved" paths never overwrite the message content — the
+    # winning path (auto-fire, another click) has already rendered the
+    # correct final state.  We only edit the message when THIS click wins.
+
+    if action == "usage_cancel":
+        removed = await bot._usage_queue_remove(qid)
+        if removed:
+            if msg:
+                try:
+                    await msg.edit(content="Cancelled.", view=None)
+                except Exception:
+                    pass
+        else:
+            await interaction.followup.send(
+                "This prompt was already resolved.", ephemeral=True,
+            )
+        return
+
+    if action == "usage_queue":
+        updated = await bot._usage_queue_update(qid, status="queued")
+        if not updated:
+            await interaction.followup.send(
+                "This prompt was already resolved.", ephemeral=True,
+            )
+            return
+        from bot.discord.usage_notifier import next_window_end_utc
+        unlock_ts = int(next_window_end_utc().timestamp())
+        if msg:
+            try:
+                await msg.edit(
+                    content=f"⏸ Queued — will run at <t:{unlock_ts}:t>.",
+                    view=None,
+                )
+            except Exception:
+                pass
+        return
+
+    # action == "usage_run"
+    removed = await bot._usage_queue_remove(qid)
+    if not removed:
+        await interaction.followup.send(
+            "This prompt was already resolved.", ephemeral=True,
+        )
+        return
+
+    if msg:
+        try:
+            await msg.edit(content="Running now…", view=None)
+        except Exception:
+            pass
+
+    channel_id = removed["channel_id"]
+    prompt = removed["prompt"]
+    repo_name = removed.get("repo_name")
+    # Fire-and-forget so the interaction handler returns promptly; the
+    # lock inside _replay_to_thread serializes any concurrent spawn.
+    asyncio.create_task(
+        bot._replay_to_thread(channel_id, prompt, repo_name=repo_name),
+    )
 
 
 async def _handle_repo_switch(

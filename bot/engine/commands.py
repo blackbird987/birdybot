@@ -267,6 +267,12 @@ async def on_text(ctx: RequestContext, text: str) -> None:
     """Handle a plain text message — run as query."""
     if not text.strip():
         return
+    # Usage-limit gate: during Anthropic throttle windows the platform offers
+    # Run now / Queue for 11am PT / Cancel buttons and returns True if handled.
+    if ctx.offer_usage_limit_choice is not None:
+        handled = await ctx.offer_usage_limit_choice(ctx, text)
+        if handled:
+            return
     lock = _get_channel_lock(ctx.channel_id)
     pending = await _enqueue_with_pending_ui(ctx, text)
     async with lock:

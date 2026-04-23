@@ -175,6 +175,9 @@ class RequestContext:
     increment_query_count: Callable[[], None] | None = None
     # Platform callbacks (set by platform layer, called by engine)
     on_merged: Callable[[], Awaitable[None]] | None = None  # Apply "merged" tag after branch merge
+    # Usage-limit gate: if set and returns True, the engine skips normal execution
+    # (the platform handled the message by offering Run/Queue/Cancel buttons).
+    offer_usage_limit_choice: Callable[["RequestContext", str], Awaitable[bool]] | None = None
 
     @property
     def effective_mode(self) -> str:

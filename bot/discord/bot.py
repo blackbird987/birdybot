@@ -15,10 +15,12 @@ Extracted modules:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import tempfile
 import time as _time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -49,6 +51,19 @@ if TYPE_CHECKING:
     from bot.store.state import StateStore
 
 log = logging.getLogger(__name__)
+
+
+def _parse_iso(s: str | None) -> datetime | None:
+    """Parse an ISO-8601 datetime string, returning None on any failure."""
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s)
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 class _AutoDeleteMessenger:
@@ -130,6 +145,8 @@ class ClaudeBot(discord.Client):
         self._monitor_started: bool = False
         self._notifier = None  # set by app.py after notifier is created
         self._voice_enabled: bool = bool(config.OPENAI_API_KEY)
+        # Serializes all read/modify/write ops on config.USAGE_QUEUE_FILE.
+        self._usage_queue_lock = asyncio.Lock()
         self._setup_commands()
 
     @property
@@ -255,6 +272,7 @@ class ClaudeBot(discord.Client):
                 await apply_thread_tags(ch, "completed", merged=True)
 
         ctx.on_merged = _apply_merged_tag
+        ctx.offer_usage_limit_choice = self._offer_usage_limit_choice
         return ctx
 
     # --- Delegation to extracted modules ---
@@ -307,6 +325,10 @@ class ClaudeBot(discord.Client):
         self._cancel_sleep(channel_id)
         ctx = self._ctx(channel_id, session_id=session_id, repo_name=resolved_repo,
                         thread_info=info)
+        # Replay bypasses the usage-limit gate: the window-end promoter already
+        # classified these as queued, and "Run now" clicks have already been
+        # consented to.  Re-prompting would loop.
+        ctx.offer_usage_limit_choice = None
         await commands.on_text(ctx, prompt)
         self._forums.persist_ctx_settings(ctx)
         asyncio.create_task(self._try_apply_tags_after_run(channel_id))
@@ -426,6 +448,221 @@ class ClaudeBot(discord.Client):
                 self._forums.persist_ctx_settings(ctx)
                 asyncio.create_task(self._try_apply_tags_after_run(channel_id))
                 self._schedule_sleep(channel_id)
+
+    # --- Usage-limit gate: Run now / Queue for 11am PT / Cancel ---
+
+    async def _offer_usage_limit_choice(
+        self, ctx: RequestContext, text: str,
+    ) -> bool:
+        """Platform hook invoked from on_text during throttle windows.
+
+        Returns True when the gate handled the message (prompt presented to
+        user).  Returns False to let on_text run the prompt normally — used
+        both when the window isn't active and as a safety fallback if the
+        Discord send fails after the entry was persisted.
+        """
+        from bot.discord.usage_notifier import (
+            is_usage_limit_active, next_window_end_utc,
+        )
+        if not is_usage_limit_active():
+            return False
+        # Only gate forum-thread messages.  Non-forum channels have no
+        # replay path (_replay_to_thread returns False) and queued entries
+        # would be orphaned.
+        if not self._forums.thread_to_project(ctx.channel_id):
+            return False
+
+        qid = uuid.uuid4().hex[:8]
+        end_utc = next_window_end_utc()
+        entry = {
+            "qid": qid,
+            "status": "awaiting_choice",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "run_at": end_utc.isoformat(),
+            "channel_id": ctx.channel_id,
+            "message_id": None,
+            "prompt": text,
+            "repo_name": ctx.repo_name,
+            "user_id": ctx.user_id,
+            "user_name": ctx.user_name,
+        }
+        # Persist before send so a reboot between render and click cannot
+        # silently drop the user's prompt.
+        await self._usage_queue_append(entry)
+
+        view = discord.ui.View(timeout=None)
+        view.add_item(discord.ui.Button(
+            label="Run now", style=discord.ButtonStyle.primary,
+            custom_id=f"usage_run:{qid}",
+        ))
+        view.add_item(discord.ui.Button(
+            label="Queue for 11am PT", style=discord.ButtonStyle.secondary,
+            custom_id=f"usage_queue:{qid}",
+        ))
+        view.add_item(discord.ui.Button(
+            label="Cancel", style=discord.ButtonStyle.danger,
+            custom_id=f"usage_cancel:{qid}",
+        ))
+
+        unlock_ts = int(end_utc.timestamp())
+        content = (
+            f"⚠️ Usage limits active until <t:{unlock_ts}:t>. "
+            f"Run now (will be throttled) or queue for when the window ends?"
+        )
+        try:
+            channel = self.get_channel(int(ctx.channel_id))
+            if channel is None:
+                channel = await self.fetch_channel(int(ctx.channel_id))
+            msg = await channel.send(content=content, view=view)
+        except Exception:
+            log.exception(
+                "usage gate: failed to send choice prompt for %s, falling through",
+                qid,
+            )
+            await self._usage_queue_remove(qid)
+            return False
+
+        await self._usage_queue_update(qid, message_id=str(msg.id))
+        return True
+
+    # --- Persistent queue helpers (atomic, lock-serialized) ---
+
+    def _read_usage_queue(self) -> list[dict]:
+        try:
+            data = json.loads(
+                config.USAGE_QUEUE_FILE.read_text(encoding="utf-8"),
+            )
+            return data if isinstance(data, list) else []
+        except (FileNotFoundError, json.JSONDecodeError):
+            return []
+
+    def _write_usage_queue_atomic(self, entries: list[dict]) -> None:
+        tmp = config.USAGE_QUEUE_FILE.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps(entries, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        os.replace(tmp, config.USAGE_QUEUE_FILE)
+
+    async def _usage_queue_append(self, entry: dict) -> None:
+        async with self._usage_queue_lock:
+            entries = self._read_usage_queue()
+            entries.append(entry)
+            self._write_usage_queue_atomic(entries)
+
+    async def _usage_queue_update(self, qid: str, **fields) -> dict | None:
+        async with self._usage_queue_lock:
+            entries = self._read_usage_queue()
+            updated = None
+            for e in entries:
+                if e.get("qid") == qid:
+                    e.update(fields)
+                    updated = e
+                    break
+            if updated is not None:
+                self._write_usage_queue_atomic(entries)
+            return updated
+
+    async def _usage_queue_remove(self, qid: str) -> dict | None:
+        async with self._usage_queue_lock:
+            entries = self._read_usage_queue()
+            removed = None
+            kept: list[dict] = []
+            for e in entries:
+                if removed is None and e.get("qid") == qid:
+                    removed = e
+                    continue
+                kept.append(e)
+            if removed is not None:
+                self._write_usage_queue_atomic(kept)
+            return removed
+
+    async def _usage_queue_promote_expired(self, now_utc: datetime) -> None:
+        """Flip awaiting_choice -> queued for any entries whose run_at has passed.
+
+        This is the "ignoring the prompt = queuing" semantics. Runs atomically
+        so the periodic loop never races with live user clicks on the same qid.
+        """
+        async with self._usage_queue_lock:
+            entries = self._read_usage_queue()
+            changed = False
+            for e in entries:
+                if e.get("status") != "awaiting_choice":
+                    continue
+                run_at = _parse_iso(e.get("run_at"))
+                if run_at and run_at <= now_utc:
+                    e["status"] = "queued"
+                    changed = True
+            if changed:
+                self._write_usage_queue_atomic(entries)
+
+    async def _usage_queue_pop_due(self, now_utc: datetime) -> list[dict]:
+        """Remove and return all status==queued entries whose run_at has passed."""
+        async with self._usage_queue_lock:
+            entries = self._read_usage_queue()
+            due: list[dict] = []
+            kept: list[dict] = []
+            for e in entries:
+                if e.get("status") == "queued":
+                    run_at = _parse_iso(e.get("run_at"))
+                    if run_at and run_at <= now_utc:
+                        due.append(e)
+                        continue
+                kept.append(e)
+            if due:
+                self._write_usage_queue_atomic(kept)
+            return due
+
+    async def _fire_due_entries(self, now_utc: datetime) -> None:
+        """Shared body: promote expired awaiting_choice, then pop + replay queued."""
+        await self._usage_queue_promote_expired(now_utc)
+        due = await self._usage_queue_pop_due(now_utc)
+        if not due:
+            return
+        log.info("Usage queue: firing %d due entries", len(due))
+        for entry in due:
+            # Clear the stale gate message (best-effort) so its buttons don't
+            # linger as "already resolved" traps once the prompt is running.
+            await self._retire_gate_message(entry)
+            try:
+                await self._replay_to_thread(
+                    entry["channel_id"], entry["prompt"],
+                    repo_name=entry.get("repo_name"),
+                )
+            except Exception:
+                log.exception(
+                    "usage_queue replay failed for %s", entry.get("qid"),
+                )
+
+    async def _retire_gate_message(self, entry: dict) -> None:
+        """Edit the gate-prompt message to reflect that it's been fired."""
+        msg_id = entry.get("message_id")
+        ch_id = entry.get("channel_id")
+        if not msg_id or not ch_id:
+            return
+        try:
+            channel = self.get_channel(int(ch_id))
+            if channel is None:
+                channel = await self.fetch_channel(int(ch_id))
+            msg = await channel.fetch_message(int(msg_id))
+            await msg.edit(content="▶ Window ended — running now.", view=None)
+        except Exception:
+            pass  # message deleted / no access — purely cosmetic
+
+    async def _usage_queue_startup_drain(self) -> None:
+        """Fire any entries overdue at boot — runs once before the periodic loop."""
+        if not await self._wait_for_ready("usage_queue_startup_drain"):
+            return
+        await self._fire_due_entries(datetime.now(timezone.utc))
+
+    async def _usage_queue_replay_loop(self) -> None:
+        """Periodic tick (60s). Runs AFTER startup drain completes."""
+        while True:
+            await asyncio.sleep(60)
+            try:
+                await self._fire_due_entries(datetime.now(timezone.utc))
+            except Exception:
+                log.exception("usage_queue_replay_loop iteration failed")
 
     def _resolve_user_forum_context(
         self, interaction: discord.Interaction,
@@ -591,6 +828,19 @@ class ClaudeBot(discord.Client):
         elif not getattr(self, '_notifier_warning_logged', False):
             log.warning("Usage limit notifier disabled — DISCORD_USER_ID not set in .env")
             self._notifier_warning_logged = True
+
+        # Usage-queue startup drain + periodic replay loop.  Startup drain
+        # runs first and awaits completion so the periodic loop cannot race
+        # with it on the same entries.
+        existing_replay = getattr(self, '_usage_queue_task', None)
+        if not existing_replay or existing_replay.done():
+            async def _usage_queue_main() -> None:
+                try:
+                    await self._usage_queue_startup_drain()
+                except Exception:
+                    log.exception("usage_queue_startup_drain failed")
+                await self._usage_queue_replay_loop()
+            self._usage_queue_task = asyncio.create_task(_usage_queue_main())
 
         # Clean up stale worktrees/branches from interrupted autopilot chains
         asyncio.create_task(self._startup_worktree_cleanup())

@@ -22,6 +22,29 @@ _START_MSG = (
 _END_MSG = "✅ Anthropic usage limits lifted — it's past 11am PT. You can work freely now."
 
 
+def is_usage_limit_active(now_utc: datetime | None = None) -> bool:
+    """True during weekday 5am-11am PT."""
+    now_pt = (now_utc or datetime.now(timezone.utc)).astimezone(_PT)
+    return now_pt.weekday() < 5 and _START_HOUR <= now_pt.hour < _END_HOUR
+
+
+def next_window_end_utc(now_utc: datetime | None = None) -> datetime:
+    """UTC datetime of the next 11am PT boundary.
+
+    If currently inside the weekday window, returns today's 11am PT.
+    Otherwise returns the next weekday's 11am PT.
+    """
+    now_utc = now_utc or datetime.now(timezone.utc)
+    now_pt = now_utc.astimezone(_PT)
+    end_today = now_pt.replace(hour=_END_HOUR, minute=0, second=0, microsecond=0)
+    if now_pt.weekday() < 5 and now_pt < end_today:
+        return end_today.astimezone(timezone.utc)
+    d = now_pt.date() + timedelta(days=1)
+    while d.weekday() >= 5:
+        d += timedelta(days=1)
+    return datetime(d.year, d.month, d.day, _END_HOUR, 0, 0, tzinfo=_PT).astimezone(timezone.utc)
+
+
 def _next_boundary(now_pt: datetime) -> tuple[datetime, str]:
     """Return the next start/end boundary datetime (in PT) and its message."""
     today_start = now_pt.replace(hour=_START_HOUR, minute=0, second=0, microsecond=0)
