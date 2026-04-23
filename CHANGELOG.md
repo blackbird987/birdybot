@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.79.0 — Sibling awareness with origin + age (2026-04-23)
+
 ### Changed
 - Sibling-session blurb in the appended system prompt now shows origin label + running age (e.g. `[t-200] plan 3m — fix thing`) so each session can tell at a glance what its parallels are working on. Zombie RUNNING instances (age > 2h) and sub-5s startup blips are filtered out. Malformed or legacy tz-naive `created_at` values degrade per-sibling (naive assumed UTC) instead of crashing `run_instance`. Multi-line prompts are whitespace-collapsed so they render as one line. Fixes pre-existing double-bracket rendering (`[[t-200]]`) from the id template.
 
