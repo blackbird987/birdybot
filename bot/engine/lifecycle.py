@@ -146,19 +146,59 @@ def _origin_label(origin: InstanceOrigin) -> str:
     return origin.value.replace("_", "-") + " "
 
 
+# Siblings older than this are treated as zombie RUNNING instances (crashed
+# runner, skipped finalize) and hidden. Sub-5s entries are filtered too —
+# short-lived RUNNING blips from other threads' turn boundaries.
+_SIBLING_MAX_AGE_SEC = 2 * 3600
+_SIBLING_MIN_AGE_SEC = 5
+
+
+def _format_age(seconds: float) -> str:
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)}h"
+    return f"{int(seconds // 86400)}d"
+
+
 def get_sibling_summary(store, inst: Instance) -> str | None:
     """Scan running instances in same repo, return summary for system prompt."""
     if not inst.repo_name:
         return None
-    siblings = [
-        i for i in store.list_instances()
-        if i.repo_name == inst.repo_name
-        and i.id != inst.id
-        and i.status == InstanceStatus.RUNNING
-    ]
+    now = datetime.now(timezone.utc)
+    siblings: list[tuple[Instance, float]] = []
+    for i in store.list_by_status(InstanceStatus.RUNNING):
+        if i.repo_name != inst.repo_name:
+            continue
+        if i.id == inst.id:
+            continue
+        try:
+            started = datetime.fromisoformat(i.created_at)
+        except (ValueError, TypeError):
+            continue
+        # Legacy state.json entries may be tz-naive; assume UTC so the
+        # subtraction below doesn't crash (aware - naive = TypeError).
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        age_sec = (now - started).total_seconds()
+        if age_sec < _SIBLING_MIN_AGE_SEC or age_sec > _SIBLING_MAX_AGE_SEC:
+            continue
+        siblings.append((i, age_sec))
+
     if not siblings:
         return None
-    lines = [f"[{s.display_id()}] {s.prompt[:60]}" for s in siblings[:8]]
+    siblings.sort(key=lambda t: t[1], reverse=True)  # oldest first
+
+    lines = []
+    for s, age_sec in siblings[:8]:
+        label = s.origin.value.replace("_", "-")
+        age = _format_age(age_sec)
+        # Collapse whitespace so multi-line prompts don't break the blurb
+        # into phantom sibling lines when rendered in the system prompt.
+        snippet = " ".join(s.prompt.split())[:60]
+        lines.append(f"{s.display_id()} {label} {age} — {snippet}")
     return "Other active sessions in this repo:\n" + "\n".join(lines)
 
 
