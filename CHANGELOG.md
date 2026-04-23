@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.78.0 — Usage-limit gate (2026-04-23)
+
 ### Added
 - Usage-limit gate: when a forum-thread message lands during Anthropic's weekday 5–11am PT throttle window, the bot replies with **Run now / Queue for 11am PT / Cancel** buttons instead of auto-spawning a session. Queued prompts persist to `data/usage_queue.json` at render time (survives reboots) and auto-fire at the window boundary. Prompts the user never acts on are promoted to queued when the window ends, so messages can be stacked passively. On startup, any overdue entries fire immediately before the periodic loop resumes. Queue file writes are atomic (tmp + `os.replace`) and serialized through an `asyncio.Lock`.
 
