@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- Diagnostic logging in `on_message` for incoming attachments and empty-content messages — dumps filename/size/content_type per attachment, and flags/type/snapshots/embeds for empty messages. Investigative aid for paste-as-file content the bot was failing to read.
+
 ## v0.78.0 — Usage-limit gate (2026-04-23)
 
 ### Added

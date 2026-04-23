@@ -916,6 +916,20 @@ class ClaudeBot(discord.Client):
         # Handle file attachments
         IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
         AUDIO_EXTS = {".ogg", ".mp3", ".wav", ".m4a", ".webm"}
+        if message.attachments:
+            log.info(
+                "Message has %d attachment(s): %s",
+                len(message.attachments),
+                [(a.filename, a.size, a.content_type) for a in message.attachments],
+            )
+        elif not text:
+            log.info(
+                "Empty message (flags=%s, type=%s, snapshots=%s, embeds=%d)",
+                message.flags.value,
+                message.type,
+                bool(getattr(message, "message_snapshots", None)),
+                len(message.embeds),
+            )
         for att in message.attachments:
             if not att.filename:
                 continue
