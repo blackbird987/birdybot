@@ -61,3 +61,4 @@
 - [ ] [Performance] Sequential chain processing blocks independent threads unnecessarily (Medium)
 - [ ] [Reliability] Archived thread guard for chain resume (Medium)
 - [ ] [Reliability] Mid-file JSONL corruption disables branching (Low)
+- [ ] [DRY/Cleanup] Reuse existing age/truncation helpers if present (Low)
