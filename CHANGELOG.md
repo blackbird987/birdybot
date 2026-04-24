@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.79.1 — Bug fixes (2026-04-24)
+
 ### Fixed
 - Cooldown retry loop O(n²) scalability bug: replaced full instance scan per cycle with pre-built session_id lookup dict, reducing per-iteration complexity from O(n²) to O(n).
 - Age calculation in startup worktree cleanup: added check for negative age (system clock skew) to avoid silent misbehavior when timestamps are corrupted or in the future.
