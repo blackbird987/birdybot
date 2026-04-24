@@ -623,6 +623,19 @@ async def run() -> None:
             try:
                 now = dt.now(tz_mod.utc)
                 all_instances = store.list_instances(all_=True)
+
+                # Build a fast lookup: session_id -> [completed instances by created_at desc]
+                # to avoid O(n²) search for each cooldown instance
+                completed_by_session: dict[str, list] = {}
+                for s in all_instances:
+                    if s.status == InstanceStatus.COMPLETED and s.session_id:
+                        if s.session_id not in completed_by_session:
+                            completed_by_session[s.session_id] = []
+                        completed_by_session[s.session_id].append(s)
+                # Sort by created_at descending so most recent is first
+                for sids in completed_by_session.values():
+                    sids.sort(key=lambda x: x.created_at or "", reverse=True)
+
                 for inst in all_instances:
                     if not inst.cooldown_retry_at or not inst.cooldown_channel_id:
                         continue
@@ -635,12 +648,14 @@ async def run() -> None:
                     if now >= retry_at:
                         # Skip if session already has completed work after this instance
                         # (e.g. user switched accounts and finished the task manually)
-                        if inst.session_id and any(
-                            s.session_id == inst.session_id
-                            and s.status == InstanceStatus.COMPLETED
-                            and s.created_at > inst.created_at
-                            for s in all_instances
-                        ):
+                        # O(1) lookup via pre-built dict instead of O(n) scan per instance
+                        completed_after = (
+                            inst.session_id
+                            and inst.session_id in completed_by_session
+                            and completed_by_session[inst.session_id]
+                            and (completed_by_session[inst.session_id][0].created_at or "") > (inst.created_at or "")
+                        )
+                        if completed_after:
                             log.info("Skipping stale cooldown retry for %s — session %s already completed",
                                      inst.id, inst.session_id)
                             inst.cooldown_retry_at = None

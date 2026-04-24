@@ -1847,6 +1847,12 @@ class ClaudeRunner:
                 messages.append(f"skip {branch_name}: no timestamp — use /merge manually")
                 continue
             age_hours = (now - ref_dt).total_seconds() / 3600
+            # Guard against future dates (system clock wrong) or excessively old instances
+            if age_hours < 0:
+                messages.append(
+                    f"skip {branch_name}: timestamp in future ({-age_hours:.0f}h) — check system clock"
+                )
+                continue
             if age_hours > MAX_STALE_AGE_HOURS:
                 messages.append(
                     f"skip {branch_name}: stale ({age_hours:.0f}h old) — use /merge manually"

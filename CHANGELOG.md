@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+- Cooldown retry loop O(n²) scalability bug: replaced full instance scan per cycle with pre-built session_id lookup dict, reducing per-iteration complexity from O(n²) to O(n).
+- Age calculation in startup worktree cleanup: added check for negative age (system clock skew) to avoid silent misbehavior when timestamps are corrupted or in the future.
+- Session index rebuild exception handling: broadened catch from `OSError` to `Exception` to handle all failure modes uniformly.
+
 ## v0.78.1 — Attachment diagnostics (2026-04-23)
 
 ### Added
