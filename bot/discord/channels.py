@@ -16,6 +16,7 @@ log = logging.getLogger(__name__)
 CONTROL_ROOM_NAME = "⚙️ Control Room"
 ARCHIVE_NAME = "🗄 Archive"
 MONITOR_NAME = "📊 Monitor"
+VERIFY_BOARD_NAME = "verify-board"
 
 
 def _private_overwrites(
@@ -647,6 +648,30 @@ def build_control_view(
         row=overflow_row,
     ))
     return view
+
+
+async def create_verify_board_post(
+    forum: discord.ForumChannel,
+    proj,
+    guild_id: int = 0,
+) -> tuple[discord.Thread, discord.Message]:
+    """Create the pinned verify-board thread inside a repo forum."""
+    from bot.discord import verify_board as vb_mod
+
+    embed = vb_mod.build_board_embed(proj, guild_id)
+    view = vb_mod.build_board_view(proj.repo_name, proj)
+
+    result = await forum.create_thread(
+        name=VERIFY_BOARD_NAME, embed=embed, view=view,
+    )
+    thread = result.thread
+    msg = result.message
+    try:
+        await thread.edit(pinned=True)
+    except Exception:
+        log.debug("Could not pin verify-board thread", exc_info=True)
+    log.info("Created verify-board %s in forum %s", thread.id, forum.name)
+    return thread, msg
 
 
 async def create_repo_control_post(

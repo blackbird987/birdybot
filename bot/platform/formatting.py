@@ -301,6 +301,7 @@ def action_button_specs(
                 ButtonSpec("Merge", f"merge:{iid}"),
                 ButtonSpec("Discard", f"discard:{iid}"),
             ])
+        rows.append([ButtonSpec("Send to Verify Board", f"verify_board:{iid}")])
         return rows
 
     if instance.status == InstanceStatus.COMPLETED:
@@ -460,6 +461,12 @@ def action_button_specs(
         if instance.session_id and not share_added:
             expand_row.append(ButtonSpec("\U0001f4ce Share", f"share:{iid}"))
         rows.append(expand_row)
+
+    # Send to Verify Board \u2014 for verify/commit completions, when there's room
+    if (instance.status == InstanceStatus.COMPLETED
+            and instance.origin in (InstanceOrigin.VERIFY, InstanceOrigin.COMMIT)
+            and len(rows) < 5):
+        rows.append([ButtonSpec("Send to Verify Board", f"verify_board:{iid}")])
 
     return rows
 

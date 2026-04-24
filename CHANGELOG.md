@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- Verify Board (Phase 1, manual): per-repo pinned `verify-board` thread with a single edited message showing three lanes — **NEEDS CHECK / CLAIMED / DONE TODAY** — plus header counts (`N pending · N claimed · N done (24h)`). Action row: **Mark done / Claim / Dismiss / Add / History**. Bulk status changes via ephemeral select menu (Discord 25-option cap). Add modal accepts ≤120 chars. Origin backlinks render as passive Discord URLs (`← thread-name`); never fetches the origin thread, avoiding accidental unarchive. Items live in `ForumProject.verify_items` (JSON-safe dicts). All mutations go through `ForumManager._mutate_verify(repo, mutator)` — repo lock held only for in-memory mutate + save, then `refresh_verify_board` fires as a background task outside the lock so taps stay responsive. Auto-pruned to 7 days / 50 resolved cap on every refresh. `Send to Verify Board` button appears on completed VERIFY/DONE/COMMIT result embeds, opening the Add modal pre-filled with the session summary and origin backlink. Reconcile loop creates the board on every startup for repos missing one, including auto-follow. Phase 2 (auto-parse `\`\`\`verify` blocks at session end) deferred.
+
 ## v0.79.1 — Bug fixes (2026-04-24)
 
 ### Fixed
