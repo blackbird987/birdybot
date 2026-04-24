@@ -178,6 +178,11 @@ class RequestContext:
     # Usage-limit gate: if set and returns True, the engine skips normal execution
     # (the platform handled the message by offering Run/Queue/Cancel buttons).
     offer_usage_limit_choice: Callable[["RequestContext", str], Awaitable[bool]] | None = None
+    # Image attachments saved for this request. The platform layer owns the
+    # file lifecycle; the gate sets images_claimed=True to hand off ownership
+    # to the usage_queue entry, which then owns cleanup via replay or Cancel.
+    pending_image_paths: list[str] = field(default_factory=list)
+    images_claimed: bool = False  # True once gate has persisted paths to queue
 
     @property
     def effective_mode(self) -> str:

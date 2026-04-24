@@ -522,6 +522,8 @@ async def _handle_usage_action(
     if action == "usage_cancel":
         removed = await bot._usage_queue_remove(qid)
         if removed:
+            from bot.discord.bot import _unlink_image_paths
+            _unlink_image_paths(removed.get("image_paths", []), site="cancel")
             if msg:
                 try:
                     await msg.edit(content="Cancelled.", view=None)
@@ -569,11 +571,23 @@ async def _handle_usage_action(
     channel_id = removed["channel_id"]
     prompt = removed["prompt"]
     repo_name = removed.get("repo_name")
+    image_paths = removed.get("image_paths", [])
+    # Quiet the gate for this thread for the rest of the throttle window —
+    # one Run Now click consents to bypass everything until the window ends.
+    from bot.discord.usage_notifier import next_window_end_utc
+    bot._usage_gate_bypass[channel_id] = next_window_end_utc()
+
+    async def _run_and_cleanup() -> None:
+        from bot.discord.bot import _strip_missing_image_refs, _unlink_image_paths
+        cleaned = _strip_missing_image_refs(prompt, image_paths)
+        try:
+            await bot._replay_to_thread(channel_id, cleaned, repo_name=repo_name)
+        finally:
+            _unlink_image_paths(image_paths, site="run_now")
+
     # Fire-and-forget so the interaction handler returns promptly; the
     # lock inside _replay_to_thread serializes any concurrent spawn.
-    asyncio.create_task(
-        bot._replay_to_thread(channel_id, prompt, repo_name=repo_name),
-    )
+    asyncio.create_task(_run_and_cleanup())
 
 
 async def _handle_repo_switch(
