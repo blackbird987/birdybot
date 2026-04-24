@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.80.0 — Image-attachment lifecycle + usage-gate quieting (2026-04-25)
+
 ### Fixed
 - Image attachment files leaked when a message hit an early-return path before the `try`/`finally` cleanup block (voice transcription failure after an image was saved, archive channels, control-room threads, "select a repo tag" prompt, etc.). Moved the `try:` to wrap the entire `on_message` body so every return path runs the image-cleanup `finally`.
 - Usage-limit gate re-prompted on every message inside an active throttle window. A "Run now" click now sets a per-channel bypass that quiets the gate for the rest of the window (auto-prunes when the throttle ends).
