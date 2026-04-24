@@ -718,6 +718,11 @@ class ClaudeRunner:
         if origin_key == "build" and self._diagnostics_enabled(instance):
             parts.append(config.DIAGNOSTIC_GUIDANCE)
 
+        # Verify Board emission guidance — opt-in per build-origin session.
+        # Keeps prompt footprint off plan/explore steps where items never apply.
+        if origin_key in ("build", "build_and_ship", "apply_revisions", "done"):
+            parts.append(config.VERIFY_BOARD_GUIDANCE)
+
         # Plan mode: instruct Claude not to modify files, output a plan instead
         if instance.mode == "plan":
             parts.append(config.PLAN_MODE_CONSTRAINT)

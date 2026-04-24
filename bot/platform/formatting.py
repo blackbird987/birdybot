@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 
 from bot import config
 from bot.claude.types import CODE_CHANGE_TOOLS, PLAN_ORIGINS, Instance, InstanceOrigin, InstanceStatus, Schedule
+from bot.engine.verify import strip_verify_blocks
 from bot.platform.base import ButtonSpec
 
 
@@ -240,6 +241,14 @@ _WORKFLOW_ORIGINS = frozenset({
     InstanceOrigin.VERIFY, InstanceOrigin.BUILD_AND_SHIP,
 })
 
+# Origins that plausibly produce things a human needs to eyeball in-app —
+# drives whether `Send to Verify Board` button appears on the result embed.
+_VERIFY_BOARD_ORIGINS = frozenset({
+    InstanceOrigin.VERIFY, InstanceOrigin.DONE, InstanceOrigin.COMMIT,
+    InstanceOrigin.BUILD, InstanceOrigin.BUILD_AND_SHIP,
+    InstanceOrigin.APPLY_REVISIONS,
+})
+
 
 def mode_name(mode: str) -> str:
     """Human-readable mode name."""
@@ -461,6 +470,16 @@ def action_button_specs(
             expand_row.append(ButtonSpec("\U0001f4ce Share", f"share:{iid}"))
         rows.append(expand_row)
 
+    # "Send to Verify Board" \u2014 offered on meaningful completions that a human
+    # might want to eyeball. Gated on origin to keep it off trivial results.
+    # Dropped silently when all 5 View rows are used.
+    if (instance.status == InstanceStatus.COMPLETED
+            and instance.origin in _VERIFY_BOARD_ORIGINS
+            and len(rows) < 5):
+        rows.append([
+            ButtonSpec("Send to Verify Board", f"verify_board:{iid}"),
+        ])
+
     return rows
 
 
@@ -531,9 +550,14 @@ def format_result_md(instance: Instance) -> str:
 
 
 def format_expanded_result_md(instance: Instance, result_text: str, budget: int = 3900) -> str:
-    """Format full result text for expanded view, truncated to budget."""
+    """Format full result text for expanded view, truncated to budget.
+
+    Strips ```verify-board``` fences — they're instructional markers
+    already parsed into the repo's Verify Board, not content the user
+    needs to re-read in the Expand view.
+    """
     header = f"**{instance.display_id()}**\n\n"
-    text = redact_secrets(result_text)
+    text = strip_verify_blocks(redact_secrets(result_text))
 
     if len(text) > budget:
         cut = text.rfind('\n', 0, budget)
