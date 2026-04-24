@@ -18,7 +18,7 @@ import asyncio
 import json
 import logging
 import os
-import tempfile
+import re
 import time as _time
 import uuid
 from datetime import datetime, timezone
@@ -64,6 +64,56 @@ def _parse_iso(s: str | None) -> datetime | None:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt
+
+
+def _unlink_image_paths(paths: list[str], *, site: str) -> int:
+    """Best-effort delete each path; log a single line with the count.
+
+    Only counts files that actually existed and got removed — already-missing
+    paths return cleanly without inflating the count.
+    """
+    deleted = 0
+    for p in paths or []:
+        try:
+            Path(p).unlink()
+            deleted += 1
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+    if deleted:
+        log.info("Image cleanup [%s]: deleted %d files", site, deleted)
+    return deleted
+
+
+def _strip_missing_image_refs(prompt: str, image_paths: list[str]) -> str:
+    """Drop "saved at `<path>`" / "screenshot at `<path>`" clauses for paths
+    that no longer exist on disk.  Falls back to noop if every file is intact.
+
+    A queue entry can outlive its image files (sweep, manual cleanup, disk
+    rotation).  Without this scrub the replay sends Claude a path that fails
+    its Read tool call silently — better to drop the path and let Claude
+    respond to whatever text remains.
+    """
+    if not image_paths:
+        return prompt
+    missing = [p for p in image_paths if not Path(p).exists()]
+    if not missing:
+        return prompt
+    cleaned = prompt
+    for p in missing:
+        esc = re.escape(p)
+        cleaned = re.sub(r"\s*saved at `" + esc + r"`", "", cleaned)
+        cleaned = re.sub(
+            r"Analyze this screenshot at `" + esc + r"`\.\s*",
+            "[image no longer available] ",
+            cleaned,
+        )
+    log.warning(
+        "Replay: %d image file(s) missing for queued prompt — stripped path refs",
+        len(missing),
+    )
+    return cleaned
 
 
 class _AutoDeleteMessenger:
@@ -147,6 +197,9 @@ class ClaudeBot(discord.Client):
         self._voice_enabled: bool = bool(config.OPENAI_API_KEY)
         # Serializes all read/modify/write ops on config.USAGE_QUEUE_FILE.
         self._usage_queue_lock = asyncio.Lock()
+        # channel_id -> window_end_utc; bypass the usage-limit gate while now < end.
+        # In-memory by design — a reboot mid-window means one more prompt then quiet.
+        self._usage_gate_bypass: dict[str, datetime] = {}
         self._setup_commands()
 
     @property
@@ -466,6 +519,16 @@ class ClaudeBot(discord.Client):
         )
         if not is_usage_limit_active():
             return False
+        # Per-channel bypass set by Run Now — quiets the gate for the rest of
+        # the throttle window in this thread.  Checked AFTER is_usage_limit_active
+        # so stale entries auto-prune once Anthropic lifts the throttle (the
+        # early-return above means we never even read the map).
+        bypass_end = self._usage_gate_bypass.get(ctx.channel_id)
+        now = datetime.now(timezone.utc)
+        if bypass_end and now < bypass_end:
+            return False
+        if bypass_end:  # expired — prune inline
+            self._usage_gate_bypass.pop(ctx.channel_id, None)
         # Only gate forum-thread messages.  Non-forum channels have no
         # replay path (_replay_to_thread returns False) and queued entries
         # would be orphaned.
@@ -485,6 +548,7 @@ class ClaudeBot(discord.Client):
             "repo_name": ctx.repo_name,
             "user_id": ctx.user_id,
             "user_name": ctx.user_name,
+            "image_paths": list(ctx.pending_image_paths),
         }
         # Persist before send so a reboot between render and click cannot
         # silently drop the user's prompt.
@@ -523,6 +587,11 @@ class ClaudeBot(discord.Client):
             return False
 
         await self._usage_queue_update(qid, message_id=str(msg.id))
+        # Hand off image-file lifecycle to the queue entry — only after both
+        # the persist AND the Discord send succeeded.  If we fell through to
+        # the except path above, this stays False and on_message's finally
+        # cleans up the files.
+        ctx.images_claimed = True
         return True
 
     # --- Persistent queue helpers (atomic, lock-serialized) ---
@@ -624,15 +693,19 @@ class ClaudeBot(discord.Client):
             # Clear the stale gate message (best-effort) so its buttons don't
             # linger as "already resolved" traps once the prompt is running.
             await self._retire_gate_message(entry)
+            prompt = _strip_missing_image_refs(
+                entry.get("prompt", ""), entry.get("image_paths", []),
+            )
             try:
                 await self._replay_to_thread(
-                    entry["channel_id"], entry["prompt"],
+                    entry["channel_id"], prompt,
                     repo_name=entry.get("repo_name"),
                 )
             except Exception:
                 log.exception(
                     "usage_queue replay failed for %s", entry.get("qid"),
                 )
+            _unlink_image_paths(entry.get("image_paths", []), site="replay")
 
     async def _retire_gate_message(self, entry: dict) -> None:
         """Edit the gate-prompt message to reflect that it's been fired."""
@@ -654,6 +727,38 @@ class ClaudeBot(discord.Client):
         if not await self._wait_for_ready("usage_queue_startup_drain"):
             return
         await self._fire_due_entries(datetime.now(timezone.utc))
+        await self._sweep_pending_images()
+
+    async def _sweep_pending_images(self) -> None:
+        """Belt-and-suspenders: remove orphaned files in PENDING_IMAGES_DIR.
+
+        A file is orphaned if no live queue entry references it.  We only
+        delete files older than 48h to give in-flight requests breathing room
+        between save-time and queue-append.
+        """
+        try:
+            referenced: set[str] = set()
+            async with self._usage_queue_lock:
+                for e in self._read_usage_queue():
+                    for p in e.get("image_paths", []) or []:
+                        referenced.add(str(Path(p).resolve()))
+            cutoff = _time.time() - 48 * 3600
+            deleted = 0
+            for f in config.PENDING_IMAGES_DIR.iterdir():
+                if not f.is_file():
+                    continue
+                if str(f.resolve()) in referenced:
+                    continue
+                try:
+                    if f.stat().st_mtime < cutoff:
+                        f.unlink(missing_ok=True)
+                        deleted += 1
+                except Exception:
+                    pass
+            if deleted:
+                log.info("Image cleanup [sweep]: deleted %d orphaned files", deleted)
+        except Exception:
+            log.exception("Pending-images sweep failed")
 
     async def _usage_queue_replay_loop(self) -> None:
         """Periodic tick (60s). Runs AFTER startup drain completes."""
@@ -911,7 +1016,8 @@ class ClaudeBot(discord.Client):
             msg_access = AccessResult(allowed=True, is_owner=True)
 
         text = message.content.strip()
-        _temp_files: list[str] = []
+        _image_paths: list[str] = []
+        ctx = None  # set later in forum-thread / unmapped-channel branches
 
         # Handle file attachments
         IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
@@ -976,17 +1082,16 @@ class ClaudeBot(discord.Client):
 
             elif ext in IMAGE_EXTS and att.size <= 10_000_000:
                 try:
-                    fd, tmp_path = tempfile.mkstemp(suffix=ext)
-                    os.close(fd)
+                    img_path = config.PENDING_IMAGES_DIR / f"{uuid.uuid4().hex}{ext}"
                     file_bytes = await att.read()
-                    Path(tmp_path).write_bytes(file_bytes)
-                    _temp_files.append(tmp_path)
-                    img_prompt = f"[Image: {att.filename} saved at {tmp_path}]"
+                    img_path.write_bytes(file_bytes)
+                    _image_paths.append(str(img_path))
+                    img_prompt = f"[Image: {att.filename} saved at `{img_path}`]"
                     if text:
                         text = f"{text}\n\n{img_prompt}"
                     else:
-                        text = f"Analyze this screenshot at {tmp_path}. Describe what you see."
-                    log.info("Saved image attachment %s (%d bytes) to %s", att.filename, att.size, tmp_path)
+                        text = f"Analyze this screenshot at `{img_path}`. Describe what you see."
+                    log.info("Saved image attachment %s (%d bytes) to %s", att.filename, att.size, img_path)
                 except Exception:
                     log.warning("Failed to save image %s", att.filename, exc_info=True)
 
@@ -1118,6 +1223,7 @@ class ClaudeBot(discord.Client):
                                         access_result=msg_access)
                         ctx.user_id = str(message.author.id)
                         ctx.user_name = message.author.display_name
+                        ctx.pending_image_paths = list(_image_paths)
                         self._forums.attach_session_callbacks(ctx, info, channel_id)
                         user_text = text  # preserve before tweet enrichment for title/topic
                         try:
@@ -1143,14 +1249,25 @@ class ClaudeBot(discord.Client):
             ctx = self._ctx(channel_id, access_result=msg_access)
             ctx.user_id = str(message.author.id)
             ctx.user_name = message.author.display_name
+            ctx.pending_image_paths = list(_image_paths)
             try:
                 text = await enrich_with_tweets(text)
             except Exception:
                 log.warning("Tweet enrichment failed, continuing with original text", exc_info=True)
             await commands.on_text(ctx, text)
         finally:
-            for tmp in _temp_files:
-                Path(tmp).unlink(missing_ok=True)
+            # Images claimed by the usage-limit gate are owned by the queue
+            # entry from here on (cleanup happens at replay or Cancel).
+            if ctx is None or not ctx.images_claimed:
+                deleted = 0
+                for p in _image_paths:
+                    try:
+                        Path(p).unlink(missing_ok=True)
+                        deleted += 1
+                    except Exception:
+                        pass
+                if deleted:
+                    log.info("Image cleanup [on_message]: deleted %d files", deleted)
 
     async def _route_lobby_message(
         self, message: discord.Message, text: str, repo_name: str | None,

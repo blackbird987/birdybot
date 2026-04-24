@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## v0.80.0 — Image-attachment lifecycle + usage-gate quieting (2026-04-25)
+
+### Fixed
+- Image attachment files leaked when a message hit an early-return path before the `try`/`finally` cleanup block (voice transcription failure after an image was saved, archive channels, control-room threads, "select a repo tag" prompt, etc.). Moved the `try:` to wrap the entire `on_message` body so every return path runs the image-cleanup `finally`.
+- Usage-limit gate re-prompted on every message inside an active throttle window. A "Run now" click now sets a per-channel bypass that quiets the gate for the rest of the window (auto-prunes when the throttle ends).
+- Image temp files were deleted before "Run now" clicks could replay the queued prompt (`tempfile.mkstemp` cleanup raced with the gate). Switched to persistent `data/pending_images/` storage with explicit lifecycle handoff via `RequestContext.images_claimed`.
+- `_unlink_image_paths` logged count was inflated: `unlink(missing_ok=True)` made every iteration count as deleted regardless of whether a file actually existed. Now uses plain `unlink()` with `FileNotFoundError` swallowed.
+
+### Added
+- `_strip_missing_image_refs` scrubs queued prompts of file-path clauses for images that no longer exist on disk, so replays after a 48h sweep don't hand Claude broken paths.
+- `_sweep_pending_images` startup belt-and-suspenders cleanup of orphaned image files older than 48h in `data/pending_images/`.
+
+### Changed
+- `on_message`'s finally now calls the shared `_unlink_image_paths` helper instead of inlining its own loop.
+
 ## v0.79.1 — Bug fixes (2026-04-24)
 
 ### Fixed

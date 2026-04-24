@@ -157,9 +157,11 @@ REBOOT_REQUEST_FILE: Path = DATA_DIR / "reboot_request.json"
 DRAIN_QUEUE_FILE: Path = DATA_DIR / "drain_queue.json"
 PENDING_PROMPTS_FILE: Path = DATA_DIR / "pending_prompts.json"
 USAGE_QUEUE_FILE: Path = DATA_DIR / "usage_queue.json"
+PENDING_IMAGES_DIR: Path = DATA_DIR / "pending_images"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
+PENDING_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
 # System prompt appended via --append-system-prompt
 MOBILE_HINT = (
