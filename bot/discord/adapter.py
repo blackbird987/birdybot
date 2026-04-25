@@ -422,6 +422,20 @@ class DiscordMessenger:
         if forums:
             await forums.refresh_control_room(repo_name)
 
+    async def is_conversation_closed(self, channel_id: str) -> bool:
+        """Return True if the Discord thread is archived (or no longer reachable)."""
+        try:
+            ch = await self._resolve_channel(channel_id)
+        except Exception:
+            return False
+        if not ch:
+            # Channel can't be resolved — treat as effectively closed so we
+            # don't ping into the void.
+            return True
+        if isinstance(ch, discord.Thread):
+            return bool(getattr(ch, "archived", False))
+        return False
+
     async def close_conversation(self, channel_id: str, *, skip_mention: bool = False) -> None:
         """Archive a Discord forum thread, optionally mentioning participants.
 

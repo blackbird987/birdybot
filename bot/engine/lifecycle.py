@@ -462,10 +462,12 @@ def finalize_run(ctx: RequestContext, inst: Instance, result: RunResult) -> None
     # Append to persistent session history log (best-effort)
     _log_history(ctx, inst, result.result_text)
 
-    # Run session evaluation (best-effort, never blocks)
+    # Run session evaluation (best-effort, never blocks).
+    # evaluate_instance reads result text from inst.result_file so we don't
+    # need to plumb result_text through.
     try:
         from bot.engine.eval import evaluate_instance
-        evaluate_instance(inst, result.result_text)
+        evaluate_instance(inst)
     except Exception:
         log.debug("Eval failed for %s", inst.id, exc_info=True)
 

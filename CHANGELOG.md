@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## v0.85.0 — Deferred review items: divergence + read-only triage + ping/persistence cleanup (2026-04-25)
+
+### Fixed
+- Startup auto-merge of stale `done` instances now runs a divergence safety check before merging. Skips diverged branches (ahead/behind both nonzero), missing source/target branches, treats already-merged branches as no-op (and clears their stale state), and logs every per-instance decision.
+- Triage subagent (medium/low revision triage) is now hard-pinned to a read-only permission floor regardless of parent session mode. Added `SpawnConfig.permission_mode` + `_enforce_readonly_floor` named hook that clamps `mode="explore"` and `bash_policy="none"`. The Claude provider now respects `bash_policy="none"` for owner sessions too (previously only enforced on non-owner sessions), so a build-mode parent can no longer leak Bash file-write capability into the triage subagent.
+- Autopilot mention to closed/auto-merged threads suppressed: `_notify_user` now consults `Messenger.is_conversation_closed` and skips the `@user` ping when the thread is archived. Discord adapter implements the check via `discord.Thread.archived`.
+- Forum projects dict no longer mutated outside `_forum_lock`. Reconcile-forums replacement of `_forum_projects` now happens under the lock; race-free sweep of stale mappings. The paired "lock-await contention" item was investigated and intentionally NOT changed: a tighter critical section that excludes the Discord create call introduces an orphan-resource race (two coroutines for the same key both create real Discord channels/threads, only one wins the publish — the loser is orphaned). Original lock-around-create discipline is kept for safety; per-key locking would be the proper fix if contention becomes a real issue.
+- Pending `/ref` context survives bot reboot: switched from process-local `time.monotonic` to wall-clock `time.time`, persisted to `platform_state["pending_refs"]`, and reloaded on startup (drops expired entries).
+
+### Changed
+- `evaluate_instance(inst, result_text)` simplified to `evaluate_instance(inst)`. The function now reads result text from `inst.result_file` directly, so callers don't need to keep `RunResult.result_text` around.
+- Session result embeds gain an inline flag-summary footer line (`⚠ flags: 2 narration, 1 verbosity`) sourced from the persisted SessionEval, so warnings surface in the result instead of hiding in `data/evals/`.
+- Prior-deferred items injected into the plan-review prompt now deduplicate using the same normalized key (`StateStore.deferred_dedup_key`, renamed from the previously-private `_dedup_key`) that `append_deferred` uses on write — prevents semantically-equivalent rewordings from piling up across review rounds.
+- Forum channels are created with a topic (`Sessions for <repo>. Pinned: archive (closed sessions) + control room.`) so the channel header explains the forum's purpose.
+
 ## v0.80.0 — Image-attachment lifecycle + usage-gate quieting (2026-04-25)
 
 ### Fixed

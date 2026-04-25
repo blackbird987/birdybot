@@ -144,6 +144,15 @@ class Messenger(Protocol):
         """
         ...
 
+    async def is_conversation_closed(self, channel_id: str) -> bool:
+        """Return True if the conversation has been archived/closed.
+
+        Used by the engine to suppress @mentions to threads that have
+        already been auto-merged + closed (which would cause a redundant
+        ping and unwanted unarchive). Default: False (assume open).
+        """
+        return False
+
 
 @dataclass
 class RequestContext:

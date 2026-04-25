@@ -146,8 +146,28 @@ class ChainEval:
 
 # --- Per-instance heuristic checks ---
 
-def evaluate_instance(inst: Instance, result_text: str | None) -> SessionEval:
-    """Run all heuristic checks on a completed instance."""
+def _load_result_text(inst: Instance) -> str:
+    """Read the saved result file for this instance, if present.
+
+    Returns "" on any failure — heuristic eval is best-effort and never
+    blocks finalize.
+    """
+    if not inst.result_file:
+        return ""
+    try:
+        return Path(inst.result_file).read_text(encoding="utf-8")
+    except Exception:
+        log.debug("Failed to read result_file for %s", inst.id, exc_info=True)
+        return ""
+
+
+def evaluate_instance(inst: Instance) -> SessionEval:
+    """Run all heuristic checks on a completed instance.
+
+    Reads the result text from ``inst.result_file`` so callers don't need
+    to keep the RunResult around — the Instance is the single source of
+    truth for everything eval needs.
+    """
     if not config.EVAL_ENABLED:
         return SessionEval(instance_id=inst.id, repo=inst.repo_name,
                            origin=inst.origin.value, mode=inst.mode)
@@ -167,7 +187,7 @@ def evaluate_instance(inst: Instance, result_text: str | None) -> SessionEval:
         evaluated_at=datetime.now(timezone.utc).isoformat(),
     )
 
-    text = result_text or ""
+    text = _load_result_text(inst)
     if text:
         ev.flags.extend(_check_narration(inst, text))
         ev.flags.extend(_check_verbosity(inst, text))
@@ -434,6 +454,25 @@ def _save_chain_eval(ev: ChainEval) -> None:
         )
     except Exception:
         log.debug("Failed to save chain eval for %s", ev.chain_id, exc_info=True)
+
+
+def load_session_eval(instance_id: str) -> SessionEval | None:
+    """Load the persisted SessionEval for a single instance, or None.
+
+    Returns None if eval is disabled, the file doesn't exist, or it can't
+    be parsed. Cheap one-shot read for embed-render time.
+    """
+    if not EVALS_DIR.exists():
+        return None
+    path = EVALS_DIR / f"{instance_id}.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return SessionEval.from_dict(data)
+    except Exception:
+        log.debug("Failed to load eval for %s", instance_id, exc_info=True)
+        return None
 
 
 def load_evals(since_hours: int = 24) -> list[SessionEval]:

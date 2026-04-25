@@ -109,7 +109,7 @@ class Instance:
     jsonl_uuid_by_msg_id: dict[str, str] = field(default_factory=dict)  # Discord msg_id -> JSONL assistant uuid (for "Branch from here")
     # Access control fields (non-owner sessions)
     is_owner_session: bool = True     # False for granted user sessions
-    bash_policy: str = "full"         # "full", "allowlist", "none" — for non-owner explore mode
+    bash_policy: str = "full"         # "full"=Bash unrestricted; "allowlist"=non-owner allowlist guard; "none"=Bash disabled for ANY session
     effort: str = "high"             # reasoning effort: low/medium/high/max
     model: str | None = None         # CLI model override (e.g. "sonnet" for plan steps)
     cooldown_retry_at: str | None = None   # ISO datetime — auto-retry after usage limit
