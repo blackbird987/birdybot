@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Verify Board hot-fix: removed three duplicate function definitions caused by a merge collision that shadowed the working implementations. Second `create_verify_board_post` (channels.py), second `ensure_verify_board` + second `refresh_verify_board` + private `_verify_lock` (forums.py), and second `_handle_verify_history` (interactions.py) all called wrong APIs (`build_board_embed(proj, guild_id)` instead of `(repo_name, items)`, and non-existent `render_history_text`). Symptoms: pinned verify-board thread rendered "No items to verify" despite items being persisted in state.json, and tapping the History button raised AttributeError that surfaced as Discord "interaction failed". `_mutate_verify` now uses the public `verify_lock(repo_name)` helper to match the rest of the verify codepath.
+
 ## v0.87.0 — Autopilot/button usage-limit gating (2026-04-25)
 
 ### Added

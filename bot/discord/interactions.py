@@ -1904,22 +1904,6 @@ async def _handle_verify_select(
         )
 
 
-async def _handle_verify_history(
-    bot: ClaudeBot, interaction: discord.Interaction, repo_name: str,
-) -> None:
-    """Send an ephemeral 30d history of verify items."""
-    from bot.discord import verify_board as vb_mod
-
-    proj = bot._forums.forum_projects.get(repo_name)
-    if not proj:
-        await interaction.followup.send(
-            f"No verify-board for `{repo_name}`.", ephemeral=True,
-        )
-        return
-    text = vb_mod.render_history_text(proj)
-    await interaction.followup.send(text, ephemeral=True)
-
-
 async def _open_verify_board_modal(
     bot: ClaudeBot, interaction: discord.Interaction, instance_id: str,
 ) -> None:
