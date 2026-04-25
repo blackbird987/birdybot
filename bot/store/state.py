@@ -10,7 +10,7 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from bot.claude.types import Instance, InstanceStatus, InstanceType, Schedule
+from bot.claude.types import ChainPhaseState, Instance, InstanceStatus, InstanceType, Schedule
 from bot.engine.auto_fix import AutoFixState
 from bot.engine.deploy import DeployState
 
@@ -44,6 +44,7 @@ class StateStore:
         self._platform_state: dict[str, dict] = {}  # platform -> arbitrary state
         self._autopilot_chains: dict[str, list[str]] = {}  # session_id -> remaining steps
         self._chain_deferred: dict[str, list[str]] = {}  # session_id -> deferred revisions
+        self._chain_phases: dict[str, dict] = {}  # session_id -> ChainPhaseState dict
         self._deploy_state: dict[str, DeployState] = {}  # repo_name -> deploy state
         self._deploy_configs: dict[str, dict] = {}  # repo_name -> deploy config
         self._auto_fix_state: dict[str, AutoFixState] = {}  # "repo:trigger" -> state
@@ -84,6 +85,7 @@ class StateStore:
             self._platform_state = data.get("platform_state", {})
             self._autopilot_chains = data.get("autopilot_chains", {})
             self._chain_deferred = data.get("chain_deferred", {})
+            self._chain_phases = data.get("chain_phases", {})
             self._deploy_state = {
                 k: DeployState.from_dict(v)
                 for k, v in data.get("deploy_state", {}).items()
@@ -156,6 +158,7 @@ class StateStore:
             "platform_state": self._platform_state,
             "autopilot_chains": self._autopilot_chains,
             "chain_deferred": self._chain_deferred,
+            "chain_phases": self._chain_phases,
             "deploy_state": {k: v.to_dict() for k, v in self._deploy_state.items()},
             "deploy_configs": self._deploy_configs,
             "auto_fix_state": {k: v.to_dict() for k, v in self._auto_fix_state.items()},
@@ -737,6 +740,99 @@ class StateStore:
             return
         self._chain_deferred.pop(session_id, None)
         self.mark_dirty()
+
+    # --- Chain Phase State (multi-phase build chains) ---
+
+    def get_chain_phases(self, session_id: str | None) -> ChainPhaseState | None:
+        """Load phase state for an autopilot chain, or None if not phased."""
+        if not session_id:
+            return None
+        d = self._chain_phases.get(session_id)
+        if not d:
+            return None
+        try:
+            return ChainPhaseState.from_dict(d)
+        except Exception:
+            log.exception("Failed to deserialize chain_phases for %s", session_id)
+            return None
+
+    def set_chain_phases(self, session_id: str | None, state: ChainPhaseState) -> None:
+        """Persist the full phase state for an autopilot chain."""
+        if not session_id:
+            return
+        self._chain_phases[session_id] = state.to_dict()
+        self.save()
+
+    def clear_chain_phases(self, session_id: str | None) -> None:
+        """Remove phase state for an autopilot chain."""
+        if not session_id:
+            return
+        if self._chain_phases.pop(session_id, None) is not None:
+            self.save()
+
+    def advance_chain_phase(self, session_id: str | None) -> ChainPhaseState | None:
+        """Atomically advance the cursor and clear pre-phase fields.
+
+        Bumps cursor by one and clears `paused_at` + `pre_phase_head` in a
+        single save so a reboot between writes can never observe a partial
+        transition. Returns the updated state, or None if no phases tracked.
+        """
+        if not session_id:
+            return None
+        state = self.get_chain_phases(session_id)
+        if state is None:
+            return None
+        state.cursor += 1
+        state.paused_at = None
+        state.pre_phase_head = None
+        self._chain_phases[session_id] = state.to_dict()
+        self.save()
+        return state
+
+    def set_phase_pause(self, session_id: str | None, where: str | None) -> None:
+        """Mark a phase as paused at 'pre' or 'post' (or None to clear)."""
+        if not session_id:
+            return
+        state = self.get_chain_phases(session_id)
+        if state is None:
+            return
+        state.paused_at = where
+        self._chain_phases[session_id] = state.to_dict()
+        self.save()
+
+    def set_pre_phase_head(self, session_id: str | None, sha: str | None) -> None:
+        """Record the git HEAD captured before the current phase spawned."""
+        if not session_id:
+            return
+        state = self.get_chain_phases(session_id)
+        if state is None:
+            return
+        state.pre_phase_head = sha
+        self._chain_phases[session_id] = state.to_dict()
+        self.save()
+
+    def set_phase_spawn_metadata(
+        self,
+        session_id: str | None,
+        worktree_path: str | None,
+        first_build_id: str | None,
+    ) -> None:
+        """Atomically record both worktree_path and first_build_id.
+
+        These two fields must move together: a crash with one set but not the
+        other would make the resume's `is_first` check disagree with reality
+        (e.g. first_build_id=None + worktree_path=set would re-trigger
+        auto_branch over an existing worktree).
+        """
+        if not session_id:
+            return
+        state = self.get_chain_phases(session_id)
+        if state is None:
+            return
+        state.worktree_path = worktree_path
+        state.first_build_id = first_build_id
+        self._chain_phases[session_id] = state.to_dict()
+        self.save()
 
     # --- Persistent Per-Repo Deferred Revisions (stored in repo TODO.md) ---
 
