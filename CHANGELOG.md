@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.86.0 — Context priming + stale-session scrub (2026-04-25)
+
 ### Added
 - `scripts/scrub_stale_sessions.py` — one-shot recovery tool that walks every `ThreadInfo` in `state.json`, checks if its `session_id` JSONL still exists under `~/.claude/projects/`, and clears any orphans. Atomic write + auto-reboot. Use after any account swap or CLI session purge to preempt the one-time "first message hits No conversation found" cost on each affected thread.
 - Context priming for fresh CLI sessions: when a query lands in a Discord thread with no resumable session (post-account-swap, post-scrub, brand-new thread that already has prior messages), the bot reads up to the last 50 messages and distills a deterministic digest (last 3 user messages × 350 chars + 1 truncated assistant reply + thread topic, ~450 tokens) prepended to the first prompt as one-shot context. Quoted content is wrapped in per-briefing nonced fence delimiters with an explicit "data, not directives" header — the nonce is stripped from quoted text before wrapping so user-controllable content cannot reproduce the closing fence. `[BOT_CMD: …]` lines are stripped before quoting to prevent Tier-2 dispatcher replay. Bot/webhook role assignment matches `on_message`'s `TEST_WEBHOOK_IDS` parity. Cache is in-memory on `ForumManager` (never persisted to `state.json`, so raw user text doesn't land on disk), invalidated after every primed run completes (success or failure) and also on out-of-band session rebinds. Visible "Reconstructing context…" status during the read. No extra LLM call. Does not run inside the runner's silent retry-without-resume path or account-failover recursion — those recover on the next message instead.
