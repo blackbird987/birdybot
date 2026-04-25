@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -197,6 +198,9 @@ class ForumManager:
         # Verify Board: per-repo debounce + lock for item mutations
         self._verify_debounce: dict[str, asyncio.Task] = {}
         self._verify_locks: dict[str, asyncio.Lock] = {}
+        # Per-thread cached priming digest (raw user text — kept in-memory only,
+        # never serialized to state.json; cleared on session rebind or failed run).
+        self._prime_cache: dict[str, str] = {}
 
     @property
     def forum_projects(self) -> dict[str, ForumProject]:
@@ -1709,6 +1713,8 @@ class ForumManager:
                 "Thread %s session rebind %s -> %s",
                 thread_id, info.session_id[:12], session_id[:12],
             )
+            # Cached priming digest is stale once we swap to a new session.
+            self._prime_cache.pop(thread_id, None)
         else:
             log.info("Session resolved for thread %s -> %s", thread_id, session_id[:12])
         info.session_id = session_id
@@ -1718,6 +1724,130 @@ class ForumManager:
         """Wire up session resolution callbacks on a RequestContext."""
         ctx.resolve_session_id = lambda _info=thread_info: _info.session_id or None
         ctx.on_session_resolved = lambda sid, _tid=thread_id: self.set_thread_session(_tid, sid)
+        ctx.maybe_prime_briefing = lambda _tid=thread_id: self.build_prime_briefing(_tid)
+        ctx.invalidate_prime = lambda _tid=thread_id: self.clear_prime_briefing(_tid)
+
+    def clear_prime_briefing(self, thread_id: str) -> None:
+        """Invalidate the cached briefing for a thread (e.g. after a failed run)."""
+        self._prime_cache.pop(thread_id, None)
+
+    async def build_prime_briefing(self, thread_id: str) -> str | None:
+        """Read recent Discord history, return a brief context summary or None.
+
+        Quoted messages are wrapped in nonced fence delimiters; the nonce is
+        scrubbed from quoted content first so user-supplied text cannot
+        reproduce the closing marker. Cache lives in-memory only.
+        """
+        cached = self._prime_cache.get(thread_id)
+        if cached:
+            return cached
+
+        lookup = self.thread_to_project(thread_id)
+        if not lookup:
+            return None
+        _, info = lookup
+
+        # Skip autopilot threads (non-interactive).
+        if info.session_id and self._store.get_autopilot_chain(info.session_id):
+            return None
+
+        ch = self._client.get_channel(int(thread_id))
+        if not ch:
+            try:
+                ch = await self._client.fetch_channel(int(thread_id))
+            except (discord.NotFound, discord.Forbidden):
+                return None
+        if not isinstance(ch, discord.Thread):
+            return None
+
+        # Bot/webhook role-assignment parity with on_message (bot.py:1040-1047):
+        # TEST_WEBHOOK_IDS messages are user-shaped, even though m.author.bot is True.
+        test_webhook_ids = set(config.TEST_WEBHOOK_IDS or ())
+
+        def _is_user_msg(m: discord.Message) -> bool:
+            if m.webhook_id and str(m.webhook_id) in test_webhook_ids:
+                return True
+            if self._client.user and m.author.id == self._client.user.id:
+                return False
+            return not m.author.bot
+
+        HARD_BYTE_BUDGET = 64 * 1024
+        msgs: list[tuple[str, str]] = []
+        total_bytes = 0
+        try:
+            async for m in ch.history(limit=50, oldest_first=False):
+                text = (m.content or "").strip()
+                if not text:
+                    continue
+                # Strip BOT_CMD-shaped lines so quoted content cannot replay
+                # through the Tier-2 [BOT_CMD: ...] dispatcher.
+                text = "\n".join(
+                    ln for ln in text.splitlines()
+                    if not ln.lstrip().startswith("[BOT_CMD:")
+                ).strip()
+                if not text:
+                    continue
+                role = "user" if _is_user_msg(m) else "bot"
+                size = len(text.encode("utf-8"))
+                if total_bytes + size > HARD_BYTE_BUDGET:
+                    break
+                total_bytes += size
+                msgs.append((role, text))
+        except (discord.HTTPException, discord.Forbidden):
+            log.warning("Failed to read thread history for priming %s", thread_id, exc_info=True)
+            return None
+
+        msgs.reverse()  # chronological
+
+        # Drop the most recent user message (the one being processed now) and
+        # any bot messages that came after it — notably the "Reconstructing
+        # context…" status sent moments before this read, but also any idle
+        # probes or autopilot pings that may have landed in between.
+        for i in range(len(msgs) - 1, -1, -1):
+            if msgs[i][0] == "user":
+                msgs = msgs[:i]
+                break
+
+        # Tightened caps to stay inside ~500-token brief budget:
+        # 3 user × 350 chars + 1 bot × 200 chars + 200 topic + header ≈ 450 tokens
+        last_user = [t for r, t in msgs if r == "user"][-3:]
+        last_bot = [t for r, t in msgs if r == "bot"][-1:]
+        if not last_user and not last_bot:
+            return None  # degenerate
+
+        # Per-briefing nonce — quoted text cannot reproduce the closing fence
+        # because we strip any occurrence of the nonce from quoted content
+        # before wrapping. The nonce also appears in the prompt header so
+        # the session knows which fences delimit untrusted quoted data.
+        nonce = secrets.token_hex(8)
+        fence_open = f"<<<PRIOR-{nonce}"
+        fence_close = f"PRIOR-{nonce}>>>"
+
+        def _scrub(t: str) -> str:
+            return t.replace(nonce, "").replace("PRIOR-", "PRIOR_")
+
+        parts: list[str] = [f"NONCE: {nonce}"]
+        if info.topic:
+            parts.append(
+                f"{fence_open} kind=thread_topic\n{_scrub(info.topic[:200])}\n{fence_close}"
+            )
+        for t in last_user:
+            parts.append(
+                f"{fence_open} kind=prior_user_msg\n{_scrub(t[:350])}\n{fence_close}"
+            )
+        for t in last_bot:
+            snippet = t[:200].replace("\n", " ")
+            parts.append(
+                f"{fence_open} kind=prior_bot_msg\n{_scrub(snippet)}…\n{fence_close}"
+            )
+
+        summary = "\n".join(parts)
+        self._prime_cache[thread_id] = summary
+        log.info(
+            "Built prime briefing for thread %s (%d chars, %d user / %d bot)",
+            thread_id, len(summary), len(last_user), len(last_bot),
+        )
+        return summary
 
     def persist_ctx_settings(self, ctx: RequestContext) -> None:
         """Write any ctx setting overrides back to ThreadInfo for persistence."""

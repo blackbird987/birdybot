@@ -172,6 +172,11 @@ class RequestContext:
     # Session resolution callbacks (Discord race-condition fix)
     resolve_session_id: Callable[[], str | None] | None = None
     on_session_resolved: Callable[[str], None] | None = None
+    # Context priming for fresh CLI sessions (Discord forum threads only).
+    # maybe_prime_briefing returns a digest of recent thread messages or None;
+    # invalidate_prime drops the cached digest after a failed run.
+    maybe_prime_briefing: Callable[[], Awaitable[str | None]] | None = None
+    invalidate_prime: Callable[[], None] | None = None
     # User identity (for multi-user access control)
     user_id: str | None = None
     user_name: str | None = None
