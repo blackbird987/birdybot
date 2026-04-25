@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.88.0 — Session-index rebuild + Verify Board hot-fix (2026-04-25)
+
 ### Added
 - `bot/claude/session_index.py` + `scripts/rebuild_session_index.py` — recovery tool that rebuilds Claude CLI's `~/.claude/projects/<project>/sessions-index.json` from on-disk JSONLs. Use when `--resume <id>` returns "No conversation found" for sessions whose JSONL files exist (CLI sometimes stops updating the index, leaving JSONLs orphaned). Per-project asyncio lock + atomic temp-file write + active-session guard (skips projects with live RUNNING/QUEUED/STALLED instances to avoid racing the CLI's own writes); local post-write verification only — never spawns `claude.exe --resume <id>` to probe (would permanently append "ok" turns to a real user session). Tolerates truncated/corrupt JSONL lines, falls back to queue-operation enqueue content when no `user` record carries text, preserves `originalPath` from existing index when present.
 
