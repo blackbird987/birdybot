@@ -1690,14 +1690,29 @@ class ForumManager:
     # --- Session Callbacks ---
 
     def set_thread_session(self, thread_id: str, session_id: str) -> None:
-        """Write session_id to ThreadInfo immediately (called from engine callback)."""
+        """Write session_id to ThreadInfo immediately (called from engine callback).
+
+        Always overwrites: the engine fires this once per successful run with the
+        current canonical session_id, so the latest value wins. This is critical
+        for account failover — the old session lives on the exhausted account and
+        must be replaced with the new account's session_id, otherwise every
+        subsequent resume hits "No conversation found" (dementia bug).
+        """
         lookup = self.thread_to_project(thread_id)
-        if lookup:
-            _, info = lookup
-            if not info.session_id:
-                info.session_id = session_id
-                self.save_forum_map()
-                log.info("Session resolved for thread %s -> %s", thread_id, session_id[:12])
+        if not lookup:
+            return
+        _, info = lookup
+        if info.session_id == session_id:
+            return
+        if info.session_id:
+            log.info(
+                "Thread %s session rebind %s -> %s",
+                thread_id, info.session_id[:12], session_id[:12],
+            )
+        else:
+            log.info("Session resolved for thread %s -> %s", thread_id, session_id[:12])
+        info.session_id = session_id
+        self.save_forum_map()
 
     def attach_session_callbacks(self, ctx: RequestContext, thread_info: ThreadInfo, thread_id: str) -> None:
         """Wire up session resolution callbacks on a RequestContext."""
