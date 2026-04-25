@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- `bot/claude/session_index.py` + `scripts/rebuild_session_index.py` — recovery tool that rebuilds Claude CLI's `~/.claude/projects/<project>/sessions-index.json` from on-disk JSONLs. Use when `--resume <id>` returns "No conversation found" for sessions whose JSONL files exist (CLI sometimes stops updating the index, leaving JSONLs orphaned). Per-project asyncio lock + atomic temp-file write + active-session guard (skips projects with live RUNNING/QUEUED/STALLED instances to avoid racing the CLI's own writes); local post-write verification only — never spawns `claude.exe --resume <id>` to probe (would permanently append "ok" turns to a real user session). Tolerates truncated/corrupt JSONL lines, falls back to queue-operation enqueue content when no `user` record carries text, preserves `originalPath` from existing index when present.
+
 ### Fixed
 - Verify Board hot-fix: removed three duplicate function definitions caused by a merge collision that shadowed the working implementations. Second `create_verify_board_post` (channels.py), second `ensure_verify_board` + second `refresh_verify_board` + private `_verify_lock` (forums.py), and second `_handle_verify_history` (interactions.py) all called wrong APIs (`build_board_embed(proj, guild_id)` instead of `(repo_name, items)`, and non-existent `render_history_text`). Symptoms: pinned verify-board thread rendered "No items to verify" despite items being persisted in state.json, and tapping the History button raised AttributeError that surfaced as Discord "interaction failed". `_mutate_verify` now uses the public `verify_lock(repo_name)` helper to match the rest of the verify codepath.
 
