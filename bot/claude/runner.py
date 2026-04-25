@@ -36,6 +36,13 @@ log = logging.getLogger(__name__)
 # On Windows, prevent subprocess console windows from popping up
 _NOWND: dict = config.NOWND
 
+# Tunable knobs for the cross-account session-recovery path (step 3 of the
+# dementia fix).  60s cache window dedupes rebuild_project_index calls when a
+# burst of resumes hits the same missing-session state.  30s timeout caps
+# rebuild latency so a slow disk scan can't block an autopilot chain.
+REBUILD_CACHE_TTL_SECS = 60
+REBUILD_TIMEOUT_SECS = 30
+
 ProgressCallback = Callable  # async callback(message: str, detail: str)
 StallCallback = Callable[[str], None]     # async callback(instance_id)
 
@@ -72,6 +79,11 @@ class ClaudeRunner:
         # Multi-account failover: tracks when each account's usage limit resets
         self._account_cooldowns: dict[str, datetime] = {}
 
+        # Last-rebuild timestamp per (account_dir, project_dir) — dedupes the
+        # auto-rebuild recovery layer so a flurry of failed resumes doesn't
+        # re-scan the same project multiple times.
+        self._rebuild_cache: dict[tuple[str, str], float] = {}
+
     @property
     def provider(self) -> ProviderConfig:
         """Current provider — re-reads config for runtime switching."""
@@ -99,8 +111,18 @@ class ClaudeRunner:
         except asyncio.TimeoutError:
             raise RuntimeError(f"{self.provider.name} CLI --version timed out")
 
-    def _pick_account(self, exclude: set[str] | None = None) -> str | None:
-        """Return the first configured account not on cooldown/excluded, or None."""
+    def _pick_account(
+        self,
+        exclude: set[str] | None = None,
+        prefer: str | None = None,
+    ) -> str | None:
+        """Return the first configured account not on cooldown/excluded, or None.
+
+        ``prefer`` (if set) is returned first when it is in CLAUDE_ACCOUNTS,
+        not on cooldown, and not in ``exclude``.  Falls through to normal
+        rotation otherwise — never blocks waiting for the preferred account.
+        Used by the dementia fix to honor per-instance session ownership.
+        """
         if not config.CLAUDE_ACCOUNTS:
             return None
         now = datetime.now(timezone.utc)
@@ -109,6 +131,13 @@ class ClaudeRunner:
             k: v for k, v in self._account_cooldowns.items() if v > now
         }
         exclude = exclude or set()
+        if (
+            prefer
+            and prefer in config.CLAUDE_ACCOUNTS
+            and prefer not in exclude
+            and prefer not in self._account_cooldowns
+        ):
+            return prefer
         for acct in config.CLAUDE_ACCOUNTS:
             if acct in exclude:
                 continue
@@ -141,12 +170,18 @@ class ClaudeRunner:
         api_fallback: bool = False,
         _provider: ProviderConfig | None = None,
         _binary: str | None = None,
+        _recovery_state: set[str] | None = None,
     ) -> RunResult:
         # Snapshot provider + binary at entry — in-flight sessions keep their
         # provider even if a runtime switch happens mid-run.
         # On recursive retries, the caller passes the original snapshot.
         provider = _provider or self.provider
         binary = _binary or config.CLAUDE_BINARY
+        # Sentinel-pattern default — never use a mutable default arg.
+        # Tracks recovery strategies already attempted on this run so each
+        # fires at most once (bounds recursion depth from the layered
+        # No-conversation-found recovery added by the dementia fix).
+        recovery_state: set[str] = _recovery_state if _recovery_state is not None else set()
 
         # Git worktree isolation for build tasks
         if instance.branch:
@@ -167,8 +202,6 @@ class ClaudeRunner:
                 api_fallback=api_fallback, provider=provider, binary=binary,
             )
         )
-        log.info("Running %s (prompt: %d chars via stdin): %s",
-                 instance.id, len(prompt_text), " ".join(cmd)[:500])
 
         # Strip provider-specific env vars to prevent nested-session errors.
         # Strip ANTHROPIC_API_KEY on non-PPU runs so the CLI can never
@@ -179,12 +212,22 @@ class ClaudeRunner:
         if not api_fallback:
             env.pop("ANTHROPIC_API_KEY", None)
 
-        # Multi-account failover (Claude-only: other providers use single account)
+        # Multi-account failover (Claude-only: other providers use single account).
+        # Honor per-instance session ownership via `prefer`: if the instance
+        # has a session_account stamped from a prior successful run, route to
+        # that account first so --resume actually finds the session JSONL.
         account_dir: str | None = None
         if provider.supports_account_failover:
-            account_dir = self._pick_account(exclude=instance._accounts_tried)
+            account_dir = self._pick_account(
+                exclude=instance._accounts_tried,
+                prefer=instance.session_account if instance.session_id else None,
+            )
             if account_dir:
                 env[provider.config_dir_env] = account_dir
+
+        acct_tag = f" [acct={account_dir[-20:]}]" if account_dir else ""
+        log.info("Running %s%s (prompt: %d chars via stdin): %s",
+                 instance.id, acct_tag, len(prompt_text), " ".join(cmd)[:500])
 
         proc = None
         try:
@@ -225,12 +268,87 @@ class ClaudeRunner:
             # Tag result now — before any early returns — so all exit paths carry the flag.
             result.api_fallback_used = api_fallback
 
-            # Dead session: clear session_id and retry without --resume
+            # Stamp session ownership: on a successful run, record which
+            # account_dir hosted the session so future resumes prefer it.
+            # Pairs with `prefer=instance.session_account` in _pick_account
+            # to keep the picker from sending --resume to the wrong home.
+            if (
+                not result.is_error
+                and account_dir
+                and (result.session_id or instance.session_id)
+            ):
+                instance.session_account = account_dir
+
+            # Dead session: layered recovery before silent --resume drop.
+            # Layer 1: try the OTHER account (the session may live there).
+            # Layer 2: rebuild the owning account's session-index in-process
+            #          and retry once with --resume intact.
+            # Layer 3: clear session_id and run blank (last resort).
             error_text = result.error_message or result.result_text or ""
             if result.is_error and "No conversation found" in error_text and instance.session_id:
-                log.warning("Session %s not found for %s, retrying without resume", instance.session_id, instance.id)
+                # Layer 1: try other account if we haven't yet and one is available.
+                if (
+                    "other_account" not in recovery_state
+                    and provider.supports_account_failover
+                    and account_dir
+                ):
+                    recovery_state.add("other_account")
+                    instance._accounts_tried.add(account_dir)
+                    next_account = self._pick_account(exclude=instance._accounts_tried)
+                    if next_account:
+                        log.info(
+                            "Session %s missing on %s, trying %s for %s",
+                            instance.session_id[:12], account_dir[-20:],
+                            next_account[-20:], instance.id,
+                        )
+                        return await self._run_impl(
+                            instance, on_progress, on_stall,
+                            context, sibling_context,
+                            api_fallback=api_fallback,
+                            _provider=provider, _binary=binary,
+                            _recovery_state=recovery_state,
+                        )
+
+                # Layer 2: rebuild session-index for the owning account.
+                if "rebuild" not in recovery_state:
+                    recovery_state.add("rebuild")
+                    owning_account = (
+                        instance.session_account
+                        if instance.session_account in config.CLAUDE_ACCOUNTS
+                        else account_dir
+                    )
+                    rebuilt = await self._maybe_rebuild_session_index(
+                        owning_account, instance,
+                    )
+                    if rebuilt:
+                        log.info(
+                            "Rebuilt session-index for %s; retrying --resume on %s",
+                            instance.id, (owning_account or "?")[-20:],
+                        )
+                        # Clear _accounts_tried so the picker can revisit the
+                        # owning account on the retry.
+                        instance._accounts_tried.discard(owning_account or "")
+                        return await self._run_impl(
+                            instance, on_progress, on_stall,
+                            context, sibling_context,
+                            api_fallback=api_fallback,
+                            _provider=provider, _binary=binary,
+                            _recovery_state=recovery_state,
+                        )
+
+                # Layer 3 (last resort): drop session and run blank.
+                log.warning(
+                    "Session %s exhausted recovery for %s, retrying without resume",
+                    instance.session_id, instance.id,
+                )
                 instance.session_id = None
-                return await self._run_impl(instance, on_progress, on_stall, context, sibling_context, api_fallback=api_fallback, _provider=provider, _binary=binary)
+                return await self._run_impl(
+                    instance, on_progress, on_stall,
+                    context, sibling_context,
+                    api_fallback=api_fallback,
+                    _provider=provider, _binary=binary,
+                    _recovery_state=recovery_state,
+                )
 
             # Usage limit: try next account before falling through to cooldown/PPU
             if result.is_error:
@@ -261,6 +379,7 @@ class ClaudeRunner:
                             context, sibling_context,
                             api_fallback=api_fallback,
                             _provider=provider, _binary=binary,
+                            _recovery_state=recovery_state,
                         )
                     # All accounts exhausted — fall through to cooldown/PPU
                     result.usage_limit_reset = reset_at
@@ -274,7 +393,11 @@ class ClaudeRunner:
                 log.info("Transient error for %s, retrying in 30s", instance.id)
                 instance.retry_count = 1
                 await asyncio.sleep(30)
-                return await self._run_impl(instance, on_progress, on_stall, context, sibling_context, api_fallback=False, _provider=provider, _binary=binary)
+                return await self._run_impl(
+                    instance, on_progress, on_stall, context, sibling_context,
+                    api_fallback=False, _provider=provider, _binary=binary,
+                    _recovery_state=recovery_state,
+                )
 
             return result
 
@@ -1267,8 +1390,73 @@ class ClaudeRunner:
         from bot.engine.session_fork import encode_project_path
         return encode_project_path(path)
 
+    async def _maybe_rebuild_session_index(
+        self,
+        account_dir: str | None,
+        instance: Instance,
+    ) -> bool:
+        """Rebuild sessions-index.json for the project owning this session.
+
+        Best-effort recovery for "No conversation found" — see step 3 of the
+        cross-account dementia plan.  Returns True iff a rebuild actually ran
+        (and so a --resume retry is worth attempting).
+
+        - Caches per (account_dir, project_dir) for REBUILD_CACHE_TTL_SECS to
+          avoid rescanning during bursts of correlated failures.
+        - Bounded by REBUILD_TIMEOUT_SECS so a slow disk can't stall the chain.
+        - Wrapped in try/except: rebuild errors fall through to layer 3 rather
+          than propagating.  Rebuild is a recovery tool, not a critical path.
+        """
+        if not account_dir or not instance.repo_path:
+            return False
+        from bot.claude.session_index import rebuild_project_index
+        encoded = self._encode_project_path(
+            instance.worktree_path or instance.repo_path
+        )
+        project_dir = Path(account_dir) / "projects" / encoded
+        cache_key = (account_dir, str(project_dir))
+        now = asyncio.get_event_loop().time()
+        last = self._rebuild_cache.get(cache_key, 0.0)
+        if now - last < REBUILD_CACHE_TTL_SECS:
+            log.info(
+                "Rebuild skipped for %s (cached <%ds ago)",
+                instance.id, REBUILD_CACHE_TTL_SECS,
+            )
+            return False
+        if not project_dir.is_dir():
+            log.info(
+                "Rebuild skipped for %s — no project dir at %s",
+                instance.id, project_dir,
+            )
+            return False
+        try:
+            await asyncio.wait_for(
+                rebuild_project_index(project_dir),
+                timeout=REBUILD_TIMEOUT_SECS,
+            )
+            self._rebuild_cache[cache_key] = now
+            return True
+        except asyncio.TimeoutError:
+            log.warning(
+                "Rebuild timed out (>%ds) for %s on %s",
+                REBUILD_TIMEOUT_SECS, instance.id, account_dir[-20:],
+            )
+            return False
+        except Exception:
+            log.exception(
+                "Rebuild failed for %s on %s",
+                instance.id, account_dir[-20:],
+            )
+            return False
+
     def _copy_session_to_worktree(self, instance: Instance) -> None:
-        """Copy session JSONL from main repo's project dir to worktree's project dir."""
+        """Copy session JSONL from main repo's project dir to worktree's project dir.
+
+        Source dir is the OWNING account's projects/ (instance.session_account
+        if set and still in CLAUDE_ACCOUNTS), not the active account's.  This
+        keeps build-mode --resume working when the plan session lives on a
+        different account than the picker chose for this build.
+        """
         if not instance.repo_path or not instance.worktree_path or not instance.session_id:
             return
         repo_encoded = self._encode_project_path(instance.repo_path)
@@ -1276,7 +1464,13 @@ class ClaudeRunner:
         if repo_encoded == wt_encoded:
             return  # Same path, no copy needed
 
-        src_dir = config.CLAUDE_PROJECTS_DIR / repo_encoded
+        if (
+            instance.session_account
+            and instance.session_account in config.CLAUDE_ACCOUNTS
+        ):
+            src_dir = Path(instance.session_account) / "projects" / repo_encoded
+        else:
+            src_dir = config.CLAUDE_PROJECTS_DIR / repo_encoded
         dst_dir = config.CLAUDE_PROJECTS_DIR / wt_encoded
         src_file = src_dir / f"{instance.session_id}.jsonl"
 

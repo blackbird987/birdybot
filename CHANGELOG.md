@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Fixed
+- Hot-fix for the dementia push: `_run_impl` referenced `account_dir` in its log line before the variable was assigned, raising `UnboundLocalError` on every spawn (every text query, every chain step). Moved the `[acct=…]` log line below the `_pick_account` block so it only formats once `account_dir` exists. Symptom on `1497667263325671596`: "I rebooted, is it live?" never reached the CLI — the runner crashed before subprocess spawn.
+- Hot-fix for autopilot chain resume on reboot: v0.84.0 introduced `chain_entry_sha` callsites in `bot/app.py` and `bot/engine/workflows.py` but the matching `get/set/clear_chain_entry_sha` storage was never added to `StateStore`. Every interrupted chain resumed at startup hit `AttributeError` and was logged-and-skipped (7 chains lost on the most recent boot). Added the dict + persistence + accessor trio in `bot/store/state.py`; existing `state.json` files load with an empty dict (back-compat).
+
+### Fixed (original push)
+- Cross-account session dementia: `_pick_account` was account-agnostic, so `--resume <session>` could route to a home dir that didn't host the JSONL → "No conversation found" → silent retry without `--resume` ran the build with a blank context (the user-visible "I don't have a plan" symptom that broke autopilot intermittently). Root-cause fix in `bot/claude/runner.py` + `bot/claude/types.py`:
+  - New `Instance.session_account` field stamps which account dir owns `session_id` after every successful run; persisted in `state.json` (default `None` for back-compat with existing instances).
+  - `_pick_account(prefer=…)` returns the owning account first when valid + healthy; falls through to rotation if on cooldown or pruned from `CLAUDE_ACCOUNTS` so it never blocks waiting for a preferred account.
+  - `_copy_session_to_worktree` reads source JSONL from the owning account's `projects/<encoded>/`, not the active account's — fixes build-mode autopilot where the picker chose a different account than the plan session.
+  - Layered recovery for "No conversation found" replaces the silent fallback: try the OTHER account → rebuild that account's `sessions-index.json` in-process via `rebuild_project_index` → only then run blank. Recursion guard via `_recovery_state` kwarg (each strategy fires once, depth ≤3); sentinel-pattern default (`None` → fresh `set()`) avoids the mutable-default trap. Rebuild call is wrapped in try/except, deduped per `(account_dir, project_dir)` for `REBUILD_CACHE_TTL_SECS=60s`, and bounded by `asyncio.wait_for(timeout=REBUILD_TIMEOUT_SECS=30s)` so a slow disk can't stall the chain.
+  - "Running" log line now includes `[acct=…]` tag so post-mortems can tell from `bot.log` which account a run targeted.
+  - Migration: 2112 existing instances load with `session_account=None` and use the agnostic picker — the rebuild recovery layer is their safety net until they're regenerated.
+  - Out of scope (deferred): plan content out-of-band persistence; cooldown-blocks-recovery edge case (when the owning account is on cooldown and only a non-owning account is healthy, the session is genuinely suspended until the owner's cooldown expires — acceptable behavior).
+
 ## v0.88.0 — Session-index rebuild + Verify Board hot-fix (2026-04-25)
 
 ### Added

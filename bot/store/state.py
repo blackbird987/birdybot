@@ -45,6 +45,7 @@ class StateStore:
         self._autopilot_chains: dict[str, list[str]] = {}  # session_id -> remaining steps
         self._chain_deferred: dict[str, list[str]] = {}  # session_id -> deferred revisions
         self._chain_phases: dict[str, dict] = {}  # session_id -> ChainPhaseState dict
+        self._chain_entry_sha: dict[str, str] = {}  # session_id -> HEAD sha snapshot
         self._deploy_state: dict[str, DeployState] = {}  # repo_name -> deploy state
         self._deploy_configs: dict[str, dict] = {}  # repo_name -> deploy config
         self._auto_fix_state: dict[str, AutoFixState] = {}  # "repo:trigger" -> state
@@ -86,6 +87,7 @@ class StateStore:
             self._autopilot_chains = data.get("autopilot_chains", {})
             self._chain_deferred = data.get("chain_deferred", {})
             self._chain_phases = data.get("chain_phases", {})
+            self._chain_entry_sha = data.get("chain_entry_sha", {})
             self._deploy_state = {
                 k: DeployState.from_dict(v)
                 for k, v in data.get("deploy_state", {}).items()
@@ -159,6 +161,7 @@ class StateStore:
             "autopilot_chains": self._autopilot_chains,
             "chain_deferred": self._chain_deferred,
             "chain_phases": self._chain_phases,
+            "chain_entry_sha": self._chain_entry_sha,
             "deploy_state": {k: v.to_dict() for k, v in self._deploy_state.items()},
             "deploy_configs": self._deploy_configs,
             "auto_fix_state": {k: v.to_dict() for k, v in self._auto_fix_state.items()},
@@ -740,6 +743,28 @@ class StateStore:
             return
         self._chain_deferred.pop(session_id, None)
         self.mark_dirty()
+
+    # --- Chain Entry SHA (verify_release diff anchor) ---
+
+    def get_chain_entry_sha(self, session_id: str | None) -> str | None:
+        """Return the HEAD SHA snapshotted at the chain `done` step, or None."""
+        if not session_id:
+            return None
+        return self._chain_entry_sha.get(session_id)
+
+    def set_chain_entry_sha(self, session_id: str | None, sha: str | None) -> None:
+        """Persist the HEAD SHA so verify_release survives reboots."""
+        if not session_id or not sha:
+            return
+        self._chain_entry_sha[session_id] = sha
+        self.save()
+
+    def clear_chain_entry_sha(self, session_id: str | None) -> None:
+        """Remove the chain entry SHA when the chain ends or is abandoned."""
+        if not session_id:
+            return
+        if self._chain_entry_sha.pop(session_id, None) is not None:
+            self.save()
 
     # --- Chain Phase State (multi-phase build chains) ---
 

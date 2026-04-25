@@ -118,6 +118,7 @@ class Instance:
     cooldown_retries: int = 0              # Count of cooldown retries attempted (capped at 3)
     cooldown_channel_id: str | None = None # Channel to retry in (for cooldown loop)
     api_fallback: bool = False            # Force API billing fallback on next run
+    session_account: str | None = None   # Account dir whose ~/.claude/projects/ owns session_id (for prefer-on-resume)
     _accounts_tried: set[str] = field(default_factory=set)  # Ephemeral: tracks accounts tried this run (not persisted)
 
     def display_id(self) -> str:
@@ -193,6 +194,7 @@ class Instance:
             "cooldown_retries": self.cooldown_retries,
             "cooldown_channel_id": self.cooldown_channel_id,
             "api_fallback": self.api_fallback,
+            "session_account": self.session_account,
         }
 
     @classmethod
@@ -250,6 +252,7 @@ class Instance:
             cooldown_retries=d.get("cooldown_retries", 0),
             cooldown_channel_id=d.get("cooldown_channel_id"),
             api_fallback=d.get("api_fallback", False),
+            session_account=d.get("session_account"),
         )
 
 
