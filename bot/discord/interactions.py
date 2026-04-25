@@ -13,7 +13,7 @@ import discord
 from bot.discord import access as access_mod
 from bot.discord import channels
 from bot.discord.access import AccessResult, load_access_config, effective_mode as access_effective_mode
-from bot.discord.modals import QuickTaskModal
+from bot.discord.modals import QuickTaskModal, VerifyAddModal
 from bot.engine import commands
 from bot.engine import sessions as sessions_mod
 from bot.platform.formatting import MODE_COLOR, VALID_EFFORTS, VALID_MODES, effort_name, mode_name
@@ -152,6 +152,28 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
     if custom_id.startswith("wizard:"):
         from bot.discord.wizard import handle_wizard_button
         await handle_wizard_button(bot, interaction, custom_id)
+        return
+
+    # --- Verify Board ---
+    if custom_id.startswith("verify_menu:"):
+        await _handle_verify_menu_open(bot, interaction, custom_id)
+        return
+    if custom_id.startswith("verify_select:"):
+        await _handle_verify_select(bot, interaction, custom_id)
+        return
+    if custom_id.startswith("verify_add:"):
+        # Must send modal as initial response — not defer
+        repo_name = custom_id.split(":", 1)[1]
+        await _handle_verify_add(bot, interaction, repo_name)
+        return
+    if custom_id.startswith("verify_history:"):
+        repo_name = custom_id.split(":", 1)[1]
+        await _handle_verify_history(bot, interaction, repo_name)
+        return
+    if custom_id.startswith("verify_board:"):
+        # Send modal prefilled from session result embed
+        instance_id = custom_id.split(":", 1)[1]
+        await _handle_verify_board_from_embed(bot, interaction, instance_id)
         return
 
     parts = custom_id.split(":", 1)
@@ -588,6 +610,171 @@ async def _handle_usage_action(
     # Fire-and-forget so the interaction handler returns promptly; the
     # lock inside _replay_to_thread serializes any concurrent spawn.
     asyncio.create_task(_run_and_cleanup())
+
+
+# --- Verify Board handlers ---
+
+
+# action_kind → (target_status, present-tense verb, past-tense verb).
+# Single source of truth for the three bulk-action variants.
+_VERIFY_ACTIONS: dict[str, tuple[str, str, str]] = {
+    "done":    ("done",      "mark done", "marked done"),
+    "claim":   ("claimed",   "claim",     "claimed"),
+    "dismiss": ("dismissed", "dismiss",   "dismissed"),
+}
+
+
+async def _handle_verify_menu_open(
+    bot: ClaudeBot, interaction: discord.Interaction, custom_id: str,
+) -> None:
+    """`verify_menu:{action}:{repo}` → ephemeral select-menu popup for bulk action."""
+    from bot.discord.verify_board import build_select_options
+
+    try:
+        _, action_kind, repo_name = custom_id.split(":", 2)
+    except ValueError:
+        await interaction.response.send_message("Bad verify menu id.", ephemeral=True)
+        return
+    if action_kind not in _VERIFY_ACTIONS:
+        await interaction.response.send_message("Unknown action.", ephemeral=True)
+        return
+    proj = bot._forums.forum_projects.get(repo_name)
+    if not proj:
+        await interaction.response.send_message(
+            f"Unknown repo: `{repo_name}`", ephemeral=True,
+        )
+        return
+    options = build_select_options(proj.verify_items)
+    if not options:
+        await interaction.response.send_message(
+            "Nothing to act on — the board is empty.", ephemeral=True,
+        )
+        return
+
+    _, verb_present, _ = _VERIFY_ACTIONS[action_kind]
+    view = discord.ui.View(timeout=180)
+    view.add_item(discord.ui.Select(
+        placeholder=f"Pick items to {verb_present}",
+        min_values=1,
+        max_values=len(options),
+        options=options,
+        custom_id=f"verify_select:{action_kind}:{repo_name}",
+    ))
+    await interaction.response.send_message(
+        f"Pick items to **{verb_present}**:", view=view, ephemeral=True,
+    )
+
+
+async def _handle_verify_select(
+    bot: ClaudeBot, interaction: discord.Interaction, custom_id: str,
+) -> None:
+    """Select-menu submit for bulk status change."""
+    from bot.engine.verify import set_status
+
+    try:
+        _, action_kind, repo_name = custom_id.split(":", 2)
+    except ValueError:
+        await interaction.response.send_message("Bad select id.", ephemeral=True)
+        return
+    action = _VERIFY_ACTIONS.get(action_kind)
+    if not action:
+        await interaction.response.send_message("Unknown action.", ephemeral=True)
+        return
+    target_status, _, verb_past = action
+
+    values = interaction.data.get("values", []) if interaction.data else []
+    if not values:
+        await interaction.response.send_message("No items selected.", ephemeral=True)
+        return
+
+    proj = bot._forums.forum_projects.get(repo_name)
+    if not proj:
+        await interaction.response.send_message(
+            f"Unknown repo: `{repo_name}`", ephemeral=True,
+        )
+        return
+
+    user_id = str(interaction.user.id)
+    updated = 0
+    lock = bot._forums.verify_lock(repo_name)
+    async with lock:
+        for vid in values:
+            if set_status(proj.verify_items, vid, target_status, user_id):
+                updated += 1
+        if updated:
+            bot._forums.save_forum_map()
+
+    if updated:
+        bot._forums.schedule_verify_refresh(repo_name)
+
+    await interaction.response.edit_message(
+        content=f"{updated} item(s) {verb_past}.", view=None,
+    )
+
+
+async def _handle_verify_add(
+    bot: ClaudeBot, interaction: discord.Interaction, repo_name: str,
+) -> None:
+    """`verify_add:{repo}` → open blank modal."""
+    if repo_name not in bot._forums.forum_projects:
+        await interaction.response.send_message(
+            f"Unknown repo: `{repo_name}`", ephemeral=True,
+        )
+        return
+    modal = VerifyAddModal(bot, repo_name)
+    await interaction.response.send_modal(modal)
+
+
+async def _handle_verify_history(
+    bot: ClaudeBot, interaction: discord.Interaction, repo_name: str,
+) -> None:
+    """`verify_history:{repo}` → ephemeral 30-day history embed."""
+    from bot.discord.verify_board import build_history_embed
+
+    proj = bot._forums.forum_projects.get(repo_name)
+    if not proj:
+        await interaction.response.send_message(
+            f"Unknown repo: `{repo_name}`", ephemeral=True,
+        )
+        return
+    embed = build_history_embed(repo_name, proj.verify_items)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+async def _handle_verify_board_from_embed(
+    bot: ClaudeBot, interaction: discord.Interaction, instance_id: str,
+) -> None:
+    """`verify_board:{instance_id}` → modal with origin backlink prefilled.
+
+    Prefills from `inst.summary` (the one-liner set at finalize), since
+    `inst.prompt` on workflow-button sessions is often a static template
+    string (e.g. "Implement the plan…") which isn't useful as a verify item.
+    Blank prefill is fine — user types what they want checked.
+    """
+    inst = bot._store.get_instance(instance_id)
+    if not inst:
+        await interaction.response.send_message(
+            "Instance not found.", ephemeral=True,
+        )
+        return
+    if inst.repo_name not in bot._forums.forum_projects:
+        await interaction.response.send_message(
+            f"No forum for repo `{inst.repo_name}`.", ephemeral=True,
+        )
+        return
+    thread_id = str(interaction.channel_id) if interaction.channel_id else None
+    prefill = ""
+    if inst.summary:
+        # First line of the summary, trimmed for the short-form input.
+        prefill = inst.summary.strip().splitlines()[0][:80]
+    modal = VerifyAddModal(
+        bot, inst.repo_name,
+        prefill=prefill,
+        origin_thread_id=thread_id,
+        origin_thread_name=inst.id,       # already in "t-2842" / "q-5707" form
+        origin_instance_id=inst.id,
+    )
+    await interaction.response.send_modal(modal)
 
 
 async def _handle_repo_switch(

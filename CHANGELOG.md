@@ -23,6 +23,10 @@
 - Cooldown retry loop O(n²) scalability bug: replaced full instance scan per cycle with pre-built session_id lookup dict, reducing per-iteration complexity from O(n²) to O(n).
 - Age calculation in startup worktree cleanup: added check for negative age (system clock skew) to avoid silent misbehavior when timestamps are corrupted or in the future.
 - Session index rebuild exception handling: broadened catch from `OSError` to `Exception` to handle all failure modes uniformly.
+## v0.82.0 — Verify Board (2026-04-25)
+
+### Added
+- **Verify Board** — per-repo pinned `verify-board` forum thread with a single living embed showing what needs human verification in-app. Three-lane Kanban: NEEDS CHECK / CLAIMED / DONE TODAY. Action row: `Mark done ✅` / `Claim` / `Dismiss ✖` / `Add` / `History` — bulk actions open ephemeral select menus. Colour signals state (grey empty / amber pending / red if pending >24h). Auto-populated from build-origin sessions emitting a ```verify-board``` fenced block (capped at 2 items per session, dedupe, 50-item cap, 7-day prune of resolved). Manual add via modal; `Send to Verify Board` button on build/commit/done/apply_revisions result embeds pre-fills with origin backlink. Threads auto-created at startup for existing forums via `reconcile_forums` and for new repos via `on_repo_added`. Debounced 500ms per-repo refresh coalesces rapid mutations. Verify-board fences stripped from displayed result text.
 
 ## v0.78.1 — Attachment diagnostics (2026-04-23)
 

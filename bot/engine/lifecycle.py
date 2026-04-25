@@ -15,6 +15,11 @@ from bot.claude.types import (
     RunResult,
 )
 from bot.platform.base import ButtonSpec, MessageHandle, RequestContext
+from bot.engine.verify import (
+    add_item as verify_add_item,
+    parse_verify_blocks,
+    strip_verify_blocks,
+)
 from bot.platform.formatting import (
     action_button_specs,
     format_context_footer,
@@ -42,6 +47,60 @@ def _with_fallback_footer(text: str, result: RunResult) -> str:
         return text
     cost_note = f" · ~${result.cost_usd:.2f}" if result.cost_usd else ""
     return text + f"\n\n`⚡ Responded via API billing ({config.API_FALLBACK_MODEL}){cost_note}`"
+
+
+def _collect_verify_items(ctx: RequestContext, inst: Instance, result_text: str) -> None:
+    """Parse ```verify-board``` blocks from result and push to the repo's board.
+
+    Fire-and-forget via asyncio.create_task — never blocks send_result.
+    Only runs on Discord (where the board lives) and when a forum for
+    this repo exists. Pure no-op on telegram / missing forum.
+    """
+    if ctx.platform != "discord":
+        return
+    if not result_text or not inst.repo_name:
+        return
+    items = parse_verify_blocks(result_text)
+    if not items:
+        return
+    # Defense-in-depth — a hallucinated secret in a verify item would
+    # otherwise persist to state.json in the clear. Items are short and
+    # redaction is cheap.
+    items = [redact_secrets(t) for t in items]
+    bot = getattr(ctx.messenger, "_bot", None)
+    forums = getattr(bot, "_forums", None) if bot else None
+    if not forums:
+        return
+    proj = forums.forum_projects.get(inst.repo_name)
+    if not proj:
+        return
+
+    # Backlink metadata — channel_id is the thread id for forum threads
+    thread_id = str(ctx.channel_id) if ctx.channel_id else None
+    short_name = inst.id  # e.g. "t-2842"
+
+    async def _push() -> None:
+        lock = forums.verify_lock(inst.repo_name)
+        async with lock:
+            added = 0
+            for text in items:
+                if verify_add_item(
+                    proj.verify_items, text,
+                    origin_thread_id=thread_id,
+                    origin_thread_name=short_name,
+                    origin_instance_id=inst.id,
+                ):
+                    added += 1
+            if added:
+                forums.save_forum_map()
+        if added:
+            forums.schedule_verify_refresh(inst.repo_name)
+            log.info(
+                "Added %d verify-board item(s) from %s for repo %s",
+                added, inst.id, inst.repo_name,
+            )
+
+    asyncio.create_task(_push())
 
 
 def _format_reset_time(reset_utc: datetime) -> str:
@@ -268,7 +327,16 @@ async def run_instance(
         if await schedule_cooldown_retry(ctx, inst, result, silent=silent):
             return  # Timer loop in app.py picks this up
 
-        await send_result(ctx, inst, _with_fallback_footer(result.result_text, result), silent=silent, result=result)
+        # Extract verify-board items from the original result_text BEFORE
+        # stripping the fences for display. Pushes to the repo's board
+        # asynchronously (fire-and-forget — never blocks delivery).
+        _collect_verify_items(ctx, inst, result.result_text)
+
+        display_text = strip_verify_blocks(result.result_text)
+        await send_result(
+            ctx, inst, _with_fallback_footer(display_text, result),
+            silent=silent, result=result,
+        )
 
         # Track API fallback spending for daily budget cap
         if result.api_fallback_used and result.cost_usd:
@@ -290,7 +358,12 @@ async def run_instance(
             try:
                 if not finalized:
                     finalize_run(ctx, inst, result)
-                await send_result(ctx, inst, _with_fallback_footer(result.result_text, result), silent=silent, result=result)
+                _collect_verify_items(ctx, inst, result.result_text)
+                display_text = strip_verify_blocks(result.result_text)
+                await send_result(
+                    ctx, inst, _with_fallback_footer(display_text, result),
+                    silent=silent, result=result,
+                )
                 delivered = True
             except (asyncio.CancelledError, Exception):
                 pass

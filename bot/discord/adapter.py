@@ -408,6 +408,8 @@ class DiscordMessenger:
             try:
                 await forums.get_or_create_forum(repo_name)
                 asyncio.create_task(forums.ensure_control_post(repo_name))
+                asyncio.create_task(forums.ensure_archive_thread(repo_name))
+                asyncio.create_task(forums.ensure_verify_board(repo_name))
             except Exception:
                 log.warning("Failed to auto-create forum for %s", repo_name)
             refresh = getattr(self._bot, "_refresh_dashboard", None)
