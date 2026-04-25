@@ -352,7 +352,7 @@ def _migrate_deferred_to_todo(store: StateStore) -> None:
         seen: set[str] = set()
         unique: list[str] = []
         for item in raw_items:
-            norm = StateStore._dedup_key(item)
+            norm = StateStore.deferred_dedup_key(item)
             if norm not in seen:
                 seen.add(norm)
                 unique.append(item)

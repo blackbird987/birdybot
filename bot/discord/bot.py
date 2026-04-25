@@ -187,9 +187,12 @@ class ClaudeBot(discord.Client):
         self._dashboard_pending_flag = [False]  # Mutable flag for dashboard_mod
         self._idle_timers: dict[str, asyncio.TimerHandle] = {}  # channel_id -> scheduled sleep
         self._sleep_gen: dict[str, int] = {}  # generation counter per channel (stale-callback guard)
-        # Pending /ref context: {thread_id: (context_str, monotonic_timestamp)}
-        # Consumed by on_message, expires after 10 minutes
+        # Pending /ref context: {thread_id: (context_str, unix_epoch_seconds)}
+        # Consumed by on_message, expires after 10 minutes. Persisted to
+        # platform_state so a reboot mid-window doesn't drop the user's
+        # loaded context (10-min TTL would otherwise be lost in seconds).
         self._pending_refs: dict[str, tuple[str, float]] = {}
+        self._load_pending_refs()
 
         self._monitor_service: MonitorService | None = None
         self._monitor_started: bool = False
@@ -218,6 +221,46 @@ class ClaudeBot(discord.Client):
         if self._discord_user_id:
             return user_id == self._discord_user_id
         return True
+
+    # --- Pending /ref persistence ---
+
+    _PENDING_REFS_TTL_SECONDS = 600
+
+    def _load_pending_refs(self) -> None:
+        """Restore pending /ref context from platform_state (drops expired)."""
+        try:
+            state = self._store.get_platform_state("discord")
+            raw = state.get("pending_refs", {}) or {}
+            if not isinstance(raw, dict):
+                return
+            now = _time.time()
+            for tid, entry in raw.items():
+                # Tuples become lists in JSON; accept either for forward-compat.
+                if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+                    continue
+                text, ts = entry
+                try:
+                    ts = float(ts)
+                except (TypeError, ValueError):
+                    continue
+                if (now - ts) >= self._PENDING_REFS_TTL_SECONDS:
+                    continue
+                self._pending_refs[str(tid)] = (str(text), ts)
+            if self._pending_refs:
+                log.info("Restored %d pending /ref entries", len(self._pending_refs))
+        except Exception:
+            log.debug("Failed to load pending_refs", exc_info=True)
+
+    def _save_pending_refs(self) -> None:
+        """Persist pending /ref context to platform_state."""
+        try:
+            state = self._store.get_platform_state("discord")
+            state["pending_refs"] = {
+                tid: [text, ts] for tid, (text, ts) in self._pending_refs.items()
+            }
+            self._store.set_platform_state("discord", state, persist=True)
+        except Exception:
+            log.debug("Failed to save pending_refs", exc_info=True)
 
     def _check_access(
         self, user_id: int, *,
@@ -1206,13 +1249,14 @@ class ClaudeBot(discord.Client):
 
                         was_pending = not session_id
 
-                        # Inject pending /ref context
+                        # Inject pending /ref context (wall-clock TTL — survives reboot)
                         ref = self._pending_refs.pop(channel_id, None)
                         if ref:
                             ref_text, ref_time = ref
-                            if (_time.monotonic() - ref_time) < 600:
+                            if (_time.time() - ref_time) < self._PENDING_REFS_TTL_SECONDS:
                                 text = f"{ref_text}\n\n{text}"
                                 log.info("Injected /ref context into prompt in thread %s", ch_name)
+                            self._save_pending_refs()
 
                         self._cancel_sleep(channel_id)
                         await self._clear_thread_sleeping(message.channel)

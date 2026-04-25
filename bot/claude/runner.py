@@ -1774,6 +1774,54 @@ class ClaudeRunner:
         if wt_proj_dir.is_dir():
             shutil.rmtree(str(wt_proj_dir), ignore_errors=True)
 
+    # --- Divergence safety check (used by startup auto-merge) ---
+
+    @staticmethod
+    def _check_branch_divergence(
+        repo: str, branch: str, target: str,
+    ) -> tuple[str, str]:
+        """Decide whether `branch` is safe to auto-merge into `target`.
+
+        Returns (decision, reason) where decision is one of:
+          - "ok":   clean fast-forward / pure ahead — safe to merge
+          - "noop": branch has no new commits (already merged or empty)
+          - "skip": unsafe (diverged, missing branches, git error)
+        """
+        # Verify target branch exists
+        r = subprocess.run(
+            ["git", "rev-parse", "--verify", f"refs/heads/{target}"],
+            cwd=repo, capture_output=True, text=True, **_NOWND,
+        )
+        if r.returncode != 0:
+            return ("skip", f"target branch '{target}' missing")
+
+        # Verify source branch exists
+        r = subprocess.run(
+            ["git", "rev-parse", "--verify", f"refs/heads/{branch}"],
+            cwd=repo, capture_output=True, text=True, **_NOWND,
+        )
+        if r.returncode != 0:
+            return ("skip", f"source branch '{branch}' missing")
+
+        # Compute ahead/behind: left=target-only, right=branch-only
+        r = subprocess.run(
+            ["git", "rev-list", "--left-right", "--count", f"{target}...{branch}"],
+            cwd=repo, capture_output=True, text=True, **_NOWND,
+        )
+        if r.returncode != 0:
+            return ("skip", f"rev-list failed: {(r.stderr or '').strip()}")
+        parts = r.stdout.strip().split()
+        if len(parts) != 2 or not all(p.isdigit() for p in parts):
+            return ("skip", f"unexpected rev-list output: {r.stdout!r}")
+        behind, ahead = int(parts[0]), int(parts[1])
+
+        if ahead == 0:
+            # No new commits on branch — already merged (or never had any)
+            return ("noop", f"branch already merged into {target} (ahead=0, behind={behind})")
+        if behind > 0:
+            return ("skip", f"diverged from {target} (ahead={ahead}, behind={behind})")
+        return ("ok", f"safe to merge (ahead={ahead}, behind=0)")
+
     # --- Orphan scanning ---
 
     @staticmethod
@@ -1863,6 +1911,30 @@ class ClaudeRunner:
                     f"skip {branch_name}: stale ({age_hours:.0f}h old) — use /merge manually"
                 )
                 continue
+
+            # Divergence safety check — never silently merge a branch that has
+            # forked from its target since the bot session started.
+            try:
+                decision, reason = await asyncio.to_thread(
+                    self._check_branch_divergence,
+                    inst.repo_path, branch_name, inst.original_branch,
+                )
+            except Exception as e:
+                log.warning("startup auto-merge: divergence check raised for %s",
+                            branch_name, exc_info=True)
+                messages.append(f"skip {branch_name}: divergence check failed ({e})")
+                continue
+            if decision == "skip":
+                messages.append(f"skip {branch_name}: {reason} — use /merge manually")
+                continue
+            if decision == "noop":
+                messages.append(f"no-op {branch_name}: {reason}")
+                # Branch already merged; clear stale branch refs on all
+                # instances (including source) so this case doesn't recur
+                # on every startup.
+                self._clear_stale_branches_static(store, branch_name)
+                continue
+
             try:
                 msg = await self.merge_branch(inst)
                 store.update_instance(inst)
@@ -1870,6 +1942,7 @@ class ClaudeRunner:
                     self._clear_stale_branches_static(store, branch_name)
                 messages.append(f"merge {branch_name}: {msg}")
             except Exception as e:
+                log.warning("startup auto-merge: merge %s raised", branch_name, exc_info=True)
                 messages.append(f"merge {branch_name}: error ({e})")
 
         # 3. Clean up remaining orphaned branches and worktrees (under repo lock)

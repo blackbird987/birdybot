@@ -24,6 +24,15 @@ async def _notify_user(ctx: RequestContext, suffix: str = "") -> None:
     """Send a @mention to notify the user that the chain needs attention."""
     if not ctx.user_id:
         return
+    # If the thread has already been archived (e.g. autopilot merged + closed),
+    # skip the mention — re-pinging would force an unwanted unarchive and
+    # re-notify the user about an already-completed chain.
+    try:
+        if await ctx.messenger.is_conversation_closed(ctx.channel_id):
+            log.info("Suppressing chain mention: %s is closed", ctx.channel_id)
+            return
+    except Exception:
+        log.debug("is_conversation_closed check raised for %s", ctx.channel_id, exc_info=True)
     mention = ctx.messenger.format_mention(ctx.user_id)
     if not mention:
         return
@@ -79,6 +88,30 @@ class SpawnConfig:
     copy_branch: bool = False
     auto_branch: bool = False
     silent: bool = False
+    # Hard read-only floor: when set to "explore", spawn_from forces the new
+    # instance to explore mode AND bash_policy="none", overriding any value
+    # that would otherwise be inherited from the parent (e.g. a build-mode
+    # parent leaking write tools into a triage subagent).
+    permission_mode: str | None = None
+
+
+def _enforce_readonly_floor(
+    permission_mode: str | None,
+    spawn_mode: str,
+    bash_policy: str,
+) -> tuple[str, str]:
+    """Named hook: clamp mode + bash_policy when a permission_mode floor is set.
+
+    Currently the only supported floor is ``"explore"``: clamps to explore
+    mode AND ``bash_policy="none"`` so the spawned subagent can't write
+    files via Edit/Write/NotebookEdit OR via Bash. Raises ValueError on
+    unknown floor so a typo can't silently bypass the safety net.
+    """
+    if permission_mode is None:
+        return (spawn_mode, bash_policy)
+    if permission_mode == "explore":
+        return ("explore", "none")
+    raise ValueError(f"unknown permission_mode floor: {permission_mode!r}")
 
 
 # --- Helpers ---
@@ -221,6 +254,14 @@ async def spawn_from(
         if _rank.get(cfg.mode, 0) > _rank.get(ctx.mode_ceiling, 0):
             effective_spawn_mode = ctx.mode_ceiling
 
+    # Apply permission_mode floor BEFORE create_instance so the new mode
+    # is what gets persisted from the start (no race window where a parent's
+    # build mode leaks into the child's command line).
+    inherited_bash_policy = source.bash_policy
+    effective_spawn_mode, inherited_bash_policy = _enforce_readonly_floor(
+        cfg.permission_mode, effective_spawn_mode, inherited_bash_policy,
+    )
+
     new_inst = ctx.store.create_instance(
         instance_type=cfg.instance_type,
         prompt=cfg.prompt,
@@ -241,7 +282,7 @@ async def spawn_from(
     new_inst.user_id = source.user_id or (ctx.user_id or "")
     new_inst.user_name = source.user_name or (ctx.user_name or "")
     new_inst.is_owner_session = source.is_owner_session
-    new_inst.bash_policy = source.bash_policy
+    new_inst.bash_policy = inherited_bash_policy
     new_inst.deferred_revisions = source.deferred_revisions
 
     if cfg.resume_session:
@@ -552,11 +593,21 @@ async def _review_plan_loop(
     current_msg = source_msg_id
     last_review: Instance | None = None
 
-    # Build review prompt with prior deferred context
+    # Build review prompt with prior deferred context.
+    # Use the store's normalized dedup key (same one append_deferred uses)
+    # so the injection list collapses semantically-equivalent rewordings —
+    # otherwise nearly-identical items pile up across review rounds.
     source = ctx.store.get_instance(source_id)
     prior_deferred: list[str] = []
     if source and source.repo_name:
-        prior_deferred = list(dict.fromkeys(ctx.store.get_deferred_items(source.repo_name)))
+        raw_items = ctx.store.get_deferred_items(source.repo_name)
+        seen_keys: set[str] = set()
+        for item in raw_items:
+            key = ctx.store.deferred_dedup_key(item)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            prior_deferred.append(item)
 
     review_prompt = config.PLAN_REVIEW_PROMPT
     if prior_deferred:
@@ -605,6 +656,10 @@ async def _review_plan_loop(
                     origin=InstanceOrigin.APPLY_REVISIONS,
                     status_text="Triaging medium/low revisions...",
                     resume_session=True,
+                    # Hard floor: triage is read-only by intent; even if the
+                    # parent is a build-mode session, this subagent must not
+                    # touch files. Pinned via the named enforcement hook.
+                    permission_mode="explore",
                 ), source_msg_id=pre_triage_msg)
 
                 if (triage_result

@@ -115,9 +115,11 @@ class _ClaudeProvider(ProviderConfig):
         disallowed: set[str] = set()
         if instance.mode != "build":  # type: ignore[attr-defined]
             disallowed.update(self.code_change_tools)
-        if not instance.is_owner_session:  # type: ignore[attr-defined]
-            if instance.bash_policy == "none":  # type: ignore[attr-defined]
-                disallowed.add("Bash")
+        # bash_policy="none" is an explicit opt-out of Bash for ANY session
+        # (owner or non-owner). Used by the triage subagent's read-only floor
+        # to prevent file writes via shell commands in explore mode.
+        if instance.bash_policy == "none":  # type: ignore[attr-defined]
+            disallowed.add("Bash")
         if disallowed:
             cmd.extend(["--disallowed-tools", ",".join(sorted(disallowed))])
 

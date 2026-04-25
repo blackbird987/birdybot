@@ -61,6 +61,29 @@ def result_color(instance: Instance) -> discord.Color:
     }.get(instance.status, discord.Color.default())
 
 
+def _flag_summary(instance: Instance) -> str:
+    """One-line summary of session-eval flags by category, or "" if none.
+
+    Reads the persisted SessionEval written by finalize_run; returns ""
+    if eval is disabled, missing, or has no flags. Surfaces flag counts
+    inline on the result footer so warnings aren't hidden in data/evals/.
+    """
+    try:
+        from bot.engine.eval import load_session_eval
+    except Exception:
+        return ""
+    ev = load_session_eval(instance.id)
+    if not ev or not ev.flags:
+        return ""
+    counts: dict[str, int] = {}
+    for f in ev.flags:
+        counts[f.category] = counts.get(f.category, 0) + 1
+    # Stable order: severity-aware-ish — issues/warnings tend to read first.
+    parts = [f"{n} {cat}" for cat, n in sorted(counts.items(), key=lambda kv: -kv[1])]
+    icon = "⚠" if any(f.severity in ("warning", "issue") for f in ev.flags) else "ℹ"
+    return f"{icon} flags: {', '.join(parts)}"
+
+
 def build_result_embed(
     instance: Instance,
     description: str,
@@ -91,6 +114,9 @@ def build_result_embed(
         )
         if ctx_text:
             footer_parts.append(ctx_text)
+    flags_line = _flag_summary(instance)
+    if flags_line:
+        footer_parts.append(flags_line)
 
     if footer_parts:
         embed.set_footer(text=" | ".join(footer_parts))

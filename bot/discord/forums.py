@@ -405,7 +405,13 @@ class ForumManager:
         await channels.sync_user_forum_tags(forum, repo_names)
 
     async def get_or_create_forum(self, repo_name: str) -> discord.ForumChannel | None:
-        """Get or create a forum channel for a repo."""
+        """Get or create a forum channel for a repo.
+
+        Lock discipline: ``_forum_lock`` is held across the Discord create
+        call so concurrent callers for the same repo can't both create
+        duplicate forums. Forum creation is once-per-repo so the
+        contention is sparse; safety-first beats throughput here.
+        """
         guild = self._client.get_guild(self._guild_id)
         if not guild or not self._category_id:
             return None
@@ -477,6 +483,11 @@ class ForumManager:
             return None
 
         thread = None
+        # Hold _thread_lock across the Discord create call. Two messages
+        # arriving concurrently for the same session_id would otherwise both
+        # create real Discord threads and orphan one of them. Serializing
+        # creates is cheap (per-user pace) and the safety guarantee matters
+        # more than the marginal contention.
         async with self._thread_lock:
             # Double-check after lock (another message may have created it)
             if session_id:
@@ -618,9 +629,12 @@ class ForumManager:
                     )
                     log.info("Discovered unmapped forum %s (%s)", ch.id, ch.name)
 
-        if valid_projects != self._forum_projects:
-            self._forum_projects = valid_projects
-            self.save_forum_map()
+        # Publish reconciled mapping under lock so concurrent get_or_create
+        # callers don't see a half-replaced dict.
+        async with self._forum_lock:
+            if valid_projects != self._forum_projects:
+                self._forum_projects = valid_projects
+                self.save_forum_map()
 
         # Clean up thread names and stale tags
         from bot.claude.types import InstanceStatus

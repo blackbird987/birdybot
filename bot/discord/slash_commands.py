@@ -682,7 +682,8 @@ def setup(bot: ClaudeBot) -> None:
         )
         if in_forum_thread:
             context = bot._forums.build_ref_context(proj, info, msgs, thread)
-            bot._pending_refs[channel_id] = (context, _time.monotonic())
+            bot._pending_refs[channel_id] = (context, _time.time())
+            bot._save_pending_refs()
             await interaction.followup.send(
                 embed=embed,
                 content="Context loaded \u2014 your next message will include this reference.",

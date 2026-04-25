@@ -243,6 +243,10 @@ async def ensure_forum(
         name=sanitized,
         category=category,
         default_auto_archive_duration=auto_archive,
+        # Forum-level topic (the "Guidelines" section). Sets context for any
+        # thread that lands in this forum, and labels the archive sub-thread's
+        # parent so it's clear what the forum is for at a glance.
+        topic=f"Sessions for `{name}`. Pinned: archive (closed sessions) + control room.",
     )
     # Sync permissions from category (private to owner + bot)
     try:

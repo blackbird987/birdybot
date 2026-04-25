@@ -741,11 +741,13 @@ class StateStore:
     # --- Persistent Per-Repo Deferred Revisions (stored in repo TODO.md) ---
 
     @staticmethod
-    def _dedup_key(item: str) -> str:
+    def deferred_dedup_key(item: str) -> str:
         """Normalize a deferred item to a dedup key.
 
         Strips severity tag, leading dash, lowercases, then uses
         [Tag] + first 40 chars of description as the comparison key.
+        Public so engine code (e.g. plan-review injection) can dedup
+        with the same normalization used on append.
         """
         import re
         text = re.sub(r'\s*\((Critical|High|Medium|Low)\)\s*$', '', item)
@@ -779,10 +781,10 @@ class StateStore:
 
         # Deduplicate against existing items using normalized keys
         existing_items = self._parse_deferred_section(content)
-        existing_keys = {self._dedup_key(i) for i in existing_items}
+        existing_keys = {self.deferred_dedup_key(i) for i in existing_items}
         new_items = [
             item for item in items
-            if self._dedup_key(item) not in existing_keys
+            if self.deferred_dedup_key(item) not in existing_keys
         ]
         if not new_items:
             log.debug("All %d deferred items already tracked for %s", len(items), repo_name)
