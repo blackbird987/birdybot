@@ -311,6 +311,7 @@ def action_button_specs(
                 ButtonSpec("Merge", f"merge:{iid}"),
                 ButtonSpec("Discard", f"discard:{iid}"),
             ])
+        rows.append([ButtonSpec("Send to Verify Board", f"verify_board:{iid}")])
         return rows
 
     if instance.status == InstanceStatus.COMPLETED:

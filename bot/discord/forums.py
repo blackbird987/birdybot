@@ -1573,6 +1573,120 @@ class ForumManager:
         except Exception:
             log.debug("Failed to refresh control room for user %s", user_id, exc_info=True)
 
+    # --- Verify Board ---
+
+    def _verify_lock(self, repo_name: str) -> asyncio.Lock:
+        """Get or create a per-repo lock for verify-board mutations."""
+        lock = self._verify_locks.get(repo_name)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._verify_locks[repo_name] = lock
+        return lock
+
+    async def ensure_verify_board(self, repo_name: str) -> discord.Thread | None:
+        """Ensure the pinned verify-board thread exists for a repo's forum.
+
+        Serialized via the per-repo verify lock so concurrent reconcile +
+        first-tap can't create duplicate boards.
+        """
+        proj = self._forum_projects.get(repo_name)
+        if not proj or not proj.forum_channel_id:
+            return None
+
+        async with self._verify_lock(repo_name):
+            # Re-check after acquiring lock
+            if proj.verify_board_thread_id:
+                try:
+                    ch = await self._client.fetch_channel(int(proj.verify_board_thread_id))
+                    if isinstance(ch, discord.Thread):
+                        if ch.archived:
+                            try:
+                                await ch.edit(archived=False)
+                            except Exception:
+                                pass
+                        return ch
+                except discord.NotFound:
+                    log.info("Verify-board thread %s for %s was deleted, recreating",
+                             proj.verify_board_thread_id, repo_name)
+                    proj.verify_board_thread_id = None
+                    proj.verify_board_message_id = None
+
+            forum = self._client.get_channel(int(proj.forum_channel_id))
+            if not forum or not isinstance(forum, discord.ForumChannel):
+                return None
+
+            thread, msg = await channels.create_verify_board_post(
+                forum, proj, guild_id=self._guild_id,
+            )
+            proj.verify_board_thread_id = str(thread.id)
+            proj.verify_board_message_id = str(msg.id)
+            self.save_forum_map()
+
+        try:
+            await self._auto_follow_thread(thread, repo_name)
+        except Exception:
+            log.debug("Failed to auto-follow verify-board thread %s", thread.id)
+        return thread
+
+    async def refresh_verify_board(self, repo_name: str) -> None:
+        """Re-render the verify-board embed for a repo (out-of-lock Discord edit)."""
+        from bot.discord import verify_board as vb_mod
+
+        proj = self._forum_projects.get(repo_name)
+        if not proj or not proj.verify_board_thread_id or not proj.verify_board_message_id:
+            return
+        try:
+            thread = await self._client.fetch_channel(int(proj.verify_board_thread_id))
+        except discord.NotFound:
+            log.info("Verify-board thread for %s was deleted, clearing IDs", repo_name)
+            proj.verify_board_thread_id = None
+            proj.verify_board_message_id = None
+            self.save_forum_map()
+            return
+        if not isinstance(thread, discord.Thread):
+            return
+
+        embed = vb_mod.build_board_embed(proj, self._guild_id)
+        view = vb_mod.build_board_view(repo_name, proj)
+        try:
+            msg = await thread.fetch_message(int(proj.verify_board_message_id))
+            await msg.edit(embed=embed, view=view)
+        except discord.NotFound:
+            log.info("Verify-board message for %s was deleted, recreating thread", repo_name)
+            proj.verify_board_thread_id = None
+            proj.verify_board_message_id = None
+            self.save_forum_map()
+            try:
+                await self.ensure_verify_board(repo_name)
+            except Exception:
+                log.debug("Failed to recreate verify-board for %s", repo_name, exc_info=True)
+        except Exception:
+            log.debug("Failed to refresh verify-board for %s", repo_name, exc_info=True)
+
+    async def _mutate_verify(self, repo_name: str, mutator):
+        """Run `mutator(proj.verify_items)` under the repo lock, then save + refresh.
+
+        The mutator runs in-memory only — no Discord awaits inside the lock.
+        Pruning happens under the same lock so it can't clobber concurrent
+        appends. After release, `refresh_verify_board` is fired as a background
+        task so the caller doesn't block on a Discord edit.
+        Returns whatever the mutator returns.
+        """
+        from bot.engine import verify as verify_mod
+
+        proj = self._forum_projects.get(repo_name)
+        if not proj:
+            return None
+        async with self._verify_lock(repo_name):
+            result = mutator(proj.verify_items)
+            try:
+                verify_mod.prune_old(proj.verify_items)
+            except Exception:
+                log.debug("verify prune failed for %s", repo_name, exc_info=True)
+            self.save_forum_map()
+        asyncio.create_task(self.refresh_verify_board(repo_name))
+        return result
+
     # --- Session Callbacks ---
 
     def set_thread_session(self, thread_id: str, session_id: str) -> None:
