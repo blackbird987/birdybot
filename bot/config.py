@@ -467,6 +467,15 @@ PLAN_PROMPT_PREFIX = (
     "Create a detailed implementation plan for the following task. "
     "Explore the codebase, understand existing patterns and architecture, "
     "and design your approach. Do NOT implement anything yet — just plan.\n\n"
+    "If the work breaks naturally into sequential PRs or phases, emit a "
+    "`phase-plan` fenced block at the end. Each phase is a line of the form "
+    "`- id: <slug> | title: <title> | gate: mechanical|design|risk` "
+    "(optionally followed by `| reason: <one short sentence>`). "
+    "Use `mechanical` for refactors/renames/file moves with no behavior change. "
+    "Use `design` when human input on the approach should land before starting. "
+    "Use `risk` for production-behavior changes (data, auth, payments, infra) "
+    "where a human should review before each phase ships. "
+    "Omit the block entirely if the task is single-phase.\n\n"
     "Task: "
 )
 
@@ -478,8 +487,22 @@ BUILD_FROM_QUERY_PROMPT = (
     "Now implement the above. You have full build permissions."
 )
 
+BUILD_PHASE_PROMPT = (
+    "You're on Phase {id}: {title}. Implement ONLY this phase from the plan. "
+    "Commit it separately with a message prefixed `[{id}] `. "
+    "When done, emit a `phase-status` fenced block at the end of your response:\n"
+    "```phase-status\n"
+    "done: true\n"
+    "commit: <sha>\n"
+    "```\n"
+    "Do not start the next phase — the chain handles that."
+)
+
 PLAN_REVIEW_PROMPT = (
     'Review the plan above and propose your best revisions. '
+    'If the plan includes a `phase-plan` block, also sanity-check the phase '
+    'breakdown: are gate types right (mechanical/design/risk)? Should any '
+    'phase be split or merged? Flag issues as revisions like any other.\n\n'
     'Format your response EXACTLY as described below.\n\n'
     'START with a plain summary paragraph (no bold, no bullets). '
     '1-2 sentences: how many revisions, their priorities, general theme. '

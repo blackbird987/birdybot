@@ -11,7 +11,8 @@ from pathlib import Path
 
 from bot import config
 from bot.claude.types import (
-    CODE_CHANGE_TOOLS, Instance, InstanceOrigin, InstanceStatus, InstanceType,
+    CODE_CHANGE_TOOLS, ChainPhaseState, Instance, InstanceOrigin, InstanceStatus,
+    InstanceType, PHASE_GATES, Phase,
 )
 from bot.engine import lifecycle, sessions as sessions_mod
 from bot.platform.base import ButtonSpec, RequestContext
@@ -65,6 +66,7 @@ async def _exit_chain(
     if clear_state:
         ctx.store.clear_autopilot_chain(session_id)
         ctx.store.clear_chain_deferred(session_id)
+        ctx.store.clear_chain_phases(session_id)
     await _notify_user(ctx, suffix)
 
 
@@ -144,6 +146,107 @@ def _extract_deferred(inst: Instance) -> list[str]:
 def _extract_triage_deferred(inst: Instance) -> list[str]:
     """Extract still-deferred items after LLM triage."""
     return _parse_deferred_block(inst, _TRIAGE_RESULT_RE)
+
+
+# --- Phase plan parsing & gate helpers ---
+
+_PHASE_PLAN_RE = re.compile(r'```phase-plan\s*\n(.*?)```', re.DOTALL)
+
+
+def _extract_phase_plan(inst: Instance | None) -> list[Phase]:
+    """Parse a `phase-plan` fenced block from an instance's result file.
+
+    Each line inside the block looks like:
+      `- id: <slug> | title: <title> | gate: mechanical|design|risk [| reason: <text>]`
+    Lines with missing/invalid id or gate are silently skipped.
+    Returns [] if the block is absent or malformed.
+    """
+    if not inst or not inst.result_file:
+        return []
+    try:
+        text = Path(inst.result_file).read_text(encoding="utf-8")
+    except OSError:
+        return []
+    # Take the LAST block — if the plan was revised, the most recent
+    # phase-plan supersedes earlier drafts in the same result file.
+    blocks = _PHASE_PLAN_RE.findall(text)
+    if not blocks:
+        return []
+    phases: list[Phase] = []
+    for raw in blocks[-1].splitlines():
+        line = raw.strip()
+        if not line.startswith("-"):
+            continue
+        line = line.lstrip("-").strip()
+        fields: dict[str, str] = {}
+        for part in line.split("|"):
+            if ":" not in part:
+                continue
+            k, _, v = part.partition(":")
+            fields[k.strip().lower()] = v.strip()
+        pid = fields.get("id", "")
+        title = fields.get("title", "")
+        gate = fields.get("gate", "").lower()
+        reason = fields.get("reason", "")
+        if not pid or gate not in PHASE_GATES:
+            continue
+        phases.append(Phase(id=pid, title=title, gate=gate, reason=reason))
+    return phases
+
+
+def _find_phase_plan(store, inst: Instance | None, max_depth: int = 24) -> list[Phase]:
+    """Walk parent_id chain to find the most recent phase-plan block.
+
+    The plan-review loop (review → apply → triage) often produces follow-up
+    instances whose result files don't echo the original `phase-plan` block
+    (e.g. TRIAGE_DEFERRED_PROMPT only asks for the triage section). Without
+    this walk, autopilot would silently fall back to single-shot for any
+    plan that went through revisions. Depth must accommodate the worst-case
+    review loop: up to MAX_ROUNDS=5 review/apply pairs (10 instances) plus
+    plan + triage + the originating question, so we budget 24 to leave
+    headroom for nested chain entry points. Bounded to protect against any
+    future parent-id cycle.
+    """
+    visited: set[str] = set()
+    current = inst
+    while current and current.id not in visited and len(visited) < max_depth:
+        visited.add(current.id)
+        phases = _extract_phase_plan(current)
+        if phases:
+            return phases
+        if not current.parent_id:
+            return []
+        current = store.get_instance(current.parent_id)
+    return []
+
+
+async def _git_head(path: str | None) -> str | None:
+    """Return the current git HEAD SHA at *path*, or None if unavailable."""
+    if not path or not Path(path).is_dir():
+        return None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git", "-C", path, "rev-parse", "HEAD",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+        if proc.returncode == 0:
+            return stdout.decode().strip() or None
+    except Exception:
+        log.debug("git rev-parse failed for %s", path, exc_info=True)
+    return None
+
+
+def _phase_gate_suffix(phase: Phase, where: str) -> str:
+    """Build the user-facing notification text for a phase gate pause."""
+    if where == "pre":
+        head = f"Phase `{phase.id}` ({phase.title}) needs your input before starting"
+    else:
+        head = f"Phase `{phase.id}` ({phase.title}) shipped — review before next phase"
+    if phase.reason:
+        head += f": {phase.reason}"
+    return head + "."
 
 
 # --- Spawn ---
@@ -786,14 +889,246 @@ async def _run_autopilot_chain(
                     )
             elif step == "build":
                 source = ctx.store.get_instance(current_id)
-                is_plan = source.plan_active if source else False
-                result = await spawn_from(ctx, current_id, SpawnConfig(
-                    instance_type=InstanceType.TASK,
-                    prompt=config.BUILD_FROM_PLAN_PROMPT if is_plan else config.BUILD_FROM_QUERY_PROMPT,
-                    mode="build", origin=InstanceOrigin.BUILD,
-                    status_text="Building...", resume_session=True,
-                    auto_branch=True, silent=True,
-                ), source_msg_id=current_msg)
+                multi_phase_ran = False
+
+                # Phase-plan support requires a session_id (so phase state can
+                # persist across reboots and resume-replies). Without one we
+                # fall back to the classic single-shot build.
+                phase_state: ChainPhaseState | None = None
+                if session_id:
+                    phase_state = ctx.store.get_chain_phases(session_id)
+                    if phase_state is None:
+                        discovered = _find_phase_plan(ctx.store, source)
+                        if discovered:
+                            phase_state = ChainPhaseState(phases=discovered, cursor=0)
+                            ctx.store.set_chain_phases(session_id, phase_state)
+
+                if phase_state and phase_state.phases:
+                    # --- Multi-phase build loop ---
+                    multi_phase_ran = True
+                    while not phase_state.is_done():
+                        # Resume after a post-phase risk gate: just advance.
+                        if phase_state.paused_at == "post":
+                            phase_state = ctx.store.advance_chain_phase(session_id)
+                            if phase_state is None or phase_state.is_done():
+                                break
+                            continue
+
+                        phase = phase_state.current()
+                        if phase is None:
+                            break
+
+                        # Mid-spawn reboot recovery: pre_phase_head set with no
+                        # pause means we crashed between capture and completion.
+                        # If git HEAD moved, the phase committed — advance.
+                        # EXCEPT for risk gates (non-final): if we crashed
+                        # between phase completion and persisting paused_at,
+                        # silently advancing would skip the human-review gate
+                        # the user explicitly asked for. Pause now instead so
+                        # the gate's intent is preserved across the crash.
+                        if phase_state.paused_at is None and phase_state.pre_phase_head:
+                            check_path = phase_state.worktree_path or (source.repo_path if source else None)
+                            current_head = await _git_head(check_path)
+                            if current_head and current_head != phase_state.pre_phase_head:
+                                is_last = phase_state.cursor + 1 >= len(phase_state.phases)
+                                if phase.gate == "risk" and not is_last:
+                                    log.info(
+                                        "Phase %s completed before crash with risk gate — pausing for review",
+                                        phase.id,
+                                    )
+                                    ctx.store.set_phase_pause(session_id, "post")
+                                    await _exit_chain(
+                                        ctx, source_id, session_id, steps, completed_steps,
+                                        chain_instances, None, "phase_gate_risk",
+                                        _phase_gate_suffix(phase, "post"),
+                                        intervention=True,
+                                    )
+                                    return result
+                                log.info(
+                                    "Phase %s appears completed (HEAD %s -> %s) after reboot — advancing",
+                                    phase.id, phase_state.pre_phase_head, current_head,
+                                )
+                                phase_state = ctx.store.advance_chain_phase(session_id)
+                                if phase_state is None or phase_state.is_done():
+                                    break
+                                continue
+
+                        # Pre-phase gate (design = wait for human input first).
+                        # Skip if already paused here (we got resumed past it).
+                        # Don't append "build" to completed_steps — the step
+                        # is partial, not done. Matches the failure-exit pattern
+                        # used by the outer chain loop.
+                        # Pass result=None to _exit_chain: `result` here is the
+                        # PRIOR step's instance (e.g. review_loop), already
+                        # appended to chain_instances at the bottom of that
+                        # step's iteration; passing it again would double-count
+                        # it in _eval_chain_safe.
+                        if phase.gate == "design" and phase_state.paused_at != "pre":
+                            ctx.store.set_phase_pause(session_id, "pre")
+                            await _exit_chain(
+                                ctx, source_id, session_id, steps, completed_steps,
+                                chain_instances, None, "phase_gate_design",
+                                _phase_gate_suffix(phase, "pre"),
+                                intervention=True,
+                            )
+                            return result
+
+                        # 4a: capture HEAD before spawning the phase build.
+                        capture_path = phase_state.worktree_path or (source.repo_path if source else None)
+                        pre_head = await _git_head(capture_path)
+                        ctx.store.set_pre_phase_head(session_id, pre_head)
+
+                        # 4b: spawn the phase. First phase auto-branches; later
+                        # phases copy the branch info from the first phase's
+                        # build instance so they all land on the same worktree.
+                        is_first = phase_state.cursor == 0 and not phase_state.first_build_id
+                        spawn_source_id = current_id
+                        if not is_first and phase_state.first_build_id:
+                            spawn_source_id = phase_state.first_build_id
+
+                        # Use replace (not .format) so titles containing
+                        # `{...}` (e.g. "Refactor `{get_user}`") don't crash.
+                        phase_prompt = (config.BUILD_PHASE_PROMPT
+                                        .replace("{id}", phase.id)
+                                        .replace("{title}", phase.title))
+                        phase_result = await spawn_from(
+                            ctx, spawn_source_id,
+                            SpawnConfig(
+                                instance_type=InstanceType.TASK,
+                                prompt=phase_prompt,
+                                mode="build", origin=InstanceOrigin.BUILD,
+                                status_text=f"Building phase {phase.id}...",
+                                resume_session=True,
+                                auto_branch=is_first,
+                                copy_branch=not is_first,
+                                silent=True,
+                            ),
+                            source_msg_id=current_msg,
+                        )
+                        result = phase_result
+
+                        # 4c: atomically record worktree + first build id from
+                        # the spawn output. Atomic so a crash between writes
+                        # can't leave first_build_id None while worktree_path
+                        # is set (which would re-trigger auto_branch on resume).
+                        # Mirror the write into the local object so the next
+                        # iteration sees the new values even if a re-fetch
+                        # would fail (corruption); avoids re-running auto_branch
+                        # over an existing worktree.
+                        if is_first and phase_result and phase_result.worktree_path:
+                            ctx.store.set_phase_spawn_metadata(
+                                session_id, phase_result.worktree_path, phase_result.id,
+                            )
+                            phase_state.worktree_path = phase_result.worktree_path
+                            phase_state.first_build_id = phase_result.id
+
+                        # Mid-phase failure / needs_input: pause at "pre" so
+                        # resume re-runs this same phase after the user replies.
+                        if (not phase_result
+                                or phase_result.status != InstanceStatus.COMPLETED
+                                or phase_result.needs_input):
+                            outcome = (
+                                "needs_input"
+                                if (phase_result and phase_result.needs_input)
+                                else "failed"
+                            )
+                            ctx.store.set_phase_pause(session_id, "pre")
+                            await _exit_chain(
+                                ctx, source_id, session_id, steps, completed_steps,
+                                chain_instances, phase_result, outcome,
+                                f"Phase `{phase.id}` needs your attention.",
+                                intervention=True,
+                            )
+                            return phase_result
+
+                        # Per-phase empty-diff guard: phase finished but git
+                        # HEAD didn't move — abandon the chain. This IS terminal,
+                        # so completed_steps gets the append (matches the
+                        # single-shot empty-diff path further below).
+                        post_head = await _git_head(phase_result.worktree_path)
+                        if pre_head and post_head and pre_head == post_head:
+                            await ctx.messenger.send_text(
+                                ctx.channel_id,
+                                f"⚠️ Phase `{phase.id}` produced no commits. Halting chain.",
+                                silent=True,
+                            )
+                            # Only the first phase owns the worktree lifecycle —
+                            # tear it down so Merge/Discard don't appear empty.
+                            if is_first and phase_result.branch:
+                                await ctx.runner.discard_branch(phase_result)
+                                ctx.store.update_instance(phase_result)
+                            completed_steps.append(step)
+                            await _exit_chain(
+                                ctx, source_id, session_id, steps, completed_steps,
+                                chain_instances, phase_result, "abandoned",
+                                f"Phase `{phase.id}` had no changes.",
+                                clear_state=True,
+                            )
+                            return phase_result
+
+                        # Post-phase gate (risk = human review before next phase
+                        # ships). Skip on the final phase — the rest of the
+                        # autopilot chain (review/verify/done) covers final review.
+                        # Append phase_result to chain_instances FIRST (eval needs
+                        # to see the just-shipped phase) and pass None to
+                        # _exit_chain so it doesn't double-append.
+                        is_last = phase_state.cursor + 1 >= len(phase_state.phases)
+                        if (phase.gate == "risk" and not is_last
+                                and phase_state.paused_at != "post"):
+                            chain_instances.append(phase_result)
+                            ctx.store.set_phase_pause(session_id, "post")
+                            await _exit_chain(
+                                ctx, source_id, session_id, steps, completed_steps,
+                                chain_instances, None, "phase_gate_risk",
+                                _phase_gate_suffix(phase, "post"),
+                                intervention=True,
+                            )
+                            return phase_result
+
+                        # Successful, non-gated phase completion.
+                        # Skip inline append on the last phase — the end-of-iter
+                        # `chain_instances.append(result)` at the bottom of the
+                        # outer loop handles it. Appending here too would
+                        # double-count the final phase in the chain eval.
+                        if not is_last:
+                            chain_instances.append(phase_result)
+                        current_id = phase_result.id
+                        current_msg = _last_msg_id(phase_result, ctx.platform)
+
+                        # Advance — atomic clear of paused_at + pre_phase_head.
+                        phase_state = ctx.store.advance_chain_phase(session_id)
+                        if phase_state is None:
+                            break
+
+                    # All phases done. Clear phase state and fall through to
+                    # the next chain step. Safety net: if reboot recovery
+                    # advanced past the last phase, `result` may be None even
+                    # though the chain actually finished — recover the most
+                    # recent build instance from chain_instances or first_build.
+                    ctx.store.clear_chain_phases(session_id)
+                    if result is None:
+                        for inst in reversed(chain_instances):
+                            if inst.origin == InstanceOrigin.BUILD:
+                                result = inst
+                                current_id = inst.id
+                                current_msg = _last_msg_id(inst, ctx.platform)
+                                break
+                        if result is None and phase_state and phase_state.first_build_id:
+                            recovered = ctx.store.get_instance(phase_state.first_build_id)
+                            if recovered:
+                                result = recovered
+                                current_id = recovered.id
+                                current_msg = _last_msg_id(recovered, ctx.platform)
+                else:
+                    # --- Single-shot build (no phases declared) ---
+                    is_plan = source.plan_active if source else False
+                    result = await spawn_from(ctx, current_id, SpawnConfig(
+                        instance_type=InstanceType.TASK,
+                        prompt=config.BUILD_FROM_PLAN_PROMPT if is_plan else config.BUILD_FROM_QUERY_PROMPT,
+                        mode="build", origin=InstanceOrigin.BUILD,
+                        status_text="Building...", resume_session=True,
+                        auto_branch=True, silent=True,
+                    ), source_msg_id=current_msg)
             elif step == "review_code":
                 result = await on_review_code(ctx, current_id, current_msg)
             elif step == "verify":
@@ -863,8 +1198,12 @@ async def _run_autopilot_chain(
                 )
                 return result
 
-            # Guard: build produced no code changes — halt chain
-            if step == "build" and result and not result.code_active:
+            # Guard: build produced no code changes — halt chain.
+            # Skipped for multi-phase: each phase ran its own per-phase
+            # HEAD-movement check, and `result` here is only the LAST phase,
+            # whose code_active flag doesn't reflect prior phases' commits.
+            if (step == "build" and result and not result.code_active
+                    and not multi_phase_ran):
                 await ctx.messenger.send_text(
                     ctx.channel_id,
                     "⚠️ Build produced no code changes. Check the plan or retry.",
@@ -943,12 +1282,23 @@ async def resume_autopilot_chain(
 
     For chains with >=2 remaining steps, skip the first (the answered step)
     and run the rest. For a single remaining step, re-run it (the user's
-    answer feeds into the respawn). Returns None only when no chain exists.
+    answer feeds into the respawn).
+
+    Phase exception: if the chain is paused mid-build at a phase boundary
+    (`chain_phases` exists, next step is "build"), do NOT skip — the build
+    loop reads `paused_at` from `chain_phases` to decide which phase to run
+    next. Skipping would jump past the build entirely.
+
+    Returns None only when no chain exists.
     """
     chain = ctx.store.get_autopilot_chain(session_id)
     if not chain:
         return None
-    remaining = chain[1:] if len(chain) >= 2 else chain
+    phase_state = ctx.store.get_chain_phases(session_id) if session_id else None
+    if phase_state and phase_state.phases and chain and chain[0] == "build":
+        remaining = chain
+    else:
+        remaining = chain[1:] if len(chain) >= 2 else chain
     return await _run_autopilot_chain(
         ctx, source_id, source_msg_id, remaining, session_id,
     )

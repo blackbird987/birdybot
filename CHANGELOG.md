@@ -16,6 +16,10 @@
 
 ### Changed
 - `on_message`'s finally now calls the shared `_unlink_image_paths` helper instead of inlining its own loop.
+## v0.83.0 — Multi-phase autopilot builds (2026-04-25)
+
+### Added
+- Multi-phase autopilot builds: plan step can declare a `phase-plan` fenced block (one line per phase with `id | title | gate` where gate is `mechanical | design | risk`), and the build step splits into one Claude spawn per phase committing under `[<id>]` prefixes. `design` gates pause for human input before the phase, `risk` gates pause for review after the phase. Phase state (`cursor`, `paused_at`, `pre_phase_head`, `worktree_path`, `first_build_id`) persists in `data/state.json` under `chain_phases` so chains survive reboots and resume mid-phase. `_find_phase_plan` walks the parent_id chain (depth 24, cycle-protected) so the phase plan isn't lost when the review/apply/triage loop produces follow-up instances that don't echo it. Per-phase empty-diff guard halts the chain if a phase produces no commits; first-phase failures discard the worktree, later-phase failures preserve prior phases' work. Reboot recovery compares git HEAD against the captured `pre_phase_head` to detect phases that committed before the crash; risk-gated phases pause for review on recovery instead of silently advancing.
 
 ## v0.79.1 — Bug fixes (2026-04-24)
 

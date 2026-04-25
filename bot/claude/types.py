@@ -262,6 +262,79 @@ class RunResult:
     last_assistant_uuid: str | None = None  # JSONL uuid of final assistant message (for "Branch from here")
 
 
+# Valid gate types for autopilot phase boundaries.
+# - mechanical: pure refactor (rename, move, format) — autopilot flies through
+# - design:     human input wanted on approach before starting — pause pre-phase
+# - risk:       production-behavior change — pause for human review post-phase
+PHASE_GATES = frozenset({"mechanical", "design", "risk"})
+
+
+@dataclass
+class Phase:
+    """One declared phase from a multi-phase plan."""
+    id: str                    # short slug, e.g. "p1"
+    title: str                 # human-readable label
+    gate: str                  # one of PHASE_GATES
+    reason: str = ""           # optional one-line rationale from the plan
+
+    def to_dict(self) -> dict:
+        return {"id": self.id, "title": self.title, "gate": self.gate, "reason": self.reason}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> Phase:
+        return cls(
+            id=d["id"],
+            title=d.get("title", ""),
+            gate=d.get("gate", "mechanical"),
+            reason=d.get("reason", ""),
+        )
+
+
+@dataclass
+class ChainPhaseState:
+    """Tracks position in a multi-phase build chain.
+
+    Persists across reboots so a chain can be resumed mid-phase. The build
+    step in the autopilot chain consults this to know which phase to spawn,
+    whether to pause for a gate, and where to pick up after a restart.
+    """
+    phases: list[Phase] = field(default_factory=list)
+    cursor: int = 0                          # index of the phase currently in flight (0-based)
+    paused_at: str | None = None             # None | "pre" | "post" — gate the chain is waiting at
+    pre_phase_head: str | None = None        # git SHA captured BEFORE the phase spawned (for empty-diff guard + reboot recovery)
+    worktree_path: str | None = None         # shared worktree across all phases of the chain
+    first_build_id: str | None = None        # instance id of the first phase build (so later phases can copy_branch)
+
+    def current(self) -> Phase | None:
+        if 0 <= self.cursor < len(self.phases):
+            return self.phases[self.cursor]
+        return None
+
+    def is_done(self) -> bool:
+        return self.cursor >= len(self.phases)
+
+    def to_dict(self) -> dict:
+        return {
+            "phases": [p.to_dict() for p in self.phases],
+            "cursor": self.cursor,
+            "paused_at": self.paused_at,
+            "pre_phase_head": self.pre_phase_head,
+            "worktree_path": self.worktree_path,
+            "first_build_id": self.first_build_id,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> ChainPhaseState:
+        return cls(
+            phases=[Phase.from_dict(p) for p in d.get("phases", [])],
+            cursor=d.get("cursor", 0),
+            paused_at=d.get("paused_at"),
+            pre_phase_head=d.get("pre_phase_head"),
+            worktree_path=d.get("worktree_path"),
+            first_build_id=d.get("first_build_id"),
+        )
+
+
 @dataclass
 class Schedule:
     id: str                     # "s-001"
