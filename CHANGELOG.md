@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.89.0 — Cross-account session dementia fix (2026-04-26)
+
 ### Fixed
 - Hot-fix for the dementia push: `_run_impl` referenced `account_dir` in its log line before the variable was assigned, raising `UnboundLocalError` on every spawn (every text query, every chain step). Moved the `[acct=…]` log line below the `_pick_account` block so it only formats once `account_dir` exists. Symptom on `1497667263325671596`: "I rebooted, is it live?" never reached the CLI — the runner crashed before subprocess spawn.
 - Hot-fix for autopilot chain resume on reboot: v0.84.0 introduced `chain_entry_sha` callsites in `bot/app.py` and `bot/engine/workflows.py` but the matching `get/set/clear_chain_entry_sha` storage was never added to `StateStore`. Every interrupted chain resumed at startup hit `AttributeError` and was logged-and-skipped (7 chains lost on the most recent boot). Added the dict + persistence + accessor trio in `bot/store/state.py`; existing `state.json` files load with an empty dict (back-compat).
