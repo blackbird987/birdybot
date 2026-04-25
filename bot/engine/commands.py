@@ -2159,6 +2159,16 @@ async def handle_callback(
                 )
         else:
             await ctx.messenger.send_text(ctx.channel_id, "Instance not found.")
+
+    elif action == "amend":
+        # Verify-release Amend: re-run the chain `done` step with the
+        # verifier's rationale prepended, then re-run verify_release.
+        await workflows.on_amend_done(ctx, instance_id, source_msg_id)
+
+    elif action == "continue_anyway":
+        # Verify-release Continue: clear needs_input on the verify_release
+        # instance and resume the chain at the next step (release / merge).
+        await workflows.on_continue_anyway(ctx, instance_id, source_msg_id)
     elif action == "sess_resume":
         await workflows.on_sess_resume(ctx, instance_id, source_msg_id)
 

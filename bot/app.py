@@ -975,6 +975,7 @@ async def _resume_interrupted_chains(
                 session_id,
             )
             store.clear_autopilot_chain(session_id)
+            store.clear_chain_entry_sha(session_id)
             continue
 
         thread_id, info = lookup
@@ -995,6 +996,7 @@ async def _resume_interrupted_chains(
                 session_id,
             )
             store.clear_autopilot_chain(session_id)
+            store.clear_chain_entry_sha(session_id)
             continue
 
         log.info(

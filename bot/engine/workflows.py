@@ -6,8 +6,10 @@ import asyncio
 import json
 import logging
 import re
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from bot import config
 from bot.claude.types import (
@@ -77,6 +79,63 @@ async def _exit_chain(
         ctx.store.clear_chain_deferred(session_id)
         ctx.store.clear_chain_phases(session_id)
     await _notify_user(ctx, suffix)
+
+
+# Mention text per chain-pause outcome — keeps wording consistent and ensures
+# the send_text fallback inside _notify_user is never empty.
+_CHAIN_EXIT_MESSAGES: dict[str, str] = {
+    "needs_input": "Needs your attention.",
+    "failed": "Chain failed — needs your attention.",
+    "phantom_detected": (
+        "Release verifier flagged phantom claims. "
+        "Tap Amend to fix, or Continue to ship anyway."
+    ),
+    "budget_exhausted": "Cost budget reached.",
+    "merge_failed": "Merge failed — needs resolution.",
+    "abandoned": "Build had no changes.",
+}
+
+
+async def _exit_chain_needs_input(
+    ctx: RequestContext,
+    source_id: str,
+    session_id: str | None,
+    steps: list[str],
+    completed_steps: list[str],
+    chain_instances: list[Instance],
+    result: Instance | None,
+    outcome: Literal[
+        "needs_input", "failed", "phantom_detected",
+        "budget_exhausted", "merge_failed", "abandoned",
+    ],
+    *,
+    clear_state: bool | None = None,
+    intervention: bool | None = None,
+    suffix_override: str | None = None,
+) -> None:
+    """Chain exit for halt/intervention paths.
+
+    Wraps `_exit_chain` with outcome-specific defaults so each callsite no
+    longer has to hand-craft mention text or pick `clear_state` /
+    `intervention`. Pass an override only if the default is wrong for the
+    callsite (e.g. tests that need a specific wording).
+
+    Callers MUST return immediately after calling this.
+    """
+    suffix = suffix_override or _CHAIN_EXIT_MESSAGES.get(outcome) or "Chain stopped."
+
+    # Defaults: phantom_detected and needs_input keep state for resume;
+    # everything else is terminal and clears chain state.
+    if clear_state is None:
+        clear_state = outcome not in ("needs_input", "phantom_detected")
+    if intervention is None:
+        intervention = outcome in ("needs_input", "phantom_detected", "failed")
+
+    await _exit_chain(
+        ctx, source_id, session_id, steps, completed_steps,
+        chain_instances, result, outcome, suffix,
+        clear_state=clear_state, intervention=intervention,
+    )
 
 
 @dataclass
@@ -654,16 +713,44 @@ async def on_commit(ctx: RequestContext, source_id: str, source_msg_id: str | No
     ), source_msg_id=source_msg_id)
 
 
-async def on_done(ctx: RequestContext, source_id: str, source_msg_id: str | None = None) -> Instance | None:
-    """Commit all changes, update changelog, then close the conversation."""
+async def on_done(
+    ctx: RequestContext,
+    source_id: str,
+    source_msg_id: str | None = None,
+    *,
+    prompt_variant: Literal["chain", "standalone"] = "standalone",
+    extra_context: str | None = None,
+) -> Instance | None:
+    """Commit all changes, update changelog, then close the conversation.
+
+    `prompt_variant`:
+      - "standalone" (default): full /done — commit + cut release + tag.
+      - "chain": commit + update [Unreleased] only. Release/tag run later
+        as the autopilot `release` step, after the `verify_release` gate.
+
+    `extra_context` is prepended to the prompt and used by the Amend button
+    to surface the verifier's phantom-bullet rationale.
+    """
+    if prompt_variant == "chain":
+        prompt = config.DONE_PROMPT_CHAIN
+    else:
+        prompt = config.DONE_PROMPT_STANDALONE
+    if extra_context:
+        prompt = f"{extra_context}\n\n{prompt}"
+
     result = await spawn_from(ctx, source_id, SpawnConfig(
-        instance_type=InstanceType.TASK, prompt=config.DONE_PROMPT,
+        instance_type=InstanceType.TASK, prompt=prompt,
         mode="build", origin=InstanceOrigin.DONE,
         status_text="Wrapping up...", resume_session=True,
         copy_branch=True, silent=True,
     ), source_msg_id=source_msg_id)
 
     if not result or result.status != InstanceStatus.COMPLETED:
+        return result
+
+    # In chain mode the `release` step still runs after this — never close
+    # the thread mid-chain, even when there is no branch to merge.
+    if prompt_variant == "chain":
         return result
 
     # Only close the thread if no branch is pending merge.
@@ -679,9 +766,18 @@ async def on_done(ctx: RequestContext, source_id: str, source_msg_id: str | None
 
 # --- Autopilot chains ---
 
-_AUTOPILOT_STEPS = ["review_loop", "build", "review_code", "verify", "done", "merge"]
-_BUILD_AND_SHIP_STEPS = ["build", "review_code", "verify", "done", "merge"]
-_AUTOPILOT_HOLD_STEPS = ["review_loop", "build", "review_code", "verify", "done"]
+_AUTOPILOT_STEPS = [
+    "review_loop", "build", "review_code", "verify",
+    "done", "verify_release", "release", "merge",
+]
+_BUILD_AND_SHIP_STEPS = [
+    "build", "review_code", "verify",
+    "done", "verify_release", "release", "merge",
+]
+_AUTOPILOT_HOLD_STEPS = [
+    "review_loop", "build", "review_code", "verify",
+    "done", "verify_release", "release",
+]
 
 
 async def _review_plan_loop(
@@ -842,6 +938,486 @@ def _find_mergeable_instance(store, session_id: str | None) -> Instance | None:
     return None
 
 
+_NOWND: dict = config.NOWND
+_DIFF_PAYLOAD_CAP = 20 * 1024  # 20KB before truncation
+
+# Anchored regex: ## [Unreleased] header, capture until next ## header or EOF.
+_UNRELEASED_RE = re.compile(
+    r'^##\s*\[Unreleased\]\s*$\n(.*?)(?=^##\s|\Z)',
+    re.DOTALL | re.MULTILINE,
+)
+
+# Pull a fenced ```json``` block out of verifier output.
+_JSON_BLOCK_RE = re.compile(
+    r'```json\s*\n(.*?)```', re.DOTALL,
+)
+
+
+def _git_head_sha(repo_path: str) -> str | None:
+    """Return current HEAD SHA in *repo_path*, or None on failure."""
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_path, capture_output=True, timeout=5, text=True, **_NOWND,
+        )
+        if r.returncode != 0:
+            return None
+        sha = r.stdout.strip()
+        return sha or None
+    except Exception:
+        log.warning("git rev-parse HEAD failed in %s", repo_path, exc_info=True)
+        return None
+
+
+def _git_log_messages(repo_path: str, entry_sha: str) -> str:
+    """Concatenated commit messages from entry_sha..HEAD (newest first)."""
+    try:
+        r = subprocess.run(
+            ["git", "log", f"{entry_sha}..HEAD", "--format=%B%x00"],
+            cwd=repo_path, capture_output=True, timeout=10, text=True, **_NOWND,
+        )
+        if r.returncode != 0:
+            return ""
+        # Split on NUL, strip empties
+        parts = [p.strip() for p in r.stdout.split("\x00") if p.strip()]
+        return "\n\n---\n\n".join(parts)
+    except Exception:
+        log.warning("git log failed in %s", repo_path, exc_info=True)
+        return ""
+
+
+def _git_diff_stat(repo_path: str, entry_sha: str) -> str:
+    try:
+        r = subprocess.run(
+            ["git", "diff", "--stat", f"{entry_sha}..HEAD"],
+            cwd=repo_path, capture_output=True, timeout=10, text=True, **_NOWND,
+        )
+        return r.stdout if r.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def _git_diff_payload(repo_path: str, entry_sha: str) -> tuple[str, bool, list[str]]:
+    """Return (diff_text, truncated, file_list).
+
+    Truncation is at _DIFF_PAYLOAD_CAP bytes; file_list is the full
+    `git diff --name-only` so a downstream pass can re-fetch any file
+    that fell outside the window.
+    """
+    try:
+        r = subprocess.run(
+            ["git", "diff", f"{entry_sha}..HEAD"],
+            cwd=repo_path, capture_output=True, timeout=15, text=True, **_NOWND,
+        )
+        diff = r.stdout if r.returncode == 0 else ""
+    except Exception:
+        diff = ""
+
+    truncated = False
+    if len(diff) > _DIFF_PAYLOAD_CAP:
+        diff = diff[:_DIFF_PAYLOAD_CAP] + "\n[TRUNCATED]"
+        truncated = True
+
+    files: list[str] = []
+    try:
+        rf = subprocess.run(
+            ["git", "diff", "--name-only", f"{entry_sha}..HEAD"],
+            cwd=repo_path, capture_output=True, timeout=10, text=True, **_NOWND,
+        )
+        if rf.returncode == 0:
+            files = [ln.strip() for ln in rf.stdout.splitlines() if ln.strip()]
+    except Exception:
+        pass
+
+    return diff, truncated, files
+
+
+def _read_unreleased_block(repo_path: str) -> str | None:
+    """Return the raw text of the ## [Unreleased] block, or None if missing/malformed."""
+    cl = Path(repo_path) / "CHANGELOG.md"
+    if not cl.exists():
+        return None
+    try:
+        text = cl.read_text(encoding="utf-8")
+    except Exception:
+        return None
+    # Normalize \r\n / \r so the multiline regex anchors work consistently
+    # regardless of how the file was committed.
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    m = _UNRELEASED_RE.search(text)
+    if not m:
+        return None
+    body = m.group(1).strip()
+    if not body:
+        return None
+    return body
+
+
+def _resolve_chain_repo_path(*candidates: Instance | None) -> str | None:
+    """Pick the right cwd for git operations during a chain step.
+
+    Walks candidates in order and prefers each one's worktree (where the
+    chain is committing) over its bare repo path. Returns the first
+    existing directory.
+    """
+    for cand in candidates:
+        if not cand:
+            continue
+        if cand.worktree_path and Path(cand.worktree_path).is_dir():
+            return cand.worktree_path
+        if cand.repo_path and Path(cand.repo_path).is_dir():
+            return cand.repo_path
+    return None
+
+
+def _parse_verifier_json(text: str) -> dict | None:
+    """Extract the verifier's JSON verdict from result text. None on failure.
+
+    Takes the LAST ```json``` block in the output — if Claude narrates or
+    quotes the prompt template before emitting the real answer, the final
+    block is the authoritative verdict. Matches the convention used by
+    `_verify_passed`.
+    """
+    if not text:
+        return None
+    blocks = _JSON_BLOCK_RE.findall(text)
+    if not blocks:
+        return None
+    try:
+        data = json.loads(blocks[-1].strip())
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    if data.get("verdict") not in ("ok", "mismatch"):
+        return None
+    return data
+
+
+async def on_verify_release(
+    ctx: RequestContext,
+    source_id: str,
+    source_msg_id: str | None = None,
+    *,
+    entry_sha: str | None = None,
+) -> Instance | None:
+    """Cross-check `done`-step claims (commit messages + CHANGELOG) vs. real diff.
+
+    Spawns a verifier Claude with a bounded payload. On `mismatch` (phantom
+    claims), sets `result.needs_input = True` so the chain pauses and the
+    user gets Amend / Continue buttons.
+
+    Fail-closed: any of {non-zero exit, empty result, JSON parse error,
+    missing required keys, unparseable changelog, no entry SHA} is treated
+    as `mismatch` so the user gets a chance to inspect.
+    """
+    source_inst = ctx.store.get_instance(source_id)
+    repo_path = _resolve_chain_repo_path(source_inst)
+    if not repo_path:
+        log.warning("verify_release: cannot resolve repo path for %s", source_id)
+        return None
+
+    # Defensive guards — the dispatch loop also pre-skips on these conditions,
+    # but on_verify_release is also called directly by on_amend_done.
+    if not entry_sha:
+        log.warning("verify_release: no entry SHA — skipping gate")
+        return None
+    head_sha = _git_head_sha(repo_path)
+    if head_sha and head_sha == entry_sha:
+        log.info("verify_release: entry == HEAD, no commits to verify")
+        return None
+
+    commit_messages = _git_log_messages(repo_path, entry_sha) or "(no commit messages)"
+    diff_stat = _git_diff_stat(repo_path, entry_sha) or "(empty)"
+    diff_payload, truncated, files = _git_diff_payload(repo_path, entry_sha)
+    if not diff_payload:
+        diff_payload = "(empty diff)"
+
+    truncation_note = ""
+    if truncated:
+        files_blob = "\n".join(files) if files else "(unknown)"
+        truncation_note = (
+            f" — diff was truncated at {_DIFF_PAYLOAD_CAP} bytes. "
+            f"Full file list:\n{files_blob}\n"
+            f"If a claim references a file outside the window, list it under "
+            f"`needs_inspection` instead of marking phantom."
+        )
+
+    unreleased = _read_unreleased_block(repo_path)
+    changelog_block = unreleased or "(parser failure: [Unreleased] missing or malformed)"
+
+    prompt = config.build_release_verify_prompt(
+        commit_messages=commit_messages,
+        changelog_unreleased=changelog_block,
+        diff_stat=diff_stat,
+        diff_payload=diff_payload,
+        truncation_note=truncation_note,
+    )
+
+    result = await spawn_from(ctx, source_id, SpawnConfig(
+        instance_type=InstanceType.QUERY,
+        prompt=prompt,
+        mode="explore",
+        origin=InstanceOrigin.VERIFY_RELEASE,
+        status_text="Verifying release claims...",
+        resume_session=True,
+        copy_branch=True,
+        silent=True,
+    ), source_msg_id=source_msg_id)
+
+    if not result:
+        return None
+    if result.status != InstanceStatus.COMPLETED:
+        return result
+
+    # Track failure modes explicitly so we don't have to back-derive
+    # "was this a real mismatch or a synthesized one?" from rationale strings.
+    changelog_parse_failed = unreleased is None
+    verifier_parse_failed = False
+
+    verdict_data: dict | None = None
+    if result.result_file and Path(result.result_file).exists():
+        try:
+            text = Path(result.result_file).read_text(encoding="utf-8")
+        except Exception:
+            text = ""
+        verdict_data = _parse_verifier_json(text)
+    if verdict_data is None:
+        verifier_parse_failed = True
+
+    if changelog_parse_failed:
+        verdict_data = {
+            "verdict": "mismatch",
+            "phantom_bullets": [],
+            "missing_bullets": [],
+            "needs_inspection": [],
+            "rationale": "couldn't parse [Unreleased] block in CHANGELOG.md",
+        }
+    elif verifier_parse_failed:
+        verdict_data = {
+            "verdict": "mismatch",
+            "phantom_bullets": [],
+            "missing_bullets": [],
+            "needs_inspection": [],
+            "rationale": "verifier output was unparseable — failing closed",
+        }
+
+    raw_phantoms = verdict_data.get("phantom_bullets")
+    # Be tolerant of a verifier that returns a non-list (e.g. a string) —
+    # iterating a string would otherwise treat each character as a phantom.
+    if not isinstance(raw_phantoms, list):
+        raw_phantoms = []
+    phantoms = [str(x) for x in raw_phantoms]
+    rationale = str(verdict_data.get("rationale") or "")
+
+    # Mismatch when EITHER a parser/verifier failure forced fail-closed,
+    # OR the verifier reported a real mismatch with non-empty phantoms.
+    real_mismatch = (
+        verdict_data.get("verdict") == "mismatch" and bool(phantoms)
+    )
+    is_mismatch = changelog_parse_failed or verifier_parse_failed or real_mismatch
+
+    if is_mismatch:
+        result.needs_input = True
+        ctx.store.update_instance(result)
+
+        # Discord's text-message ceiling is 2000 chars. Cap each bullet
+        # individually so one runaway claim doesn't push the whole body
+        # past the limit and break the gate UI.
+        def _cap(s: str, n: int) -> str:
+            return s if len(s) <= n else s[:n - 1] + "…"
+
+        capped_phantoms = [_cap(b, 200) for b in phantoms[:10]]
+        more = len(phantoms) - len(capped_phantoms)
+        bullets_text = (
+            "\n".join(f"• {b}" for b in capped_phantoms)
+            if capped_phantoms else "(see rationale)"
+        )
+        if more > 0:
+            bullets_text += f"\n• …and {more} more"
+
+        body = (
+            f"⚠️ **Release verifier flagged a mismatch.**\n\n"
+            f"**Phantom claims:**\n{bullets_text}\n\n"
+            f"**Rationale:** {_cap(rationale, 400)}\n\n"
+            f"Tap **Amend** to re-run the wrap-up step with this feedback, "
+            f"or **Continue anyway** to proceed to release."
+        )
+        try:
+            await ctx.messenger.send_text(
+                ctx.channel_id, body,
+                buttons=[[
+                    ButtonSpec("Amend", f"amend:{result.id}"),
+                    ButtonSpec("Continue anyway", f"continue_anyway:{result.id}"),
+                ]],
+                silent=False,
+            )
+        except Exception:
+            log.exception("verify_release: failed to post Amend/Continue UI")
+
+    return result
+
+
+async def on_amend_done(
+    ctx: RequestContext,
+    verify_release_instance_id: str,
+    source_msg_id: str | None = None,
+) -> Instance | None:
+    """Amend button: re-run chain `done` with verifier feedback, then re-verify.
+
+    The button is wired to the verify_release Instance, so we read its
+    rationale (from the result file) and prepend it as `extra_context` to
+    the next on_done call. After done finishes we run on_verify_release
+    again with a fresh entry SHA.
+    """
+    vr = ctx.store.get_instance(verify_release_instance_id)
+    if not vr:
+        await ctx.messenger.send_text(ctx.channel_id, "Instance not found.")
+        return None
+    if not vr.session_id:
+        await ctx.messenger.send_text(
+            ctx.channel_id,
+            "No session attached to this verify-release run — cannot amend.",
+        )
+        return None
+    if not ctx.store.get_autopilot_chain(vr.session_id):
+        await ctx.messenger.send_text(
+            ctx.channel_id, "No paused chain to amend.",
+        )
+        return None
+
+    # Pull the verifier verdict from the result file (best-effort).
+    verdict: dict | None = None
+    if vr.result_file and Path(vr.result_file).exists():
+        try:
+            text = Path(vr.result_file).read_text(encoding="utf-8")
+        except Exception:
+            text = ""
+        verdict = _parse_verifier_json(text)
+
+    if verdict:
+        raw_phantoms = verdict.get("phantom_bullets")
+        if not isinstance(raw_phantoms, list):
+            raw_phantoms = []
+        # Cap each bullet to keep the amend prompt focused (Claude can
+        # always reread the full verifier output if needed).
+        capped = [str(b)[:300] for b in raw_phantoms[:20]]
+        phantom_text = "\n".join(f"- {b}" for b in capped) or "(see rationale)"
+        verdict_rationale = (str(verdict.get("rationale") or "(none)"))[:600]
+    else:
+        # Couldn't parse the verifier output — still need to instruct Claude
+        # what to fix. Generic message + ask Claude to inspect on its own.
+        phantom_text = (
+            "(verifier output couldn't be parsed — inspect the prior commit "
+            "and CHANGELOG manually for unsubstantiated claims)"
+        )
+        verdict_rationale = "verifier output was unparseable"
+
+    rationale = (
+        "AMEND MODE — the prior `done` step already created a commit, "
+        "but the release verifier flagged a problem with its commit message "
+        "and CHANGELOG. Override step 1 of the prompt below: do NOT create a "
+        "new commit. Instead:\n"
+        "  1. Edit CHANGELOG.md to remove or correct the phantom bullets in "
+        "the [Unreleased] section.\n"
+        "  2. If a phantom claim is real but unimplemented, implement the "
+        "code change.\n"
+        "  3. Stage CHANGELOG.md (and any new code) and run "
+        "`git commit --amend` with a corrected commit message body — do not "
+        "create a duplicate commit.\n"
+        "  4. Then continue with steps 2-5 of the prompt below (verify "
+        "CHANGELOG, no version bump, no tag, no leftover uncommitted "
+        "changes).\n\n"
+        f"Phantom claims:\n{phantom_text}\n\n"
+        f"Verifier rationale: {verdict_rationale}"
+    )
+
+    # Clear needs_input so the chain dispatcher doesn't re-block on the
+    # same instance. Do NOT re-snapshot entry SHA — the original snapshot
+    # was taken before the *first* `done` ran, and it's the correct anchor
+    # for diffing the union of original-commit + amend-commit. Re-snapshotting
+    # would set entry_sha to the post-original-done HEAD, after which
+    # verify_release would only see the amend's delta (often empty when
+    # `git commit --amend` rewrites the message without touching files).
+    vr.needs_input = False
+    ctx.store.update_instance(vr)
+
+    done_result = await on_done(
+        ctx, verify_release_instance_id, source_msg_id,
+        prompt_variant="chain", extra_context=rationale or None,
+    )
+    if (not done_result
+            or done_result.status != InstanceStatus.COMPLETED
+            or done_result.needs_input):
+        # Done failed, errored, or asked a question — surface the result
+        # and stop. Chain remains paused; user can reply or click again.
+        return done_result
+
+    entry_sha = ctx.store.get_chain_entry_sha(vr.session_id)
+    verify_result = await on_verify_release(
+        ctx, done_result.id, _last_msg_id(done_result, ctx.platform),
+        entry_sha=entry_sha,
+    )
+
+    # If verify still fails, on_verify_release already re-posted the gate UI.
+    # If it passed (or was skipped), auto-resume the chain at the next step.
+    if verify_result is None or (
+        verify_result.status == InstanceStatus.COMPLETED
+        and not verify_result.needs_input
+    ):
+        next_source_id = (verify_result or done_result).id
+        next_msg_id = _last_msg_id(verify_result or done_result, ctx.platform)
+        await resume_autopilot_chain(
+            ctx, next_source_id, next_msg_id, vr.session_id,
+        )
+    return verify_result
+
+
+async def on_continue_anyway(
+    ctx: RequestContext,
+    verify_release_instance_id: str,
+    source_msg_id: str | None = None,
+) -> Instance | None:
+    """Continue Anyway button: clear needs_input + resume chain at next step."""
+    vr = ctx.store.get_instance(verify_release_instance_id)
+    if not vr:
+        await ctx.messenger.send_text(ctx.channel_id, "Instance not found.")
+        return None
+    vr.needs_input = False
+    ctx.store.update_instance(vr)
+    resumed = await resume_autopilot_chain(
+        ctx, verify_release_instance_id, source_msg_id, vr.session_id,
+    )
+    if resumed is None:
+        await ctx.messenger.send_text(
+            ctx.channel_id, "No paused chain to continue.",
+        )
+    return resumed
+
+
+async def on_release_chain(
+    ctx: RequestContext,
+    source_id: str,
+    source_msg_id: str | None = None,
+) -> Instance | None:
+    """Run the autopilot `release` chain step — cuts version, updates files, tags.
+
+    Reuses RELEASE_PROMPT (the same prompt /release uses) so behavior matches
+    the manual command. Defaults to `patch` bump.
+    """
+    prompt = config.RELEASE_PROMPT.format(version_hint="patch")
+    return await spawn_from(ctx, source_id, SpawnConfig(
+        instance_type=InstanceType.TASK,
+        prompt=prompt,
+        mode="build",
+        origin=InstanceOrigin.RELEASE,
+        status_text="Cutting release...",
+        resume_session=True,
+        copy_branch=True,
+        silent=True,
+    ), source_msg_id=source_msg_id)
+
+
 def clear_stale_branches(store, branch_name: str) -> int:
     """Clear branch/worktree_path on ALL instances sharing a branch name.
 
@@ -921,11 +1497,9 @@ async def _run_autopilot_chain(
                         f"⚠️ Cost budget exhausted (${chain_cost:.2f} / ${cost_budget_usd:.2f}). Pausing chain.",
                         silent=True,
                     )
-                    await _exit_chain(
+                    await _exit_chain_needs_input(
                         ctx, source_id, session_id, steps, completed_steps,
                         chain_instances, result, "budget_exhausted",
-                        "Cost budget reached.",
-                        clear_state=True,
                     )
                     return result
 
@@ -1189,7 +1763,55 @@ async def _run_autopilot_chain(
             elif step == "verify":
                 result = await on_verify(ctx, current_id, current_msg)
             elif step == "done":
-                result = await on_done(ctx, current_id, current_msg)
+                # Snapshot HEAD before the chain `done` so verify_release has
+                # a stable diff anchor (entry_sha..HEAD).
+                src_for_sha = ctx.store.get_instance(current_id)
+                repo_path = _resolve_chain_repo_path(src_for_sha)
+                if repo_path:
+                    head_sha = _git_head_sha(repo_path)
+                    if head_sha:
+                        ctx.store.set_chain_entry_sha(session_id, head_sha)
+                result = await on_done(
+                    ctx, current_id, current_msg, prompt_variant="chain",
+                )
+            elif step == "verify_release":
+                entry_sha = ctx.store.get_chain_entry_sha(session_id)
+                src_for_skip = ctx.store.get_instance(current_id)
+                skip_repo = _resolve_chain_repo_path(src_for_skip)
+                skip_head = _git_head_sha(skip_repo) if skip_repo else None
+
+                # Skip pre-spawn so budget/spawn failures aren't conflated
+                # with the legitimate "nothing to verify" case below.
+                if not entry_sha:
+                    log.warning(
+                        "verify_release: no entry SHA — skipping gate (chain %s)",
+                        session_id,
+                    )
+                    try:
+                        await ctx.messenger.send_text(
+                            ctx.channel_id,
+                            "ℹ️ Release verifier skipped — no diff anchor "
+                            "available. Proceeding without claim verification.",
+                            silent=True,
+                        )
+                    except Exception:
+                        pass
+                    completed_steps.append(step)
+                    continue
+                if skip_head and skip_head == entry_sha:
+                    log.info("verify_release: entry == HEAD, no commits to verify")
+                    completed_steps.append(step)
+                    continue
+
+                result = await on_verify_release(
+                    ctx, current_id, current_msg, entry_sha=entry_sha,
+                )
+                # From here, None means spawn failed — treated as chain
+                # failure by the post-step status guard below.
+            elif step == "release":
+                # Cut a release if [Unreleased] has entries; the prompt itself
+                # aborts cleanly when the section is empty (no harm done).
+                result = await on_release_chain(ctx, current_id, current_msg)
             elif step == "merge":
                 # Merge step: git operations only, no Claude instance.
                 # On resume after restart, result may be None — look up the
@@ -1230,11 +1852,9 @@ async def _run_autopilot_chain(
                             silent=True,
                         )
                         completed_steps.append(step)
-                        await _exit_chain(
+                        await _exit_chain_needs_input(
                             ctx, source_id, session_id, steps, completed_steps,
                             chain_instances, None, "merge_failed",
-                            "Merge failed — needs resolution.",
-                            clear_state=True,
                         )
                         return result
                 completed_steps.append(step)
@@ -1244,12 +1864,34 @@ async def _run_autopilot_chain(
 
             if not result or result.status != InstanceStatus.COMPLETED or result.needs_input:
                 # Chain paused/failed/question — notify user, state saved for resume
-                outcome = "needs_input" if (result and result.needs_input) else "failed"
-                await _exit_chain(
+                if result and result.needs_input and step == "verify_release":
+                    outcome = "phantom_detected"
+                elif result and result.needs_input:
+                    outcome = "needs_input"
+                else:
+                    outcome = "failed"
+
+                # Release-step partial-failure recovery hint: a half-done
+                # release (commit landed but tag failed) leaves the worktree
+                # in a state that's hard to debug from the chain failure
+                # embed alone. Surface a one-liner before exiting.
+                if step == "release" and outcome == "failed":
+                    try:
+                        await ctx.messenger.send_text(
+                            ctx.channel_id,
+                            "ℹ️ Release step halted mid-sequence. Run "
+                            "`git log --oneline -3` in the worktree to "
+                            "inspect; if a release commit exists without a "
+                            "tag, retry the release step manually or "
+                            "`git reset --soft HEAD~1` first.",
+                            silent=True,
+                        )
+                    except Exception:
+                        pass
+
+                await _exit_chain_needs_input(
                     ctx, source_id, session_id, steps, completed_steps,
                     chain_instances, result, outcome,
-                    "Needs your attention.",
-                    intervention=True,
                 )
                 return result
 
@@ -1269,11 +1911,9 @@ async def _run_autopilot_chain(
                     await ctx.runner.discard_branch(result)
                     ctx.store.update_instance(result)
                 completed_steps.append(step)
-                await _exit_chain(
+                await _exit_chain_needs_input(
                     ctx, source_id, session_id, steps, completed_steps,
                     chain_instances, result, "abandoned",
-                    "Build had no changes.",
-                    clear_state=True,
                 )
                 return result
             chain_instances.append(result)
@@ -1322,6 +1962,7 @@ async def _run_autopilot_chain(
 
         ctx.store.clear_autopilot_chain(session_id)
         ctx.store.clear_chain_deferred(session_id)
+        ctx.store.clear_chain_entry_sha(session_id)
         return result
     finally:
         ctx.runner.end_task(chain_task_id)
