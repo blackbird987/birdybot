@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.85.1 — Instance.read_result_text helper (2026-04-25)
+
 ### Changed
 - New `Instance.read_result_text()` helper centralizes the `result_file` path-check + best-effort read; `evaluate_instance` migrated off its private copy.
 
