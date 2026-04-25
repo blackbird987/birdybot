@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.87.0 — Autopilot/button usage-limit gating (2026-04-25)
+
 ### Added
 - Usage-limit gate now intercepts Claude-spawning button clicks (Autopilot, Plan, Build, Review code, Commit, Done, Retry, Amend, Continue autopilot, Continue, Continue anyway, Build & ship, Apply revisions, Review plan, Autopilot (Hold)) — taps during the 5–11am PT throttle window offer the same Run now / Queue / Cancel flow used for text prompts. Queued button entries fire automatically at window end. Buttons tapped while an instance is already running keep the existing Steer/Cancel pending UI (gate only applies when the channel lock is free, so mid-run steering is preserved). Per-channel "Run now" bypass also covers buttons. Double-tap dedup on the same channel + action + instance_id prevents duplicate queue entries from impatient clicks. Queue entries gain a `type` field (`"text"` | `"callback"`); pre-0.86 on-disk entries default to `"text"` for backward compatibility.
 
