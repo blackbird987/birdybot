@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- `scripts/scrub_stale_sessions.py` — one-shot recovery tool that walks every `ThreadInfo` in `state.json`, checks if its `session_id` JSONL still exists under `~/.claude/projects/`, and clears any orphans. Atomic write + auto-reboot. Use after any account swap or CLI session purge to preempt the one-time "first message hits No conversation found" cost on each affected thread.
+
 ## v0.85.2 — Account-failover session rebind (2026-04-25)
 
 ### Fixed
