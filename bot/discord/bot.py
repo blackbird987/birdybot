@@ -526,6 +526,11 @@ class ClaudeBot(discord.Client):
         }
         button_action = _ORIGIN_TO_ACTION.get(action, action)
 
+        # source_msg_id was added in 0.87 for gated-button replay; pre-0.87
+        # entries (drain-queue) won't have it — .get() keeps that path
+        # backward-compatible (handle_callback tolerates None).
+        source_msg_id = entry.get("source_msg_id")
+
         log.info("Replaying callback %s:%s in thread %s",
                  button_action, instance_id[:12], channel_id)
 
@@ -535,7 +540,7 @@ class ClaudeBot(discord.Client):
         async with lock:
             try:
                 await commands.handle_callback(
-                    ctx, button_action, instance_id, source_msg_id=None,
+                    ctx, button_action, instance_id, source_msg_id=source_msg_id,
                 )
             except Exception:
                 log.exception("Failed to replay callback %s in thread %s",
@@ -547,15 +552,26 @@ class ClaudeBot(discord.Client):
 
     # --- Usage-limit gate: Run now / Queue for 11am PT / Cancel ---
 
-    async def _offer_usage_limit_choice(
-        self, ctx: RequestContext, text: str,
+    async def _offer_gate(
+        self,
+        ctx: RequestContext,
+        *,
+        entry_extras: dict,
+        label: str,
     ) -> bool:
-        """Platform hook invoked from on_text during throttle windows.
+        """Render the Run/Queue/Cancel UI and persist a queue entry.
 
-        Returns True when the gate handled the message (prompt presented to
-        user).  Returns False to let on_text run the prompt normally — used
-        both when the window isn't active and as a safety fallback if the
-        Discord send fails after the entry was persisted.
+        Shared body for both text-prompt and button-callback gating.
+        ``entry_extras`` carries type-specific fields (``type``+``prompt``
+        +``image_paths`` for text; ``type``+``action``+``instance_id``
+        +``source_msg_id`` for callback).  ``label`` is the human-readable
+        name shown in the gate UI ("Autopilot", "this prompt", etc.).
+
+        Returns True when the gate handled the interaction.  Returns False
+        to fall through to normal dispatch — used when the window isn't
+        active, when a per-channel bypass is in effect, when the channel
+        isn't a forum thread (no replay path), and as a safety fallback
+        if the Discord send fails after the entry was persisted.
         """
         from bot.discord.usage_notifier import (
             is_usage_limit_active, next_window_end_utc,
@@ -572,11 +588,30 @@ class ClaudeBot(discord.Client):
             return False
         if bypass_end:  # expired — prune inline
             self._usage_gate_bypass.pop(ctx.channel_id, None)
-        # Only gate forum-thread messages.  Non-forum channels have no
-        # replay path (_replay_to_thread returns False) and queued entries
-        # would be orphaned.
+        # Only gate forum-thread interactions.  Non-forum channels have no
+        # replay path (_replay_to_thread/_replay_callback return early) and
+        # queued entries would be orphaned.
         if not self._forums.thread_to_project(ctx.channel_id):
             return False
+
+        # Double-tap dedup for callback gating: if the same channel + action
+        # + instance_id is already awaiting_choice, don't create a duplicate.
+        # Discord doesn't debounce buttons, so an impatient user tapping
+        # Autopilot twice would otherwise produce two queue entries that
+        # both auto-fire at window end.
+        if entry_extras.get("type") == "callback":
+            async with self._usage_queue_lock:
+                for e in self._read_usage_queue():
+                    if (e.get("status") == "awaiting_choice"
+                        and e.get("type") == "callback"
+                        and e.get("channel_id") == ctx.channel_id
+                        and e.get("action") == entry_extras.get("action")
+                        and e.get("instance_id") == entry_extras.get("instance_id")):
+                        log.info(
+                            "usage gate: dedup duplicate %s in %s (existing qid=%s)",
+                            entry_extras.get("action"), ctx.channel_id, e.get("qid"),
+                        )
+                        return True
 
         qid = uuid.uuid4().hex[:8]
         end_utc = next_window_end_utc()
@@ -587,14 +622,13 @@ class ClaudeBot(discord.Client):
             "run_at": end_utc.isoformat(),
             "channel_id": ctx.channel_id,
             "message_id": None,
-            "prompt": text,
             "repo_name": ctx.repo_name,
             "user_id": ctx.user_id,
             "user_name": ctx.user_name,
-            "image_paths": list(ctx.pending_image_paths),
         }
+        entry.update(entry_extras)
         # Persist before send so a reboot between render and click cannot
-        # silently drop the user's prompt.
+        # silently drop the user's intent.
         await self._usage_queue_append(entry)
 
         view = discord.ui.View(timeout=None)
@@ -614,7 +648,7 @@ class ClaudeBot(discord.Client):
         unlock_ts = int(end_utc.timestamp())
         content = (
             f"⚠️ Usage limits active until <t:{unlock_ts}:t>. "
-            f"Run now (will be throttled) or queue for when the window ends?"
+            f"**{label}** — Run now (will be throttled) or queue?"
         )
         try:
             channel = self.get_channel(int(ctx.channel_id))
@@ -630,12 +664,56 @@ class ClaudeBot(discord.Client):
             return False
 
         await self._usage_queue_update(qid, message_id=str(msg.id))
-        # Hand off image-file lifecycle to the queue entry — only after both
-        # the persist AND the Discord send succeeded.  If we fell through to
-        # the except path above, this stays False and on_message's finally
-        # cleans up the files.
-        ctx.images_claimed = True
+        log.info(
+            "usage gate: intercepted %s in %s (qid=%s)",
+            entry_extras.get("action") or "text", ctx.channel_id, qid,
+        )
+        # Hand off image-file lifecycle to the queue entry (text path only) —
+        # only after both the persist AND the Discord send succeeded.  If we
+        # fell through to the except path above, this stays False and
+        # on_message's finally cleans up the files.
+        if entry_extras.get("type") == "text":
+            ctx.images_claimed = True
         return True
+
+    async def _offer_usage_limit_choice(
+        self, ctx: RequestContext, text: str,
+    ) -> bool:
+        """Platform hook invoked from on_text during throttle windows."""
+        return await self._offer_gate(
+            ctx,
+            entry_extras={
+                "type": "text",
+                "prompt": text,
+                "image_paths": list(ctx.pending_image_paths),
+            },
+            label="this prompt",
+        )
+
+    async def _offer_usage_limit_choice_for_callback(
+        self,
+        ctx: RequestContext,
+        action: str,
+        instance_id: str,
+        source_msg_id: str | None,
+    ) -> bool:
+        """Gate a Claude-spawning button click during throttle windows.
+
+        Called from interactions.py before button dispatch.  The caller
+        must check that no instance is already running on the channel
+        (via lock.locked()) so the existing Steer/Cancel pending UI keeps
+        owning the mid-run case.
+        """
+        return await self._offer_gate(
+            ctx,
+            entry_extras={
+                "type": "callback",
+                "action": action,
+                "instance_id": instance_id,
+                "source_msg_id": source_msg_id,
+            },
+            label=interactions_mod.action_label(action),
+        )
 
     # --- Persistent queue helpers (atomic, lock-serialized) ---
 
@@ -726,7 +804,13 @@ class ClaudeBot(discord.Client):
             return due
 
     async def _fire_due_entries(self, now_utc: datetime) -> None:
-        """Shared body: promote expired awaiting_choice, then pop + replay queued."""
+        """Shared body: promote expired awaiting_choice, then pop + replay queued.
+
+        Dispatches by entry ``type``: text entries replay through on_text
+        (``_replay_to_thread``), callback entries re-fire the button action
+        (``_replay_callback``).  Entries without a ``type`` field (pre-0.87)
+        default to text for backward compatibility.
+        """
         await self._usage_queue_promote_expired(now_utc)
         due = await self._usage_queue_pop_due(now_utc)
         if not due:
@@ -736,19 +820,24 @@ class ClaudeBot(discord.Client):
             # Clear the stale gate message (best-effort) so its buttons don't
             # linger as "already resolved" traps once the prompt is running.
             await self._retire_gate_message(entry)
-            prompt = _strip_missing_image_refs(
-                entry.get("prompt", ""), entry.get("image_paths", []),
-            )
             try:
-                await self._replay_to_thread(
-                    entry["channel_id"], prompt,
-                    repo_name=entry.get("repo_name"),
-                )
+                if entry.get("type", "text") == "callback":
+                    await self._replay_callback(entry)
+                else:
+                    prompt = _strip_missing_image_refs(
+                        entry.get("prompt", ""), entry.get("image_paths", []),
+                    )
+                    await self._replay_to_thread(
+                        entry["channel_id"], prompt,
+                        repo_name=entry.get("repo_name"),
+                    )
             except Exception:
                 log.exception(
                     "usage_queue replay failed for %s", entry.get("qid"),
                 )
-            _unlink_image_paths(entry.get("image_paths", []), site="replay")
+            # Image cleanup applies only to text entries (callbacks have none).
+            if entry.get("type", "text") != "callback":
+                _unlink_image_paths(entry.get("image_paths", []), site="replay")
 
     async def _retire_gate_message(self, entry: dict) -> None:
         """Edit the gate-prompt message to reflect that it's been fired."""

@@ -31,6 +31,31 @@ _QUERY_ACTIONS: frozenset[str] = frozenset({
     "amend", "continue_anyway",
 })
 
+# Human-readable labels for the usage-limit gate UI.  Falls back to a
+# title-cased version of the action name for any action not listed.
+_ACTION_LABELS: dict[str, str] = {
+    "plan": "Plan",
+    "build": "Build",
+    "review_plan": "Review plan",
+    "apply_revisions": "Apply revisions",
+    "review_code": "Review code",
+    "commit": "Commit",
+    "done": "Done",
+    "retry": "Retry",
+    "amend": "Amend",
+    "autopilot": "Autopilot",
+    "autopilot_hold": "Autopilot (Hold)",
+    "build_and_ship": "Build & ship",
+    "continue_autopilot": "Continue autopilot",
+    "continue_ppu": "Continue",
+    "continue_anyway": "Continue anyway",
+}
+
+
+def action_label(action: str) -> str:
+    """Human-readable label for a button action (used by usage-limit gate)."""
+    return _ACTION_LABELS.get(action, action.replace("_", " ").title())
+
 # Verify-board sub-action → (resulting status, verb prompt, past-tense confirm).
 # Keyed by the "sub" segment of verify_menu/verify_select custom_ids.
 _VERIFY_ACTIONS: dict[str, tuple[str, str, str]] = {
@@ -364,18 +389,36 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
     source_msg_id = str(interaction.message.id) if interaction.message else None
 
     is_query = action in _QUERY_ACTIONS
-    if is_query:
-        bot._cancel_sleep(channel_id)
-        asyncio.create_task(bot._clear_thread_sleeping(interaction.channel))
-        asyncio.create_task(bot._set_thread_active_tag(interaction.channel, True))
-        asyncio.create_task(bot._refresh_dashboard())
 
+    # Build ctx early so the usage-limit gate can see user info.
     lookup = bot._forums.thread_to_project(channel_id)
     t_info = lookup[1] if lookup else None
     ctx = bot._ctx(channel_id, session_id=t_info.session_id if t_info else None,
                     thread_info=t_info, access_result=btn_access)
     ctx.user_id = str(interaction.user.id)
     ctx.user_name = interaction.user.display_name
+
+    # Usage-limit gate: during throttle windows, offer Run/Queue/Cancel
+    # before spawning a Claude session.  Skipped when an instance is
+    # already running on the channel — the existing pending UI
+    # (Steer/Cancel) owns the mid-run case, and the gate would hide it.
+    if is_query:
+        from bot.engine.commands import _get_channel_lock as _peek_channel_lock
+        if not _peek_channel_lock(channel_id).locked():
+            handled = await bot._offer_usage_limit_choice_for_callback(
+                ctx, action, instance_id, source_msg_id,
+            )
+            if handled:
+                return
+
+    # Cosmetic side-effects flip the thread to "active" — do this only
+    # after we've decided the query is actually going to run.
+    if is_query:
+        bot._cancel_sleep(channel_id)
+        asyncio.create_task(bot._clear_thread_sleeping(interaction.channel))
+        asyncio.create_task(bot._set_thread_active_tag(interaction.channel, True))
+        asyncio.create_task(bot._refresh_dashboard())
+
     if t_info:
         bot._forums.attach_session_callbacks(ctx, t_info, channel_id)
 
@@ -601,10 +644,16 @@ async def _handle_usage_action(
             return
         from bot.discord.usage_notifier import next_window_end_utc
         unlock_ts = int(next_window_end_utc().timestamp())
+        # Show which button was queued so users skimming a thread can tell
+        # stacked entries apart.  Text prompts use the generic "Queued".
+        if updated.get("type") == "callback":
+            queued_label = f"{action_label(updated.get('action', ''))} queued"
+        else:
+            queued_label = "Queued"
         if msg:
             try:
                 await msg.edit(
-                    content=f"⏸ Queued — will run at <t:{unlock_ts}:t>.",
+                    content=f"⏸ {queued_label} — will run at <t:{unlock_ts}:t>.",
                     view=None,
                 )
             except Exception:
@@ -626,25 +675,32 @@ async def _handle_usage_action(
             pass
 
     channel_id = removed["channel_id"]
-    prompt = removed["prompt"]
-    repo_name = removed.get("repo_name")
-    image_paths = removed.get("image_paths", [])
     # Quiet the gate for this thread for the rest of the throttle window —
     # one Run Now click consents to bypass everything until the window ends.
     from bot.discord.usage_notifier import next_window_end_utc
     bot._usage_gate_bypass[channel_id] = next_window_end_utc()
 
-    async def _run_and_cleanup() -> None:
-        from bot.discord.bot import _strip_missing_image_refs, _unlink_image_paths
-        cleaned = _strip_missing_image_refs(prompt, image_paths)
-        try:
-            await bot._replay_to_thread(channel_id, cleaned, repo_name=repo_name)
-        finally:
-            _unlink_image_paths(image_paths, site="run_now")
+    # Dispatch by entry type.  Callback entries replay the original button
+    # action via _replay_callback (no images involved).  Text entries replay
+    # the prompt and own the image-file lifecycle.
+    if removed.get("type", "text") == "callback":
+        asyncio.create_task(bot._replay_callback(removed))
+    else:
+        prompt = removed["prompt"]
+        repo_name = removed.get("repo_name")
+        image_paths = removed.get("image_paths", [])
 
-    # Fire-and-forget so the interaction handler returns promptly; the
-    # lock inside _replay_to_thread serializes any concurrent spawn.
-    asyncio.create_task(_run_and_cleanup())
+        async def _run_and_cleanup() -> None:
+            from bot.discord.bot import _strip_missing_image_refs, _unlink_image_paths
+            cleaned = _strip_missing_image_refs(prompt, image_paths)
+            try:
+                await bot._replay_to_thread(channel_id, cleaned, repo_name=repo_name)
+            finally:
+                _unlink_image_paths(image_paths, site="run_now")
+
+        # Fire-and-forget so the interaction handler returns promptly; the
+        # lock inside _replay_to_thread serializes any concurrent spawn.
+        asyncio.create_task(_run_and_cleanup())
 
 
 # --- Verify Board handlers ---
