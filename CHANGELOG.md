@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## v0.85.2 — Account-failover session rebind (2026-04-25)
+
+### Fixed
+- Account-failover dementia bug: `ForumManager.set_thread_session` was gated on `if not info.session_id`, so when a usage limit triggered failover (e.g. protonmail → klerk) and the runner spawned a fresh session on the backup account, the new session_id was silently discarded and the thread stayed pinned to the exhausted account's old session_id. Every subsequent message then hit "No conversation found" and started cold. The callback now always overwrites with the latest session_id (the engine fires it once per successful run with the canonical id) and logs the rebind.
+
 ## v0.85.1 — Instance.read_result_text helper (2026-04-25)
 
 ### Changed
