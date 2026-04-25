@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 
 
 # Tools that indicate code was modified (used for button context detection).
@@ -123,6 +124,20 @@ class Instance:
         if self.name:
             return f"[{self.id}:{self.name}]"
         return f"[{self.id}]"
+
+    def read_result_text(self) -> str:
+        """Return result-file text, or "" if missing/unreadable.
+
+        Best-effort read used by heuristic eval and workflow parsers —
+        any read failure (missing path, IO error, decode error) collapses
+        to "" so callers don't need to wrap every read in try/except.
+        """
+        if not self.result_file:
+            return ""
+        try:
+            return Path(self.result_file).read_text(encoding="utf-8")
+        except Exception:
+            return ""
 
     def to_dict(self) -> dict:
         return {

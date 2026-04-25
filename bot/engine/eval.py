@@ -146,21 +146,6 @@ class ChainEval:
 
 # --- Per-instance heuristic checks ---
 
-def _load_result_text(inst: Instance) -> str:
-    """Read the saved result file for this instance, if present.
-
-    Returns "" on any failure — heuristic eval is best-effort and never
-    blocks finalize.
-    """
-    if not inst.result_file:
-        return ""
-    try:
-        return Path(inst.result_file).read_text(encoding="utf-8")
-    except Exception:
-        log.debug("Failed to read result_file for %s", inst.id, exc_info=True)
-        return ""
-
-
 def evaluate_instance(inst: Instance) -> SessionEval:
     """Run all heuristic checks on a completed instance.
 
@@ -187,7 +172,7 @@ def evaluate_instance(inst: Instance) -> SessionEval:
         evaluated_at=datetime.now(timezone.utc).isoformat(),
     )
 
-    text = _load_result_text(inst)
+    text = inst.read_result_text()
     if text:
         ev.flags.extend(_check_narration(inst, text))
         ev.flags.extend(_check_verbosity(inst, text))

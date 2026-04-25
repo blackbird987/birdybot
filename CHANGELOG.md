@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- New `Instance.read_result_text()` helper centralizes the `result_file` path-check + best-effort read; `evaluate_instance` migrated off its private copy.
+
 ## v0.85.0 — Deferred review items: divergence + read-only triage + ping/persistence cleanup (2026-04-25)
 
 ### Fixed
@@ -16,6 +19,7 @@
 - Session result embeds gain an inline flag-summary footer line (`⚠ flags: 2 narration, 1 verbosity`) sourced from the persisted SessionEval, so warnings surface in the result instead of hiding in `data/evals/`.
 - Prior-deferred items injected into the plan-review prompt now deduplicate using the same normalized key (`StateStore.deferred_dedup_key`, renamed from the previously-private `_dedup_key`) that `append_deferred` uses on write — prevents semantically-equivalent rewordings from piling up across review rounds.
 - Forum channels are created with a topic (`Sessions for <repo>. Pinned: archive (closed sessions) + control room.`) so the channel header explains the forum's purpose.
+
 ## v0.84.0 — Autopilot release-claim verification gate (2026-04-25)
 
 ### Added
