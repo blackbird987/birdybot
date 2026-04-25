@@ -237,7 +237,8 @@ _WORKFLOW_ORIGINS = frozenset({
     InstanceOrigin.REVIEW_PLAN, InstanceOrigin.REVIEW_CODE,
     InstanceOrigin.COMMIT, InstanceOrigin.DONE,
     InstanceOrigin.APPLY_REVISIONS, InstanceOrigin.RELEASE,
-    InstanceOrigin.VERIFY, InstanceOrigin.BUILD_AND_SHIP,
+    InstanceOrigin.VERIFY, InstanceOrigin.VERIFY_RELEASE,
+    InstanceOrigin.BUILD_AND_SHIP,
 })
 
 

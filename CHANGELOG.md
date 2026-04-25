@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+- Autopilot CHANGELOG/Commit verification gate: a new `verify_release` chain step runs after `done` and before any release tag is created. It cross-checks each commit-message bullet and `[Unreleased]` entry against the actual diff and halts the chain on phantom claims (claims with no corresponding code change). The gate offers **Amend** (re-runs the wrap-up step with the verifier's rationale) and **Continue anyway** buttons.
+- New `release` chain step: cuts the version, updates the project's version file, commits and tags. Replaces the release/tag work that used to happen inline inside `done`. Reuses the same `RELEASE_PROMPT` as `/release` so manual and automated releases match.
+- `chain_entry_sha` persisted state — snapshots HEAD before the chain `done` step so `verify_release` has a stable diff anchor that survives reboots.
+- New `RELEASE_VERIFY_PROMPT` and `DONE_PROMPT_CHAIN` config prompts. The chain `done` variant requires bullet-formatted commit-message bodies referencing real files/symbols, so the verifier can extract claims reliably.
+
+### Changed
+- `on_done` now takes a `prompt_variant` ("chain" vs "standalone"). Manual `/done` keeps the full standalone behavior (commit + cut release + tag). Inside autopilot, `done` only commits and updates `[Unreleased]`; the new `release` step cuts the version afterwards.
+- `CODE_REVIEW_PROMPT` now instructs the reviewer to verify each CHANGELOG/commit-message bullet maps to a real diff change.
+- Autopilot, Build & Ship, and Autopilot (Hold) chains all gain the `verify_release` and `release` steps before merge / completion.
+- `_exit_chain_needs_input` helper consolidates the four chain-pause exit paths (budget exhausted, merge failed, abandoned build, needs input / phantom detected) so mention text varies by outcome and the send-text fallback is never empty.
+
 ## v0.80.0 — Image-attachment lifecycle + usage-gate quieting (2026-04-25)
 
 ### Fixed

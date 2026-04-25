@@ -28,6 +28,7 @@ _QUERY_ACTIONS: frozenset[str] = frozenset({
     "retry", "plan", "build", "review_plan", "apply_revisions",
     "review_code", "commit", "done", "autopilot", "autopilot_hold",
     "build_and_ship", "continue_autopilot", "continue_ppu",
+    "amend", "continue_anyway",
 })
 
 # --- Deploy status message management (keeps control rooms clean) ---

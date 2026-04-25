@@ -559,7 +559,10 @@ CODE_REVIEW_PROMPT = (
     'existing code you just modified with "fresh eyes" looking super '
     'carefully for any obvious bugs, errors, problems, issues, confusion, '
     'etc. Carefully fix anything you uncover. Use ultrathink. '
-    'Review if this is DRY, scalable, maintainable and modular.'
+    'Review if this is DRY, scalable, maintainable and modular. '
+    'If a CHANGELOG entry or commit message has been written, verify each '
+    'bullet corresponds to a real code change in the current diff — flag '
+    'and fix phantom claims.'
 )
 
 VERIFY_PROMPT = (
@@ -788,7 +791,7 @@ _RELEASE_STEPS = (
     '- Create git tag vX.Y.Z\n'
 )
 
-DONE_PROMPT = (
+DONE_PROMPT_STANDALONE = (
     'Wrap up this session.\n'
     '1. Review all uncommitted changes and commit them with a clear, '
     'descriptive message. Update CHANGELOG.md: add a concise summary of '
@@ -811,6 +814,115 @@ DONE_PROMPT = (
     'VERSION: <vX.Y.Z or "none">\n'
     '```'
 )
+
+# Backward-compat alias used by /done and any non-chain caller.
+DONE_PROMPT = DONE_PROMPT_STANDALONE
+
+DONE_PROMPT_CHAIN = (
+    'Wrap up this build step (autopilot chain). Do NOT cut a release or '
+    'create any tag — that happens in a later chain step.\n'
+    '1. Review all uncommitted changes and commit them with a clear, '
+    'descriptive message.\n'
+    '2. Update CHANGELOG.md: add a concise summary of changes under '
+    '## [Unreleased]. If the file does not exist, create it with an '
+    '[Unreleased] header. Do NOT replace the [Unreleased] header with a '
+    'version number.\n'
+    '3. Do NOT update any version file (pyproject.toml, package.json, etc.).\n'
+    '4. Do NOT create a git tag.\n'
+    '5. Make sure nothing is left uncommitted.\n\n'
+    'Format contract for the commit message body:\n'
+    '- Write the body as one bullet per discrete change, prefixed with `- `.\n'
+    '- Each bullet must reference a real file or symbol you actually '
+    'modified in this commit.\n'
+    '- Do not list speculative or aspirational changes.\n\n'
+    'At the very end of your response, output a structured summary block '
+    'in exactly this format (no extra text after the block):\n'
+    '```summary\n'
+    'COMMIT: <short_hash> <commit message>\n'
+    'CHANGELOG:\n'
+    '- <entry 1>\n'
+    '- <entry 2>\n'
+    'VERSION: none\n'
+    '```'
+)
+
+# Verifier prompt for the autopilot `verify_release` chain step.
+# Built via plain string `.replace()` rather than `str.format()` because the
+# embedded JSON-schema example contains literal `{`/`}` that would collide
+# with format placeholders. Use `build_release_verify_prompt(...)` below
+# rather than calling `.format()` directly.
+RELEASE_VERIFY_PROMPT = (
+    'You are a release-claim verifier. The autopilot chain just ran the '
+    '`done` step, which produced one or more commits and a CHANGELOG '
+    '[Unreleased] entry. Your job is to cross-check the claims against '
+    'the actual diff and report any **phantom** claims (statements about '
+    'code that does not exist in the diff).\n\n'
+    'You MUST return exactly one fenced ```json``` block as your final '
+    'output, with this schema and no extra prose after it:\n'
+    '```json\n'
+    '{\n'
+    '  "verdict": "ok" | "mismatch",\n'
+    '  "phantom_bullets": [\n'
+    '    "<exact bullet text that has no corresponding code change>"\n'
+    '  ],\n'
+    '  "missing_bullets": [\n'
+    '    "<short description of a real diff change that no claim covers>"\n'
+    '  ],\n'
+    '  "needs_inspection": [\n'
+    '    "<file or claim that requires a deeper look outside the truncated diff>"\n'
+    '  ],\n'
+    '  "rationale": "<one or two sentences explaining your verdict>"\n'
+    '}\n'
+    '```\n\n'
+    'Verdict rules:\n'
+    '- Set `verdict` to "mismatch" ONLY if `phantom_bullets` is non-empty.\n'
+    '- `missing_bullets` is informational only — it never flips the verdict.\n'
+    '- If the diff was truncated and a claim references a file outside the '
+    'window, list it under `needs_inspection` instead of marking it phantom.\n'
+    '- If you cannot reasonably evaluate (parser failure, unreadable diff, '
+    'malformed inputs), output the JSON block with verdict "mismatch" and '
+    'a clear rationale.\n\n'
+    'Inputs follow.\n\n'
+    '## Commit messages produced by `done`\n'
+    '```\n'
+    '<<COMMIT_MESSAGES>>\n'
+    '```\n\n'
+    '## CHANGELOG [Unreleased] block\n'
+    '```\n'
+    '<<CHANGELOG_UNRELEASED>>\n'
+    '```\n\n'
+    '## git diff --stat (from chain entry to HEAD)\n'
+    '```\n'
+    '<<DIFF_STAT>>\n'
+    '```\n\n'
+    '## git diff (size-capped)<<TRUNCATION_NOTE>>\n'
+    '```\n'
+    '<<DIFF_PAYLOAD>>\n'
+    '```\n'
+)
+
+
+def build_release_verify_prompt(
+    *,
+    commit_messages: str,
+    changelog_unreleased: str,
+    diff_stat: str,
+    diff_payload: str,
+    truncation_note: str,
+) -> str:
+    """Substitute inputs into RELEASE_VERIFY_PROMPT without using str.format.
+
+    Plain `.replace()` is safe against the literal `{` / `}` in the embedded
+    JSON-schema example.
+    """
+    return (
+        RELEASE_VERIFY_PROMPT
+        .replace("<<COMMIT_MESSAGES>>", commit_messages)
+        .replace("<<CHANGELOG_UNRELEASED>>", changelog_unreleased)
+        .replace("<<DIFF_STAT>>", diff_stat)
+        .replace("<<DIFF_PAYLOAD>>", diff_payload)
+        .replace("<<TRUNCATION_NOTE>>", truncation_note)
+    )
 
 RELEASE_PROMPT = (
     'Cut a new release.\n'

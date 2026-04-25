@@ -44,6 +44,7 @@ class StateStore:
         self._platform_state: dict[str, dict] = {}  # platform -> arbitrary state
         self._autopilot_chains: dict[str, list[str]] = {}  # session_id -> remaining steps
         self._chain_deferred: dict[str, list[str]] = {}  # session_id -> deferred revisions
+        self._chain_entry_sha: dict[str, str] = {}  # session_id -> SHA before `done` step
         self._deploy_state: dict[str, DeployState] = {}  # repo_name -> deploy state
         self._deploy_configs: dict[str, dict] = {}  # repo_name -> deploy config
         self._auto_fix_state: dict[str, AutoFixState] = {}  # "repo:trigger" -> state
@@ -84,6 +85,7 @@ class StateStore:
             self._platform_state = data.get("platform_state", {})
             self._autopilot_chains = data.get("autopilot_chains", {})
             self._chain_deferred = data.get("chain_deferred", {})
+            self._chain_entry_sha = data.get("chain_entry_sha", {})
             self._deploy_state = {
                 k: DeployState.from_dict(v)
                 for k, v in data.get("deploy_state", {}).items()
@@ -156,6 +158,7 @@ class StateStore:
             "platform_state": self._platform_state,
             "autopilot_chains": self._autopilot_chains,
             "chain_deferred": self._chain_deferred,
+            "chain_entry_sha": self._chain_entry_sha,
             "deploy_state": {k: v.to_dict() for k, v in self._deploy_state.items()},
             "deploy_configs": self._deploy_configs,
             "auto_fix_state": {k: v.to_dict() for k, v in self._auto_fix_state.items()},
@@ -736,6 +739,28 @@ class StateStore:
         if not session_id:
             return
         self._chain_deferred.pop(session_id, None)
+        self.mark_dirty()
+
+    # --- Chain Entry SHA (verify_release diff anchor) ---
+
+    def get_chain_entry_sha(self, session_id: str | None) -> str | None:
+        """Get SHA snapshotted before the `done` step for verify_release."""
+        if not session_id:
+            return None
+        return self._chain_entry_sha.get(session_id)
+
+    def set_chain_entry_sha(self, session_id: str | None, sha: str) -> None:
+        """Persist SHA snapshotted before the `done` step for verify_release."""
+        if not session_id or not sha:
+            return
+        self._chain_entry_sha[session_id] = sha
+        self.mark_dirty()
+
+    def clear_chain_entry_sha(self, session_id: str | None) -> None:
+        """Remove stored entry SHA for a session."""
+        if not session_id:
+            return
+        self._chain_entry_sha.pop(session_id, None)
         self.mark_dirty()
 
     # --- Persistent Per-Repo Deferred Revisions (stored in repo TODO.md) ---
