@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.84.0 — Autopilot release-claim verification gate (2026-04-25)
+
 ### Added
 - Autopilot CHANGELOG/Commit verification gate: a new `verify_release` chain step runs after `done` and before any release tag is created. It cross-checks each commit-message bullet and `[Unreleased]` entry against the actual diff and halts the chain on phantom claims (claims with no corresponding code change). The gate offers **Amend** (re-runs the wrap-up step with the verifier's rationale) and **Continue anyway** buttons.
 - New `release` chain step: cuts the version, updates the project's version file, commits and tags. Replaces the release/tag work that used to happen inline inside `done`. Reuses the same `RELEASE_PROMPT` as `/release` so manual and automated releases match.
