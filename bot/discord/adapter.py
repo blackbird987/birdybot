@@ -8,6 +8,7 @@ import logging
 import discord
 
 from bot.discord import channels, formatter as discord_fmt
+from bot.discord.formatter import apply_discord_safety
 from bot.platform.base import ButtonSpec, MessageHandle
 from bot.platform.formatting import FinalizeInfo
 
@@ -143,7 +144,7 @@ class DiscordMessenger:
             return MessageHandle(platform="discord", _data={})
 
         embed = discord.Embed(
-            description=text[:4096],
+            description=apply_discord_safety(text),
             color=discord.Color.blurple(),
         )
         view = _buttons_to_view(buttons)
@@ -182,7 +183,7 @@ class DiscordMessenger:
         try:
             msg = await channel.fetch_message(int(message_id))
             embed = discord.Embed(
-                description=text[:4096],
+                description=apply_discord_safety(text),
                 color=color,
             )
             if footer:
@@ -203,7 +204,10 @@ class DiscordMessenger:
             return ""
 
         view = _buttons_to_view(buttons)
-        msg = await channel.send(content=text, view=view, silent=silent)
+        msg = await channel.send(
+            content=apply_discord_safety(text, limit=2000),
+            view=view, silent=silent,
+        )
         return str(msg.id)
 
     async def send_result(
@@ -245,7 +249,7 @@ class DiscordMessenger:
             embed = self._build_finalize_embed(finalize, color, metadata)
         else:
             embed = discord.Embed(
-                description=text[:4096],
+                description=apply_discord_safety(text),
                 color=color,
             )
             # Add metadata as inline fields (Duration, Cost, Repo, Branch)
@@ -358,10 +362,12 @@ class DiscordMessenger:
             elif msg.embeds:
                 # Original was an embed — update embed description (4096 limit)
                 embed = msg.embeds[0].copy()
-                embed.description = text[:4096]
+                embed.description = apply_discord_safety(text)
                 await msg.edit(embed=embed, view=view)
             else:
-                await msg.edit(content=text[:2000], view=view)
+                await msg.edit(
+                    content=apply_discord_safety(text, limit=2000), view=view,
+                )
         except Exception:
             log.debug("Failed to edit message %s", msg_id, exc_info=True)
 
