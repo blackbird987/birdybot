@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.90.0 — Always-reach-terminal-state + Verify Board fallback (2026-04-26)
+
 ### Added
 - Autopilot chains always reach a terminal state. New `RESULT: manual` verify outcome (with required `WHY:` line) auto-enrolls a Verify Board item instead of halting the chain silently. `VERIFY_PROMPT` updated to instruct Claude when to emit `manual` vs `pass`/`fail`/`skip`. Under `warn` policy, `manual`/`crashed` outcomes flow through Verify Board; under `block` policy they halt with `needs_input`. Chain-complete tail posts a silent handoff embed listing pending manual-verify items.
 - `Instance.needs_manual_verification` + `manual_verify_reason` fields persisted to `state.json` (legacy entries default cleanly).
