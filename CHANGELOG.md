@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+- Release verifier no longer fires a false "mismatch" when the local CHANGELOG regex can't parse `[Unreleased]` but the LLM verdict is `ok`. The LLM sees the full diff and is now authoritative; the regex hit was a tooling artifact that was synthesizing a fake mismatch and forcing an Amend/Continue prompt on clean releases. Logs a `warning` when this happens so a real regex regression remains visible.
+- Verifier-output-unparseable gate copy no longer mislabels itself as "Phantom claims" — when phantoms is empty (the only path that now reaches the gate without real phantoms), the body says "Release verifier output couldn't be parsed — failing closed" instead.
+
 ## v0.90.1 — Discord pipe-table rendering (2026-04-26)
 
 ### Added
@@ -24,6 +28,19 @@
 ### Changed
 - `_verify_passed` replaced with `_verify_outcome(inst) -> Literal["pass","fail","manual","skip","crashed"]`. Status-first ordering: `if inst.status != COMPLETED → "crashed"` BEFORE regex parse, so a stale `RESULT: pass` block on a FAILED instance doesn't masquerade as success. Only `fail` re-enters the autopilot fix-loop.
 - Extracted `_finalize_merge(ctx, target, *, close_silent)` shared by autopilot merge and standalone `on_done`. `on_done` now auto-merges when `result.branch` is set.
+### Added
+- Cross-account JSONL hydration (`ClaudeRunner._hydrate_session_for_account`): before each spawn, ensure the session JSONL exists at the chosen account's `projects/<encode(cwd)>/` and copy it from any other configured account that has it, then rebuild the target's `sessions-index.json`. Closes the worktree-builds-during-cooldown gap that v0.89.0's recovery layers couldn't cover (rebuild can't help when the project dir doesn't exist on the recovery account at all). Searches both `cwd`-encoded and `repo_path`-encoded project dirs so worktree builds whose plan session lives under the main repo dir hydrate correctly. Cached per `(account_dir, target_dir, session_id)` for `HYDRATE_CACHE_TTL_SECS=60s` and bounded by `REBUILD_TIMEOUT_SECS=30s` for the index rebuild step. Effect: either subscription can now resume any session on demand — the runner stops paying the ~2s "miss + failover" tax that pre-fix instances incurred on every request, and silent "I don't see a plan" failures from worktree resumes during cooldown windows are eliminated.
+
+### Changed
+- `_copy_session_to_worktree` removed; its job is now handled by hydration, which writes to the chosen account's project dir instead of the CLI default. The old function wrote to `config.CLAUDE_PROJECTS_DIR` (always the protonmail dir) regardless of which account the picker chose, so worktree builds running under klerk would silently miss the JSONL.
+- `_copy_session_from_worktree` is now account-aware: takes an `account_dir` parameter, reads the worktree project dir from that account, and mirrors JSONLs back to both that account's main-repo project dir AND the owning `session_account`'s main-repo dir. Means a follow-up resume on either account finds the file locally without needing hydrate to run first. Threaded through `_stream_output` (new `account_dir` kwarg) and the merge path passes `None` to fall through to `instance.session_account`.
+
+### Fixed (review-round refinements)
+- `_hydrate_session_for_account` early-return path (target JSONL already in place) now still calls `_maybe_rebuild_session_index` so a stale index entry — the original dementia symptom — gets refreshed instead of waiting for the index to decay naturally. Cheap on cache hit thanks to shared `_rebuild_cache`.
+- `_copy_first_match` re-checks `target_file.exists()` inside the threaded function before `shutil.copy2` to guard against concurrent hydrate calls clobbering the same destination (matters on Windows where back-to-back copies can raise PermissionError).
+- Hydrate's post-copy index refresh switched from a direct `rebuild_project_index` call to `_maybe_rebuild_session_index`, so it shares the 60s rebuild cache with the layer-2 recovery path and can't double-scan when both fire in the same window.
+- `_stream_output`'s `last_assistant_uuid` capture now resolves the JSONL under the active `account_dir` instead of the global `config.CLAUDE_PROJECTS_DIR` (which always points at the default account, e.g. protonmail). On runs hosted by a non-default account (e.g. klerk), the lookup was silently missing, leaving `result.last_assistant_uuid = None` → "Branch from here" button broken on every klerk-hosted run since multi-account was introduced.
+- `_cleanup_worktree_session_dir` now sweeps every configured account's `projects/` root, not just `CLAUDE_PROJECTS_DIR`. Pre-fix: a worktree build that ran on the non-default account left `~/.claude-<acct>/projects/<encode(worktree)>/` orphaned forever — slow disk leak that compounded with each multi-account build.
 
 ## v0.89.0 — Cross-account session dementia fix (2026-04-26)
 

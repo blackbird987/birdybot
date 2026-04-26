@@ -1357,9 +1357,9 @@ async def on_verify_release(
     if result.status != InstanceStatus.COMPLETED:
         return result
 
-    # Track failure modes explicitly so we don't have to back-derive
-    # "was this a real mismatch or a synthesized one?" from rationale strings.
-    changelog_parse_failed = unreleased is None
+    # The LLM sees the full diff and is the authoritative judge. Only fail
+    # closed when its output itself is unreadable — a local CHANGELOG regex
+    # miss is a tooling artifact, not a release signal.
     verifier_parse_failed = False
 
     verdict_data: dict | None = None
@@ -1371,16 +1371,6 @@ async def on_verify_release(
         verdict_data = _parse_verifier_json(text)
     if verdict_data is None:
         verifier_parse_failed = True
-
-    if changelog_parse_failed:
-        verdict_data = {
-            "verdict": "mismatch",
-            "phantom_bullets": [],
-            "missing_bullets": [],
-            "needs_inspection": [],
-            "rationale": "couldn't parse [Unreleased] block in CHANGELOG.md",
-        }
-    elif verifier_parse_failed:
         verdict_data = {
             "verdict": "mismatch",
             "phantom_bullets": [],
@@ -1388,6 +1378,14 @@ async def on_verify_release(
             "needs_inspection": [],
             "rationale": "verifier output was unparseable — failing closed",
         }
+    elif unreleased is None:
+        # Local parser regressed but LLM verdict is intact — keep diagnostic
+        # signal so a real regex bug doesn't hide forever.
+        log.warning(
+            "verify_release: local CHANGELOG parser returned None; "
+            "trusting LLM verdict %s",
+            verdict_data.get("verdict"),
+        )
 
     raw_phantoms = verdict_data.get("phantom_bullets")
     # Be tolerant of a verifier that returns a non-list (e.g. a string) —
@@ -1397,12 +1395,10 @@ async def on_verify_release(
     phantoms = [str(x) for x in raw_phantoms]
     rationale = str(verdict_data.get("rationale") or "")
 
-    # Mismatch when EITHER a parser/verifier failure forced fail-closed,
-    # OR the verifier reported a real mismatch with non-empty phantoms.
     real_mismatch = (
         verdict_data.get("verdict") == "mismatch" and bool(phantoms)
     )
-    is_mismatch = changelog_parse_failed or verifier_parse_failed or real_mismatch
+    is_mismatch = verifier_parse_failed or real_mismatch
 
     if is_mismatch:
         result.needs_input = True
@@ -1416,20 +1412,27 @@ async def on_verify_release(
 
         capped_phantoms = [_cap(b, 200) for b in phantoms[:10]]
         more = len(phantoms) - len(capped_phantoms)
-        bullets_text = (
-            "\n".join(f"• {b}" for b in capped_phantoms)
-            if capped_phantoms else "(see rationale)"
-        )
-        if more > 0:
-            bullets_text += f"\n• …and {more} more"
 
-        body = (
-            f"⚠️ **Release verifier flagged a mismatch.**\n\n"
-            f"**Phantom claims:**\n{bullets_text}\n\n"
-            f"**Rationale:** {_cap(rationale, 400)}\n\n"
-            f"Tap **Amend** to re-run the wrap-up step with this feedback, "
-            f"or **Continue anyway** to proceed to release."
-        )
+        if capped_phantoms:
+            bullets_text = "\n".join(f"• {b}" for b in capped_phantoms)
+            if more > 0:
+                bullets_text += f"\n• …and {more} more"
+            body = (
+                f"⚠️ **Release verifier flagged a mismatch.**\n\n"
+                f"**Phantom claims:**\n{bullets_text}\n\n"
+                f"**Rationale:** {_cap(rationale, 400)}\n\n"
+                f"Tap **Amend** to re-run the wrap-up step with this feedback, "
+                f"or **Continue anyway** to proceed to release."
+            )
+        else:
+            # verifier_parse_failed path: no phantoms to enumerate, just
+            # tell the user the gate is fail-closed and why.
+            body = (
+                f"⚠️ **Release verifier output couldn't be parsed — failing closed.**\n\n"
+                f"**Rationale:** {_cap(rationale, 400)}\n\n"
+                f"Tap **Amend** to retry the wrap-up step, "
+                f"or **Continue anyway** to proceed to release."
+            )
         try:
             await ctx.messenger.send_text(
                 ctx.channel_id, body,
