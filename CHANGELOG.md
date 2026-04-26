@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.90.1 — Discord pipe-table rendering (2026-04-26)
+
 ### Added
 - Discord pipe-table rendering: Claude's markdown tables (`| col | col |` / `|---|---|`) now render as either a padded monospace code block (narrow tables ≤ 58 chars total width) or a bullet list with bold first column (fallback for wider tables that wrap badly on mobile). Previously Discord rendered them as raw text with visible pipes and a `|---|---|` separator line.
 - `bot.discord.formatter.apply_discord_safety(text, limit)` — central helper that rewrites pipe tables, truncates to the embed/content limit, and balances any unclosed ``` fences left over after truncation. Wired into the five Claude-text→Discord paths in `bot/discord/adapter.py`: `send_thinking`, `edit_thinking`, `send_text`, `send_result`, and `edit_text`.
