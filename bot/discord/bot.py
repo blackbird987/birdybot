@@ -369,6 +369,33 @@ class ClaudeBot(discord.Client):
 
         ctx.on_merged = _apply_merged_tag
         ctx.offer_usage_limit_choice = self._offer_usage_limit_choice
+
+        # Verify Board enrollment — engine calls this when verify gives up
+        # (manual / crashed / unrecoverable fail under warn). The closure
+        # binds the forum manager so the engine stays platform-agnostic.
+        async def _add_verify_item(
+            repo_name: str,
+            text: str,
+            origin_thread_id: str | None,
+            origin_thread_name: str | None,
+            origin_instance_id: str | None,
+        ) -> None:
+            forums = getattr(_bot, "_forums", None)
+            if not forums:
+                return
+            from bot.engine import verify as verify_mod
+
+            def _mutate(items: list[dict]):
+                return verify_mod.add_item(
+                    items, text,
+                    origin_thread_id=origin_thread_id,
+                    origin_thread_name=origin_thread_name,
+                    origin_instance_id=origin_instance_id,
+                )
+
+            await forums._mutate_verify(repo_name, _mutate)
+
+        ctx.add_verify_item = _add_verify_item
         return ctx
 
     # --- Delegation to extracted modules ---

@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+- Autopilot chains always reach a terminal state. New `RESULT: manual` verify outcome (with required `WHY:` line) auto-enrolls a Verify Board item instead of halting the chain silently. `VERIFY_PROMPT` updated to instruct Claude when to emit `manual` vs `pass`/`fail`/`skip`. Under `warn` policy, `manual`/`crashed` outcomes flow through Verify Board; under `block` policy they halt with `needs_input`. Chain-complete tail posts a silent handoff embed listing pending manual-verify items.
+- `Instance.needs_manual_verification` + `manual_verify_reason` fields persisted to `state.json` (legacy entries default cleanly).
+- `RequestContext.add_verify_item` callback (Discord wires it to `forums._mutate_verify`; Telegram leaves it None).
+- `_RELEASE_STEPS` now instructs the model to pick a tag above the highest existing `v*` (avoids reusing a tagged version on re-runs).
+
+### Changed
+- `_verify_passed` replaced with `_verify_outcome(inst) -> Literal["pass","fail","manual","skip","crashed"]`. Status-first ordering: `if inst.status != COMPLETED → "crashed"` BEFORE regex parse, so a stale `RESULT: pass` block on a FAILED instance doesn't masquerade as success. Only `fail` re-enters the autopilot fix-loop.
+- Extracted `_finalize_merge(ctx, target, *, close_silent)` shared by autopilot merge and standalone `on_done`. `on_done` now auto-merges when `result.branch` is set.
+
 ## v0.89.0 — Cross-account session dementia fix (2026-04-26)
 
 ### Fixed
