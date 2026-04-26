@@ -189,6 +189,11 @@ class RequestContext:
     increment_query_count: Callable[[], None] | None = None
     # Platform callbacks (set by platform layer, called by engine)
     on_merged: Callable[[], Awaitable[None]] | None = None  # Apply "merged" tag after branch merge
+    # Verify Board enrollment — engine calls this when verify reports `manual`
+    # or unrecoverable `fail` under warn policy. Discord populates this with
+    # a forum-aware closure; Telegram leaves it None (no-op).
+    # Signature: (repo_name, text, origin_thread_id, origin_thread_name, origin_instance_id)
+    add_verify_item: Callable[[str, str, str | None, str | None, str | None], Awaitable[None]] | None = None
     # Usage-limit gate: if set and returns True, the engine skips normal execution
     # (the platform handled the message by offering Run/Queue/Cancel buttons).
     offer_usage_limit_choice: Callable[["RequestContext", str], Awaitable[bool]] | None = None

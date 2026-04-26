@@ -579,7 +579,7 @@ _VERIFY_BLOCK_RE = re.compile(
     r'```verify\s*\n(.*?)\n```', re.IGNORECASE | re.DOTALL
 )
 _VERIFY_RESULT_RE = re.compile(
-    r'^\s*RESULT:\s*(pass|fail|skip)\s*$', re.IGNORECASE | re.MULTILINE
+    r'^\s*RESULT:\s*(pass|fail|skip|manual)\s*$', re.IGNORECASE | re.MULTILINE
 )
 _VERIFY_ACTIONS_RE = re.compile(
     r'^\s*ACTIONS_TESTED:\s*(.+)$', re.IGNORECASE | re.MULTILINE
@@ -590,30 +590,42 @@ _VERIFY_ENDPOINTS_RE = re.compile(
 _VERIFY_SUMMARY_RE = re.compile(
     r'^\s*SUMMARY:\s*(.+)$', re.IGNORECASE | re.MULTILINE
 )
+_VERIFY_WHY_RE = re.compile(
+    r'^\s*WHY:\s*(.+)$', re.IGNORECASE | re.MULTILINE
+)
 
 
-def _verify_passed(inst: Instance) -> bool:
-    """Check if verify step reported pass or skip (fail-safe: missing block = fail).
+VerifyOutcome = Literal["pass", "fail", "manual", "skip", "crashed"]
 
-    Treats skip like pass for chain advancement — if verify legitimately had
-    nothing to run (docs-only change, library covered by tests, etc.), advance
-    the chain rather than block on a false failure.
+
+def _verify_outcome(inst: Instance) -> VerifyOutcome:
+    """Classify a verify-instance run into one of five outcomes.
+
+    Status check runs FIRST: a non-COMPLETED instance is `crashed` regardless
+    of whatever block text the runner happened to capture. This prevents a
+    stale `RESULT:` line from a prior fix-loop round (or partial stdout) from
+    masquerading as a real verdict when the verify environment actually died.
+
+    On healthy instances we parse the LAST ```verify``` block — if the model
+    narrates/pre-quotes the template before the real output, the final block
+    is authoritative. Missing block / unparseable RESULT collapses to `fail`
+    so the fix-loop runs (Claude forgot to emit it ≠ environment crashed).
     """
+    if inst.status != InstanceStatus.COMPLETED:
+        return "crashed"
     if not inst.result_file:
-        return False
+        return "fail"
     try:
         text = Path(inst.result_file).read_text(encoding="utf-8")
     except OSError:
-        return False
-    # Take the LAST block — if the model narrates/pre-quotes the template
-    # before the real output, the final block is the authoritative verdict.
+        return "fail"
     blocks = _VERIFY_BLOCK_RE.findall(text)
     if not blocks:
-        return False
+        return "fail"
     block = blocks[-1]
     result_m = _VERIFY_RESULT_RE.search(block)
     if not result_m:
-        return False
+        return "fail"
     result = result_m.group(1).lower()
     if result == "skip":
         summary = _VERIFY_SUMMARY_RE.search(block)
@@ -621,7 +633,14 @@ def _verify_passed(inst: Instance) -> bool:
             "Verify skipped: %s",
             summary.group(1).strip() if summary else "no reason given",
         )
-        return True
+        return "skip"
+    if result == "manual":
+        why = _VERIFY_WHY_RE.search(block)
+        log.info(
+            "Verify manual: %s",
+            why.group(1).strip() if why else "no WHY given",
+        )
+        return "manual"
     # pass/fail path — log what was actually tested for observability
     actions = _VERIFY_ACTIONS_RE.search(block)
     endpoints = _VERIFY_ENDPOINTS_RE.search(block)
@@ -629,7 +648,60 @@ def _verify_passed(inst: Instance) -> bool:
         log.info("Verify actions: %s", actions.group(1).strip())
     if endpoints:
         log.info("Verify endpoints: %s", endpoints.group(1).strip())
-    return result == "pass"
+    return "pass" if result == "pass" else "fail"
+
+
+def _verify_why(inst: Instance) -> str | None:
+    """Extract WHY: line from the LAST verify block, or None if absent."""
+    if not inst.result_file:
+        return None
+    try:
+        text = Path(inst.result_file).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    blocks = _VERIFY_BLOCK_RE.findall(text)
+    if not blocks:
+        return None
+    m = _VERIFY_WHY_RE.search(blocks[-1])
+    if not m:
+        return None
+    why = m.group(1).strip()
+    return why or None
+
+
+async def _enroll_verify_board(
+    ctx: RequestContext, inst: Instance, why: str,
+) -> None:
+    """Push a Verify Board item for this instance + reason.
+
+    Delegates to the platform's `add_verify_item` callback (Discord populates
+    it; Telegram is None → no-op). Lock-protected mutation + state save +
+    debounced board refresh all happen inside the callback. The engine never
+    touches forum_projects directly.
+
+    Picks the best human-readable origin label available without breaking
+    platform agnosticism: `inst.summary` > `inst.name` > `inst.display_id()`.
+    The Discord side may further enrich this with the actual thread title.
+    """
+    if not ctx.add_verify_item or not inst.repo_name:
+        return
+    label = (
+        (inst.summary or "").strip()
+        or (inst.name or "").strip()
+        or inst.display_id()
+    )
+    if len(label) > 60:
+        label = label[:59].rstrip() + "…"
+    thread_id = str(ctx.channel_id) if ctx.channel_id else None
+    try:
+        await ctx.add_verify_item(
+            inst.repo_name, why, thread_id, label, inst.id,
+        )
+    except Exception:
+        log.exception(
+            "Failed to enroll Verify Board item for %s in %s",
+            inst.id, inst.repo_name,
+        )
 
 
 def _load_verify_policy(source_inst: Instance | None) -> str:
@@ -647,11 +719,20 @@ def _load_verify_policy(source_inst: Instance | None) -> str:
 
 
 async def on_verify(ctx: RequestContext, source_id: str, source_msg_id: str | None = None) -> Instance | None:
-    """Run verification. Auto-fix loop if tests fail (max 2 rounds).
+    """Run verification. Auto-fix loop only on `fail`; other outcomes break.
 
-    Respects verify_policy from .claude/test.json:
-      "block"  — halt chain on failure (wait for user)
-      "warn"   — flag failure but proceed (default)
+    Outcomes (`_verify_outcome`):
+      pass    — break, chain advances
+      skip    — break, chain advances (verify legitimately had nothing to run)
+      manual  — verification was impossible. Under `warn`, enroll Verify Board
+                + flag the instance + advance. Under `block`, halt with
+                needs_input (block opt-in exists to refuse "I couldn't verify").
+      fail    — re-enter the fix-loop; after MAX_FIX_ROUNDS, enroll under `warn`
+                or halt under `block`.
+      crashed — verify environment died (status != COMPLETED). Under `warn`,
+                enroll + advance. Under `block`, halt.
+
+    Respects verify_policy from .claude/test.json (default: "warn").
     """
     MAX_FIX_ROUNDS = 2
     current_source = source_id
@@ -676,28 +757,70 @@ async def on_verify(ctx: RequestContext, source_id: str, source_msg_id: str | No
         if not result:
             break
 
-        passed = _verify_passed(result)
-        if passed:
+        outcome = _verify_outcome(result)
+
+        if outcome in ("pass", "skip"):
             break
 
-        # Last round — can't fix further
-        if round_num >= MAX_FIX_ROUNDS:
-            if verify_policy == "warn" and result.status == InstanceStatus.COMPLETED:
-                # Instance ran fine but tests reported fail — proceed with warning
+        if outcome == "manual":
+            why = _verify_why(result) or "verification couldn't run automatically"
+            if verify_policy == "warn":
+                await _enroll_verify_board(ctx, result, why)
+                result.needs_manual_verification = True
+                result.manual_verify_reason = why
+                ctx.store.update_instance(result)
+            else:
+                # block: refuse to advance on "I couldn't verify"
+                result.needs_input = True
+                ctx.store.update_instance(result)
                 await ctx.messenger.send_text(
                     ctx.channel_id,
-                    f"⚠️ Verification failed after {round_num + 1} rounds — proceeding anyway. Check results.",
+                    f"⛔ Verify reported `manual` under block policy — halting. {why}",
                     silent=True,
                 )
-                break
-            # "block" policy or genuine instance failure — halt the chain.
-            # Set needs_input so the chain guard pauses and pings the user.
-            if result.status == InstanceStatus.COMPLETED:
+            break
+
+        if outcome == "crashed":
+            why = "verify environment crashed — manual check needed"
+            if verify_policy == "warn":
+                await _enroll_verify_board(ctx, result, why)
+                # Note: status != COMPLETED so we cannot persist the flag
+                # on this instance — the Verify Board entry is the signal.
+            else:
+                # block: halt. The instance already failed so needs_input
+                # would not be reached by the chain guard; surface the reason.
+                await ctx.messenger.send_text(
+                    ctx.channel_id,
+                    f"⛔ Verify environment crashed under block policy — halting. {why}",
+                    silent=True,
+                )
+            break
+
+        # outcome == "fail" — Claude already tried to fix inline. Decide
+        # whether to re-enter the fix-loop or terminate.
+        if round_num >= MAX_FIX_ROUNDS:
+            if verify_policy == "warn":
+                why = (
+                    f"verify failed after {MAX_FIX_ROUNDS + 1} rounds — "
+                    "manual check needed"
+                )
+                await _enroll_verify_board(ctx, result, why)
+                result.needs_manual_verification = True
+                result.manual_verify_reason = why
+                ctx.store.update_instance(result)
+                await ctx.messenger.send_text(
+                    ctx.channel_id,
+                    f"⚠️ Verification failed after {round_num + 1} rounds — "
+                    "proceeding; item posted to Verify Board.",
+                    silent=True,
+                )
+            else:
+                # block policy — halt the chain via needs_input
                 result.needs_input = True
                 ctx.store.update_instance(result)
             break
 
-        # Tests failed — Claude already tried to fix inline. Re-verify.
+        # Re-enter fix-loop: feed this instance into the next round.
         current_source = result.id
         current_msg = _last_msg_id(result, ctx.platform)
 
@@ -753,13 +876,29 @@ async def on_done(
     if prompt_variant == "chain":
         return result
 
-    # Only close the thread if no branch is pending merge.
-    # If a branch exists, the user still needs to click Merge/Discard.
-    if not result.branch:
-        try:
-            await ctx.messenger.close_conversation(ctx.channel_id, skip_mention=True)
-        except Exception:
-            log.debug("Failed to close conversation for channel %s", ctx.channel_id, exc_info=True)
+    # Standalone Done: if a build branch is open, attempt the same merge +
+    # tag + close sequence the autopilot chain runs. On failure the
+    # Merge/Discard buttons remain (current behavior) so the user can
+    # resolve manually.
+    if result.branch and result.original_branch:
+        merged_ok = await _finalize_merge(ctx, result, close_silent=True)
+        if not merged_ok:
+            try:
+                await ctx.messenger.send_text(
+                    ctx.channel_id,
+                    "⚠️ Auto-merge failed. Use /merge or the Merge "
+                    "button to resolve.",
+                    silent=True,
+                )
+            except Exception:
+                log.debug("Failed to send merge-failed hint", exc_info=True)
+        return result
+
+    # No branch to merge — close the thread directly.
+    try:
+        await ctx.messenger.close_conversation(ctx.channel_id, skip_mention=True)
+    except Exception:
+        log.debug("Failed to close conversation for channel %s", ctx.channel_id, exc_info=True)
 
     return result
 
@@ -915,6 +1054,54 @@ async def _review_plan_loop(
         last_review.deferred_revisions = _extract_deferred(last_review)
         ctx.store.update_instance(last_review)
     return last_review
+
+
+async def _finalize_merge(
+    ctx: RequestContext, merge_target: Instance, *, close_silent: bool = False,
+) -> bool:
+    """Merge a build branch + post-merge bookkeeping + close the thread.
+
+    Shared between the autopilot `merge` step and the standalone Done button
+    so both call sites apply the same tag/deploy/close sequence.
+
+    Returns True on successful merge (caller may chain on this), False if
+    the merge command reported failure. On failure, caller is responsible
+    for posting the "use /merge to resolve" hint and surfacing buttons —
+    `_finalize_merge` only mutates state on the success path.
+
+    `close_silent`: pass True when the caller already pinged the user (or
+    intentionally wants the close to skip the participant mention). The
+    autopilot path defaults to a loud close (chain-completion notification);
+    the standalone Done path opts in to silent close.
+    """
+    if not merge_target.branch or not merge_target.original_branch:
+        return False
+    branch_name = merge_target.branch
+    merge_msg = await ctx.runner.merge_branch(merge_target)
+    ctx.store.update_instance(merge_target)
+    log.info("Auto-merge: %s", merge_msg)
+    if "failed" in merge_msg.lower():
+        return False
+    clear_stale_branches(ctx.store, branch_name)
+    from bot.engine.deploy import update_after_merge, rescan_deploy_config_after_merge
+    update_after_merge(ctx.store, merge_target)
+    rescan_deploy_config_after_merge(
+        ctx.store, merge_target.repo_name, merge_target.repo_path,
+    )
+    await ctx.messenger.on_deploy_state_changed(merge_target.repo_name)
+    # Apply "merged" tag before close (tag must land before archive)
+    if ctx.on_merged:
+        await ctx.on_merged()
+    await ctx.messenger.send_text(
+        ctx.channel_id, f"✅ {merge_msg}", silent=True,
+    )
+    try:
+        await ctx.messenger.close_conversation(
+            ctx.channel_id, skip_mention=close_silent,
+        )
+    except Exception:
+        log.debug("Failed to close conversation after merge", exc_info=True)
+    return True
 
 
 def _find_mergeable_instance(store, session_id: str | None) -> Instance | None:
@@ -1076,7 +1263,7 @@ def _parse_verifier_json(text: str) -> dict | None:
     Takes the LAST ```json``` block in the output — if Claude narrates or
     quotes the prompt template before emitting the real answer, the final
     block is the authoritative verdict. Matches the convention used by
-    `_verify_passed`.
+    `_verify_outcome`.
     """
     if not text:
         return None
@@ -1823,32 +2010,15 @@ async def _run_autopilot_chain(
                     merge_target = _find_mergeable_instance(ctx.store, session_id)
 
                 if merge_target and merge_target.branch and merge_target.original_branch:
-                    branch_name = merge_target.branch
-                    merge_msg = await ctx.runner.merge_branch(merge_target)
-                    ctx.store.update_instance(merge_target)
-                    log.info("Autopilot auto-merge: %s", merge_msg)
-                    if "failed" not in merge_msg.lower():
-                        clear_stale_branches(ctx.store, branch_name)
-                        from bot.engine.deploy import update_after_merge, rescan_deploy_config_after_merge
-                        update_after_merge(ctx.store, merge_target)
-                        rescan_deploy_config_after_merge(ctx.store, merge_target.repo_name, merge_target.repo_path)
-                        await ctx.messenger.on_deploy_state_changed(merge_target.repo_name)
-                        # Apply "merged" tag before close (tag must land before archive)
-                        if ctx.on_merged:
-                            await ctx.on_merged()
-                        await ctx.messenger.send_text(
-                            ctx.channel_id, f"✅ {merge_msg}", silent=True,
-                        )
-                        try:
-                            # Don't skip mention — this is the user's notification
-                            # that the autopilot chain completed successfully.
-                            await ctx.messenger.close_conversation(ctx.channel_id)
-                        except Exception:
-                            log.debug("Failed to close conversation after autopilot merge")
-                    else:
+                    # close_silent=False: chain-completion close should ping
+                    # the user so they see the autopilot finished.
+                    merged_ok = await _finalize_merge(
+                        ctx, merge_target, close_silent=False,
+                    )
+                    if not merged_ok:
                         await ctx.messenger.send_text(
                             ctx.channel_id,
-                            f"⚠️ Auto-merge failed: {merge_msg}\nUse /merge to resolve.",
+                            "⚠️ Auto-merge failed. Use /merge to resolve.",
                             silent=True,
                         )
                         completed_steps.append(step)
@@ -1939,6 +2109,32 @@ async def _run_autopilot_chain(
         outcome = "merged" if "merge" in completed_steps else "completed"
         _eval_chain_safe(ctx.store, source_id, steps, completed_steps,
                          chain_instances, outcome)
+
+        # Terminal-state handoff: if any chain instance is flagged for manual
+        # verification, surface the WHY lines so the user knows what to eyeball.
+        # Sent silently — the colored Verify Board is the loud signal; this
+        # message is just contextual breadcrumb pointing at it.
+        manual_items = [
+            i for i in chain_instances if i.needs_manual_verification
+        ]
+        if manual_items:
+            why_lines = "\n".join(
+                f"• {i.manual_verify_reason}"
+                for i in manual_items if i.manual_verify_reason
+            )
+            repo_label = result.repo_name if result and result.repo_name else "this repo"
+            try:
+                await ctx.messenger.send_text(
+                    ctx.channel_id,
+                    f"ℹ️ Pending manual verification — items "
+                    f"posted to Verify Board for {repo_label}:\n{why_lines}",
+                    silent=True,
+                )
+            except Exception:
+                log.debug(
+                    "Manual-verify handoff message failed for %s",
+                    ctx.channel_id, exc_info=True,
+                )
 
         # Chain finished without a merge step — prompt the user to test
         # the worktree and decide. Wrapped in try/except so a transient

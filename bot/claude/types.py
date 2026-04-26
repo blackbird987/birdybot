@@ -107,6 +107,8 @@ class Instance:
     plan_active: bool = False  # Session has an active plan (for button context)
     code_active: bool = False  # Session has uncommitted code changes (for button context)
     needs_input: bool = False  # AskUserQuestion detected — waiting for user reply
+    needs_manual_verification: bool = False  # Verify outcome was `manual` or unrecoverable `fail` under warn — handed off to Verify Board
+    manual_verify_reason: str | None = None  # WHY: line (or chain summary) for the Verify Board entry
     deferred_revisions: list[str] = field(default_factory=list)  # Medium/Low revisions from plan review
     jsonl_uuid_by_msg_id: dict[str, str] = field(default_factory=dict)  # Discord msg_id -> JSONL assistant uuid (for "Branch from here")
     # Access control fields (non-owner sessions)
@@ -184,6 +186,8 @@ class Instance:
             "plan_active": self.plan_active,
             "code_active": self.code_active,
             "needs_input": self.needs_input,
+            "needs_manual_verification": self.needs_manual_verification,
+            "manual_verify_reason": self.manual_verify_reason,
             "deferred_revisions": self.deferred_revisions,
             "jsonl_uuid_by_msg_id": self.jsonl_uuid_by_msg_id,
             "is_owner_session": self.is_owner_session,
@@ -242,6 +246,8 @@ class Instance:
             plan_active=d.get("plan_active", False),
             code_active=d.get("code_active", False),
             needs_input=d.get("needs_input", False),
+            needs_manual_verification=d.get("needs_manual_verification", False),
+            manual_verify_reason=d.get("manual_verify_reason"),
             deferred_revisions=d.get("deferred_revisions", []),
             jsonl_uuid_by_msg_id=d.get("jsonl_uuid_by_msg_id", {}),
             is_owner_session=d.get("is_owner_session", True),
