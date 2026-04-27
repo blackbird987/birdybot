@@ -1875,16 +1875,28 @@ async def _run_autopilot_chain(
                         # single-shot empty-diff path further below).
                         post_head = await _git_head(phase_result.worktree_path)
                         if pre_head and post_head and pre_head == post_head:
-                            await ctx.messenger.send_text(
-                                ctx.channel_id,
-                                f"⚠️ Phase `{phase.id}` produced no commits. Halting chain.",
-                                silent=True,
+                            halt_text = (
+                                f"⚠️ Phase `{phase.id}` produced no commits. "
+                                f"Halting chain."
                             )
+                            preserved: str | None = None
                             # Only the first phase owns the worktree lifecycle —
                             # tear it down so Merge/Discard don't appear empty.
                             if is_first and phase_result.branch:
-                                await ctx.runner.discard_branch(phase_result)
+                                outcome = await ctx.runner.discard_branch(
+                                    phase_result, preserve_if_dirty=True,
+                                )
+                                preserved = outcome.preserved_branch
                                 ctx.store.update_instance(phase_result)
+                            if preserved:
+                                halt_text += (
+                                    f"\nUncommitted changes preserved on "
+                                    f"`{preserved}` (WIP commit). "
+                                    f"Recover: `git checkout {preserved}`"
+                                )
+                            await ctx.messenger.send_text(
+                                ctx.channel_id, halt_text, silent=True,
+                            )
                             completed_steps.append(step)
                             await _exit_chain(
                                 ctx, source_id, session_id, steps, completed_steps,
@@ -2102,21 +2114,34 @@ async def _run_autopilot_chain(
                     and pre_build_head == post_build_head
                 )
                 if no_changes:
+                    preserved: str | None = None
+                    # Clean up empty branch/worktree so Merge/Discard don't appear.
+                    # preserve_if_dirty=True is the safety net: if the build
+                    # agent forgot to commit (the original "build had no
+                    # changes but the worktree is full of edits" bug), we
+                    # roll its work into a WIP commit on the branch instead
+                    # of force-removing the worktree and losing the changes.
+                    if result.branch:
+                        outcome = await ctx.runner.discard_branch(
+                            result, preserve_if_dirty=True,
+                        )
+                        preserved = outcome.preserved_branch
+                        ctx.store.update_instance(result)
+                    halt_text = "⚠️ Build produced no commits. Halting chain."
+                    if preserved:
+                        halt_text += (
+                            f"\nUncommitted changes preserved on `{preserved}` "
+                            f"(WIP commit). Recover: `git checkout {preserved}`"
+                        )
                     try:
                         await ctx.messenger.send_text(
-                            ctx.channel_id,
-                            "⚠️ Build produced no commits. Halting chain.",
-                            silent=True,
+                            ctx.channel_id, halt_text, silent=True,
                         )
                     except Exception:
                         log.exception(
                             "Empty-diff halt notice failed to send for %s",
                             ctx.channel_id,
                         )
-                    # Clean up empty branch/worktree so Merge/Discard don't appear
-                    if result.branch:
-                        await ctx.runner.discard_branch(result)
-                        ctx.store.update_instance(result)
                     completed_steps.append(step)
                     await _exit_chain_needs_input(
                         ctx, source_id, session_id, steps, completed_steps,

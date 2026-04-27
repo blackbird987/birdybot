@@ -381,7 +381,13 @@ WORKFLOW_GUIDANCE: dict[str, str] = {
     ),
     "build": (
         "You're implementing a plan that was already reviewed. Follow the plan above — "
-        "don't re-plan or redesign. Focus on clean execution."
+        "don't re-plan or redesign. Focus on clean execution.\n\n"
+        "BEFORE you say the build is complete or describe 'what changed', you MUST commit:\n"
+        "1. Run `git status` — if the working tree has any changes, `git add` and `git commit` them.\n"
+        "2. Run `git log -1 --oneline` and confirm your new commit is on the current branch.\n"
+        "3. Never claim 'committed locally' or 'implementation complete' unless step 2 shows your commit.\n"
+        "If the chain detects zero new commits when you finish, it will halt and your work "
+        "will be rolled into a WIP commit you'll have to recover by hand — so just commit before saying done."
     ),
     "review_plan": (
         "You're reviewing a plan for gaps, risks, and improvements. Be critical. "

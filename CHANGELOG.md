@@ -2,7 +2,9 @@
 
 ## [Unreleased]
 
-## v0.91.1 — Merge clobber safety & verifier fixes (2026-04-27)
+### Fixed
+- Autopilot no-commits halt no longer destroys uncommitted work (mechanism: when the build agent forgot to `git commit` and the chain detected zero HEAD movement, `_discard_branch_sync` ran `git worktree remove --force` followed by `git branch -D` — git's own auto-stash on dirty `--force` removes was orphaned, only `git fsck` recoverable, and sometimes the changes were destroyed outright). `bot/claude/runner.py` `discard_branch` now takes `preserve_if_dirty` — when set, a dirty worktree is rolled into a `WIP: build halted with uncommitted changes (<id>)` commit on the branch, only the worktree is removed, and the branch survives so the user can recover with one `git checkout`. The chain-halt callsites in `bot/engine/workflows.py` (single-shot build at ~2096 and per-phase build at ~1880) pass the flag; user-initiated Discard commands keep the explicit-nuke semantics. Recovery hint surfaced inline in the halt message so the user sees the branch name without reading logs.
+- Build agent prompt now requires `git status` + `git log -1 --oneline` verification before claiming "implementation complete" or "committed locally" (mechanism: prior prompt was generic "follow the plan, focus on clean execution" with no commit-verification step, so the agent could finish a 12m build, list modified files, and never run `git commit` — observed twice within an hour on parallel sessions). Upstream prevention; the WIP-preservation fix above is the safety net.
 
 ### Fixed
 - Build phase no longer forgets the just-produced plan and behaves as if the session were empty (mechanism: cross-account JSONL hydration was preferring a stale copy on a different account over the up-to-date copy on the running account). `_hydrate_session_for_account` in `bot/claude/runner.py` now checks the same account's main-repo project dir before scanning other accounts — that's where every prior `--resume` actually wrote its turns. Cross-account log line tagged `[cross-account]` for greppability when this regresses again.
