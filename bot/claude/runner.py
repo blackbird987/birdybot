@@ -805,6 +805,9 @@ class ClaudeRunner:
         # Honesty & verification guidance
         parts.append(config.HONESTY_CONSTRAINT)
 
+        # Don't frame effort in human-developer weeks — execution is fast for an LLM
+        parts.append(config.EFFORT_FRAMING)
+
         # Bot capability context so Claude knows what the user can do
         parts.append(config.BOT_CONTEXT)
 
