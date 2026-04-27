@@ -695,40 +695,46 @@ async def _run_bg_task(ctx: RequestContext, inst: Instance) -> None:
 # --- /release ---
 
 async def on_release(ctx: RequestContext, text: str) -> None:
-    """Handle /release [patch|minor|major|X.Y.Z]."""
-    if not check_budget(ctx):
-        await ctx.messenger.send_text(ctx.channel_id, "Daily budget exceeded.")
-        return
+    """Handle /release [patch|minor|major].
 
+    Calls the deterministic ceremony directly under the per-repo git lock —
+    no LLM step, no spawning. The ceremony parses [Unreleased], dedupes
+    against every prior version, computes the next version above all v* tags
+    + the version-file value, and atomically commits + tags.
+    """
     repo_name, repo_path = ctx.store.get_active_repo()
     if not repo_path:
-        await ctx.messenger.send_text(ctx.channel_id, "No repo set. Use /repo add <name> <path> first.")
+        await ctx.messenger.send_text(
+            ctx.channel_id,
+            "No repo set. Use /repo add <name> <path> first.",
+        )
         return
 
-    version_hint = text.strip() if text.strip() else "patch"
-    prompt = config.RELEASE_PROMPT.format(version_hint=version_hint)
+    hint = (text or "").strip().lower() or "patch"
+    if hint not in ("patch", "minor", "major"):
+        await ctx.messenger.send_text(
+            ctx.channel_id,
+            "Usage: /release [patch|minor|major]",
+        )
+        return
 
-    inst = ctx.store.create_instance(
-        instance_type=InstanceType.TASK,
-        prompt=prompt,
-        name=f"release-{version_hint}",
-        mode="build",
-    )
-    inst.origin = InstanceOrigin.RELEASE
-    inst.origin_platform = ctx.platform
-    inst.effort = ctx.effective_effort
-    inst.status = InstanceStatus.QUEUED
-    ctx.store.update_instance(inst)
+    result = await ctx.runner.run_release_ceremony(repo_path, hint)
+    if not result.cut:
+        await ctx.messenger.send_text(
+            ctx.channel_id,
+            f"No release cut — {result.skipped_reason or 'ceremony skipped'}.",
+        )
+        return
 
-    escaped = ctx.messenger.escape(inst.display_id())
-    handle = await ctx.messenger.send_text(
+    short_sha = (result.commit_sha or "")[:7]
+    await ctx.messenger.send_text(
         ctx.channel_id,
-        f"{escaped} — releasing ({ctx.messenger.escape(version_hint)})...",
+        (
+            f"Released **{result.tag}** — {result.summary}\n"
+            f"Commit `{short_sha}` + tag `{result.tag}` (local). "
+            "Run `git push --follow-tags` to publish."
+        ),
     )
-    inst.message_ids.setdefault(ctx.platform, []).append(handle)
-    ctx.store.update_instance(inst)
-
-    asyncio.create_task(_run_bg_task(ctx, inst))
 
 
 # --- /list ---
