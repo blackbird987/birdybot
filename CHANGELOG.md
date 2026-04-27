@@ -5,6 +5,10 @@
 ### Fixed
 - Release verifier no longer fires a false "mismatch" when the local CHANGELOG regex can't parse `[Unreleased]` but the LLM verdict is `ok`. The LLM sees the full diff and is now authoritative; the regex hit was a tooling artifact that was synthesizing a fake mismatch and forcing an Amend/Continue prompt on clean releases. Logs a `warning` when this happens so a real regex regression remains visible.
 - Verifier-output-unparseable gate copy no longer mislabels itself as "Phantom claims" — when phantoms is empty (the only path that now reaches the gate without real phantoms), the body says "Release verifier output couldn't be parsed — failing closed" instead.
+## v0.91.0 — Effort framing system prompt (2026-04-27)
+
+### Added
+- `EFFORT_FRAMING` system-prompt block (`bot/config.py`) telling Claude not to frame tradeoffs in human-developer time. LLMs trained on human-engineer prose tend to estimate work in weeks/days ("the proper fix is a 2-3 week refactor") and offer false "quick hack vs. proper fix" tradeoffs on time grounds — but execution is minutes for an LLM. Block reframes legitimate tradeoffs as scope/risk/blast-radius/reversibility, not calendar time. Wired into the prompt chain in `bot/claude/runner.py` next to `HONESTY_CONSTRAINT`.
 
 ## v0.90.1 — Discord pipe-table rendering (2026-04-26)
 
