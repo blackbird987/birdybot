@@ -1142,14 +1142,19 @@ _JSON_BLOCK_RE = re.compile(
 
 def _git_head_sha(repo_path: str) -> str | None:
     """Return current HEAD SHA in *repo_path*, or None on failure."""
+    # encoding/errors: subprocess.run(text=True) on Windows decodes via
+    # cp1252; UTF-8 bytes in git output crash the reader thread silently
+    # and return CompletedProcess(stdout=None, returncode=0). Force utf-8
+    # with replace so non-decodable bytes never produce None stdout.
     try:
         r = subprocess.run(
             ["git", "rev-parse", "HEAD"],
-            cwd=repo_path, capture_output=True, timeout=5, text=True, **_NOWND,
+            cwd=repo_path, capture_output=True, timeout=5,
+            text=True, encoding="utf-8", errors="replace", **_NOWND,
         )
         if r.returncode != 0:
             return None
-        sha = r.stdout.strip()
+        sha = (r.stdout or "").strip()
         return sha or None
     except Exception:
         log.warning("git rev-parse HEAD failed in %s", repo_path, exc_info=True)
@@ -1161,12 +1166,13 @@ def _git_log_messages(repo_path: str, entry_sha: str) -> str:
     try:
         r = subprocess.run(
             ["git", "log", f"{entry_sha}..HEAD", "--format=%B%x00"],
-            cwd=repo_path, capture_output=True, timeout=10, text=True, **_NOWND,
+            cwd=repo_path, capture_output=True, timeout=10,
+            text=True, encoding="utf-8", errors="replace", **_NOWND,
         )
         if r.returncode != 0:
             return ""
         # Split on NUL, strip empties
-        parts = [p.strip() for p in r.stdout.split("\x00") if p.strip()]
+        parts = [p.strip() for p in (r.stdout or "").split("\x00") if p.strip()]
         return "\n\n---\n\n".join(parts)
     except Exception:
         log.warning("git log failed in %s", repo_path, exc_info=True)
@@ -1177,9 +1183,10 @@ def _git_diff_stat(repo_path: str, entry_sha: str) -> str:
     try:
         r = subprocess.run(
             ["git", "diff", "--stat", f"{entry_sha}..HEAD"],
-            cwd=repo_path, capture_output=True, timeout=10, text=True, **_NOWND,
+            cwd=repo_path, capture_output=True, timeout=10,
+            text=True, encoding="utf-8", errors="replace", **_NOWND,
         )
-        return r.stdout if r.returncode == 0 else ""
+        return (r.stdout or "") if r.returncode == 0 else ""
     except Exception:
         return ""
 
@@ -1194,9 +1201,10 @@ def _git_diff_payload(repo_path: str, entry_sha: str) -> tuple[str, bool, list[s
     try:
         r = subprocess.run(
             ["git", "diff", f"{entry_sha}..HEAD"],
-            cwd=repo_path, capture_output=True, timeout=15, text=True, **_NOWND,
+            cwd=repo_path, capture_output=True, timeout=15,
+            text=True, encoding="utf-8", errors="replace", **_NOWND,
         )
-        diff = r.stdout if r.returncode == 0 else ""
+        diff = (r.stdout or "") if r.returncode == 0 else ""
     except Exception:
         diff = ""
 
@@ -1209,10 +1217,11 @@ def _git_diff_payload(repo_path: str, entry_sha: str) -> tuple[str, bool, list[s
     try:
         rf = subprocess.run(
             ["git", "diff", "--name-only", f"{entry_sha}..HEAD"],
-            cwd=repo_path, capture_output=True, timeout=10, text=True, **_NOWND,
+            cwd=repo_path, capture_output=True, timeout=10,
+            text=True, encoding="utf-8", errors="replace", **_NOWND,
         )
         if rf.returncode == 0:
-            files = [ln.strip() for ln in rf.stdout.splitlines() if ln.strip()]
+            files = [ln.strip() for ln in (rf.stdout or "").splitlines() if ln.strip()]
     except Exception:
         pass
 
