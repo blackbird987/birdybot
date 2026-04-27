@@ -1061,7 +1061,8 @@ async def on_discard(ctx: RequestContext, text: str) -> None:
         return
 
     branch_name = inst.branch  # Save before discard clears it
-    msg = await ctx.runner.discard_branch(inst)
+    outcome = await ctx.runner.discard_branch(inst)
+    msg = outcome.message
     ctx.store.update_instance(inst)
     if "failed" not in msg.lower():
         if not branch_name:
@@ -2118,7 +2119,8 @@ async def handle_callback(
             return
         # Early guard: branch already cleared by a prior merge/discard
         if not inst.branch:
-            msg = await ctx.runner.discard_branch(inst)  # returns "Already discarded (...)"
+            outcome = await ctx.runner.discard_branch(inst)  # returns "Already discarded (...)"
+            msg = outcome.message
             try:
                 from bot.store import history as history_mod
                 stale = history_mod.get_branch_for_instance(inst.id)
@@ -2133,7 +2135,8 @@ async def handle_callback(
                 await ctx.messenger.send_text(ctx.channel_id, escaped)
             return
         branch_name = inst.branch  # Save before discard clears it
-        msg = await ctx.runner.discard_branch(inst)
+        outcome = await ctx.runner.discard_branch(inst)
+        msg = outcome.message
         ctx.store.update_instance(inst)
         # Clear stale branch refs on all sibling instances
         if branch_name:

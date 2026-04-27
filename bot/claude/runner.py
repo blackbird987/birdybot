@@ -12,7 +12,7 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, NamedTuple
 
 from bot import config
 from bot.claude.parser import (
@@ -48,6 +48,19 @@ HYDRATE_CACHE_TTL_SECS = 60
 
 ProgressCallback = Callable  # async callback(message: str, detail: str)
 StallCallback = Callable[[str], None]     # async callback(instance_id)
+
+
+class DiscardOutcome(NamedTuple):
+    """Result of discard_branch.
+
+    `preserved_branch` is set when uncommitted work was found and rolled into
+    a WIP commit so the branch survives — callers can surface a recovery hint.
+    """
+    message: str
+    preserved_branch: str | None = None
+
+    def __str__(self) -> str:  # back-compat with callers that f-string the result
+        return self.message
 
 
 class ClaudeRunner:
@@ -2207,47 +2220,127 @@ class ClaudeRunner:
             return False
         return True
 
-    async def discard_branch(self, instance: Instance) -> str:
-        """Delete worktree and branch without merging."""
+    async def discard_branch(
+        self, instance: Instance, *, preserve_if_dirty: bool = False,
+    ) -> DiscardOutcome:
+        """Delete worktree and branch without merging.
+
+        When `preserve_if_dirty` is True and the worktree has uncommitted
+        changes, the changes are first rolled into a WIP commit on the
+        branch and only the worktree is removed — the branch survives so
+        the user can recover with `git checkout <branch>`. This is the
+        safety net for the autopilot no-commits halt path, where the build
+        agent forgot to commit and we'd otherwise destroy its work via
+        `git worktree remove --force`.
+        """
         if not instance.branch or not instance.original_branch:
             if instance.original_branch and not instance.branch:
-                return f"Already discarded ({config.BRANCH_PREFIX}/{instance.id})"
-            return "No branch to discard"
+                return DiscardOutcome(
+                    f"Already discarded ({config.BRANCH_PREFIX}/{instance.id})"
+                )
+            return DiscardOutcome("No branch to discard")
         if not instance.repo_path:
-            return "No repo path"
+            return DiscardOutcome("No repo path")
         repo_lock = self._get_repo_lock(instance.repo_path)
         async with repo_lock:
-            return await asyncio.to_thread(self._discard_branch_sync, instance)
+            return await asyncio.to_thread(
+                self._discard_branch_sync, instance,
+                preserve_if_dirty,
+            )
 
-    def _discard_branch_sync(self, instance: Instance) -> str:
+    def _discard_branch_sync(
+        self, instance: Instance, preserve_if_dirty: bool = False,
+    ) -> DiscardOutcome:
         repo = instance.repo_path
         errors: list[str] = []
+        preserved_branch: str | None = None
+
+        worktree_path = instance.worktree_path
+        wt_exists = bool(worktree_path) and Path(worktree_path).exists()
+
+        # Optional safety net: if the caller asked us to preserve dirty
+        # work AND the worktree has uncommitted changes, roll them into a
+        # WIP commit so the branch lives on. Without this, the
+        # `worktree remove --force` below either silently auto-stashes
+        # (orphaned, only fsck-recoverable) or destroys the changes
+        # outright depending on git's mood.
+        if preserve_if_dirty and wt_exists:
+            status = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=worktree_path, capture_output=True, text=True, **_NOWND,
+            )
+            if status.returncode == 0 and status.stdout.strip():
+                add_r = subprocess.run(
+                    ["git", "add", "-A"],
+                    cwd=worktree_path, capture_output=True, text=True, **_NOWND,
+                )
+                if add_r.returncode == 0:
+                    commit_msg = (
+                        f"WIP: build halted with uncommitted changes "
+                        f"({instance.id})"
+                    )
+                    commit_r = subprocess.run(
+                        ["git", "commit", "-m", commit_msg, "--no-verify"],
+                        cwd=worktree_path, capture_output=True, text=True, **_NOWND,
+                    )
+                    if commit_r.returncode == 0:
+                        preserved_branch = instance.branch
+                        log.info(
+                            "Preserved dirty worktree as WIP commit on %s "
+                            "(instance %s)",
+                            instance.branch, instance.id,
+                        )
+                    else:
+                        log.warning(
+                            "WIP commit failed for %s, falling back to "
+                            "force-discard: %s",
+                            instance.branch, commit_r.stderr.strip(),
+                        )
+                else:
+                    log.warning(
+                        "git add -A failed for %s before WIP commit: %s",
+                        worktree_path, add_r.stderr.strip(),
+                    )
 
         # Each cleanup step is independent — continue on failure
-        if instance.worktree_path and Path(instance.worktree_path).exists():
+        if wt_exists:
             r = subprocess.run(
-                ["git", "worktree", "remove", instance.worktree_path, "--force"],
+                ["git", "worktree", "remove", worktree_path, "--force"],
                 cwd=repo, capture_output=True, text=True, **_NOWND,
             )
             if r.returncode != 0:
-                log.warning("Failed to remove worktree %s: %s", instance.worktree_path, r.stderr.strip())
+                log.warning("Failed to remove worktree %s: %s", worktree_path, r.stderr.strip())
                 errors.append(f"worktree remove: {r.stderr.strip()}")
 
-        r = subprocess.run(
-            ["git", "branch", "-D", instance.branch],
-            cwd=repo, capture_output=True, text=True, **_NOWND,
-        )
-        if r.returncode != 0:
-            log.warning("Failed to delete branch %s: %s", instance.branch, r.stderr.strip())
-            errors.append(f"branch delete: {r.stderr.strip()}")
+        # Skip branch deletion when we just preserved a WIP commit on it —
+        # that's the whole point of preservation.
+        if not preserved_branch:
+            r = subprocess.run(
+                ["git", "branch", "-D", instance.branch],
+                cwd=repo, capture_output=True, text=True, **_NOWND,
+            )
+            if r.returncode != 0:
+                log.warning("Failed to delete branch %s: %s", instance.branch, r.stderr.strip())
+                errors.append(f"branch delete: {r.stderr.strip()}")
 
         self._cleanup_worktree_session_dir(instance)
 
-        instance.branch = None
+        # Clear worktree_path always (it's gone). Clear branch only when we
+        # actually deleted it; otherwise the surviving WIP branch stays
+        # tracked on the instance for downstream UI/recovery flows.
         instance.worktree_path = None
+        if not preserved_branch:
+            instance.branch = None
+
+        if preserved_branch:
+            return DiscardOutcome(
+                f"Preserved uncommitted work on `{preserved_branch}` (WIP commit). "
+                f"Recover: `git checkout {preserved_branch}`",
+                preserved_branch=preserved_branch,
+            )
         if errors:
-            return f"Discarded (with warnings: {'; '.join(errors)})"
-        return f"Discarded branch, back on {instance.original_branch}"
+            return DiscardOutcome(f"Discarded (with warnings: {'; '.join(errors)})")
+        return DiscardOutcome(f"Discarded branch, back on {instance.original_branch}")
 
     def _cleanup_worktree_session_dir(self, instance: Instance) -> None:
         """Remove the worktree's CLI project directory across every configured account.
