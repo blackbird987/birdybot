@@ -374,6 +374,44 @@ async def run() -> None:
     setup_logging()
     log.info("Starting Claude Bot...")
 
+    if config.CLAUDE_ACCOUNTS:
+        log.info(
+            "Claude accounts configured: %d (%s)",
+            len(config.CLAUDE_ACCOUNTS),
+            ", ".join(config.CLAUDE_ACCOUNTS),
+        )
+        valid: list[str] = []
+        for acct in config.CLAUDE_ACCOUNTS:
+            acct_path = Path(acct)
+            if not acct_path.is_dir():
+                log.error(
+                    "CLAUDE_ACCOUNTS entry dropped: %s (dir does not exist). "
+                    "See CLAUDE.md -> Multi-Account Setup.",
+                    acct,
+                )
+            elif not (acct_path / ".credentials.json").is_file():
+                log.error(
+                    "CLAUDE_ACCOUNTS entry dropped: %s (no .credentials.json -- "
+                    "not logged in). See CLAUDE.md -> Multi-Account Setup.",
+                    acct,
+                )
+            else:
+                valid.append(acct)
+        if len(valid) != len(config.CLAUDE_ACCOUNTS):
+            log.warning(
+                "Multi-account failover degraded: %d of %d accounts usable",
+                len(valid),
+                len(config.CLAUDE_ACCOUNTS),
+            )
+            config.CLAUDE_ACCOUNTS = valid
+
+    if not config.CLAUDE_ACCOUNTS:
+        log.warning(
+            "CLAUDE_ACCOUNTS unset or all invalid -- running single-account "
+            "from default ~/.claude. Failover is DISABLED. "
+            "See CLAUDE.md -> Multi-Account Setup."
+        )
+
     if not _acquire_pid_lock():
         return
 
