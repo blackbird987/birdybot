@@ -264,18 +264,25 @@ def build_dashboard_embed(
 
 
 def _get_version() -> str:
-    """Read version — try installed package first, fall back to pyproject.toml."""
-    try:
-        from importlib.metadata import version as pkg_version
-        return pkg_version("claude-bot")
-    except Exception:
-        pass
+    """Read version — pyproject.toml first (source-run is the dev path),
+    fall back to installed package metadata for true-installed deploys.
+
+    importlib.metadata caches the version recorded at `pip install -e .`
+    time, so it stays stale after every pyproject bump until reinstall.
+    Reading the file first means a fresh bump is visible on the next bot
+    restart with no `pip install` step.
+    """
     try:
         from pathlib import Path
         pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
         match = re.search(r'version\s*=\s*"([^"]+)"', pyproject.read_text())
         if match:
             return match.group(1)
+    except Exception:
+        pass
+    try:
+        from importlib.metadata import version as pkg_version
+        return pkg_version("claude-bot")
     except Exception:
         pass
     return "unknown"

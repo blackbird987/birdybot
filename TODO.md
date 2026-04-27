@@ -64,3 +64,4 @@
 - [ ] [DRY/Cleanup] Reuse existing age/truncation helpers if present (Low)
 - [ ] [Modularity] Centralize image lifecycle instead of scattering (Medium)
 - [ ] [Reliability] Phase id matching format unspecified (Medium)
+- [ ] [Reliability] Closed/auto-merged threads still ping the user (Medium)

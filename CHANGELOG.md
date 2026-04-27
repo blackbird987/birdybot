@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## v0.91.4 — Dashboard reads pyproject.toml before installed metadata (2026-04-28)
+
+### Fixed
+- Dashboard footer no longer shows a stale version after `pyproject.toml` bumps (mechanism: `_get_version()` in `bot/discord/dashboard.py` called `importlib.metadata.version("claude-bot")` first, which returns the version recorded at `pip install -e .` time — so every release after the install kept reading the install-time version until you reinstalled). Order flipped: pyproject.toml first (source-run dev path is authoritative), `importlib.metadata` as fallback for true-installed deploys.
+
 ## v0.91.3 — Preserve uncommitted build work on autopilot halt (2026-04-27)
 
 ### Fixed
