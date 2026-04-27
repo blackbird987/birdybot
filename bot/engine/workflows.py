@@ -907,15 +907,15 @@ async def on_done(
 
 _AUTOPILOT_STEPS = [
     "review_loop", "build", "review_code", "verify",
-    "done", "verify_release", "release", "merge",
+    "done", "verify_release", "merge",
 ]
 _BUILD_AND_SHIP_STEPS = [
     "build", "review_code", "verify",
-    "done", "verify_release", "release", "merge",
+    "done", "verify_release", "merge",
 ]
 _AUTOPILOT_HOLD_STEPS = [
     "review_loop", "build", "review_code", "verify",
-    "done", "verify_release", "release",
+    "done", "verify_release",
 ]
 
 
@@ -1594,29 +1594,6 @@ async def on_continue_anyway(
     return resumed
 
 
-async def on_release_chain(
-    ctx: RequestContext,
-    source_id: str,
-    source_msg_id: str | None = None,
-) -> Instance | None:
-    """Run the autopilot `release` chain step — cuts version, updates files, tags.
-
-    Reuses RELEASE_PROMPT (the same prompt /release uses) so behavior matches
-    the manual command. Defaults to `patch` bump.
-    """
-    prompt = config.RELEASE_PROMPT.format(version_hint="patch")
-    return await spawn_from(ctx, source_id, SpawnConfig(
-        instance_type=InstanceType.TASK,
-        prompt=prompt,
-        mode="build",
-        origin=InstanceOrigin.RELEASE,
-        status_text="Cutting release...",
-        resume_session=True,
-        copy_branch=True,
-        silent=True,
-    ), source_msg_id=source_msg_id)
-
-
 def clear_stale_branches(store, branch_name: str) -> int:
     """Clear branch/worktree_path on ALL instances sharing a branch name.
 
@@ -1682,6 +1659,13 @@ async def _run_autopilot_chain(
     # Passing session_id would block spawn_from's check_spawn_allowed guard.
     ctx.runner.begin_task(chain_task_id)
     try:
+        # Pin the release bump intent for any chain that ends in `merge`.
+        # The post-merge ceremony reads this off the done-step instance to
+        # decide whether to cut a release. Default is "patch"; future work
+        # can let the user override (minor/major) before kicking off the chain.
+        if "merge" in steps and not ctx.store.get_chain_bump_type(session_id):
+            ctx.store.set_chain_bump_type(session_id, "patch")
+
         for step in steps:
             # Update remaining steps in session state for resume
             remaining = steps[steps.index(step):]
@@ -1994,6 +1978,15 @@ async def _run_autopilot_chain(
                 result = await on_done(
                     ctx, current_id, current_msg, prompt_variant="chain",
                 )
+                # Stamp the done-step instance with the chain's release intent
+                # so the post-merge ceremony fires at merge time. We pin this
+                # on the same instance that owns the branch/worktree we'll be
+                # merging — that's the one runner._merge_branch_sync receives.
+                if result and result.status == InstanceStatus.COMPLETED:
+                    bump = ctx.store.get_chain_bump_type(session_id)
+                    if bump:
+                        result.bump_type = bump
+                        ctx.store.update_instance(result, critical=True)
             elif step == "verify_release":
                 entry_sha = ctx.store.get_chain_entry_sha(session_id)
                 src_for_skip = ctx.store.get_instance(current_id)
@@ -2028,10 +2021,6 @@ async def _run_autopilot_chain(
                 )
                 # From here, None means spawn failed — treated as chain
                 # failure by the post-step status guard below.
-            elif step == "release":
-                # Cut a release if [Unreleased] has entries; the prompt itself
-                # aborts cleanly when the section is empty (no harm done).
-                result = await on_release_chain(ctx, current_id, current_msg)
             elif step == "merge":
                 # Merge step: git operations only, no Claude instance.
                 # On resume after restart, result may be None — look up the
@@ -2043,6 +2032,15 @@ async def _run_autopilot_chain(
                     merge_target = _find_mergeable_instance(ctx.store, session_id)
 
                 if merge_target and merge_target.branch and merge_target.original_branch:
+                    # Recover bump_type if it was lost (resume after reboot,
+                    # or merge_target came back from _find_mergeable_instance
+                    # without the stamp). Chain state is the source of truth.
+                    if not merge_target.bump_type:
+                        chain_bump = ctx.store.get_chain_bump_type(session_id)
+                        if chain_bump:
+                            merge_target.bump_type = chain_bump
+                            ctx.store.update_instance(merge_target, critical=True)
+
                     # close_silent=False: chain-completion close should ping
                     # the user so they see the autopilot finished.
                     merged_ok = await _finalize_merge(
@@ -2073,24 +2071,6 @@ async def _run_autopilot_chain(
                     outcome = "needs_input"
                 else:
                     outcome = "failed"
-
-                # Release-step partial-failure recovery hint: a half-done
-                # release (commit landed but tag failed) leaves the worktree
-                # in a state that's hard to debug from the chain failure
-                # embed alone. Surface a one-liner before exiting.
-                if step == "release" and outcome == "failed":
-                    try:
-                        await ctx.messenger.send_text(
-                            ctx.channel_id,
-                            "ℹ️ Release step halted mid-sequence. Run "
-                            "`git log --oneline -3` in the worktree to "
-                            "inspect; if a release commit exists without a "
-                            "tag, retry the release step manually or "
-                            "`git reset --soft HEAD~1` first.",
-                            silent=True,
-                        )
-                    except Exception:
-                        pass
 
                 await _exit_chain_needs_input(
                     ctx, source_id, session_id, steps, completed_steps,
@@ -2221,6 +2201,7 @@ async def _run_autopilot_chain(
         ctx.store.clear_autopilot_chain(session_id)
         ctx.store.clear_chain_deferred(session_id)
         ctx.store.clear_chain_entry_sha(session_id)
+        ctx.store.clear_chain_bump_type(session_id)
         return result
     finally:
         ctx.runner.end_task(chain_task_id)
