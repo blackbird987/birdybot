@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.91.0 — Effort framing system prompt (2026-04-27)
+
 ### Added
 - `EFFORT_FRAMING` system-prompt block (`bot/config.py`) telling Claude not to frame tradeoffs in human-developer time. LLMs trained on human-engineer prose tend to estimate work in weeks/days ("the proper fix is a 2-3 week refactor") and offer false "quick hack vs. proper fix" tradeoffs on time grounds — but execution is minutes for an LLM. Block reframes legitimate tradeoffs as scope/risk/blast-radius/reversibility, not calendar time. Wired into the prompt chain in `bot/claude/runner.py` next to `HONESTY_CONSTRAINT`.
 
