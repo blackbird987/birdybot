@@ -29,6 +29,7 @@ from bot.claude.provider import ProviderConfig, get_provider
 from bot.claude.types import (
     Instance, InstanceOrigin, InstanceStatus, InstanceType,
 )
+from bot.engine import release_ceremony
 from bot.store import history as history_mod
 
 log = logging.getLogger(__name__)
@@ -1731,6 +1732,16 @@ class ClaudeRunner:
 
     # --- Merge / Discard ---
 
+    async def run_release_ceremony(
+        self, repo_path: str, bump_kind: str,
+    ) -> "release_ceremony.CeremonyResult":
+        """Run the deterministic release ceremony under the per-repo git lock."""
+        repo_lock = self._get_repo_lock(repo_path)
+        async with repo_lock:
+            return await asyncio.to_thread(
+                release_ceremony.run_release_ceremony, repo_path, bump_kind,
+            )
+
     async def merge_branch(self, instance: Instance) -> str:
         """Merge worktree branch into master. Returns status message."""
         if not instance.branch or not instance.original_branch:
@@ -1879,6 +1890,36 @@ class ClaudeRunner:
             # Clean up worktree project dir
             self._cleanup_worktree_session_dir(instance)
 
+            # Post-merge release ceremony (deterministic, lock-held).  Replaces
+            # the old LLM-driven `release` autopilot step so two parallel
+            # autopilots can't drift versions or duplicate bullets.
+            ceremony_note = ""
+            ceremony_result: release_ceremony.CeremonyResult | None = None
+            if instance.bump_type:
+                try:
+                    ceremony_result = release_ceremony.run_release_ceremony(
+                        repo, instance.bump_type,
+                    )
+                except Exception:
+                    log.exception("Release ceremony raised in %s", repo)
+                    ceremony_result = None
+                if ceremony_result and ceremony_result.cut:
+                    ceremony_note = (
+                        f"\nReleased **{ceremony_result.tag}** — {ceremony_result.summary}"
+                    )
+                    log.info(
+                        "Release ceremony cut %s in %s (commit %s)",
+                        ceremony_result.tag,
+                        repo,
+                        (ceremony_result.commit_sha or "")[:7],
+                    )
+                elif ceremony_result and ceremony_result.skipped_reason:
+                    log.info(
+                        "Release ceremony skipped in %s: %s",
+                        repo,
+                        ceremony_result.skipped_reason,
+                    )
+
             # Push merged result to origin
             push_note = ""
             try:
@@ -1892,7 +1933,7 @@ class ClaudeRunner:
                     log.info("No remote 'origin' in %s — skipping push", repo)
                     push_note = "\nℹ️ No remote configured — local merge is fine"
                 elif (push_r := subprocess.run(
-                    ["git", "push", "origin", target],
+                    ["git", "push", "--follow-tags", "origin", target],
                     cwd=repo, capture_output=True, text=True,
                     timeout=30, **_NOWND,
                 )).returncode != 0:
@@ -1901,39 +1942,10 @@ class ClaudeRunner:
                               repo, push_detail)
                     push_note = f"\n⚠️ Could not push to origin (exit {push_r.returncode})"
                 else:
-                    log.info("Pushed %s to origin after merge in %s", target, repo)
-                    # Push tags if the merged branch's tip had any
-                    try:
-                        tag_r = subprocess.run(
-                            ["git", "tag", "--points-at", "HEAD^2"],
-                            cwd=repo, capture_output=True, text=True, **_NOWND,
-                        )
-                        if tag_r.returncode != 0:
-                            log.debug("git tag --points-at HEAD^2 failed in %s (rc=%d), skipping tag push",
-                                      repo, tag_r.returncode)
-                        else:
-                            tags = tag_r.stdout.strip()
-                            if tags:
-                                tag_names = tags.splitlines()
-                                tag_push_r = subprocess.run(
-                                    ["git", "push", "origin"] + tag_names,
-                                    cwd=repo, capture_output=True, text=True,
-                                    timeout=30, **_NOWND,
-                                )
-                                if tag_push_r.returncode != 0:
-                                    tag_detail = (tag_push_r.stderr or tag_push_r.stdout or "").strip()
-                                    log.error("Tag push to origin in %s: %s", repo, tag_detail)
-                                    push_note += f"\n⚠️ Tags not pushed (exit {tag_push_r.returncode})"
-                                else:
-                                    tag_list = ", ".join(tag_names)
-                                    log.info("Pushed tags [%s] to origin in %s", tag_list, repo)
-                                    push_note += f"\nTags pushed: {tag_list}"
-                    except subprocess.TimeoutExpired:
-                        log.error("Tag push to origin timed out (30s) in %s", repo)
-                        push_note += "\n⚠️ Tag push timed out (30s)"
-                    except Exception as e:
-                        log.error("Tag push error in %s: %s", repo, e)
-                        push_note += f"\n⚠️ Tag push error: {type(e).__name__}"
+                    log.info(
+                        "Pushed %s to origin (with --follow-tags) after merge in %s",
+                        target, repo,
+                    )
             except subprocess.TimeoutExpired:
                 log.error("Push to origin timed out (30s) in %s", repo)
                 push_note = "\n⚠️ Push to origin timed out (30s)"
@@ -1959,7 +1971,7 @@ class ClaudeRunner:
                         f"\nℹ️ Stashed {dirty_total} uncommitted file(s) before merge: {files_str}"
                     )
             stash_status = self._restore_stash(repo) if stashed else ""
-            return f"Merged into {target}{suffix}{dirty_note}{push_note}{stash_status}"
+            return f"Merged into {target}{suffix}{ceremony_note}{dirty_note}{push_note}{stash_status}"
         except subprocess.CalledProcessError as e:
             # Abort any in-progress merge to keep main repo clean for other sessions
             subprocess.run(
