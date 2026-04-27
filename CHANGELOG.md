@@ -3,8 +3,14 @@
 ## [Unreleased]
 
 ### Fixed
+- Build phase no longer forgets the just-produced plan and behaves as if the session were empty (mechanism: cross-account JSONL hydration was preferring a stale copy on a different account over the up-to-date copy on the running account). `_hydrate_session_for_account` in `bot/claude/runner.py` now checks the same account's main-repo project dir before scanning other accounts — that's where every prior `--resume` actually wrote its turns. Cross-account log line tagged `[cross-account]` for greppability when this regresses again.
+- Autopilot no longer marches a no-op build through review/verify/release/merge into master (mechanism: empty-diff guard read `code_active`, which inherits from session siblings and gave false positives when a build wrote nothing in a session that previously made edits). The single-shot build path now compares git HEAD before/after the build — same approach the multi-phase loop already uses. `send_text` for the halt notice is wrapped in try/except so a transient Discord blip can't leave the chain hung.
 - Release verifier no longer fires a false "mismatch" when the local CHANGELOG regex can't parse `[Unreleased]` but the LLM verdict is `ok`. The LLM sees the full diff and is now authoritative; the regex hit was a tooling artifact that was synthesizing a fake mismatch and forcing an Amend/Continue prompt on clean releases. Logs a `warning` when this happens so a real regex regression remains visible.
 - Verifier-output-unparseable gate copy no longer mislabels itself as "Phantom claims" — when phantoms is empty (the only path that now reaches the gate without real phantoms), the body says "Release verifier output couldn't be parsed — failing closed" instead.
+
+### Added
+- `scripts/verify_hydrate_same_account.py` — standalone regression script that seeds a fake multi-account layout (fresh JSONL on the running account, stale on the other) and asserts `_hydrate_session_for_account` copies the same-account fresh content into the worktree's encoded project dir. Locks in the t-3251 dementia bug fix at the unit level.
+
 ## v0.91.0 — Effort framing system prompt (2026-04-27)
 
 ### Added

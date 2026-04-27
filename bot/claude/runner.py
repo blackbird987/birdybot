@@ -42,6 +42,9 @@ _NOWND: dict = config.NOWND
 # rebuild latency so a slow disk scan can't block an autopilot chain.
 REBUILD_CACHE_TTL_SECS = 60
 REBUILD_TIMEOUT_SECS = 30
+# Cross-account JSONL hydration: same TTL semantics as rebuild — bursts of
+# correlated resume attempts shouldn't re-scan every account on disk.
+HYDRATE_CACHE_TTL_SECS = 60
 
 ProgressCallback = Callable  # async callback(message: str, detail: str)
 StallCallback = Callable[[str], None]     # async callback(instance_id)
@@ -83,6 +86,11 @@ class ClaudeRunner:
         # auto-rebuild recovery layer so a flurry of failed resumes doesn't
         # re-scan the same project multiple times.
         self._rebuild_cache: dict[tuple[str, str], float] = {}
+
+        # Last-hydrate timestamp per (account_dir, project_dir, session_id) —
+        # caches the cross-account JSONL discovery scan so retries don't
+        # re-walk every account's projects/ on each attempt.
+        self._hydrate_cache: dict[tuple[str, str, str], float] = {}
 
     @property
     def provider(self) -> ProviderConfig:
@@ -187,12 +195,6 @@ class ClaudeRunner:
         if instance.branch:
             await self._ensure_worktree(instance, provider=provider)
 
-        # Copy session file to worktree's project dir so --resume works
-        if instance.worktree_path and instance.session_id:
-            await asyncio.to_thread(
-                self._copy_session_to_worktree, instance,
-            )
-
         # Use worktree as cwd if available (file isolation)
         working_dir = instance.worktree_path or instance.repo_path or None
 
@@ -224,6 +226,16 @@ class ClaudeRunner:
             )
             if account_dir:
                 env[provider.config_dir_env] = account_dir
+
+        # Hydrate session JSONL into the chosen account's project dir before
+        # spawn.  Searches every configured account for the session file and
+        # copies it into place if found elsewhere — makes either subscription
+        # able to resume any session on demand, including worktree builds
+        # whose owning account is on cooldown.
+        if account_dir and instance.session_id and working_dir:
+            await self._hydrate_session_for_account(
+                account_dir, working_dir, instance.session_id, instance,
+            )
 
         acct_tag = f" [acct={account_dir[-20:]}]" if account_dir else ""
         log.info("Running %s%s (prompt: %d chars via stdin): %s",
@@ -263,6 +275,7 @@ class ClaudeRunner:
             result = await self._stream_output(
                 proc, instance, on_progress, on_stall,
                 supports_live_usage=provider.supports_live_usage,
+                account_dir=account_dir,
             )
 
             # Tag result now — before any early returns — so all exit paths carry the flag.
@@ -436,6 +449,7 @@ class ClaudeRunner:
         on_stall: StallCallback | None,
         *,
         supports_live_usage: bool = False,
+        account_dir: str | None = None,
     ) -> RunResult:
         """Read stdout line-by-line, parse stream-json, detect stalls.
 
@@ -633,20 +647,29 @@ class ClaudeRunner:
 
         # Copy session files back from worktree to main repo project dir
         if instance.worktree_path:
-            await asyncio.to_thread(self._copy_session_from_worktree, instance)
+            await asyncio.to_thread(
+                self._copy_session_from_worktree, instance, account_dir,
+            )
 
         # Extract summary
         instance.summary = extract_summary(result.result_text)
 
         # Capture the JSONL uuid of the final assistant message so the
         # "Branch from here" button can fork the session at this point.
+        # Resolve under the active account_dir — the JSONL was just written
+        # there.  config.CLAUDE_PROJECTS_DIR points only at the default
+        # account, so a non-default-account run (e.g. klerk) would miss.
         session_id = result.session_id or captured_session_id
         if session_id and instance.repo_path:
             try:
                 from bot.engine.session_fork import (
                     encode_project_path, get_last_assistant_uuid,
                 )
-                proj = config.CLAUDE_PROJECTS_DIR / encode_project_path(instance.repo_path)
+                projects_root = (
+                    Path(account_dir) / "projects"
+                    if account_dir else config.CLAUDE_PROJECTS_DIR
+                )
+                proj = projects_root / encode_project_path(instance.repo_path)
                 jsonl = proj / f"{session_id}.jsonl"
                 last_uuid = await asyncio.to_thread(get_last_assistant_uuid, jsonl)
                 if last_uuid:
@@ -1452,44 +1475,157 @@ class ClaudeRunner:
             )
             return False
 
-    def _copy_session_to_worktree(self, instance: Instance) -> None:
-        """Copy session JSONL from main repo's project dir to worktree's project dir.
+    async def _hydrate_session_for_account(
+        self,
+        account_dir: str,
+        cwd: str,
+        session_id: str,
+        instance: Instance,
+    ) -> bool:
+        """Ensure the session JSONL exists at account_dir's project dir for cwd.
 
-        Source dir is the OWNING account's projects/ (instance.session_account
-        if set and still in CLAUDE_ACCOUNTS), not the active account's.  This
-        keeps build-mode --resume working when the plan session lives on a
-        different account than the picker chose for this build.
+        If missing, search every configured account (in both the cwd-encoded
+        and repo-encoded project dirs) for a JSONL matching session_id and
+        copy it to the target.  Then refresh the target's sessions-index so
+        the CLI can locate the session via ``--resume``.
+
+        Even on the early-return-True path (file already in place), we still
+        delegate to ``_maybe_rebuild_session_index`` — the file may have been
+        written by the CLI without an index update (the original dementia
+        symptom).  The rebuild_cache dedupes back-to-back calls so this is
+        cheap in steady state.
+
+        Returns True iff the JSONL is present at the target after this call.
+        Best-effort: failures are logged and return False; the caller falls
+        through to the existing recovery layers.
         """
-        if not instance.repo_path or not instance.worktree_path or not instance.session_id:
-            return
-        repo_encoded = self._encode_project_path(instance.repo_path)
-        wt_encoded = self._encode_project_path(instance.worktree_path)
-        if repo_encoded == wt_encoded:
-            return  # Same path, no copy needed
+        encoded_cwd = self._encode_project_path(cwd)
+        target_dir = Path(account_dir) / "projects" / encoded_cwd
+        target_file = target_dir / f"{session_id}.jsonl"
+        encoded_repo = (
+            self._encode_project_path(instance.repo_path)
+            if instance.repo_path else None
+        )
 
-        if (
-            instance.session_account
-            and instance.session_account in config.CLAUDE_ACCOUNTS
-        ):
-            src_dir = Path(instance.session_account) / "projects" / repo_encoded
-        else:
-            src_dir = config.CLAUDE_PROJECTS_DIR / repo_encoded
-        dst_dir = config.CLAUDE_PROJECTS_DIR / wt_encoded
-        src_file = src_dir / f"{instance.session_id}.jsonl"
+        if target_file.exists():
+            # File is in place but its index entry might be stale.  Refresh
+            # via the shared cache — cheap on cache hit, fixes the dementia
+            # symptom on cache miss.
+            await self._maybe_rebuild_session_index(account_dir, instance)
+            return True
 
-        if not src_file.exists():
-            log.debug("No session file to copy for %s", instance.session_id[:12])
-            return
+        # Same-account fast path: a worktree build's encoded_cwd differs
+        # from the main-repo encoding, but earlier q-* steps wrote turns to
+        # this account's main-repo project dir.  That copy is the freshest
+        # by definition — every prior --resume on this account appended to
+        # it.  Prefer it over any cross-account copy, which could be stale
+        # (e.g. left behind by a past failover run).
+        if encoded_repo and encoded_repo != encoded_cwd:
+            same_acct_src = (
+                Path(account_dir) / "projects" / encoded_repo
+                / f"{session_id}.jsonl"
+            )
 
-        dst_dir.mkdir(parents=True, exist_ok=True)
-        dst_file = dst_dir / f"{instance.session_id}.jsonl"
-        shutil.copy2(str(src_file), str(dst_file))
-        log.info("Copied session %s to worktree project dir", instance.session_id[:12])
+            def _copy_same_account() -> bool:
+                if not same_acct_src.exists():
+                    return False
+                target_dir.mkdir(parents=True, exist_ok=True)
+                if not target_file.exists():
+                    shutil.copy2(str(same_acct_src), str(target_file))
+                return True
 
-    def _copy_session_from_worktree(self, instance: Instance) -> None:
-        """Copy session JSONL back from worktree's project dir to main repo's project dir.
+            try:
+                hit = await asyncio.to_thread(_copy_same_account)
+            except OSError:
+                log.exception(
+                    "Hydrate same-account copy failed for %s -> %s",
+                    session_id[:12], target_dir,
+                )
+                hit = False
 
-        Also handles the case where the CLI created a NEW session (different ID).
+            if hit:
+                log.info(
+                    "Hydrated session %s into %s for %s (same-account from %s)",
+                    session_id[:12], account_dir[-20:], instance.id,
+                    encoded_repo[-30:],
+                )
+                await self._maybe_rebuild_session_index(account_dir, instance)
+                return True
+
+        cache_key = (account_dir, str(target_dir), session_id)
+        now = asyncio.get_event_loop().time()
+        last = self._hydrate_cache.get(cache_key, 0.0)
+        if now - last < HYDRATE_CACHE_TTL_SECS:
+            return target_file.exists()
+        self._hydrate_cache[cache_key] = now
+
+        # Build candidate source paths: every OTHER account × {cwd, repo_path}.
+        # The current account's own paths are already covered by the
+        # target_file check and same-account fast path above.
+        accounts = list(config.CLAUDE_ACCOUNTS) or [account_dir]
+        candidates: list[Path] = []
+        for acct in accounts:
+            if acct == account_dir:
+                continue
+            candidates.append(
+                Path(acct) / "projects" / encoded_cwd / f"{session_id}.jsonl"
+            )
+            if encoded_repo and encoded_repo != encoded_cwd:
+                candidates.append(
+                    Path(acct) / "projects" / encoded_repo / f"{session_id}.jsonl"
+                )
+
+        def _copy_first_match() -> Path | None:
+            for src in candidates:
+                if src.exists():
+                    target_dir.mkdir(parents=True, exist_ok=True)
+                    # Race-safety: another coroutine may have just hydrated
+                    # the same target.  Re-check before clobbering.
+                    if not target_file.exists():
+                        shutil.copy2(str(src), str(target_file))
+                    return src
+            return None
+
+        try:
+            src = await asyncio.to_thread(_copy_first_match)
+        except OSError:
+            log.exception(
+                "Hydrate copy failed for %s -> %s",
+                session_id[:12], target_dir,
+            )
+            return False
+
+        if src is None:
+            log.info(
+                "Hydrate: session %s not found on any account for %s",
+                session_id[:12], instance.id,
+            )
+            return False
+
+        log.info(
+            "Hydrated session %s into %s for %s [cross-account] (from %s)",
+            session_id[:12], account_dir[-20:], instance.id,
+            str(src.parent.parent.parent)[-30:],
+        )
+
+        # Rebuild the target's index so the CLI sees the new JSONL.  Shared
+        # cache with layer 2 means concurrent recovery paths don't double-scan.
+        await self._maybe_rebuild_session_index(account_dir, instance)
+
+        return target_file.exists()
+
+    def _copy_session_from_worktree(
+        self,
+        instance: Instance,
+        account_dir: str | None = None,
+    ) -> None:
+        """Mirror session JSONLs from worktree's project dir back to main-repo dirs.
+
+        Reads from ``account_dir``'s worktree project dir (the account that
+        hosted the run).  Writes to BOTH the same account's main-repo project
+        dir AND the owning ``session_account``'s main-repo dir if different,
+        so a follow-up resume on either account finds the JSONL locally
+        without needing hydrate to run first.
         """
         if not instance.repo_path or not instance.worktree_path:
             return
@@ -1498,18 +1634,45 @@ class ClaudeRunner:
         if wt_encoded == repo_encoded:
             return
 
-        wt_proj_dir = config.CLAUDE_PROJECTS_DIR / wt_encoded
-        repo_proj_dir = config.CLAUDE_PROJECTS_DIR / repo_encoded
-
+        # Source: account that ran (preferred) → session_account → CLI default
+        src_account = (
+            account_dir
+            or instance.session_account
+            or str(config.CLAUDE_PROJECTS_DIR.parent)
+        )
+        wt_proj_dir = Path(src_account) / "projects" / wt_encoded
         if not wt_proj_dir.is_dir():
-            return
+            # Legacy fallback: pre-hydrate runs may have written to the CLI default
+            wt_proj_dir = config.CLAUDE_PROJECTS_DIR / wt_encoded
+            if not wt_proj_dir.is_dir():
+                return
 
-        # Copy all .jsonl files (handles new session IDs)
-        repo_proj_dir.mkdir(parents=True, exist_ok=True)
-        for f in wt_proj_dir.glob("*.jsonl"):
-            dst = repo_proj_dir / f.name
-            shutil.copy2(str(f), str(dst))
-            log.debug("Copied session file %s back to main repo project dir", f.name)
+        # Destinations: same account's main-repo dir + owning account's if different
+        dest_accounts: list[str] = []
+        if account_dir:
+            dest_accounts.append(account_dir)
+        if (
+            instance.session_account
+            and instance.session_account in config.CLAUDE_ACCOUNTS
+            and instance.session_account not in dest_accounts
+        ):
+            dest_accounts.append(instance.session_account)
+        if not dest_accounts:
+            dest_accounts.append(str(config.CLAUDE_PROJECTS_DIR.parent))
+
+        for dest in dest_accounts:
+            repo_proj_dir = Path(dest) / "projects" / repo_encoded
+            repo_proj_dir.mkdir(parents=True, exist_ok=True)
+            for f in wt_proj_dir.glob("*.jsonl"):
+                dst = repo_proj_dir / f.name
+                try:
+                    shutil.copy2(str(f), str(dst))
+                except OSError:
+                    log.exception("Back-copy %s -> %s failed", f, dst)
+                else:
+                    log.debug(
+                        "Back-copied %s to %s", f.name, dest[-20:],
+                    )
 
     # --- Diff ---
 
@@ -1556,8 +1719,11 @@ class ClaudeRunner:
         repo = instance.repo_path
         target = instance.original_branch
         try:
-            # Copy session files back before cleanup
-            self._copy_session_from_worktree(instance)
+            # Copy session files back before cleanup.  account_dir=None lets
+            # the helper fall through to instance.session_account (the account
+            # that hosted the run), which is correct for the post-merge case
+            # where we no longer have the live runner context.
+            self._copy_session_from_worktree(instance, None)
 
             # Re-verify original_branch exists; re-detect if stale
             r = subprocess.run(
@@ -1963,13 +2129,23 @@ class ClaudeRunner:
         return f"Discarded branch, back on {instance.original_branch}"
 
     def _cleanup_worktree_session_dir(self, instance: Instance) -> None:
-        """Remove the worktree's CLI project directory (session files already copied back)."""
+        """Remove the worktree's CLI project directory across every configured account.
+
+        Pre-multi-account this only cleaned ``CLAUDE_PROJECTS_DIR`` (the
+        default account).  With cross-account hydration, a worktree build
+        may have written its JSONL into any account's ``projects/`` dir,
+        so we sweep all of them to avoid orphaned per-instance directories.
+        """
         if not instance.worktree_path:
             return
         wt_encoded = self._encode_project_path(instance.worktree_path)
-        wt_proj_dir = config.CLAUDE_PROJECTS_DIR / wt_encoded
-        if wt_proj_dir.is_dir():
-            shutil.rmtree(str(wt_proj_dir), ignore_errors=True)
+        sweep_roots: set[Path] = {config.CLAUDE_PROJECTS_DIR}
+        for acct in config.CLAUDE_ACCOUNTS:
+            sweep_roots.add(Path(acct) / "projects")
+        for root in sweep_roots:
+            wt_proj_dir = root / wt_encoded
+            if wt_proj_dir.is_dir():
+                shutil.rmtree(str(wt_proj_dir), ignore_errors=True)
 
     # --- Divergence safety check (used by startup auto-merge) ---
 

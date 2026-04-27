@@ -1941,6 +1941,15 @@ async def _run_autopilot_chain(
                 else:
                     # --- Single-shot build (no phases declared) ---
                     is_plan = source.plan_active if source else False
+                    # Snapshot HEAD before the build so the empty-diff guard
+                    # below can compare against the post-build worktree HEAD.
+                    # Source is typically a q-* step with no worktree, so we
+                    # fall back to repo_path (= worktree's initial HEAD).
+                    pre_build_head: str | None = None
+                    if source:
+                        pre_build_head = await _git_head(
+                            source.worktree_path or source.repo_path
+                        )
                     result = await spawn_from(ctx, current_id, SpawnConfig(
                         instance_type=InstanceType.TASK,
                         prompt=config.BUILD_FROM_PLAN_PROMPT if is_plan else config.BUILD_FROM_QUERY_PROMPT,
@@ -2068,27 +2077,43 @@ async def _run_autopilot_chain(
                 )
                 return result
 
-            # Guard: build produced no code changes — halt chain.
+            # Guard: build produced no commits — halt chain.
+            # HEAD movement is authoritative; the prior `code_active` check
+            # gave false positives because that flag inherits from session
+            # siblings (lifecycle.py:441) — a build that wrote nothing in a
+            # session that previously made edits would still report True.
             # Skipped for multi-phase: each phase ran its own per-phase
-            # HEAD-movement check, and `result` here is only the LAST phase,
-            # whose code_active flag doesn't reflect prior phases' commits.
-            if (step == "build" and result and not result.code_active
-                    and not multi_phase_ran):
-                await ctx.messenger.send_text(
-                    ctx.channel_id,
-                    "⚠️ Build produced no code changes. Check the plan or retry.",
-                    silent=True,
+            # HEAD-movement check at line ~1867.
+            if step == "build" and result and not multi_phase_ran:
+                post_build_head = await _git_head(
+                    result.worktree_path or result.repo_path
                 )
-                # Clean up empty branch/worktree so Merge/Discard don't appear
-                if result.branch:
-                    await ctx.runner.discard_branch(result)
-                    ctx.store.update_instance(result)
-                completed_steps.append(step)
-                await _exit_chain_needs_input(
-                    ctx, source_id, session_id, steps, completed_steps,
-                    chain_instances, result, "abandoned",
+                no_changes = bool(
+                    pre_build_head and post_build_head
+                    and pre_build_head == post_build_head
                 )
-                return result
+                if no_changes:
+                    try:
+                        await ctx.messenger.send_text(
+                            ctx.channel_id,
+                            "⚠️ Build produced no commits. Halting chain.",
+                            silent=True,
+                        )
+                    except Exception:
+                        log.exception(
+                            "Empty-diff halt notice failed to send for %s",
+                            ctx.channel_id,
+                        )
+                    # Clean up empty branch/worktree so Merge/Discard don't appear
+                    if result.branch:
+                        await ctx.runner.discard_branch(result)
+                        ctx.store.update_instance(result)
+                    completed_steps.append(step)
+                    await _exit_chain_needs_input(
+                        ctx, source_id, session_id, steps, completed_steps,
+                        chain_instances, result, "abandoned",
+                    )
+                    return result
             chain_instances.append(result)
             completed_steps.append(step)
             current_id = result.id
