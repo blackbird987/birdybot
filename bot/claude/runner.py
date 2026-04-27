@@ -1568,13 +1568,24 @@ class ClaudeRunner:
                 target = self._get_default_branch(repo)
                 instance.original_branch = target
 
-            # Stash uncommitted changes that would block checkout
+            # Stash uncommitted changes that would block checkout.  Capture
+            # the file list (capped for display) and the true total so the
+            # post-merge message can report state honestly without hiding
+            # the count behind the cap.
+            dirty_files: list[str] = []
+            dirty_total = 0
             status_r = subprocess.run(
                 ["git", "status", "--porcelain"],
                 cwd=repo, capture_output=True, text=True, **_NOWND,
             )
             if status_r.stdout.strip():
-                log.info("Stashing dirty working tree in %s before merge", repo)
+                parsed = [
+                    line[3:].strip() for line in status_r.stdout.strip().splitlines()
+                ]
+                dirty_total = len(parsed)
+                dirty_files = parsed[:5]  # display cap only — dirty_total carries truth
+                log.info("Stashing dirty working tree in %s before merge (%d files): %s",
+                         repo, dirty_total, ", ".join(dirty_files))
                 stash_r = subprocess.run(
                     ["git", "stash", "push", "-m",
                      f"auto-stash for merge {instance.branch}"],
@@ -1601,9 +1612,16 @@ class ClaudeRunner:
                 cwd=repo, capture_output=True, text=True, check=True, **_NOWND,
             )
 
-            # Merge the worktree's branch (-X ours auto-resolves config conflicts)
+            # Merge the worktree's branch.  No -X ours: real conflicts
+            # surface and flow through _auto_resolve_merge_conflicts, which
+            # tries three-way merge-file first (preserving both sides'
+            # non-overlapping changes via the union-style result) and falls
+            # back to the feature branch only on textual hunk overlap.
+            # -X ours silently kept master's hunk on every conflict, which
+            # invisibly clobbered the second of two parallel builds touching
+            # the same file.
             merge_r = subprocess.run(
-                ["git", "merge", instance.branch, "--no-ff", "-X", "ours",
+                ["git", "merge", instance.branch, "--no-ff",
                  "-m", f"Merge {instance.branch} ({instance.display_id()})"],
                 cwd=repo, capture_output=True, text=True, **_NOWND,
             )
@@ -1628,7 +1646,8 @@ class ClaudeRunner:
                     )
                     log.error("Merge failed for %s into %s in %s: %s",
                               instance.branch, target, repo, detail)
-                    return f"Merge failed: {detail}"
+                    stash_status = self._restore_stash(repo) if stashed else ""
+                    return f"Merge failed: {detail}{stash_status}"
 
             # --- Cleanup (reached on successful merge) ---
 
@@ -1732,7 +1751,20 @@ class ClaudeRunner:
             suffix = ""
             if auto_resolved > 0:
                 suffix = f" (auto-resolved {auto_resolved} conflict{'s' if auto_resolved != 1 else ''})"
-            return f"Merged into {target}{suffix}{push_note}"
+            dirty_note = ""
+            if dirty_total:
+                files_str = ", ".join(f"`{f}`" for f in dirty_files)
+                if dirty_total > len(dirty_files):
+                    dirty_note = (
+                        f"\nℹ️ Stashed {dirty_total} uncommitted file(s) before merge "
+                        f"(showing first {len(dirty_files)}): {files_str}"
+                    )
+                else:
+                    dirty_note = (
+                        f"\nℹ️ Stashed {dirty_total} uncommitted file(s) before merge: {files_str}"
+                    )
+            stash_status = self._restore_stash(repo) if stashed else ""
+            return f"Merged into {target}{suffix}{dirty_note}{push_note}{stash_status}"
         except subprocess.CalledProcessError as e:
             # Abort any in-progress merge to keep main repo clean for other sessions
             subprocess.run(
@@ -1742,23 +1774,96 @@ class ClaudeRunner:
             detail = (e.stderr or e.stdout or "").strip()
             log.error("Merge failed for %s into %s in %s: %s",
                       instance.branch, target, repo, detail)
-            return f"Merge failed: {detail}"
-        finally:
-            if stashed:
-                # Only pop if working tree is clean (abort or merge succeeded)
-                check_r = subprocess.run(
-                    ["git", "status", "--porcelain"],
-                    cwd=repo, capture_output=True, text=True, **_NOWND,
+            stash_status = self._restore_stash(repo) if stashed else ""
+            return f"Merge failed: {detail}{stash_status}"
+
+    def _restore_stash(self, repo: str) -> str:
+        """Pop the auto-stash if safe; return user-facing status string.
+
+        Distinguishes four outcomes for the user (and logs accordingly):
+          - clean pop succeeded → "Stashed changes restored after merge"
+          - skipped (tree dirty) → "stash preserved" warning
+          - pop conflicted, rolled back → "stash preserved" warning
+          - pop conflicted, rollback failed → escalated tree-may-be-dirty warning
+          - subprocess raised → soft "could not verify" warning
+
+        Never claims "safe" when safety can't actually be verified — the
+        rollback path tracks its own success explicitly.  All git
+        subprocesses are wrapped so any unexpected failure surfaces a
+        soft warning rather than propagating; the caller can still
+        return its merge-result string with stash status appended.
+        """
+        try:
+            check_r = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=repo, capture_output=True, text=True, **_NOWND,
+            )
+            if check_r.stdout.strip():
+                log.warning(
+                    "Skipping stash pop — working tree not clean in %s; stash preserved",
+                    repo,
                 )
-                if not check_r.stdout.strip():
-                    subprocess.run(
-                        ["git", "stash", "pop"],
+                return (
+                    "\n⚠️ Your uncommitted changes conflicted with the merge. "
+                    "Preserved as `stash@{0}` — `git stash list` / `git stash pop` to recover."
+                )
+            pop_r = subprocess.run(
+                ["git", "stash", "pop"],
+                cwd=repo, capture_output=True, text=True, **_NOWND,
+            )
+            if pop_r.returncode != 0:
+                rollback_ok = False
+                try:
+                    rb_r = subprocess.run(
+                        ["git", "checkout", "--", "."],
                         cwd=repo, capture_output=True, text=True, **_NOWND,
                     )
-                else:
+                    rollback_ok = rb_r.returncode == 0
+                    if not rollback_ok:
+                        log.warning(
+                            "Rollback `git checkout -- .` returned rc=%d in %s: %s",
+                            rb_r.returncode, repo,
+                            (rb_r.stderr or rb_r.stdout or "").strip(),
+                        )
+                except (subprocess.SubprocessError, OSError):
                     log.warning(
-                        "Skipping stash pop — working tree not clean in %s",
-                        repo)
+                        "Rollback `git checkout -- .` raised in %s",
+                        repo, exc_info=True,
+                    )
+                    rollback_ok = False
+
+                if rollback_ok:
+                    log.warning(
+                        "Stash pop conflicted in %s, rolled back; stash preserved",
+                        repo,
+                    )
+                    return (
+                        "\n⚠️ Stash pop conflicted — aborted. "
+                        "Your changes are safe in `stash@{0}`."
+                    )
+                else:
+                    log.error(
+                        "Stash pop conflicted AND rollback failed in %s — "
+                        "tree may contain conflict markers",
+                        repo,
+                    )
+                    return (
+                        "\n⚠️ Stash pop conflicted AND rollback failed — your tree may "
+                        "contain conflict markers. Run `git status` and inspect "
+                        "`stash@{0}` manually before continuing."
+                    )
+            # Clean pop — confirm restoration so the user never has to guess
+            # where their pre-merge work lives.
+            log.info("Restored stashed changes after merge in %s", repo)
+            return "\nℹ️ Stashed changes restored after merge."
+        except (subprocess.SubprocessError, OSError):
+            log.warning(
+                "Stash restore subprocess failed in %s",
+                repo, exc_info=True,
+            )
+            return (
+                "\n⚠️ Could not verify stash state — check `git stash list` manually."
+            )
 
     def _auto_resolve_merge_conflicts(
         self, repo: str, branch: str, detail: str,
