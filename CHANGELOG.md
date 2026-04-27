@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.92.0 — Deterministic post-merge release ceremony (2026-04-28)
+
 ### Changed
 - Replaced the LLM-driven `release` autopilot step with a deterministic post-merge ceremony that runs on master inside the per-repo git lock. The ceremony parses `[Unreleased]`, dedupes against every prior versioned section (so union-merge leaks from sibling worktrees can't reappear under a fresh version), computes a version strictly above all `v*` tags + the version-file value, and atomically commits CHANGELOG + version file + tag. Eliminates version drift when parallel autopilots release simultaneously on the same repo. New `bot/engine/release_ceremony.py` module + `scripts/verify_ceremony.py` harness (24/24 PASS).
 - `/release [patch|minor|major]` now calls the ceremony directly (no LLM, no spawn) and returns the cut version + short SHA.
