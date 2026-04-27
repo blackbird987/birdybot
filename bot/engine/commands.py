@@ -540,6 +540,25 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
             if ctx.on_session_resolved:
                 ctx.on_session_resolved(result.session_id)
 
+        # Recovery exhausted: layer-3 fired in the runner (resume failed on every
+        # account + index rebuild, fresh session was created).  The thread's prior
+        # turns are still on disk under the dead session_id but unreachable from
+        # --resume.  Surface this to the user so the dementia is visible — without
+        # this notice, the rebind is silent and the user only notices when the
+        # bot answers as if it has no memory.
+        if result.session_recovery_exhausted:
+            try:
+                await ctx.messenger.send_text(
+                    ctx.channel_id,
+                    "⚠️ Lost prior conversation context — claude.exe couldn't "
+                    "resume the previous session even after recovery attempts. "
+                    "Continuing with a fresh session. Re-paste anything important "
+                    "from earlier in this thread if you need me to remember it.",
+                    silent=True,
+                )
+            except Exception:
+                log.exception("Failed to send session-recovery-exhausted notice")
+
         # If we primed this turn, drop the cache regardless of outcome.
         # Success path: the new session is now resumable, future messages
         # don't need priming so the cached digest is dead weight. Failure

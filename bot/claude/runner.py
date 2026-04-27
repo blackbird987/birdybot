@@ -293,36 +293,22 @@ class ClaudeRunner:
                 instance.session_account = account_dir
 
             # Dead session: layered recovery before silent --resume drop.
-            # Layer 1: try the OTHER account (the session may live there).
-            # Layer 2: rebuild the owning account's session-index in-process
-            #          and retry once with --resume intact.
+            # Layer 1: rebuild the owning account's session-index in-process
+            #          and retry once with --resume intact.  Runs FIRST because
+            #          claude.exe's "No conversation found" usually means the
+            #          JSONL is on disk but missing from its index (e.g. after
+            #          a mid-stream crash) — see commit history for t-3260
+            #          forensics.  Account-swap before this would futilely
+            #          rebuild the wrong account's index.
+            # Layer 2: try the OTHER account (the session may live there).
             # Layer 3: clear session_id and run blank (last resort).
             error_text = result.error_message or result.result_text or ""
             if result.is_error and "No conversation found" in error_text and instance.session_id:
-                # Layer 1: try other account if we haven't yet and one is available.
-                if (
-                    "other_account" not in recovery_state
-                    and provider.supports_account_failover
-                    and account_dir
-                ):
-                    recovery_state.add("other_account")
-                    instance._accounts_tried.add(account_dir)
-                    next_account = self._pick_account(exclude=instance._accounts_tried)
-                    if next_account:
-                        log.info(
-                            "Session %s missing on %s, trying %s for %s",
-                            instance.session_id[:12], account_dir[-20:],
-                            next_account[-20:], instance.id,
-                        )
-                        return await self._run_impl(
-                            instance, on_progress, on_stall,
-                            context, sibling_context,
-                            api_fallback=api_fallback,
-                            _provider=provider, _binary=binary,
-                            _recovery_state=recovery_state,
-                        )
-
-                # Layer 2: rebuild session-index for the owning account.
+                # Layer 1: rebuild session-index for the owning account FIRST.
+                # _maybe_rebuild_session_index is cheap on cache hit and short-
+                # circuits if the project dir doesn't exist, so calling it
+                # before the cross-account swap has negligible downside but
+                # catches the common case where the JSONL is right here.
                 if "rebuild" not in recovery_state:
                     recovery_state.add("rebuild")
                     owning_account = (
@@ -349,19 +335,49 @@ class ClaudeRunner:
                             _recovery_state=recovery_state,
                         )
 
-                # Layer 3 (last resort): drop session and run blank.
+                # Layer 2: try other account if we haven't yet and one is available.
+                if (
+                    "other_account" not in recovery_state
+                    and provider.supports_account_failover
+                    and account_dir
+                ):
+                    recovery_state.add("other_account")
+                    instance._accounts_tried.add(account_dir)
+                    next_account = self._pick_account(exclude=instance._accounts_tried)
+                    if next_account:
+                        log.info(
+                            "Session %s missing on %s, trying %s for %s",
+                            instance.session_id[:12], account_dir[-20:],
+                            next_account[-20:], instance.id,
+                        )
+                        return await self._run_impl(
+                            instance, on_progress, on_stall,
+                            context, sibling_context,
+                            api_fallback=api_fallback,
+                            _provider=provider, _binary=binary,
+                            _recovery_state=recovery_state,
+                        )
+
+                # Layer 3 (last resort): drop session and run blank.  Tag the
+                # downstream result so commands.py can surface a "lost prior
+                # context" notice to the user instead of silently rebinding to
+                # a fresh session.  Without this, the thread accumulates orphan
+                # JSONLs across retries (the t-3260 cascade: 3 sessions in 90s).
                 log.warning(
                     "Session %s exhausted recovery for %s, retrying without resume",
                     instance.session_id, instance.id,
                 )
                 instance.session_id = None
-                return await self._run_impl(
+                recovery_state.add("exhausted")
+                fresh = await self._run_impl(
                     instance, on_progress, on_stall,
                     context, sibling_context,
                     api_fallback=api_fallback,
                     _provider=provider, _binary=binary,
                     _recovery_state=recovery_state,
                 )
+                fresh.session_recovery_exhausted = True
+                return fresh
 
             # Usage limit: try next account before falling through to cooldown/PPU
             if result.is_error:

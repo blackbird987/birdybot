@@ -285,6 +285,11 @@ class RunResult:
     usage_limit_reset: object = None  # datetime | None — when usage limit resets (set by parser)
     api_fallback_used: bool = False   # True if result came from API billing fallback
     last_assistant_uuid: str | None = None  # JSONL uuid of final assistant message (for "Branch from here")
+    # Recovery exhausted: layer-3 path fired (rebuild + cross-account both failed,
+    # session_id was dropped and a fresh session was created).  The thread's prior
+    # context is unrecoverable from this run's perspective.  commands.py surfaces
+    # this to the user so the dementia is visible instead of silent.
+    session_recovery_exhausted: bool = False
 
 
 # Valid gate types for autopilot phase boundaries.
