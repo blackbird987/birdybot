@@ -46,6 +46,7 @@ class StateStore:
         self._chain_deferred: dict[str, list[str]] = {}  # session_id -> deferred revisions
         self._chain_phases: dict[str, dict] = {}  # session_id -> ChainPhaseState dict
         self._chain_entry_sha: dict[str, str] = {}  # session_id -> HEAD sha snapshot
+        self._chain_bump_type: dict[str, str] = {}  # session_id -> "patch"|"minor"|"major" — release ceremony intent
         self._deploy_state: dict[str, DeployState] = {}  # repo_name -> deploy state
         self._deploy_configs: dict[str, dict] = {}  # repo_name -> deploy config
         self._auto_fix_state: dict[str, AutoFixState] = {}  # "repo:trigger" -> state
@@ -88,6 +89,7 @@ class StateStore:
             self._chain_deferred = data.get("chain_deferred", {})
             self._chain_phases = data.get("chain_phases", {})
             self._chain_entry_sha = data.get("chain_entry_sha", {})
+            self._chain_bump_type = data.get("chain_bump_type", {})
             self._deploy_state = {
                 k: DeployState.from_dict(v)
                 for k, v in data.get("deploy_state", {}).items()
@@ -162,6 +164,7 @@ class StateStore:
             "chain_deferred": self._chain_deferred,
             "chain_phases": self._chain_phases,
             "chain_entry_sha": self._chain_entry_sha,
+            "chain_bump_type": self._chain_bump_type,
             "deploy_state": {k: v.to_dict() for k, v in self._deploy_state.items()},
             "deploy_configs": self._deploy_configs,
             "auto_fix_state": {k: v.to_dict() for k, v in self._auto_fix_state.items()},
@@ -764,6 +767,28 @@ class StateStore:
         if not session_id:
             return
         if self._chain_entry_sha.pop(session_id, None) is not None:
+            self.save()
+
+    # --- Chain Bump Type (release ceremony intent) ---
+
+    def get_chain_bump_type(self, session_id: str | None) -> str | None:
+        """Return the release bump intent ("patch"/"minor"/"major") for this chain, or None."""
+        if not session_id:
+            return None
+        return self._chain_bump_type.get(session_id)
+
+    def set_chain_bump_type(self, session_id: str | None, bump: str | None) -> None:
+        """Pin the release bump intent on chain start so the post-merge ceremony knows what to cut."""
+        if not session_id or not bump:
+            return
+        self._chain_bump_type[session_id] = bump
+        self.save()
+
+    def clear_chain_bump_type(self, session_id: str | None) -> None:
+        """Drop the chain's bump intent when the chain ends or is abandoned."""
+        if not session_id:
+            return
+        if self._chain_bump_type.pop(session_id, None) is not None:
             self.save()
 
     # --- Chain Phase State (multi-phase build chains) ---

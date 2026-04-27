@@ -121,6 +121,7 @@ class Instance:
     cooldown_channel_id: str | None = None # Channel to retry in (for cooldown loop)
     api_fallback: bool = False            # Force API billing fallback on next run
     session_account: str | None = None   # Account dir whose ~/.claude/projects/ owns session_id (for prefer-on-resume)
+    bump_type: str | None = None         # Release intent ("patch"/"minor"/"major") read by the post-merge ceremony
     _accounts_tried: set[str] = field(default_factory=set)  # Ephemeral: tracks accounts tried this run (not persisted)
 
     def display_id(self) -> str:
@@ -199,6 +200,7 @@ class Instance:
             "cooldown_channel_id": self.cooldown_channel_id,
             "api_fallback": self.api_fallback,
             "session_account": self.session_account,
+            "bump_type": self.bump_type,
         }
 
     @classmethod
@@ -259,6 +261,7 @@ class Instance:
             cooldown_channel_id=d.get("cooldown_channel_id"),
             api_fallback=d.get("api_fallback", False),
             session_account=d.get("session_account"),
+            bump_type=d.get("bump_type"),
         )
 
 
