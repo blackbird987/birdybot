@@ -53,6 +53,46 @@ Build tasks use git worktrees for parallel isolation:
 - Autopilot auto-merges after a successful chain completes
 - `/branches` scans for orphaned branches and worktree directories
 
+## Multi-Account Setup
+
+The bot supports failover across multiple Claude subscriptions. When the active
+account hits its 5h or weekly limit, the runner automatically rotates to the
+next account in `CLAUDE_ACCOUNTS`.
+
+**Each account needs its own config directory** — Claude Code stores OAuth
+credentials per `CLAUDE_CONFIG_DIR`, so two accounts cannot share `~/.claude`.
+
+### One-time setup on a new machine
+
+1. Pick a directory for the second account, e.g. `~/.claude-work`
+2. Authenticate it (interactive — Claude can't do this for you):
+   - **Bash/zsh**: `CLAUDE_CONFIG_DIR=~/.claude-work claude`
+   - **PowerShell**: `$env:CLAUDE_CONFIG_DIR="$HOME/.claude-work"; claude`
+   - **cmd.exe**: `set CLAUDE_CONFIG_DIR=%USERPROFILE%\.claude-work && claude`
+
+   Then inside the CLI: `/login` → pick the second account.
+3. Add both paths to `.env`:
+   ```
+   CLAUDE_ACCOUNTS=/home/you/.claude,/home/you/.claude-work
+   ```
+4. Restart the bot. Boot log should show:
+   `Claude accounts configured: 2 (...)`
+   If a path is wrong or not logged in, the bot drops it from rotation and
+   logs an ERROR per dropped entry.
+
+### Verify
+
+- Check `data/logs/bot.log` for the startup line above
+- Dashboard footer shows `· N accts` when N > 1 (`bot/discord/dashboard.py:221`)
+
+### Notes
+
+- Order matters — first entry is the default. Put your primary account first.
+- Sessions are pinned to the account that started them (`session_account` in
+  `Instance`), so `--resume` always lands on the right account.
+- Invalid entries are pruned at startup — `_pick_account()` only rotates among
+  validated dirs, so a typo can't cause silent runtime failover failures.
+
 ## Versioning
 
 See `~/.claude/CLAUDE.md` for universal versioning conventions.

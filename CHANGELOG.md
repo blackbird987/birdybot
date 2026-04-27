@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+- Startup visibility for multi-account failover (`bot/app.py` in `run()`): when `CLAUDE_ACCOUNTS` is set, logs `Claude accounts configured: N (...)` and validates each entry — missing dirs and dirs without `.credentials.json` produce an ERROR per bad path and are pruned from the in-memory list, so `_pick_account()` can never rotate into a broken dir at runtime. A WARNING is emitted whenever the post-validation list is empty (either `CLAUDE_ACCOUNTS` was unset, or every entry was invalid), pointing at CLAUDE.md → Multi-Account Setup. Closes the silent-misconfig footgun where a fresh install on a new device runs single-account-only with no indication the failover infra exists.
+- `.env.example` now documents `CLAUDE_ACCOUNTS` (was undocumented; the only source of truth was `bot/config.py`).
+- CLAUDE.md `## Multi-Account Setup` section with per-shell setup recipe (bash/PowerShell/cmd.exe) so the recipe works on the user's actual primary OS, plus verification and ordering notes.
+
 ## v0.91.4 — Dashboard reads pyproject.toml before installed metadata (2026-04-28)
 
 ### Fixed
