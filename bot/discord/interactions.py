@@ -928,6 +928,7 @@ async def _handle_mode_set(
         await interaction.response.edit_message(embed=embed, view=view)
     else:
         await interaction.response.defer()
+    asyncio.create_task(bot._try_apply_tags_after_run(thread_id))
     log.info("Mode set to %s via welcome button", target_mode)
 
 
