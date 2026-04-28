@@ -258,6 +258,11 @@ class DiscordMessenger:
                     if not k.startswith("_") and v:
                         embed.add_field(name=k, value=str(v), inline=True)
 
+        if metadata:
+            session_loc = metadata.get("_session_loc")
+            if session_loc:
+                embed.set_footer(text=session_loc)
+
         view = _buttons_to_view(buttons)
         # Include @mention as content alongside the embed to ping the user.
         # Force non-silent when mentioning so the notification actually fires.

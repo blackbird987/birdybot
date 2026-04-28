@@ -761,6 +761,11 @@ async def send_result(
     if inst.branch:
         meta["Branch"] = inst.branch
     meta["Mode"] = mode_name(inst.mode)
+    if inst.worktree_path:
+        session_loc = f"worktree: {inst.branch or '?'}"
+    else:
+        session_loc = "master"
+    meta["_session_loc"] = session_loc
     if inst.deferred_revisions:
         meta["_deferred_revisions"] = inst.deferred_revisions
 
@@ -789,6 +794,7 @@ async def send_result(
             _record_msg(msg_id)
 
         elif len(result_text) < 2000:
+            result_text = result_text + f"\n-# {session_loc}"
             markup = ctx.messenger.markdown_to_markup(result_text)
             chunks = ctx.messenger.chunk_message(markup)
             # Prepend mention to first chunk so user gets pinged.
