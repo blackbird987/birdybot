@@ -108,6 +108,72 @@ class StateStore:
         except Exception:
             log.exception("Failed to load state file, starting fresh")
 
+        # One-time cleanup: drop noise items + repair corrupted thread_name
+        # backlinks on the aiagent verify board. Idempotent; safe to leave in
+        # place. Runs after _load so it sees the just-populated platform_state,
+        # and before any caller (e.g. ForumManager) reads forum_projects.
+        try:
+            cleaned = self._migrate_verify_board_cleanup()
+        except Exception as e:
+            log.warning(
+                "verify-board cleanup migration failed: %s — skipping", e
+            )
+            cleaned = 0
+        if cleaned:
+            # Persist immediately so disk and memory stay consistent — without
+            # this, state.json on disk stays dirty until the next verify push.
+            self.save()
+
+    def _migrate_verify_board_cleanup(self) -> int:
+        """One-time cleanup of aiagent's verify-board: drop 3 noise items and
+        repair 2 corrupted origin_thread_name backlinks.
+
+        Idempotent — re-running on already-cleaned state mutates nothing.
+        Returns the count of mutations applied (0 means nothing to do).
+        """
+        DROP_IDS = {"v-f48s", "v-yvex", "v-km3w"}
+        FIX_THREAD_NAME = {
+            "v-198k": "t-3205",
+            "v-m5x9": "t-3212",
+        }
+        proj = (
+            self._platform_state
+            .get("discord", {})
+            .get("forum_projects", {})
+            .get("aiagent")
+        )
+        if not proj:
+            return 0
+        items = proj.get("verify_items")
+        if not isinstance(items, list):
+            return 0
+
+        dropped = 0
+        fixed = 0
+        kept: list = []
+        for it in items:
+            iid = it.get("id") if isinstance(it, dict) else None
+            if iid in DROP_IDS:
+                dropped += 1
+                continue
+            if iid in FIX_THREAD_NAME:
+                expected = FIX_THREAD_NAME[iid]
+                if it.get("origin_thread_name") != expected:
+                    it["origin_thread_name"] = expected
+                    fixed += 1
+            kept.append(it)
+        proj["verify_items"] = kept
+
+        mutations = dropped + fixed
+        if mutations:
+            log.info(
+                "verify-board cleanup: dropped %d, fixed %d (aiagent)",
+                dropped, fixed,
+            )
+        else:
+            log.debug("verify-board cleanup: nothing to do")
+        return mutations
+
     def _update_mtime(self) -> None:
         """Record current file mtime after we read or write."""
         try:
