@@ -12,8 +12,20 @@ from bot.platform.formatting import MODE_DISPLAY
 
 if TYPE_CHECKING:
     from bot.discord.bot import ClaudeBot
+    from bot.discord.forums import ThreadInfo
 
 log = logging.getLogger(__name__)
+
+
+def _thread_mode(bot: ClaudeBot, info: ThreadInfo | None) -> str:
+    """Resolve the user-controlled thread mode, falling back to the global default.
+
+    Forum mode tags reflect the thread's persisted mode setting, not the mode
+    of whichever chain step happened to run last.
+    """
+    if info and info.mode:
+        return info.mode
+    return bot._store.mode
 
 
 async def apply_thread_tags(
@@ -64,10 +76,11 @@ async def try_apply_tags_after_run(bot: ClaudeBot, channel_id: str) -> None:
     if not lookup:
         return
     _, info = lookup
+    mode = _thread_mode(bot, info)
     # Find the most recent instance for this session
     for inst in bot._store.list_instances()[:5]:
         if inst.session_id and inst.session_id == info.session_id:
-            await apply_thread_tags(ch, inst.status.value, info.origin, mode=inst.mode)
+            await apply_thread_tags(ch, inst.status.value, info.origin, mode=mode)
             return
     # No matching instance — still clear "active" tag as fallback
     await set_thread_active_tag(bot, ch, False)
@@ -145,7 +158,8 @@ async def set_thread_active_tag(
                 current_tags.append(active_tag)
             # Also set mode tag
             lookup = bot._forums.thread_to_project(str(channel.id))
-            mode = lookup[1].mode if lookup and lookup[1].mode else bot._store.mode
+            info = lookup[1] if lookup else None
+            mode = _thread_mode(bot, info)
             mode_tag = tag_map.get(mode)
             # Remove other mode tags, add current
             for m in MODE_DISPLAY:

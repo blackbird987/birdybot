@@ -459,6 +459,9 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
             bot._forums.persist_ctx_settings(ctx)
             if action.startswith("mode_"):
                 asyncio.create_task(bot._refresh_dashboard())
+                # Refresh forum tag immediately so the mode tag matches the
+                # toggle without waiting for the next run to finish.
+                asyncio.create_task(bot._try_apply_tags_after_run(channel_id))
 
 
 # --- Individual handlers ---

@@ -183,6 +183,12 @@ def setup(bot: ClaudeBot) -> None:
             await interaction.response.send_message("Unauthorized", ephemeral=True)
             return
         await bot._run_slash(interaction, lambda ctx: commands.on_mode(ctx, mode))
+        # Mirror the button-click path: refresh the forum mode tag instantly
+        # so users don't have to wait for the next run for the tag to match.
+        if mode.strip():
+            asyncio.create_task(
+                bot._try_apply_tags_after_run(str(interaction.channel_id))
+            )
 
     @bot.tree.command(name="verbose", description="Progress detail level", guild=guild_obj)
     @app_commands.describe(level="0, 1, or 2")
