@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.92.2 — Forum mode tag stays put across autopilot and instant-refreshes on toggle (2026-04-28)
+
 ### Fixed
 - Forum thread mode tag no longer flips away from the user's selection during autopilot runs (mechanism: `try_apply_tags_after_run` in `bot/discord/tags.py` was looking up the most recent instance for the thread's session and passing `inst.mode` to `apply_thread_tags`, but autopilot chains spawn `explore`/`plan`-mode review/triage steps so the tag would be rewritten to whichever mode the latest chain step happened to use — even though `info.mode`, the user's per-thread setting, was still `build`). The helper now resolves the thread's persisted mode via a new `_thread_mode(bot, info)` helper at the top of `tags.py` (info.mode → store.mode fallback) and passes that to `apply_thread_tags`. Runtime mode resolution (`ctx.effective_mode`, `instance.mode`, `info.mode` flow) is unaffected — this was a visual-only desync. Companion change: `set_thread_active_tag` now goes through the same helper so all three call sites share one fallback rule.
 
