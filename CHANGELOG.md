@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- One-time startup migration in `StateStore._load` that cleans up the aiagent verify-board: drops 3 noise items (`v-f48s` ` ```summary COMMIT...`, `v-yvex` "no diagnostic surface...", `v-km3w` corrupted meta-excuse) and repairs 2 corrupted `origin_thread_name` backlinks (`v-198k` → `t-3205`, `v-m5x9` → `t-3212`). Idempotent; runs after state load before `ForumManager` constructs `forum_projects`, so the cleaned items reach the live board on next boot. Wrapped in try/except so any unexpected schema shape logs a warning instead of blocking startup. Persists immediately via the existing atomic `save()` so disk and memory stay consistent. Companion to the upstream parser/`_enroll_verify_board` bugs that produced the noise — those fixes are deferred separately.
+
 ## v0.91.5 — Validate CLAUDE_ACCOUNTS at startup (2026-04-28)
 
 ### Added
