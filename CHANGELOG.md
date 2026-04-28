@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.92.3 — Session-location footer on result messages (2026-04-28)
+
 ### Added
 - Session-location footer on every final result message — shows `master` (quick tasks, main repo) or `worktree: <branch>` (build tasks) so it's always obvious which checkout the session is pointing at. Computed once in `bot/engine/lifecycle.py:send_result` from `inst.worktree_path` + `inst.branch` and threaded through both output paths: short-text replies append `\n-# {loc}` (Discord small-text) to `result_text` before markdown conversion so existing chunking/mention/length logic handles it transparently; embed replies (failed/empty/long/finalize) get `embed.set_footer(text=loc)` in `bot/discord/adapter.py:send_result` after the if/else that builds the embed, so one block covers both the plain and finalize embed branches.
 
