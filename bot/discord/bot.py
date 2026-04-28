@@ -110,8 +110,8 @@ def _strip_missing_image_refs(prompt: str, image_paths: list[str]) -> str:
             cleaned,
         )
     log.warning(
-        "Replay: %d image file(s) missing for queued prompt — stripped path refs",
-        len(missing),
+        "Replay: %d image file(s) missing for queued prompt — stripped path refs: %s",
+        len(missing), missing,
     )
     return cleaned
 
@@ -881,10 +881,56 @@ class ClaudeBot(discord.Client):
         except Exception:
             pass  # message deleted / no access — purely cosmetic
 
+    async def _migrate_relative_image_paths(self) -> None:
+        """Rewrite pre-fix relative image paths in queued entries to absolute.
+
+        Pre-fix entries (DATA_DIR=data unresolved) stored relative paths in
+        both the ``image_paths`` array and inline in the prompt text
+        (``[Image: ... saved at `<path>`]`` / ``Analyze this screenshot at
+        `<path>`.``).  Those only resolved when the spawned subprocess shared
+        the bot's cwd — broken for every non-bot repo and every worktree.
+        Replays send the prompt text verbatim to Claude, so the inline
+        substitution is the part that actually fixes the user-visible bug;
+        the array is updated in lockstep so cleanup and existence checks
+        stay consistent.  Resolves against the bot's cwd (= project root
+        at startup).  Idempotent — already-absolute entries are skipped.
+        """
+        async with self._usage_queue_lock:
+            entries = self._read_usage_queue()
+            changed = 0
+            for e in entries:
+                paths = e.get("image_paths") or []
+                if not paths:
+                    continue
+                prompt = e.get("prompt", "")
+                new_paths: list[str] = []
+                entry_changed = False
+                for p in paths:
+                    if Path(p).is_absolute():
+                        new_paths.append(p)
+                        continue
+                    resolved = str(Path(p).resolve())
+                    new_paths.append(resolved)
+                    if prompt and p in prompt:
+                        prompt = prompt.replace(p, resolved)
+                    entry_changed = True
+                if entry_changed:
+                    e["image_paths"] = new_paths
+                    if prompt != e.get("prompt", ""):
+                        e["prompt"] = prompt
+                    changed += 1
+            if changed:
+                self._write_usage_queue_atomic(entries)
+                log.info(
+                    "Usage queue: migrated %d entries with relative image paths to absolute",
+                    changed,
+                )
+
     async def _usage_queue_startup_drain(self) -> None:
         """Fire any entries overdue at boot — runs once before the periodic loop."""
         if not await self._wait_for_ready("usage_queue_startup_drain"):
             return
+        await self._migrate_relative_image_paths()
         await self._fire_due_entries(datetime.now(timezone.utc))
         await self._sweep_pending_images()
 

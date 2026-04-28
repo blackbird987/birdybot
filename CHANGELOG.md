@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Screenshots/images uploaded in Discord are readable again from non-bot repos and build worktrees. `DATA_DIR` is now `.resolve()`d at startup in `bot/config.py` so `PENDING_IMAGES_DIR` (and the path injected into the prompt as `[Image: … saved at \`{path}\`]`) is always absolute. Previously, with `.env`'s `DATA_DIR=data`, the relative path only resolved when the spawned Claude subprocess happened to share the bot's cwd — broken for every non-bot repo and every build worktree (`.worktrees/<id>/`). Regression introduced in commit `8a722bf` (Apr 25) when image storage moved from `tempfile.mkstemp` (always absolute) to `data/pending_images/`. Companion: startup migration in `bot/discord/bot.py:_migrate_relative_image_paths` rewrites pre-fix relative paths in queued `usage_queue.json` entries to absolute — both the `image_paths[]` array and the inline path inside the prompt text — so post-reboot replays of pre-fix queue entries hand Claude a path it can actually open. `_strip_missing_image_refs` now logs the actual paths it drops so future regressions to relative paths are grep-able instead of a bare count.
+
 ## v0.92.3 — Session-location footer on result messages (2026-04-28)
 
 ### Added

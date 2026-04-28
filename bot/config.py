@@ -133,7 +133,7 @@ LOG_TRIAGE_TIMEOUT_SECS: int = int(os.getenv("LOG_TRIAGE_TIMEOUT_SECS", "60"))
 LOG_TRIAGE_MODEL: str = os.getenv("LOG_TRIAGE_MODEL", "claude-haiku-4-5-20251001")
 
 # Data directory
-DATA_DIR: Path = Path(os.getenv("DATA_DIR", str(_PROJECT_ROOT / "data")))
+DATA_DIR: Path = Path(os.getenv("DATA_DIR", str(_PROJECT_ROOT / "data"))).resolve()
 RESULTS_DIR: Path = DATA_DIR / "results"
 LOGS_DIR: Path = DATA_DIR / "logs"
 STATE_FILE: Path = DATA_DIR / "state.json"
