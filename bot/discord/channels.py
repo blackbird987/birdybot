@@ -16,7 +16,7 @@ log = logging.getLogger(__name__)
 CONTROL_ROOM_NAME = "⚙️ Control Room"
 ARCHIVE_NAME = "🗄 Archive"
 MONITOR_NAME = "📊 Monitor"
-VERIFY_BOARD_NAME = "verify-board"
+VERIFY_BOARD_NAME = "✅ Verify Board"
 
 
 def _private_overwrites(

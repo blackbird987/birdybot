@@ -11,6 +11,8 @@
 
 ### Added
 - Session-location footer on every final result message — shows `master` (quick tasks, main repo) or `worktree: <branch>` (build tasks) so it's always obvious which checkout the session is pointing at. Computed once in `bot/engine/lifecycle.py:send_result` from `inst.worktree_path` + `inst.branch` and threaded through both output paths: short-text replies append `\n-# {loc}` (Discord small-text) to `result_text` before markdown conversion so existing chunking/mention/length logic handles it transparently; embed replies (failed/empty/long/finalize) get `embed.set_footer(text=loc)` in `bot/discord/adapter.py:send_result` after the if/else that builds the embed, so one block covers both the plain and finalize embed branches.
+### Changed
+- Verify Board thread name now uses the `✅ Verify Board` emoji-prefixed Title Case naming pattern matching the other pinned threads (Control Room, Archive, Monitor) for visual scanning in the Discord sidebar. Existing `verify-board` threads are auto-renamed on next `ensure_verify_board` call.
 
 ## v0.92.2 — Forum mode tag stays put across autopilot and instant-refreshes on toggle (2026-04-28)
 

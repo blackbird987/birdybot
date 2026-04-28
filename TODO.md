@@ -73,3 +73,5 @@
 - [ ] [DRY/Cleanup] Use set_status("dismissed") instead of hard delete (Medium)
 - [ ] [Modularity] Fold into reusable /verify cleanup admin command (Medium)
 - [ ] [UX/UI] Print before/after diff and post-cleanup count (Low)
+- [ ] [Reliability] Guard against suffix landing inside trailing code fence (Low)
+- [ ] [Modularity] Consider resolving PENDING_IMAGES_DIR locally instead of DATA_DIR globally (Medium)

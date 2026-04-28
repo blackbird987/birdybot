@@ -893,6 +893,12 @@ class ForumManager:
                             await ch.edit(archived=False)
                         except Exception:
                             log.debug("Could not unarchive verify-board", exc_info=True)
+                    if ch.name != channels.VERIFY_BOARD_NAME and ch.name in ("verify-board", "Verify Board"):
+                        try:
+                            await ch.edit(name=channels.VERIFY_BOARD_NAME)
+                            log.info("Renamed %s -> %s (thread=%s)", ch.name, channels.VERIFY_BOARD_NAME, ch.id)
+                        except Exception:
+                            log.debug("Failed to rename verify-board thread", exc_info=True)
                     return ch
             except discord.NotFound:
                 log.info(
