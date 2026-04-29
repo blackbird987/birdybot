@@ -406,8 +406,9 @@ class ClaudeRunner:
                     if next_account:
                         log.info("Failing over from %s to %s for %s",
                                  account_dir, next_account, instance.id)
-                        # Clear session — it belongs to the exhausted account
-                        instance.session_id = None
+                        # Keep session_id — _hydrate_session_for_account copies
+                        # the JSONL cross-account so --resume continues the same
+                        # conversation on the backup account.
                         if on_progress:
                             try:
                                 await on_progress(
