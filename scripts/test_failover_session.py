@@ -8,7 +8,8 @@ desired behaviour so a future refactor can't silently re-introduce the bug.
 Strategy: stub the CLI subprocess boundary, not _run_impl itself.  Both
 real _run_impl invocations (outer + recursive failover) execute against the
 real failover branch — only ``asyncio.create_subprocess_exec`` and the
-streaming output parser are faked.  The test asserts:
+runner's ``_stream_output`` (which would otherwise read real CLI output)
+are faked.  The test asserts:
 
   - the failover spawn's argv contains ``--resume <original_session_id>``
   - ``instance.session_id`` after the call equals the original id
@@ -31,7 +32,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from bot import config
-from bot.claude import runner as runner_mod
 from bot.claude.runner import ClaudeRunner
 from bot.claude.types import Instance, InstanceStatus, InstanceType, RunResult
 from bot.engine.session_fork import encode_project_path
