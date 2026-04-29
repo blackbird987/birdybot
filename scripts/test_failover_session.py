@@ -4,8 +4,9 @@ Background: bot/claude/runner.py:410 used to clear ``instance.session_id =
 None`` on failover, which defeated cross-account session hydration and
 caused the dementia symptom most recently observed on chain t-3386 (the
 failover-spawned build retry had to ask "Can you remind me what PR2
-covers?" because it never saw the plan).  This test pins down the desired behaviour so a future refactor
-can't silently re-introduce the bug.
+covers?" because it never saw the plan).  This test pins down the
+desired behaviour so a future refactor can't silently re-introduce the
+bug.
 
 Strategy: stub the CLI subprocess boundary, not _run_impl itself.  Both
 real _run_impl invocations (outer + recursive failover) execute against the
