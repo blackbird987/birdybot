@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.92.6 — Cross-account failover preserves session_id (2026-04-29)
+
 ### Fixed
 - Cross-account failover no longer wipes `instance.session_id`. Previously, when a Claude account hit its usage limit and the runner failed over to the backup account, `runner.py:410` cleared the session id "because it belonged to the exhausted account" — but `_hydrate_session_for_account` already migrates session JSONLs across accounts, so the clear actively defeated the cross-account resume mechanism it was meant to coexist with. The recursive failover spawn lost `--resume <id>`, the CLI minted a fresh empty session, and any subsequent cooldown retry resumed *that* empty session — losing the chain's plan/context (most recently observed on chain t-3386, where a build retry asked "Can you remind me what PR2 covers?" because the failover-spawned session never saw the plan). Now the session id is preserved across failover, hydrate copies the JSONL to the backup account, and the spawn correctly carries `--resume <original_id>`. Regression guard in `scripts/test_failover_session.py`.
 
