@@ -9,12 +9,14 @@ CLI usage:
     python outlook.py search "query" [count]
     python outlook.py unread
     python outlook.py read "subject"
+    python outlook.py draft "to" "subject" "body" [attachment1 attachment2 ...]
 """
 
 from __future__ import annotations
 
 import datetime
 import logging
+import os
 import re
 import sys
 
@@ -33,6 +35,7 @@ except ImportError:
 # Outlook folder constants (OlDefaultFolders enum)
 _FOLDER_INBOX = 6
 _FOLDER_CALENDAR = 9
+_FOLDER_DRAFTS = 16
 
 # --- Cached COM singleton ---
 
@@ -301,6 +304,47 @@ def read_email(subject: str) -> dict | None:
     return _with_retry(_do)
 
 
+def create_draft(
+    to: str,
+    subject: str,
+    body: str,
+    attachments: list[str] | None = None,
+) -> dict:
+    """Create a draft email in Outlook Drafts folder.
+
+    Args:
+        to: Recipient email address(es), semicolon-separated for multiple.
+        subject: Email subject line.
+        body: Plain text email body.
+        attachments: Optional list of absolute file paths to attach.
+
+    Returns:
+        Dict with subject and attachment count for confirmation.
+    """
+
+    def _do():
+        global _app
+        _get_namespace()  # ensure connection
+        mail = _app.CreateItem(0)  # 0 = olMailItem
+        mail.To = to
+        mail.Subject = subject
+        mail.Body = body
+        if attachments:
+            for path in attachments:
+                abs_path = os.path.abspath(path)
+                if not os.path.isfile(abs_path):
+                    raise FileNotFoundError(f"Attachment not found: {abs_path}")
+                mail.Attachments.Add(abs_path)
+        mail.Save()  # saves to Drafts
+        return {
+            "subject": subject,
+            "to": to,
+            "attachments": len(attachments) if attachments else 0,
+        }
+
+    return _with_retry(_do)
+
+
 # --- CLI ---
 
 
@@ -336,7 +380,7 @@ def main(args: list[str] | None = None) -> int:
     args = args or sys.argv[1:]
     if not args:
         print("Usage: python outlook.py <command> [options]")
-        print("Commands: inbox, calendar, search, unread, read")
+        print("Commands: inbox, calendar, search, unread, read, draft")
         return 1
 
     cmd = args[0]
@@ -370,6 +414,20 @@ def main(args: list[str] | None = None) -> int:
                 print(f"\n{email['body']}")
             else:
                 print(f"No email found matching '{args[1]}'")
+        elif cmd == "draft":
+            if len(args) < 4:
+                print("Usage: draft <to> <subject> <body> [attachment ...]")
+                return 1
+            to_addr = args[1]
+            subj = args[2]
+            body_text = args[3]
+            att = args[4:] if len(args) > 4 else None
+            result = create_draft(to_addr, subj, body_text, att)
+            print(f"Draft created: {result['subject']}")
+            print(f"To: {result['to']}")
+            if result["attachments"]:
+                print(f"Attachments: {result['attachments']}")
+            print("Check your Outlook Drafts folder.")
         else:
             print(f"Unknown command: {cmd}")
             return 1

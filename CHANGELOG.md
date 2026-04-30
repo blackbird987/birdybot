@@ -388,6 +388,8 @@
   `lifecycle.run_instance`).
 - Documented the lock contract on `workflows.resume_autopilot_chain` so future
   callers know they must hold the channel lock for the full awaitable.
+### Added
+- `outlook.py draft` command: creates a draft email in Outlook's Drafts folder via `_FOLDER_DRAFTS` (16). Accepts `to`, `subject`, `body`, plus optional attachment paths (validated as files via `os.path.isfile` before `Attachments.Add`); returns `{subject, to, attachments}` for confirmation. Uses the existing `_with_retry` + cached COM singleton, so it inherits the same reconnect behavior as the read-side commands.
 
 ## v0.92.8 — Multi-account Claude Login panel (2026-04-30)
 
