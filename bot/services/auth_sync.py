@@ -22,8 +22,11 @@ import base64
 import hashlib
 import json
 import logging
+import os
 import subprocess
 import sys
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -257,3 +260,153 @@ async def startup_auth_check(bot: ClaudeBot) -> None:
             await bot._notifier.broadcast(msg)
     else:
         log.info("No AUTH_SYNC messages found — credentials still missing")
+
+
+# ---------------------------------------------------------------------------
+# Multi-account status (per CLAUDE_CONFIG_DIR)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class AccountStatus:
+    """Snapshot of a single CLAUDE_CONFIG_DIR's auth state."""
+    path: str                          # absolute config dir path
+    label: str                         # short display label (e.g. ".claude")
+    logged_in: bool                    # credentials.json present + has refreshToken
+    email: str | None = None           # from .claude.json oauthAccount
+    org: str | None = None             # organizationName
+    account_uuid: str | None = None    # accountUuid
+    cooldown_until: datetime | None = None  # tz-aware UTC
+    error: str | None = None           # any read error to surface
+
+
+def _read_account_identity(account_dir: Path) -> tuple[str | None, str | None, str | None]:
+    """Read (email, org, accountUuid) from <dir>/.claude.json. None on miss."""
+    cfg_path = account_dir / ".claude.json"
+    if not cfg_path.exists():
+        return None, None, None
+    try:
+        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except Exception:
+        log.debug("Failed to read %s", cfg_path, exc_info=True)
+        return None, None, None
+    oauth = data.get("oauthAccount") or {}
+    return (
+        oauth.get("emailAddress"),
+        oauth.get("organizationName"),
+        oauth.get("accountUuid"),
+    )
+
+
+def _check_credentials_file(account_dir: Path) -> bool:
+    """True if <dir>/.credentials.json has a refreshToken."""
+    cred_path = account_dir / ".credentials.json"
+    if not cred_path.exists():
+        return False
+    try:
+        data = json.loads(cred_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    oauth = data.get("claudeAiOauth") or {}
+    return bool(oauth.get("refreshToken"))
+
+
+async def collect_account_statuses(
+    account_dirs: list[str],
+    cooldowns: dict[str, datetime] | None = None,
+) -> list[AccountStatus]:
+    """Build AccountStatus list for the given dirs (off the event loop)."""
+    cooldowns = cooldowns or {}
+
+    def _build() -> list[AccountStatus]:
+        out: list[AccountStatus] = []
+        for raw in account_dirs:
+            p = Path(raw).expanduser()
+            label = p.name or str(p)
+            try:
+                logged_in = _check_credentials_file(p)
+                email, org, uuid_ = _read_account_identity(p)
+                out.append(AccountStatus(
+                    path=str(p),
+                    label=label,
+                    logged_in=logged_in,
+                    email=email,
+                    org=org,
+                    account_uuid=uuid_,
+                    cooldown_until=cooldowns.get(str(p)) or cooldowns.get(raw),
+                ))
+            except Exception as exc:
+                out.append(AccountStatus(
+                    path=str(p), label=label, logged_in=False, error=str(exc),
+                ))
+        return out
+
+    return await asyncio.to_thread(_build)
+
+
+# ---------------------------------------------------------------------------
+# Console / login terminal helpers
+# ---------------------------------------------------------------------------
+
+def host_can_show_console() -> bool:
+    """Best-effort: can this host pop up an interactive terminal window?
+
+    On Windows we want all three: an active console session, the bot
+    process is attached to an interactive window station (not Services-0x0),
+    and SESSIONNAME is set (i.e. running as a logged-in user, not SYSTEM).
+    On POSIX a DISPLAY/WAYLAND_DISPLAY is required for a GUI terminal.
+    """
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            session_id = ctypes.windll.wtsapi32.WTSGetActiveConsoleSessionId()
+            if session_id == 0xFFFFFFFF:
+                return False
+            user32 = ctypes.windll.user32
+            hwinsta = user32.GetProcessWindowStation()
+            if not hwinsta:
+                return False
+            # SESSIONNAME unset on Service accounts
+            if not os.environ.get("SESSIONNAME"):
+                return False
+            return True
+        except Exception:
+            log.debug("host_can_show_console: Windows probe failed", exc_info=True)
+            return False
+    # POSIX
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
+def launch_login_terminal(account_dir: str) -> bool:
+    """Spawn an interactive terminal window running `claude /login` for *account_dir*.
+
+    Returns True if the spawn was attempted successfully.  The user must
+    complete the OAuth flow in that window — we do not block.
+    """
+    binary = config.CLAUDE_BINARY
+    p = Path(account_dir).expanduser()
+    try:
+        if sys.platform == "win32":
+            CREATE_NEW_CONSOLE = 0x00000010
+            env = os.environ.copy()
+            env["CLAUDE_CONFIG_DIR"] = str(p)
+            cmd = f'cmd.exe /k "set CLAUDE_CONFIG_DIR={p} && \"{binary}\""'
+            subprocess.Popen(
+                cmd, shell=True, env=env, creationflags=CREATE_NEW_CONSOLE,
+            )
+            log.info("Spawned login terminal for %s", p)
+            return True
+        # POSIX — try a few common terminal emulators
+        env = os.environ.copy()
+        env["CLAUDE_CONFIG_DIR"] = str(p)
+        for term in ("x-terminal-emulator", "gnome-terminal", "konsole", "xterm"):
+            try:
+                subprocess.Popen([term, "-e", binary], env=env)
+                log.info("Spawned %s for login on %s", term, p)
+                return True
+            except FileNotFoundError:
+                continue
+        log.warning("No terminal emulator found to launch login for %s", p)
+        return False
+    except Exception:
+        log.exception("Failed to spawn login terminal for %s", p)
+        return False
