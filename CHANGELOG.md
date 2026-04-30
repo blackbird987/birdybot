@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.92.9 — Preserve session_id through cooldown retry (2026-04-30)
+
 ### Fixed
 - Dementia after usage-limit cooldown retry (t-3452 cascade). Defense-in-depth fix across four layers so a single missing safeguard can't lose the session again:
   - `bot/claude/runner.py` now refuses to spawn the CLI when every configured account is on cooldown or excluded — previously the spawn proceeded without `CLAUDE_CONFIG_DIR` set, the CLI defaulted to a wrong account, `--resume` collapsed with "No conversation found", and recovery Layer 3 fired and dropped `instance.session_id`. The synthetic `RunResult` now carries `usage_limit_reset` so the cooldown retry path re-queues the instance with `session_id` intact.
