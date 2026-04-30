@@ -12,7 +12,10 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Awaitable, Callable, NamedTuple
+from typing import TYPE_CHECKING, Awaitable, Callable, NamedTuple
+
+if TYPE_CHECKING:
+    from bot.store.state import StateStore
 
 from bot import config
 from bot.claude.parser import (
@@ -66,7 +69,13 @@ class DiscardOutcome(NamedTuple):
 class ClaudeRunner:
     """Manages coding CLI subprocesses (Claude Code, Cursor, etc.)."""
 
-    def __init__(self) -> None:
+    def __init__(self, store: "StateStore | None" = None) -> None:
+        # When ``store`` is provided the runner persists/loads
+        # ``_account_cooldowns`` through it so a reboot can't forget which
+        # account is mid-cooldown — the bug that produced the t-3452 dementia.
+        # Forward-declared via TYPE_CHECKING to keep the import edge clean
+        # if state.py ever pulls in runner indirectly.
+        self._store = store
         self._semaphore = asyncio.Semaphore(config.MAX_CONCURRENT)
         self._processes: dict[str, asyncio.subprocess.Process] = {}
         # Task-level tracking: covers the full lifecycle of a query/workflow,
@@ -92,8 +101,26 @@ class ClaudeRunner:
         # (worktree add/remove, merge, branch delete) to prevent lock file races
         self._repo_locks: dict[str, asyncio.Lock] = {}
 
-        # Multi-account failover: tracks when each account's usage limit resets
+        # Multi-account failover: tracks when each account's usage limit resets.
+        # Hydrated below from the persisted store so reboots don't forget which
+        # account is on cooldown (root cause of t-3452 — fresh runner mistook
+        # an exhausted primary for available, blew its --resume on a doomed
+        # spawn, hit "No conversation found", then dropped session_id).
         self._account_cooldowns: dict[str, datetime] = {}
+        if store is not None:
+            try:
+                persisted = store.get_account_cooldowns()
+            except Exception:
+                log.exception("Failed to load persisted account cooldowns")
+                persisted = {}
+            now = datetime.now(timezone.utc)
+            for acct, iso in persisted.items():
+                try:
+                    reset = datetime.fromisoformat(iso)
+                except (TypeError, ValueError):
+                    continue
+                if reset > now:
+                    self._account_cooldowns[acct] = reset
 
         # Last-rebuild timestamp per (account_dir, project_dir) — dedupes the
         # auto-rebuild recovery layer so a flurry of failed resumes doesn't
@@ -166,6 +193,23 @@ class ClaudeRunner:
                 return acct
         return None
 
+    def _set_account_cooldown(self, account_dir: str, reset_at: datetime) -> None:
+        """Record cooldown both in memory and on disk via the StateStore.
+
+        Routing every cooldown write through here is what gives the
+        persistence layer its single source of truth — direct dict writes
+        would skip the save() and reintroduce the t-3452 reboot gap.
+        """
+        self._account_cooldowns[account_dir] = reset_at
+        if self._store is not None:
+            try:
+                self._store.set_account_cooldown(account_dir, reset_at.isoformat())
+            except Exception:
+                log.exception(
+                    "Failed to persist account cooldown for %s",
+                    account_dir[-20:] if account_dir else "?",
+                )
+
     async def run(
         self,
         instance: Instance,
@@ -211,6 +255,52 @@ class ClaudeRunner:
         # Use worktree as cwd if available (file isolation)
         working_dir = instance.worktree_path or instance.repo_path or None
 
+        # Multi-account failover (Claude-only: other providers use single account).
+        # Honor per-instance session ownership via `prefer`: if the instance
+        # has a session_account stamped from a prior successful run, route to
+        # that account first so --resume actually finds the session JSONL.
+        #
+        # Picked BEFORE _build_command so the refuse-to-spawn short-circuit
+        # below can return without leaking the temp files _build_command
+        # writes (system-prompt, api-key, cursor-rules) — those only get
+        # cleaned up in the spawn try/finally block further down.
+        account_dir: str | None = None
+        if provider.supports_account_failover:
+            account_dir = self._pick_account(
+                exclude=instance._accounts_tried,
+                prefer=instance.session_account if instance.session_id else None,
+            )
+            if not account_dir and config.CLAUDE_ACCOUNTS:
+                # Refuse to spawn when every configured account is on cooldown
+                # or already excluded.  Spawning anyway would invoke the CLI
+                # without CLAUDE_CONFIG_DIR set, which (a) routes the call to
+                # whichever account `claude` defaults to — usually the wrong
+                # one, and (b) means hydration ran for *some* account_dir but
+                # the actual subprocess used a different one, so --resume
+                # collapses with "No conversation found", Layer 3 fires, and
+                # session_id gets dropped.  This was the t-3452 root cause.
+                #
+                # Synthesize a usage-limit RunResult instead so the cooldown
+                # retry path in app.py can re-queue the instance with its
+                # session_id intact.  Session_id is preserved on the result so
+                # finalize_run() does NOT clobber instance.session_id with None.
+                earliest_reset = None
+                if self._account_cooldowns:
+                    earliest_reset = min(self._account_cooldowns.values())
+                log.warning(
+                    "Refusing spawn for %s: all %d account(s) on cooldown or excluded",
+                    instance.id, len(config.CLAUDE_ACCOUNTS),
+                )
+                return RunResult(
+                    is_error=True,
+                    error_message=(
+                        "All configured Claude accounts are on usage-limit cooldown."
+                    ),
+                    result_text="",
+                    session_id=instance.session_id,
+                    usage_limit_reset=earliest_reset,
+                )
+
         cmd, prompt_text, system_prompt_file, api_key_file, rules_file = (
             self._build_command(
                 instance, context, sibling_context,
@@ -226,19 +316,8 @@ class ClaudeRunner:
             env.pop(var, None)
         if not api_fallback:
             env.pop("ANTHROPIC_API_KEY", None)
-
-        # Multi-account failover (Claude-only: other providers use single account).
-        # Honor per-instance session ownership via `prefer`: if the instance
-        # has a session_account stamped from a prior successful run, route to
-        # that account first so --resume actually finds the session JSONL.
-        account_dir: str | None = None
-        if provider.supports_account_failover:
-            account_dir = self._pick_account(
-                exclude=instance._accounts_tried,
-                prefer=instance.session_account if instance.session_id else None,
-            )
-            if account_dir:
-                env[provider.config_dir_env] = account_dir
+        if account_dir:
+            env[provider.config_dir_env] = account_dir
 
         # Hydrate session JSONL into the chosen account's project dir before
         # spawn.  Searches every configured account for the session file and
@@ -376,6 +455,7 @@ class ClaudeRunner:
                 # context" notice to the user instead of silently rebinding to
                 # a fresh session.  Without this, the thread accumulates orphan
                 # JSONLs across retries (the t-3260 cascade: 3 sessions in 90s).
+                original_session_id = instance.session_id
                 log.warning(
                     "Session %s exhausted recovery for %s, retrying without resume",
                     instance.session_id, instance.id,
@@ -390,6 +470,26 @@ class ClaudeRunner:
                     _recovery_state=recovery_state,
                 )
                 fresh.session_recovery_exhausted = True
+                # Don't poison the retry path: if the fallback produced no
+                # usable output (refuse-to-spawn synthetic result, or the
+                # CLI exited before generating any text), restore the
+                # ORIGINAL session_id so the cooldown retry in app.py
+                # can still resume it.  Predicate uses result_text rather
+                # than num_turns because a usage-limit hit *after* turn 1
+                # also has no recoverable conversation but does have turns.
+                fresh_text = (fresh.result_text or "").strip()
+                if (
+                    fresh.session_id != original_session_id
+                    and not fresh_text
+                    and original_session_id
+                ):
+                    log.info(
+                        "Layer-3 fresh run produced no output; "
+                        "restoring original session_id %s for %s",
+                        original_session_id[:12], instance.id,
+                    )
+                    fresh.session_id = original_session_id
+                    instance.session_id = original_session_id
                 return fresh
 
             # Usage limit: try next account before falling through to cooldown/PPU
@@ -397,9 +497,10 @@ class ClaudeRunner:
                 reset_at = provider.parse_usage_limit(error_text)
                 if reset_at:
                     log.info("Usage limit for %s, resets at %s", instance.id, reset_at)
-                    # Mark this account as on cooldown
+                    # Mark this account as on cooldown — routed through
+                    # the helper so the value lands on disk too.
                     if account_dir:
-                        self._account_cooldowns[account_dir] = reset_at
+                        self._set_account_cooldown(account_dir, reset_at)
                         instance._accounts_tried.add(account_dir)
                     # Try next account before giving up
                     next_account = self._pick_account(exclude=instance._accounts_tried)

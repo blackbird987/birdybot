@@ -52,6 +52,10 @@ class StateStore:
         self._active_provider: str | None = None  # Runtime provider override
         self._fallback_cost: float = 0.0     # Rolling daily API fallback spend
         self._fallback_cost_date: str = ""   # YYYY-MM-DD for fallback cost reset
+        # account_dir -> ISO timestamp of usage-limit reset.  Persisted across
+        # reboots so a build triggered immediately after restart doesn't waste
+        # a CLI invocation on a known-cooldown account (the t-3452 dementia).
+        self._account_cooldowns: dict[str, str] = {}
         self._dirty: bool = False  # Dirty flag — mark_dirty() defers save to auto-save loop
         self._last_mtime: float = 0.0  # Track file mtime for external change detection
 
@@ -100,6 +104,7 @@ class StateStore:
             self._active_provider = data.get("active_provider")
             self._fallback_cost = data.get("fallback_cost", 0.0)
             self._fallback_cost_date = data.get("fallback_cost_date", "")
+            self._account_cooldowns = data.get("account_cooldowns", {})
             for d in data.get("schedules", []):
                 sched = Schedule.from_dict(d)
                 self._schedules[sched.id] = sched
@@ -234,6 +239,7 @@ class StateStore:
             "active_provider": self._active_provider,
             "fallback_cost": self._fallback_cost,
             "fallback_cost_date": self._fallback_cost_date,
+            "account_cooldowns": self._account_cooldowns,
             "schedules": [s.to_dict() for s in self._schedules.values()],
         }
         try:
@@ -564,6 +570,32 @@ class StateStore:
     def active_provider(self, value: str | None) -> None:
         self._active_provider = value
         self.mark_dirty()
+
+    # --- Account Cooldowns (multi-account failover memory) ---
+
+    def get_account_cooldowns(self) -> dict[str, str]:
+        """Return a copy of {account_dir -> ISO reset timestamp}.
+
+        Caller is responsible for parsing the timestamps and purging entries
+        that have already elapsed; this store keeps strings to avoid coupling
+        the persistence layer to datetime semantics.
+        """
+        return dict(self._account_cooldowns)
+
+    def set_account_cooldown(self, account_dir: str, reset_iso: str | None) -> None:
+        """Record (or clear with None) a usage-limit reset for an account.
+
+        Persists immediately so a reboot between cooldown-set and the next
+        spawn cannot lose the memory — that gap is exactly what allowed the
+        t-3452 dementia (fresh runner had empty cooldowns, picked the
+        already-exhausted primary, hit "No conversation found", fell through
+        to Layer 3 which dropped the session).
+        """
+        if reset_iso is None:
+            self._account_cooldowns.pop(account_dir, None)
+        else:
+            self._account_cooldowns[account_dir] = reset_iso
+        self.save()
 
     # --- Platform State ---
 

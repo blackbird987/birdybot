@@ -402,7 +402,13 @@ def _repo_has_changes(repo_path: str) -> bool:
 
 def finalize_run(ctx: RequestContext, inst: Instance, result: RunResult) -> None:
     """Apply RunResult to Instance and persist."""
-    inst.session_id = result.session_id
+    # Defense in depth: a synthetic RunResult from refuse-to-spawn or an
+    # error path may carry session_id=None even though the instance has a
+    # valid prior session.  Don't clobber it — that's exactly the t-3452
+    # poisoning that caused the cooldown retry to forget which session
+    # to resume.
+    if result.session_id:
+        inst.session_id = result.session_id
     inst.cost_usd = result.cost_usd
     inst.duration_ms = result.duration_ms
     inst.tools_used = result.tools_used
