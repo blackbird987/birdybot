@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+- Dementia after usage-limit cooldown retry (t-3452 cascade). Defense-in-depth fix across four layers so a single missing safeguard can't lose the session again:
+  - `bot/claude/runner.py` now refuses to spawn the CLI when every configured account is on cooldown or excluded — previously the spawn proceeded without `CLAUDE_CONFIG_DIR` set, the CLI defaulted to a wrong account, `--resume` collapsed with "No conversation found", and recovery Layer 3 fired and dropped `instance.session_id`. The synthetic `RunResult` now carries `usage_limit_reset` so the cooldown retry path re-queues the instance with `session_id` intact.
+  - Account cooldowns are persisted to `data/state.json` (top-level `account_cooldowns`) via `StateStore.set_account_cooldown` and rehydrated into `ClaudeRunner._account_cooldowns` at construction (expired entries purged on load). Without this, a reboot mid-cooldown produced an empty in-memory dict and the very next spawn re-attempted the exhausted account.
+  - Layer-3 fallback no longer poisons the retry path. When the fresh blank run produces no usable output (refuse-to-spawn synthetic result, or CLI exits before any text), `runner.py` restores the original `session_id` on both the result and the instance so the cooldown retry can still resume the original conversation.
+  - `bot/engine/lifecycle.py:finalize_run` ignores `RunResult.session_id` when it is None — defense in depth that prevents any synthetic / error-path result from silently nulling `instance.session_id`.
+  - All cooldown writes routed through a single `_set_account_cooldown` helper that updates both the in-memory dict and the persisted store. Regression guard in `scripts/test_runner_dementia.py` covering refuse-to-spawn, cooldown persistence (with expired-entry purge on reload) across a runner restart, the `_set_account_cooldown` helper's memory + disk writes, and the `finalize_run` session-id guard.
+
 ## v0.92.7 — Refuse cross-repo session rebinds (2026-04-30)
 
 ### Fixed

@@ -445,7 +445,7 @@ async def run() -> None:
             log.warning("Could not restore provider '%s': %s", store.active_provider, exc)
 
     # Initialize shared runner
-    runner = ClaudeRunner()
+    runner = ClaudeRunner(store=store)
 
     try:
         cli_version = await runner.check_cli()
