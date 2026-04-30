@@ -562,8 +562,15 @@ async def _handle_pending_action(
     channel_id = pending.channel_id
     lookup = bot._forums.thread_to_project(channel_id)
     t_info = lookup[1] if lookup else None
+    # Carry the thread's bound repo into the steered query — without this, the
+    # engine falls through to store.get_active_repo() and silently runs the
+    # steered prompt against whichever repo the user last switched to. See
+    # bot.engine.commands._run_query: when ctx.repo_name is None on a forum
+    # thread, the rebind guard refuses the query with an explicit error.
+    repo_name = lookup[0].repo_name if lookup else None
     ctx = bot._ctx(channel_id,
                    session_id=t_info.session_id if t_info else pending.session_id,
+                   repo_name=repo_name,
                    thread_info=t_info, access_result=btn_access)
     ctx.user_id = pending.user_id or str(interaction.user.id)
     ctx.user_name = pending.user_name or interaction.user.display_name

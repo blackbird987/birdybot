@@ -171,7 +171,10 @@ class RequestContext:
     effort: str | None = None         # None=inherit, "low"/"medium"/"high"/"max"
     # Session resolution callbacks (Discord race-condition fix)
     resolve_session_id: Callable[[], str | None] | None = None
-    on_session_resolved: Callable[[str], None] | None = None
+    # Async so the platform wrapper can post a user-visible message when it
+    # rejects a cross-repo rebind (see bot.discord.forums.set_thread_session
+    # and the wrapper in attach_session_callbacks).
+    on_session_resolved: Callable[[str, str | None], Awaitable[None]] | None = None
     # Context priming for fresh CLI sessions (Discord forum threads only).
     # maybe_prime_briefing returns a digest of recent thread messages or None;
     # invalidate_prime drops the cached digest after a failed run.

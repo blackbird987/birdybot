@@ -8,6 +8,7 @@ ForumManager's public interface.
 from __future__ import annotations
 
 import asyncio
+import enum
 import logging
 import secrets
 import subprocess
@@ -97,6 +98,19 @@ class ThreadInfo:
             user_name=data.get("user_name"),
             user_ids=set(data.get("user_ids", [])),
         )
+
+
+class RebindResult(enum.Enum):
+    """Outcome of a session-rebind attempt on a thread.
+
+    State mutation is sync (returns this enum); the user-visible message on
+    rejection is dispatched by the async wrapper in attach_session_callbacks.
+    """
+    ACCEPTED = "accepted"
+    NOOP_SAME_SESSION = "noop_same_session"
+    REJECTED_REPO_MISMATCH = "rejected_repo_mismatch"
+    REJECTED_NO_REPO = "rejected_no_repo"
+    UNKNOWN_THREAD = "unknown_thread"
 
 
 @dataclass
@@ -1609,21 +1623,48 @@ class ForumManager:
 
     # --- Session Callbacks ---
 
-    def set_thread_session(self, thread_id: str, session_id: str) -> None:
-        """Write session_id to ThreadInfo immediately (called from engine callback).
+    def set_thread_session(
+        self, thread_id: str, session_id: str, repo_name: str | None,
+    ) -> RebindResult:
+        """Write session_id to ThreadInfo if the offered repo matches the bind.
 
-        Always overwrites: the engine fires this once per successful run with the
-        current canonical session_id, so the latest value wins. This is critical
-        for account failover — the old session lives on the exhausted account and
-        must be replaced with the new account's session_id, otherwise every
-        subsequent resume hits "No conversation found" (dementia bug).
+        State mutation only — the async wrapper in attach_session_callbacks
+        handles user-visible messaging on rejection. Returns a RebindResult so
+        the caller can decide what to surface.
+
+        Cross-repo rebinds are refused: every legitimate caller has an
+        instance with repo_name (verified by enumeration of on_session_resolved
+        callsites — only bot.engine.commands._run_query fires it, and that
+        path always has inst.repo_name). A None or mismatched repo means
+        either a future code path lost context or the runner fell back to the
+        wrong cwd; in both cases blocking the rebind preserves the thread's
+        session continuity (see thread 1498267960257675334 incident).
+
+        Same-account failover still works: it lands here with the same
+        repo_name as the bind, just a new session_id, which counts as ACCEPTED.
         """
         lookup = self.thread_to_project(thread_id)
         if not lookup:
-            return
-        _, info = lookup
+            return RebindResult.UNKNOWN_THREAD
+        proj, info = lookup
         if info.session_id == session_id:
-            return
+            return RebindResult.NOOP_SAME_SESSION
+        if not repo_name:
+            log.error(
+                "Rebind blocked for thread %s: no repo_name supplied "
+                "(bound=%s, offered_session=%s)",
+                thread_id, proj.repo_name, session_id[:12],
+            )
+            return RebindResult.REJECTED_NO_REPO
+        if repo_name.lower() != proj.repo_name.lower():
+            log.error(
+                "Rebind blocked for thread %s: cross-repo (bound=%s, "
+                "offered_repo=%s, offered_session=%s)",
+                thread_id, proj.repo_name, repo_name, session_id[:12],
+            )
+            return RebindResult.REJECTED_REPO_MISMATCH
+
+        # Accepted — only now do we mutate, invalidate cache, persist.
         if info.session_id:
             log.info(
                 "Thread %s session rebind %s -> %s",
@@ -1635,11 +1676,38 @@ class ForumManager:
             log.info("Session resolved for thread %s -> %s", thread_id, session_id[:12])
         info.session_id = session_id
         self.save_forum_map()
+        return RebindResult.ACCEPTED
 
     def attach_session_callbacks(self, ctx: RequestContext, thread_info: ThreadInfo, thread_id: str) -> None:
-        """Wire up session resolution callbacks on a RequestContext."""
+        """Wire up session resolution callbacks on a RequestContext.
+
+        on_session_resolved is async: when set_thread_session returns a
+        REJECTED_* result, the wrapper posts a user-visible notice via the
+        messenger so the rebind block isn't silent.
+        """
         ctx.resolve_session_id = lambda _info=thread_info: _info.session_id or None
-        ctx.on_session_resolved = lambda sid, _tid=thread_id: self.set_thread_session(_tid, sid)
+
+        async def _on_resolved(sid: str, repo_name: str | None,
+                                _tid: str = thread_id, _ctx: RequestContext = ctx) -> None:
+            result = self.set_thread_session(_tid, sid, repo_name)
+            if result in (RebindResult.REJECTED_REPO_MISMATCH, RebindResult.REJECTED_NO_REPO):
+                lookup = self.thread_to_project(_tid)
+                bound = lookup[0].repo_name if lookup else "?"
+                offered = repo_name or "<unknown>"
+                try:
+                    await _ctx.messenger.send_text(
+                        _ctx.channel_id,
+                        f"⚠️ Session rebind blocked — this thread is bound to "
+                        f"`{bound}` but the new session belongs to `{offered}`. "
+                        "Recovery aborted to prevent cross-repo corruption. "
+                        "If this looks wrong, check the thread's repo binding "
+                        "or report the incident.",
+                        silent=True,
+                    )
+                except Exception:
+                    log.exception("Failed to post rebind-blocked notice for %s", _tid)
+
+        ctx.on_session_resolved = _on_resolved
         ctx.maybe_prime_briefing = lambda _tid=thread_id: self.build_prime_briefing(_tid)
         ctx.invalidate_prime = lambda _tid=thread_id: self.clear_prime_briefing(_tid)
 

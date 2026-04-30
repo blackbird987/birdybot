@@ -388,6 +388,27 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
             )
             return
     else:
+        # Forum-thread channels always have a deterministic repo binding —
+        # falling back to the global active repo silently runs the query
+        # against whichever repo the user last switched to (see thread
+        # 1498267960257675334 incident, where a steered query ran in
+        # Flowchart-read-only because the steer path didn't pass repo_name).
+        # resolve_session_id is only wired in attach_session_callbacks, so
+        # its presence is a faithful "this is a forum thread" signal without
+        # needing a new RequestContext field.
+        if ctx.resolve_session_id is not None:
+            await ctx.messenger.send_text(
+                ctx.channel_id,
+                "⚠️ Missing repo context for this thread — refusing to fall "
+                "back to the global active repo. This is a bug; please "
+                f"report thread id `{ctx.channel_id}`.",
+            )
+            log.error(
+                "Engine refused get_active_repo() fallback for forum thread "
+                "channel=%s (resolve_session_id is set, indicating thread origin)",
+                ctx.channel_id,
+            )
+            return
         repo_name, repo_path = ctx.store.get_active_repo()
     if not repo_path:
         await ctx.messenger.send_text(
@@ -536,9 +557,12 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
             # For non-Discord platforms, update the store's global active_session_id
             if not ctx.session_id:
                 ctx.store.active_session_id = result.session_id
-            # Write session_id back immediately (before lock release)
+            # Write session_id back immediately (before lock release).
+            # Pass the instance's repo_name so the platform wrapper can refuse
+            # rebinds that cross the thread's bound repo (see Fix 2 in
+            # bot.discord.forums.set_thread_session — RebindResult).
             if ctx.on_session_resolved:
-                ctx.on_session_resolved(result.session_id)
+                await ctx.on_session_resolved(result.session_id, inst.repo_name or None)
 
         # Recovery exhausted: layer-3 fired in the runner (resume failed on every
         # account + index rebuild, fresh session was created).  The thread's prior
