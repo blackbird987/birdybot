@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- The Ark's **Claude Login** button now opens a multi-account auth panel instead of running a blind cross-PC sync. The panel lists every `CLAUDE_CONFIG_DIR` in `CLAUDE_ACCOUNTS`, shows which Anthropic email/org each is logged into (read from `<dir>/.claude.json`'s `oauthAccount`), flags `✅`/`✗` per dir, and surfaces in-memory failover cooldowns. Per-dir **Log in / Re-login** buttons spawn an interactive terminal with `CLAUDE_CONFIG_DIR` set so the operator can run `/login` against the right account directly (Windows: `cmd /k` + `CREATE_NEW_CONSOLE`; POSIX: tries `x-terminal-emulator` → `gnome-terminal` → `konsole` → `xterm`). The host's ability to pop a console is detected up-front via `host_can_show_console()` (3-signal Windows check: `WTSGetActiveConsoleSessionId`, attached window station, `SESSIONNAME` set; POSIX: `DISPLAY` or `WAYLAND_DISPLAY`) — when headless, login buttons disable themselves and the panel hints to use **Sync credentials** from another PC. Hint lines also fire when all dirs are unauthenticated or when every account is on cooldown. The previous push/pull encrypted-credential flow is preserved as the **Sync credentials** sub-action (`auth:sync`). Routing: `auth:login:<i>`, `auth:sync`, `auth:refresh` all dispatch through `bot/discord/wizard.py:handle_auth_button` via a new `auth:` branch in `bot/discord/interactions.py`. Account identity is read off the event loop in `bot/services/auth_sync.py:collect_account_statuses`. Panel is gated on `PROVIDER == claude`. Resolves the failure mode where the user couldn't tell *why* failover wasn't engaging — the panel now makes per-account state legible from the phone.
+
 ## v0.92.6 — Cross-account failover preserves session_id (2026-04-29)
 
 ### Fixed

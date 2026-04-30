@@ -225,7 +225,218 @@ async def handle_ark_button(
 async def _handle_claude_login(
     bot: ClaudeBot, interaction: discord.Interaction,
 ) -> None:
-    """Smart auth sync: pull if credentials are waiting, push otherwise."""
+    """Show multi-account auth panel: which CLAUDE_CONFIG_DIRs are logged in,
+    which Anthropic email each maps to, and per-dir Login + global Sync.
+    """
+    await interaction.response.defer(ephemeral=True)
+
+    if config.PROVIDER != "claude":
+        await interaction.followup.send(
+            f"Auth panel is Claude-specific. Current provider: **{config.PROVIDER}**.",
+            ephemeral=True,
+        )
+        return
+
+    from bot.services.auth_sync import (
+        collect_account_statuses,
+        host_can_show_console,
+    )
+
+    account_dirs = list(config.CLAUDE_ACCOUNTS) or [
+        str(Path.home() / config.PROVIDER_DIR_NAME)
+    ]
+    cooldowns = getattr(bot._runner, "_account_cooldowns", {}) or {}
+    statuses = await collect_account_statuses(account_dirs, cooldowns)
+
+    can_console = host_can_show_console()
+    embed = _build_auth_panel_embed(statuses, can_console)
+    view = _build_auth_panel_view(statuses, can_console)
+
+    await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+
+def _build_auth_panel_embed(statuses: list, can_console: bool) -> discord.Embed:
+    """Render account statuses + hint lines as an ephemeral embed."""
+    from datetime import datetime as _dt, timezone as _tz
+
+    title = f"Claude Auth — {config.PC_NAME}"
+    embed = discord.Embed(title=title, color=discord.Color.blurple())
+
+    if not statuses:
+        embed.description = "No CLAUDE_ACCOUNTS configured."
+        return embed
+
+    now = _dt.now(_tz.utc)
+    lines: list[str] = []
+    for st in statuses:
+        mark = "✅" if st.logged_in else "✗"
+        ident = st.email or (
+            "(not logged in)" if not st.logged_in else "(unknown identity)"
+        )
+        org = f" · _{st.org}_" if st.org else ""
+        line = f"{mark} **`{st.label}`** — {ident}{org}"
+        if st.cooldown_until and st.cooldown_until > now:
+            mins = max(1, int((st.cooldown_until - now).total_seconds() // 60))
+            line += f"  · cooldown {mins}m (UTC)"
+        if st.error:
+            line += f"  · error: {st.error[:60]}"
+        lines.append(line)
+    embed.description = "\n".join(lines)
+
+    uuids = [s.account_uuid for s in statuses if s.account_uuid]
+    if len(uuids) != len(set(uuids)):
+        embed.add_field(
+            name="⚠️ Duplicate accounts",
+            value=(
+                "Two config dirs map to the same Anthropic account "
+                "— failover won’t help."
+            ),
+            inline=False,
+        )
+
+    hints: list[str] = []
+    if all(not s.logged_in for s in statuses):
+        hints.append(
+            "All dirs are unauthenticated — try **Sync credentials** "
+            "from another PC, or log in below."
+        )
+    elif all(s.cooldown_until and s.cooldown_until > now for s in statuses):
+        hints.append(
+            "All accounts are on cooldown. Wait or add another account "
+            "to `CLAUDE_ACCOUNTS`."
+        )
+    if not can_console:
+        hints.append(
+            "This host can’t pop up a terminal — log in on the machine "
+            "running the bot, or use **Sync credentials**."
+        )
+    if hints:
+        embed.add_field(name="Hint", value="\n".join(hints), inline=False)
+
+    return embed
+
+
+def _build_auth_panel_view(statuses: list, can_console: bool) -> discord.ui.View:
+    """Build per-account Login buttons + Sync/Refresh row."""
+    view = discord.ui.View(timeout=300)
+
+    for i, st in enumerate(statuses[:4]):
+        label = (
+            f"Log in {st.label}" if not st.logged_in
+            else f"Re-login {st.label}"
+        )
+        view.add_item(discord.ui.Button(
+            label=label[:80],
+            style=(
+                discord.ButtonStyle.primary if not st.logged_in
+                else discord.ButtonStyle.secondary
+            ),
+            custom_id=f"auth:login:{i}",
+            disabled=not can_console,
+            row=0,
+        ))
+
+    view.add_item(discord.ui.Button(
+        label="Sync credentials",
+        style=discord.ButtonStyle.secondary,
+        custom_id="auth:sync",
+        emoji="\U0001f504",
+        row=1,
+    ))
+    view.add_item(discord.ui.Button(
+        label="Refresh",
+        style=discord.ButtonStyle.secondary,
+        custom_id="auth:refresh",
+        row=1,
+    ))
+    return view
+
+
+async def handle_auth_button(
+    bot: ClaudeBot,
+    interaction: discord.Interaction,
+    custom_id: str,
+) -> None:
+    """Dispatch auth:* button presses."""
+    if not bot._is_owner(interaction.user.id):
+        await interaction.response.send_message("Owner only.", ephemeral=True)
+        return
+
+    parts = custom_id.split(":")
+    action = parts[1] if len(parts) > 1 else ""
+
+    if action == "login" and len(parts) >= 3:
+        await interaction.response.defer(ephemeral=True)
+        try:
+            idx = int(parts[2])
+        except ValueError:
+            await interaction.followup.send("Invalid login index.", ephemeral=True)
+            return
+
+        from bot.services.auth_sync import (
+            host_can_show_console, launch_login_terminal,
+        )
+
+        account_dirs = list(config.CLAUDE_ACCOUNTS) or [
+            str(Path.home() / config.PROVIDER_DIR_NAME)
+        ]
+        if idx >= len(account_dirs):
+            await interaction.followup.send(
+                "Account no longer in config.", ephemeral=True,
+            )
+            return
+
+        if not host_can_show_console():
+            await interaction.followup.send(
+                "This host can’t pop up a terminal. Log in on the bot machine "
+                "directly, or use **Sync credentials** from another PC.",
+                ephemeral=True,
+            )
+            return
+
+        target = account_dirs[idx]
+        ok = launch_login_terminal(target)
+        if ok:
+            await interaction.followup.send(
+                f"Opened a terminal for `{Path(target).name}` on "
+                f"**{config.PC_NAME}**.\n"
+                f"Run `/login` inside, then tap **Refresh** here.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.followup.send(
+                "Failed to open a login terminal — check bot logs.",
+                ephemeral=True,
+            )
+        return
+
+    if action == "sync":
+        await _handle_cross_pc_sync(bot, interaction)
+        return
+
+    if action == "refresh":
+        await interaction.response.defer(ephemeral=True)
+        from bot.services.auth_sync import (
+            collect_account_statuses, host_can_show_console,
+        )
+        account_dirs = list(config.CLAUDE_ACCOUNTS) or [
+            str(Path.home() / config.PROVIDER_DIR_NAME)
+        ]
+        cooldowns = getattr(bot._runner, "_account_cooldowns", {}) or {}
+        statuses = await collect_account_statuses(account_dirs, cooldowns)
+        can_console = host_can_show_console()
+        embed = _build_auth_panel_embed(statuses, can_console)
+        view = _build_auth_panel_view(statuses, can_console)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        return
+
+    await interaction.response.send_message("Unknown auth action.", ephemeral=True)
+
+
+async def _handle_cross_pc_sync(
+    bot: ClaudeBot, interaction: discord.Interaction,
+) -> None:
+    """Cross-PC credential sync: pull if a push is waiting, otherwise push."""
     await interaction.response.defer(ephemeral=True)
 
     from bot.services.auth_sync import (
@@ -240,7 +451,6 @@ async def _handle_claude_login(
         await interaction.followup.send("No lobby channel configured.", ephemeral=True)
         return
 
-    # Step 1: Try to pull (scan for AUTH_SYNC messages from other PCs)
     source = await pull_credentials(bot, lobby_id)
     if source:
         ok = verify_cli()
@@ -255,12 +465,10 @@ async def _handle_claude_login(
                 f"from {source}, but CLI verify failed — tokens may be revoked."
             )
         await interaction.followup.send(msg, ephemeral=True)
-        # Also broadcast to lobby so it's visible
         if hasattr(bot, "_notifier") and bot._notifier:
             await bot._notifier.broadcast(msg)
         return
 
-    # Step 2: Nothing to pull — try to push this machine's credentials
     if not credentials_look_valid():
         await interaction.followup.send(
             f"\u274c **{config.PC_NAME}**: No valid local credentials and "
@@ -274,14 +482,13 @@ async def _handle_claude_login(
     if result:
         await interaction.followup.send(
             f"\U0001f4e4 Credentials pushed from **{config.PC_NAME}**.\n"
-            "Tap **Claude Login** on the other machine to pull.",
+            "Tap **Sync credentials** on the other machine to pull.",
             ephemeral=True,
         )
     else:
         await interaction.followup.send(
             "Failed to push credentials — check logs.", ephemeral=True,
         )
-
 
 # ---------------------------------------------------------------------------
 # Wizard step handler
