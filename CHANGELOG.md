@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+- Steer no longer drops the thread's repo binding. Previously the steer button cleared `ctx.repo_name` on the re-dispatched query, so the engine fell through to `store.get_active_repo()` and ran the steered prompt against whichever repo the user had last switched to — corrupting the originating thread (incident: thread 1498267960257675334 steered an aiagent merge into Flowchart-read-only mid-flight, the bot then rebound the thread to the wrong-repo session via the recovery path).
+- Session rebinds that cross the thread's bound repo are now refused. `set_thread_session` returns a `RebindResult` enum and the async wrapper in `attach_session_callbacks` posts a user-visible notice on rejection. Without this guard, any future code path that loses repo context produces silent thread corruption (the steer fix alone closes one door of many).
+- Engine refuses the `store.get_active_repo()` fallback for forum-thread channels (detected via `ctx.resolve_session_id is not None`, which is only set by `attach_session_callbacks`). Forum threads always have a deterministic repo binding; the global fallback is reserved for The Ark / DM-style channels.
+
 ## v0.92.6 — Cross-account failover preserves session_id (2026-04-29)
 
 ### Fixed
