@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.92.10 — Lock contract for autopilot chain progression (2026-05-01)
+
 ### Fixed
 - Duplicate concurrent build sessions on the same Discord thread (t-3501). Two
   spawn-progression paths bypassed the per-channel `_get_channel_lock` contract
