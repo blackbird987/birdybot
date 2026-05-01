@@ -522,7 +522,7 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
 
     heartbeat_task = asyncio.create_task(heartbeat())
     start_time = asyncio.get_event_loop().time()
-    ctx.runner.begin_task(inst.id, session_id=inst.session_id)
+    ctx.runner.begin_task(inst.id, session_id=inst.session_id, channel_id=ctx.channel_id)
     try:
         try:
             result = await ctx.runner.run(

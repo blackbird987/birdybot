@@ -359,6 +359,24 @@ async def spawn_from(
         await ctx.messenger.send_text(ctx.channel_id, "Instance not found.")
         return None
 
+    # Defensive duplicate-spawn guard: catches paths that bypassed the
+    # per-channel lock contract (e.g. unlocked cooldown retry, auto_fix chain
+    # step, future regressions).  The lock is the primary defense; this is
+    # a backstop so a missed lock can't double-spawn on the same channel.
+    if ctx.channel_id is not None:
+        active_inst_id = ctx.runner.active_instance_for_channel(ctx.channel_id)
+        if active_inst_id and active_inst_id != source_id:
+            log.warning(
+                "spawn_from blocked: channel %s already has active instance %s "
+                "(attempted spawn from %s, origin=%s)",
+                ctx.channel_id, active_inst_id, source_id, cfg.origin.value,
+            )
+            await ctx.messenger.send_text(
+                ctx.channel_id,
+                "Another session is already running on this thread — wait for it to finish.",
+            )
+            return None
+
     # Block spawns during reboot drain. Same-session overlap is allowed —
     # the channel lock + Queued embed serialize it visibly.
     check_session = source.session_id if cfg.resume_session else None
@@ -2242,6 +2260,17 @@ async def resume_autopilot_chain(
     (`chain_phases` exists, next step is "build"), do NOT skip — the build
     loop reads `paused_at` from `chain_phases` to decide which phase to run
     next. Skipping would jump past the build entirely.
+
+    LOCK CONTRACT: callers MUST hold ``commands._get_channel_lock(channel_id)``
+    while invoking this function and for the duration of the returned
+    awaitable.  Without the lock, a concurrent text/button on the same
+    thread can spawn a second session in parallel — see the t-3501 incident.
+    Known callers that already hold the lock:
+      - ``commands._run_query`` (text path)
+      - ``interactions._dispatch_callback`` (button path)
+      - ``app._do_cooldown_retry_locked`` (cooldown auto-retry)
+      - ``app._resume_interrupted_chains`` (post-reboot resume)
+      - ``auto_fix.spawn_fix_session`` (auto-fix chain step)
 
     Returns None only when no chain exists.
     """
