@@ -363,9 +363,12 @@ async def spawn_from(
     # per-channel lock contract (e.g. unlocked cooldown retry, auto_fix chain
     # step, future regressions).  The lock is the primary defense; this is
     # a backstop so a missed lock can't double-spawn on the same channel.
+    # In normal flows (chain steps, button clicks on a completed instance)
+    # the previous instance's end_task has already cleared this mapping, so
+    # this only fires when something is genuinely still running.
     if ctx.channel_id is not None:
         active_inst_id = ctx.runner.active_instance_for_channel(ctx.channel_id)
-        if active_inst_id and active_inst_id != source_id:
+        if active_inst_id:
             log.warning(
                 "spawn_from blocked: channel %s already has active instance %s "
                 "(attempted spawn from %s, origin=%s)",

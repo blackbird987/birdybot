@@ -5,20 +5,19 @@
 ### Fixed
 - Duplicate concurrent build sessions on the same Discord thread (t-3501). Two
   spawn-progression paths bypassed the per-channel `_get_channel_lock` contract
-  used elsewhere — the cooldown auto-retry chain-resume in `bot/app.py` and the
-  `auto_fix.spawn_fix_session` chain-step call to `workflows.on_autopilot`. A
-  third trigger came from orphaned autopilot chains in `state.json` whose
-  session_id no longer matched the thread's bound session (e.g. after
-  cross-account rebind), so post-reboot resume fired a chain for the old
-  session in parallel with the user's new one.
-- Defense-in-depth: `_do_cooldown_retry` extracted into `_do_cooldown_retry_locked`
-  invoked under the channel lock; `auto_fix.spawn_fix_session` re-acquires the
-  lock for its `on_autopilot` chain step (the prior `on_text` call released it);
-  `_resume_interrupted_chains` now drops chains whose stored session_id no
-  longer matches the thread's `info.session_id`; `workflows.spawn_from` gained
-  a defensive guard via `runner.active_instance_for_channel(channel_id)` that
-  rejects with a user-visible message if any other path slips through;
-  `runner.begin_task` now also tracks `channel_id` (cleared on `end_task`).
+  that already serialises text and button dispatch — the cooldown auto-retry
+  chain-resume in `bot/app.py` and the `auto_fix.spawn_fix_session` chain-step
+  call to `workflows.on_autopilot` (which released the lock its preceding
+  `on_text` had held).
+- Defense-in-depth: `_do_cooldown_retry` extracted into
+  `_do_cooldown_retry_locked` invoked under the channel lock;
+  `auto_fix.spawn_fix_session` re-acquires the lock around its
+  `on_autopilot` call; `workflows.spawn_from` gained a backstop guard via a
+  new `runner.active_instance_for_channel(channel_id)` lookup that rejects
+  with a user-visible message if any other path slips past the lock;
+  `runner.begin_task` / `end_task` now also track `channel_id` (via a new
+  `_active_channels` map populated from `commands._run_query` and
+  `lifecycle.run_instance`).
 - Documented the lock contract on `workflows.resume_autopilot_chain` so future
   callers know they must hold the channel lock for the full awaitable.
 

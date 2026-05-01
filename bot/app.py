@@ -1018,20 +1018,6 @@ async def _resume_interrupted_chains(
 
         thread_id, info = lookup
 
-        # Orphan-chain cleanup: a thread can have its session_id rebound (e.g.
-        # cross-account recovery, manual rebind), leaving a chain keyed to the
-        # OLD session.  Resuming that chain in the rebound thread means a chain
-        # for session A runs alongside the user's session B → duplicate spawns.
-        # If the thread is now bound to a different session, drop the orphan.
-        if info.session_id and info.session_id != session_id:
-            log.warning(
-                "Orphan chain for session %s — thread %s is now bound to %s; clearing chain",
-                session_id, thread_id, info.session_id,
-            )
-            store.clear_autopilot_chain(session_id)
-            store.clear_chain_entry_sha(session_id)
-            continue
-
         # Skip sessions whose thread has a callback in the drain queue
         if thread_id in drain_callback_channel_ids:
             log.info(
