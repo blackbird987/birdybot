@@ -290,7 +290,7 @@ async def run_instance(
     start_time = asyncio.get_event_loop().time()
     result = None
     finalized = False
-    ctx.runner.begin_task(inst.id, session_id=inst.session_id)
+    ctx.runner.begin_task(inst.id, session_id=inst.session_id, channel_id=ctx.channel_id)
     try:
         try:
             result = await ctx.runner.run(

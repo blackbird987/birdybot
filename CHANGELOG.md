@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+## v0.92.10 — Lock contract for autopilot chain progression (2026-05-01)
+
+### Fixed
+- Duplicate concurrent build sessions on the same Discord thread (t-3501). Two
+  spawn-progression paths bypassed the per-channel `_get_channel_lock` contract
+  that already serialises text and button dispatch — the cooldown auto-retry
+  chain-resume in `bot/app.py` and the `auto_fix.spawn_fix_session` chain-step
+  call to `workflows.on_autopilot` (which released the lock its preceding
+  `on_text` had held).
+- Defense-in-depth: `_do_cooldown_retry` extracted into
+  `_do_cooldown_retry_locked` invoked under the channel lock;
+  `auto_fix.spawn_fix_session` re-acquires the lock around its
+  `on_autopilot` call; `workflows.spawn_from` gained a backstop guard via a
+  new `runner.active_instance_for_channel(channel_id)` lookup that rejects
+  with a user-visible message if any other path slips past the lock;
+  `runner.begin_task` / `end_task` now also track `channel_id` (via a new
+  `_active_channels` map populated from `commands._execute_query` and
+  `lifecycle.run_instance`).
+- Documented the lock contract on `workflows.resume_autopilot_chain` so future
+  callers know they must hold the channel lock for the full awaitable.
+
 ## v0.92.8 — Multi-account Claude Login panel (2026-04-30)
 
 ### Changed

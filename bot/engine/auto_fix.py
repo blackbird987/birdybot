@@ -155,13 +155,20 @@ async def spawn_fix_session(
     if platform_msgs:
         source_msg_id = platform_msgs[-1]
 
-    # Chain into autopilot with cost budget
+    # Chain into autopilot with cost budget.
+    # Acquire the per-channel lock for the chain — on_text above released its
+    # lock when its query finished, so without re-acquiring here a concurrent
+    # text/button on this thread could double-spawn.  Matches the contract
+    # documented on workflows.resume_autopilot_chain.
+    from bot.engine.commands import _get_channel_lock
+    chain_lock = _get_channel_lock(str(channel_id))
     try:
-        result = await workflows.on_autopilot(
-            ctx, source_inst.id, source_msg_id,
-            start_from="review_loop",
-            cost_budget_usd=max_cost_usd,
-        )
+        async with chain_lock:
+            result = await workflows.on_autopilot(
+                ctx, source_inst.id, source_msg_id,
+                start_from="review_loop",
+                cost_budget_usd=max_cost_usd,
+            )
     except Exception:
         log.exception("Auto-fix autopilot chain failed for %s/%s", repo_name, trigger)
         try:

@@ -83,6 +83,7 @@ class ClaudeRunner:
         # gaps between autopilot chain steps.
         self._active_tasks: set[str] = set()
         self._active_sessions: dict[str, str] = {}  # session_id -> task_id
+        self._active_channels: dict[str, str] = {}  # channel_id -> task_id
         self._idle_event = asyncio.Event()
         self._idle_event.set()  # starts idle
 
@@ -1129,11 +1130,18 @@ class ClaudeRunner:
 
     # --- Task-level tracking ---
 
-    def begin_task(self, instance_id: str, session_id: str | None = None) -> None:
+    def begin_task(
+        self,
+        instance_id: str,
+        session_id: str | None = None,
+        channel_id: str | None = None,
+    ) -> None:
         """Mark a high-level task (query/workflow chain) as active."""
         self._active_tasks.add(instance_id)
         if session_id:
             self._active_sessions[session_id] = instance_id
+        if channel_id:
+            self._active_channels[str(channel_id)] = instance_id
         self._idle_event.clear()
 
     def end_task(self, instance_id: str) -> None:
@@ -1147,6 +1155,10 @@ class ClaudeRunner:
         stale = [s for s, t in self._active_sessions.items() if t == instance_id]
         for s in stale:
             del self._active_sessions[s]
+        # Clean up channel tracking
+        stale_chans = [c for c, t in self._active_channels.items() if t == instance_id]
+        for c in stale_chans:
+            del self._active_channels[c]
         if not self._active_tasks and not self._processes:
             self._idle_event.set()
             self._maybe_fire_idle_reboot()
@@ -1187,6 +1199,17 @@ class ClaudeRunner:
         if not session_id:
             return None
         return self._active_sessions.get(session_id)
+
+    def active_instance_for_channel(self, channel_id: str | int | None) -> str | None:
+        """Return instance_id of the currently-running task for a channel, or None.
+
+        Used as a defensive duplicate-spawn guard in ``workflows.spawn_from`` —
+        catches paths that bypassed the per-channel lock (e.g. a future caller
+        that forgets the contract).
+        """
+        if channel_id is None:
+            return None
+        return self._active_channels.get(str(channel_id))
 
     def check_spawn_allowed(self, session_id: str | None = None) -> str | None:
         """Return an error message if spawning is blocked, or None if OK.

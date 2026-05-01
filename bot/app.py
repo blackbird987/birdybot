@@ -1075,9 +1075,13 @@ async def _resume_interrupted_chains(
 
 
 async def _do_cooldown_retry(store, runner, inst, discord_bot, retrying_set):
-    """Auto-retry an instance after usage-limit cooldown expires."""
-    from bot.engine import lifecycle
-    from bot.platform.formatting import running_button_specs
+    """Auto-retry an instance after usage-limit cooldown expires.
+
+    Holds the per-channel lock for the entire retry + chain-resume so a
+    concurrent text/button on the same thread can't double-spawn against the
+    same session (root cause of the t-3501 duplicate-build incident).
+    """
+    from bot.engine.commands import _get_channel_lock
 
     try:
         channel_id = inst.cooldown_channel_id
@@ -1088,91 +1092,11 @@ async def _do_cooldown_retry(store, runner, inst, discord_bot, retrying_set):
             store.update_instance(inst)
             return
 
-        # Build RequestContext from discord bot (like scheduler does)
-        lookup = discord_bot._forums.thread_to_project(channel_id)
-        t_info = lookup[1] if lookup else None
-        repo_name = lookup[0].repo_name if lookup else inst.repo_name
-        ctx = discord_bot._ctx(channel_id, thread_info=t_info, repo_name=repo_name)
-
-        # Wake the thread (cancel sleep, set active tag)
-        discord_bot._cancel_sleep(channel_id)
-        try:
-            ch = discord_bot.get_channel(int(channel_id))
-            if ch:
-                asyncio.create_task(discord_bot._clear_thread_sleeping(ch))
-                asyncio.create_task(discord_bot._set_thread_active_tag(ch, True))
-        except Exception:
-            pass
-
-        # Create new instance from original
-        new_inst = store.create_instance(
-            instance_type=inst.instance_type,
-            prompt=inst.prompt,
-            mode=inst.mode,
-        )
-        new_inst.origin = inst.origin
-        new_inst.origin_platform = inst.origin_platform
-        new_inst.effort = inst.effort
-        new_inst.parent_id = inst.id
-        new_inst.repo_name = inst.repo_name
-        new_inst.repo_path = inst.repo_path
-        new_inst.cooldown_retries = inst.cooldown_retries  # Carry count forward
-        if inst.session_id:
-            new_inst.session_id = inst.session_id
-        if inst.branch:
-            new_inst.branch = inst.branch
-            new_inst.original_branch = inst.original_branch
-            new_inst.worktree_path = inst.worktree_path
-        store.update_instance(new_inst)
-
-        # Clear cooldown on the original instance
-        inst.cooldown_retry_at = None
-        inst.cooldown_channel_id = None
-        store.update_instance(inst)
-
-        escaped = ctx.messenger.escape(new_inst.display_id())
-        handle = await ctx.messenger.send_thinking(
-            channel_id, f"⏳ {escaped} auto-retrying after cooldown...",
-            buttons=running_button_specs(new_inst.id),
-        )
-        if handle.get("message_id"):
-            new_inst.message_ids.setdefault(ctx.platform, []).append(handle.get("message_id"))
-            store.update_instance(new_inst)
-
-        log.info("Cooldown retry: %s → %s in channel %s", inst.id, new_inst.id, channel_id)
-        try:
-            await lifecycle.run_instance(ctx, new_inst, handle=handle)
-
-            # Resume autopilot chain if this retry was mid-chain
-            if (new_inst.status == InstanceStatus.COMPLETED
-                    and not new_inst.needs_input
-                    and not new_inst.cooldown_retry_at
-                    and new_inst.session_id):
-                chain = store.get_autopilot_chain(new_inst.session_id)
-                if chain and len(chain) > 1:
-                    last_msgs = new_inst.message_ids.get("discord", [])
-                    last_msg = last_msgs[-1] if last_msgs else None
-                    log.info("Cooldown retry resuming autopilot chain: %s → step %s",
-                             new_inst.id, chain[1])
-                    try:
-                        await ctx.messenger.send_text(
-                            channel_id,
-                            "⏳ Autopilot resuming after cooldown...",
-                            silent=True,
-                        )
-                        from bot.engine import workflows
-                        await workflows.resume_autopilot_chain(
-                            ctx, new_inst.id, last_msg, new_inst.session_id,
-                        )
-                    except Exception:
-                        log.exception("Autopilot chain resume failed after cooldown retry %s",
-                                      new_inst.id)
-        finally:
-            # Post-run cleanup (matches normal query flow in interactions.py)
-            discord_bot._forums.persist_ctx_settings(ctx)
-            discord_bot._schedule_sleep(channel_id)
-            asyncio.create_task(discord_bot._try_apply_tags_after_run(channel_id))
-            asyncio.create_task(discord_bot._refresh_dashboard())
+        lock = _get_channel_lock(str(channel_id))
+        async with lock:
+            await _do_cooldown_retry_locked(
+                store, runner, inst, discord_bot, channel_id,
+            )
 
     except Exception:
         log.exception("Cooldown retry failed for %s", inst.id)
@@ -1182,6 +1106,98 @@ async def _do_cooldown_retry(store, runner, inst, discord_bot, retrying_set):
         store.update_instance(inst)
     finally:
         retrying_set.discard(inst.id)
+
+
+async def _do_cooldown_retry_locked(store, runner, inst, discord_bot, channel_id):
+    """Inner cooldown retry body, run while holding the channel lock."""
+    from bot.engine import lifecycle
+    from bot.platform.formatting import running_button_specs
+
+    # Build RequestContext from discord bot (like scheduler does)
+    lookup = discord_bot._forums.thread_to_project(channel_id)
+    t_info = lookup[1] if lookup else None
+    repo_name = lookup[0].repo_name if lookup else inst.repo_name
+    ctx = discord_bot._ctx(channel_id, thread_info=t_info, repo_name=repo_name)
+
+    # Wake the thread (cancel sleep, set active tag)
+    discord_bot._cancel_sleep(channel_id)
+    try:
+        ch = discord_bot.get_channel(int(channel_id))
+        if ch:
+            asyncio.create_task(discord_bot._clear_thread_sleeping(ch))
+            asyncio.create_task(discord_bot._set_thread_active_tag(ch, True))
+    except Exception:
+        pass
+
+    # Create new instance from original
+    new_inst = store.create_instance(
+        instance_type=inst.instance_type,
+        prompt=inst.prompt,
+        mode=inst.mode,
+    )
+    new_inst.origin = inst.origin
+    new_inst.origin_platform = inst.origin_platform
+    new_inst.effort = inst.effort
+    new_inst.parent_id = inst.id
+    new_inst.repo_name = inst.repo_name
+    new_inst.repo_path = inst.repo_path
+    new_inst.cooldown_retries = inst.cooldown_retries  # Carry count forward
+    if inst.session_id:
+        new_inst.session_id = inst.session_id
+    if inst.branch:
+        new_inst.branch = inst.branch
+        new_inst.original_branch = inst.original_branch
+        new_inst.worktree_path = inst.worktree_path
+    store.update_instance(new_inst)
+
+    # Clear cooldown on the original instance
+    inst.cooldown_retry_at = None
+    inst.cooldown_channel_id = None
+    store.update_instance(inst)
+
+    escaped = ctx.messenger.escape(new_inst.display_id())
+    handle = await ctx.messenger.send_thinking(
+        channel_id, f"⏳ {escaped} auto-retrying after cooldown...",
+        buttons=running_button_specs(new_inst.id),
+    )
+    if handle.get("message_id"):
+        new_inst.message_ids.setdefault(ctx.platform, []).append(handle.get("message_id"))
+        store.update_instance(new_inst)
+
+    log.info("Cooldown retry: %s → %s in channel %s", inst.id, new_inst.id, channel_id)
+    try:
+        await lifecycle.run_instance(ctx, new_inst, handle=handle)
+
+        # Resume autopilot chain if this retry was mid-chain
+        if (new_inst.status == InstanceStatus.COMPLETED
+                and not new_inst.needs_input
+                and not new_inst.cooldown_retry_at
+                and new_inst.session_id):
+            chain = store.get_autopilot_chain(new_inst.session_id)
+            if chain and len(chain) > 1:
+                last_msgs = new_inst.message_ids.get("discord", [])
+                last_msg = last_msgs[-1] if last_msgs else None
+                log.info("Cooldown retry resuming autopilot chain: %s → step %s",
+                         new_inst.id, chain[1])
+                try:
+                    await ctx.messenger.send_text(
+                        channel_id,
+                        "⏳ Autopilot resuming after cooldown...",
+                        silent=True,
+                    )
+                    from bot.engine import workflows
+                    await workflows.resume_autopilot_chain(
+                        ctx, new_inst.id, last_msg, new_inst.session_id,
+                    )
+                except Exception:
+                    log.exception("Autopilot chain resume failed after cooldown retry %s",
+                                  new_inst.id)
+    finally:
+        # Post-run cleanup (matches normal query flow in interactions.py)
+        discord_bot._forums.persist_ctx_settings(ctx)
+        discord_bot._schedule_sleep(channel_id)
+        asyncio.create_task(discord_bot._try_apply_tags_after_run(channel_id))
+        asyncio.create_task(discord_bot._refresh_dashboard())
 
 
 async def _start_discord(store, runner, notifier, stop_event):
