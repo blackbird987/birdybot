@@ -2268,12 +2268,14 @@ async def resume_autopilot_chain(
     while invoking this function and for the duration of the returned
     awaitable.  Without the lock, a concurrent text/button on the same
     thread can spawn a second session in parallel — see the t-3501 incident.
-    Known callers that already hold the lock:
-      - ``commands._run_query`` (text path)
-      - ``interactions._dispatch_callback`` (button path)
-      - ``app._do_cooldown_retry_locked`` (cooldown auto-retry)
-      - ``app._resume_interrupted_chains`` (post-reboot resume)
-      - ``auto_fix.spawn_fix_session`` (auto-fix chain step)
+    Direct callers and how they satisfy the contract:
+      - ``commands.handle_callback`` (continue_autopilot action) — locked by
+        ``interactions.handle`` for query-class actions.
+      - ``workflows.on_amend_done``, ``workflows.on_continue_anyway`` —
+        invoked via the "amend" / "continue_anyway" buttons, same lock path.
+      - ``app._do_cooldown_retry_locked`` — wraps the full retry in the lock.
+    The companion ``_run_autopilot_chain`` is also called directly by
+    ``app._resume_interrupted_chains`` under its own lock acquisition.
 
     Returns None only when no chain exists.
     """

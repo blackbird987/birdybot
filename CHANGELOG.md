@@ -16,7 +16,7 @@
   new `runner.active_instance_for_channel(channel_id)` lookup that rejects
   with a user-visible message if any other path slips past the lock;
   `runner.begin_task` / `end_task` now also track `channel_id` (via a new
-  `_active_channels` map populated from `commands._run_query` and
+  `_active_channels` map populated from `commands._execute_query` and
   `lifecycle.run_instance`).
 - Documented the lock contract on `workflows.resume_autopilot_chain` so future
   callers know they must hold the channel lock for the full awaitable.
