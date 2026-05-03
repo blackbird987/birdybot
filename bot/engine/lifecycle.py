@@ -572,10 +572,11 @@ def make_progress_callbacks(
         Side effect: mirrors the live ``context_tokens`` and ``context_model``
         onto ``inst`` so the result embed and persisted state reflect the last
         live value even if no result event arrives (e.g. killed run). Cache
-        token totals are intentionally NOT written here — those are sums owned
-        by ``parser.extract_result`` at completion. A killed run will therefore
-        have ``context_tokens`` populated but ``cache_*_tokens`` left at their
-        initial values; analytics should filter to completed sessions.
+        token totals are intentionally NOT written here — they're sums computed
+        by ``parser.extract_result`` from the events captured up to stream end.
+        Killed runs therefore receive a partial sum covering the events
+        processed before the kill; analytics needing complete totals should
+        filter to ``status == 'completed'``.
         """
         usage = latest_usage[0]
         if not usage:
