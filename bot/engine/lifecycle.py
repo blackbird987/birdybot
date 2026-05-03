@@ -588,10 +588,11 @@ def make_progress_callbacks(
             severity = "crit"
         elif pct >= 0.85:
             severity = "warn"
-        # Persist into the instance so result embed + session state reflect it.
+        # context_tokens is a snapshot (current context-window size) — safe to
+        # update live. cache_read/creation are session totals owned solely by
+        # parser.extract_result at completion; writing per-call snapshots here
+        # would corrupt the totals if the session crashes before finalization.
         inst.context_tokens = tokens
-        inst.cache_read_tokens = int(usage.get("cache_read_input_tokens") or 0)
-        inst.cache_creation_tokens = int(usage.get("cache_creation_input_tokens") or 0)
         if isinstance(model, str):
             inst.context_model = model
         return text, severity

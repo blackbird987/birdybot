@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Fixed
+- `Instance.cache_read_tokens` and `Instance.cache_creation_tokens` now reflect
+  session totals (sum across every assistant API call) instead of just the last
+  call's snapshot. Previously the parser overwrote these fields with each
+  per-call usage event and only the final value was persisted, masking real
+  cache efficiency in `state.json` analytics. Live snapshot writes from
+  `bot/engine/lifecycle.py` were removed so `parser.extract_result` is the sole
+  writer at completion — preventing crashed sessions from leaking partial
+  per-call values into the totals. Note: instances written before this fix
+  retain the old snapshot semantics; analyses spanning the cutover should
+  filter to `status == "completed"` after this version.
+
 ## v0.92.10 — Lock contract for autopilot chain progression (2026-05-01)
 
 ### Fixed

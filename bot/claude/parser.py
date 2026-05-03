@@ -134,6 +134,11 @@ def extract_result(events: list[dict]) -> RunResult:
     tools_seen: set[str] = set()
     result_event: dict | None = None
     latest_usage: dict | None = None
+    # Session-total cache accounting — each assistant event reports per-call
+    # usage, so summing gives the true session total. Without this, only the
+    # final call's numbers would be persisted, masking real cache efficiency.
+    total_cache_read = 0
+    total_cache_creation = 0
     # Per-turn text tracking: each assistant event starts a new turn
     assistant_turns: list[list[str]] = []
     current_turn: list[str] = []
@@ -149,6 +154,8 @@ def extract_result(events: list[dict]) -> RunResult:
             usage = extract_usage(event)
             if usage:
                 latest_usage = usage
+                total_cache_read += int(usage.get("cache_read_input_tokens") or 0)
+                total_cache_creation += int(usage.get("cache_creation_input_tokens") or 0)
 
             content = event.get("content", [])
             if not content:
@@ -187,11 +194,12 @@ def extract_result(events: list[dict]) -> RunResult:
     if current_turn:
         assistant_turns.append(current_turn)
 
-    # Propagate the last observed assistant usage so lifecycle code can
-    # compute the final context-footer without replaying events.
+    # cache_*_tokens are session totals (sum across every assistant call).
+    # context_tokens stays a snapshot of the final call — it represents the
+    # context-window size at end of session, not a cumulative figure.
     if latest_usage:
-        result.cache_read_tokens = int(latest_usage.get("cache_read_input_tokens") or 0)
-        result.cache_creation_tokens = int(latest_usage.get("cache_creation_input_tokens") or 0)
+        result.cache_read_tokens = total_cache_read
+        result.cache_creation_tokens = total_cache_creation
         result.context_tokens = context_tokens_from_usage(latest_usage)
         model = latest_usage.get("model")
         if isinstance(model, str):
