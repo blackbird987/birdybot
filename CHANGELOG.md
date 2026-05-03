@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.92.12 — Worktree location awareness + recovery visibility (2026-05-03)
+
 ### Added
 - Worktree location awareness for build sessions (t-3541). The runner now
   injects a "Working Location" preamble at the top of the system prompt
