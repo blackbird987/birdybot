@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.92.13 — Hide title-gen jsonls in /session (2026-05-03)
+
 ### Fixed
 - `/session` picker no longer lists `[Temp] Generate a 4-6 word title for…`
   entries from the title-generation subprocess. The CLI persists every `-p`
