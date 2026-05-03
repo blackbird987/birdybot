@@ -569,9 +569,13 @@ def make_progress_callbacks(
     def _compute_footer() -> tuple[str | None, str | None]:
         """Render footer text + severity from cached usage. (None, None) if empty.
 
-        Side effect: mirrors the latest token counts onto ``inst`` so the result
-        embed and persisted state reflect the last live value even if no result
-        event arrives (e.g. killed run).
+        Side effect: mirrors the live ``context_tokens`` and ``context_model``
+        onto ``inst`` so the result embed and persisted state reflect the last
+        live value even if no result event arrives (e.g. killed run). Cache
+        token totals are intentionally NOT written here — those are sums owned
+        by ``parser.extract_result`` at completion. A killed run will therefore
+        have ``context_tokens`` populated but ``cache_*_tokens`` left at their
+        initial values; analytics should filter to completed sessions.
         """
         usage = latest_usage[0]
         if not usage:
