@@ -516,7 +516,7 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
         inst.message_ids.setdefault(ctx.platform, []).append(handle.get("message_id"))
         ctx.store.update_instance(inst)
 
-    on_progress, on_stall, heartbeat = lifecycle.make_progress_callbacks(
+    on_progress, on_stall, heartbeat, on_recovery = lifecycle.make_progress_callbacks(
         ctx, inst, handle, ctx.effective_verbose,
     )
 
@@ -528,6 +528,7 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
             result = await ctx.runner.run(
                 inst, on_progress=on_progress, on_stall=on_stall,
                 context=ctx.effective_context,
+                on_recovery=on_recovery,
             )
         finally:
             heartbeat_task.cancel()
@@ -570,7 +571,10 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
         # --resume.  Surface this to the user so the dementia is visible — without
         # this notice, the rebind is silent and the user only notices when the
         # bot answers as if it has no memory.
-        if result.session_recovery_exhausted:
+        # Skip when the t-3541 Layer 4 on_recovery callback already posted a
+        # richer mid-run warning for this same event — avoids two near-identical
+        # alerts for one recovery.
+        if result.session_recovery_exhausted and not result.recovery_warning_posted:
             try:
                 await ctx.messenger.send_text(
                     ctx.channel_id,

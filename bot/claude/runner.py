@@ -51,6 +51,12 @@ HYDRATE_CACHE_TTL_SECS = 60
 
 ProgressCallback = Callable  # async callback(message: str, detail: str)
 StallCallback = Callable[[str], None]     # async callback(instance_id)
+# Recovery callback: fires once per Layer 3 recovery event so the platform
+# layer can post a visible thread warning (the silent session-clear was half
+# of the t-3541 confusion — user couldn't see why context vanished).
+# Signature: async callback(reason: str, lost_session_id: str | None,
+#                            worktree_path: str | None)
+RecoveryCallback = Callable
 
 
 class DiscardOutcome(NamedTuple):
@@ -218,12 +224,14 @@ class ClaudeRunner:
         on_stall: StallCallback | None = None,
         context: str | None = None,
         sibling_context: str | None = None,
+        on_recovery: RecoveryCallback | None = None,
     ) -> RunResult:
         """Run CLI for an instance. Blocks until completion or timeout."""
         async with self._semaphore:
             return await self._run_impl(
                 instance, on_progress, on_stall, context, sibling_context,
                 api_fallback=instance.api_fallback,
+                on_recovery=on_recovery,
             )
 
     async def _run_impl(
@@ -237,6 +245,7 @@ class ClaudeRunner:
         _provider: ProviderConfig | None = None,
         _binary: str | None = None,
         _recovery_state: set[str] | None = None,
+        on_recovery: RecoveryCallback | None = None,
     ) -> RunResult:
         # Snapshot provider + binary at entry — in-flight sessions keep their
         # provider even if a runtime switch happens mid-run.
@@ -426,6 +435,7 @@ class ClaudeRunner:
                             api_fallback=api_fallback,
                             _provider=provider, _binary=binary,
                             _recovery_state=recovery_state,
+                            on_recovery=on_recovery,
                         )
 
                 # Layer 2: try other account if we haven't yet and one is available.
@@ -449,6 +459,7 @@ class ClaudeRunner:
                             api_fallback=api_fallback,
                             _provider=provider, _binary=binary,
                             _recovery_state=recovery_state,
+                            on_recovery=on_recovery,
                         )
 
                 # Layer 3 (last resort): drop session and run blank.  Tag the
@@ -461,6 +472,25 @@ class ClaudeRunner:
                     "Session %s exhausted recovery for %s, retrying without resume",
                     instance.session_id, instance.id,
                 )
+                # Fire the recovery callback BEFORE clearing session_id so
+                # the platform layer can post a visible thread warning
+                # (Layer 4 of t-3541 fix).  Best-effort — don't let a
+                # callback failure block recovery.  Track success so the
+                # downstream `session_recovery_exhausted` notice in
+                # commands.py can suppress its older, terser duplicate.
+                warning_posted = False
+                if on_recovery:
+                    try:
+                        await on_recovery(
+                            error_text or "No conversation found",
+                            original_session_id,
+                            instance.worktree_path,
+                        )
+                        warning_posted = True
+                    except Exception:
+                        log.exception(
+                            "on_recovery callback failed for %s", instance.id,
+                        )
                 instance.session_id = None
                 recovery_state.add("exhausted")
                 fresh = await self._run_impl(
@@ -469,8 +499,10 @@ class ClaudeRunner:
                     api_fallback=api_fallback,
                     _provider=provider, _binary=binary,
                     _recovery_state=recovery_state,
+                    on_recovery=on_recovery,
                 )
                 fresh.session_recovery_exhausted = True
+                fresh.recovery_warning_posted = warning_posted
                 # Don't poison the retry path: if the fallback produced no
                 # usable output (refuse-to-spawn synthetic result, or the
                 # CLI exited before generating any text), restore the
@@ -525,6 +557,7 @@ class ClaudeRunner:
                             api_fallback=api_fallback,
                             _provider=provider, _binary=binary,
                             _recovery_state=recovery_state,
+                            on_recovery=on_recovery,
                         )
                     # All accounts exhausted — fall through to cooldown/PPU
                     result.usage_limit_reset = reset_at
@@ -542,6 +575,7 @@ class ClaudeRunner:
                     instance, on_progress, on_stall, context, sibling_context,
                     api_fallback=False, _provider=provider, _binary=binary,
                     _recovery_state=recovery_state,
+                    on_recovery=on_recovery,
                 )
 
             return result
@@ -826,10 +860,29 @@ class ClaudeRunner:
         """
         provider = provider or self.provider
 
-        # Build prompt — never mutated on the instance
+        # Build prompt — never mutated on the instance.
+        # Resume fallback (t-3541): when a Layer 3 recovery clears session_id
+        # and respawns, the LLM may not see Layer 1's system-prompt preamble
+        # if --resume replays the original JSONL system prompt verbatim
+        # (Probe A outcome).  This user-message slot is therefore the
+        # PRIMARY orientation signal on resume — include the expected
+        # CWD/branch so the LLM can verify with `pwd` if something looks off.
         prompt = instance.prompt
         if not prompt:
-            prompt = "Continue the previous conversation."
+            sanity_path = instance.worktree_path or instance.repo_path or "(unknown)"
+            # Don't hardcode "master" — repos that use main / develop / etc.
+            # would get a misleading sanity check.  Fall through:
+            # build branch → resolved default → punt to LLM self-check.
+            sanity_branch = (
+                instance.branch
+                or instance.original_branch
+                or "(verify with `git branch --show-current`)"
+            )
+            prompt = (
+                f"Continue the previous conversation. "
+                f"(Sanity check: your CWD should be `{sanity_path}` "
+                f"on branch `{sanity_branch}` — verify with `pwd` if anything looks off.)"
+            )
 
         # API key file (only for providers that support API fallback)
         api_key_file: str | None = None
@@ -944,6 +997,60 @@ class ClaudeRunner:
         except Exception:
             return True
 
+    @staticmethod
+    def _build_location_block(instance: Instance) -> str:
+        """Tell the LLM exactly where it is on disk and on git.
+
+        Anchors the LLM's ground truth so when files look unexpected — e.g.
+        after a Layer 3 recovery clears session_id and respawns — it knows
+        to verify CWD before "fixing" code that actually exists on its
+        branch.  This is the t-3541 fix: previously the LLM was spawned
+        with cwd=worktree_path but never told it was in a worktree, so a
+        silent recovery + a confused glance at git log produced phantom
+        "code disappeared" panics.
+
+        Note on --resume semantics (Probe A): if --resume replays the
+        original system prompt from the JSONL rather than re-rendering,
+        this block only protects fresh spawns.  Layer 2's user-prompt
+        fallback covers the resume path.
+        """
+        # Prefer original_branch (resolved by _get_default_branch in the
+        # worktree creator — could be master, main, or whatever the repo
+        # actually uses) over hardcoding "master".  Falls back through
+        # the chain so we never lie to the LLM about a master branch
+        # that doesn't exist.
+        default_branch = instance.original_branch or "the default branch"
+        if instance.worktree_path:
+            return (
+                "--- Working Location ---\n"
+                f"You are running inside a git worktree:\n"
+                f"  CWD:       {instance.worktree_path}\n"
+                f"  Branch:    {instance.branch or '(unknown)'}\n"
+                f"  Main repo: {instance.repo_path} "
+                f"(stays on {default_branch} — do NOT cd there)\n"
+                "\n"
+                "If files look unexpectedly missing or different from what you remember:\n"
+                "1. Run `pwd` and `git branch --show-current` to verify your location.\n"
+                "2. If CWD is not the worktree above, STOP and report it — do not try to\n"
+                "   \"fix\" code by re-creating it. The work likely exists on your branch.\n"
+                "3. Never `git checkout` in the main repo path — it breaks parallel builds.\n"
+                "\n"
+            )
+        if instance.repo_path:
+            current_branch = (
+                instance.branch
+                or instance.original_branch
+                or "(check with `git branch --show-current`)"
+            )
+            return (
+                "--- Working Location ---\n"
+                f"You are running in the main repo at {instance.repo_path}.\n"
+                f"Branch: {current_branch}.\n"
+                "No worktree is in use for this session.\n"
+                "\n"
+            )
+        return ""
+
     def _build_system_prompt(
         self, instance: Instance,
         context: str | None = None,
@@ -952,7 +1059,15 @@ class ClaudeRunner:
     ) -> str:
         """Build the system prompt with mobile hint, bot context, pinned context, repo CLAUDE.md, and projects dir."""
         provider = provider or self.provider
-        parts = [config.MOBILE_HINT]
+        # Working Location preamble (t-3541): anchor the LLM's CWD/branch
+        # ground truth at the very top of the system prompt so it can self-
+        # correct after a session loss instead of confabulating about
+        # "missing" code.
+        parts: list[str] = []
+        location_block = self._build_location_block(instance)
+        if location_block:
+            parts.append(location_block)
+        parts.append(config.MOBILE_HINT)
 
         # Explain that user can only see text output (critical for good responses)
         parts.append(config.CHAT_APP_CONSTRAINT)
@@ -1519,10 +1634,167 @@ class ClaudeRunner:
             except Exception:
                 log.warning("Failed to copy %s/ into worktree %s", cfg_dir, wt_dir, exc_info=True)
 
+            # t-3541 Layer 3: install per-worktree PreToolUse hook config.
+            # No-op unless WORKTREE_HOOK_ENABLED is set (default off — must
+            # stay off until Probe B Part 1 confirms hooks load under the
+            # bot's CLAUDE_CONFIG_DIR setup; see config.py for procedure).
+            # Runs inside the per-repo lock already held by the caller
+            # (_ensure_worktree), so .git/info/exclude appends are
+            # serialized across parallel build creations on the same repo.
+            if config.WORKTREE_HOOK_ENABLED:
+                try:
+                    self._install_worktree_hook(repo, wt_dir)
+                except Exception:
+                    log.warning(
+                        "Worktree hook install failed for %s — Layer 3 "
+                        "enforcement will be missing for this build "
+                        "(Layers 1, 2, 4 still active)",
+                        wt_dir, exc_info=True,
+                    )
+
             log.info("Created worktree %s (branch %s) in %s", wt_dir, branch, repo)
         except subprocess.CalledProcessError as e:
             log.error("Failed to create worktree: %s", e.stderr)
             raise RuntimeError(f"Failed to create worktree: {e.stderr}")
+
+    @staticmethod
+    def _install_worktree_hook(repo_path: str, wt_dir: str) -> None:
+        """Install the t-3541 Layer 3 PreToolUse hook into a build worktree.
+
+        Writes ``.claude/settings.local.json`` inside the worktree pointing
+        at the bot's worktree_guard.py script (absolute path so CWD doesn't
+        matter), and appends the settings file to ``.git/info/exclude`` in
+        the common gitdir so it can never ride into the build branch and
+        merge back into the repo's default branch.
+
+        Caller MUST hold the per-repo asyncio git-admin lock (the only
+        callsite, _create_worktree_sync, runs under that lock).  Without
+        the lock, parallel build creations would race on the
+        .git/info/exclude append.
+
+        The exclude append is idempotent — re-creating a worktree on a
+        repo that already has the line is a no-op.
+
+        NOTE: .git/info/exclude lives in the COMMON gitdir, shared across
+        all worktrees and the main repo.  The bot-managed
+        .claude/settings.local.json path is excluded globally for this
+        repo, which is the intended behavior (the file is bot-owned;
+        nothing else in the repo should track it).
+        """
+        # 1. Write the hook config inside the worktree.
+        hook_script = (
+            Path(__file__).resolve().parent / "hooks" / "worktree_guard.py"
+        )
+        if not hook_script.is_file():
+            log.warning("worktree_guard.py not found at %s", hook_script)
+            return
+
+        # Use the same Python that's running the bot — keeps the hook on
+        # the same interpreter the rest of the bot validates against.
+        python_exe = sys.executable or "python"
+        env_block = {
+            "CLAUDE_BOT_WORKTREE": wt_dir,
+            "CLAUDE_BOT_REPO_PATH": repo_path,
+        }
+        # Settings JSON shape — UNVERIFIED, see Probe B Part 1.  The
+        # concrete schema for Claude Code hooks (key names, matcher
+        # type — string regex vs. {"tool_name": ...} object, whether
+        # `command` lives flat or under nested `hooks: [{"type": ...}]`,
+        # whether `env` is honored at all) must be confirmed empirically
+        # before WORKTREE_HOOK_ENABLED is flipped on.  See bot/config.py
+        # for the verification procedure.  If the shape below turns out
+        # wrong, Claude Code will either ignore the file (no-op, safe)
+        # or refuse to load (visible startup error, also safe — Layers
+        # 1, 2, 4 keep working).
+        settings_payload = {
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": {"tool_name": "Bash"},
+                        "command": f'"{python_exe}" "{hook_script}"',
+                        "env": env_block,
+                    }
+                ]
+            }
+        }
+        settings_dir = Path(wt_dir) / ".claude"
+        settings_dir.mkdir(parents=True, exist_ok=True)
+        settings_path = settings_dir / "settings.local.json"
+        # Don't clobber a pre-existing project hook config.  If a project
+        # ships its own settings.local.json, leave it alone — Probe-B-
+        # confirmed dangerous-op blocking isn't worth wiping the project's
+        # own intent.  The build still gets Layers 1/2/4.
+        if settings_path.exists():
+            log.info(
+                "Worktree %s already has .claude/settings.local.json; "
+                "skipping bot hook install (project owns this file)",
+                wt_dir,
+            )
+            return
+        settings_path.write_text(
+            _json_mod.dumps(settings_payload, indent=2),
+            encoding="utf-8",
+        )
+
+        # 2. Append the settings file path to .git/info/exclude so a
+        # stray `git add -A` in the worktree can't stage it onto the
+        # build branch.  Path is relative to the worktree root (git
+        # exclude entries are matched against tree-root-relative paths).
+        exclude_line = ".claude/settings.local.json"
+        # Common gitdir lookup — works for both regular checkouts and
+        # worktrees (`git rev-parse --git-common-dir` returns the shared
+        # .git in either case).
+        try:
+            r = subprocess.run(
+                ["git", "rev-parse", "--git-common-dir"],
+                cwd=repo_path, capture_output=True, text=True,
+                check=True, **_NOWND,
+            )
+            common_dir = r.stdout.strip()
+        except subprocess.CalledProcessError:
+            log.warning(
+                "Could not resolve git common dir for %s; skipping "
+                ".git/info/exclude append",
+                repo_path,
+            )
+            return
+        if not common_dir:
+            # Defensive: empty rev-parse output would resolve to Path('.')
+            # below and create a stray `info/` directory in the repo root.
+            log.warning(
+                "git rev-parse --git-common-dir returned empty for %s; "
+                "skipping .git/info/exclude append",
+                repo_path,
+            )
+            return
+        common_path = Path(common_dir)
+        if not common_path.is_absolute():
+            common_path = (Path(repo_path) / common_path).resolve()
+        info_dir = common_path / "info"
+        info_dir.mkdir(parents=True, exist_ok=True)
+        exclude_path = info_dir / "exclude"
+        existing = ""
+        if exclude_path.exists():
+            try:
+                existing = exclude_path.read_text(encoding="utf-8")
+            except OSError:
+                existing = ""
+        # Idempotent: skip if already present (anywhere on its own line).
+        if any(
+            line.strip() == exclude_line
+            for line in existing.splitlines()
+        ):
+            return
+        addendum = ""
+        if existing and not existing.endswith("\n"):
+            addendum += "\n"
+        addendum += f"{exclude_line}\n"
+        with exclude_path.open("a", encoding="utf-8") as f:
+            f.write(addendum)
+        log.info(
+            "Installed worktree hook for %s; excluded %s in %s",
+            wt_dir, exclude_line, exclude_path,
+        )
 
     @staticmethod
     def _get_default_branch(repo_path: str) -> str:
