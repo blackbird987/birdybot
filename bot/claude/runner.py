@@ -2372,12 +2372,13 @@ class ClaudeRunner:
     def _restore_stash(self, repo: str) -> str:
         """Pop the auto-stash if safe; return user-facing status string.
 
-        Distinguishes four outcomes for the user (and logs accordingly):
-          - clean pop succeeded → "Stashed changes restored after merge"
-          - skipped (tree dirty) → "stash preserved" warning
-          - pop conflicted, rolled back → "stash preserved" warning
-          - pop conflicted, rollback failed → escalated tree-may-be-dirty warning
-          - subprocess raised → soft "could not verify" warning
+        Distinguishes five user-facing outcomes (icon shown is what the user sees;
+        log severity is set independently per call site):
+          - clean pop succeeded → ℹ️ "Stashed changes restored after merge"
+          - skipped (tree dirty) → ℹ️ "not auto-restored, recover manually"
+          - pop conflicted, rolled back → ⚠️ "pop conflicted, aborted; stash preserved"
+          - pop conflicted, rollback failed → ⚠️ "tree may contain conflict markers"
+          - subprocess raised → ⚠️ "could not verify stash state"
 
         Never claims "safe" when safety can't actually be verified — the
         rollback path tracks its own success explicitly.  All git
@@ -2390,14 +2391,17 @@ class ClaudeRunner:
                 ["git", "status", "--porcelain"],
                 cwd=repo, capture_output=True, text=True, **_NOWND,
             )
-            if check_r.stdout.strip():
+            dirty = check_r.stdout.strip()
+            if dirty:
                 log.warning(
-                    "Skipping stash pop — working tree not clean in %s; stash preserved",
+                    "Skipping stash pop — working tree not clean in %s; stash preserved. "
+                    "Dirty paths:\n%s",
                     repo,
+                    dirty,
                 )
                 return (
-                    "\n⚠️ Your uncommitted changes conflicted with the merge. "
-                    "Preserved as `stash@{0}` — `git stash list` / `git stash pop` to recover."
+                    "\nℹ️ Stashed changes not auto-restored (working tree wasn't clean after merge). "
+                    "Recover with `git stash pop` — list with `git stash list`."
                 )
             pop_r = subprocess.run(
                 ["git", "stash", "pop"],
