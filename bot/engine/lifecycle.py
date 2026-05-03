@@ -569,9 +569,14 @@ def make_progress_callbacks(
     def _compute_footer() -> tuple[str | None, str | None]:
         """Render footer text + severity from cached usage. (None, None) if empty.
 
-        Side effect: mirrors the latest token counts onto ``inst`` so the result
-        embed and persisted state reflect the last live value even if no result
-        event arrives (e.g. killed run).
+        Side effect: mirrors the live ``context_tokens`` and ``context_model``
+        onto ``inst`` so the result embed and persisted state reflect the last
+        live value even if no result event arrives (e.g. killed run). Cache
+        token totals are intentionally NOT written here — they're sums computed
+        by ``parser.extract_result`` from the events captured up to stream end.
+        Killed runs therefore receive a partial sum covering the events
+        processed before the kill; analytics needing complete totals should
+        filter to ``status == 'completed'``.
         """
         usage = latest_usage[0]
         if not usage:
@@ -588,10 +593,11 @@ def make_progress_callbacks(
             severity = "crit"
         elif pct >= 0.85:
             severity = "warn"
-        # Persist into the instance so result embed + session state reflect it.
+        # context_tokens is a snapshot (current context-window size) — safe to
+        # update live. cache_read/creation are session totals owned solely by
+        # parser.extract_result at completion; writing per-call snapshots here
+        # would corrupt the totals if the session crashes before finalization.
         inst.context_tokens = tokens
-        inst.cache_read_tokens = int(usage.get("cache_read_input_tokens") or 0)
-        inst.cache_creation_tokens = int(usage.get("cache_creation_input_tokens") or 0)
         if isinstance(model, str):
             inst.context_model = model
         return text, severity
