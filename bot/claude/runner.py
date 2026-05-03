@@ -2372,12 +2372,13 @@ class ClaudeRunner:
     def _restore_stash(self, repo: str) -> str:
         """Pop the auto-stash if safe; return user-facing status string.
 
-        Distinguishes five outcomes for the user (and logs accordingly):
-          - clean pop succeeded → info "Stashed changes restored after merge"
-          - skipped (tree dirty) → info "not auto-restored, recover manually"
-          - pop conflicted, rolled back → warning "pop conflicted, aborted; stash preserved"
-          - pop conflicted, rollback failed → warning "tree may contain conflict markers"
-          - subprocess raised → warning "could not verify stash state"
+        Distinguishes five user-facing outcomes (icon shown is what the user sees;
+        log severity is set independently per call site):
+          - clean pop succeeded → ℹ️ "Stashed changes restored after merge"
+          - skipped (tree dirty) → ℹ️ "not auto-restored, recover manually"
+          - pop conflicted, rolled back → ⚠️ "pop conflicted, aborted; stash preserved"
+          - pop conflicted, rollback failed → ⚠️ "tree may contain conflict markers"
+          - subprocess raised → ⚠️ "could not verify stash state"
 
         Never claims "safe" when safety can't actually be verified — the
         rollback path tracks its own success explicitly.  All git
