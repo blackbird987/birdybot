@@ -290,6 +290,11 @@ class RunResult:
     # context is unrecoverable from this run's perspective.  commands.py surfaces
     # this to the user so the dementia is visible instead of silent.
     session_recovery_exhausted: bool = False
+    # True iff the runner's on_recovery callback fired successfully for this run
+    # (Layer 4 of t-3541).  Used by commands.py to suppress the older terse
+    # post-completion notice when the richer mid-run callback warning already
+    # posted — avoids posting two near-identical warnings for the same event.
+    recovery_warning_posted: bool = False
 
 
 # Valid gate types for autopilot phase boundaries.

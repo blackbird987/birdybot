@@ -278,9 +278,10 @@ async def run_instance(
 
     on_progress = None
     on_stall = None
+    on_recovery = None
     heartbeat_task = None
     if handle:
-        on_progress, on_stall, heartbeat = make_progress_callbacks(
+        on_progress, on_stall, heartbeat, on_recovery = make_progress_callbacks(
             ctx, inst, handle, ctx.effective_verbose,
         )
         heartbeat_task = asyncio.create_task(heartbeat())
@@ -297,6 +298,7 @@ async def run_instance(
                 inst, on_progress=on_progress, on_stall=on_stall,
                 context=ctx.effective_context,
                 sibling_context=sibling_ctx,
+                on_recovery=on_recovery,
             )
         finally:
             if heartbeat_task:
@@ -712,7 +714,53 @@ def make_progress_callbacks(
                 )
             await asyncio.sleep(10)
 
-    return on_progress, on_stall, heartbeat
+    # Layer 4 of t-3541: when the runner's Layer 3 recovery silently clears
+    # session_id, post a visible thread warning so the user understands why
+    # context just vanished.  Without this, a recovery looks identical to a
+    # normal turn and the next "code disappeared" panic has no explanation.
+    recovery_warned = [False]
+
+    async def on_recovery(
+        reason: str,
+        lost_session_id: str | None,
+        worktree_path: str | None,
+    ) -> None:
+        # Fire at most once per session even if recovery fires multiple
+        # times (defensive — Layer 3 only runs once per error_text but
+        # nothing prevents re-entry across retries).
+        if recovery_warned[0]:
+            return
+        recovery_warned[0] = True
+        sid_tail = (lost_session_id or "")[-8:] or "(none)"
+        path = worktree_path or inst.repo_path or "(unknown)"
+        # Trim CLI error to one line so the message stays compact, and
+        # strip backticks so the inline-code wrapping below can't be
+        # broken by an error message that happens to contain one.
+        reason_line = (reason or "session not found").splitlines()[0][:200]
+        reason_line = reason_line.replace("`", "'")
+        path_safe = path.replace("`", "'")
+        try:
+            await ctx.messenger.send_text(
+                ctx.channel_id,
+                (
+                    f"⚠️ **Session context lost — recovery respawn**\n"
+                    f"`{inst.display_id()}` lost its conversation history.\n"
+                    f"• Session id: `…{sid_tail}`\n"
+                    f"• Worktree:   `{path_safe}`\n"
+                    f"• Reason:     `{reason_line}`\n"
+                    f"\n"
+                    f"Your next message will start with fresh context — "
+                    f"re-state what you want it to do."
+                ),
+            )
+        except Exception:
+            log.debug(
+                "Failed to send recovery warning for %s",
+                inst.id,
+                exc_info=True,
+            )
+
+    return on_progress, on_stall, heartbeat, on_recovery
 
 
 async def _try_apply_near_limit(

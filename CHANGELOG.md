@@ -15,6 +15,49 @@
   per-call values into the totals. Note: instances written before this fix
   retain the old snapshot semantics; analyses spanning the cutover should
   filter to `status == "completed"` after this version.
+## v0.92.12 — Worktree location awareness + recovery visibility (2026-05-03)
+
+### Added
+- Worktree location awareness for build sessions (t-3541). The runner now
+  injects a "Working Location" preamble at the top of the system prompt
+  containing the worktree CWD, branch, and main repo path so the LLM has a
+  concrete ground truth instead of having to confabulate from `git status`
+  output. The fallback resume prompt (used when `instance.prompt` is empty)
+  now embeds the same CWD/branch hint so a Layer 3 silent recovery doesn't
+  leave the respawn flying blind. Both helpers degrade gracefully on non-
+  worktree (main-repo) sessions.
+- Richer + earlier visibility for Layer 3 recovery (t-3541). The
+  pre-existing post-run notice (`commands.py:574`, "Lost prior
+  conversation context — claude.exe couldn't resume...") now has a
+  partner: an `on_recovery` callback fires *during* the recovery (before
+  the recursive respawn) via `make_progress_callbacks`, posting a
+  markdown-formatted warning through `messenger.send_text` with the
+  lost session id tail, worktree path, and CLI reason — info the older
+  terse notice didn't carry. Real-time delivery means the user sees the
+  alert before the fresh session starts producing confused output, not
+  after. Backticks in path/reason are scrubbed so they can't break
+  inline-code wrapping. Fires at most once per session; failures are
+  best-effort and never block recovery. The two notices are
+  deduplicated via a new `RunResult.recovery_warning_posted` flag —
+  `commands.py:574` skips its terse version when the richer callback
+  has already fired, so an interactive query gets exactly one warning.
+  (Coverage note: only `_execute_query` currently surfaces recovery
+  state to the user. `_run_bg_task` reads neither flag — pre-existing
+  gap, not in scope here.)
+- Layer 3 PreToolUse hook scaffolding (t-3541, gated). New
+  `bot/claude/hooks/worktree_guard.py` denies `git worktree remove
+  <self>`, destructive ops against the main repo path (`git -C <repo>
+  ...`, `--git-dir=<repo>/.git`, `rm -rf <repo>...`), and fails open
+  otherwise. Per-worktree installer in `_create_worktree_sync` writes a
+  `.claude/settings.local.json` referencing the absolute hook path,
+  appends the path to `.git/info/exclude` (idempotent, under the existing
+  per-repo git-admin lock so parallel build creations don't race), and
+  skips install if the project already ships its own
+  `settings.local.json`. **Disabled by default** via
+  `WORKTREE_HOOK_ENABLED=0` — must stay off until Probe B Part 1 confirms
+  Claude Code loads project-level hooks under `CLAUDE_CONFIG_DIR`. See
+  `bot/config.py` for the verification procedure. Layers 1, 2, and 4 are
+  unconditional and deliver value standalone.
 
 ## v0.92.10 — Lock contract for autopilot chain progression (2026-05-01)
 
