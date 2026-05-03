@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.92.14 — Clarify post-merge stash message (2026-05-03)
+
 - Clarify post-merge stash message — auto-restore-skipped path no longer reads as "conflicted with the merge", and dirty paths are now logged for diagnosis.
 
 ## v0.92.13 — Hide title-gen jsonls in /session (2026-05-03)

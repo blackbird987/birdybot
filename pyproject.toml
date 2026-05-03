@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-bot"
-version = "0.92.13"
+version = "0.92.14"
 description = "Discord bot for managing Claude Code CLI instances"
 requires-python = ">=3.11"
 dependencies = [
