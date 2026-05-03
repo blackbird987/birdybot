@@ -254,6 +254,12 @@ def scan_sessions(
         if not last_msgs:
             continue
 
+        # Skip title-gen subprocess jsonls — they pollute the picker with
+        # "[Temp] Generate a 4-6 word title for…" entries. Backstop in case
+        # titles.py's per-call cleanup missed one.
+        if first_user_msg.startswith(config.TITLE_PROMPT_MARKER):
+            continue
+
         mtime_dt = datetime.fromtimestamp(mtime, tz=timezone.utc)
         age = format_age(now - mtime_dt)
 

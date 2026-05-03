@@ -495,6 +495,13 @@ def set_provider(name: str) -> None:
 
 # --- Canned prompts for contextual action buttons ---
 
+# Title-generation marker. Used as the literal prefix of the title-gen
+# subprocess prompt in bot/discord/titles.py and as the skip marker in
+# bot/engine/sessions.py + the startup cleanup. Defined here (rather than in
+# titles.py) so the engine layer doesn't have to reach into the discord layer.
+# If you change the title prompt wording, update this prefix in lockstep.
+TITLE_PROMPT_MARKER = "Generate a 4-6 word title for this coding session"
+
 PLAN_PROMPT_PREFIX = (
     "Create a detailed implementation plan for the following task. "
     "Explore the codebase, understand existing patterns and architecture, "

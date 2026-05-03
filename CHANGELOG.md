@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### Fixed
+- `/session` picker no longer lists `[Temp] Generate a 4-6 word title for…`
+  entries from the title-generation subprocess. The CLI persists every `-p`
+  call as a JSONL under `~/.claude/projects/`, and `titles.py` ran with
+  `cwd=tempfile.gettempdir()` so each title call left a session file in a
+  Temp-keyed project dir that `scan_sessions` then surfaced in the picker.
+  Three-layer fix: `bot/discord/titles.py` snapshots pre-existing JSONLs in
+  the Temp project dir before spawn and deletes any new ones in a `finally`
+  block; `bot/engine/sessions.py` skips entries whose first user message
+  starts with the shared `config.TITLE_PROMPT_MARKER` constant as a backstop;
+  `bot/app.py` runs `cleanup_stale_temp_jsonls()` at startup to sweep
+  leftovers from prior runs that crashed before per-call cleanup ran. The
+  startup sweep requires BOTH a temp-like project dir AND the marker prefix
+  before deleting, so a real user session that happens to start with the
+  same string is never touched. Marker lives in `bot/config.py` alongside
+  the other Claude-driving prompt prefixes so the engine layer never has to
+  reach into the discord layer.
+
 ## v0.92.11 — Sum cache tokens across session (2026-05-03)
 
 ### Fixed
