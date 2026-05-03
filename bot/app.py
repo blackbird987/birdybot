@@ -436,6 +436,16 @@ async def run() -> None:
     # One-time migration: data/deferred/*.md → repo TODO.md files
     _migrate_deferred_to_todo(store)
 
+    # Sweep stale title-gen jsonls so /session pickers don't list "[Temp]…"
+    # entries from prior runs that crashed before per-call cleanup ran.
+    try:
+        from bot.discord.titles import cleanup_stale_temp_jsonls
+        removed = cleanup_stale_temp_jsonls()
+        if removed:
+            log.info("Cleaned %d stale title-gen jsonl(s)", removed)
+    except Exception:
+        log.warning("Stale title-gen cleanup failed at startup", exc_info=True)
+
     # Restore provider from state (overrides env var if explicitly switched at runtime)
     if store.active_provider and store.active_provider != config.PROVIDER:
         try:
