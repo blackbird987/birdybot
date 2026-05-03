@@ -2392,12 +2392,14 @@ class ClaudeRunner:
             )
             if check_r.stdout.strip():
                 log.warning(
-                    "Skipping stash pop — working tree not clean in %s; stash preserved",
+                    "Skipping stash pop — working tree not clean in %s; stash preserved. "
+                    "Dirty paths:\n%s",
                     repo,
+                    check_r.stdout.strip(),
                 )
                 return (
-                    "\n⚠️ Your uncommitted changes conflicted with the merge. "
-                    "Preserved as `stash@{0}` — `git stash list` / `git stash pop` to recover."
+                    "\nℹ️ Stashed changes not auto-restored (working tree wasn't clean after merge). "
+                    "Recover with `git stash pop` — list with `git stash list`."
                 )
             pop_r = subprocess.run(
                 ["git", "stash", "pop"],
