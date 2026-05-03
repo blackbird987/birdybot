@@ -77,3 +77,4 @@
 - [ ] [Modularity] Consider resolving PENDING_IMAGES_DIR locally instead of DATA_DIR globally (Medium)
 - [ ] [Reliability] Defensive inline comment naming prior incidents (Medium)
 - [ ] [Bug Risk] Confirm no other `session_id = None` assignments in failover paths (Medium)
+- [ ] [Bug Risk] Mixed semantics in state.json (Medium)
