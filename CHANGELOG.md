@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.92.11 — Sum cache tokens across session (2026-05-03)
+
 ### Fixed
 - `Instance.cache_read_tokens` and `Instance.cache_creation_tokens` now reflect
   session totals (sum across every assistant API call) instead of just the last
