@@ -206,15 +206,21 @@ def _extract_latest_plan_text(
     """Return the most recent revised plan text, falling back to the original.
 
     Walks chain_instances backward looking for an APPLY_REVISIONS instance
-    (whose result_text is the revised plan). REVIEW_PLAN instances are
-    intentionally skipped — their result_text is the revisions list, not
-    the plan, and injecting them would mislead the build agent into
-    implementing the review instead of the plan.
+    (whose result_text is the revised plan — both the apply and triage
+    spawns share that origin and both output a full revised plan + a
+    trailing metadata block). REVIEW_PLAN instances are intentionally
+    skipped — their result_text is the revisions list, not the plan.
 
-    Falls back to the chain's source instance (which holds the original
-    plan that started the chain) when no APPLY_REVISIONS exists — e.g.
-    when review converged on the first try and never spawned an apply
-    round, or on the max-rounds-hit path which also returns a REVIEW_PLAN.
+    Relies on `_review_plan_loop` appending intermediate APPLY_REVISIONS
+    to chain_instances; without that, the loop's final return (often a
+    REVIEW_PLAN on the converged-no-deferred path) would be the only
+    revision-related instance visible and the helper would miss real
+    revisions from earlier rounds.
+
+    Falls back to the chain's source instance (the original plan) when
+    no APPLY_REVISIONS exists — e.g. review converged on the first try
+    with nothing to triage, or the chain ran build directly off a plan
+    with no review_loop step.
 
     Strips trailing "### Applied" / "### Triaged" review-metadata blocks
     before returning, so the injected text is plan-only.
@@ -1000,7 +1006,10 @@ _AUTOPILOT_HOLD_STEPS = [
 
 
 async def _review_plan_loop(
-    ctx: RequestContext, source_id: str, source_msg_id: str | None,
+    ctx: RequestContext,
+    source_id: str,
+    source_msg_id: str | None,
+    chain_instances: list[Instance],
 ) -> tuple[Instance | None, bool]:
     """Review plan, auto-applying Critical/High revisions. Max 5 rounds.
 
@@ -1008,6 +1017,11 @@ async def _review_plan_loop(
     loop hit _REVIEW_LOOP_MAX_ROUNDS without a clean review (the autopilot
     chain treats this as a halt signal — silently falling through to build
     burns a build on a plan the reviewer is still flagging).
+
+    Mutates chain_instances: every successful intermediate APPLY_REVISIONS
+    is appended so cost accounting and `_extract_latest_plan_text` can see
+    them. The final return value is appended once by the chain caller (no
+    duplication — early-failure returns happen before the in-loop append).
 
     Stores deferred revisions on the returned Instance.
     """
@@ -1129,6 +1143,14 @@ async def _review_plan_loop(
             return applied, False
         if applied.needs_input:
             return applied, False
+
+        # Surface intermediate apply for downstream consumers — cost accounting
+        # at line ~1776 and _extract_latest_plan_text both need to see it. The
+        # chain caller appends the loop's final return value separately, so an
+        # apply that ends up being the final returned instance is appended by
+        # the caller (not here) — early-failure returns above this line ensure
+        # we never reach this point on a path that becomes the final return.
+        chain_instances.append(applied)
 
         current_source = applied.id
         current_msg = _last_msg_id(applied, ctx.platform)
@@ -1788,7 +1810,7 @@ async def _run_autopilot_chain(
 
             if step == "review_loop":
                 result, did_not_converge = await _review_plan_loop(
-                    ctx, current_id, current_msg,
+                    ctx, current_id, current_msg, chain_instances,
                 )
                 if did_not_converge and result:
                     src_for_halt = ctx.store.get_instance(source_id)
