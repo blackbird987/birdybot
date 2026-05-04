@@ -244,8 +244,13 @@ def _extract_latest_plan_text(
             raw = source.read_result_text() or ""
     if not raw:
         return ""
+    # rfind, not find: a plan body can legitimately use "### Applied" as
+    # a section header (e.g. "### Applied migrations"). The metadata block
+    # is always at the END of the agent's output, so the LAST occurrence
+    # is the right cut point. find() would strip at the body header and
+    # silently drop the rest of the plan + the actual metadata.
     for marker in _PLAN_METADATA_MARKERS:
-        idx = raw.find(marker)
+        idx = raw.rfind(marker)
         if idx != -1:
             raw = raw[:idx].rstrip()
     return raw[:_BUILD_PLAN_INJECT_MAX]
