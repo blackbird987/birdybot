@@ -217,15 +217,19 @@ def _extract_latest_plan_text(
     revision-related instance visible and the helper would miss real
     revisions from earlier rounds.
 
-    Falls back to the chain's source instance (the original plan) when
-    no APPLY_REVISIONS exists — e.g. review converged on the first try
-    with nothing to triage, or the chain ran build directly off a plan
-    with no review_loop step.
+    Falls back to the chain's source instance only when its origin is
+    PLAN (the original plan instance whose result_text IS a plan) and
+    no APPLY_REVISIONS was found. Skipping the fallback for non-plan
+    sources is critical: a build-and-ship chain can be launched from a
+    query/BG task whose result_text is the agent's reply (not a plan),
+    and prepending it under "Plan to implement (verbatim) — implement
+    it exactly" would actively mislead the build agent.
 
     Strips trailing "### Applied" / "### Triaged" review-metadata blocks
     before returning, so the injected text is plan-only.
 
-    Returns "" if neither source has readable text.
+    Returns "" if no usable plan text is available — call sites should
+    skip the inject prefix in that case (`if plan_text:`).
     """
     raw = ""
     for inst in reversed(chain_instances):
@@ -236,7 +240,7 @@ def _extract_latest_plan_text(
                 break
     if not raw:
         source = ctx.store.get_instance(source_id)
-        if source:
+        if source and source.origin == InstanceOrigin.PLAN:
             raw = source.read_result_text() or ""
     if not raw:
         return ""
