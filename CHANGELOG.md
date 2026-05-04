@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+- Halt the autopilot chain when `_review_plan_loop` exhausts its 5-round budget without converging, instead of silently falling through to Build. Previously, a plan that the reviewer kept flagging would still trigger a Build step on the unreviewed plan, often after the underlying CLI session had been compacted — leading to "Build had no changes" failures with no visible cause. The chain now exits via `_exit_chain_needs_input("review_did_not_converge")`, sends a one-line halt notice to the thread, and does NOT mark `review_loop` as completed so a manual restart can re-enter the loop.
+- Inject the latest plan text into the Build prompt as a defense against in-process session compaction. `_extract_latest_plan_text` walks the chain backward for an `APPLY_REVISIONS` result, falls back to the source plan instance, strips trailing `### Applied` / `### Triaged` metadata blocks, and caps the inject at 8000 chars. The prefix lives in `config.BUILD_PLAN_INJECTION_PREFIX` and is prepended to both the single-shot build prompt and the first phase of phased builds — subsequent phases keep the original prompt to avoid re-priming.
+
 ## v0.92.14 — Clarify post-merge stash message (2026-05-03)
 
 - Clarify post-merge stash message — auto-restore-skipped path no longer reads as "conflicted with the merge", and dirty paths are now logged for diagnosis.
