@@ -2985,6 +2985,53 @@ class ClaudeRunner:
         except Exception as e:
             return ("error", f"divergence check raised: {e}")
 
+    @staticmethod
+    def _select_recovery_candidates(store) -> list[Instance]:
+        """Pick the Instance records eligible for the worktree-recovery scan.
+
+        Three filters layered on top of the basic "has branch + worktree +
+        repo" precondition:
+
+          1. Status: skip FAILED/KILLED. Those worktrees are the
+             cleanup_stale_worktrees pass's job — surfacing drift warnings on
+             crashed builds is noise the user can't act on. Cleanup protects
+             branches with ``inst.branch`` set (active_branches) and refuses
+             to rmtree on ``git worktree remove`` failure, so the files stay
+             on disk regardless.
+          2. In-pass dedupe by (repo_path, branch). Chained builds share a
+             branch — one decision per branch, not N events per chain.
+          3. Cross-pass dedupe via ``flagged_branches``. Once any sibling on
+             a branch is parked ``manual_recovery_needed``, ALL siblings on
+             that branch stay quiet on later reboots. Without this, the
+             next-newest sibling becomes the new "first hit" and re-fires
+             the warning every reboot until every sibling is flagged.
+
+        ``store.list_instances(all_=True)`` returns newest-first. Newer
+        flagged siblings can appear after we've already added an older
+        non-flagged sibling to ``candidates``, so flagging is collected in
+        a first pass and applied as a post-filter.
+        """
+        flagged_branches: set[tuple[str, str]] = set()
+        seen: set[tuple[str, str]] = set()
+        candidates: list[Instance] = []
+        for inst in store.list_instances(all_=True):
+            if not (inst.branch and inst.worktree_path and inst.repo_path):
+                continue
+            key = (inst.repo_path, inst.branch)
+            if inst.manual_recovery_needed:
+                flagged_branches.add(key)
+                continue
+            if inst.status in (InstanceStatus.FAILED, InstanceStatus.KILLED):
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(inst)
+        return [
+            inst for inst in candidates
+            if (inst.repo_path, inst.branch) not in flagged_branches
+        ]
+
     async def recover_partial_worktrees(
         self, store, repos: dict[str, str],
     ) -> list[WorktreeRecoveryEvent]:
@@ -3016,11 +3063,7 @@ class ClaudeRunner:
         # Build repo_path → repo_name reverse map for event labelling.
         path_to_name = {p: n for n, p in repos.items()}
 
-        candidates = [
-            inst for inst in store.list_instances(all_=True)
-            if inst.branch and inst.worktree_path and inst.repo_path
-            and not inst.manual_recovery_needed
-        ]
+        candidates = self._select_recovery_candidates(store)
         for inst in candidates:
             repo_path = inst.repo_path
             if not Path(repo_path).is_dir():
