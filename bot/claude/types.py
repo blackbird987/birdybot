@@ -128,6 +128,12 @@ class Instance:
     # recovery scan refused to act and parked the instance for human review.
     manual_recovery_needed: bool = False
     manual_recovery_reason: str | None = None
+    # SHA of the default branch at the moment this conceptual session first
+    # spawned. Anchors the "what shipped while I was away" check on every
+    # resume/compaction so a context-exhausted agent doesn't silently rebuild
+    # work merged onto master after it started. Captured lazily on first
+    # prompt build when None and inherited through spawn_from.
+    master_baseline_head: str | None = None
     _accounts_tried: set[str] = field(default_factory=set)  # Ephemeral: tracks accounts tried this run (not persisted)
 
     def display_id(self) -> str:
@@ -209,6 +215,7 @@ class Instance:
             "chained_from": self.chained_from,
             "manual_recovery_needed": self.manual_recovery_needed,
             "manual_recovery_reason": self.manual_recovery_reason,
+            "master_baseline_head": self.master_baseline_head,
         }
 
     @classmethod
@@ -272,6 +279,7 @@ class Instance:
             chained_from=d.get("chained_from"),
             manual_recovery_needed=d.get("manual_recovery_needed", False),
             manual_recovery_reason=d.get("manual_recovery_reason"),
+            master_baseline_head=d.get("master_baseline_head"),
         )
 
 

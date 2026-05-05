@@ -549,6 +549,11 @@ async def spawn_from(
     new_inst.is_owner_session = source.is_owner_session
     new_inst.bash_policy = inherited_bash_policy
     new_inst.deferred_revisions = source.deferred_revisions
+    # Carry the conceptual session's baseline forward — what was on master
+    # when this thread of work first started. Resumed/chained spawns inherit
+    # so the "what shipped since" check anchors to the original start, not
+    # the most recent button press.
+    new_inst.master_baseline_head = source.master_baseline_head
 
     if cfg.resume_session:
         new_inst.session_id = source.session_id

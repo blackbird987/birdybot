@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+- Resumed/compacted sessions now see "what shipped to master while I was away" so they don't blindly rebuild already-merged work. New `_build_master_context_block` injects last 10 commits on the default branch, "since this session started" delta against `Instance.master_baseline_head` (lazily captured on first prompt build, inherited through `spawn_from`), and a branch-vs-master diff stat that explicitly warns when the diff is empty (likely already merged). Block lands in BOTH the system prompt (fresh spawns) AND the resume user-message preamble at `runner.py:902` (covers `--resume` paths where the original system prompt is replayed verbatim and prompt-builder edits never reach the LLM). Field is added to `Instance.to_dict`/`from_dict` so the baseline survives reboots via the existing `finalize_run` save path.
+- Cross-session merge race: `_merge_branch_sync` was wrapped in `try/except subprocess.CalledProcessError` only — any other exception (`OSError`, `KeyboardInterrupt`, `SystemExit`, errors from `_restore_stash` / `_copy_session_from_worktree` / push) propagated uncaught after `git merge` had already written `.git/MERGE_HEAD`, and the next session's commit/merge attempt would fail blaming the wrong owner. Now wraps the body in `try/finally` that runs `git merge --abort` whenever the success flag wasn't set AND `MERGE_HEAD` still exists. Idempotent and catches every exception type. Plus a new `_check_main_repo_clean` pre-flight on `merge_branch`, `discard_branch`, and `_fix_repo_head` (the last covers startup recovery in `cleanup_stale_worktrees`) that auto-aborts leftover MERGE_HEAD from a crashed prior run, or surfaces an explicit "manual resolution needed" error rather than scribbling on a poisoned tree.
+
 ## v0.92.17 — Recover live worktrees from orphan-cleanup destruction (2026-05-05)
 
 ### Fixed
