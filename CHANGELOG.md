@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.92.18 — Dedupe worktree-recovery scan (2026-05-06)
+
 ### Fixed
 - Worktree-recovery scan no longer spams duplicate "lost git metadata" warnings for chained builds. `recover_partial_worktrees` now layers three filters (extracted as `_select_recovery_candidates` for testability): (1) skip FAILED/KILLED status — drift warnings on crashed/killed builds are noise the user can't usefully act on; (2) in-pass dedupe by `(repo_path, branch)` so chained siblings sharing a branch produce one event, not N; (3) cross-pass dedupe via `flagged_branches` set so once any sibling is parked `manual_recovery_needed`, ALL siblings on that branch stay quiet on later reboots — without this the next-newest sibling re-fired the same warning every reboot. Filter-narrowing is non-destructive: `cleanup_stale_worktrees` protects branches with `inst.branch` set and refuses `shutil.rmtree` on `git worktree remove` failure, so FAILED/KILLED worktrees stay on disk untouched (neither auto-recovered nor deleted) and remain available for manual inspection.
 
