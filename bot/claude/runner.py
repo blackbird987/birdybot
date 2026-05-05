@@ -904,15 +904,20 @@ class ClaudeRunner:
                 f"(Sanity check: your CWD should be `{sanity_path}` "
                 f"on branch `{sanity_branch}` — verify with `pwd` if anything looks off.)"
             )
-            # Bug 1 fix: --resume may replay the original JSONL system prompt
-            # verbatim, in which case any master-context block in the system
-            # prompt never reaches the resumed agent. The user-message
-            # preamble runs on every resume, so inject the master snapshot
-            # here too. Belt-and-braces: even if --resume rebuilds the system
-            # prompt, the redundancy is cheap and reinforces the signal.
+
+        # Bug 1 fix: prepend master-activity snapshot on every resume so the
+        # LLM sees what shipped to master while it was away.  This MUST run
+        # outside the `if not prompt` block — Build buttons set prompt to a
+        # canned BUILD_FROM_PLAN_PROMPT (non-empty), and Build is the exact
+        # path that hits the duplicate-rebuild bug.  Gated on session_id so
+        # fresh spawns (covered by the system-prompt injection) don't
+        # double-up.  --resume may replay the original JSONL system prompt
+        # verbatim, in which case the system-prompt block never reaches the
+        # resumed agent — this user-message slot is the load-bearing copy.
+        if instance.session_id:
             master_block = self._build_master_context_block(instance)
             if master_block:
-                prompt = prompt + "\n\n" + master_block
+                prompt = master_block + "\n\n" + prompt
 
         # API key file (only for providers that support API fallback)
         api_key_file: str | None = None
@@ -1114,6 +1119,17 @@ class ClaudeRunner:
                 short = instance.master_baseline_head[:7]
                 parts.append("")
                 if since_log:
+                    # Cap to keep the prompt bounded — long-running sessions
+                    # could otherwise pump hundreds of commits into every
+                    # resume preamble.
+                    since_lines = since_log.splitlines()
+                    if len(since_lines) > 30:
+                        shown = since_lines[:30]
+                        suffix_line = (
+                            f"... and {len(since_lines) - 30} more "
+                            f"(run `git log {short}..{default_branch} --oneline` for the rest)"
+                        )
+                        since_log = "\n".join([*shown, suffix_line])
                     parts.append(
                         f"Commits merged onto `{default_branch}` since this session "
                         f"started ({short}):"
