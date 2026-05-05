@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.92.15 — Halt autopilot on plan-review non-convergence (2026-05-05)
+
 ### Fixed
 - Halt the autopilot chain when `_review_plan_loop` exhausts its 5-round budget without converging, instead of silently falling through to Build. Previously, a plan that the reviewer kept flagging would still trigger a Build step on the unreviewed plan, often after the underlying CLI session had been compacted — leading to "Build had no changes" failures with no visible cause. The chain now exits via `_exit_chain_needs_input("review_did_not_converge")` (which clears chain state and pings the user with context for manual follow-up).
 - Inject the latest plan text into the Build prompt as a defense against in-process session compaction. `_extract_latest_plan_text` walks the chain backward for the most recent `APPLY_REVISIONS` result (both apply and triage spawns produce a full revised plan), falls back to the source plan instance, strips trailing `### Applied` / `### Triaged` metadata blocks, and caps the inject at 8000 chars. The prefix lives in `config.BUILD_PLAN_INJECTION_PREFIX` and is prepended to both the single-shot build prompt and the first phase of phased builds — subsequent phases keep the original prompt to avoid re-priming.
