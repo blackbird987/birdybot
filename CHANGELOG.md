@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.92.16 — Stack successive Builds on prior unmerged branch (2026-05-05)
+
 ### Fixed
 - Successive Builds in the same Discord thread now stack on the prior unmerged build's branch+worktree instead of re-cutting from master. Previously, hitting Build twice without merging in between would silently throw away the first build's file changes — the conversation session resumed (Claude "remembered" the prior turn) but the worktree reset to master, so build #2 never saw build #1's edits. New `on_build` lookup (`_find_prior_build_for_chain`) finds the most recent COMPLETED build in the same session+repo with a still-registered worktree, and routes the next spawn through `copy_branch=True, chain_from=<prior_id>`. Status + `runner.active_ids` filter blocks chaining onto a still-running build (would otherwise have two processes writing the same worktree). Worktree validation checks `<repo>/.git/worktrees/<basename>` metadata in addition to dir-on-disk to skip orphaned dirs left behind by `git worktree remove` or force-deleted branches. After Merge or Discard the branch+worktree are nulled, so the next Build is fresh from master automatically.
 - Build result footers now show `stacked on t-NNNN` when the build was chained, so the chain decision is visible to the user (and in logs) instead of silent.
