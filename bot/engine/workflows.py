@@ -131,7 +131,10 @@ async def _exit_chain_needs_input(
     if clear_state is None:
         clear_state = outcome not in ("needs_input", "phantom_detected")
     if intervention is None:
-        intervention = outcome in ("needs_input", "phantom_detected", "failed")
+        intervention = outcome in (
+            "needs_input", "phantom_detected", "failed",
+            "review_did_not_converge",
+        )
 
     await _exit_chain(
         ctx, source_id, session_id, steps, completed_steps,
