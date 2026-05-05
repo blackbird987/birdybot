@@ -3007,10 +3007,10 @@ class ClaudeRunner:
              next-newest sibling becomes the new "first hit" and re-fires
              the warning every reboot until every sibling is flagged.
 
-        ``store.list_instances(all_=True)`` returns newest-first. Newer
-        flagged siblings can appear after we've already added an older
-        non-flagged sibling to ``candidates``, so flagging is collected in
-        a first pass and applied as a post-filter.
+        ``store.list_instances(all_=True)`` returns newest-first. Iteration
+        order means we may add a newer non-flagged sibling to ``candidates``
+        before encountering an older flagged sibling on the same branch, so
+        flagging is collected during the loop and applied as a post-filter.
         """
         flagged_branches: set[tuple[str, str]] = set()
         seen: set[tuple[str, str]] = set()
@@ -3047,8 +3047,10 @@ class ClaudeRunner:
         Without this method, ``_is_worktree_live`` returns False forever and
         every later Build silently restarts from master.
 
-        Walks every Instance with ``branch + worktree_path`` set whose repo
-        is known. For each instance whose metadata dir is missing:
+        Walks the deduped+filtered candidate set from
+        ``_select_recovery_candidates`` (one Instance per (repo, branch),
+        FAILED/KILLED skipped, branches with any flagged sibling silenced).
+        For each candidate whose metadata dir is missing:
           1. Compare worktree contents against the branch tip blob hashes.
           2. On match → ``git worktree add --force`` to re-register.
           3. On drift → flag instance ``manual_recovery_needed`` so the

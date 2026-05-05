@@ -1,8 +1,9 @@
 """Regression tests for ``ClaudeRunner._select_recovery_candidates``.
 
-Locks in the v0.92.18 spam fix: the worktree-recovery scan must emit at most
-one decision per (repo, branch), skip FAILED/KILLED status, and stay quiet on
-branches where any sibling has already been parked manual_recovery_needed.
+Locks in the post-v0.92.17 spam fix: the worktree-recovery scan must emit at
+most one decision per (repo, branch), skip FAILED/KILLED status, and stay
+quiet on branches where any sibling has already been parked
+manual_recovery_needed.
 
 Run: python scripts/test_worktree_recovery_dedupe.py
 Exit 0 = all pass, exit 1 = failures.
@@ -34,9 +35,10 @@ def _check(actual, expected, label: str) -> None:
 
 
 # Minimal Instance stand-in. The real dataclass has 50+ fields; the candidate
-# selector touches only six (id, branch, worktree_path, repo_path, status,
+# selector touches only five (branch, worktree_path, repo_path, status,
 # manual_recovery_needed), so a duck-typed shim keeps the test fast and
-# robust against unrelated schema churn.
+# robust against unrelated schema churn. ``id`` is here only for the test's
+# own _ids() helper.
 @dataclass
 class _FakeInst:
     id: str
@@ -77,7 +79,11 @@ def test_chained_siblings_dedupe_to_one_event() -> None:
 
 
 def test_failed_killed_skipped() -> None:
-    """FAILED/KILLED do not get drift warnings — cleanup pass handles them."""
+    """FAILED/KILLED do not get drift warnings. Their worktree files stay
+    on disk untouched (cleanup_stale_worktrees protects branches with
+    inst.branch set), but the bot has no auto-action to take on a crashed
+    or killed build, so the warning would be noise.
+    """
     print("\n[FAILED/KILLED skipped, COMPLETED kept]")
     instances = [
         _FakeInst("a", "claude-bot/a", "/repo/.worktrees/a", "/repo",
