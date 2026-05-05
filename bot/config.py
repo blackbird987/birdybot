@@ -518,6 +518,23 @@ PLAN_PROMPT_PREFIX = (
     "Task: "
 )
 
+# Prefix injected ahead of build prompts when the chain has a plan/review
+# instance available. Defends against session compaction wiping the plan
+# from the resumed session's in-memory history (failure mode observed on
+# t-3655: build agent reported "the previous session was compacted; what I
+# have is a summary of the plan, not the full plan text" and then halted).
+# {plan_text} is substituted via .replace() in the call sites — keeps the
+# template fail-soft if a future placeholder is added without updating the
+# substitution call.
+BUILD_PLAN_INJECTION_PREFIX = (
+    "## Plan to implement (verbatim)\n\n"
+    "The session below was resumed and may have been compacted. "
+    "Treat the following block as the source of truth for what to build, "
+    "not your in-memory recollection. Implement it exactly.\n\n"
+    "{plan_text}\n\n"
+    "---\n\n"
+)
+
 BUILD_FROM_PLAN_PROMPT = (
     "Now implement the plan above. You have full build permissions."
 )

@@ -96,7 +96,7 @@ class ChainEval:
     revision_loops: int = 0
     code_review_rounds: int = 0
     deferred_count: int = 0
-    outcome: str = ""       # "merged", "discarded", "abandoned", "failed", "needs_input"
+    outcome: str = ""       # "merged", "discarded", "abandoned", "failed", "needs_input", "review_did_not_converge"
     intervention: bool = False
     session_evals: list[str] = field(default_factory=list)
     flags: list[EvalFlag] = field(default_factory=list)

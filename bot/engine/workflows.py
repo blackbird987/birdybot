@@ -93,6 +93,7 @@ _CHAIN_EXIT_MESSAGES: dict[str, str] = {
     "budget_exhausted": "Cost budget reached.",
     "merge_failed": "Merge failed — needs resolution.",
     "abandoned": "Build had no changes.",
+    "review_did_not_converge": "Plan review didn't converge — needs your attention.",
 }
 
 
@@ -107,6 +108,7 @@ async def _exit_chain_needs_input(
     outcome: Literal[
         "needs_input", "failed", "phantom_detected",
         "budget_exhausted", "merge_failed", "abandoned",
+        "review_did_not_converge",
     ],
     *,
     clear_state: bool | None = None,
@@ -129,7 +131,10 @@ async def _exit_chain_needs_input(
     if clear_state is None:
         clear_state = outcome not in ("needs_input", "phantom_detected")
     if intervention is None:
-        intervention = outcome in ("needs_input", "phantom_detected", "failed")
+        intervention = outcome in (
+            "needs_input", "phantom_detected", "failed",
+            "review_did_not_converge",
+        )
 
     await _exit_chain(
         ctx, source_id, session_id, steps, completed_steps,
@@ -180,6 +185,78 @@ def _enforce_readonly_floor(
 _REVIEW_STATUS_RE = re.compile(r'```review-status\s*\n(.*?)```', re.DOTALL)
 _HIGH_PRIO_RE = re.compile(r'(?:Critical|High)\s*[·|]', re.IGNORECASE)
 _TRIAGE_RESULT_RE = re.compile(r'```triage-result\s*\n(.*?)```', re.DOTALL)
+
+# Module-level so the halt message in the autopilot chain can reference the
+# same value the loop guard uses — kills drift if the cap ever changes.
+_REVIEW_LOOP_MAX_ROUNDS = 5
+
+# Cap injected plan text so a runaway plan can't blow the prompt budget.
+# 8000 chars ≈ 2000 tokens — comfortably within budget, large enough to
+# carry the full plans we've seen in practice (largest observed ~5500).
+_BUILD_PLAN_INJECT_MAX = 8000
+
+# Headings that mark trailing review-metadata sections in APPLY_REVISIONS /
+# TRIAGE result text. Stripped before injection so the build agent doesn't
+# treat "applied/skipped" log lines as plan items to implement.
+_PLAN_METADATA_MARKERS = ("\n### Applied", "\n### Triaged")
+
+
+def _extract_latest_plan_text(
+    ctx: RequestContext,
+    chain_instances: list[Instance],
+    source_id: str,
+) -> str:
+    """Return the most recent revised plan text, falling back to the original.
+
+    Walks chain_instances backward looking for an APPLY_REVISIONS instance
+    (whose result_text is the revised plan — both the apply and triage
+    spawns share that origin and both output a full revised plan + a
+    trailing metadata block). REVIEW_PLAN instances are intentionally
+    skipped — their result_text is the revisions list, not the plan.
+
+    Relies on `_review_plan_loop` appending intermediate APPLY_REVISIONS
+    to chain_instances; without that, the loop's final return (often a
+    REVIEW_PLAN on the converged-no-deferred path) would be the only
+    revision-related instance visible and the helper would miss real
+    revisions from earlier rounds.
+
+    Falls back to the chain's source instance only when its origin is
+    PLAN (the original plan instance whose result_text IS a plan) and
+    no APPLY_REVISIONS was found. Skipping the fallback for non-plan
+    sources is critical: a build-and-ship chain can be launched from a
+    query/BG task whose result_text is the agent's reply (not a plan),
+    and prepending it under "Plan to implement (verbatim) — implement
+    it exactly" would actively mislead the build agent.
+
+    Strips trailing "### Applied" / "### Triaged" review-metadata blocks
+    before returning, so the injected text is plan-only.
+
+    Returns "" if no usable plan text is available — call sites should
+    skip the inject prefix in that case (`if plan_text:`).
+    """
+    raw = ""
+    for inst in reversed(chain_instances):
+        if inst.origin == InstanceOrigin.APPLY_REVISIONS:
+            text = inst.read_result_text()
+            if text:
+                raw = text
+                break
+    if not raw:
+        source = ctx.store.get_instance(source_id)
+        if source and source.origin == InstanceOrigin.PLAN:
+            raw = source.read_result_text() or ""
+    if not raw:
+        return ""
+    # rfind, not find: a plan body can legitimately use "### Applied" as
+    # a section header (e.g. "### Applied migrations"). The metadata block
+    # is always at the END of the agent's output, so the LAST occurrence
+    # is the right cut point. find() would strip at the body header and
+    # silently drop the rest of the plan + the actual metadata.
+    for marker in _PLAN_METADATA_MARKERS:
+        idx = raw.rfind(marker)
+        if idx != -1:
+            raw = raw[:idx].rstrip()
+    return raw[:_BUILD_PLAN_INJECT_MAX]
 
 
 def _last_msg_id(inst: Instance, platform: str) -> str | None:
@@ -941,13 +1018,25 @@ _AUTOPILOT_HOLD_STEPS = [
 
 
 async def _review_plan_loop(
-    ctx: RequestContext, source_id: str, source_msg_id: str | None,
-) -> Instance | None:
+    ctx: RequestContext,
+    source_id: str,
+    source_msg_id: str | None,
+    chain_instances: list[Instance],
+) -> tuple[Instance | None, bool]:
     """Review plan, auto-applying Critical/High revisions. Max 5 rounds.
+
+    Returns (last_review, did_not_converge). did_not_converge=True iff the
+    loop hit _REVIEW_LOOP_MAX_ROUNDS without a clean review (the autopilot
+    chain treats this as a halt signal — silently falling through to build
+    burns a build on a plan the reviewer is still flagging).
+
+    Mutates chain_instances: every successful intermediate APPLY_REVISIONS
+    is appended so cost accounting and `_extract_latest_plan_text` can see
+    them. The final return value is appended once by the chain caller (no
+    duplication — early-failure returns happen before the in-loop append).
 
     Stores deferred revisions on the returned Instance.
     """
-    MAX_ROUNDS = 5
     current_source = source_id
     current_msg = source_msg_id
     last_review: Instance | None = None
@@ -977,7 +1066,7 @@ async def _review_plan_loop(
             f"{items_text}\n\n{review_prompt}"
         )
 
-    for round_num in range(MAX_ROUNDS):
+    for round_num in range(_REVIEW_LOOP_MAX_ROUNDS):
         status = "Reviewing plan..." if round_num == 0 else f"Re-reviewing plan (round {round_num + 1})..."
         review = await spawn_from(ctx, current_source, SpawnConfig(
             instance_type=InstanceType.QUERY,
@@ -989,9 +1078,9 @@ async def _review_plan_loop(
         ), source_msg_id=current_msg)
 
         if not review or review.status != InstanceStatus.COMPLETED:
-            return review
+            return review, False
         if review.needs_input:
-            return review
+            return review, False
 
         last_review = review
 
@@ -1026,15 +1115,15 @@ async def _review_plan_loop(
                         and not triage_result.needs_input):
                     triage_result.deferred_revisions = _extract_triage_deferred(triage_result)
                     ctx.store.update_instance(triage_result)
-                    return triage_result
+                    return triage_result, False
 
                 # Triage needs user input — pause chain as normal
                 if triage_result and triage_result.needs_input:
-                    return triage_result
+                    return triage_result, False
 
                 # Triage hit usage limit — pause chain, let cooldown retry handle it
                 if triage_result and triage_result.cooldown_retry_at:
-                    return triage_result
+                    return triage_result, False
 
                 # Triage failed — log, notify, fall back to pre-triage review
                 log.warning(
@@ -1050,7 +1139,7 @@ async def _review_plan_loop(
 
             review.deferred_revisions = deferred
             ctx.store.update_instance(review)
-            return review
+            return review, False
 
         # Apply only Critical/High
         applied = await spawn_from(ctx, review.id, SpawnConfig(
@@ -1063,18 +1152,26 @@ async def _review_plan_loop(
         ), source_msg_id=_last_msg_id(review, ctx.platform))
 
         if not applied or applied.status != InstanceStatus.COMPLETED:
-            return applied
+            return applied, False
         if applied.needs_input:
-            return applied
+            return applied, False
+
+        # Surface intermediate apply for downstream consumers — cost accounting
+        # at line ~1776 and _extract_latest_plan_text both need to see it. The
+        # chain caller appends the loop's final return value separately, so an
+        # apply that ends up being the final returned instance is appended by
+        # the caller (not here) — early-failure returns above this line ensure
+        # we never reach this point on a path that becomes the final return.
+        chain_instances.append(applied)
 
         current_source = applied.id
         current_msg = _last_msg_id(applied, ctx.platform)
 
-    # Max rounds hit — store whatever the last review found
+    # Max rounds hit — non-convergence signal for the chain caller.
     if last_review:
         last_review.deferred_revisions = _extract_deferred(last_review)
         ctx.store.update_instance(last_review)
-    return last_review
+    return last_review, True
 
 
 async def _finalize_merge(
@@ -1724,7 +1821,31 @@ async def _run_autopilot_chain(
                     return result
 
             if step == "review_loop":
-                result = await _review_plan_loop(ctx, current_id, current_msg)
+                result, did_not_converge = await _review_plan_loop(
+                    ctx, current_id, current_msg, chain_instances,
+                )
+                if did_not_converge and result:
+                    src_for_halt = ctx.store.get_instance(source_id)
+                    src_ref = f" {src_for_halt.display_id()}" if src_for_halt else ""
+                    await ctx.messenger.send_text(
+                        ctx.channel_id,
+                        f"⚠️ Plan{src_ref} didn't converge after "
+                        f"{_REVIEW_LOOP_MAX_ROUNDS} review rounds — "
+                        f"halting chain. This usually means the plan is "
+                        f"operational/advisory rather than a code change, "
+                        f"or the reviewer keeps finding new issues. "
+                        f"Review the latest revision and either retry the "
+                        f"build manually or simplify the plan.",
+                        silent=True,
+                    )
+                    # Do NOT append "review_loop" to completed_steps — it
+                    # hung, didn't complete; mirror the general failure-exit
+                    # convention further below in this loop.
+                    await _exit_chain_needs_input(
+                        ctx, source_id, session_id, steps, completed_steps,
+                        chain_instances, result, "review_did_not_converge",
+                    )
+                    return result
                 # Post deferred revisions summary if any
                 if result and result.status == InstanceStatus.COMPLETED and result.deferred_revisions:
                     chain_deferred = result.deferred_revisions
@@ -1840,6 +1961,23 @@ async def _run_autopilot_chain(
                         phase_prompt = (config.BUILD_PHASE_PROMPT
                                         .replace("{id}", phase.id)
                                         .replace("{title}", phase.title))
+
+                        # Inject the latest plan text only on the first phase —
+                        # compaction risk is highest at the plan→build handoff.
+                        # Subsequent phases run inside the same build session
+                        # with just-committed code as their anchor, so the
+                        # extra prompt budget isn't worth it on every phase.
+                        if is_first:
+                            plan_text = _extract_latest_plan_text(
+                                ctx, chain_instances, source_id,
+                            )
+                            if plan_text:
+                                phase_prompt = (
+                                    config.BUILD_PLAN_INJECTION_PREFIX
+                                    .replace("{plan_text}", plan_text)
+                                    + phase_prompt
+                                )
+
                         phase_result = await spawn_from(
                             ctx, spawn_source_id,
                             SpawnConfig(
@@ -1992,9 +2130,22 @@ async def _run_autopilot_chain(
                         pre_build_head = await _git_head(
                             source.worktree_path or source.repo_path
                         )
+                    base_prompt = (
+                        config.BUILD_FROM_PLAN_PROMPT if is_plan
+                        else config.BUILD_FROM_QUERY_PROMPT
+                    )
+                    plan_text = _extract_latest_plan_text(
+                        ctx, chain_instances, source_id,
+                    )
+                    build_prompt = (
+                        config.BUILD_PLAN_INJECTION_PREFIX
+                        .replace("{plan_text}", plan_text)
+                        + base_prompt
+                        if plan_text else base_prompt
+                    )
                     result = await spawn_from(ctx, current_id, SpawnConfig(
                         instance_type=InstanceType.TASK,
-                        prompt=config.BUILD_FROM_PLAN_PROMPT if is_plan else config.BUILD_FROM_QUERY_PROMPT,
+                        prompt=build_prompt,
                         mode="build", origin=InstanceOrigin.BUILD,
                         status_text="Building...", resume_session=True,
                         auto_branch=True, silent=True,
