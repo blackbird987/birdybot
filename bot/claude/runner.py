@@ -2985,6 +2985,54 @@ class ClaudeRunner:
         except Exception as e:
             return ("error", f"divergence check raised: {e}")
 
+    @staticmethod
+    def _select_recovery_candidates(store) -> list[Instance]:
+        """Pick the Instance records eligible for the worktree-recovery scan.
+
+        Three filters layered on top of the basic "has branch + worktree +
+        repo" precondition:
+
+          1. Status: skip FAILED/KILLED. Surfacing drift warnings on
+             crashed/killed builds is noise the user can't usefully act on
+             (the build has no "next step" the bot is going to take). The
+             worktree files stay on disk untouched: cleanup_stale_worktrees
+             protects branches with ``inst.branch`` set and refuses
+             ``shutil.rmtree`` on ``git worktree remove`` failure, so the
+             user can still manually inspect or reuse them.
+          2. In-pass dedupe by (repo_path, branch). Chained builds share a
+             branch — one decision per branch, not N events per chain.
+          3. Cross-pass dedupe via ``flagged_branches``. Once any sibling on
+             a branch is parked ``manual_recovery_needed``, ALL siblings on
+             that branch stay quiet on later reboots. Without this, the
+             next-newest sibling becomes the new "first hit" and re-fires
+             the warning every reboot until every sibling is flagged.
+
+        ``store.list_instances(all_=True)`` returns newest-first. Iteration
+        order means we may add a newer non-flagged sibling to ``candidates``
+        before encountering an older flagged sibling on the same branch, so
+        flagging is collected during the loop and applied as a post-filter.
+        """
+        flagged_branches: set[tuple[str, str]] = set()
+        seen: set[tuple[str, str]] = set()
+        candidates: list[Instance] = []
+        for inst in store.list_instances(all_=True):
+            if not (inst.branch and inst.worktree_path and inst.repo_path):
+                continue
+            key = (inst.repo_path, inst.branch)
+            if inst.manual_recovery_needed:
+                flagged_branches.add(key)
+                continue
+            if inst.status in (InstanceStatus.FAILED, InstanceStatus.KILLED):
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(inst)
+        return [
+            inst for inst in candidates
+            if (inst.repo_path, inst.branch) not in flagged_branches
+        ]
+
     async def recover_partial_worktrees(
         self, store, repos: dict[str, str],
     ) -> list[WorktreeRecoveryEvent]:
@@ -2999,8 +3047,10 @@ class ClaudeRunner:
         Without this method, ``_is_worktree_live`` returns False forever and
         every later Build silently restarts from master.
 
-        Walks every Instance with ``branch + worktree_path`` set whose repo
-        is known. For each instance whose metadata dir is missing:
+        Walks the deduped+filtered candidate set from
+        ``_select_recovery_candidates`` (one Instance per (repo, branch),
+        FAILED/KILLED skipped, branches with any flagged sibling silenced).
+        For each candidate whose metadata dir is missing:
           1. Compare worktree contents against the branch tip blob hashes.
           2. On match → ``git worktree add --force`` to re-register.
           3. On drift → flag instance ``manual_recovery_needed`` so the
@@ -3016,11 +3066,7 @@ class ClaudeRunner:
         # Build repo_path → repo_name reverse map for event labelling.
         path_to_name = {p: n for n, p in repos.items()}
 
-        candidates = [
-            inst for inst in store.list_instances(all_=True)
-            if inst.branch and inst.worktree_path and inst.repo_path
-            and not inst.manual_recovery_needed
-        ]
+        candidates = self._select_recovery_candidates(store)
         for inst in candidates:
             repo_path = inst.repo_path
             if not Path(repo_path).is_dir():
