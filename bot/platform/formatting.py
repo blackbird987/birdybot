@@ -545,6 +545,8 @@ def format_result_md(instance: Instance) -> str:
     if dur:
         meta.append(dur)
     meta.append(mode_name(instance.mode))
+    if instance.chained_from:
+        meta.append(f"stacked on {instance.chained_from}")
     if meta:
         parts.append(" | ".join(meta))
 
