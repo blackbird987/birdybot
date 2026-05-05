@@ -78,3 +78,4 @@
 - [ ] [Reliability] Defensive inline comment naming prior incidents (Medium)
 - [ ] [Bug Risk] Confirm no other `session_id = None` assignments in failover paths (Medium)
 - [ ] [Bug Risk] Mixed semantics in state.json (Medium)
+- [ ] [Reliability] Resume-from-reboot may lose iterative revisions (Medium)
