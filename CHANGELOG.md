@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## v0.92.17 — Recover live worktrees from orphan-cleanup destruction (2026-05-05)
+
+### Fixed
+- Stop the orphan-cleanup pass from silently destroying live build worktrees on every restart. Root cause: `git branch --list` decorates branches checked out in linked worktrees with a `+ ` prefix, but `scan_orphan_branches` only stripped `* `, so every active build's branch was misclassified as orphan. Cleanup then ran `git worktree remove` against the live build (succeeded — nuked metadata), then `git branch -D '+ claude-bot/t-XXXX'` (failed silently because of the literal `+`), leaving state.json with a branch+worktree path that `_is_worktree_live` returned False for forever. Next Build click silently re-cut from master. New `bot/claude/branch_utils.canonical_branch` centralizes decoration-stripping; `scan_orphan_branches` now uses `git for-each-ref --format=%(refname:short) refs/heads/{prefix}/*` (decoration-free) and canonicalizes both sides of the membership check defensively. `_cleanup_orphans_sync` checks subprocess return codes, unions in `git worktree list --porcelain`-bound branches as a protected set, and never falls through to `shutil.rmtree` (the original silent-destruction path).
+- Auto-recover partial worktrees at startup. `recover_partial_worktrees` walks every Instance with `branch + worktree_path` set whose `.git/worktrees/<name>/` metadata is missing while the working dir survives. It compares `git ls-tree -r <branch>` blob hashes against batched `git hash-object --stdin-paths` of the worktree files; on match, runs `git worktree add --force` to re-register; on drift, flags the instance `manual_recovery_needed=True` and refuses (would silently overwrite uncommitted work). Every decision is surfaced to the relevant Discord thread (`♻️ Recovered…` or `⚠️ …drift…`); silent recovery was how the original bug stayed invisible.
+- Inline-recover in `on_build` before falling back to fresh-master. When the live-prior-build lookup returns None, `_find_recoverable_session_predecessor` checks for a session-mate whose worktree dir survives but metadata is gone. If found, `_attempt_inline_worktree_recovery` runs the same content-divergence guard, re-registers on match (then re-runs the chain lookup so the next Build stacks correctly), or posts a thread message and falls through on drift. Three outcomes (`♻️ Recovered prior build…`, `⚠️ …drifted; starting fresh…`, `⚠️ Couldn't verify…`) replace the silent reset that masked the t-3700 failure.
+- New `Instance.manual_recovery_needed` / `manual_recovery_reason` fields persist the "drifted, parked for human review" flag across reboots so subsequent recovery passes leave the instance alone.
+
+### Tests
+- New `scripts/test_branch_scan.py` regression test locks in `canonical_branch` decoration handling (`+ `, `* `, plain, detached-HEAD placeholders, internal whitespace) and the t-3700 membership-check scenario.
+
 ## v0.92.16 — Stack successive Builds on prior unmerged branch (2026-05-05)
 
 ### Fixed

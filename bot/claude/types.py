@@ -122,6 +122,12 @@ class Instance:
     api_fallback: bool = False            # Force API billing fallback on next run
     session_account: str | None = None   # Account dir whose ~/.claude/projects/ owns session_id (for prefer-on-resume)
     chained_from: str | None = None       # Instance ID of the prior build whose branch+worktree this build was stacked on
+    # Worktree-recovery flag: startup found the branch tip OK but the worktree
+    # metadata gone AND the working tree had drifted from the branch tip, so
+    # automatic re-register would silently overwrite uncommitted work. The
+    # recovery scan refused to act and parked the instance for human review.
+    manual_recovery_needed: bool = False
+    manual_recovery_reason: str | None = None
     _accounts_tried: set[str] = field(default_factory=set)  # Ephemeral: tracks accounts tried this run (not persisted)
 
     def display_id(self) -> str:
@@ -201,6 +207,8 @@ class Instance:
             "api_fallback": self.api_fallback,
             "session_account": self.session_account,
             "chained_from": self.chained_from,
+            "manual_recovery_needed": self.manual_recovery_needed,
+            "manual_recovery_reason": self.manual_recovery_reason,
         }
 
     @classmethod
@@ -262,6 +270,8 @@ class Instance:
             api_fallback=d.get("api_fallback", False),
             session_account=d.get("session_account"),
             chained_from=d.get("chained_from"),
+            manual_recovery_needed=d.get("manual_recovery_needed", False),
+            manual_recovery_reason=d.get("manual_recovery_reason"),
         )
 
 

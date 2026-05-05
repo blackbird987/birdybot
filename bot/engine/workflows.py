@@ -659,6 +659,22 @@ async def on_build(ctx: RequestContext, source_id: str, source_msg_id: str | Non
     prior = _find_prior_build_for_chain(
         ctx.store, source.session_id, source.repo_path, runner=ctx.runner,
     )
+    if not prior:
+        # No live prior found — but maybe one is recoverable (worktree dir
+        # survived, only git metadata was lost). Don't silently fall through
+        # to fresh-master; that's how the t-3700 bug was invisible.
+        recoverable = _find_recoverable_session_predecessor(
+            ctx.store, source.session_id, source.repo_path,
+        )
+        if recoverable:
+            await _attempt_inline_worktree_recovery(ctx, recoverable)
+            # Re-run the chain lookup — recovery may have made the prior
+            # live again. If it did, fall through to the chained spawn.
+            prior = _find_prior_build_for_chain(
+                ctx.store, source.session_id, source.repo_path,
+                runner=ctx.runner,
+            )
+
     if prior:
         log.info(
             "Build chaining: source=%s onto prior=%s (branch=%s, worktree=%s)",
@@ -677,6 +693,138 @@ async def on_build(ctx: RequestContext, source_id: str, source_msg_id: str | Non
         status_text="Building...", resume_session=True,
         auto_branch=True, silent=True,
     ), source_msg_id=source_msg_id)
+
+
+async def _attempt_inline_worktree_recovery(
+    ctx: RequestContext, inst: Instance,
+) -> None:
+    """Try to re-register a session-mate's lost worktree before fresh-master.
+
+    Three outcomes, all surfaced to the thread (silent fallback was the
+    failure mode of t-3700):
+      - content matches branch tip → ``git worktree add --force`` →
+        thread message ``♻️ Recovered prior build {branch}``.
+      - content drifted → flag ``manual_recovery_needed=True`` →
+        thread message ``⚠️ Prior build {branch} drifted; starting fresh``.
+      - error during check → leave instance alone, log, post a skip notice.
+
+    Mutations to the Instance are persisted via store.update_instance.
+    """
+    runner = ctx.runner
+    if runner is None:
+        return
+    try:
+        decision, reason = await asyncio.to_thread(
+            runner._check_worktree_content_matches_branch,
+            inst.repo_path, inst.worktree_path, inst.branch,
+        )
+    except Exception as e:
+        log.warning(
+            "Inline recovery: divergence check raised for %s",
+            inst.branch, exc_info=True,
+        )
+        try:
+            await ctx.messenger.send_text(
+                ctx.channel_id,
+                f"⚠️ Couldn't verify prior build `{inst.branch}` "
+                f"({e}); starting fresh from master.",
+                silent=True,
+            )
+        except Exception:
+            pass
+        return
+
+    if decision == "diverged":
+        inst.manual_recovery_needed = True
+        inst.manual_recovery_reason = reason
+        ctx.store.update_instance(inst)
+        log.info(
+            "Inline recovery: %s drifted from branch tip — manual review (%s)",
+            inst.branch, reason,
+        )
+        try:
+            await ctx.messenger.send_text(
+                ctx.channel_id,
+                f"⚠️ Prior build `{inst.branch}` lost git metadata AND has "
+                f"uncommitted drift ({reason}). Starting this Build fresh "
+                f"from master — inspect the prior worktree manually before "
+                f"merging anything.",
+                silent=True,
+            )
+        except Exception:
+            log.debug("Failed to send drift notice", exc_info=True)
+        return
+
+    if decision == "error":
+        log.info(
+            "Inline recovery: divergence check error for %s: %s",
+            inst.branch, reason,
+        )
+        try:
+            await ctx.messenger.send_text(
+                ctx.channel_id,
+                f"⚠️ Couldn't verify prior build `{inst.branch}` "
+                f"({reason}); starting fresh from master.",
+                silent=True,
+            )
+        except Exception:
+            pass
+        return
+
+    # decision == "match" → re-register under the per-repo lock
+    try:
+        repo_lock = runner._get_repo_lock(inst.repo_path)
+        async with repo_lock:
+            r = await asyncio.to_thread(
+                subprocess.run,
+                ["git", "worktree", "add", "--force",
+                 inst.worktree_path, inst.branch],
+                cwd=inst.repo_path, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", **config.NOWND,
+            )
+    except Exception as e:
+        log.warning(
+            "Inline recovery: worktree add raised for %s",
+            inst.branch, exc_info=True,
+        )
+        try:
+            await ctx.messenger.send_text(
+                ctx.channel_id,
+                f"⚠️ Couldn't re-register prior build `{inst.branch}` "
+                f"({e}); starting fresh from master.",
+                silent=True,
+            )
+        except Exception:
+            pass
+        return
+
+    if r.returncode != 0:
+        err = (r.stderr or "").strip()[:200]
+        log.warning(
+            "Inline recovery: worktree add failed for %s: %s",
+            inst.branch, err,
+        )
+        try:
+            await ctx.messenger.send_text(
+                ctx.channel_id,
+                f"⚠️ Couldn't re-register prior build `{inst.branch}` "
+                f"({err}); starting fresh from master.",
+                silent=True,
+            )
+        except Exception:
+            pass
+        return
+
+    log.info("Inline recovery: re-registered worktree for %s", inst.branch)
+    try:
+        await ctx.messenger.send_text(
+            ctx.channel_id,
+            f"♻️ Recovered prior build `{inst.branch}` (lost git metadata, "
+            f"content matched branch tip). Build will chain onto it.",
+            silent=True,
+        )
+    except Exception:
+        log.debug("Failed to send recovery notice", exc_info=True)
 
 
 async def on_review_plan(ctx: RequestContext, source_id: str, source_msg_id: str | None = None) -> Instance | None:
@@ -1340,6 +1488,46 @@ def _find_mergeable_instance(store, session_id: str | None) -> Instance | None:
         )
         or _find_session_branch_instance(store, session_id)
     )
+
+
+def _find_recoverable_session_predecessor(
+    store, session_id: str | None, repo_path: str | None,
+) -> Instance | None:
+    """Most recent session-mate instance whose branch+worktree dir survive
+    but whose git worktree metadata is gone — a candidate for inline
+    re-register before a Build click decides to fresh-master.
+
+    Mirrors ``_find_session_branch_instance`` but inverts the live-worktree
+    filter: we want the case where ``_is_worktree_live`` returns False
+    specifically because of missing ``.git/worktrees/<name>/`` metadata,
+    not because the worktree dir itself is gone (that's truly orphaned).
+    Skip instances already flagged ``manual_recovery_needed`` — they were
+    parked on a previous pass and the user hasn't intervened yet.
+    """
+    if not session_id or not repo_path:
+        return None
+    for inst in store.list_instances(all_=True):  # newest-first
+        if inst.session_id != session_id:
+            continue
+        if inst.repo_path != repo_path:
+            continue
+        if inst.manual_recovery_needed:
+            continue
+        if not (inst.branch and inst.original_branch and inst.worktree_path):
+            continue
+        if _is_worktree_live(inst.repo_path, inst.worktree_path):
+            continue
+        # Working dir present but git metadata missing → recoverable
+        wt_dir = Path(inst.worktree_path)
+        if not wt_dir.is_dir():
+            continue
+        meta_dir = (
+            Path(inst.repo_path) / ".git" / "worktrees" / wt_dir.name
+        )
+        if meta_dir.is_dir():
+            continue
+        return inst
+    return None
 
 
 def _find_prior_build_for_chain(
