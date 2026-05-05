@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from bot.store.state import StateStore
 
 from bot import config
+from bot.claude.branch_utils import canonical_branch
 from bot.claude.parser import (
     RunResult,
     extract_progress,
@@ -57,6 +58,26 @@ StallCallback = Callable[[str], None]     # async callback(instance_id)
 # Signature: async callback(reason: str, lost_session_id: str | None,
 #                            worktree_path: str | None)
 RecoveryCallback = Callable
+
+
+class WorktreeRecoveryEvent(NamedTuple):
+    """Result of a single worktree-recovery decision at startup.
+
+    `status` is one of:
+      - "recovered": metadata was missing, content matched branch tip,
+        ``git worktree add --force`` re-registered it.
+      - "manual_recovery_needed": metadata missing AND working-tree content
+        had drifted from branch tip — refused to overwrite, parked the
+        instance for human review (``manual_recovery_needed=True`` set on
+        the Instance dataclass).
+      - "skipped": couldn't decide (git error, missing dir, etc.); recovery
+        deferred. The instance is left alone so the user can investigate.
+    """
+    instance_id: str
+    repo_name: str
+    branch: str
+    status: str  # "recovered" | "manual_recovery_needed" | "skipped"
+    detail: str = ""
 
 
 class DiscardOutcome(NamedTuple):
@@ -2814,17 +2835,284 @@ class ClaudeRunner:
 
     @staticmethod
     def scan_orphan_branches(repo_path: str, active_branches: set[str]) -> list[str]:
-        """Find bot-managed branches not associated with active instances."""
+        """Find bot-managed branches not associated with active instances.
+
+        Uses ``git for-each-ref`` instead of ``git branch --list`` so output is
+        decoration-free — ``git branch`` prefixes worktree-bound branches with
+        ``+ `` which previously slipped past the membership filter and caused
+        every active build to be misclassified as orphan on every restart.
+        Both sides of the membership check are normalised through
+        ``canonical_branch`` for defense-in-depth in case any caller still
+        passes pre-decorated names.
+        """
         try:
+            # Explicit /* glob: ``refs/heads/{prefix}/`` (no glob) is treated as
+            # an exact ref name, missing all branches. ``refs/heads/{prefix}/*``
+            # matches every direct child.
             result = subprocess.run(
-                ["git", "branch", "--list", f"{config.BRANCH_PREFIX}/*"],
-                cwd=repo_path, capture_output=True, text=True, **_NOWND,
+                ["git", "for-each-ref",
+                 "--format=%(refname:short)",
+                 f"refs/heads/{config.BRANCH_PREFIX}/*"],
+                cwd=repo_path, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", **_NOWND,
             )
-            branches = [b.strip().lstrip("* ") for b in result.stdout.splitlines() if b.strip()]
-            return [b for b in branches if b not in active_branches]
+            if result.returncode != 0:
+                log.warning(
+                    "for-each-ref failed in %s: %s",
+                    repo_path, (result.stderr or "").strip(),
+                )
+                return []
+            branches: list[str] = []
+            for line in result.stdout.splitlines():
+                cb = canonical_branch(line)
+                if cb is not None:
+                    branches.append(cb)
+            active_canon = {
+                canonical_branch(b) for b in active_branches
+                if canonical_branch(b) is not None
+            }
+            return [b for b in branches if b not in active_canon]
         except Exception:
             log.debug("Failed to scan branches in %s", repo_path, exc_info=True)
             return []
+
+    @staticmethod
+    def _git_worktree_branches(repo_path: str) -> set[str]:
+        """Return the set of branches currently bound to a git worktree.
+
+        Parses ``git worktree list --porcelain``; lines starting with
+        ``branch refs/heads/X`` give the bound branch X. Used as a
+        protect-list during orphan cleanup so a branch with a live worktree
+        can never be mistakenly deleted, even if the active-branch set fed
+        in by the caller is stale.
+        """
+        try:
+            r = subprocess.run(
+                ["git", "worktree", "list", "--porcelain"],
+                cwd=repo_path, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", **_NOWND,
+            )
+            if r.returncode != 0:
+                return set()
+            bound: set[str] = set()
+            for line in r.stdout.splitlines():
+                if line.startswith("branch refs/heads/"):
+                    name = line[len("branch refs/heads/"):].strip()
+                    if name:
+                        bound.add(name)
+            return bound
+        except Exception:
+            log.debug("worktree list failed in %s", repo_path, exc_info=True)
+            return set()
+
+    @staticmethod
+    def _check_worktree_content_matches_branch(
+        repo_path: str, worktree_path: str, branch: str,
+    ) -> tuple[str, str]:
+        """Cheap content-divergence check: do all tracked files in the
+        worktree dir hash to the same blobs as the branch tip?
+
+        Returns one of:
+          - ("match", "") — every tracked path's content hash matches the
+            branch tip's tree. Safe to ``git worktree add --force`` — the
+            re-register won't surprise anyone with overwrites.
+          - ("diverged", reason) — at least one tracked file's content has
+            been modified relative to the branch tip. Re-registering would
+            silently overwrite uncommitted work — refuse.
+          - ("error", reason) — couldn't determine (git error, missing dir).
+            Caller should treat as "diverged" for safety.
+
+        Implementation: ``git ls-tree -r <branch>`` enumerates expected blobs;
+        ``git hash-object --stdin-paths`` rehashes the corresponding files
+        in the worktree dir in a single batched call. Untracked files in the
+        worktree are ignored — they don't constitute "drift" since they
+        wouldn't be touched by re-registering.
+        """
+        wt = Path(worktree_path)
+        if not wt.is_dir():
+            return ("error", f"worktree dir missing: {worktree_path}")
+        try:
+            r = subprocess.run(
+                ["git", "ls-tree", "-r", branch],
+                cwd=repo_path, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", **_NOWND,
+            )
+            if r.returncode != 0:
+                return ("error", f"ls-tree failed: {(r.stderr or '').strip()[:200]}")
+            # Each line: "<mode> <type> <sha>\t<path>"
+            expected: dict[str, str] = {}
+            for line in r.stdout.splitlines():
+                if not line:
+                    continue
+                meta, _, path = line.partition("\t")
+                if not path:
+                    continue
+                parts = meta.split()
+                if len(parts) < 3 or parts[1] != "blob":
+                    continue
+                expected[path] = parts[2]
+            if not expected:
+                return ("match", "")
+            # Build batched hash-object input: only include paths that exist
+            # as regular files in the worktree. Missing files mean drift
+            # (deletion) — return diverged immediately.
+            paths_in_order: list[str] = []
+            stdin_lines: list[str] = []
+            for rel in expected:
+                f = wt / rel
+                if not f.is_file():
+                    return ("diverged", f"missing tracked file: {rel}")
+                paths_in_order.append(rel)
+                stdin_lines.append(str(f))
+            r = subprocess.run(
+                ["git", "hash-object", "--stdin-paths"],
+                cwd=repo_path, capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
+                input="\n".join(stdin_lines) + "\n", **_NOWND,
+            )
+            if r.returncode != 0:
+                return ("error", f"hash-object failed: {(r.stderr or '').strip()[:200]}")
+            actual = r.stdout.splitlines()
+            if len(actual) != len(paths_in_order):
+                return (
+                    "error",
+                    f"hash-object output mismatch: {len(actual)} vs {len(paths_in_order)}",
+                )
+            for rel, sha in zip(paths_in_order, actual):
+                if sha.strip() != expected[rel]:
+                    return ("diverged", f"content drift: {rel}")
+            return ("match", "")
+        except Exception as e:
+            return ("error", f"divergence check raised: {e}")
+
+    async def recover_partial_worktrees(
+        self, store, repos: dict[str, str],
+    ) -> list[WorktreeRecoveryEvent]:
+        """Re-register worktrees whose ``.git/worktrees/<name>/`` metadata is
+        gone but whose working directory + branch are otherwise intact.
+
+        This is the auto-recovery path for the t-3700 failure mode: an
+        earlier orphan-cleanup pass ran ``git worktree remove`` against a
+        live build (because it misidentified the branch as orphan), nuked
+        the metadata, then failed to delete the branch. The branch tip and
+        the working files survived; only git's link between them was lost.
+        Without this method, ``_is_worktree_live`` returns False forever and
+        every later Build silently restarts from master.
+
+        Walks every Instance with ``branch + worktree_path`` set whose repo
+        is known. For each instance whose metadata dir is missing:
+          1. Compare worktree contents against the branch tip blob hashes.
+          2. On match → ``git worktree add --force`` to re-register.
+          3. On drift → flag instance ``manual_recovery_needed`` so the
+             user is forced to inspect before the bot touches it again.
+          4. On error → emit a "skipped" event, leave instance untouched.
+
+        Each decision is recorded as a ``WorktreeRecoveryEvent`` so the
+        platform layer can post a one-line notice into the relevant thread.
+        Silence is what kept the original bug invisible — we don't repeat
+        that here.
+        """
+        events: list[WorktreeRecoveryEvent] = []
+        # Build repo_path → repo_name reverse map for event labelling.
+        path_to_name = {p: n for n, p in repos.items()}
+
+        candidates = [
+            inst for inst in store.list_instances(all_=True)
+            if inst.branch and inst.worktree_path and inst.repo_path
+            and not inst.manual_recovery_needed
+        ]
+        for inst in candidates:
+            repo_path = inst.repo_path
+            if not Path(repo_path).is_dir():
+                continue
+            wt_path = inst.worktree_path
+            wt_dir = Path(wt_path)
+            basename = wt_dir.name
+            meta_dir = Path(repo_path) / ".git" / "worktrees" / basename
+            # Metadata present? Nothing to recover.
+            if meta_dir.is_dir():
+                continue
+            # Working directory missing entirely? Not our problem here —
+            # the orphan-cleanup path will pick it up. (Also: we'd have no
+            # files to compare against the branch tip.)
+            if not wt_dir.is_dir():
+                continue
+            repo_name = path_to_name.get(repo_path, repo_path)
+            # Ensure the branch still exists at all — if not, this isn't a
+            # partial-worktree case, it's a fully-cleaned-up case.
+            r = subprocess.run(
+                ["git", "rev-parse", "--verify", f"refs/heads/{inst.branch}"],
+                cwd=repo_path, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", **_NOWND,
+            )
+            if r.returncode != 0:
+                events.append(WorktreeRecoveryEvent(
+                    instance_id=inst.id, repo_name=repo_name,
+                    branch=inst.branch, status="skipped",
+                    detail="branch no longer exists",
+                ))
+                continue
+            # Check content match vs branch tip
+            try:
+                decision, reason = await asyncio.to_thread(
+                    self._check_worktree_content_matches_branch,
+                    repo_path, wt_path, inst.branch,
+                )
+            except Exception as e:
+                events.append(WorktreeRecoveryEvent(
+                    instance_id=inst.id, repo_name=repo_name,
+                    branch=inst.branch, status="skipped",
+                    detail=f"divergence check raised: {e}",
+                ))
+                continue
+            if decision == "diverged":
+                inst.manual_recovery_needed = True
+                inst.manual_recovery_reason = reason
+                store.update_instance(inst)
+                events.append(WorktreeRecoveryEvent(
+                    instance_id=inst.id, repo_name=repo_name,
+                    branch=inst.branch, status="manual_recovery_needed",
+                    detail=reason,
+                ))
+                continue
+            if decision == "error":
+                events.append(WorktreeRecoveryEvent(
+                    instance_id=inst.id, repo_name=repo_name,
+                    branch=inst.branch, status="skipped",
+                    detail=reason,
+                ))
+                continue
+            # decision == "match": safe to re-register under repo lock
+            try:
+                repo_lock = self._get_repo_lock(repo_path)
+                async with repo_lock:
+                    r = await asyncio.to_thread(
+                        subprocess.run,
+                        ["git", "worktree", "add", "--force",
+                         str(wt_dir), inst.branch],
+                        cwd=repo_path, capture_output=True, text=True,
+                        encoding="utf-8", errors="replace", **_NOWND,
+                    )
+            except Exception as e:
+                events.append(WorktreeRecoveryEvent(
+                    instance_id=inst.id, repo_name=repo_name,
+                    branch=inst.branch, status="skipped",
+                    detail=f"worktree add raised: {e}",
+                ))
+                continue
+            if r.returncode != 0:
+                events.append(WorktreeRecoveryEvent(
+                    instance_id=inst.id, repo_name=repo_name,
+                    branch=inst.branch, status="skipped",
+                    detail=f"worktree add failed: {(r.stderr or '').strip()[:200]}",
+                ))
+                continue
+            events.append(WorktreeRecoveryEvent(
+                instance_id=inst.id, repo_name=repo_name,
+                branch=inst.branch, status="recovered",
+                detail="re-registered after metadata loss",
+            ))
+        return events
 
     @staticmethod
     def scan_orphan_worktrees(repo_path: str, active_worktrees: set[str]) -> list[str]:
@@ -2970,37 +3258,73 @@ class ClaudeRunner:
         return f"switched HEAD from {current} to {target}"
 
     def _cleanup_orphans_sync(self, store, repo_path: str) -> list[str]:
-        """Remove orphaned branches and worktrees for a repo."""
+        """Remove orphaned branches and worktrees for a repo.
+
+        Defense-in-depth against the t-3700 bug class: never falls through to
+        ``shutil.rmtree`` (would silently destroy uncommitted work in a worktree
+        whose metadata was lost), and unions in ``git worktree list``-bound
+        branches as a protected set. If either ``git worktree remove`` or
+        ``git branch -D`` returns non-zero we log+report a skip rather than
+        keep marching toward deletion.
+        """
         cleaned: list[str] = []
 
-        # Collect branches still referenced by any instance
+        # Collect branches still referenced by any instance — canonicalise
+        # both sides so a stray decoration in state.json (or anywhere else)
+        # can't punch a hole in the protect-list.
         active_branches = {
-            inst.branch for inst in store.list_instances(all_=True)
-            if inst.branch
+            canonical_branch(inst.branch) for inst in store.list_instances(all_=True)
+            if inst.branch and canonical_branch(inst.branch)
         }
+        # Belt-and-braces: anything currently bound to a live worktree is
+        # always protected, even if state.json forgot it.
+        wt_protected = self._git_worktree_branches(repo_path)
+        protected = active_branches | wt_protected
 
         orphan_branches = self.scan_orphan_branches(repo_path, active_branches)
         for branch in orphan_branches:
+            # Skip anything in the protected set after the second check —
+            # scan_orphan_branches uses active_branches but wt_protected is
+            # a separate, independent guard.
+            if branch in protected:
+                cleaned.append(f"skip orphan {branch}: bound to live worktree")
+                continue
+
             # Infer worktree dir from branch name (prefix/t-xxx → .worktrees/t-xxx)
             wt_name = branch.split("/")[-1] if "/" in branch else branch
             wt_dir = Path(repo_path) / ".worktrees" / wt_name
             if wt_dir.exists():
                 r = subprocess.run(
                     ["git", "worktree", "remove", str(wt_dir), "--force"],
-                    cwd=repo_path, capture_output=True, text=True, **_NOWND,
+                    cwd=repo_path, capture_output=True, text=True,
+                    encoding="utf-8", errors="replace", **_NOWND,
                 )
                 if r.returncode != 0:
-                    shutil.rmtree(str(wt_dir), ignore_errors=True)
-            subprocess.run(
+                    cleaned.append(
+                        f"skip orphan {branch}: worktree remove failed "
+                        f"({(r.stderr or '').strip()[:200]})"
+                    )
+                    # Do NOT fall through to rmtree — silent destruction of
+                    # uncommitted work was exactly the bug we are fixing.
+                    continue
+            r = subprocess.run(
                 ["git", "branch", "-D", branch],
-                cwd=repo_path, capture_output=True, text=True, **_NOWND,
+                cwd=repo_path, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", **_NOWND,
             )
+            if r.returncode != 0:
+                cleaned.append(
+                    f"skip orphan {branch}: branch -D failed "
+                    f"({(r.stderr or '').strip()[:200]})"
+                )
+                continue
             cleaned.append(f"cleaned orphan {branch}")
 
         # Prune any worktree registrations pointing to deleted directories
         subprocess.run(
             ["git", "worktree", "prune"],
-            cwd=repo_path, capture_output=True, text=True, **_NOWND,
+            cwd=repo_path, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", **_NOWND,
         )
 
         return cleaned

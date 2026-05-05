@@ -1156,11 +1156,34 @@ class ClaudeBot(discord.Client):
         asyncio.create_task(self._startup_worktree_cleanup())
 
     async def _startup_worktree_cleanup(self) -> None:
-        """Merge pending autopilot results and clean up orphaned worktrees."""
+        """Recover partial worktrees, merge pending results, clean orphans.
+
+        Order is load-bearing: ``recover_partial_worktrees`` must run BEFORE
+        ``cleanup_stale_worktrees`` so an instance whose metadata was lost in
+        an earlier buggy cleanup pass gets re-registered before the next
+        cleanup pass would otherwise scoop it up as an orphan again. Without
+        the recovery-first ordering, a single bad startup could permanently
+        cement state.json into a broken state across reboots.
+        """
         try:
             repos = self._store.list_repos()
             if not repos:
                 return
+            try:
+                events = await self._runner.recover_partial_worktrees(
+                    self._store, repos,
+                )
+            except Exception:
+                events = []
+                log.warning("Worktree recovery scan failed", exc_info=True)
+            for ev in events:
+                log.info(
+                    "Worktree recovery: %s %s/%s status=%s detail=%s",
+                    ev.instance_id, ev.repo_name, ev.branch,
+                    ev.status, ev.detail,
+                )
+            if events:
+                await self._surface_recovery_events(events)
             messages = await self._runner.cleanup_stale_worktrees(
                 self._store, repos,
             )
@@ -1170,6 +1193,52 @@ class ClaudeBot(discord.Client):
                 log.info("Startup cleanup complete: %d actions", len(messages))
         except Exception:
             log.warning("Startup worktree cleanup failed", exc_info=True)
+
+    async def _surface_recovery_events(self, events) -> None:
+        """Post a one-line notice into each recovery event's thread.
+
+        Silent recovery is what kept the original t-3700 bug invisible —
+        every surfaced event here is a state change the user (managing
+        from phone) needs to see. ``skipped`` events with a "branch no
+        longer exists" detail are noise (recovered upstream by orphan
+        cleanup) and intentionally suppressed.
+        """
+        for ev in events:
+            if ev.status == "skipped" and "no longer exists" in (ev.detail or ""):
+                continue
+            inst = self._store.get_instance(ev.instance_id)
+            if not inst or not inst.session_id:
+                continue
+            try:
+                lookup = self._forums.session_to_thread(inst.session_id)
+            except Exception:
+                lookup = None
+            if not lookup:
+                continue
+            thread_id, _ = lookup
+            if ev.status == "recovered":
+                text = (
+                    f"♻️ Recovered worktree for `{ev.branch}` "
+                    f"after metadata loss (content matched branch tip)."
+                )
+            elif ev.status == "manual_recovery_needed":
+                text = (
+                    f"⚠️ Worktree for `{ev.branch}` lost git metadata "
+                    f"AND has uncommitted drift ({ev.detail}). "
+                    f"Inspect manually before the next Build."
+                )
+            else:  # "skipped"
+                text = (
+                    f"⚠️ Skipped worktree recovery for `{ev.branch}` "
+                    f"({ev.detail})."
+                )
+            try:
+                await self.messenger.send_text(thread_id, text, silent=True)
+            except Exception:
+                log.debug(
+                    "Failed to post recovery notice to thread %s", thread_id,
+                    exc_info=True,
+                )
 
     def _in_scope(self, guild: discord.Guild | None, channel: discord.abc.GuildChannel | None = None) -> bool:
         """Check guild + channel is within our category."""
