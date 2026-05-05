@@ -154,6 +154,11 @@ class SpawnConfig:
     copy_branch: bool = False
     auto_branch: bool = False
     silent: bool = False
+    # When set with copy_branch=True, spawn_from copies branch/worktree from
+    # this instance ID instead of from `source`. Used by on_build to chain
+    # successive builds in the same thread onto the prior build's branch
+    # rather than re-cutting from master each time.
+    chain_from: str | None = None
     # Hard read-only floor: when set to "explore", spawn_from forces the new
     # instance to explore mode AND bash_policy="none", overriding any value
     # that would otherwise be inherited from the parent (e.g. a build-mode
@@ -548,9 +553,33 @@ async def spawn_from(
     if cfg.resume_session:
         new_inst.session_id = source.session_id
     if cfg.copy_branch:
-        new_inst.branch = source.branch
-        new_inst.original_branch = source.original_branch
-        new_inst.worktree_path = source.worktree_path
+        branch_src: Instance | None = source
+        if cfg.chain_from:
+            candidate = ctx.store.get_instance(cfg.chain_from)
+            if candidate and candidate.branch and candidate.worktree_path:
+                branch_src = candidate
+            else:
+                # chain_from is an explicit declaration that we want to stack
+                # on a specific prior build. If that prior vanished between
+                # the on_build lookup and now, abort the spawn rather than
+                # silently fall back to source (which usually has no branch
+                # for chain callers) or to a fresh master branch (which is
+                # the very behavior we were trying to avoid).
+                log.error(
+                    "spawn_from %s: chain_from=%s missing or no live branch — aborting",
+                    new_inst.id, cfg.chain_from,
+                )
+                new_inst.status = InstanceStatus.FAILED
+                new_inst.error = (
+                    f"chain_from={cfg.chain_from} vanished before spawn"
+                )
+                ctx.store.update_instance(new_inst)
+                return None
+        new_inst.branch = branch_src.branch
+        new_inst.original_branch = branch_src.original_branch
+        new_inst.worktree_path = branch_src.worktree_path
+        if cfg.chain_from:
+            new_inst.chained_from = cfg.chain_from
     elif cfg.auto_branch:
         new_inst.branch = f"{config.BRANCH_PREFIX}/{new_inst.id}"
 
@@ -617,9 +646,33 @@ async def on_build(ctx: RequestContext, source_id: str, source_msg_id: str | Non
         await ctx.messenger.send_text(ctx.channel_id, "Instance not found.")
         return None
     is_plan = source.plan_active
+    prompt = (
+        config.BUILD_FROM_PLAN_PROMPT if is_plan
+        else config.BUILD_FROM_QUERY_PROMPT
+    )
+
+    # Stack on the prior unmerged build in this thread/session if one exists,
+    # so successive Builds extend the same branch instead of re-cutting from
+    # master each time. Falls back to a fresh branch when there is no prior,
+    # or when the prior was already merged/discarded (branch nulled), or
+    # when its worktree is no longer git-registered.
+    prior = _find_prior_build_for_chain(
+        ctx.store, source.session_id, source.repo_path, runner=ctx.runner,
+    )
+    if prior:
+        log.info(
+            "Build chaining: source=%s onto prior=%s (branch=%s, worktree=%s)",
+            source.id, prior.id, prior.branch, prior.worktree_path,
+        )
+        return await spawn_from(ctx, source_id, SpawnConfig(
+            instance_type=InstanceType.TASK, prompt=prompt,
+            mode="build", origin=InstanceOrigin.BUILD,
+            status_text="Building...", resume_session=True,
+            copy_branch=True, chain_from=prior.id, silent=True,
+        ), source_msg_id=source_msg_id)
+
     return await spawn_from(ctx, source_id, SpawnConfig(
-        instance_type=InstanceType.TASK,
-        prompt=config.BUILD_FROM_PLAN_PROMPT if is_plan else config.BUILD_FROM_QUERY_PROMPT,
+        instance_type=InstanceType.TASK, prompt=prompt,
         mode="build", origin=InstanceOrigin.BUILD,
         status_text="Building...", resume_session=True,
         auto_branch=True, silent=True,
@@ -1222,25 +1275,109 @@ async def _finalize_merge(
     return True
 
 
-def _find_mergeable_instance(store, session_id: str | None) -> Instance | None:
-    """Find a completed done instance with a branch, for merge-step resume."""
+def _is_worktree_live(repo_path: str, worktree_path: str) -> bool:
+    """Cheap validation that a worktree is registered with git, not just
+    a leftover directory.
+
+    git worktree creates ``<repo>/.git/worktrees/<basename>/`` metadata when
+    a worktree is registered, and removes that dir when the worktree is
+    unregistered (``git worktree remove``).  Checking both the worktree dir
+    and that metadata catches the case where the dir survived but git no
+    longer recognises it (manual rm, branch force-deleted, ``worktree
+    remove`` followed by mkdir, etc.) — preventing the chain-detector from
+    handing a dead worktree path to a fresh build spawn.
+
+    Pure stat — no subprocess.
+    """
+    if not repo_path or not worktree_path:
+        return False
+    try:
+        if not Path(worktree_path).is_dir():
+            return False
+        basename = Path(worktree_path).name
+        return (Path(repo_path) / ".git" / "worktrees" / basename).is_dir()
+    except OSError:
+        return False
+
+
+def _find_session_branch_instance(
+    store, session_id: str | None,
+    *, predicate=None,
+) -> Instance | None:
+    """Most recent instance in a session with a live branch + worktree.
+
+    Filters newest-first to instances sharing ``session_id`` whose
+    ``branch``/``original_branch``/``worktree_path`` are all set and whose
+    worktree is still registered with git (`_is_worktree_live`).  An
+    optional predicate narrows further (e.g. require completion, exclude
+    running instances).  Shared between the merge-resume path and the
+    chain-detector so they can't drift out of sync.
+    """
     if not session_id:
         return None
-    # list_instances returns newest-first — first match is the most recent
-    all_insts = store.list_instances(all_=True)
-    # Prefer a done instance
-    for inst in all_insts:
-        if (inst.session_id == session_id
-                and inst.origin == InstanceOrigin.DONE
-                and inst.status == InstanceStatus.COMPLETED
-                and inst.branch and inst.original_branch):
-            return inst
-    # Fallback: any instance in the session with a branch
-    for inst in all_insts:
-        if (inst.session_id == session_id
-                and inst.branch and inst.original_branch):
-            return inst
+    for inst in store.list_instances(all_=True):  # newest-first
+        if inst.session_id != session_id:
+            continue
+        if not (inst.branch and inst.original_branch and inst.worktree_path):
+            continue
+        if not _is_worktree_live(inst.repo_path, inst.worktree_path):
+            continue
+        if predicate is not None and not predicate(inst):
+            continue
+        return inst
     return None
+
+
+def _find_mergeable_instance(store, session_id: str | None) -> Instance | None:
+    """Find a completed done instance with a branch, for merge-step resume."""
+    return (
+        _find_session_branch_instance(
+            store, session_id,
+            predicate=lambda i: (
+                i.origin == InstanceOrigin.DONE
+                and i.status == InstanceStatus.COMPLETED
+            ),
+        )
+        or _find_session_branch_instance(store, session_id)
+    )
+
+
+def _find_prior_build_for_chain(
+    store, session_id: str | None, repo_path: str | None,
+    runner=None,
+) -> Instance | None:
+    """Most recent COMPLETED build in this session+repo to chain a new
+    build on top of.
+
+    Returns None if there is no prior unmerged work, or if the only
+    candidate is still running (status != COMPLETED, or the runner still
+    has it as an active subprocess).  Callers fall back to a fresh
+    branch-from-master spawn in that case.
+
+    The status + active-subprocess gate is critical: ``inst.branch`` is
+    set the moment a build instance is created, before its subprocess
+    starts.  Without this filter, two rapid Build clicks would both
+    chain the second click onto the still-running first build and
+    write the same worktree directory simultaneously.
+    """
+    if not repo_path:
+        return None
+    active_ids = (
+        set(runner.active_ids) if runner is not None else set()
+    )
+
+    def is_chainable(inst: Instance) -> bool:
+        if inst.repo_path != repo_path:
+            return False
+        if inst.status != InstanceStatus.COMPLETED:
+            return False
+        if inst.id in active_ids:
+            return False
+        return True
+
+    return _find_session_branch_instance(
+        store, session_id, predicate=is_chainable,
+    )
 
 
 _NOWND: dict = config.NOWND

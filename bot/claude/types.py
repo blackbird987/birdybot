@@ -121,6 +121,7 @@ class Instance:
     cooldown_channel_id: str | None = None # Channel to retry in (for cooldown loop)
     api_fallback: bool = False            # Force API billing fallback on next run
     session_account: str | None = None   # Account dir whose ~/.claude/projects/ owns session_id (for prefer-on-resume)
+    chained_from: str | None = None       # Instance ID of the prior build whose branch+worktree this build was stacked on
     _accounts_tried: set[str] = field(default_factory=set)  # Ephemeral: tracks accounts tried this run (not persisted)
 
     def display_id(self) -> str:
@@ -199,6 +200,7 @@ class Instance:
             "cooldown_channel_id": self.cooldown_channel_id,
             "api_fallback": self.api_fallback,
             "session_account": self.session_account,
+            "chained_from": self.chained_from,
         }
 
     @classmethod
@@ -259,6 +261,7 @@ class Instance:
             cooldown_channel_id=d.get("cooldown_channel_id"),
             api_fallback=d.get("api_fallback", False),
             session_account=d.get("session_account"),
+            chained_from=d.get("chained_from"),
         )
 
 
