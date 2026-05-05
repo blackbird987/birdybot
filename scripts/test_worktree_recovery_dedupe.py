@@ -45,7 +45,6 @@ class _FakeInst:
     repo_path: str | None
     status: InstanceStatus = InstanceStatus.COMPLETED
     manual_recovery_needed: bool = False
-    created_at: str = ""  # only used to drive newest-first iteration order
 
 
 @dataclass
@@ -149,6 +148,27 @@ def test_flagged_appears_after_unflagged_in_iteration() -> None:
     _check(_ids(out), [], "newer non-flagged dropped by post-filter")
 
 
+def test_failed_with_flag_still_silences_branch() -> None:
+    """Order invariant: ``manual_recovery_needed`` check MUST run before the
+    status filter. Otherwise a FAILED-and-flagged instance would skip without
+    adding its branch to flagged_branches, and other (COMPLETED) siblings on
+    the same branch would re-fire the warning every reboot.
+    """
+    print("\n[FAILED + flagged still silences branch]")
+    instances = [
+        # newest, COMPLETED, would normally produce a candidate
+        _FakeInst("c1", "claude-bot/x", "/repo/.worktrees/c1", "/repo",
+                  status=InstanceStatus.COMPLETED),
+        # older, FAILED + flagged from a prior pass
+        _FakeInst("f1", "claude-bot/x", "/repo/.worktrees/f1", "/repo",
+                  status=InstanceStatus.FAILED,
+                  manual_recovery_needed=True),
+    ]
+    out = ClaudeRunner._select_recovery_candidates(_FakeStore(instances))
+    _check(_ids(out), [],
+           "FAILED+flagged sibling silences COMPLETED sibling on same branch")
+
+
 def test_missing_required_fields_skipped() -> None:
     """Instances without all of branch+worktree_path+repo_path are skipped."""
     print("\n[missing fields skipped]")
@@ -168,6 +188,7 @@ if __name__ == "__main__":
     test_completed_with_drift_is_scanned()
     test_already_flagged_branch_silences_siblings()
     test_flagged_appears_after_unflagged_in_iteration()
+    test_failed_with_flag_still_silences_branch()
     test_missing_required_fields_skipped()
     print()
     if _failures:

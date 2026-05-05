@@ -2992,12 +2992,13 @@ class ClaudeRunner:
         Three filters layered on top of the basic "has branch + worktree +
         repo" precondition:
 
-          1. Status: skip FAILED/KILLED. Those worktrees are the
-             cleanup_stale_worktrees pass's job — surfacing drift warnings on
-             crashed builds is noise the user can't act on. Cleanup protects
-             branches with ``inst.branch`` set (active_branches) and refuses
-             to rmtree on ``git worktree remove`` failure, so the files stay
-             on disk regardless.
+          1. Status: skip FAILED/KILLED. Surfacing drift warnings on
+             crashed/killed builds is noise the user can't usefully act on
+             (the build has no "next step" the bot is going to take). The
+             worktree files stay on disk untouched: cleanup_stale_worktrees
+             protects branches with ``inst.branch`` set and refuses
+             ``shutil.rmtree`` on ``git worktree remove`` failure, so the
+             user can still manually inspect or reuse them.
           2. In-pass dedupe by (repo_path, branch). Chained builds share a
              branch — one decision per branch, not N events per chain.
           3. Cross-pass dedupe via ``flagged_branches``. Once any sibling on
