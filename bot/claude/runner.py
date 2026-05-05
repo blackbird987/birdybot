@@ -905,6 +905,20 @@ class ClaudeRunner:
                 f"on branch `{sanity_branch}` — verify with `pwd` if anything looks off.)"
             )
 
+        # Bug 1 fix: prepend master-activity snapshot on every resume so the
+        # LLM sees what shipped to master while it was away.  This MUST run
+        # outside the `if not prompt` block — Build buttons set prompt to a
+        # canned BUILD_FROM_PLAN_PROMPT (non-empty), and Build is the exact
+        # path that hits the duplicate-rebuild bug.  Gated on session_id so
+        # fresh spawns (covered by the system-prompt injection) don't
+        # double-up.  --resume may replay the original JSONL system prompt
+        # verbatim, in which case the system-prompt block never reaches the
+        # resumed agent — this user-message slot is the load-bearing copy.
+        if instance.session_id:
+            master_block = self._build_master_context_block(instance)
+            if master_block:
+                prompt = master_block + "\n\n" + prompt
+
         # API key file (only for providers that support API fallback)
         api_key_file: str | None = None
         if api_fallback and provider.supports_api_fallback and config.ANTHROPIC_API_KEY:
@@ -1019,6 +1033,150 @@ class ClaudeRunner:
             return True
 
     @staticmethod
+    def _build_master_context_block(instance: Instance) -> str:
+        """Snapshot recent master activity so resumed sessions don't rebuild shipped work.
+
+        Bug 1 mitigation: a session that lost context via compaction or
+        resume has no idea whether master moved while it was away — and the
+        LLM has been observed silently re-implementing already-merged work.
+        Run cheap read-only git commands and inject a "Recent master
+        activity" block into both the system prompt (fresh spawns) and the
+        resume user-message preamble (resumed sessions, where --resume may
+        replay the original system prompt verbatim and never see system-
+        prompt edits).
+
+        Also captures `master_baseline_head` lazily on first call when the
+        field is unset, so subsequent resumes can show "what shipped since
+        this session started" instead of just a flat last-N list.
+        """
+        if not instance.repo_path or not Path(instance.repo_path).is_dir():
+            return ""
+        repo = instance.repo_path
+        # Default-branch detection: prefer original_branch (already resolved
+        # for this repo by _get_default_branch at worktree create time) so we
+        # don't hardcode "master" against repos that use main/develop.
+        default_branch = instance.original_branch
+        if not default_branch:
+            try:
+                r = subprocess.run(
+                    ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+                    cwd=repo, capture_output=True, text=True, **_NOWND,
+                )
+                if r.returncode == 0 and r.stdout.strip():
+                    default_branch = r.stdout.strip().split("/", 1)[-1]
+            except Exception:
+                pass
+        if not default_branch:
+            default_branch = "master"
+
+        try:
+            log_r = subprocess.run(
+                ["git", "log", "-10", "--oneline", default_branch],
+                cwd=repo, capture_output=True, text=True, **_NOWND,
+            )
+        except Exception:
+            return ""
+        if log_r.returncode != 0:
+            return ""
+        recent_log = log_r.stdout.strip()
+        if not recent_log:
+            return ""
+
+        # Lazily capture baseline on first prompt build for this session
+        # so resumed/compacted spawns can compute "since I started" deltas.
+        if not instance.master_baseline_head:
+            try:
+                head_r = subprocess.run(
+                    ["git", "rev-parse", default_branch],
+                    cwd=repo, capture_output=True, text=True, **_NOWND,
+                )
+                if head_r.returncode == 0:
+                    sha = head_r.stdout.strip()
+                    if sha:
+                        instance.master_baseline_head = sha
+            except Exception:
+                pass
+
+        parts: list[str] = [
+            "--- Recent master activity ---",
+            f"Last 10 commits on `{default_branch}`:",
+            recent_log,
+        ]
+
+        # "What shipped since this session started" — the load-bearing check
+        # against blind rebuild-after-compaction.
+        if instance.master_baseline_head:
+            try:
+                since_r = subprocess.run(
+                    ["git", "log", "--oneline",
+                     f"{instance.master_baseline_head}..{default_branch}"],
+                    cwd=repo, capture_output=True, text=True, **_NOWND,
+                )
+            except Exception:
+                since_r = None
+            if since_r and since_r.returncode == 0:
+                since_log = since_r.stdout.strip()
+                short = instance.master_baseline_head[:7]
+                parts.append("")
+                if since_log:
+                    # Cap to keep the prompt bounded — long-running sessions
+                    # could otherwise pump hundreds of commits into every
+                    # resume preamble.
+                    since_lines = since_log.splitlines()
+                    if len(since_lines) > 30:
+                        shown = since_lines[:30]
+                        suffix_line = (
+                            f"... and {len(since_lines) - 30} more "
+                            f"(run `git log {short}..{default_branch} --oneline` for the rest)"
+                        )
+                        since_log = "\n".join([*shown, suffix_line])
+                    parts.append(
+                        f"Commits merged onto `{default_branch}` since this session "
+                        f"started ({short}):"
+                    )
+                    parts.append(since_log)
+                else:
+                    parts.append(
+                        f"No new commits on `{default_branch}` since this session "
+                        f"started ({short})."
+                    )
+
+        # Branch-vs-master diff stat — surfaces "branch already merged" cases.
+        if instance.branch and instance.branch != default_branch:
+            try:
+                diff_r = subprocess.run(
+                    ["git", "diff", "--stat",
+                     f"{default_branch}...{instance.branch}"],
+                    cwd=repo, capture_output=True, text=True, **_NOWND,
+                )
+            except Exception:
+                diff_r = None
+            if diff_r and diff_r.returncode == 0:
+                stat = diff_r.stdout.strip()
+                parts.append("")
+                if stat:
+                    # Cap to keep system prompt manageable
+                    if len(stat) > 1500:
+                        stat = stat[:1500] + "\n... (truncated)"
+                    parts.append(f"`{instance.branch}` vs `{default_branch}`:")
+                    parts.append(stat)
+                else:
+                    parts.append(
+                        f"WARNING: branch `{instance.branch}` has no diff vs "
+                        f"`{default_branch}` — the work may already be merged. "
+                        f"Verify with the user before re-implementing."
+                    )
+
+        parts.append("")
+        parts.append(
+            "Before implementing anything, scan the commits above for "
+            "already-shipped work. If a recent master commit looks like what "
+            "you are about to do, ASK THE USER before duplicating it."
+        )
+        parts.append("")
+        return "\n".join(parts)
+
+    @staticmethod
     def _build_location_block(instance: Instance) -> str:
         """Tell the LLM exactly where it is on disk and on git.
 
@@ -1088,6 +1246,12 @@ class ClaudeRunner:
         location_block = self._build_location_block(instance)
         if location_block:
             parts.append(location_block)
+        # Bug 1 fix: surface recent master activity so resumed/compacted
+        # sessions don't rebuild work that already shipped while they were
+        # away. Also lazily captures master_baseline_head as a side effect.
+        master_block = self._build_master_context_block(instance)
+        if master_block:
+            parts.append(master_block)
         parts.append(config.MOBILE_HINT)
 
         # Explain that user can only see text output (critical for good responses)
@@ -2149,6 +2313,42 @@ class ClaudeRunner:
 
     # --- Merge / Discard ---
 
+    @staticmethod
+    def _check_main_repo_clean(repo: str) -> str | None:
+        """Detect leftover MERGE_HEAD from a sibling session's failed merge.
+
+        Bug 2 mitigation: when an in-process merge dies on a non-
+        CalledProcessError exception (or the bot crashes mid-merge),
+        MERGE_HEAD persists in the main repo's .git/ and poisons every
+        subsequent operation that touches it — sibling sessions then refuse
+        to commit, blame the wrong session, or worse.
+
+        Cheap pre-flight: if MERGE_HEAD exists, try `git merge --abort` to
+        clear it (idempotent, safe when no merge is active). Only return a
+        warning string if abort failed — in which case the caller should
+        bail rather than scribble on a poisoned tree. Returns None on the
+        clean / successfully-recovered path.
+        """
+        merge_head = Path(repo) / ".git" / "MERGE_HEAD"
+        if not merge_head.exists():
+            return None
+        log.warning("Main repo %s has leftover MERGE_HEAD — attempting cleanup", repo)
+        try:
+            subprocess.run(
+                ["git", "merge", "--abort"],
+                cwd=repo, capture_output=True, text=True, **_NOWND,
+            )
+        except Exception:
+            log.warning("git merge --abort raised in %s", repo, exc_info=True)
+        if merge_head.exists():
+            return (
+                f"Main repo {repo} has unresolved MERGE_HEAD that could not be "
+                f"auto-aborted — manual resolution needed (`git merge --abort` "
+                f"in the main repo, then retry)."
+            )
+        log.info("Cleared leftover MERGE_HEAD in %s", repo)
+        return None
+
     async def merge_branch(self, instance: Instance) -> str:
         """Merge worktree branch into master. Returns status message."""
         if not instance.branch or not instance.original_branch:
@@ -2165,6 +2365,13 @@ class ClaudeRunner:
         stashed = False
         repo = instance.repo_path
         target = instance.original_branch
+        # Bug 2 pre-flight: detect a poisoned tree from a prior session's
+        # crashed merge BEFORE we layer our own merge on top. Bails cleanly
+        # if the leftover state can't be auto-recovered.
+        precheck = self._check_main_repo_clean(repo)
+        if precheck:
+            return f"Merge skipped: {precheck}"
+        merge_succeeded = False
         try:
             # Copy session files back before cleanup.  account_dir=None lets
             # the helper fall through to instance.session_account (the account
@@ -2377,6 +2584,7 @@ class ClaudeRunner:
                         f"\nℹ️ Stashed {dirty_total} uncommitted file(s) before merge: {files_str}"
                     )
             stash_status = self._restore_stash(repo) if stashed else ""
+            merge_succeeded = True
             return f"Merged into {target}{suffix}{dirty_note}{push_note}{stash_status}"
         except subprocess.CalledProcessError as e:
             # Abort any in-progress merge to keep main repo clean for other sessions
@@ -2389,6 +2597,25 @@ class ClaudeRunner:
                       instance.branch, target, repo, detail)
             stash_status = self._restore_stash(repo) if stashed else ""
             return f"Merge failed: {detail}{stash_status}"
+        finally:
+            # Bug 2 fix: any non-CalledProcessError exception (OSError,
+            # KeyboardInterrupt, SystemExit, etc.) raised after `git merge`
+            # but before we recorded success would otherwise propagate
+            # uncaught and leave MERGE_HEAD in main .git/, poisoning every
+            # later session's view of the repo. Catch-all unconditional
+            # cleanup. Idempotent — `git merge --abort` is a no-op when no
+            # merge is active.
+            if not merge_succeeded and (Path(repo) / ".git" / "MERGE_HEAD").exists():
+                try:
+                    subprocess.run(
+                        ["git", "merge", "--abort"],
+                        cwd=repo, capture_output=True, text=True, **_NOWND,
+                    )
+                    log.warning(
+                        "Aborted leftover merge in %s during finally cleanup", repo,
+                    )
+                except Exception:
+                    log.exception("git merge --abort raised during finally cleanup")
 
     def _restore_stash(self, repo: str) -> str:
         """Pop the auto-stash if safe; return user-facing status string.
@@ -2676,6 +2903,13 @@ class ClaudeRunner:
         repo = instance.repo_path
         errors: list[str] = []
         preserved_branch: str | None = None
+        # Bug 2 pre-flight: discard touches the main repo (worktree remove,
+        # branch -D). A leftover MERGE_HEAD from a sibling session can make
+        # those operations misbehave or attribute the residue to this
+        # session's user. Auto-recover or surface an explicit error.
+        precheck = self._check_main_repo_clean(repo)
+        if precheck:
+            return DiscardOutcome(f"Discard skipped: {precheck}")
 
         worktree_path = instance.worktree_path
         wt_exists = bool(worktree_path) and Path(worktree_path).exists()
@@ -3285,6 +3519,12 @@ class ClaudeRunner:
 
     def _fix_repo_head(self, repo_path: str) -> str | None:
         """If repo HEAD is on a bot-managed branch, checkout default branch."""
+        # Bug 2 pre-flight: a leftover MERGE_HEAD makes `git checkout` refuse
+        # ("you need to resolve your current index first"). Clear it so
+        # startup HEAD recovery can actually run.
+        precheck = self._check_main_repo_clean(repo_path)
+        if precheck:
+            return precheck
         r = subprocess.run(
             ["git", "symbolic-ref", "--short", "HEAD"],
             cwd=repo_path, capture_output=True, text=True, **_NOWND,
