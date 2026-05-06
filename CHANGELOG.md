@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.92.21 — Serialize release step + orphan-bump recovery (2026-05-06)
+
 ### Fixed
 - Two parallel `claude` worktrees can no longer collide on the same version number when their `release` chain steps run concurrently. New per-repo `_release_locks` (orthogonal to `_repo_locks`) serialize the version-pick + tag step at all three release entrypoints: autopilot release chain (`on_release_chain` in `bot/engine/workflows.py`), manual `/done` standalone (`on_done` in `bot/engine/workflows.py` for `prompt_variant="standalone"`), and manual `/release` (`on_release` in `bot/engine/commands.py`). Lock is held only across the release Claude session — does not block worktree creation, merges, or branch deletion (those still go through `_repo_locks`). Released before `_finalize_merge` runs so successor sessions can proceed in parallel.
 - New `release_lock_scope(repo_path, label)` async context manager on `ClaudeRunner` with structured `event=waiting`/`event=acquired`/`event=released` log lines tagged by call site so timing of release contention is debuggable.
