@@ -79,3 +79,5 @@
 - [ ] [Bug Risk] Confirm no other `session_id = None` assignments in failover paths (Medium)
 - [ ] [Bug Risk] Mixed semantics in state.json (Medium)
 - [ ] [Reliability] Resume-from-reboot may lose iterative revisions (Medium)
+- [ ] [Modularity] Lock release/reacquire dance is fragile; prefer internal no-lock merge variant (Medium)
+- [ ] [Bug Risk] Enumerate every release-spawn entrypoint (Medium)
