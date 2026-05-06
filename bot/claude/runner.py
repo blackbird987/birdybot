@@ -10,6 +10,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable, NamedTuple
@@ -80,6 +82,22 @@ class WorktreeRecoveryEvent(NamedTuple):
     detail: str = ""
 
 
+class ReleaseRecoveryEvent(NamedTuple):
+    """A non-terminal release/done instance whose worktree carries a
+    release-shaped commit (``vX.Y.Z: ...``) that has no matching git tag.
+
+    Surfaced at startup so the user knows a release session was interrupted
+    after the version bump but before the tag was created — letting another
+    release pick the same version would re-collide.
+    """
+    instance_id: str
+    repo_name: str
+    branch: str | None
+    commit_sha: str
+    bumped_version: str  # e.g. "v1.2.3" — what the commit message claimed
+    detail: str = ""
+
+
 class DiscardOutcome(NamedTuple):
     """Result of discard_branch.
 
@@ -128,6 +146,12 @@ class ClaudeRunner:
         # Per-repo lock: serializes git-metadata-mutating operations
         # (worktree add/remove, merge, branch delete) to prevent lock file races
         self._repo_locks: dict[str, asyncio.Lock] = {}
+
+        # Per-repo release lock: serializes release sessions (version pick +
+        # tag create) so two worktrees can't race on the same version number.
+        # Orthogonal to _repo_locks — release sessions don't block worktree
+        # creation or merges, only other releases.
+        self._release_locks: dict[str, asyncio.Lock] = {}
 
         # Multi-account failover: tracks when each account's usage limit resets.
         # Hydrated below from the persisted store so reboots don't forget which
@@ -1753,6 +1777,45 @@ class ClaudeRunner:
         if repo_path not in self._repo_locks:
             self._repo_locks[repo_path] = asyncio.Lock()
         return self._repo_locks[repo_path]
+
+    def _get_release_lock(self, repo_path: str) -> asyncio.Lock:
+        """Get or create a per-repo release lock.
+
+        Held for the duration of a release Claude session so two worktrees
+        can't both pick the same version number. Orthogonal to _repo_locks —
+        does not block worktree creation, merges, or branch deletion.
+        """
+        if repo_path not in self._release_locks:
+            self._release_locks[repo_path] = asyncio.Lock()
+        return self._release_locks[repo_path]
+
+    @asynccontextmanager
+    async def release_lock_scope(self, repo_path: str, label: str):
+        """Acquire the release lock with structured wait/hold logging.
+
+        ``label`` identifies the call site (e.g. "release-chain", "done-standalone",
+        "release-cmd") so logs distinguish entrypoints.
+        """
+        lock = self._get_release_lock(repo_path)
+        wait_start = time.monotonic()
+        log.info(
+            "release-lock repo=%s site=%s event=waiting", repo_path, label,
+        )
+        async with lock:
+            wait = time.monotonic() - wait_start
+            hold_start = time.monotonic()
+            log.info(
+                "release-lock repo=%s site=%s event=acquired wait=%.2fs",
+                repo_path, label, wait,
+            )
+            try:
+                yield
+            finally:
+                hold = time.monotonic() - hold_start
+                log.info(
+                    "release-lock repo=%s site=%s event=released hold=%.2fs",
+                    repo_path, label, hold,
+                )
 
     # --- Git worktree management ---
 
@@ -3416,6 +3479,114 @@ class ClaudeRunner:
                 instance_id=inst.id, repo_name=repo_name,
                 branch=inst.branch, status="recovered",
                 detail="re-registered after metadata loss",
+            ))
+        return events
+
+    async def scan_orphan_release_commits(
+        self, store, repos: dict[str, str],
+    ) -> list[ReleaseRecoveryEvent]:
+        """Detect release sessions that committed a version bump but never
+        tagged it (bot died or session was killed mid-release).
+
+        Conservative by design: only acts on instances whose own worktree
+        still exists AND whose worktree HEAD carries a ``vX.Y.Z:`` commit
+        with no matching tag. Other startup-stale instances (QUEUED that
+        never ran, RUNNING that never committed, worktree already cleaned
+        up) are left untouched — their HEAD reflects nothing about THIS
+        instance's release attempt, so we'd misattribute. They get handled
+        by the existing recovery / cleanup paths.
+        """
+        import re as _re
+        events: list[ReleaseRecoveryEvent] = []
+        path_to_name = {p: n for n, p in repos.items()}
+
+        # Match `vX.Y.Z[.W]: ...` at the start of the commit subject.
+        version_re = _re.compile(r"^(v\d+\.\d+\.\d+(?:\.\d+)?)[:\s]")
+
+        target_origins = {InstanceOrigin.RELEASE, InstanceOrigin.DONE}
+        non_terminal = {InstanceStatus.RUNNING, InstanceStatus.QUEUED}
+
+        for inst in store.list_instances(all_=True):
+            if inst.origin not in target_origins:
+                continue
+            if inst.status not in non_terminal:
+                continue
+            if not inst.repo_path or not Path(inst.repo_path).is_dir():
+                continue
+            # Require a live worktree — falling back to the main repo's HEAD
+            # would misattribute another worktree's release commit to this
+            # instance, which is exactly the multi-worktree scenario this
+            # fix exists for.
+            if not inst.worktree_path or not Path(inst.worktree_path).is_dir():
+                continue
+
+            try:
+                subj_proc = await asyncio.to_thread(
+                    subprocess.run,
+                    ["git", "log", "-1", "--pretty=%H%n%s"],
+                    cwd=inst.worktree_path, capture_output=True, text=True,
+                    encoding="utf-8", errors="replace", **_NOWND,
+                )
+            except Exception:
+                continue
+            if subj_proc.returncode != 0:
+                continue
+
+            lines = (subj_proc.stdout or "").strip().splitlines()
+            if len(lines) < 2:
+                continue
+            commit_sha = lines[0].strip()
+            subject = lines[1].strip()
+            m = version_re.match(subject)
+            if not m:
+                # Worktree HEAD isn't release-shaped — instance crashed
+                # before bumping (or never started). Leave alone; existing
+                # cleanup mechanisms own this case.
+                continue
+            version = m.group(1)
+
+            try:
+                tag_proc = await asyncio.to_thread(
+                    subprocess.run,
+                    ["git", "rev-parse", "--verify", f"refs/tags/{version}"],
+                    cwd=inst.repo_path, capture_output=True, text=True,
+                    encoding="utf-8", errors="replace", **_NOWND,
+                )
+            except Exception:
+                continue
+            tag_exists = tag_proc.returncode == 0
+            if tag_exists:
+                # Bumped + tagged — the dangerous step is already done.
+                # Don't surface; another mechanism can sweep up the stale
+                # status if needed.
+                continue
+
+            repo_name = path_to_name.get(inst.repo_path, inst.repo_path)
+            inst.status = InstanceStatus.FAILED
+            inst.error = (
+                f"Release session interrupted: commit {commit_sha[:12]} bumped "
+                f"to {version} but no matching tag exists. Verify before re-running."
+            )
+            store.update_instance(inst)
+            # Stop autopilot chain resume from silently re-spawning another
+            # release attempt against the same session — leaving the bumped
+            # commit on the branch and a fresh release on top is the failure
+            # mode this probe is meant to prevent. User decides via the
+            # surfaced notice whether to /release again or revert.
+            if inst.session_id:
+                try:
+                    store.clear_autopilot_chain(inst.session_id)
+                    store.clear_chain_entry_sha(inst.session_id)
+                except Exception:
+                    log.debug(
+                        "Failed to clear autopilot chain for session %s",
+                        inst.session_id, exc_info=True,
+                    )
+            events.append(ReleaseRecoveryEvent(
+                instance_id=inst.id, repo_name=repo_name,
+                branch=inst.branch, commit_sha=commit_sha,
+                bumped_version=version,
+                detail="commit bumped version but tag was never created",
             ))
         return events
 

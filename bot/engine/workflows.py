@@ -1165,12 +1165,22 @@ async def on_done(
     if extra_context:
         prompt = f"{extra_context}\n\n{prompt}"
 
-    result = await spawn_from(ctx, source_id, SpawnConfig(
+    cfg = SpawnConfig(
         instance_type=InstanceType.TASK, prompt=prompt,
         mode="build", origin=InstanceOrigin.DONE,
         status_text="Wrapping up...", resume_session=True,
         copy_branch=True, silent=True,
-    ), source_msg_id=source_msg_id)
+    )
+    if prompt_variant == "standalone":
+        source = ctx.store.get_instance(source_id)
+        repo_path_for_lock = source.repo_path if source else None
+        if repo_path_for_lock:
+            async with ctx.runner.release_lock_scope(repo_path_for_lock, "done-standalone"):
+                result = await spawn_from(ctx, source_id, cfg, source_msg_id=source_msg_id)
+        else:
+            result = await spawn_from(ctx, source_id, cfg, source_msg_id=source_msg_id)
+    else:
+        result = await spawn_from(ctx, source_id, cfg, source_msg_id=source_msg_id)
 
     if not result or result.status != InstanceStatus.COMPLETED:
         return result
@@ -2053,7 +2063,7 @@ async def on_release_chain(
     the manual command. Defaults to `patch` bump.
     """
     prompt = config.RELEASE_PROMPT.format(version_hint="patch")
-    return await spawn_from(ctx, source_id, SpawnConfig(
+    cfg = SpawnConfig(
         instance_type=InstanceType.TASK,
         prompt=prompt,
         mode="build",
@@ -2062,7 +2072,13 @@ async def on_release_chain(
         resume_session=True,
         copy_branch=True,
         silent=True,
-    ), source_msg_id=source_msg_id)
+    )
+    source = ctx.store.get_instance(source_id)
+    repo_path_for_lock = source.repo_path if source else None
+    if repo_path_for_lock:
+        async with ctx.runner.release_lock_scope(repo_path_for_lock, "release-chain"):
+            return await spawn_from(ctx, source_id, cfg, source_msg_id=source_msg_id)
+    return await spawn_from(ctx, source_id, cfg, source_msg_id=source_msg_id)
 
 
 def clear_stale_branches(store, branch_name: str) -> int:
