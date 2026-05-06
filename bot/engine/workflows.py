@@ -837,6 +837,10 @@ async def on_review_plan(ctx: RequestContext, source_id: str, source_msg_id: str
         instance_type=InstanceType.QUERY, prompt=config.PLAN_REVIEW_PROMPT,
         mode="explore", origin=InstanceOrigin.REVIEW_PLAN,
         status_text="Reviewing plan...", resume_session=True,
+        # Hard floor: review-plan rewrites plan TEXT only — never source files.
+        # Without this, mode="explore" only blocks Edit/Write/NotebookEdit and
+        # Bash stays open as a write backdoor (sed/echo>/tee>). See t-3792.
+        permission_mode="explore",
     ), source_msg_id=source_msg_id)
 
 
@@ -845,6 +849,8 @@ async def on_apply_revisions(ctx: RequestContext, source_id: str, source_msg_id:
         instance_type=InstanceType.QUERY, prompt=config.APPLY_REVISIONS_PROMPT,
         mode="explore", origin=InstanceOrigin.APPLY_REVISIONS,
         status_text="Applying revisions...", resume_session=True,
+        # Hard floor — see on_review_plan.
+        permission_mode="explore",
     ), source_msg_id=source_msg_id)
 
 
@@ -1281,6 +1287,8 @@ async def _review_plan_loop(
             origin=InstanceOrigin.REVIEW_PLAN,
             status_text=status,
             resume_session=True,
+            # Hard floor — review is plan-text only, no source writes via Bash.
+            permission_mode="explore",
         ), source_msg_id=current_msg)
 
         if not review or review.status != InstanceStatus.COMPLETED:
@@ -1355,6 +1363,8 @@ async def _review_plan_loop(
             origin=InstanceOrigin.APPLY_REVISIONS,
             status_text=f"Applying revisions (round {round_num + 1})...",
             resume_session=True,
+            # Hard floor — apply rewrites plan TEXT only.
+            permission_mode="explore",
         ), source_msg_id=_last_msg_id(review, ctx.platform))
 
         if not applied or applied.status != InstanceStatus.COMPLETED:
