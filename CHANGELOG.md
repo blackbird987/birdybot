@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- `_merge_branch_sync` is now idempotent against stale `instance.branch`. If a prior merge succeeded but state didn't persist before a restart, the resume path used to fail with a misleading "Merge failed" because `git checkout` / `git merge` against a no-longer-existing branch errored out. New early-out at the top of `_merge_branch_sync` runs `git rev-parse --verify refs/heads/<branch>`; on miss, best-effort removes any lingering worktree dir, clears `instance.branch`/`worktree_path`, and returns the same `Already merged (...)` string the existing line-2354 early-out uses — so `_finalize_merge` returns True and the user sees the normal ✅ completion. Placed before `_check_main_repo_clean` so a missing branch ref short-circuits ahead of the MERGE_HEAD precheck (residual poisoning from elsewhere isn't this call's problem when there's nothing left to merge).
+
 ## v0.92.18 — Dedupe worktree-recovery scan (2026-05-06)
 
 ### Fixed

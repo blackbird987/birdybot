@@ -2365,6 +2365,31 @@ class ClaudeRunner:
         stashed = False
         repo = instance.repo_path
         target = instance.original_branch
+        # Idempotency: if the branch ref no longer exists, a prior run already
+        # merged + cleaned it up — state just didn't persist before a restart.
+        # Treat as success so the resume path doesn't surface a scary "failed"
+        # message.  Manual `git branch -D` outside the bot would also land
+        # here, which is acceptable: that workflow isn't supported, and the
+        # alternative (failing loudly on the legitimate restart case) is worse.
+        ref_check = subprocess.run(
+            ["git", "rev-parse", "--verify", f"refs/heads/{instance.branch}"],
+            cwd=repo, capture_output=True, text=True, **_NOWND,
+        )
+        if ref_check.returncode != 0:
+            # Branch is gone but the worktree dir may linger if the prior run
+            # crashed between `git merge` and `git worktree remove`.  Best-
+            # effort cleanup so we don't leak it for /branches to find later.
+            if instance.worktree_path and Path(instance.worktree_path).exists():
+                subprocess.run(
+                    ["git", "worktree", "remove", instance.worktree_path, "--force"],
+                    cwd=repo, capture_output=True, text=True, **_NOWND,
+                )
+            stale_branch = instance.branch
+            instance.branch = None
+            instance.worktree_path = None
+            return (
+                f"Already merged ({stale_branch} → {instance.original_branch})"
+            )
         # Bug 2 pre-flight: detect a poisoned tree from a prior session's
         # crashed merge BEFORE we layer our own merge on top. Bails cleanly
         # if the leftover state can't be auto-recovered.
