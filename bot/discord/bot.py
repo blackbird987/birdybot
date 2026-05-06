@@ -1191,6 +1191,21 @@ class ClaudeBot(discord.Client):
                 log.info("Startup cleanup: %s", msg)
             if messages:
                 log.info("Startup cleanup complete: %d actions", len(messages))
+            try:
+                release_events = await self._runner.scan_orphan_release_commits(
+                    self._store, repos,
+                )
+            except Exception:
+                release_events = []
+                log.warning("Orphan release-commit scan failed", exc_info=True)
+            for ev in release_events:
+                log.info(
+                    "Release recovery: %s %s/%s commit=%s bumped=%s detail=%s",
+                    ev.instance_id, ev.repo_name, ev.branch,
+                    ev.commit_sha, ev.bumped_version, ev.detail,
+                )
+            if release_events:
+                await self._surface_release_recovery_events(release_events)
         except Exception:
             log.warning("Startup worktree cleanup failed", exc_info=True)
 
@@ -1238,6 +1253,39 @@ class ClaudeBot(discord.Client):
                 log.debug(
                     "Failed to post recovery notice to thread %s", thread_id,
                     exc_info=True,
+                )
+
+    async def _surface_release_recovery_events(self, events) -> None:
+        """Post a notice when a release session crashed mid-tag.
+
+        Each event represents a non-terminal RELEASE/DONE instance that
+        committed a vX.Y.Z bump but has no matching git tag — the runner
+        has already marked it FAILED. Surface so the user can decide
+        whether to retry the release or clean up the bumped commit.
+        """
+        for ev in events:
+            inst = self._store.get_instance(ev.instance_id)
+            if not inst or not inst.session_id:
+                continue
+            try:
+                lookup = self._forums.session_to_thread(inst.session_id)
+            except Exception:
+                lookup = None
+            if not lookup:
+                continue
+            thread_id, _ = lookup
+            text = (
+                f"⚠️ Release crashed mid-tag: commit `{ev.commit_sha[:8]}` "
+                f"bumped to `{ev.bumped_version}` on `{ev.branch}` but no "
+                f"matching tag was created. Marked as failed — re-run "
+                f"/release if you want to retry, or revert the bump."
+            )
+            try:
+                await self.messenger.send_text(thread_id, text, silent=True)
+            except Exception:
+                log.debug(
+                    "Failed to post release-recovery notice to thread %s",
+                    thread_id, exc_info=True,
                 )
 
     def _in_scope(self, guild: discord.Guild | None, channel: discord.abc.GuildChannel | None = None) -> bool:

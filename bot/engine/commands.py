@@ -756,7 +756,11 @@ async def on_release(ctx: RequestContext, text: str) -> None:
     inst.message_ids.setdefault(ctx.platform, []).append(handle)
     ctx.store.update_instance(inst)
 
-    asyncio.create_task(_run_bg_task(ctx, inst))
+    async def _release_with_lock() -> None:
+        async with ctx.runner.release_lock_scope(repo_path, "release-cmd"):
+            await _run_bg_task(ctx, inst)
+
+    asyncio.create_task(_release_with_lock())
 
 
 # --- /list ---
