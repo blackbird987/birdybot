@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.92.22 — Hard Bash floor on plan-text spawns (2026-05-06)
+
 ### Fixed
 - Plan-review and apply-revisions spawns now clamp Bash via a hard `permission_mode="explore"` floor, closing the backdoor surfaced in t-3792 where the model used `sed`/`>` redirects to edit source files in the main repo and bypassed build-worktree isolation. `bot/engine/workflows.py` adds `permission_mode="explore"` to 4 spawn sites — `on_review_plan`, `on_apply_revisions`, and the autopilot loop's review + apply spawns in `_review_plan_loop`. The existing `_enforce_readonly_floor` helper clamps both `mode` to `"explore"` and `bash_policy` to `"none"`, which causes `bot/claude/provider.py` to add `Bash` to `--disallowed-tools` on top of `Edit/Write/NotebookEdit`. The triage spawn already had the floor — left untouched. New `scripts/verify_plan_floor.py` is a deterministic in-process regression check: it exercises `_enforce_readonly_floor` and `provider.build_command` against a synthetic Instance and asserts the disallow set covers `Bash` plus every member of `provider.code_change_tools` (so future provider tool additions like `MultiEdit` are auto-required, not silently missed).
 
