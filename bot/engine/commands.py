@@ -800,12 +800,15 @@ async def on_release(ctx: RequestContext, text: str) -> None:
     async def _release_with_lock() -> None:
         async with ctx.runner.release_lock_scope(repo_path, "release-cmd"):
             await _run_bg_task(ctx, inst)
-            # LLM session done — bot creates the tag on the release commit.
-            # /release runs on master (no worktree, no merge); the helper
-            # walks the most recent branch-unique commits looking for the
-            # `vX.Y.Z:` subject so cleanup commits after the release
-            # commit don't strand the tag. No push (matches existing
-            # /release behavior — user pushes manually).
+            # /release is the standalone (no-merge) release path: the LLM
+            # commits on master directly. We still defer tag creation to the
+            # bot so the same idempotent + conflict-safe codepath handles
+            # both flows. Pass "HEAD" because there is no merge — the
+            # release commit is on the current branch tip. Window is
+            # HEAD^1..HEAD (a single commit), which assumes the LLM stops
+            # after the release commit per the new RELEASE_PROMPT contract.
+            # If the LLM ever lands a cleanup commit on top, this miss is
+            # silent — the merge path covers the multi-commit case.
             if inst.status == InstanceStatus.COMPLETED:
                 try:
                     tag, _ = await asyncio.to_thread(
@@ -813,7 +816,7 @@ async def on_release(ctx: RequestContext, text: str) -> None:
                     )
                 except Exception:
                     log.exception(
-                        "Tag-release after /release raised in %s", repo_path,
+                        "Tag-release step raised in %s after /release", repo_path,
                     )
                     tag = None
                 if tag:
