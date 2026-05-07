@@ -82,6 +82,11 @@ async def _exit_chain(
         ctx.store.clear_autopilot_chain(session_id)
         ctx.store.clear_chain_deferred(session_id)
         ctx.store.clear_chain_phases(session_id)
+    else:
+        # Chain queue stays for user-driven resume (needs_input,
+        # phantom_detected, phase_gate_risk). Mark it paused so the
+        # post-reboot resumer doesn't treat it as crashed-mid-step.
+        ctx.store.set_autopilot_chain_status(session_id, "paused")
     await _notify_user(ctx, suffix)
 
 

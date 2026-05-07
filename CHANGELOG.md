@@ -2,8 +2,14 @@
 
 ## [Unreleased]
 
+## v0.92.24 — Pause-aware autopilot resume (2026-05-07)
+
 ### Fixed
 - Plain-text replies in a thread whose autopilot stopped at `merge_failed` no longer trigger a fresh review/build. Previously, after auto-merge failed, the thread idled and any subsequent text resumed the latest CLI session as a free-form prompt — with recent review context still loaded, Claude reinterpreted the user's pasted error message as a directive to do another review. Now `_merge_branch_sync` failure paths (autopilot merge step in `bot/engine/workflows.py:2576` area and standalone Done auto-merge in `bot/engine/workflows.py:1203` area) record a `pending_merge` entry keyed by instance_id (`StateStore.set_pending_merge` in `bot/store/state.py`) and post a button row `[Try Merge Again] [Discard]` (`merge_failed_button_specs` in `bot/platform/formatting.py`). On the next text in `on_text` (`bot/engine/commands.py`), the pending entry blocks the spawn and re-surfaces the buttons. Pending entry cleared on successful merge or discard via slash command and button paths.
+- Post-reboot autopilot resume no longer re-runs work that was paused waiting on the user. Root cause: `data/state.json` recorded chain queues but had no concept of "paused vs running", so `_resume_interrupted_chains` (`bot/app.py`) replayed every queue it found — including queues left behind by `needs_input` / `phantom_detected` / `phase_gate_risk` exits. Symptom seen at 2 AM: a stale chain queue resumed on reboot and started a fresh `release` step against an already-shipped session. New per-session `autopilot_chain_meta` field (`StateStore` in `bot/store/state.py`) tracks `{status, updated_at}` where status is `running` or `paused`. `set_autopilot_chain` stamps `running` on every step iteration; the `else` branch of `_exit_chain` (`bot/engine/workflows.py`) stamps `paused` when the chain queue is preserved for user-driven resume. `_resume_interrupted_chains` now skips `paused` chains entirely, and drops `running` chains older than a 48-hour TTL as presumed-abandoned. Manual finalize entry points — `/done`, `/merge`, and the Done/Merge/Discard buttons — call new `_clear_chain_on_manual_finalize` helper (`bot/engine/commands.py`) which drops any lingering chain queue + chain entry SHA so a manual end-of-task can't leave a resumable queue behind. `/commit` deliberately excluded (used for mid-chain checkpoints).
+
+### Migration
+- Load-time migration in `StateStore._load`: any `autopilot_chains` entry without a matching `autopilot_chain_meta` record is dropped on startup with a WARNING. Pre-existing chain queues from before this change have no status record, so rather than guessing whether they were `running` (resume) or `paused` (skip) we drop them — a stale queue that resumes is exactly the bug this field exists to prevent.
 
 ## v0.92.21 — Serialize release step + orphan-bump recovery (2026-05-06)
 

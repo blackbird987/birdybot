@@ -77,6 +77,27 @@ def check_budget(ctx: RequestContext) -> bool:
     return daily < config.DAILY_BUDGET_USD
 
 
+def _clear_chain_on_manual_finalize(
+    store, session_id: str | None, op: str,
+) -> None:
+    """Drop any lingering autopilot chain state when the user finalizes manually.
+
+    /done, /merge, and the Done/Merge/Discard buttons are all explicit
+    user-driven endings. If a chain queue is still hanging around (e.g. paused
+    on a needs_input that the user resolved by hand), it must NOT be eligible
+    for post-reboot resume — the work is already done.
+    """
+    if not session_id:
+        return
+    if store.get_autopilot_chain(session_id):
+        log.info(
+            "Manual %s — clearing autopilot chain queue for session %s",
+            op, session_id,
+        )
+        store.clear_autopilot_chain(session_id)
+        store.clear_chain_entry_sha(session_id)
+
+
 async def budget_warning(ctx: RequestContext) -> None:
     daily = ctx.store.get_daily_cost()
     if daily >= config.DAILY_BUDGET_USD * 0.8:
@@ -2141,6 +2162,7 @@ async def handle_callback(
         if not inst:
             await ctx.messenger.send_text(ctx.channel_id, "Instance not found.")
             return
+        _clear_chain_on_manual_finalize(ctx.store, inst.session_id, "Merge button")
         # Early guard: branch already cleared by a prior merge/discard
         if not inst.branch:
             msg = await ctx.runner.merge_branch(inst)  # returns "Already merged (...)"
@@ -2196,6 +2218,7 @@ async def handle_callback(
         if not inst:
             await ctx.messenger.send_text(ctx.channel_id, "Instance not found.")
             return
+        _clear_chain_on_manual_finalize(ctx.store, inst.session_id, "Discard button")
         # Early guard: branch already cleared by a prior merge/discard
         if not inst.branch:
             outcome = await ctx.runner.discard_branch(inst)  # returns "Already discarded (...)"
@@ -2297,6 +2320,9 @@ async def handle_callback(
     elif action == "commit":
         await workflows.on_commit(ctx, instance_id, source_msg_id)
     elif action == "done":
+        inst = ctx.store.get_instance(instance_id)
+        if inst:
+            _clear_chain_on_manual_finalize(ctx.store, inst.session_id, "Done button")
         await workflows.on_done(ctx, instance_id, source_msg_id)
     elif action == "autopilot":
         await workflows.on_autopilot(ctx, instance_id, source_msg_id)

@@ -43,6 +43,7 @@ class StateStore:
         self._effort: str = "high"  # reasoning effort: low/medium/high/max
         self._platform_state: dict[str, dict] = {}  # platform -> arbitrary state
         self._autopilot_chains: dict[str, list[str]] = {}  # session_id -> remaining steps
+        self._autopilot_chain_meta: dict[str, dict] = {}  # session_id -> {status, updated_at}
         self._pending_merges: dict[str, dict] = {}  # instance_id -> pending merge metadata
         self._chain_deferred: dict[str, list[str]] = {}  # session_id -> deferred revisions
         self._chain_phases: dict[str, dict] = {}  # session_id -> ChainPhaseState dict
@@ -90,6 +91,22 @@ class StateStore:
             self._effort = data.get("effort", "high")
             self._platform_state = data.get("platform_state", {})
             self._autopilot_chains = data.get("autopilot_chains", {})
+            self._autopilot_chain_meta = data.get("autopilot_chain_meta", {})
+            # Migration: pre-meta chain queues have no status record. Drop them
+            # rather than guess — a stale unmetered chain that resumes after
+            # reboot is exactly the bug this field exists to prevent.
+            unmetered = [
+                sid for sid in list(self._autopilot_chains.keys())
+                if sid not in self._autopilot_chain_meta
+            ]
+            for sid in unmetered:
+                log.warning(
+                    "Dropping unmetered autopilot chain on load: session=%s steps=%s",
+                    sid, self._autopilot_chains.get(sid),
+                )
+                self._autopilot_chains.pop(sid, None)
+            if unmetered:
+                self.mark_dirty()
             self._pending_merges = data.get("pending_merges", {})
             self._chain_deferred = data.get("chain_deferred", {})
             self._chain_phases = data.get("chain_phases", {})
@@ -232,6 +249,7 @@ class StateStore:
             "effort": self._effort,
             "platform_state": self._platform_state,
             "autopilot_chains": self._autopilot_chains,
+            "autopilot_chain_meta": self._autopilot_chain_meta,
             "pending_merges": self._pending_merges,
             "chain_deferred": self._chain_deferred,
             "chain_phases": self._chain_phases,
@@ -814,6 +832,10 @@ class StateStore:
         if not session_id:
             return
         self._autopilot_chains[session_id] = steps
+        self._autopilot_chain_meta[session_id] = {
+            "status": "running",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
         self.mark_dirty()
 
     def clear_autopilot_chain(self, session_id: str | None) -> None:
@@ -821,6 +843,29 @@ class StateStore:
         if not session_id:
             return
         self._autopilot_chains.pop(session_id, None)
+        self._autopilot_chain_meta.pop(session_id, None)
+        self.mark_dirty()
+
+    def get_autopilot_chain_meta(self, session_id: str | None) -> dict | None:
+        """Return {status, updated_at} for a session's chain, or None."""
+        if not session_id:
+            return None
+        return self._autopilot_chain_meta.get(session_id)
+
+    def set_autopilot_chain_status(
+        self, session_id: str | None, status: str
+    ) -> None:
+        """Update chain status to 'running' or 'paused' with a timestamp."""
+        if not session_id or status not in ("running", "paused"):
+            return
+        # Only stamp meta if the chain queue still exists — clearing the chain
+        # already drops meta, and we don't want zombie meta with no queue.
+        if session_id not in self._autopilot_chains:
+            return
+        self._autopilot_chain_meta[session_id] = {
+            "status": status,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
         self.mark_dirty()
 
     # --- Pending Merges (auto-merge failed; awaiting user resolution) ---
