@@ -18,7 +18,11 @@ from bot.claude.types import (
 )
 from bot.engine import lifecycle, sessions as sessions_mod
 from bot.platform.base import ButtonSpec, RequestContext
-from bot.platform.formatting import action_button_specs, running_button_specs
+from bot.platform.formatting import (
+    action_button_specs,
+    merge_failed_button_specs,
+    running_button_specs,
+)
 
 log = logging.getLogger(__name__)
 
@@ -1203,15 +1207,27 @@ async def on_done(
     if result.branch and result.original_branch:
         merged_ok = await _finalize_merge(ctx, result, close_silent=True)
         if not merged_ok:
+            msg = (
+                "⚠️ Auto-merge failed. Tap **Try Merge Again** to retry "
+                "(useful if a parallel build just completed) or **Discard** "
+                "to drop the branch. Plain-text replies in this thread are "
+                "ignored until you choose."
+            )
             try:
                 await ctx.messenger.send_text(
-                    ctx.channel_id,
-                    "⚠️ Auto-merge failed. Use /merge or the Merge "
-                    "button to resolve.",
+                    ctx.channel_id, msg,
+                    buttons=merge_failed_button_specs(result.id),
                     silent=True,
                 )
             except Exception:
                 log.debug("Failed to send merge-failed hint", exc_info=True)
+            ctx.store.set_pending_merge(
+                result.id,
+                session_id=result.session_id,
+                channel_id=ctx.channel_id,
+                repo_name=result.repo_name,
+                message=msg,
+            )
         return result
 
     # No branch to merge — close the thread directly.
@@ -2577,10 +2593,24 @@ async def _run_autopilot_chain(
                         ctx, merge_target, close_silent=False,
                     )
                     if not merged_ok:
+                        msg = (
+                            "⚠️ Auto-merge failed. Tap **Try Merge Again** "
+                            "to retry (useful if a parallel build just "
+                            "completed) or **Discard** to drop the branch. "
+                            "Plain-text replies in this thread are ignored "
+                            "until you choose."
+                        )
                         await ctx.messenger.send_text(
-                            ctx.channel_id,
-                            "⚠️ Auto-merge failed. Use /merge to resolve.",
+                            ctx.channel_id, msg,
+                            buttons=merge_failed_button_specs(merge_target.id),
                             silent=True,
+                        )
+                        ctx.store.set_pending_merge(
+                            merge_target.id,
+                            session_id=merge_target.session_id,
+                            channel_id=ctx.channel_id,
+                            repo_name=merge_target.repo_name,
+                            message=msg,
                         )
                         completed_steps.append(step)
                         await _exit_chain_needs_input(

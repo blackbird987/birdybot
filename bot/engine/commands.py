@@ -29,6 +29,7 @@ from bot.platform.formatting import (
     format_result_md,
     format_schedule_list_md,
     format_status_md,
+    merge_failed_button_specs,
     mode_label,
     queued_button_specs,
     redact_secrets,
@@ -273,6 +274,25 @@ async def on_text(ctx: RequestContext, text: str) -> None:
         handled = await ctx.offer_usage_limit_choice(ctx, text)
         if handled:
             return
+    # Pending-merge guard: if auto-merge failed in this channel, plain text
+    # would otherwise resume a stale CLI session and (with recent review
+    # context) get reinterpreted as "do another review". Block the spawn
+    # and re-surface the merge buttons instead — user must resolve first.
+    pending_merge = ctx.store.get_pending_merge_by_channel(ctx.channel_id)
+    if pending_merge:
+        pm_iid, _meta = pending_merge
+        try:
+            await ctx.messenger.send_text(
+                ctx.channel_id,
+                "⚠️ Auto-merge is still unresolved — your message was not "
+                "sent to Claude. Tap **Try Merge Again** or **Discard** "
+                "below to clear it, then retry.",
+                buttons=merge_failed_button_specs(pm_iid),
+                silent=True,
+            )
+        except Exception:
+            log.debug("Failed to re-post merge-failed buttons", exc_info=True)
+        return
     lock = _get_channel_lock(ctx.channel_id)
     pending = await _enqueue_with_pending_ui(ctx, text)
     async with lock:
@@ -759,6 +779,29 @@ async def on_release(ctx: RequestContext, text: str) -> None:
     async def _release_with_lock() -> None:
         async with ctx.runner.release_lock_scope(repo_path, "release-cmd"):
             await _run_bg_task(ctx, inst)
+            # LLM session done — bot creates the tag on the release commit.
+            # /release runs on master (no worktree, no merge); the helper
+            # walks the most recent branch-unique commits looking for the
+            # `vX.Y.Z:` subject so cleanup commits after the release
+            # commit don't strand the tag. No push (matches existing
+            # /release behavior — user pushes manually).
+            if inst.status == InstanceStatus.COMPLETED:
+                try:
+                    tag, _ = await asyncio.to_thread(
+                        ctx.runner._tag_release_at, repo_path, "HEAD",
+                    )
+                except Exception:
+                    log.exception(
+                        "Tag-release after /release raised in %s", repo_path,
+                    )
+                    tag = None
+                if tag:
+                    await ctx.messenger.send_text(
+                        ctx.channel_id,
+                        f"Created tag `{tag}` on master. "
+                        f"Run `git push origin {tag}` to publish.",
+                        silent=True,
+                    )
 
     asyncio.create_task(_release_with_lock())
 
@@ -1066,6 +1109,7 @@ async def on_merge(ctx: RequestContext, text: str) -> None:
     msg = await ctx.runner.merge_branch(inst)
     ctx.store.update_instance(inst)
     if "failed" not in msg.lower():
+        ctx.store.clear_pending_merge(inst.id)
         # Resolve branch name for history cleanup (None when "already merged")
         if not branch_name:
             from bot.store import history as history_mod
@@ -1097,6 +1141,7 @@ async def on_discard(ctx: RequestContext, text: str) -> None:
     msg = outcome.message
     ctx.store.update_instance(inst)
     if "failed" not in msg.lower():
+        ctx.store.clear_pending_merge(inst.id)
         if not branch_name:
             from bot.store import history as history_mod
             branch_name = history_mod.get_branch_for_instance(inst.id)
@@ -2099,6 +2144,7 @@ async def handle_callback(
         # Early guard: branch already cleared by a prior merge/discard
         if not inst.branch:
             msg = await ctx.runner.merge_branch(inst)  # returns "Already merged (...)"
+            ctx.store.clear_pending_merge(inst.id)
             # History may still record the original branch — clean it up so
             # future sessions don't see a stale "(branch: X)" line.
             try:
@@ -2119,6 +2165,7 @@ async def handle_callback(
         ctx.store.update_instance(inst)
         # Clear stale branch refs on all sibling instances
         if branch_name and "failed" not in msg.lower():
+            ctx.store.clear_pending_merge(inst.id)
             workflows.clear_stale_branches(ctx.store, branch_name)
             from bot.engine.deploy import update_after_merge, rescan_deploy_config_after_merge
             update_after_merge(ctx.store, inst)
@@ -2153,6 +2200,7 @@ async def handle_callback(
         if not inst.branch:
             outcome = await ctx.runner.discard_branch(inst)  # returns "Already discarded (...)"
             msg = outcome.message
+            ctx.store.clear_pending_merge(inst.id)
             try:
                 from bot.store import history as history_mod
                 stale = history_mod.get_branch_for_instance(inst.id)
@@ -2173,6 +2221,8 @@ async def handle_callback(
         # Clear stale branch refs on all sibling instances
         if branch_name:
             workflows.clear_stale_branches(ctx.store, branch_name)
+        if "failed" not in msg.lower():
+            ctx.store.clear_pending_merge(inst.id)
         escaped = ctx.messenger.escape(msg)
         # Pass updated buttons when branch was resolved (strips Merge/Discard)
         buttons = action_button_specs(inst) if not inst.branch else None

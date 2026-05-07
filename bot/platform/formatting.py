@@ -292,6 +292,20 @@ def status_icon(status: InstanceStatus) -> str:
 
 # --- Button Specs (platform-agnostic) ---
 
+def merge_failed_button_specs(instance_id: str) -> list[list[ButtonSpec]]:
+    """Buttons posted after an auto-merge failure — retry or discard.
+
+    Posting actual buttons (instead of plain text) means the user's tap is
+    routed through the existing merge/discard handlers rather than typing
+    text into the thread, which Claude would otherwise reinterpret as a
+    fresh review/build prompt.
+    """
+    return [[
+        ButtonSpec("Try Merge Again", f"merge:{instance_id}"),
+        ButtonSpec("Discard", f"discard:{instance_id}"),
+    ]]
+
+
 def action_button_specs(
     instance: Instance, show_expand: bool = False,
     has_autopilot_chain: bool = False,

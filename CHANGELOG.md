@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Plain-text replies in a thread whose autopilot stopped at `merge_failed` no longer trigger a fresh review/build. Previously, after auto-merge failed, the thread idled and any subsequent text resumed the latest CLI session as a free-form prompt — with recent review context still loaded, Claude reinterpreted the user's pasted error message as a directive to do another review. Now `_merge_branch_sync` failure paths (autopilot merge step in `bot/engine/workflows.py:2576` area and standalone Done auto-merge in `bot/engine/workflows.py:1203` area) record a `pending_merge` entry keyed by instance_id (`StateStore.set_pending_merge` in `bot/store/state.py`) and post a button row `[Try Merge Again] [Discard]` (`merge_failed_button_specs` in `bot/platform/formatting.py`). On the next text in `on_text` (`bot/engine/commands.py`), the pending entry blocks the spawn and re-surfaces the buttons. Pending entry cleared on successful merge or discard via slash command and button paths.
+
 ## v0.92.21 — Serialize release step + orphan-bump recovery (2026-05-06)
 
 ### Fixed

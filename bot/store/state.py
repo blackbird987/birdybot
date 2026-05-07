@@ -43,6 +43,7 @@ class StateStore:
         self._effort: str = "high"  # reasoning effort: low/medium/high/max
         self._platform_state: dict[str, dict] = {}  # platform -> arbitrary state
         self._autopilot_chains: dict[str, list[str]] = {}  # session_id -> remaining steps
+        self._pending_merges: dict[str, dict] = {}  # instance_id -> pending merge metadata
         self._chain_deferred: dict[str, list[str]] = {}  # session_id -> deferred revisions
         self._chain_phases: dict[str, dict] = {}  # session_id -> ChainPhaseState dict
         self._chain_entry_sha: dict[str, str] = {}  # session_id -> HEAD sha snapshot
@@ -89,6 +90,7 @@ class StateStore:
             self._effort = data.get("effort", "high")
             self._platform_state = data.get("platform_state", {})
             self._autopilot_chains = data.get("autopilot_chains", {})
+            self._pending_merges = data.get("pending_merges", {})
             self._chain_deferred = data.get("chain_deferred", {})
             self._chain_phases = data.get("chain_phases", {})
             self._chain_entry_sha = data.get("chain_entry_sha", {})
@@ -230,6 +232,7 @@ class StateStore:
             "effort": self._effort,
             "platform_state": self._platform_state,
             "autopilot_chains": self._autopilot_chains,
+            "pending_merges": self._pending_merges,
             "chain_deferred": self._chain_deferred,
             "chain_phases": self._chain_phases,
             "chain_entry_sha": self._chain_entry_sha,
@@ -819,6 +822,63 @@ class StateStore:
             return
         self._autopilot_chains.pop(session_id, None)
         self.mark_dirty()
+
+    # --- Pending Merges (auto-merge failed; awaiting user resolution) ---
+
+    def set_pending_merge(
+        self,
+        instance_id: str,
+        *,
+        session_id: str | None,
+        channel_id: str,
+        repo_name: str,
+        message: str,
+    ) -> None:
+        """Record that an auto-merge failed and is awaiting user action.
+
+        Set when autopilot or standalone-Done auto-merge fails. While present,
+        any plain-text message in the channel is prefixed with a system note
+        in on_text so Claude doesn't reinterpret it as a fresh task.
+        """
+        if not instance_id:
+            return
+        self._pending_merges[instance_id] = {
+            "session_id": session_id or "",
+            "channel_id": channel_id,
+            "repo_name": repo_name,
+            "message": message,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self.save()
+
+    def get_pending_merge(self, instance_id: str) -> dict | None:
+        """Return pending-merge metadata for an instance, or None."""
+        return self._pending_merges.get(instance_id)
+
+    def get_pending_merge_by_session(self, session_id: str | None) -> tuple[str, dict] | None:
+        """Find a pending merge by session_id. Returns (instance_id, meta) or None."""
+        if not session_id:
+            return None
+        for iid, meta in self._pending_merges.items():
+            if meta.get("session_id") == session_id:
+                return iid, meta
+        return None
+
+    def get_pending_merge_by_channel(self, channel_id: str) -> tuple[str, dict] | None:
+        """Find a pending merge by channel_id. Returns (instance_id, meta) or None."""
+        if not channel_id:
+            return None
+        for iid, meta in self._pending_merges.items():
+            if meta.get("channel_id") == channel_id:
+                return iid, meta
+        return None
+
+    def clear_pending_merge(self, instance_id: str) -> None:
+        """Remove pending-merge state once the user resolves the merge."""
+        if not instance_id:
+            return
+        if self._pending_merges.pop(instance_id, None) is not None:
+            self.save()
 
     # --- Chain Deferred Revisions ---
 
