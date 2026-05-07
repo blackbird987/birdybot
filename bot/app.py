@@ -1000,6 +1000,8 @@ async def _resume_interrupted_chains(
 
     Brief delay lets drain queue dispatch start first and acquire its locks.
     """
+    from datetime import datetime, timedelta, timezone
+
     from bot.engine import workflows
     from bot.engine.commands import _get_channel_lock
 
@@ -1014,7 +1016,60 @@ async def _resume_interrupted_chains(
         return
 
     log.info("Found %d interrupted autopilot chains to resume", len(all_chains))
+    # Stale-chain TTL: a queue older than this is presumed abandoned and
+    # dropped. Long enough to cover an overnight pause (user steps away with
+    # a needs_input pending), short enough to avoid resurrecting weeks-old
+    # work after a long downtime.
+    stale_chain_ttl = timedelta(hours=48)
+    now = datetime.now(timezone.utc)
     for session_id, steps in all_chains.items():
+        meta = store.get_autopilot_chain_meta(session_id) or {}
+        status = meta.get("status")
+        updated_at = meta.get("updated_at")
+
+        # Defensive: any chain without meta got dropped at load. If we still
+        # see one here, something added a queue without going through
+        # set_autopilot_chain — log and skip rather than guess intent.
+        if not status:
+            log.warning(
+                "Skipping unmetered chain (post-load) for session %s — clearing",
+                session_id,
+            )
+            store.clear_autopilot_chain(session_id)
+            store.clear_chain_entry_sha(session_id)
+            continue
+
+        # Paused chains are waiting on the user (needs_input, phantom, phase
+        # gate). They MUST NOT resume on reboot — that's the bug this whole
+        # field exists to prevent.
+        if status == "paused":
+            log.info(
+                "Skipping paused autopilot chain for session %s (steps: %s)",
+                session_id, steps,
+            )
+            continue
+
+        # Stale running chains: crash happened too long ago to safely resume.
+        if updated_at:
+            try:
+                ts = datetime.fromisoformat(updated_at)
+                if now - ts > stale_chain_ttl:
+                    log.warning(
+                        "Dropping stale running chain for session %s (age %s, steps: %s)",
+                        session_id, now - ts, steps,
+                    )
+                    store.clear_autopilot_chain(session_id)
+                    store.clear_chain_entry_sha(session_id)
+                    continue
+            except (ValueError, TypeError):
+                log.warning(
+                    "Unparseable chain meta updated_at for session %s: %r — clearing",
+                    session_id, updated_at,
+                )
+                store.clear_autopilot_chain(session_id)
+                store.clear_chain_entry_sha(session_id)
+                continue
+
         # Find the thread for this session
         lookup = discord_bot._forums.session_to_thread(session_id)
         if not lookup:

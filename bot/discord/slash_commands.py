@@ -159,7 +159,23 @@ def setup(bot: ClaudeBot) -> None:
         if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
             await interaction.response.send_message("Unauthorized", ephemeral=True)
             return
-        await bot._run_slash(interaction, lambda ctx: commands.on_merge(ctx, target))
+
+        # Resolve session_id from the thread (or from the merge target) so we
+        # can clear any paused chain queue before merging.
+        channel_id = str(interaction.channel_id)
+        lookup = bot._forums.thread_to_project(channel_id)
+        info = lookup[1] if lookup else None
+        session_id = info.session_id if info else None
+        if not session_id:
+            tgt_inst = bot._store.get_instance(target)
+            session_id = tgt_inst.session_id if tgt_inst else None
+
+        async def _run(ctx):
+            from bot.engine.commands import _clear_chain_on_manual_finalize
+            _clear_chain_on_manual_finalize(bot._store, session_id, "/merge")
+            await commands.on_merge(ctx, target)
+
+        await bot._run_slash(interaction, _run)
 
     @bot.tree.command(name="discard", description="Delete branch", guild=guild_obj)
     @app_commands.describe(target="Instance ID or name")
@@ -573,9 +589,12 @@ def setup(bot: ClaudeBot) -> None:
             bot._store.update_instance(source_inst)
 
         # Acquire channel lock to prevent concurrent spawns
-        from bot.engine.commands import _get_channel_lock
+        from bot.engine.commands import _clear_chain_on_manual_finalize, _get_channel_lock
         lock = _get_channel_lock(channel_id)
         async with lock:
+            _clear_chain_on_manual_finalize(
+                bot._store, info.session_id, "/done",
+            )
             try:
                 from bot.engine import workflows
                 await workflows.on_done(ctx, source_inst.id)
