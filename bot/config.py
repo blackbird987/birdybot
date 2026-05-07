@@ -906,7 +906,8 @@ _RELEASE_STEPS = (
     '- Pick vX.Y.Z so it is strictly greater than every existing v* tag '
     '(run `git tag --list "v*"` and bump above the highest). Never reuse '
     'a tag — if your computed version already exists, bump again.\n'
-    '- Create git tag vX.Y.Z\n'
+    '- Do NOT run `git tag` — the bot creates the tag from your commit '
+    'message after merge. Stop after the commit.\n'
 )
 
 DONE_PROMPT_STANDALONE = (
@@ -1053,8 +1054,8 @@ RELEASE_PROMPT = (
     'most recent versioned section, or the version file if no '
     'prior releases exist)\n'
     + _RELEASE_STEPS +
-    '4. Report: version number, tag name, and summary of released changes. '
-    'Remind that git push --tags is needed to publish the tag.\n\n'
+    '4. Report: version number and summary of released changes. '
+    'The bot will create and push the tag after this session completes.\n\n'
     'At the very end of your response, output a structured summary block '
     'in exactly this format (no extra text after the block):\n'
     '```summary\n'

@@ -6,6 +6,7 @@ import asyncio
 import json as _json_mod
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -51,6 +52,15 @@ REBUILD_TIMEOUT_SECS = 30
 # Cross-account JSONL hydration: same TTL semantics as rebuild — bursts of
 # correlated resume attempts shouldn't re-scan every account on disk.
 HYDRATE_CACHE_TTL_SECS = 60
+
+# Release-tag deferral: the LLM commits ``vX.Y.Z: Summary`` but does not run
+# ``git tag``.  After the merge to master succeeds the bot walks the
+# branch-unique commit window and creates the tag from the first matching
+# subject. Capping the walk at 50 commits is purely defensive — typical
+# release branches are 1–3 commits, and unbounded walks could surprise us if
+# a stacked Build chain ever balloons.
+_RELEASE_COMMIT_RE = re.compile(r'^(v\d+\.\d+\.\d+(?:\.\d+)?):\s')
+_TAG_WALKBACK_CAP = 50
 
 ProgressCallback = Callable  # async callback(message: str, detail: str)
 StallCallback = Callable[[str], None]     # async callback(instance_id)
@@ -2412,6 +2422,106 @@ class ClaudeRunner:
         log.info("Cleared leftover MERGE_HEAD in %s", repo)
         return None
 
+    def _release_commit_window(
+        self, repo: str, branch_tip: str,
+    ) -> list[tuple[str, str]]:
+        """Return (sha, subject) pairs for branch-unique commits, newest-first.
+
+        Walks ``HEAD^1..<branch_tip>`` along first-parent so we only see
+        commits the merged-in branch contributed (i.e. the LLM's release
+        commit and any cleanup commits it made after). Capped at
+        ``_TAG_WALKBACK_CAP`` defensively. Returns an empty list on any git
+        failure — callers treat that as "no candidates" and skip tagging.
+        """
+        try:
+            r = subprocess.run(
+                [
+                    "git", "log", "--first-parent",
+                    f"-{_TAG_WALKBACK_CAP}",
+                    "--format=%H%x09%s",
+                    f"HEAD^1..{branch_tip}",
+                ],
+                cwd=repo, capture_output=True, text=True, **_NOWND,
+            )
+        except Exception:
+            log.exception("git log for release-commit window failed in %s", repo)
+            return []
+        if r.returncode != 0:
+            log.debug(
+                "git log HEAD^1..%s failed in %s (rc=%d): %s",
+                branch_tip, repo, r.returncode, (r.stderr or "").strip(),
+            )
+            return []
+        out: list[tuple[str, str]] = []
+        for line in (r.stdout or "").splitlines():
+            sha, _, subject = line.partition("\t")
+            sha = sha.strip()
+            if sha:
+                out.append((sha, subject))
+        return out
+
+    def _tag_release_at(
+        self, repo: str, branch_tip: str,
+    ) -> tuple[str | None, list[str]]:
+        """Walk the branch-unique window for ``vX.Y.Z: ...`` and tag it.
+
+        Returns ``(tag_name, candidate_shas)``:
+          - ``tag_name`` is the tag name when we created it, when it already
+            pointed at the release commit (idempotent), or ``None`` when
+            there was nothing to do or a same-name tag pointed elsewhere
+            (no clobber).
+          - ``candidate_shas`` is every SHA from the window — used by the
+            push block to look for any pre-existing tags that live on those
+            commits (legacy LLM-created tags before this deferral landed).
+        """
+        window = self._release_commit_window(repo, branch_tip)
+        candidate_shas = [sha for sha, _ in window]
+        for sha, subject in window:
+            m = _RELEASE_COMMIT_RE.match(subject)
+            if not m:
+                continue
+            tag_name = m.group(1)
+            # ^{commit} dereferences annotated tags down to the commit they
+            # point at. Without it, `rev-parse refs/tags/<annotated>` returns
+            # the tag-object SHA, which never equals the commit SHA we
+            # compare against — falsely tripping the no-clobber branch on
+            # an annotated tag that's actually already correct.
+            existing = subprocess.run(
+                ["git", "rev-parse", "--verify",
+                 f"refs/tags/{tag_name}^{{commit}}"],
+                cwd=repo, capture_output=True, text=True, **_NOWND,
+            )
+            if existing.returncode == 0:
+                where = (existing.stdout or "").strip()
+                if where == sha:
+                    log.info(
+                        "Tag %s already at release commit %s in %s — idempotent",
+                        tag_name, sha[:7], repo,
+                    )
+                    return tag_name, candidate_shas
+                log.warning(
+                    "Tag %s already exists at %s (release commit is %s) in %s — "
+                    "refusing to clobber",
+                    tag_name, where[:7], sha[:7], repo,
+                )
+                return None, candidate_shas
+            create = subprocess.run(
+                ["git", "tag", tag_name, sha],
+                cwd=repo, capture_output=True, text=True, **_NOWND,
+            )
+            if create.returncode != 0:
+                log.error(
+                    "git tag %s %s failed in %s: %s",
+                    tag_name, sha[:7], repo,
+                    (create.stderr or create.stdout or "").strip(),
+                )
+                return None, candidate_shas
+            log.info(
+                "Created release tag %s at %s in %s", tag_name, sha[:7], repo,
+            )
+            return tag_name, candidate_shas
+        return None, candidate_shas
+
     async def merge_branch(self, instance: Instance) -> str:
         """Merge worktree branch into master. Returns status message."""
         if not instance.branch or not instance.original_branch:
@@ -2592,6 +2702,18 @@ class ClaudeRunner:
             # Clean up worktree project dir
             self._cleanup_worktree_session_dir(instance)
 
+            # Deferred tag creation: the LLM committed `vX.Y.Z: Summary` but
+            # did not run `git tag` in the worktree. Now that the merge
+            # landed on master, walk the branch-unique window and tag the
+            # release commit. Wrapped in defense-in-depth so a future bug
+            # in the helper can't poison the merge push path.
+            candidate_shas: list[str] = []
+            try:
+                _, candidate_shas = self._tag_release_at(repo, "HEAD^2")
+            except Exception:
+                log.exception("Tag-release step raised in %s", repo)
+                candidate_shas = []
+
             # Push merged result to origin
             push_note = ""
             try:
@@ -2615,32 +2737,43 @@ class ClaudeRunner:
                     push_note = f"\n⚠️ Could not push to origin (exit {push_r.returncode})"
                 else:
                     log.info("Pushed %s to origin after merge in %s", target, repo)
-                    # Push tags if the merged branch's tip had any
+                    # Push tags pointing at any commit in the branch-unique
+                    # window. Covers the bot-created release tag plus any
+                    # legacy LLM-self-tagged commits that may still exist
+                    # on those shas.
                     try:
-                        tag_r = subprocess.run(
-                            ["git", "tag", "--points-at", "HEAD^2"],
-                            cwd=repo, capture_output=True, text=True, **_NOWND,
-                        )
-                        if tag_r.returncode != 0:
-                            log.debug("git tag --points-at HEAD^2 failed in %s (rc=%d), skipping tag push",
-                                      repo, tag_r.returncode)
-                        else:
-                            tags = tag_r.stdout.strip()
-                            if tags:
-                                tag_names = tags.splitlines()
-                                tag_push_r = subprocess.run(
-                                    ["git", "push", "origin"] + tag_names,
-                                    cwd=repo, capture_output=True, text=True,
-                                    timeout=30, **_NOWND,
+                        tag_names: list[str] = []
+                        seen: set[str] = set()
+                        for sha in candidate_shas:
+                            tag_r = subprocess.run(
+                                ["git", "tag", "--points-at", sha],
+                                cwd=repo, capture_output=True, text=True, **_NOWND,
+                            )
+                            if tag_r.returncode != 0:
+                                log.debug(
+                                    "git tag --points-at %s failed in %s (rc=%d), skipping",
+                                    sha[:7], repo, tag_r.returncode,
                                 )
-                                if tag_push_r.returncode != 0:
-                                    tag_detail = (tag_push_r.stderr or tag_push_r.stdout or "").strip()
-                                    log.error("Tag push to origin in %s: %s", repo, tag_detail)
-                                    push_note += f"\n⚠️ Tags not pushed (exit {tag_push_r.returncode})"
-                                else:
-                                    tag_list = ", ".join(tag_names)
-                                    log.info("Pushed tags [%s] to origin in %s", tag_list, repo)
-                                    push_note += f"\nTags pushed: {tag_list}"
+                                continue
+                            for name in (tag_r.stdout or "").splitlines():
+                                name = name.strip()
+                                if name and name not in seen:
+                                    seen.add(name)
+                                    tag_names.append(name)
+                        if tag_names:
+                            tag_push_r = subprocess.run(
+                                ["git", "push", "origin"] + tag_names,
+                                cwd=repo, capture_output=True, text=True,
+                                timeout=30, **_NOWND,
+                            )
+                            if tag_push_r.returncode != 0:
+                                tag_detail = (tag_push_r.stderr or tag_push_r.stdout or "").strip()
+                                log.error("Tag push to origin in %s: %s", repo, tag_detail)
+                                push_note += f"\n⚠️ Tags not pushed (exit {tag_push_r.returncode})"
+                            else:
+                                tag_list = ", ".join(tag_names)
+                                log.info("Pushed tags [%s] to origin in %s", tag_list, repo)
+                                push_note += f"\nTags pushed: {tag_list}"
                     except subprocess.TimeoutExpired:
                         log.error("Tag push to origin timed out (30s) in %s", repo)
                         push_note += "\n⚠️ Tag push timed out (30s)"
