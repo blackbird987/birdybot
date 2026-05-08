@@ -19,7 +19,7 @@ from pathlib import Path
 from bot import config
 from bot.claude.types import Instance, InstanceOrigin, InstanceStatus, InstanceType
 from bot.engine import lifecycle, pending as pending_mod, sessions as sessions_mod, workflows
-from bot.platform.base import ButtonSpec, RequestContext
+from bot.platform.base import ButtonSpec, RequestContext, SpawnArgs
 from bot.platform.formatting import (
     VALID_MODES,
     action_button_specs,
@@ -162,7 +162,7 @@ _QUOTED_LINE_PREFIX = re.compile(r'^\s*(?:>|`|```|#{1,3}\s)')
 
 
 async def _execute_bot_commands(ctx: RequestContext, result_text: str) -> None:
-    """Scan final assistant output for [BOT_CMD: /repo ...] directives."""
+    """Scan final assistant output for [BOT_CMD: /repo ...] and /spawn directives."""
     if not result_text:
         return
     for m in _BOT_CMD_RE.finditer(result_text):
@@ -196,6 +196,257 @@ async def _execute_bot_commands(ctx: RequestContext, result_text: str) -> None:
             await on_repo(ctx, repo_args)
         except Exception:
             log.warning("Failed to execute bot command: /repo %s", repo_args)
+
+    # /spawn — only the FIRST directive in the response is honored, even if the
+    # model emitted several. Subsequent ones are logged-and-skipped so a single
+    # confused turn can't fan out into N parallel sessions.
+    spawn_match = _SPAWN_DIRECTIVE_RE.search(result_text)
+    if spawn_match:
+        line_start = result_text.rfind('\n', 0, spawn_match.start()) + 1
+        line_prefix = result_text[line_start:spawn_match.start()]
+        if _QUOTED_LINE_PREFIX.match(line_prefix):
+            log.debug("BOT_CMD /spawn skipped — inside quoted content")
+        else:
+            args_str = spawn_match.group(1).strip()
+            body_match = _SPAWN_BODY_RE.search(result_text, spawn_match.end())
+            if not body_match:
+                log.warning("BOT_CMD /spawn blocked — no adjacent ~~~spawn body found")
+                try:
+                    await ctx.messenger.send_text(
+                        ctx.channel_id,
+                        "⚠️ /spawn directive ignored — must be followed by a "
+                        "`~~~spawn ... ~~~` body block.",
+                        silent=True,
+                    )
+                except Exception:
+                    pass
+            else:
+                body = body_match.group(1).strip()
+                try:
+                    await _handle_spawn_directive(ctx, args_str, body)
+                except Exception:
+                    log.exception("Failed to dispatch /spawn directive")
+        # Note: we don't iterate further — first match wins.
+        for extra in list(_SPAWN_DIRECTIVE_RE.finditer(result_text))[1:]:
+            log.warning(
+                "BOT_CMD /spawn — extra directive at offset %d ignored "
+                "(only first per response)", extra.start(),
+            )
+
+
+# --- /spawn directive (Tier-2 BOT_CMD — assistant-issued session handoff) ---
+
+_SPAWN_DIRECTIVE_RE = re.compile(r'\[BOT_CMD:\s*/spawn\s+(.+?)\]')
+# Match a tilde-fenced ~~~spawn ... ~~~ block. Tildes avoid colliding with the
+# triple-backtick code fences the model uses inside the prompt body.
+_SPAWN_BODY_RE = re.compile(r'~~~spawn\s*\n(.*?)\n~~~', re.DOTALL)
+# kv pair: key=value where value is bare or quoted (single or double).
+_SPAWN_KV_RE = re.compile(
+    r'''(\w+)=(?:"([^"]*)"|'([^']*)'|(\S+))'''
+)
+_SPAWN_ALLOWED_KEYS = {"repo", "title", "mode", "effort"}
+_SPAWN_ALLOWED_MODES = {"explore", "plan", "build"}
+_SPAWN_ALLOWED_EFFORTS = {"low", "medium", "high", "max"}
+_SPAWN_PROMPT_MAX_BYTES = 32 * 1024  # 32 KiB hard cap on body
+_SPAWN_TITLE_MAX = 80
+
+
+def _parse_spawn_kv(args_str: str) -> dict[str, str] | None:
+    """Parse `key=val key="quoted val"` into a dict.
+
+    Returns None if shell metachars sneak in or if any input bytes are
+    left unparsed (catches malformed input like trailing junk).
+    """
+    if _DANGEROUS_PATH_CHARS.search(args_str):
+        return None
+    out: dict[str, str] = {}
+    consumed_end = 0
+    for m in _SPAWN_KV_RE.finditer(args_str):
+        # Reject if there's non-whitespace junk between matches.
+        between = args_str[consumed_end:m.start()]
+        if between.strip():
+            return None
+        key = m.group(1)
+        val = m.group(2) if m.group(2) is not None else (
+            m.group(3) if m.group(3) is not None else m.group(4)
+        )
+        out[key] = val
+        consumed_end = m.end()
+    # Reject if there's non-whitespace tail.
+    if args_str[consumed_end:].strip():
+        return None
+    return out
+
+
+async def _handle_spawn_directive(
+    ctx: RequestContext, args_str: str, body: str,
+) -> None:
+    """Dispatch a [BOT_CMD: /spawn ...] directive in the parent thread.
+
+    Validates inputs, gates on autopilot/recursion/budget, calls the
+    platform-supplied ``ctx.spawn_session`` callback, and writes the
+    idempotency marker on the parent instance.
+    """
+    # Platform must support the seam — engine never imports bot.discord.
+    if ctx.spawn_session is None:
+        log.warning("BOT_CMD /spawn — platform has no spawn_session callback; ignoring")
+        return
+
+    # Block dispatch when the parent thread is mid-autopilot (running OR paused).
+    # Spawning a child while the chain holds the wheel is confusing UX and risks
+    # split-brain reviews on the same code.
+    chain_meta = ctx.store.get_autopilot_chain_meta(ctx.session_id)
+    if chain_meta and chain_meta.get("status") in ("running", "paused"):
+        try:
+            await ctx.messenger.send_text(
+                ctx.channel_id,
+                "⚠️ /spawn refused — autopilot is "
+                f"{chain_meta.get('status')} on this thread. Stop or finish "
+                "the chain before handing off a fresh session.",
+                silent=True,
+            )
+        except Exception:
+            pass
+        return
+
+    kv = _parse_spawn_kv(args_str)
+    if kv is None:
+        log.warning("BOT_CMD /spawn blocked — args failed to parse: %s", args_str)
+        return
+    extra = set(kv) - _SPAWN_ALLOWED_KEYS
+    if extra:
+        log.warning("BOT_CMD /spawn blocked — unknown keys: %s", sorted(extra))
+        return
+    repo = kv.get("repo", "").strip()
+    title = kv.get("title", "").strip()
+    if not repo or not title:
+        log.warning("BOT_CMD /spawn blocked — repo and title are required")
+        return
+    if len(title) > _SPAWN_TITLE_MAX:
+        title = title[:_SPAWN_TITLE_MAX].rstrip()
+    mode = kv.get("mode", "build").strip().lower()
+    if mode not in _SPAWN_ALLOWED_MODES:
+        log.warning("BOT_CMD /spawn blocked — invalid mode: %s", mode)
+        return
+    effort = kv.get("effort")
+    if effort is not None:
+        effort = effort.strip().lower()
+        if effort not in _SPAWN_ALLOWED_EFFORTS:
+            log.warning("BOT_CMD /spawn blocked — invalid effort: %s", effort)
+            return
+
+    # Repo must be registered.
+    repos = ctx.store.list_repos()
+    if repo not in repos:
+        try:
+            await ctx.messenger.send_text(
+                ctx.channel_id,
+                f"⚠️ /spawn refused — repo `{repo}` is not registered. "
+                "Use `/repo list` to see registered repos.",
+                silent=True,
+            )
+        except Exception:
+            pass
+        return
+
+    # Body checks.
+    if not body:
+        log.warning("BOT_CMD /spawn blocked — empty prompt body")
+        return
+    if len(body.encode("utf-8")) > _SPAWN_PROMPT_MAX_BYTES:
+        log.warning(
+            "BOT_CMD /spawn blocked — body exceeds %d bytes",
+            _SPAWN_PROMPT_MAX_BYTES,
+        )
+        try:
+            await ctx.messenger.send_text(
+                ctx.channel_id,
+                "⚠️ /spawn refused — prompt body exceeds the 32 KiB limit.",
+                silent=True,
+            )
+        except Exception:
+            pass
+        return
+
+    # Resolve the parent instance for recursion + idempotency tracking.
+    parent_iid = (
+        ctx.runner.active_instance_for_session(ctx.session_id)
+        or ctx.runner.active_instance_for_channel(ctx.channel_id)
+    )
+    parent_inst = ctx.store.get_instance(parent_iid) if parent_iid else None
+    parent_depth = parent_inst.spawn_depth if parent_inst else 0
+
+    # Recursion cap — depth 1 max. A spawned thread cannot itself spawn.
+    if parent_depth >= 1:
+        try:
+            await ctx.messenger.send_text(
+                ctx.channel_id,
+                "⚠️ /spawn refused — this thread was itself created by a "
+                "spawn directive, so it cannot spawn further. Switch to a "
+                "top-level thread (one you opened directly) and try again.",
+                silent=True,
+            )
+        except Exception:
+            pass
+        return
+
+    # Idempotency — replays of the same final response (e.g. retry, rebind)
+    # must not re-dispatch.
+    if parent_inst and parent_inst.spawn_dispatched_thread_id:
+        log.info(
+            "BOT_CMD /spawn — already dispatched to thread %s; skipping replay",
+            parent_inst.spawn_dispatched_thread_id,
+        )
+        return
+
+    # Budget gate.
+    if not check_budget(ctx):
+        try:
+            await ctx.messenger.send_text(
+                ctx.channel_id,
+                "⚠️ /spawn refused — daily budget exhausted.",
+                silent=True,
+            )
+        except Exception:
+            pass
+        return
+
+    spawn_args = SpawnArgs(
+        repo=repo,
+        title=title,
+        prompt=body,
+        mode=mode,
+        effort=effort,
+        parent_depth=parent_depth,
+    )
+    try:
+        result = await ctx.spawn_session(spawn_args)
+    except Exception:
+        log.exception("BOT_CMD /spawn — platform callback raised")
+        try:
+            await ctx.messenger.send_text(
+                ctx.channel_id,
+                "⚠️ /spawn failed — platform could not create the new session.",
+                silent=True,
+            )
+        except Exception:
+            pass
+        return
+
+    # Mark idempotency on the parent instance.
+    if parent_inst:
+        parent_inst.spawn_dispatched_thread_id = result.thread_id
+        ctx.store.update_instance(parent_inst, critical=True)
+
+    # Confirm in the parent thread.
+    link = result.thread_url or result.thread_mention
+    try:
+        await ctx.messenger.send_text(
+            ctx.channel_id,
+            f"🚀 Spawned new session: {link}",
+        )
+    except Exception:
+        log.debug("Failed to post spawn confirmation", exc_info=True)
 
 
 # --- Query ---
@@ -523,6 +774,13 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
     inst.is_owner_session = ctx.is_owner
     if not ctx.is_owner and ctx.bash_policy:
         inst.bash_policy = ctx.bash_policy
+    # Stamp spawn_depth on the first Instance of a spawned thread so the
+    # recursion cap in /spawn fires when the spawned session itself tries
+    # to spawn. One-shot: clear after consumption so subsequent prompts
+    # in the same thread inherit through the prior instance instead.
+    if ctx.spawn_depth_inherit > 0:
+        inst.spawn_depth = ctx.spawn_depth_inherit
+        ctx.spawn_depth_inherit = 0
     if resume_session:
         inst.session_id = resume_session
     inst.status = InstanceStatus.RUNNING

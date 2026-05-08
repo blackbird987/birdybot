@@ -134,6 +134,14 @@ class Instance:
     # work merged onto master after it started. Captured lazily on first
     # prompt build when None and inherited through spawn_from.
     master_baseline_head: str | None = None
+    # [BOT_CMD: /spawn] — depth of this conceptual session in a spawn chain.
+    # Top-level session = 0; spawned by depth-0 = 1; etc. The directive handler
+    # caps recursion at depth 1 to prevent fan-out runaway.
+    spawn_depth: int = 0
+    # Idempotency marker — set to the dispatched thread_id once /spawn fires
+    # successfully. Replays of the same final assistant response (via retry
+    # or thread re-binding) consult this marker and skip re-dispatch.
+    spawn_dispatched_thread_id: str | None = None
     _accounts_tried: set[str] = field(default_factory=set)  # Ephemeral: tracks accounts tried this run (not persisted)
 
     def display_id(self) -> str:
@@ -216,6 +224,8 @@ class Instance:
             "manual_recovery_needed": self.manual_recovery_needed,
             "manual_recovery_reason": self.manual_recovery_reason,
             "master_baseline_head": self.master_baseline_head,
+            "spawn_depth": self.spawn_depth,
+            "spawn_dispatched_thread_id": self.spawn_dispatched_thread_id,
         }
 
     @classmethod
@@ -280,6 +290,8 @@ class Instance:
             manual_recovery_needed=d.get("manual_recovery_needed", False),
             manual_recovery_reason=d.get("manual_recovery_reason"),
             master_baseline_head=d.get("master_baseline_head"),
+            spawn_depth=d.get("spawn_depth", 0),
+            spawn_dispatched_thread_id=d.get("spawn_dispatched_thread_id"),
         )
 
 

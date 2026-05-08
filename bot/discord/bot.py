@@ -42,7 +42,7 @@ from bot.discord import tags as tags_mod
 from bot.discord.forums import ForumManager, ThreadInfo
 from bot.discord.titles import generate_title_text
 from bot.engine import commands
-from bot.platform.base import RequestContext
+from bot.platform.base import RequestContext, SpawnArgs, SpawnResult
 from bot.services.twitter import enrich_with_tweets
 
 if TYPE_CHECKING:
@@ -333,6 +333,7 @@ class ClaudeBot(discord.Client):
             ctx.context = thread_info.context
             ctx.verbose_level = thread_info.verbose_level
             ctx.effort = thread_info.effort
+            ctx.spawn_depth_inherit = thread_info.spawn_depth
         if access_result:
             ctx.is_owner = access_result.is_owner
             if not access_result.is_owner and access_result.mode_ceiling:
@@ -396,6 +397,71 @@ class ClaudeBot(discord.Client):
             await forums._mutate_verify(repo_name, _mutate)
 
         ctx.add_verify_item = _add_verify_item
+
+        # [BOT_CMD: /spawn] — engine calls this when a directive in the
+        # assistant's final response asks the bot to hand off a generated
+        # prompt to a fresh thread. We create the thread, build a child
+        # ctx for it, stamp spawn_depth, and dispatch through on_text.
+        async def _spawn_session(args: SpawnArgs) -> SpawnResult:
+            thread = await _bot._forums.get_or_create_session_thread(
+                args.repo,
+                session_id=None,
+                topic=args.title,
+                origin="spawn",
+                user_id=ctx.user_id or None,
+                user_name=ctx.user_name or None,
+            )
+            if thread is None:
+                raise RuntimeError("get_or_create_session_thread returned None")
+            new_channel_id = str(thread.id)
+            lookup = _bot._forums.thread_to_project(new_channel_id)
+            new_info = lookup[1] if lookup else None
+            if new_info is not None:
+                new_info.spawn_depth = args.parent_depth + 1
+                new_info.mode = args.mode
+                if args.effort:
+                    new_info.effort = args.effort
+                _bot._store.save()
+            new_ctx = _bot._ctx(
+                new_channel_id,
+                session_id=None,
+                repo_name=args.repo,
+                thread_info=new_info,
+            )
+            # Inherit identity + access from the parent ctx so non-owner spawns
+            # carry the same gating into the child thread.
+            new_ctx.user_id = ctx.user_id
+            new_ctx.user_name = ctx.user_name
+            new_ctx.is_owner = ctx.is_owner
+            new_ctx.mode_ceiling = ctx.mode_ceiling
+            new_ctx.bash_policy = ctx.bash_policy
+            new_ctx.max_daily_queries = ctx.max_daily_queries
+            new_ctx.check_rate_limit = ctx.check_rate_limit
+            new_ctx.increment_query_count = ctx.increment_query_count
+            if new_info is not None:
+                _bot._forums.attach_session_callbacks(new_ctx, new_info, new_channel_id)
+
+            async def _dispatch():
+                try:
+                    await commands.on_text(new_ctx, args.prompt)
+                    if new_info is not None:
+                        _bot._forums.persist_ctx_settings(new_ctx)
+                    asyncio.create_task(_bot._try_apply_tags_after_run(new_channel_id))
+                except Exception:
+                    log.exception("spawn dispatch failed in thread %s", new_channel_id)
+
+            asyncio.create_task(_dispatch())
+            mention = f"<#{new_channel_id}>"
+            url = None
+            if thread.guild is not None:
+                url = f"https://discord.com/channels/{thread.guild.id}/{new_channel_id}"
+            return SpawnResult(
+                thread_id=new_channel_id,
+                thread_mention=mention,
+                thread_url=url,
+            )
+
+        ctx.spawn_session = _spawn_session
         return ctx
 
     # --- Delegation to extracted modules ---

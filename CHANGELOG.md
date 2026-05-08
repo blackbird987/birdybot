@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- `[BOT_CMD: /spawn]` directive — assistant can hand off a generated prompt to a fresh forum thread instead of forcing the user to copy-paste between sessions. Format: a `[BOT_CMD: /spawn repo=… title="…" mode=…]` directive followed by an adjacent `~~~spawn` … `~~~` body block carrying the prompt. New `SpawnArgs` / `SpawnResult` dataclasses and `spawn_session` callback on `RequestContext` (`bot/platform/base.py`) keep the engine platform-agnostic. Engine handler `_handle_spawn_directive` in `bot/engine/commands.py` validates inputs (repo allowlist, mode/effort allowlists, 32 KiB body cap, kv parser rejects shell metachars and unparsed leftovers, only first directive per response runs), gates dispatch on autopilot status (`get_autopilot_chain_meta` returning `running` / `paused` blocks the spawn), caps recursion at depth 1 via new `Instance.spawn_depth` and `ThreadInfo.spawn_depth` fields (a spawned thread cannot itself spawn — refusal message tells the user to switch to a top-level thread), and is idempotent against retries via new `Instance.spawn_dispatched_thread_id` marker. Discord adapter wires `_spawn_session` in `bot/discord/bot.py:_ctx`: creates a thread via `ForumManager.get_or_create_session_thread(origin="spawn")`, stamps `spawn_depth=parent_depth+1` on the new `ThreadInfo` (persisted), inherits identity / access policy from the parent ctx, and dispatches the prompt through `commands.on_text`. History stripper in `bot/discord/forums.py` drops `~~~spawn` blocks alongside `[BOT_CMD:` lines so quoted-content replay can't ride a prior spawn body back into the dispatcher. System-prompt block in `bot/config.py` documents the format, allowlists, and refusal cases for the assistant.
+
 ## v0.92.25 — Defer release tag until after merge (2026-05-07)
 
 ### Fixed
