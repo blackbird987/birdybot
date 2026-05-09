@@ -36,6 +36,34 @@ class MessageHandle:
         return self._data.get(key, default)
 
 
+@dataclass
+class SpawnArgs:
+    """Inputs for ctx.spawn_session — the [BOT_CMD: /spawn] dispatch contract.
+
+    The engine fills this in after parsing the directive; the platform
+    callback owns thread creation, ctx construction, and prompt dispatch.
+    """
+    repo: str
+    title: str
+    prompt: str
+    mode: str = "build"
+    effort: str | None = None
+    parent_depth: int = 0
+
+
+@dataclass
+class SpawnResult:
+    """Outcome of a successful spawn dispatch.
+
+    The engine uses these fields to post the confirmation reply in the
+    parent thread. ``thread_url`` is preferred when available; ``thread_mention``
+    is the fallback for renderers that don't hyperlink mentions.
+    """
+    thread_id: str
+    thread_mention: str
+    thread_url: str | None = None
+
+
 @runtime_checkable
 class Messenger(Protocol):
     """Protocol for platform-specific messaging."""
@@ -205,6 +233,15 @@ class RequestContext:
     # to the usage_queue entry, which then owns cleanup via replay or Cancel.
     pending_image_paths: list[str] = field(default_factory=list)
     images_claimed: bool = False  # True once gate has persisted paths to queue
+    # [BOT_CMD: /spawn] — platform-supplied callback that creates a fresh
+    # session thread and dispatches `args.prompt` into it. Engine never
+    # imports platform modules; if None, the engine refuses the directive.
+    spawn_session: Callable[["SpawnArgs"], Awaitable["SpawnResult"]] | None = None
+    # Spawn-depth seed for the first Instance created from this ctx. When the
+    # platform dispatches a spawned prompt into a new thread, it sets this to
+    # parent_depth + 1; the engine stamps it onto the new Instance so the
+    # recursion cap in /spawn handler trips correctly inside the spawned thread.
+    spawn_depth_inherit: int = 0
 
     @property
     def effective_mode(self) -> str:

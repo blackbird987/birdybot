@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import enum
 import logging
+import re
 import secrets
 import subprocess
 from dataclasses import dataclass, field
@@ -55,6 +56,10 @@ class ThreadInfo:
     user_name: str | None = None
     # All users who interacted with this thread (for close mentions)
     user_ids: set[str] = field(default_factory=set)
+    # [BOT_CMD: /spawn] — depth of this thread in a spawn chain. 0 = top-level
+    # (user opened it directly); 1 = created by a spawn directive. The directive
+    # handler caps recursion at depth 1, so spawned threads can't fan out further.
+    spawn_depth: int = 0
 
     def to_dict(self) -> dict:
         d = {
@@ -79,6 +84,8 @@ class ThreadInfo:
             d["user_name"] = self.user_name
         if self.user_ids:
             d["user_ids"] = sorted(self.user_ids)
+        if self.spawn_depth:
+            d["spawn_depth"] = self.spawn_depth
         return d
 
     @classmethod
@@ -97,6 +104,7 @@ class ThreadInfo:
             user_id=data.get("user_id"),
             user_name=data.get("user_name"),
             user_ids=set(data.get("user_ids", [])),
+            spawn_depth=data.get("spawn_depth", 0),
         )
 
 
@@ -1768,6 +1776,12 @@ class ForumManager:
                 text = "\n".join(
                     ln for ln in text.splitlines()
                     if not ln.lstrip().startswith("[BOT_CMD:")
+                ).strip()
+                # Drop ~~~spawn ... ~~~ payload blocks — same threat model as
+                # BOT_CMD lines: a quoted spawn body could otherwise re-issue
+                # a spawn by riding the next response back into the dispatcher.
+                text = re.sub(
+                    r"~~~spawn\s*\n.*?\n~~~", "", text, flags=re.DOTALL,
                 ).strip()
                 if not text:
                     continue

@@ -7,6 +7,17 @@
 
 ### Added
 - Stream-time path-poisoning tripwire in `_stream_output` (`bot/claude/runner.py`) records every `Edit`/`Write`/`MultiEdit`/`NotebookEdit` tool_use targeting the main repo path, plus a final reconciliation pass over all events at run end. Hits land on new `RunResult.path_poisoning` (`bot/claude/types.py`), copy onto `Instance.path_poisoning` via `finalize_run` (`bot/engine/lifecycle.py`), and surface in the autopilot zero-diff halt notice (`bot/engine/workflows.py`) as "**Path poisoning detected** — these writes were blocked, which is why the worktree branch is empty: <paths>" instead of the old silent "Build had no changes." Detection helper `detect_path_poisoning` lives in `bot/claude/parser.py` with Windows-aware case-insensitive path comparison.
+## v0.92.26 — Assistant-issued /spawn directive (2026-05-09)
+
+### Added
+- `[BOT_CMD: /spawn]` directive — assistant can hand off a generated prompt to a fresh forum thread instead of forcing the user to copy-paste between sessions. Format: `[BOT_CMD: /spawn repo=… title="…" mode=…]` followed by an adjacent `~~~spawn` … `~~~` body block carrying the prompt.
+  - Engine seam: new `SpawnArgs` / `SpawnResult` dataclasses and a `spawn_session` callback on `RequestContext` (`bot/platform/base.py`) keep the engine platform-agnostic — it never imports `bot.discord`.
+  - Directive handler `_handle_spawn_directive` in `bot/engine/commands.py` validates inputs (repo registered, mode allowlist `{explore,plan,build}`, effort allowlist `{low,medium,high,max}`, ≤32 KiB body, ≤80 char title) and parses kv args via `_parse_spawn_kv` which rejects shell metachars and any unparsed leftover bytes. Only the first directive per response runs; extras are logged and skipped.
+  - Gates: refuses dispatch when `get_autopilot_chain_meta(ctx.session_id)` is `running` or `paused`, when daily budget is exhausted, when the depth-1 recursion cap trips (a spawned thread cannot itself spawn — refusal message tells the user to switch to a top-level thread), and when the platform has no `spawn_session` callback wired.
+  - Recursion cap state lives in two new fields: `Instance.spawn_depth` and `ThreadInfo.spawn_depth` (both persisted). `_execute_query` stamps `inst.spawn_depth` from the new one-shot `ctx.spawn_depth_inherit` field on the first instance of a spawned thread. `Instance.spawn_dispatched_thread_id` is also added as a write-only audit marker (parent → child link visible in `state.json`).
+  - Discord adapter wires `_spawn_session` in `bot/discord/bot.py:_ctx`: creates a thread via `ForumManager.get_or_create_session_thread(origin="spawn")`, stamps `spawn_depth = parent_depth + 1` plus the requested mode/effort on the new `ThreadInfo` (persisted), inherits identity and access policy from the parent ctx, disables the "Reconstructing context…" priming pass on the spawn dispatch (the generated prompt is self-contained — no prior thread history exists), and dispatches the prompt through `commands.on_text` as a background task so the parent run can finish.
+  - History stripper in `bot/discord/forums.py` (`build_prime_briefing`) now drops `~~~spawn` payload blocks alongside `[BOT_CMD:` lines so a quoted spawn body can't ride a prior response back into the dispatcher.
+  - System-prompt block in `bot/config.py` documents the directive format, the kv allowlist, refusal cases, and the "one short sentence in your reply, substance lives in the ~~~spawn block" UX rule.
 
 ## v0.92.25 — Defer release tag until after merge (2026-05-07)
 
