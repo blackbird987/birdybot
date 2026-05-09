@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.92.26 — Assistant-issued /spawn directive (2026-05-09)
+
 ### Added
 - `[BOT_CMD: /spawn]` directive — assistant can hand off a generated prompt to a fresh forum thread instead of forcing the user to copy-paste between sessions. Format: `[BOT_CMD: /spawn repo=… title="…" mode=…]` followed by an adjacent `~~~spawn` … `~~~` body block carrying the prompt.
   - Engine seam: new `SpawnArgs` / `SpawnResult` dataclasses and a `spawn_session` callback on `RequestContext` (`bot/platform/base.py`) keep the engine platform-agnostic — it never imports `bot.discord`.
