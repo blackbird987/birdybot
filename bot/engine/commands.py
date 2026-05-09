@@ -285,7 +285,7 @@ async def _handle_spawn_directive(
 
     Validates inputs, gates on autopilot/recursion/budget, calls the
     platform-supplied ``ctx.spawn_session`` callback, and writes the
-    idempotency marker on the parent instance.
+    parent → child audit marker on the parent instance.
     """
     # Platform must support the seam — engine never imports bot.discord.
     if ctx.spawn_session is None:
@@ -368,7 +368,7 @@ async def _handle_spawn_directive(
             pass
         return
 
-    # Resolve the parent instance for recursion + idempotency tracking.
+    # Resolve the parent instance for recursion cap + audit marker.
     parent_iid = (
         ctx.runner.active_instance_for_session(ctx.session_id)
         or ctx.runner.active_instance_for_channel(ctx.channel_id)
@@ -424,7 +424,8 @@ async def _handle_spawn_directive(
             pass
         return
 
-    # Mark idempotency on the parent instance.
+    # Audit marker on the parent instance — write-only; surfaces the
+    # parent → child link in state.json for post-hoc inspection.
     if parent_inst:
         parent_inst.spawn_dispatched_thread_id = result.thread_id
         ctx.store.update_instance(parent_inst, critical=True)
@@ -765,10 +766,10 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
     inst.is_owner_session = ctx.is_owner
     if not ctx.is_owner and ctx.bash_policy:
         inst.bash_policy = ctx.bash_policy
-    # Stamp spawn_depth on the first Instance of a spawned thread so the
-    # recursion cap in /spawn fires when the spawned session itself tries
-    # to spawn. One-shot: clear after consumption so subsequent prompts
-    # in the same thread inherit through the prior instance instead.
+    # Stamp spawn_depth on this Instance so the recursion cap in /spawn
+    # fires when the spawned session itself tries to spawn. One-shot per
+    # request: cleared after consumption. Subsequent prompts in the same
+    # spawned thread re-seed via _ctx reading ThreadInfo.spawn_depth.
     if ctx.spawn_depth_inherit > 0:
         inst.spawn_depth = ctx.spawn_depth_inherit
         ctx.spawn_depth_inherit = 0
