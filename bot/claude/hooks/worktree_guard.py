@@ -28,9 +28,10 @@ Covered tools:
   NotebookEdit — notebook_path under main repo
 
 Why both worktree and repo paths: the worktree lives *inside* the main
-repo (under .worktrees/), so a substring check against repo_path alone
-would block edits inside the worktree itself. Allow when the path is
-under the worktree; block when it's under the repo but not the worktree.
+repo (under .worktrees/), so a path-prefix check against repo_path alone
+would also block edits inside the worktree itself. Allow when the path
+is equal-to-or-under the worktree; block when it's equal-to-or-under
+the repo but not the worktree.
 """
 
 from __future__ import annotations
