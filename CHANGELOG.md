@@ -2,7 +2,10 @@
 
 ## [Unreleased]
 
+## v0.92.27 — Case-insensitive /spawn repo + path-poisoning roll-up (2026-05-09)
+
 ### Fixed
+- `/spawn` directive now matches `repo=` case-insensitively and resolves to the canonical registered name. Registrations are lowercase by convention but the model often emits CamelCase based on directory names (e.g. `repo=AIAgent` vs registered `aiagent`) — the strict equality check refused the dispatch. `_handle_spawn_directive` (`bot/engine/commands.py`) now does a `name.lower() == repo.lower()` lookup over `ctx.store.list_repos()` and rebinds `repo` to the canonical name before building `SpawnArgs`, so downstream lookups (worktree path, store keys) all hit the right entry.
 - Build sessions can no longer silently edit the main repo path when resuming a planning session whose context referenced absolute main-repo paths (the t-3906 failure mode where the build worktree branch ended up empty while the main repo was littered with uncommitted edits on the wrong branch). Per-worktree PreToolUse hook in `bot/claude/hooks/worktree_guard.py` now covers `Edit`, `Write`, `MultiEdit`, and `NotebookEdit` in addition to `Bash`, blocks any `file_path`/`notebook_path` that resolves under the main repo but not under the worktree, returns canonical exit-2 + stderr (Claude Code's documented block contract), and accepts paths via positional argv (the bot writes them in when installing the hook). `_install_worktree_hook` (`bot/claude/runner.py`) writes the canonical `{matcher, hooks: [{type, command, timeout}]}` schema with matcher `Bash|Edit|Write|MultiEdit|NotebookEdit`, deep-merges with any pre-existing `.claude/settings.local.json` instead of clobbering it, and tags its own entry with `_owner: "claude-telegram-bot"` so re-installs replace rather than stack. The Claude provider (`bot/claude/provider.py`) now passes `--setting-sources user,project,local` and `--include-hook-events` so `settings.local.json` actually loads. `WORKTREE_HOOK_ENABLED` (`bot/config.py`) flipped on by default — verified working against Claude Code 2.1.123.
 
 ### Added

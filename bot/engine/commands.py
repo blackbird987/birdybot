@@ -335,9 +335,15 @@ async def _handle_spawn_directive(
             log.warning("BOT_CMD /spawn blocked — invalid effort: %s", effort)
             return
 
-    # Repo must be registered.
+    # Repo must be registered. Match case-insensitively and resolve to the
+    # canonical registered name — registrations are lowercase by convention
+    # but the model often emits CamelCase based on directory names.
     repos = ctx.store.list_repos()
-    if repo not in repos:
+    canonical = next(
+        (name for name in repos if name.lower() == repo.lower()),
+        None,
+    )
+    if canonical is None:
         try:
             await ctx.messenger.send_text(
                 ctx.channel_id,
@@ -348,6 +354,7 @@ async def _handle_spawn_directive(
         except Exception:
             pass
         return
+    repo = canonical
 
     # Body checks.
     if not body:
