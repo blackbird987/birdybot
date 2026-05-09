@@ -60,14 +60,6 @@ def _path_eq_or_under(candidate, parent):
     return c == p or c.startswith(p + "/")
 
 
-def _path_in(haystack, needle):
-    if not needle:
-        return False
-    if _is_windows():
-        return needle.lower() in haystack.lower()
-    return needle in haystack
-
-
 def _block(reason):
     sys.stderr.write(reason)
     sys.stderr.flush()
@@ -82,13 +74,18 @@ def _is_against_main_repo_bash(command, repo_path, worktree_path):
     if not repo_path:
         return False
     cmd_norm = command.replace("\\", "/")
-    repo_needle = _norm(repo_path)
-    wt_needle = _norm(worktree_path) if worktree_path else ""
 
     def _hits_repo_not_wt(target):
-        if wt_needle and _path_in(target, wt_needle):
+        # Strip surrounding quotes that the regex captured along with the path.
+        target = target.strip().strip('"').strip("'")
+        if not target:
             return False
-        return _path_in(target, repo_needle)
+        # Worktree lives *inside* the main repo, so check worktree first —
+        # an edit equal-to-or-under the worktree is allowed even though it
+        # would also match the main-repo prefix check.
+        if worktree_path and _path_eq_or_under(target, worktree_path):
+            return False
+        return _path_eq_or_under(target, repo_path)
 
     for m in re.finditer(r"\bgit\s+-C\s+(\S+)", cmd_norm):
         if _hits_repo_not_wt(m.group(1)):
@@ -109,9 +106,9 @@ def _is_self_worktree_remove(command, worktree_path):
     if not worktree_path:
         return False
     cmd_norm = command.replace("\\", "/")
-    needle = _norm(worktree_path)
     for m in re.finditer(r"\bgit\s+worktree\s+remove\s+(?:-\S+\s+)*(\S+)", cmd_norm):
-        if _path_in(m.group(1), needle):
+        target = m.group(1).strip().strip('"').strip("'")
+        if _path_eq_or_under(target, worktree_path):
             return True
     return False
 
