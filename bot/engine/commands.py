@@ -390,15 +390,6 @@ async def _handle_spawn_directive(
             pass
         return
 
-    # Idempotency — replays of the same final response (e.g. retry, rebind)
-    # must not re-dispatch.
-    if parent_inst and parent_inst.spawn_dispatched_thread_id:
-        log.info(
-            "BOT_CMD /spawn — already dispatched to thread %s; skipping replay",
-            parent_inst.spawn_dispatched_thread_id,
-        )
-        return
-
     # Budget gate.
     if not check_budget(ctx):
         try:

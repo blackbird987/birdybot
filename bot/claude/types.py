@@ -138,9 +138,9 @@ class Instance:
     # Top-level session = 0; spawned by depth-0 = 1; etc. The directive handler
     # caps recursion at depth 1 to prevent fan-out runaway.
     spawn_depth: int = 0
-    # Idempotency marker — set to the dispatched thread_id once /spawn fires
-    # successfully. Replays of the same final assistant response (via retry
-    # or thread re-binding) consult this marker and skip re-dispatch.
+    # Audit marker — set to the dispatched thread_id once /spawn fires
+    # successfully. Persisted alongside the instance so post-hoc inspection
+    # of state.json shows which parent instance launched which child thread.
     spawn_dispatched_thread_id: str | None = None
     _accounts_tried: set[str] = field(default_factory=set)  # Ephemeral: tracks accounts tried this run (not persisted)
 

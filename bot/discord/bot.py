@@ -440,6 +440,12 @@ class ClaudeBot(discord.Client):
             new_ctx.increment_query_count = ctx.increment_query_count
             if new_info is not None:
                 _bot._forums.attach_session_callbacks(new_ctx, new_info, new_channel_id)
+            # Skip the "Reconstructing context…" priming pass on this dispatch:
+            # a spawned thread has no prior conversation history that could
+            # actually inform the run, and the generated prompt is meant to be
+            # self-contained. Leaving it on adds a transient noise message in
+            # the brand-new thread for no benefit.
+            new_ctx.maybe_prime_briefing = None
 
             async def _dispatch():
                 try:
