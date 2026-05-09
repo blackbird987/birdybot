@@ -428,6 +428,11 @@ def finalize_run(ctx: RequestContext, inst: Instance, result: RunResult) -> None
         inst.context_model = result.model
     inst.needs_input = result.needs_input
     inst.finished_at = datetime.now(timezone.utc).isoformat()
+    # Carry path-poisoning hits onto the Instance so workflows.py (which
+    # only sees Instance, not RunResult) can enrich the zero-diff halt
+    # notice with which paths the model tried to edit in the main repo.
+    if result.path_poisoning:
+        inst.path_poisoning = list(result.path_poisoning)
 
     # Detect session context flags (plan/code) from this instance or siblings
     tools = set(result.tools_used)

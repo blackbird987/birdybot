@@ -77,6 +77,16 @@ class _ClaudeProvider(ProviderConfig):
 
         cmd = [binary or config.CLAUDE_BINARY, "-p"]
         cmd.extend(["--output-format", "stream-json", "--verbose"])
+        # Stream hook events so the runner can log/observe hook decisions
+        # (e.g. the worktree path-poisoning guard). Harmless when no hooks
+        # are installed.
+        cmd.extend(["--include-hook-events"])
+        # Project-scoped settings.local.json doesn't load by default; the
+        # bot writes the worktree-guard hook there, so opt all three scopes
+        # in. Not applied to --bare runs (api_fallback) since --bare
+        # explicitly disables the user settings cascade.
+        if not api_fallback:
+            cmd.extend(["--setting-sources", "user,project,local"])
 
         if self.supports_effort:
             cmd.extend(["--effort", instance.effort])  # type: ignore[attr-defined]

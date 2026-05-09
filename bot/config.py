@@ -83,20 +83,17 @@ REBOOT_DRAIN_TIMEOUT_SECS: int = int(os.getenv("REBOOT_DRAIN_TIMEOUT_SECS", "120
 TITLE_TIMEOUT_SECS: int = int(os.getenv("TITLE_TIMEOUT_SECS", "15"))
 INSTANCE_RETENTION_DAYS: int = int(os.getenv("INSTANCE_RETENTION_DAYS", "7"))
 
-# t-3541 Layer 3 scaffolding: install a PreToolUse hook into each build
-# worktree to mechanically block dangerous git operations against the main
-# repo path.  Defaults OFF — must stay off until Probe B Part 1 confirms
-# project-level .claude/settings.local.json hooks actually load when the
-# bot runs Claude Code with CLAUDE_CONFIG_DIR set to a non-default path.
-# To verify before flipping this on:
-#   1. Write a deny-everything PreToolUse hook in a build worktree's
-#      .claude/settings.local.json.
-#   2. Spawn the bot with the normal CLAUDE_CONFIG_DIR setup.
-#   3. Have it attempt `pwd`.  Confirm the hook fires.
-# If hooks DO NOT load: leave this off, move the hook to the user-level
-# CLAUDE_CONFIG_DIR/settings.json with worktree-conditional logic, OR
-# rely on Layers 1, 2, 4 alone (which are unconditionally enabled).
-WORKTREE_HOOK_ENABLED: bool = os.getenv("WORKTREE_HOOK_ENABLED", "0") == "1"
+# Install a PreToolUse hook into each build worktree to mechanically block
+# tools (Bash, Edit, Write, MultiEdit, NotebookEdit) from touching the main
+# repo path. Catches the path-poisoning failure mode where a build session
+# resumes a planning session whose context contained main-repo absolute
+# paths, then silently edits the wrong tree (t-3920).
+#
+# Verified against Claude Code 2.1.123: canonical hook schema works, exit-2
+# stderr blocks tool calls, settings.local.json loads when the CLI is
+# invoked with --setting-sources user,project,local (the Claude provider
+# adds that flag automatically). Set WORKTREE_HOOK_ENABLED=0 to disable.
+WORKTREE_HOOK_ENABLED: bool = os.getenv("WORKTREE_HOOK_ENABLED", "1") == "1"
 
 # API billing fallback (used when subscription limits are hit)
 ANTHROPIC_API_KEY: str | None = os.getenv("ANTHROPIC_API_KEY")

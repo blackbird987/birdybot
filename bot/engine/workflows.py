@@ -2696,6 +2696,29 @@ async def _run_autopilot_chain(
                             f"\nUncommitted changes preserved on `{preserved}` "
                             f"(WIP commit). Recover: `git checkout {preserved}`"
                         )
+                    # Path-poisoning: the build silently tried to edit the
+                    # main repo instead of the worktree (e.g. resumed planning
+                    # context carried main-repo paths). The worktree-guard
+                    # hook should have blocked the writes, but in either case
+                    # the zero-diff outcome here is explained by these paths
+                    # — surface them so the user can see what went wrong.
+                    if result.path_poisoning:
+                        sample = result.path_poisoning[:5]
+                        more = len(result.path_poisoning) - len(sample)
+                        path_lines = "\n".join(f"  • `{p}`" for p in sample)
+                        if more > 0:
+                            path_lines += f"\n  • ...and {more} more"
+                        halt_text += (
+                            "\n\n**Path poisoning detected** — the build tried "
+                            "to edit the main repo instead of the worktree. "
+                            "These writes were blocked, which is why the "
+                            "worktree branch is empty:\n"
+                            f"{path_lines}\n"
+                            "Likely cause: the build resumed a planning "
+                            "session whose context referenced main-repo paths. "
+                            "Start a fresh build (without `--resume` from the "
+                            "plan session) or re-target the edits manually."
+                        )
                     try:
                         await ctx.messenger.send_text(
                             ctx.channel_id, halt_text, silent=True,
