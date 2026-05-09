@@ -134,6 +134,11 @@ class Instance:
     # work merged onto master after it started. Captured lazily on first
     # prompt build when None and inherited through spawn_from.
     master_baseline_head: str | None = None
+    # Path-poisoning: file paths the model tried to edit in the main repo
+    # instead of the worktree (caught by the worktree-guard hook OR detected
+    # post-run). Surfaces in the zero-diff halt notice so the user sees what
+    # actually happened instead of "Build had no changes." (t-3920)
+    path_poisoning: list[str] = field(default_factory=list)
     _accounts_tried: set[str] = field(default_factory=set)  # Ephemeral: tracks accounts tried this run (not persisted)
 
     def display_id(self) -> str:
@@ -216,6 +221,7 @@ class Instance:
             "manual_recovery_needed": self.manual_recovery_needed,
             "manual_recovery_reason": self.manual_recovery_reason,
             "master_baseline_head": self.master_baseline_head,
+            "path_poisoning": self.path_poisoning,
         }
 
     @classmethod
@@ -280,6 +286,7 @@ class Instance:
             manual_recovery_needed=d.get("manual_recovery_needed", False),
             manual_recovery_reason=d.get("manual_recovery_reason"),
             master_baseline_head=d.get("master_baseline_head"),
+            path_poisoning=d.get("path_poisoning", []),
         )
 
 
@@ -316,6 +323,12 @@ class RunResult:
     # post-completion notice when the richer mid-run callback warning already
     # posted — avoids posting two near-identical warnings for the same event.
     recovery_warning_posted: bool = False
+    # Path-poisoning: list of main-repo paths the model tried to edit during
+    # this run (caught by the worktree-guard hook OR detected post-run by
+    # scanning recorded tool inputs against the worktree path). Empty when no
+    # poisoning observed. The lifecycle layer surfaces this to the user with
+    # a clear message instead of the old "Build had no changes" silence.
+    path_poisoning: list[str] = field(default_factory=list)
 
 
 # Valid gate types for autopilot phase boundaries.

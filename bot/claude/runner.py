@@ -24,6 +24,7 @@ from bot import config
 from bot.claude.branch_utils import canonical_branch
 from bot.claude.parser import (
     RunResult,
+    detect_path_poisoning,
     extract_progress,
     extract_result,
     extract_summary,
@@ -681,6 +682,16 @@ class ClaudeRunner:
         events: list[dict] = []
         captured_session_id: str | None = None
         ask_question: str | None = None  # Set when AskUserQuestion detected
+        # Path-poisoning hits observed during streaming (Edit/Write/MultiEdit/
+        # NotebookEdit targeting the main repo instead of the worktree). The
+        # worktree-guard hook should be blocking these at the syscall level,
+        # but we still record them so the post-run scan can surface a clear
+        # message to the user — and so we have telemetry if the hook ever
+        # fails to load.
+        poisoning_hits: list[str] = []
+        _poisoning_seen: set[str] = set()
+        _wt_path = (instance.worktree_path or "")
+        _repo_path = (instance.repo_path or "")
         last_output_time = asyncio.get_event_loop().time()
         process_start_time = last_output_time
         stall_warned = False
@@ -778,6 +789,21 @@ class ClaudeRunner:
                             except Exception:
                                 log.exception("Progress callback error (usage-only)")
 
+                    # Path-poisoning tripwire: record any tool_use that
+                    # targets the main repo path instead of the worktree.
+                    # Records-only — the worktree-guard hook is the actual
+                    # block; this is an observer for the post-run summary.
+                    if _wt_path and _repo_path:
+                        for hit in detect_path_poisoning(event, _wt_path, _repo_path):
+                            if hit not in _poisoning_seen:
+                                _poisoning_seen.add(hit)
+                                poisoning_hits.append(hit)
+                                log.warning(
+                                    "Path-poisoning hit for %s: %s "
+                                    "(worktree=%s, repo=%s)",
+                                    instance.id, hit, _wt_path, _repo_path,
+                                )
+
                     # Detect AskUserQuestion — Claude is blocking on stdin
                     if ask_question is None:
                         for tool_name, tool_input in iter_tool_blocks(event):
@@ -809,6 +835,8 @@ class ClaudeRunner:
             result = extract_result(events)
             result.needs_input = True
             result.is_error = False
+            if poisoning_hits:
+                result.path_poisoning = list(poisoning_hits)
             if ask_question:
                 result.result_text = ask_question
             elif not result.result_text:
@@ -838,6 +866,17 @@ class ClaudeRunner:
             stderr_text = stderr_data.decode("utf-8", errors="replace").strip()
 
         result = extract_result(events)
+        # Final reconciliation pass: walk every event so anything that
+        # slipped past the stream-time tripwire (e.g. a content_block_start
+        # that arrived in a half-flushed line) is still surfaced.
+        if _wt_path and _repo_path:
+            for ev in events:
+                for hit in detect_path_poisoning(ev, _wt_path, _repo_path):
+                    if hit not in _poisoning_seen:
+                        _poisoning_seen.add(hit)
+                        poisoning_hits.append(hit)
+        if poisoning_hits:
+            result.path_poisoning = list(poisoning_hits)
 
         if proc.returncode != 0 and not result.is_error:
             result.is_error = True
@@ -1917,7 +1956,7 @@ class ClaudeRunner:
 
     @staticmethod
     def _install_worktree_hook(repo_path: str, wt_dir: str) -> None:
-        """Install the t-3541 Layer 3 PreToolUse hook into a build worktree.
+        """Install the per-worktree PreToolUse hook.
 
         Writes ``.claude/settings.local.json`` inside the worktree pointing
         at the bot's worktree_guard.py script (absolute path so CWD doesn't
@@ -1925,21 +1964,37 @@ class ClaudeRunner:
         the common gitdir so it can never ride into the build branch and
         merge back into the repo's default branch.
 
+        Hook covers:
+          - Bash: git -C <repo>, --git-dir/--work-tree <repo>, rm -r <repo>,
+            git worktree remove <self>
+          - Edit/Write/MultiEdit/NotebookEdit: any file_path/notebook_path
+            under the main repo but not under the worktree (path-poisoning
+            from a resumed planning session)
+
+        Schema is the canonical Claude Code form:
+          {"hooks": {"PreToolUse": [{"matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit",
+                                     "hooks": [{"type": "command",
+                                                "command": "...",
+                                                "timeout": N}]}]}}
+
+        Worktree path and repo path are passed as positional argv to the
+        guard script (Claude Code does not propagate `env` blocks from
+        settings to hook subprocesses reliably; argv is unambiguous).
+
+        Settings load only when Claude is invoked with
+        ``--setting-sources user,project,local`` — the bot adds that flag
+        in the Claude provider's build_command.
+
         Caller MUST hold the per-repo asyncio git-admin lock (the only
-        callsite, _create_worktree_sync, runs under that lock).  Without
-        the lock, parallel build creations would race on the
-        .git/info/exclude append.
+        callsite, _create_worktree_sync, runs under that lock). Without
+        the lock, parallel builds would race on the exclude append and
+        on the deep-merge into an existing settings file.
 
-        The exclude append is idempotent — re-creating a worktree on a
-        repo that already has the line is a no-op.
-
-        NOTE: .git/info/exclude lives in the COMMON gitdir, shared across
-        all worktrees and the main repo.  The bot-managed
-        .claude/settings.local.json path is excluded globally for this
-        repo, which is the intended behavior (the file is bot-owned;
-        nothing else in the repo should track it).
+        Deep-merges into any pre-existing settings.local.json so a project
+        that ships its own hooks isn't clobbered. The bot's hook entry is
+        identifiable by an `_owner: "claude-telegram-bot"` marker so we can
+        replace it on re-install instead of stacking duplicates.
         """
-        # 1. Write the hook config inside the worktree.
         hook_script = (
             Path(__file__).resolve().parent / "hooks" / "worktree_guard.py"
         )
@@ -1947,61 +2002,79 @@ class ClaudeRunner:
             log.warning("worktree_guard.py not found at %s", hook_script)
             return
 
-        # Use the same Python that's running the bot — keeps the hook on
-        # the same interpreter the rest of the bot validates against.
+        # Use the same Python that's running the bot.
         python_exe = sys.executable or "python"
-        env_block = {
-            "CLAUDE_BOT_WORKTREE": wt_dir,
-            "CLAUDE_BOT_REPO_PATH": repo_path,
+        # Quote each piece individually so paths with spaces work on Windows.
+        cmd_str = (
+            f'"{python_exe}" "{hook_script}" "{wt_dir}" "{repo_path}"'
+        )
+        bot_hook_entry = {
+            "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit",
+            "_owner": "claude-telegram-bot",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": cmd_str,
+                    "timeout": 10,
+                }
+            ],
         }
-        # Settings JSON shape — UNVERIFIED, see Probe B Part 1.  The
-        # concrete schema for Claude Code hooks (key names, matcher
-        # type — string regex vs. {"tool_name": ...} object, whether
-        # `command` lives flat or under nested `hooks: [{"type": ...}]`,
-        # whether `env` is honored at all) must be confirmed empirically
-        # before WORKTREE_HOOK_ENABLED is flipped on.  See bot/config.py
-        # for the verification procedure.  If the shape below turns out
-        # wrong, Claude Code will either ignore the file (no-op, safe)
-        # or refuse to load (visible startup error, also safe — Layers
-        # 1, 2, 4 keep working).
-        settings_payload = {
-            "hooks": {
-                "PreToolUse": [
-                    {
-                        "matcher": {"tool_name": "Bash"},
-                        "command": f'"{python_exe}" "{hook_script}"',
-                        "env": env_block,
-                    }
-                ]
-            }
-        }
+
         settings_dir = Path(wt_dir) / ".claude"
         settings_dir.mkdir(parents=True, exist_ok=True)
         settings_path = settings_dir / "settings.local.json"
-        # Don't clobber a pre-existing project hook config.  If a project
-        # ships its own settings.local.json, leave it alone — Probe-B-
-        # confirmed dangerous-op blocking isn't worth wiping the project's
-        # own intent.  The build still gets Layers 1/2/4.
+
+        # Deep-merge with any existing settings — preserve project's own
+        # hooks/permissions, replace only our own entry (matched by _owner).
+        existing: dict = {}
         if settings_path.exists():
-            log.info(
-                "Worktree %s already has .claude/settings.local.json; "
-                "skipping bot hook install (project owns this file)",
-                wt_dir,
+            try:
+                existing = _json_mod.loads(
+                    settings_path.read_text(encoding="utf-8")
+                )
+                if not isinstance(existing, dict):
+                    log.warning(
+                        "Worktree %s settings.local.json is not an object; "
+                        "leaving it untouched (skipping hook install)",
+                        wt_dir,
+                    )
+                    return
+            except (OSError, ValueError) as e:
+                log.warning(
+                    "Could not parse %s (%s); leaving untouched",
+                    settings_path, e,
+                )
+                return
+
+        hooks_block = existing.setdefault("hooks", {})
+        if not isinstance(hooks_block, dict):
+            log.warning(
+                "Worktree %s settings.local.json `hooks` is not an object; "
+                "leaving it untouched", wt_dir,
             )
             return
+        pre_list = hooks_block.setdefault("PreToolUse", [])
+        if not isinstance(pre_list, list):
+            log.warning(
+                "Worktree %s settings.local.json `PreToolUse` is not an "
+                "array; leaving it untouched", wt_dir,
+            )
+            return
+        # Drop any prior bot-owned entry, then append the fresh one.
+        pre_list[:] = [
+            e for e in pre_list
+            if not (isinstance(e, dict) and e.get("_owner") == "claude-telegram-bot")
+        ]
+        pre_list.append(bot_hook_entry)
+
         settings_path.write_text(
-            _json_mod.dumps(settings_payload, indent=2),
+            _json_mod.dumps(existing, indent=2),
             encoding="utf-8",
         )
 
-        # 2. Append the settings file path to .git/info/exclude so a
-        # stray `git add -A` in the worktree can't stage it onto the
-        # build branch.  Path is relative to the worktree root (git
-        # exclude entries are matched against tree-root-relative paths).
+        # Append the settings file path to .git/info/exclude so a stray
+        # `git add -A` in the worktree can't stage it onto the build branch.
         exclude_line = ".claude/settings.local.json"
-        # Common gitdir lookup — works for both regular checkouts and
-        # worktrees (`git rev-parse --git-common-dir` returns the shared
-        # .git in either case).
         try:
             r = subprocess.run(
                 ["git", "rev-parse", "--git-common-dir"],
@@ -2017,8 +2090,6 @@ class ClaudeRunner:
             )
             return
         if not common_dir:
-            # Defensive: empty rev-parse output would resolve to Path('.')
-            # below and create a stray `info/` directory in the repo root.
             log.warning(
                 "git rev-parse --git-common-dir returned empty for %s; "
                 "skipping .git/info/exclude append",
@@ -2031,20 +2102,19 @@ class ClaudeRunner:
         info_dir = common_path / "info"
         info_dir.mkdir(parents=True, exist_ok=True)
         exclude_path = info_dir / "exclude"
-        existing = ""
+        existing_excl = ""
         if exclude_path.exists():
             try:
-                existing = exclude_path.read_text(encoding="utf-8")
+                existing_excl = exclude_path.read_text(encoding="utf-8")
             except OSError:
-                existing = ""
-        # Idempotent: skip if already present (anywhere on its own line).
+                existing_excl = ""
         if any(
             line.strip() == exclude_line
-            for line in existing.splitlines()
+            for line in existing_excl.splitlines()
         ):
             return
         addendum = ""
-        if existing and not existing.endswith("\n"):
+        if existing_excl and not existing_excl.endswith("\n"):
             addendum += "\n"
         addendum += f"{exclude_line}\n"
         with exclude_path.open("a", encoding="utf-8") as f:

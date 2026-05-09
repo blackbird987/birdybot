@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import logging
 import re
 from dataclasses import dataclass
@@ -50,6 +51,43 @@ def iter_tool_blocks(event: dict):
         cb = event.get("content_block", {})
         if cb.get("type") == "tool_use":
             yield cb.get("name", ""), cb.get("input", {})
+
+
+def _norm_path(p):
+    return p.replace('\\', '/').rstrip('/')
+
+
+def _path_under(candidate, parent):
+    if not candidate or not parent:
+        return False
+    c = _norm_path(candidate)
+    p = _norm_path(parent)
+    if os.name == 'nt':
+        c = c.lower()
+        p = p.lower()
+    return c == p or c.startswith(p + '/')
+
+
+def detect_path_poisoning(event, worktree_path, repo_path):
+    if not worktree_path or not repo_path:
+        return []
+    hits = []
+    for tool_name, tool_input in iter_tool_blocks(event):
+        if not isinstance(tool_input, dict):
+            continue
+        if tool_name in ('Edit', 'Write', 'MultiEdit'):
+            fp = tool_input.get('file_path')
+        elif tool_name == 'NotebookEdit':
+            fp = tool_input.get('notebook_path')
+        else:
+            continue
+        if not isinstance(fp, str) or not fp:
+            continue
+        if _path_under(fp, worktree_path):
+            continue
+        if _path_under(fp, repo_path):
+            hits.append(fp)
+    return hits
 
 
 def extract_progress(event: dict) -> ProgressEvent | None:
