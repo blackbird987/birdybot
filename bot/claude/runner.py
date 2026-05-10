@@ -4236,6 +4236,70 @@ class ClaudeRunner:
             return False
         return True
 
+    async def auto_commit_dirty_worktree(
+        self, instance: Instance,
+    ) -> str | None:
+        """Commit any dirty changes in the instance's worktree in place.
+
+        Unlike `discard_branch(preserve_if_dirty=True)` this leaves the
+        worktree intact so the chain (review/verify/commit/done) can keep
+        running on it. Returns the commit SHA on success, or None if the
+        worktree is clean / missing / commit failed. Used by the autopilot
+        no-commits guard to silently rescue builds where the agent wrote
+        files but forgot to run `git commit`, instead of halting the chain.
+        """
+        if not instance.worktree_path:
+            return None
+        wt = instance.worktree_path
+        if not Path(wt).exists():
+            return None
+        return await asyncio.to_thread(self._auto_commit_dirty_worktree_sync, instance)
+
+    def _auto_commit_dirty_worktree_sync(self, instance: Instance) -> str | None:
+        wt = instance.worktree_path
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=wt, capture_output=True, text=True, **_NOWND,
+        )
+        if status.returncode != 0 or not status.stdout.strip():
+            return None
+        add_r = subprocess.run(
+            ["git", "add", "-A"],
+            cwd=wt, capture_output=True, text=True, **_NOWND,
+        )
+        if add_r.returncode != 0:
+            log.warning(
+                "auto_commit_dirty_worktree: git add failed for %s: %s",
+                wt, add_r.stderr.strip(),
+            )
+            return None
+        commit_msg = (
+            f"build: auto-commit dirty worktree ([{instance.id}])\n\n"
+            f"Build agent wrote files but didn't run `git commit` before "
+            f"finishing. The autopilot guard committed the changes so the "
+            f"chain could continue."
+        )
+        commit_r = subprocess.run(
+            ["git", "commit", "-m", commit_msg, "--no-verify"],
+            cwd=wt, capture_output=True, text=True, **_NOWND,
+        )
+        if commit_r.returncode != 0:
+            log.warning(
+                "auto_commit_dirty_worktree: git commit failed for %s: %s",
+                wt, commit_r.stderr.strip(),
+            )
+            return None
+        sha_r = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=wt, capture_output=True, text=True, **_NOWND,
+        )
+        sha = sha_r.stdout.strip() if sha_r.returncode == 0 else "(unknown)"
+        log.info(
+            "auto_commit_dirty_worktree: rescued %s with commit %s on %s",
+            instance.id, sha[:8], instance.branch,
+        )
+        return sha
+
     async def discard_branch(
         self, instance: Instance, *, preserve_if_dirty: bool = False,
     ) -> DiscardOutcome:

@@ -1254,6 +1254,20 @@ async def _do_cooldown_retry_locked(store, runner, inst, discord_bot, channel_id
         new_inst.branch = inst.branch
         new_inst.original_branch = inst.original_branch
         new_inst.worktree_path = inst.worktree_path
+    # If the prior turn was running in a worktree (build / build-derived),
+    # the cooldown can interrupt mid-edit. The resumed agent often thinks
+    # the task is already done — leaving uncommitted edits stranded. Nudge
+    # it to check git state first so the autopilot's no-commits guard never
+    # has to fire.
+    if inst.worktree_path:
+        new_inst.prompt = (
+            (inst.prompt or "") +
+            "\n\n[Cooldown retry note] Your prior turn was interrupted "
+            "by a usage-limit cooldown. Before doing anything else, run "
+            "`git status` in the worktree. If there are uncommitted edits "
+            "from the previous turn, finish the work and commit (with "
+            "`git log -1 --oneline` to confirm) before saying you're done."
+        )
     store.update_instance(new_inst)
 
     # Clear cooldown on the original instance

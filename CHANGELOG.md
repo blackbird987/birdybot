@@ -388,6 +388,12 @@
   `lifecycle.run_instance`).
 - Documented the lock contract on `workflows.resume_autopilot_chain` so future
   callers know they must hold the channel lock for the full awaitable.
+## v0.93.1 — Silent rescue for "build forgot to commit" + cooldown nudge (2026-05-10)
+
+### Changed
+- Autopilot's no-commits guard no longer halts the chain when the build agent wrote files but forgot to run `git commit`. New `ClaudeRunner.auto_commit_dirty_worktree` commits the dirty worktree in place (commit message `build: auto-commit dirty worktree ([<id>])`) and the chain continues into review/verify/commit/done as if the agent had committed itself. Both the single-shot guard (`bot/engine/workflows.py:2108`) and the per-phase guard (`workflows.py:1872`) now branch on `auto_commit_dirty_worktree`'s return: SHA → silent fall-through; None (clean worktree, genuinely empty build) → halt as before. The user no longer sees "Build produced no commits" pings for the common forgot-to-commit case — only for the rare case where the agent literally did nothing. Replaces the previous `discard_branch(preserve_if_dirty=True)` + halt + WIP-recovery flow at the autopilot site; the WIP-preserve branch in `discard_branch` itself is left intact for non-autopilot callers (manual discard, etc.).
+- Cooldown retry now appends a one-line nudge to the resumed prompt when the prior turn ran in a worktree (`bot/app.py:_do_cooldown_retry`). The note tells the resumed agent to `git status` first and finish/commit any pending edits before saying done. Likely root cause of the "build had no commits" cascade observed in t-121: cooldown interrupts mid-edit, resume-Claude thinks the task is already done, and the no-commits guard fires. The nudge addresses the cause; the silent rescue above addresses the symptom if the nudge is ignored.
+
 ## v0.93.0 — Outlook draft command (2026-04-30)
 
 ### Added
