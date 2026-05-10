@@ -8,6 +8,7 @@ import logging
 import re
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -234,13 +235,25 @@ def _extract_latest_plan_text(
     revision-related instance visible and the helper would miss real
     revisions from earlier rounds.
 
-    Falls back to the chain's source instance only when its origin is
-    PLAN (the original plan instance whose result_text IS a plan) and
-    no APPLY_REVISIONS was found. Skipping the fallback for non-plan
-    sources is critical: a build-and-ship chain can be launched from a
-    query/BG task whose result_text is the agent's reply (not a plan),
-    and prepending it under "Plan to implement (verbatim) — implement
-    it exactly" would actively mislead the build agent.
+    Falls back to the chain's source instance when its origin is PLAN
+    (the original plan instance whose result_text IS a plan).
+
+    When chain_instances is empty AND source isn't PLAN-origin, falls
+    back further to a store-backed lookup: scans `list_instances(all_=False)`
+    (24h window) for the most recent APPLY_REVISIONS or PLAN instance
+    matching `source.session_id` with `created_at <= source.created_at`.
+    This catches the broken-chain case (user posted a non-button message
+    between Plan and Build, or a prior Build halted with no commits and
+    cleared the chain) where chain_instances is empty but a real plan
+    still lives in the store. The 24h cutoff in `list_instances` is the
+    soft recency cap that keeps unrelated old plans from same-session
+    threads from being resurrected; chains paused longer than 24h won't
+    get the fallback (degrading to today's no-injection behavior, not to
+    wrong injection). created_at is parsed via `datetime.fromisoformat`
+    rather than lexicographic string compare, since the codebase isn't
+    audited to guarantee uniform ISO format across all writers; naive
+    timestamps are coerced to UTC before comparison so a stray naive
+    writer can't cause a tz-aware/naive TypeError mid-Build.
 
     Strips trailing "### Applied" / "### Triaged" review-metadata blocks
     before returning, so the injected text is plan-only.
@@ -255,10 +268,53 @@ def _extract_latest_plan_text(
             if text:
                 raw = text
                 break
+    source = ctx.store.get_instance(source_id) if not raw else None
     if not raw:
-        source = ctx.store.get_instance(source_id)
         if source and source.origin == InstanceOrigin.PLAN:
             raw = source.read_result_text() or ""
+    if not raw and source and source.session_id and source.created_at:
+        try:
+            source_dt = datetime.fromisoformat(source.created_at)
+        except (ValueError, TypeError):
+            source_dt = None
+        if source_dt is not None and source_dt.tzinfo is None:
+            # Codebase intent is UTC everywhere (writers use
+            # `datetime.now(timezone.utc).isoformat()`), but the helper
+            # acknowledges format isn't audited. Treat naive timestamps as
+            # UTC so a stray naive writer can't trigger a tz-aware/naive
+            # comparison TypeError below that would propagate out of the
+            # helper and halt Build mid-flight.
+            source_dt = source_dt.replace(tzinfo=timezone.utc)
+        if source_dt is not None:
+            recent = ctx.store.list_instances(all_=False)
+            candidates: list[Instance] = []
+            for inst in recent:
+                if inst.session_id != source.session_id:
+                    continue
+                if not inst.created_at:
+                    continue
+                try:
+                    inst_dt = datetime.fromisoformat(inst.created_at)
+                except (ValueError, TypeError):
+                    continue
+                if inst_dt.tzinfo is None:
+                    inst_dt = inst_dt.replace(tzinfo=timezone.utc)
+                if inst_dt > source_dt:
+                    continue
+                candidates.append(inst)
+            for inst in candidates:
+                if inst.origin == InstanceOrigin.APPLY_REVISIONS:
+                    text = inst.read_result_text()
+                    if text:
+                        raw = text
+                        break
+            if not raw:
+                for inst in candidates:
+                    if inst.origin == InstanceOrigin.PLAN:
+                        text = inst.read_result_text()
+                        if text:
+                            raw = text
+                            break
     if not raw:
         return ""
     # rfind, not find: a plan body can legitimately use "### Applied" as
@@ -660,9 +716,22 @@ async def on_build(ctx: RequestContext, source_id: str, source_msg_id: str | Non
         await ctx.messenger.send_text(ctx.channel_id, "Instance not found.")
         return None
     is_plan = source.plan_active
-    prompt = (
+    base_prompt = (
         config.BUILD_FROM_PLAN_PROMPT if is_plan
         else config.BUILD_FROM_QUERY_PROMPT
+    )
+    # Inject the verbatim plan into the build prompt so a resumed-and-
+    # possibly-compacted Claude session implements the actual plan rather
+    # than its in-memory recollection. on_build is the manual-button /
+    # message-driven path; the autopilot chain runner has its own injection
+    # call sites at the single-shot and phase-build branches. See
+    # _extract_latest_plan_text for how the plan is recovered when the
+    # in-flight chain list is empty (broken-chain recovery).
+    plan_text = _extract_latest_plan_text(ctx, [], source_id)
+    prompt = (
+        config.BUILD_PLAN_INJECTION_PREFIX.replace("{plan_text}", plan_text)
+        + base_prompt
+        if plan_text else base_prompt
     )
 
     # Stack on the prior unmerged build in this thread/session if one exists,
