@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 import discord
 
+from bot.claude.runner import RebootResult
 from bot.discord import access as access_mod
 from bot.discord import channels
 from bot.discord.access import AccessResult, load_access_config, effective_mode as access_effective_mode
@@ -1592,12 +1593,14 @@ async def _handle_reboot_repo(
                     repo_name, drain_status=drain_text,
                 )
 
-        # Embed edit confirmed above — safe to request reboot now
+        # Embed edit confirmed above — safe to request reboot now.
+        # force=True: explicit user-initiated deploy already drained active
+        # work via wait_until_idle above; bypass busy-check.
         bot._runner.request_reboot({
             "message": msg,
             "channel_id": str(interaction.channel_id),
             "platform": "discord",
-        })
+        }, force=True)
         # NOTE: Do NOT reset deploy state here — capture_boot_baselines()
         # handles it on the next startup when it detects self_managed=True.
 
@@ -1757,12 +1760,23 @@ async def _handle_sync_git(
                     ds.pending_changes = changes
                 bot._store.set_deploy_state(repo_name, ds)
 
-            # Self-managed repo pulled new code — queue reboot
+            # Self-managed repo pulled new code — queue reboot.
+            # No force=True: this path does NOT call wait_until_idle, so an
+            # active build on another thread should NOT be force-killed. If
+            # the busy-check defers, lifecycle.py auto-promotes the deferred
+            # file at the next idle session-end (within REBOOT_DEFERRED_TTL_SECS).
             if is_self:
-                parts.append("reboot queued")
-                bot._runner.request_reboot({
+                result = bot._runner.request_reboot({
                     "message": f"Sync Git: pulled {behind} commit(s)",
+                    "channel_id": str(interaction.channel_id),
+                    "platform": "discord",
                 })
+                if result is RebootResult.DEFERRED:
+                    parts.append(
+                        "reboot deferred — will auto-retry within 1 h or pulled commits will be dropped"
+                    )
+                else:
+                    parts.append("reboot queued")
 
         # Step 4: Push if ahead
         if ahead > 0:

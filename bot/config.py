@@ -79,7 +79,13 @@ DAILY_BUDGET_USD: float = float(os.getenv("DAILY_BUDGET_USD", "20.0"))
 PC_NAME: str = os.getenv("PC_NAME", "") or __import__("platform").node()
 STALL_TIMEOUT_SECS: int = int(os.getenv("STALL_TIMEOUT_SECS", "60"))
 MAX_PROCESS_LIFETIME_SECS: int = int(os.getenv("MAX_PROCESS_LIFETIME_SECS", "14400"))
-REBOOT_DRAIN_TIMEOUT_SECS: int = int(os.getenv("REBOOT_DRAIN_TIMEOUT_SECS", "120"))
+REBOOT_DRAIN_TIMEOUT_SECS: int = int(os.getenv("REBOOT_DRAIN_TIMEOUT_SECS", "600"))
+# Deferred-reboot retention TTL: when an assistant- or auto-update-initiated
+# reboot defers because another session was active, the deferred file is
+# auto-promoted to a fresh reboot request at the next idle session-end. After
+# this many seconds the original intent is too stale to be safely resumed and
+# the deferred file is dropped with an ERROR log line instead.
+REBOOT_DEFERRED_TTL_SECS: int = int(os.getenv("REBOOT_DEFERRED_TTL_SECS", "3600"))
 TITLE_TIMEOUT_SECS: int = int(os.getenv("TITLE_TIMEOUT_SECS", "15"))
 INSTANCE_RETENTION_DAYS: int = int(os.getenv("INSTANCE_RETENTION_DAYS", "7"))
 
@@ -166,6 +172,11 @@ if REPOS_BASE_DIR and not REPOS_BASE_DIR.is_dir():
 # Ensure data dirs exist
 REBOOT_MSG_FILE: Path = DATA_DIR / "reboot_message.json"
 REBOOT_REQUEST_FILE: Path = DATA_DIR / "reboot_request.json"
+# Informational record of a deferred reboot — written fresh on each defer,
+# auto-promoted to REBOOT_REQUEST_FILE at the next idle session-end, dropped
+# after REBOOT_DEFERRED_TTL_SECS staleness threshold. Latest-wins on stacked
+# defers (intentional: each defer is a fresh intent that supersedes the prior).
+REBOOT_REQUEST_DEFERRED_FILE: Path = DATA_DIR / "reboot_request.deferred.json"
 DRAIN_QUEUE_FILE: Path = DATA_DIR / "drain_queue.json"
 PENDING_PROMPTS_FILE: Path = DATA_DIR / "pending_prompts.json"
 USAGE_QUEUE_FILE: Path = DATA_DIR / "usage_queue.json"
