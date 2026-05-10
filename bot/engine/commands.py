@@ -2132,12 +2132,14 @@ async def on_reboot(ctx: RequestContext) -> None:
                 f"⚠️ Timed out waiting. Force-rebooting with {len(ctx.runner.active_ids)} still running: {remaining}",
             )
 
-    # Queue reboot and trigger — since we waited for idle, this fires immediately
+    # Queue reboot and trigger — since we waited for idle, this fires immediately.
+    # force=True: explicit user-initiated reboot already coordinated with
+    # wait_until_idle (with timeout warning above); bypass busy-check.
     ctx.runner.request_reboot({
         "message": f"Manual reboot from {ctx.platform}",
         "channel_id": ctx.channel_id,
         "platform": ctx.platform,
-    })
+    }, force=True)
 
 
 # --- /session ---

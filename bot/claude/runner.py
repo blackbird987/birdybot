@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import enum
 import json as _json_mod
 import logging
 import os
@@ -53,6 +54,20 @@ REBUILD_TIMEOUT_SECS = 30
 # Cross-account JSONL hydration: same TTL semantics as rebuild — bursts of
 # correlated resume attempts shouldn't re-scan every account on disk.
 HYDRATE_CACHE_TTL_SECS = 60
+
+
+class RebootResult(enum.Enum):
+    """Outcome of ``Runner.request_reboot``.
+
+    - ``QUEUED``: reboot accepted; will fire on idle (or be force-killed
+      after ``REBOOT_DRAIN_TIMEOUT_SECS``).
+    - ``DEFERRED``: another non-self task was active; ``reboot_request.deferred.json``
+      written for diagnostics. Auto-promoted at the next idle session-end (within
+      ``REBOOT_DEFERRED_TTL_SECS``); dropped after that.
+    """
+    QUEUED = "queued"
+    DEFERRED = "deferred"
+
 
 # Release-tag deferral: the LLM commits ``vX.Y.Z: Summary`` but does not run
 # ``git tag``.  After the merge to master succeeds the bot walks the
@@ -1606,17 +1621,68 @@ class ClaudeRunner:
 
     # --- Reboot coalescing ---
 
-    def request_reboot(self, data: dict) -> None:
+    def request_reboot(
+        self, data: dict, current_iid: str | None = None,
+        *, force: bool = False,
+    ) -> RebootResult:
         """Queue a reboot request and trigger execution if already idle.
 
-        Safe to call from both task context (check_reboot_request — fires
-        after end_task) and non-task context (on_reboot — fires immediately).
-        Sets draining flag to block new spawns while waiting for idle.
+        If any task other than ``current_iid`` is active and ``force`` is
+        False, defers instead — writes a fresh ``reboot_request.deferred.json``
+        from ``data`` (the original ``reboot_request.json`` was already
+        unlinked by the caller), does NOT set ``_draining`` or start the
+        drain timer, and returns ``RebootResult.DEFERRED``. The deferred
+        file is auto-promoted to ``reboot_request.json`` at the next idle
+        session-end (within ``REBOOT_DEFERRED_TTL_SECS``); after that it
+        is dropped as stale.
+
+        ``current_iid`` defaults to ``None`` for non-task callers like
+        ``app.py`` auto-update; in that case any active task triggers a defer.
+        Post-``end_task`` callers may pass the just-finished iid as a safety
+        belt (it's already absent from ``_active_tasks``, but the filter is
+        correct either way).
+
+        ``force=True`` bypasses the busy-check entirely. Used by user-initiated
+        reboot paths (slash command, Deploy button) that already coordinate
+        with ``wait_until_idle`` and want to proceed regardless.
+
+        Atomicity: this function is sync and runs on the asyncio event loop.
+        The check + queue happen without an intervening ``await``, so no
+        TOCTOU window exists where a new task spawns between them.
         """
+        other_active = [] if force else [
+            iid for iid in self._active_tasks
+            if current_iid is None or iid != current_iid
+        ]
+        if other_active:
+            try:
+                deferred = dict(data)
+                deferred["blocked_by"] = list(other_active)
+                deferred["blocked_at"] = datetime.now(timezone.utc).isoformat()
+                config.REBOOT_REQUEST_DEFERRED_FILE.write_text(
+                    _json_mod.dumps(deferred, indent=2), encoding="utf-8",
+                )
+            except Exception:
+                log.exception("Failed to write deferred reboot file")
+            log.warning(
+                "Reboot deferred — %d other task(s) active: %s",
+                len(other_active), other_active,
+            )
+            return RebootResult.DEFERRED
+
+        # A queued reboot supersedes any prior deferred state — clear the
+        # deferred file so a stale defer from earlier can't auto-promote
+        # post-restart and fire a second unwanted reboot.
+        try:
+            config.REBOOT_REQUEST_DEFERRED_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
+
         self._draining = True
         self._reboot_requests.append(data)
         self._maybe_fire_idle_reboot()
         self._start_drain_timer()
+        return RebootResult.QUEUED
 
     def pending_reboots(self) -> list[dict]:
         """Return a copy of pending reboot requests."""

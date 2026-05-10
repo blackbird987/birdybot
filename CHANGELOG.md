@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+## v0.92.29 — Defer reboot when other sessions active + extend drain timeout (2026-05-10)
+
+### Fixed
+- Assistant-initiated reboots (via `data/reboot_request.json`) now defer instead of force-killing another active session after the drain timer expires. Symptom seen with q-7766 → q-7768: a v0.92.27 reboot fired 21 s after q-7766 started, the 120 s drain timer force-killed it at the 2:00 mark before its `session_id` had been persisted to `ThreadInfo`, so the follow-up resume ran fresh with no `--resume` and looked like the session had "forgotten" its prompt. New `RebootResult` enum (`bot/claude/runner.py`) — `request_reboot(data, current_iid=None, *, force=False)` returns `QUEUED` or `DEFERRED`. The check + queue happen inside the same sync function on the asyncio loop so there is no `await` between them and no TOCTOU window where a new task could spawn between the busy-check and the queue. On defer the runner writes a fresh `data/reboot_request.deferred.json` (the original `reboot_request.json` was already unlinked by `check_reboot_request` before the call) carrying `blocked_by` + `blocked_at` for diagnostics. `check_reboot_request` (`bot/engine/lifecycle.py`) derives `current_iid` via `active_instance_for_session` / `active_instance_for_channel` so the just-finished requester is excluded from the busy-check, and surfaces the `DEFERRED` outcome to the user in the requesting thread with a `⚠️ Reboot deferred — <ids> active on another thread. It will retry automatically when they finish (within 1 h)…` notice.
+- New auto-promotion path in `check_reboot_request`: at every session end, if a deferred reboot file exists and is still within `REBOOT_DEFERRED_TTL_SECS` (default 1 h, configurable via env), it is atomically `os.replace`'d to `reboot_request.json` and processed identically to a fresh request. Stale deferrals beyond the TTL are dropped with an ERROR log (`Dropping stale deferred reboot (age=Xs, …)`) so the abandoned intent is auditable instead of silently resurrected. This makes the deferred state self-healing: if a Sync-Git pull or auto-update reboot defers because another session is active, the next idle session-end automatically applies it without further user action.
+- Reboot drain timeout `REBOOT_DRAIN_TIMEOUT_SECS` default raised 120 → 600 s (`bot/config.py`). 120 s was below typical build-step latency, exactly the work most likely to be in-flight when the assistant queues a reboot. Defer is the primary safeguard; the drain timer remains the safety belt for force-rebooting genuinely stuck sessions.
+
+### Compatibility
+- User-initiated reboot paths bypass the busy-check via the new `force=True` flag: `/restart` slash command (`bot/engine/commands.py`) which already calls `wait_until_idle(timeout=300)` first, and the deploy-button reboot (`bot/discord/interactions.py`) which also drains via `wait_until_idle`. These paths preserve the pre-v0.92.29 force-reboot behavior; the drain timer is the safety belt.
+- The Sync-Git button (`bot/discord/interactions.py`) does NOT pass `force=True` — it has no `wait_until_idle` coordinator, so force-rebooting would force-kill an active build. It now captures `RebootResult` and surfaces `"reboot deferred — will auto-retry within 1 h or pulled commits will be dropped"` to the user when the busy-check defers, with the auto-promotion path handling the eventual retry.
+
+### Configuration
+- New `REBOOT_DEFERRED_TTL_SECS` env var (default `3600`) controls how long a deferred reboot record remains promotable before being dropped as stale.
+- New `REBOOT_REQUEST_DEFERRED_FILE` constant (`data/reboot_request.deferred.json`) tracks the deferred-reboot record. Latest-wins on stacked defers (each defer is a fresh intent that supersedes prior records).
+
+### Hardening (fresh-eyes review)
+- `check_reboot_request` (`bot/engine/lifecycle.py`) uses `data.setdefault("channel_id", …)` instead of unconditional assignment when attaching channel context, so an auto-promoted deferred reboot keeps the original requester's `channel_id` instead of getting hijacked by whichever thread happens to trigger the promotion. Without this, the post-reboot resume_prompt would have been routed to the wrong thread on every auto-promote.
+- Sync-Git `request_reboot` call (`bot/discord/interactions.py`) now passes `channel_id` + `platform` for parity with the Deploy button, so the post-reboot completion notice routes back to the thread that clicked Sync-Git.
+- `request_reboot` (`bot/claude/runner.py`) unlinks any pre-existing `reboot_request.deferred.json` when it queues a real reboot, so a `force=True` reboot superseding an earlier defer can't leave behind a stale deferred file that auto-promotes after the forced restart and fires a second unwanted reboot.
+
 ## v0.92.27 — Case-insensitive /spawn repo + path-poisoning roll-up (2026-05-09)
 
 ### Fixed

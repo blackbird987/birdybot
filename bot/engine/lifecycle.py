@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import subprocess
 from datetime import datetime, timedelta, timezone
 
 from bot import config
 from bot.claude.models import context_tokens_from_usage
+from bot.claude.runner import RebootResult
 from bot.claude.types import (
     CODE_CHANGE_TOOLS, PLAN_ORIGINS, Instance, InstanceOrigin, InstanceStatus,
     RunResult,
@@ -913,13 +915,94 @@ async def send_result(
     ctx.store.update_instance(inst)
 
 
+def _promote_deferred_reboot_if_eligible() -> None:
+    """Promote a deferred reboot to a fresh request if eligible.
+
+    Auto-promotion runs at the top of every ``check_reboot_request`` call.
+    A deferred file becomes a fresh ``REBOOT_REQUEST_FILE`` iff:
+      * the deferred file exists and is parseable
+      * its ``blocked_at`` is within ``REBOOT_DEFERRED_TTL_SECS`` of now
+
+    Stale deferrals (older than the TTL) are unlinked with an ERROR log so
+    the dropped intent is auditable. Failures are logged and swallowed —
+    the existing read+unlink+request flow handles whatever lands in
+    ``REBOOT_REQUEST_FILE`` regardless of how it got there.
+    """
+    deferred_path = config.REBOOT_REQUEST_DEFERRED_FILE
+    if not deferred_path.exists():
+        return
+    # If a fresh request file already exists, defer to it — don't clobber.
+    # The deferred file remains on disk and gets a chance to promote on the
+    # next idle session-end (or ages out via the TTL).
+    if config.REBOOT_REQUEST_FILE.exists():
+        return
+    try:
+        deferred = json.loads(deferred_path.read_text(encoding="utf-8"))
+    except Exception:
+        log.warning("Malformed deferred reboot file, removing", exc_info=True)
+        try:
+            deferred_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return
+
+    blocked_at_raw = deferred.get("blocked_at")
+    try:
+        blocked_at = datetime.fromisoformat(blocked_at_raw)
+        if blocked_at.tzinfo is None:
+            blocked_at = blocked_at.replace(tzinfo=timezone.utc)
+        age_secs = (datetime.now(timezone.utc) - blocked_at).total_seconds()
+    except Exception:
+        # Missing/unparseable timestamp — treat as stale to avoid resurrecting
+        # a record we can't reason about.
+        log.error(
+            "Deferred reboot has missing/unparseable blocked_at; dropping. message=%s",
+            deferred.get("message", "?"),
+        )
+        try:
+            deferred_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return
+
+    if age_secs > config.REBOOT_DEFERRED_TTL_SECS:
+        log.error(
+            "Dropping stale deferred reboot (age=%.0fs, ttl=%ds, message=%s)",
+            age_secs, config.REBOOT_DEFERRED_TTL_SECS,
+            deferred.get("message", "?"),
+        )
+        try:
+            deferred_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return
+
+    # Atomic rename — REBOOT_REQUEST_FILE is guaranteed not to exist here
+    # (the early-return above ensures it). The next read in check_reboot_request
+    # picks up the promoted file.
+    try:
+        os.replace(deferred_path, config.REBOOT_REQUEST_FILE)
+        log.info(
+            "Promoted deferred reboot (age=%.0fs, message=%s)",
+            age_secs, deferred.get("message", "?"),
+        )
+    except OSError:
+        log.exception("Failed to promote deferred reboot file")
+
+
 async def check_reboot_request(ctx: RequestContext) -> None:
     """Check if a Claude Code instance wrote a reboot request file.
 
     If found, queue the reboot on the runner. The actual reboot executes
     after all active tasks finish (coalesced — multiple autopilots requesting
     reboots produce a single reboot).
+
+    Also auto-promotes any prior deferred reboot at the top of the call so
+    a Sync-Git or auto-update reboot that deferred while another session was
+    active gets retried automatically once the bot returns to idle.
     """
+    _promote_deferred_reboot_if_eligible()
+
     try:
         raw = config.REBOOT_REQUEST_FILE.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -940,11 +1023,54 @@ async def check_reboot_request(ctx: RequestContext) -> None:
     except OSError:
         pass
 
-    # Attach channel context so the reboot executor knows where to notify
-    data["channel_id"] = ctx.channel_id
-    data["platform"] = ctx.platform
+    # Attach channel context so the reboot executor knows where to notify.
+    # setdefault, not assignment: an auto-promoted deferred request already
+    # carries the original requester's channel_id from a different thread —
+    # don't hijack the resume_prompt routing to whichever thread happened to
+    # trigger the promotion.
+    data.setdefault("channel_id", ctx.channel_id)
+    data.setdefault("platform", ctx.platform)
 
-    ctx.runner.request_reboot(data)
+    # Derive the requesting instance so request_reboot's busy-check excludes
+    # it (just-finished iid is already absent from _active_tasks via end_task,
+    # but the filter is correct either way — safety belt).
+    current_iid = (
+        ctx.runner.active_instance_for_session(ctx.session_id)
+        or ctx.runner.active_instance_for_channel(ctx.channel_id)
+    )
+
+    result = ctx.runner.request_reboot(data, current_iid=current_iid)
+    if result is RebootResult.DEFERRED:
+        blocked_by: list[str] = []
+        try:
+            deferred_raw = config.REBOOT_REQUEST_DEFERRED_FILE.read_text(encoding="utf-8")
+            blocked_by = json.loads(deferred_raw).get("blocked_by", []) or []
+        except Exception:
+            pass
+        blocked_str = ", ".join(blocked_by) if blocked_by else "another session"
+        # Route the notice to the ORIGINAL requester's channel. On the
+        # auto-promote-then-re-defer path, ctx.channel_id is whatever thread
+        # triggered the promote, not the user who requested the reboot.
+        # data["channel_id"] was filled in via setdefault above and is always
+        # populated for both fresh and auto-promoted requests.
+        notice_channel = data.get("channel_id") or ctx.channel_id
+        try:
+            await ctx.messenger.send_text(
+                notice_channel,
+                f"⚠️ Reboot deferred — {blocked_str} active on another thread. "
+                "It will retry automatically when they finish (within 1 h), "
+                "or you can `/kill` them to apply now.",
+                silent=True,
+            )
+        except Exception:
+            log.exception("Failed to send deferred-reboot notice")
+        log.info(
+            "Reboot deferred (reason: %s, blocked_by: %s)",
+            data.get("message", "reboot requested"),
+            blocked_by,
+        )
+        return
+
     log.info(
         "Queued reboot request (reason: %s, total pending: %d)",
         data.get("message", "reboot requested"),
