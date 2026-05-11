@@ -81,3 +81,6 @@
 - [ ] [Reliability] Resume-from-reboot may lose iterative revisions (Medium)
 - [ ] [Modularity] Lock release/reacquire dance is fragile; prefer internal no-lock merge variant (Medium)
 - [ ] [Bug Risk] Enumerate every release-spawn entrypoint (Medium)
+- [ ] [Performance] list_instances scans all sessions before filter (Low)
+- [ ] [Reliability] Diagnose _auto_resolve_merge_conflicts -1 path (Medium)
+- [ ] [DRY/Cleanup] Centralize merge-failed message rendering (Low)
