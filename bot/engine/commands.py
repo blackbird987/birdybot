@@ -2700,8 +2700,12 @@ async def _on_resolve_cancel(
     if not resolver_id:
         await ctx.messenger.send_text(ctx.channel_id, "No resolver running.")
         return
-    await ctx.runner.kill_and_wait(resolver_id, timeout=10)
+    # Clear resolver id BEFORE awaiting the kill — otherwise the outer
+    # _on_resolve_merge wait_for unblocks the moment kill_and_wait returns and
+    # may race us to the verify-fail message. The cleared flag is the signal
+    # that tells the merge handler this was externally handled.
     ctx.store.set_pending_merge_resolver(inst.id, None)
+    await ctx.runner.kill_and_wait(resolver_id, timeout=10)
     # Abort any half-merge so subsequent attempts start clean.
     if inst.worktree_path and Path(inst.worktree_path).is_dir():
         await asyncio.to_thread(
@@ -2904,11 +2908,13 @@ async def handle_callback(
             await ctx.messenger.send_text(ctx.channel_id, "Instance not found.")
             return
         # Resolver in flight: kill it before discarding so the worktree
-        # subprocess doesn't race the branch teardown.
+        # subprocess doesn't race the branch teardown. Clear resolver_id
+        # BEFORE awaiting the kill so the outer _on_resolve_merge wait_for
+        # sees "externally handled" the moment it resumes.
         live_resolver = _resolver_in_flight(ctx, inst.id)
         if live_resolver:
-            await ctx.runner.kill_and_wait(live_resolver, timeout=10)
             ctx.store.set_pending_merge_resolver(inst.id, None)
+            await ctx.runner.kill_and_wait(live_resolver, timeout=10)
         _clear_chain_on_manual_finalize(ctx.store, inst.session_id, "Discard button")
         # Early guard: branch already cleared by a prior merge/discard
         if not inst.branch:
