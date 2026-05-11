@@ -1716,23 +1716,38 @@ class ForumManager:
                     log.exception("Failed to post rebind-blocked notice for %s", _tid)
 
         ctx.on_session_resolved = _on_resolved
-        ctx.maybe_prime_briefing = lambda _tid=thread_id: self.build_prime_briefing(_tid)
+        # mode="cold" uses the cache (single fire per spawn); mode="resume"
+        # bypasses it because the briefing must reflect any new Discord
+        # messages that landed since the prior compaction-triggered prime.
+        ctx.maybe_prime_briefing = lambda mode="cold", _tid=thread_id: self.build_prime_briefing(
+            _tid, mode=mode, use_cache=(mode == "cold"),
+        )
         ctx.invalidate_prime = lambda _tid=thread_id: self.clear_prime_briefing(_tid)
 
     def clear_prime_briefing(self, thread_id: str) -> None:
         """Invalidate the cached briefing for a thread (e.g. after a failed run)."""
         self._prime_cache.pop(thread_id, None)
 
-    async def build_prime_briefing(self, thread_id: str) -> str | None:
+    async def build_prime_briefing(
+        self,
+        thread_id: str,
+        *,
+        mode: str = "cold",
+        use_cache: bool = True,
+    ) -> str | None:
         """Read recent Discord history, return a brief context summary or None.
 
         Quoted messages are wrapped in nonced fence delimiters; the nonce is
         scrubbed from quoted content first so user-supplied text cannot
         reproduce the closing marker. Cache lives in-memory only.
+
+        mode="cold": fresh-thread budget (~500 tokens, 3 user / 1 bot).
+        mode="resume": post-compaction budget (~12K tokens, 15 user / 8 bot).
         """
-        cached = self._prime_cache.get(thread_id)
-        if cached:
-            return cached
+        if use_cache:
+            cached = self._prime_cache.get(thread_id)
+            if cached:
+                return cached
 
         lookup = self.thread_to_project(thread_id)
         if not lookup:
@@ -1763,11 +1778,18 @@ class ForumManager:
                 return False
             return not m.author.bot
 
-        HARD_BYTE_BUDGET = 64 * 1024
+        # Resume mode reads more raw history because the per-msg/per-role
+        # caps below are also wider. Discord's per-call max is 100.
+        if mode == "resume":
+            HARD_BYTE_BUDGET = 128 * 1024
+            history_limit = 100
+        else:
+            HARD_BYTE_BUDGET = 64 * 1024
+            history_limit = 50
         msgs: list[tuple[str, str]] = []
         total_bytes = 0
         try:
-            async for m in ch.history(limit=50, oldest_first=False):
+            async for m in ch.history(limit=history_limit, oldest_first=False):
                 text = (m.content or "").strip()
                 if not text:
                     continue
@@ -1806,10 +1828,17 @@ class ForumManager:
                 msgs = msgs[:i]
                 break
 
-        # Tightened caps to stay inside ~500-token brief budget:
-        # 3 user × 350 chars + 1 bot × 200 chars + 200 topic + header ≈ 450 tokens
-        last_user = [t for r, t in msgs if r == "user"][-3:]
-        last_bot = [t for r, t in msgs if r == "bot"][-1:]
+        # Cold: ~500 token budget. Resume: ~12K token budget — the resumed
+        # session was compacted so the model lost the actual exchange and
+        # needs more verbatim history to reconstruct what the thread is about.
+        if mode == "resume":
+            user_keep, user_chars = 15, 2000
+            bot_keep, bot_chars = 8, 2000
+        else:
+            user_keep, user_chars = 3, 350
+            bot_keep, bot_chars = 1, 200
+        last_user = [t for r, t in msgs if r == "user"][-user_keep:]
+        last_bot = [t for r, t in msgs if r == "bot"][-bot_keep:]
         if not last_user and not last_bot:
             return None  # degenerate
 
@@ -1831,19 +1860,20 @@ class ForumManager:
             )
         for t in last_user:
             parts.append(
-                f"{fence_open} kind=prior_user_msg\n{_scrub(t[:350])}\n{fence_close}"
+                f"{fence_open} kind=prior_user_msg\n{_scrub(t[:user_chars])}\n{fence_close}"
             )
         for t in last_bot:
-            snippet = t[:200].replace("\n", " ")
+            snippet = t[:bot_chars].replace("\n", " ")
             parts.append(
                 f"{fence_open} kind=prior_bot_msg\n{_scrub(snippet)}…\n{fence_close}"
             )
 
         summary = "\n".join(parts)
-        self._prime_cache[thread_id] = summary
+        if use_cache:
+            self._prime_cache[thread_id] = summary
         log.info(
-            "Built prime briefing for thread %s (%d chars, %d user / %d bot)",
-            thread_id, len(summary), len(last_user), len(last_bot),
+            "Built prime briefing for thread %s mode=%s (%d chars, %d user / %d bot)",
+            thread_id, mode, len(summary), len(last_user), len(last_bot),
         )
         return summary
 
