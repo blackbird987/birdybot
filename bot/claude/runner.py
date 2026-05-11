@@ -2980,10 +2980,16 @@ class ClaudeRunner:
         Distinguishes five user-facing outcomes (icon shown is what the user sees;
         log severity is set independently per call site):
           - clean pop succeeded → ℹ️ "Stashed changes restored after merge"
-          - skipped (tree dirty) → ℹ️ "not auto-restored, recover manually"
+          - skipped (tracked changes present) → ℹ️ "not auto-restored, recover manually"
           - pop conflicted, rolled back → ⚠️ "pop conflicted, aborted; stash preserved"
           - pop conflicted, rollback failed → ⚠️ "tree may contain conflict markers"
           - subprocess raised → ⚠️ "could not verify stash state"
+
+        Only tracked changes block the pop. Untracked entries (`??`) are
+        ignored — a stash pop only fails on them if there's a filename
+        collision, and the conflict-rollback branch below handles that
+        case (the pop fails atomically, `git checkout -- .` is a no-op
+        on untracked paths, stash stays intact).
 
         Never claims "safe" when safety can't actually be verified — the
         rollback path tracks its own success explicitly.  All git
