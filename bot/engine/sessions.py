@@ -133,6 +133,81 @@ def _read_session_summary(fpath: Path) -> dict | None:
     }
 
 
+# Must match the fence_open prefix written in
+# bot/discord/forums.py:build_prime_briefing — if that string changes here OR
+# there, post-compaction priming will silently re-inject every turn (cache
+# thrash) because rehydration detection won't recognise prior briefings.
+_PRIOR_FENCE_PREFIX = "<<<PRIOR-"
+
+
+def session_resume_state(session_id: str) -> tuple[bool, bool]:
+    """Inspect a resumed session JSONL for compaction + prior rehydration.
+
+    Returns (compacted, already_rehydrated):
+      - compacted: at least one record has subtype=="compact_boundary"
+      - already_rehydrated: a `<<<PRIOR-` fence appears in a real user-prompt
+        record (NOT an isCompactSummary record) whose position is past the
+        last compact_boundary. Records above the latest boundary don't count
+        because Claude Code's --resume context starts from that boundary's
+        summary; a fence sitting above it is no longer in the model's view.
+
+    Safe defaults (False, False) on any read/parse error so the caller
+    degrades to "don't inject" rather than injecting on bad data.
+    """
+    fpath = find_session_file(session_id)
+    if not fpath:
+        return (False, False)
+
+    last_boundary_idx = -1
+    fence_indices: list[int] = []
+    idx = -1
+    try:
+        with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                idx += 1
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                rtype = rec.get("type")
+                if rtype == "system" and rec.get("subtype") == "compact_boundary":
+                    last_boundary_idx = idx
+                    continue
+                if rtype != "user":
+                    continue
+                # Skip the auto-generated compact summary turn itself —
+                # its text could echo a previously-injected fence and
+                # produce a false "rehydrated" reading after re-compaction.
+                if rec.get("isCompactSummary"):
+                    continue
+                msg = rec.get("message", {})
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    text = content
+                elif isinstance(content, list):
+                    parts = []
+                    for b in content:
+                        if isinstance(b, dict) and b.get("type") == "text":
+                            parts.append(b.get("text", ""))
+                    text = " ".join(parts)
+                else:
+                    continue
+                if _PRIOR_FENCE_PREFIX in text:
+                    fence_indices.append(idx)
+    except OSError:
+        return (False, False)
+
+    compacted = last_boundary_idx >= 0
+    if compacted:
+        already_rehydrated = any(i > last_boundary_idx for i in fence_indices)
+    else:
+        already_rehydrated = bool(fence_indices)
+    return (compacted, already_rehydrated)
+
+
 def find_session_file(session_id: str) -> Path | None:
     """Find a session JSONL file by full or partial ID."""
     projects_dir = config.CLAUDE_PROJECTS_DIR

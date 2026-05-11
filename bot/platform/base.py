@@ -203,10 +203,12 @@ class RequestContext:
     # rejects a cross-repo rebind (see bot.discord.forums.set_thread_session
     # and the wrapper in attach_session_callbacks).
     on_session_resolved: Callable[[str, str | None], Awaitable[None]] | None = None
-    # Context priming for fresh CLI sessions (Discord forum threads only).
-    # maybe_prime_briefing returns a digest of recent thread messages or None;
+    # Context priming for cold and post-compaction CLI sessions (Discord forum
+    # threads only). maybe_prime_briefing returns a digest of recent thread
+    # messages or None; the caller passes mode="cold" for fresh sessions and
+    # mode="resume" when --resume hit a compacted JSONL (bigger budget, no cache).
     # invalidate_prime drops the cached digest after a failed run.
-    maybe_prime_briefing: Callable[[], Awaitable[str | None]] | None = None
+    maybe_prime_briefing: Callable[[str], Awaitable[str | None]] | None = None
     invalidate_prime: Callable[[], None] | None = None
     # User identity (for multi-user access control)
     user_id: str | None = None
