@@ -2996,16 +2996,28 @@ class ClaudeRunner:
                 ["git", "status", "--porcelain"],
                 cwd=repo, capture_output=True, text=True, **_NOWND,
             )
-            dirty = check_r.stdout.strip()
-            if dirty:
+            # Narrow the dirty check to TRACKED changes only. Untracked
+            # entries (`??`) don't block a stash pop unless there's an
+            # actual filename collision — and if there is, the existing
+            # pop-conflict rollback path below handles it cleanly. The old
+            # behaviour (any porcelain output → skip pop) was the root cause
+            # of the q-8035 incident: a foreign concurrent merge left a `??`
+            # entry behind, this check refused the pop, and the user's
+            # tracked edits got stranded in stash@{0}.
+            tracked_dirty_lines = [
+                line for line in check_r.stdout.splitlines()
+                if line and not line.startswith("??")
+            ]
+            if tracked_dirty_lines:
+                dirty = "\n".join(tracked_dirty_lines)
                 log.warning(
-                    "Skipping stash pop — working tree not clean in %s; stash preserved. "
+                    "Skipping stash pop — tracked changes present in %s; stash preserved. "
                     "Dirty paths:\n%s",
                     repo,
                     dirty,
                 )
                 return (
-                    "\nℹ️ Stashed changes not auto-restored (working tree wasn't clean after merge). "
+                    "\nℹ️ Stashed changes not auto-restored (tracked changes present after merge). "
                     "Recover with `git stash pop` — list with `git stash list`."
                 )
             pop_r = subprocess.run(
