@@ -2515,8 +2515,6 @@ async def _on_resolve_merge(
     # Build prompt, consume any deferred user-typed guidance.
     deferred = (pending.get("deferred_text") or "").strip()
     prompt = _build_resolver_prompt(inst, conflicts, deferred)
-    if deferred:
-        ctx.store.clear_pending_merge_deferred_text(inst.id)
 
     # Spawn detached so we can persist the resolver id before awaiting.
     spawned = await workflows.spawn_resolver_detached(
@@ -2524,6 +2522,7 @@ async def _on_resolve_merge(
     )
     if not spawned:
         # Roll back the replayed merge so a retry has a clean slate.
+        # Keep deferred_text intact so the next Resolve attempt can deliver it.
         await asyncio.to_thread(
             subprocess.run,
             ["git", "merge", "--abort"],
@@ -2531,6 +2530,8 @@ async def _on_resolve_merge(
         )
         return
     resolver_inst, task = spawned
+    if deferred:
+        ctx.store.clear_pending_merge_deferred_text(inst.id)
     ctx.store.set_pending_merge_resolver(inst.id, resolver_inst.id)
 
     # Swap the merge-failed buttons (if the click came from that message) for
