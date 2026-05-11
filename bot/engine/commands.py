@@ -2479,12 +2479,7 @@ async def _on_resolve_merge(
             ctx.channel_id, "No pending merge to resolve.",
         )
         return
-    # Re-entrancy: derive from runner truth, not just persisted state, in case
-    # a crash left a stale resolver_instance_id behind with no live task.
-    persisted_id = pending.get("resolver_instance_id") or ""
-    if persisted_id and ctx.runner.active_instance_for_session(
-        ctx.store.get_instance(persisted_id).session_id if ctx.store.get_instance(persisted_id) else None,
-    ):
+    if _resolver_in_flight(ctx, inst.id):
         await ctx.messenger.send_text(
             ctx.channel_id, "Resolver already running — wait or tap Cancel.",
         )
@@ -2532,7 +2527,7 @@ async def _on_resolve_merge(
         await asyncio.to_thread(
             subprocess.run,
             ["git", "merge", "--abort"],
-            **{"cwd": inst.worktree_path, "capture_output": True, "text": True, **_NOWND},
+            cwd=inst.worktree_path, capture_output=True, text=True, **_NOWND,
         )
         return
     resolver_inst, task = spawned
@@ -2568,7 +2563,17 @@ async def _on_resolve_merge(
     except Exception:
         log.exception("Resolver task raised for %s", inst.id)
 
+    # If cancel/discard handlers ran while we were awaiting the task, they
+    # already posted UI and cleared pending state — skip the verify-fail path
+    # to avoid double-messaging.
+    pending_after = ctx.store.get_pending_merge(inst.id)
+    externally_handled = (
+        pending_after is None
+        or not pending_after.get("resolver_instance_id")
+    )
     ctx.store.set_pending_merge_resolver(inst.id, None)
+    if externally_handled and not timed_out:
+        return
 
     if timed_out:
         # Abort the half-resolved merge so subsequent attempts have a clean tree.
@@ -2576,13 +2581,12 @@ async def _on_resolve_merge(
             await asyncio.to_thread(
                 subprocess.run,
                 ["git", "merge", "--abort"],
-                **{"cwd": inst.worktree_path, "capture_output": True, "text": True, **_NOWND},
+                cwd=inst.worktree_path, capture_output=True, text=True, **_NOWND,
             )
-        await ctx.messenger.send_text(
-            ctx.channel_id,
+        await _post_resolver_failure(
+            ctx, inst, source_msg_id,
             f"Resolver timed out after {_RESOLVE_TIMEOUT_SECONDS // 60} minutes. "
             "Tap **Resolve with Claude** to retry, **Try Merge Again**, or **Discard**.",
-            buttons=merge_failed_button_specs(inst.id),
         )
         return
 
@@ -2593,18 +2597,28 @@ async def _on_resolve_merge(
             await asyncio.to_thread(
                 subprocess.run,
                 ["git", "merge", "--abort"],
-                **{"cwd": inst.worktree_path, "capture_output": True, "text": True, **_NOWND},
+                cwd=inst.worktree_path, capture_output=True, text=True, **_NOWND,
             )
-        await ctx.messenger.send_text(
-            ctx.channel_id,
+        await _post_resolver_failure(
+            ctx, inst, source_msg_id,
             f"Resolver finished but the merge wasn't completed ({detail}). "
             "Tap **Resolve with Claude** to retry with different guidance, "
             "or **Discard** to abandon the branch.",
-            buttons=merge_failed_button_specs(inst.id),
         )
         return
 
-    # Worktree merge committed cleanly — now merge feature into master.
+    # Worktree merge committed cleanly — clear the stale "Resolver running"
+    # message so the lingering Cancel button doesn't confuse the user, then
+    # merge feature into master.
+    if source_msg_id:
+        try:
+            await ctx.messenger.edit_text(
+                ctx.channel_id, source_msg_id,
+                "Conflicts resolved — merging into master...",
+                buttons=[],
+            )
+        except Exception:
+            log.debug("Could not edit source message after resolve success", exc_info=True)
     msg = await ctx.runner.merge_branch(inst)
     ctx.store.update_instance(inst)
     if "failed" not in msg.lower():
@@ -2618,6 +2632,29 @@ async def _on_resolve_merge(
         if ctx.on_merged:
             await ctx.on_merged()
     await ctx.messenger.send_text(ctx.channel_id, ctx.messenger.escape(msg))
+
+
+async def _post_resolver_failure(
+    ctx: RequestContext,
+    inst: Instance,
+    source_msg_id: str | None,
+    text: str,
+) -> None:
+    """Surface a resolver failure with merge_failed buttons.
+
+    Resets the original 'Resolver running...' message back to the merge-failed
+    UI when possible, otherwise posts a fresh message.
+    """
+    buttons = merge_failed_button_specs(inst.id)
+    if source_msg_id:
+        try:
+            await ctx.messenger.edit_text(
+                ctx.channel_id, source_msg_id, text, buttons=buttons,
+            )
+            return
+        except Exception:
+            log.debug("Could not edit source message for resolver failure", exc_info=True)
+    await ctx.messenger.send_text(ctx.channel_id, text, buttons=buttons)
 
 
 def _resolver_in_flight(ctx: RequestContext, instance_id: str) -> str | None:
@@ -2670,7 +2707,7 @@ async def _on_resolve_cancel(
         await asyncio.to_thread(
             subprocess.run,
             ["git", "merge", "--abort"],
-            **{"cwd": inst.worktree_path, "capture_output": True, "text": True, **_NOWND},
+            cwd=inst.worktree_path, capture_output=True, text=True, **_NOWND,
         )
     text = "Resolver cancelled. Tap **Resolve with Claude**, **Try Merge Again**, or **Discard**."
     if source_msg_id:
