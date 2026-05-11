@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.92.30 — Resolve with Claude for failed auto-merges (2026-05-11)
+
 ### Added
 - **Resolve with Claude** — new primary action on the merge-failed message row, between auto-merge failure and the existing **Try Merge Again** / **Discard** buttons. Tapping it replays the failing merge inside the build worktree (master → feature with `--no-commit`) and spawns a Claude resolver into the live conflict tree. The resolver gets a strict prompt: inspect conflict files, resolve markers, `git add` + `git commit --no-edit` the merge. After the run completes, the handler verifies `MERGE_HEAD` is gone and the branch SHA advanced before calling the normal `merge_branch` path. Failure paths re-post the three-button row with a diagnostic so the user can retry, send extra guidance, or discard. 15-minute hard timeout; the resolver is wrapped in `asyncio.wait_for` and SIGKILLed on overrun. A **Cancel** button is exposed via `resolve_cancel:` while the resolver is running. Discard while a resolver is mid-flight kills it first, preventing the worktree-vs-branch-teardown race.
 - `on_text` no longer silently drops messages typed during a pending merge. Each message appends (newline-separated, 2 KiB cap) to `pending_merge.deferred_text` and surfaces back to the user with a guidance preview plus the action buttons. The next Resolve spawn consumes and clears `deferred_text`, letting the user steer the resolver through plain typed instructions instead of forcing them through Discord modals.
