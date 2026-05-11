@@ -887,14 +887,63 @@ class StateStore:
         """
         if not instance_id:
             return
+        # Preserve resolver_instance_id and deferred_text across re-set so a
+        # verify-fail re-post doesn't drop active resolver state or the
+        # user's accumulated typed guidance.
+        existing = self._pending_merges.get(instance_id, {})
         self._pending_merges[instance_id] = {
             "session_id": session_id or "",
             "channel_id": channel_id,
             "repo_name": repo_name,
             "message": message,
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": existing.get("created_at")
+            or datetime.now(timezone.utc).isoformat(),
+            "resolver_instance_id": existing.get("resolver_instance_id", ""),
+            "deferred_text": existing.get("deferred_text", ""),
         }
         self.save()
+
+    def set_pending_merge_resolver(
+        self, instance_id: str, resolver_instance_id: str | None,
+    ) -> None:
+        """Set or clear the in-flight resolver instance id for a pending merge."""
+        meta = self._pending_merges.get(instance_id)
+        if not meta:
+            return
+        meta["resolver_instance_id"] = resolver_instance_id or ""
+        self.save()
+
+    def append_pending_merge_deferred_text(
+        self, instance_id: str, text: str, cap: int = 2000,
+    ) -> str:
+        """Append user-typed guidance to a pending merge, capped at *cap* chars.
+
+        Appends with a newline separator so successive refinements ("fix the
+        conflicts", "preserve both [Unreleased] sections") both reach Claude
+        on the next Resolve spawn. Returns the new accumulated text.
+        """
+        meta = self._pending_merges.get(instance_id)
+        if not meta:
+            return ""
+        existing = (meta.get("deferred_text") or "").strip()
+        addition = (text or "").strip()
+        if not addition:
+            return existing
+        joined = f"{existing}\n{addition}".strip() if existing else addition
+        if len(joined) > cap:
+            joined = joined[-cap:]
+        meta["deferred_text"] = joined
+        self.save()
+        return joined
+
+    def clear_pending_merge_deferred_text(self, instance_id: str) -> None:
+        """Drop accumulated deferred_text after it's been consumed by a spawn."""
+        meta = self._pending_merges.get(instance_id)
+        if not meta:
+            return
+        if meta.get("deferred_text"):
+            meta["deferred_text"] = ""
+            self.save()
 
     def get_pending_merge(self, instance_id: str) -> dict | None:
         """Return pending-merge metadata for an instance, or None."""

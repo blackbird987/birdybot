@@ -42,6 +42,7 @@ class InstanceOrigin(str, Enum):
     VERIFY_RELEASE = "verify_release"  # Autopilot gate: cross-check changelog/commit claims vs diff
     BUILD_AND_SHIP = "build_and_ship"  # [Build & Ship] button
     BG = "bg"                       # /bg command — background task
+    RESOLVE_MERGE = "resolve_merge" # [Resolve with Claude] — auto-merge conflict resolver
 
 
 # Origins that belong to the plan workflow (used in lifecycle + button selection)
