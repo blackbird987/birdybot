@@ -84,3 +84,5 @@
 - [ ] [Performance] list_instances scans all sessions before filter (Low)
 - [ ] [Reliability] Diagnose _auto_resolve_merge_conflicts -1 path (Medium)
 - [ ] [DRY/Cleanup] Centralize merge-failed message rendering (Low)
+- [ ] [Reliability] Automated tests for lock and hydration paths (Medium)
+- [ ] [UX/UI] Worktree creation latency needs progress feedback (Medium)
