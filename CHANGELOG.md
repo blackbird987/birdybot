@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## v0.92.31 — Narrow stash-pop dirty check to tracked changes (2026-05-11)
+
+### Fixed
+- `_restore_stash` (`bot/claude/runner.py`) no longer treats untracked files as a reason to skip the stash pop. The dirty check now filters out `??` lines from `git status --porcelain` and only considers tracked changes blocking. Root cause of the q-8035 incident: a foreign concurrent merge in the shared repo left untracked entries behind after the auto-stash, the old check rejected the pop as "tree dirty", and the user's tracked edits got stranded in `stash@{0}` until manual recovery. Filename collisions between an untracked file and a stashed file still fall through to the existing conflict-rollback path (pop fails atomically, `git checkout -- .` is a no-op on the untracked path, stash preserved), so this only un-blocks the safe case. Regression coverage: `scripts/verify_restore_stash.py` (3 scenarios — q-8035 reproduction, tracked-dirty skip, clean-tree pop).
+
 ## v0.92.30 — Resolve with Claude for failed auto-merges (2026-05-11)
 
 ### Added
