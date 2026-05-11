@@ -37,6 +37,8 @@ _STYLE_MAP = {
     "build_and_ship:": discord.ButtonStyle.success, # Green
     "continue_autopilot:": discord.ButtonStyle.success,  # Green
     "continue_ppu:": discord.ButtonStyle.danger,           # Red — signals cost
+    "resolve_merge:": discord.ButtonStyle.primary,         # Blue — primary action on merge-failed
+    "resolve_cancel:": discord.ButtonStyle.danger,         # Red — cancels in-flight resolver
 }
 
 

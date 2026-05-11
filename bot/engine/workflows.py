@@ -695,6 +695,100 @@ async def spawn_from(
     return new_inst
 
 
+async def spawn_resolver_detached(
+    ctx: RequestContext,
+    source_id: str,
+    prompt: str,
+    status_text: str = "Resolving merge conflicts...",
+) -> tuple[Instance, asyncio.Task] | None:
+    """Spawn a RESOLVE_MERGE instance into the source's worktree.
+
+    Unlike spawn_from, the run is wrapped in asyncio.create_task so the caller
+    can persist the resolver's instance id (for cancel + crash recovery) before
+    awaiting completion. Returns (instance, task) or None if guards fail.
+    """
+    source = ctx.store.get_instance(source_id)
+    if not source:
+        await ctx.messenger.send_text(ctx.channel_id, "Instance not found.")
+        return None
+    if not source.branch or not source.worktree_path:
+        await ctx.messenger.send_text(
+            ctx.channel_id,
+            "Cannot spawn resolver: source has no branch/worktree.",
+        )
+        return None
+
+    # Mirrors spawn_from guards: active-channel, drain, budget, repo.
+    if ctx.channel_id is not None:
+        active_inst_id = ctx.runner.active_instance_for_channel(ctx.channel_id)
+        if active_inst_id:
+            log.warning(
+                "spawn_resolver blocked: channel %s already has active instance %s",
+                ctx.channel_id, active_inst_id,
+            )
+            await ctx.messenger.send_text(
+                ctx.channel_id,
+                "Another session is already running on this thread — wait for it to finish.",
+            )
+            return None
+
+    spawn_err = ctx.runner.check_spawn_allowed(None)
+    if spawn_err:
+        await ctx.messenger.send_text(ctx.channel_id, spawn_err)
+        return None
+
+    from bot.engine.commands import check_budget
+    if not check_budget(ctx):
+        await ctx.messenger.send_text(
+            ctx.channel_id, "Daily budget exceeded. Use /budget reset to override.",
+        )
+        return None
+
+    if not source.repo_path or not Path(source.repo_path).is_dir():
+        await ctx.messenger.send_text(ctx.channel_id, "Repo path no longer valid.")
+        return None
+
+    new_inst = ctx.store.create_instance(
+        instance_type=InstanceType.TASK,
+        prompt=prompt,
+        mode="build",
+    )
+    new_inst.origin = InstanceOrigin.RESOLVE_MERGE
+    new_inst.origin_platform = ctx.platform
+    new_inst.effort = ctx.effective_effort
+    new_inst.parent_id = source.id
+    new_inst.repo_name = source.repo_name
+    new_inst.repo_path = source.repo_path
+    new_inst.user_id = source.user_id or (ctx.user_id or "")
+    new_inst.user_name = source.user_name or (ctx.user_name or "")
+    new_inst.is_owner_session = source.is_owner_session
+    new_inst.bash_policy = source.bash_policy
+    new_inst.master_baseline_head = source.master_baseline_head
+    new_inst.branch = source.branch
+    new_inst.original_branch = source.original_branch
+    new_inst.worktree_path = source.worktree_path
+    new_inst.chained_from = source.id
+    ctx.store.update_instance(new_inst)
+
+    escaped = ctx.messenger.escape(new_inst.display_id())
+    escaped_status = ctx.messenger.escape(status_text.lower())
+    handle = await ctx.messenger.send_thinking(
+        ctx.channel_id, f"⏳ {escaped} {escaped_status}",
+        buttons=running_button_specs(new_inst.id),
+    )
+    if handle.get("message_id"):
+        new_inst.message_ids.setdefault(ctx.platform, []).append(
+            handle.get("message_id"),
+        )
+        ctx.store.update_instance(new_inst)
+
+    task = asyncio.create_task(
+        lifecycle.run_instance(ctx, new_inst, handle=handle, silent=False),
+        name=f"resolver-{new_inst.id}",
+    )
+    return new_inst, task
+
+
 # --- Individual workflow steps (all return Instance | None) ---
 
 async def on_plan(ctx: RequestContext, source_id: str, source_msg_id: str | None = None) -> Instance | None:

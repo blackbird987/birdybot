@@ -301,8 +301,21 @@ def merge_failed_button_specs(instance_id: str) -> list[list[ButtonSpec]]:
     fresh review/build prompt.
     """
     return [[
+        ButtonSpec("Resolve with Claude", f"resolve_merge:{instance_id}"),
         ButtonSpec("Try Merge Again", f"merge:{instance_id}"),
         ButtonSpec("Discard", f"discard:{instance_id}"),
+    ]]
+
+
+def resolver_running_button_specs(instance_id: str) -> list[list[ButtonSpec]]:
+    """Buttons shown while the merge-conflict resolver is in flight.
+
+    Only Cancel — both Merge and Discard are blocked until the resolver
+    finishes or is cancelled, since either action would race the worktree
+    state Claude is actively editing.
+    """
+    return [[
+        ButtonSpec("Cancel", f"resolve_cancel:{instance_id}"),
     ]]
 
 
@@ -317,6 +330,12 @@ def action_button_specs(
     """
     rows: list[list[ButtonSpec]] = []
     iid = instance.id
+
+    # Resolver origin: no buttons on the resolver's own result. The resolve_merge
+    # handler posts a follow-up message with the appropriate Merge/Retry/Discard
+    # row once verification + post-merge has run.
+    if instance.origin == InstanceOrigin.RESOLVE_MERGE:
+        return rows
 
     # Done origin: if branch is pending merge and no autopilot, show Merge/Discard
     if instance.origin == InstanceOrigin.DONE and instance.status == InstanceStatus.COMPLETED:
