@@ -3601,10 +3601,19 @@ class ClaudeRunner:
         Three filters layered on top of the basic "has branch + worktree +
         repo" precondition:
 
-          1. Status: skip FAILED/KILLED. Surfacing drift warnings on
-             crashed/killed builds is noise the user can't usefully act on
-             (the build has no "next step" the bot is going to take). The
-             worktree files stay on disk untouched: cleanup_stale_worktrees
+          1. Status: skip FAILED/KILLED/COMPLETED. FAILED/KILLED are noise
+             on crashed/killed builds the user can't usefully act on.
+             COMPLETED is terminal from the user's perspective — they've
+             either merged/discarded (in which case ``worktree_path`` is
+             already cleared and the candidate doesn't reach this filter)
+             or moved on without doing so (in which case "inspect before
+             the next Build" is the wrong framing — there isn't one).
+             The on-demand chain-build path
+             (``workflows._attempt_inline_worktree_recovery``) still runs
+             the same divergence check when the user actually clicks Build
+             against a stale COMPLETED predecessor, so the safety net for
+             the only moment it's actionable is preserved.
+             Worktree files stay on disk untouched: cleanup_stale_worktrees
              protects branches with ``inst.branch`` set and refuses
              ``shutil.rmtree`` on ``git worktree remove`` failure, so the
              user can still manually inspect or reuse them.
@@ -3624,12 +3633,20 @@ class ClaudeRunner:
         flagged_branches: set[tuple[str, str]] = set()
         seen: set[tuple[str, str]] = set()
         candidates: list[Instance] = []
+        skipped_completed_total = 0
+        skipped_completed_with_worktree = 0
         for inst in store.list_instances(all_=True):
             if not (inst.branch and inst.worktree_path and inst.repo_path):
+                if inst.status == InstanceStatus.COMPLETED:
+                    skipped_completed_total += 1
                 continue
             key = (inst.repo_path, inst.branch)
             if inst.manual_recovery_needed:
                 flagged_branches.add(key)
+                continue
+            if inst.status == InstanceStatus.COMPLETED:
+                skipped_completed_total += 1
+                skipped_completed_with_worktree += 1
                 continue
             if inst.status in (InstanceStatus.FAILED, InstanceStatus.KILLED):
                 continue
@@ -3637,6 +3654,12 @@ class ClaudeRunner:
                 continue
             seen.add(key)
             candidates.append(inst)
+        if skipped_completed_total:
+            log.info(
+                "recovery scan: skipped %d COMPLETED instances "
+                "(%d with branch+worktree set)",
+                skipped_completed_total, skipped_completed_with_worktree,
+            )
         return [
             inst for inst in candidates
             if (inst.repo_path, inst.branch) not in flagged_branches

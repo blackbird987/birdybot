@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## v0.92.32 — Skip COMPLETED instances in worktree-recovery scan (2026-05-12)
+
+### Changed
+- Worktree-recovery scan (`ClaudeRunner._select_recovery_candidates`, `bot/claude/runner.py`) now also skips `COMPLETED` instances, not just `FAILED`/`KILLED`. Reason: every reboot was firing the `⚠️ Worktree for <branch> lost git metadata AND has uncommitted drift (missing tracked file: …). Inspect manually before the next Build.` warning into threads for terminal builds the user had already moved on from — the "inspect before the next Build" framing assumed an actionable next step that did not exist. The on-demand chain-build path (`workflows._attempt_inline_worktree_recovery`, `bot/engine/workflows.py:875`) still runs the same divergence check when the user actually clicks Build against a stale `COMPLETED` predecessor, so the safety net is preserved at the only moment it is actionable. `RUNNING`/`QUEUED` instances retain full t-3700 protection. Auto-merge is unaffected: `merge_branch` operates purely on git refs in the main repo, never reading worktree dir contents, so the dropped scan does not weaken the auto-merge path. A `log.info` line summarising skipped-COMPLETED counts (total + with-worktree-set) is emitted per startup pass to preserve audit visibility. Test coverage: `scripts/test_worktree_recovery_dedupe.py` (status-skip assertions flipped to `["d", "e"]`, the v0.92.18 positive-lock case flipped to a negative lock, fixture default status switched to `RUNNING` so scenarios continue to exercise the dedupe/flag-silencing paths they were designed for).
+
 ## v0.92.31 — Narrow stash-pop dirty check to tracked changes (2026-05-11)
 
 ### Fixed
