@@ -41,7 +41,14 @@ _LOCK = asyncio.Lock()
 
 def _families(store: "StateStore") -> dict:
     state = store.get_platform_state("discord")
-    return state.setdefault("spawn_families", {})
+    if "spawn_families" not in state:
+        # get_platform_state returns a fresh {} when the key is unset; that
+        # orphan dict isn't stored, so mutations would vanish when
+        # save_forum_map later fetches a different orphan. Re-store to anchor
+        # the dict in _platform_state before handing out a sub-ref.
+        state["spawn_families"] = {}
+        store.set_platform_state("discord", state, persist=False)
+    return state["spawn_families"]
 
 
 def prefix_for_root(slot: int) -> str:

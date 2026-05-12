@@ -497,8 +497,8 @@ class ClaudeBot(discord.Client):
             # Wave cap accounting: bump the parent's counter so the next
             # /spawn from the same orchestration run sees an incremented
             # value. Counter resets when the user types a fresh message
-            # (see commands.on_text reset block).
-            parent_lookup = _bot._forums.thread_to_project(ctx.channel_id)
+            # (see commands.on_text reset block). Reuses parent_lookup
+            # from the spawn-color block above — same thread, same ref.
             if parent_lookup is not None:
                 _, parent_info = parent_lookup
                 parent_info.spawn_wave_count += 1
