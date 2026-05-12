@@ -251,6 +251,7 @@ _SPAWN_ALLOWED_MODES = {"explore", "plan", "build"}
 _SPAWN_ALLOWED_EFFORTS = {"low", "medium", "high", "max"}
 _SPAWN_PROMPT_MAX_BYTES = 32 * 1024  # 32 KiB hard cap on body
 _SPAWN_TITLE_MAX = 80
+_TITLE_CONTROL_CHARS = re.compile(r"[\x00-\x1f]")
 # Orchestrator wave cap: max child sessions a parent may spawn within a single
 # orchestration run (across turns, surviving callback-resume replays). Reset on
 # genuine user-typed messages. Mirrors the structural caps elsewhere in the
@@ -262,11 +263,13 @@ _MAX_SPAWN_WAVES = 5
 def _parse_spawn_kv(args_str: str) -> dict[str, str] | None:
     """Parse `key=val key="quoted val"` into a dict.
 
-    Returns None if shell metachars sneak in or if any input bytes are
-    left unparsed (catches malformed input like trailing junk).
+    Returns None if any input bytes are left unparsed (catches malformed
+    input like trailing junk). No values reach a shell — `repo` is
+    whitelisted against the registry, `mode`/`effort` are enum-checked,
+    `title` is a Discord thread topic, and `body` is the prompt — so the
+    over-broad shell-metachar check that used to live here rejected
+    legitimate titles containing `()` `{}` `!`.
     """
-    if _DANGEROUS_PATH_CHARS.search(args_str):
-        return None
     out: dict[str, str] = {}
     consumed_end = 0
     for m in _SPAWN_KV_RE.finditer(args_str):
@@ -317,30 +320,65 @@ async def _handle_spawn_directive(
             pass
         return
 
+    async def _reject(log_msg: str, user_msg: str) -> None:
+        log.warning("BOT_CMD /spawn blocked — %s", log_msg)
+        try:
+            await ctx.messenger.send_text(ctx.channel_id, user_msg, silent=True)
+        except Exception:
+            pass
+
     kv = _parse_spawn_kv(args_str)
     if kv is None:
-        log.warning("BOT_CMD /spawn blocked — args failed to parse: %s", args_str)
+        await _reject(
+            f"args failed to parse: {args_str}",
+            "⚠️ /spawn directive ignored — could not parse args. "
+            "Expected `key=value` pairs, with values containing spaces "
+            "wrapped in double quotes.",
+        )
         return
     extra = set(kv) - _SPAWN_ALLOWED_KEYS
     if extra:
-        log.warning("BOT_CMD /spawn blocked — unknown keys: %s", sorted(extra))
+        await _reject(
+            f"unknown keys: {sorted(extra)}",
+            f"⚠️ /spawn directive ignored — unknown keys: "
+            f"`{', '.join(sorted(extra))}`. Allowed: "
+            f"`{', '.join(sorted(_SPAWN_ALLOWED_KEYS))}`.",
+        )
         return
     repo = kv.get("repo", "").strip()
     title = kv.get("title", "").strip()
     if not repo or not title:
-        log.warning("BOT_CMD /spawn blocked — repo and title are required")
+        await _reject(
+            "repo and title are required",
+            "⚠️ /spawn directive ignored — `repo` and `title` are both required.",
+        )
+        return
+    if _TITLE_CONTROL_CHARS.search(title):
+        await _reject(
+            "title contains control characters",
+            "⚠️ /spawn directive ignored — `title` cannot contain control "
+            "characters or newlines.",
+        )
         return
     if len(title) > _SPAWN_TITLE_MAX:
         title = title[:_SPAWN_TITLE_MAX].rstrip()
     mode = kv.get("mode", "build").strip().lower()
     if mode not in _SPAWN_ALLOWED_MODES:
-        log.warning("BOT_CMD /spawn blocked — invalid mode: %s", mode)
+        await _reject(
+            f"invalid mode: {mode}",
+            f"⚠️ /spawn directive ignored — invalid mode `{mode}`. "
+            f"Allowed: `{', '.join(sorted(_SPAWN_ALLOWED_MODES))}`.",
+        )
         return
     effort = kv.get("effort")
     if effort is not None:
         effort = effort.strip().lower()
         if effort not in _SPAWN_ALLOWED_EFFORTS:
-            log.warning("BOT_CMD /spawn blocked — invalid effort: %s", effort)
+            await _reject(
+                f"invalid effort: {effort}",
+                f"⚠️ /spawn directive ignored — invalid effort `{effort}`. "
+                f"Allowed: `{', '.join(sorted(_SPAWN_ALLOWED_EFFORTS))}`.",
+            )
             return
 
     # Repo must be registered. Match case-insensitively and resolve to the
@@ -366,7 +404,11 @@ async def _handle_spawn_directive(
 
     # Body checks.
     if not body:
-        log.warning("BOT_CMD /spawn blocked — empty prompt body")
+        await _reject(
+            "empty prompt body",
+            "⚠️ /spawn directive ignored — the `~~~spawn ... ~~~` body "
+            "block is empty.",
+        )
         return
     if len(body.encode("utf-8")) > _SPAWN_PROMPT_MAX_BYTES:
         log.warning(
