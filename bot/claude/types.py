@@ -363,6 +363,14 @@ class RunResult:
     # poisoning observed. The lifecycle layer surfaces this to the user with
     # a clear message instead of the old "Build had no changes" silence.
     path_poisoning: list[str] = field(default_factory=list)
+    # True when this run ended because we successfully fired
+    # ``proc.terminate()`` (Steer / resolve-cancel / deploy preflight) AND
+    # the exit shape matched a kill. The lifecycle layer reads this to
+    # classify as KILLED with a quiet tombstone instead of a red FAILED
+    # embed. On Windows the returncode after terminate is always 1, so
+    # this collapses to "we called terminate" — see runner._stream_output
+    # for the rationale and Windows limitation.
+    killed_intentionally: bool = False
 
 
 # Valid gate types for autopilot phase boundaries.

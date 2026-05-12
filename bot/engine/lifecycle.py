@@ -137,6 +137,12 @@ async def schedule_cooldown_retry(
     silent: bool = False,
 ) -> bool:
     """Schedule auto-retry if usage limit detected. Returns True if scheduled."""
+    # Belt-and-braces: an intentional kill (Steer / resolve-cancel) should
+    # never trigger a cooldown retry, even if a future code path reaches
+    # this function without the early-return in run_instance.  The user
+    # wanted to stop this run, not schedule it to come back later.
+    if result.killed_intentionally:
+        return False
     if not result.usage_limit_reset or inst.cooldown_retries >= MAX_COOLDOWN_RETRIES:
         return False
 
@@ -314,9 +320,15 @@ async def run_instance(
             else:
                 elapsed_str = f"{elapsed:.0f}s"
             escaped = ctx.messenger.escape(inst.display_id())
-            icon = "❓" if result.needs_input else ("✅" if not result.is_error else "❌")
+            if result.killed_intentionally:
+                icon, status = "⚡", "steered"
+            elif result.needs_input:
+                icon, status = "❓", "asking a question"
+            elif result.is_error:
+                icon, status = "❌", "failed"
+            else:
+                icon, status = "✅", "done"
             origin_label = _origin_label(inst.origin)
-            status = "asking a question" if result.needs_input else ("done" if not result.is_error else "failed")
             try:
                 await ctx.messenger.edit_thinking(
                     handle, f"{icon} {escaped} {origin_label}{status} ({elapsed_str})",
@@ -326,6 +338,17 @@ async def run_instance(
 
         finalize_run(ctx, inst, result)
         finalized = True
+
+        # Intentional kill (Steer / resolve-cancel / deploy preflight) —
+        # finalize already wrote KILLED status and preserved error_message
+        # on the Instance for /log + history.  Skip the embed delivery,
+        # cooldown retry, and orchestrator callback below: the replacement
+        # run (Steer's whole purpose) will produce its own progress card,
+        # and we don't want to spam the thread with a red FAILED-looking
+        # card right before it.  The edited thinking message above is the
+        # minimal trace.
+        if result.killed_intentionally:
+            return
 
         # Usage limit: schedule auto-retry instead of showing normal failure
         if await schedule_cooldown_retry(ctx, inst, result, silent=silent):
@@ -483,8 +506,18 @@ def finalize_run(ctx: RequestContext, inst: Instance, result: RunResult) -> None
                     break
 
     if result.is_error and not result.needs_input:
-        inst.status = InstanceStatus.FAILED
-        inst.error = result.error_message or result.result_text
+        if result.killed_intentionally:
+            # User-initiated kill (Steer / resolve-cancel / deploy preflight).
+            # Render as KILLED so the embed is suppressed by run_instance,
+            # but preserve the underlying error_message so /log and history
+            # still surface a real crash that happened to coincide with the
+            # kill window (Windows in particular cannot distinguish on
+            # returncode — see runner._stream_output for the rationale).
+            inst.status = InstanceStatus.KILLED
+            inst.error = result.error_message or None
+        else:
+            inst.status = InstanceStatus.FAILED
+            inst.error = result.error_message or result.result_text
     else:
         inst.status = InstanceStatus.COMPLETED
 
