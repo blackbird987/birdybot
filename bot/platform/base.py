@@ -244,6 +244,28 @@ class RequestContext:
     # parent_depth + 1; the engine stamps it onto the new Instance so the
     # recursion cap in /spawn handler trips correctly inside the spawned thread.
     spawn_depth_inherit: int = 0
+    # Source of this request — used by the engine to decide whether to reset
+    # the parent's orchestrator wave counter. Only "user_message" (a genuine
+    # human-typed message) resets; every other source (replay, schedule,
+    # autopilot, callback_resume, spawn_dispatch, etc.) leaves the counter
+    # intact so the cap survives across the full orchestration loop.
+    # Default is the safest "non-reset" value: missing tags fail safe.
+    source: str = "system"
+    # Orchestrator seam — invoked by engine.lifecycle after a child session
+    # finalizes terminally (COMPLETED/FAILED). The platform closure posts a
+    # summary back into the recorded parent thread with a Resume button so
+    # the orchestrator loop can continue. Discord wires this; Telegram leaves
+    # it None (no-op). Signature: (status, summary_text) -> None.
+    notify_parent_on_finalize: Callable[[str, str], Awaitable[None]] | None = None
+    # Orchestrator wave-cap accessor: returns the current spawn count for THIS
+    # thread (the thread issuing the /spawn directive). Used by the engine to
+    # enforce _MAX_SPAWN_WAVES across orchestration turns. Returns 0 if the
+    # thread isn't trackable (non-forum platforms).
+    read_spawn_wave_count: Callable[[], int] | None = None
+    # Reset the orchestrator wave counter for THIS thread. Called by the engine
+    # when a genuine user-typed message arrives (source == "user_message") so
+    # the cap allows a fresh orchestration loop after the user re-engages.
+    reset_spawn_wave_count: Callable[[], None] | None = None
 
     @property
     def effective_mode(self) -> str:

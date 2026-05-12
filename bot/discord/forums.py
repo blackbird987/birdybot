@@ -60,6 +60,15 @@ class ThreadInfo:
     # (user opened it directly); 1 = created by a spawn directive. The directive
     # handler caps recursion at depth 1, so spawned threads can't fan out further.
     spawn_depth: int = 0
+    # Orchestrator loop: if this thread was created by a /spawn directive, points
+    # back at the parent so the child can ping the parent on finalize. Set when
+    # the child thread is created; never changes after.
+    parent_thread_id: str | None = None
+    # Orchestrator wave cap: count of children this thread has spawned in the
+    # current orchestration run. Resets to 0 when the user types a fresh message
+    # (every other entry path — replay/schedule/autopilot/callback_resume/
+    # spawn_dispatch — leaves it intact so the cap survives across the loop).
+    spawn_wave_count: int = 0
 
     def to_dict(self) -> dict:
         d = {
@@ -86,6 +95,10 @@ class ThreadInfo:
             d["user_ids"] = sorted(self.user_ids)
         if self.spawn_depth:
             d["spawn_depth"] = self.spawn_depth
+        if self.parent_thread_id:
+            d["parent_thread_id"] = self.parent_thread_id
+        if self.spawn_wave_count:
+            d["spawn_wave_count"] = self.spawn_wave_count
         return d
 
     @classmethod
@@ -105,6 +118,8 @@ class ThreadInfo:
             user_name=data.get("user_name"),
             user_ids=set(data.get("user_ids", [])),
             spawn_depth=data.get("spawn_depth", 0),
+            parent_thread_id=data.get("parent_thread_id"),
+            spawn_wave_count=data.get("spawn_wave_count", 0),
         )
 
 
