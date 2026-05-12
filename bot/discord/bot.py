@@ -38,6 +38,7 @@ from bot.discord import idle as idle_mod
 from bot.discord import interactions as interactions_mod
 from bot.discord import monitoring as monitoring_mod
 from bot.discord import slash_commands as slash_commands_mod
+from bot.discord import spawn_colors
 from bot.discord import tags as tags_mod
 from bot.discord.forums import ForumManager, ThreadInfo
 from bot.discord.titles import generate_title_text
@@ -405,6 +406,55 @@ class ClaudeBot(discord.Client):
         # prompt to a fresh thread. We create the thread, build a child
         # ctx for it, stamp spawn_depth, and dispatch through on_text.
         async def _spawn_session(args: SpawnArgs) -> SpawnResult:
+            parent_id = ctx.channel_id
+            parent_lookup = _bot._forums.thread_to_project(parent_id)
+            parent_forum_project = parent_lookup[0] if parent_lookup else None
+
+            # Spawn-color: assign a slot for this family (reusing the parent's
+            # existing slot, the root's stamped slot for root-revival, or the
+            # lowest unused). Rename the parent once to prepend the colored
+            # square, and pass an explicit child name override carrying the dot.
+            assigned_slot: int | None = None
+            root_id: str | None = None
+            child_name_override: str | None = None
+            if parent_forum_project is not None:
+                result = await spawn_colors.assign_slot(
+                    parent_id,
+                    parent_forum_project,
+                    _bot._store,
+                    _bot._forums,
+                )
+                if result is not None:
+                    assigned_slot, root_id = result
+                    sanitized = (
+                        channels.build_channel_name(args.title)
+                        if args.title and args.title != "new-session"
+                        else "new-session"
+                    )
+                    child_name_override = spawn_colors.compose_for_slot(
+                        assigned_slot, sanitized, is_root=False,
+                    )
+
+            # Rename the family root to prepend the square emoji, but only if
+            # it isn't already prefixed. Reuses the existing _name_editing
+            # guard so we don't race with _generate_smart_title.
+            if assigned_slot is not None and root_id is not None:
+                square = spawn_colors.prefix_for_root(assigned_slot)
+                root_channel = _bot.get_channel(int(root_id))
+                if isinstance(root_channel, discord.Thread) and not root_channel.name.startswith(square):
+                    if root_id not in _bot._name_editing:
+                        _bot._name_editing.add(root_id)
+                        try:
+                            new_root_name = f"{square} {root_channel.name}"[:100]
+                            await root_channel.edit(name=new_root_name)
+                        except Exception:
+                            log.warning(
+                                "Failed to prepend spawn-color square to root thread %s",
+                                root_id, exc_info=True,
+                            )
+                        finally:
+                            _bot._name_editing.discard(root_id)
+
             thread = await _bot._forums.get_or_create_session_thread(
                 args.repo,
                 session_id=None,
@@ -412,6 +462,7 @@ class ClaudeBot(discord.Client):
                 origin="spawn",
                 user_id=ctx.user_id or None,
                 user_name=ctx.user_name or None,
+                name_override=child_name_override,
             )
             if thread is None:
                 raise RuntimeError("get_or_create_session_thread returned None")
@@ -428,6 +479,21 @@ class ClaudeBot(discord.Client):
                 # when this child finalizes.
                 new_info.parent_thread_id = ctx.channel_id
                 _bot._store.save()
+
+            # Register the new child in its family. Done after parent_thread_id
+            # is stamped so find_root sees the link.
+            if assigned_slot is not None and root_id is not None and lookup is not None:
+                child_forum_project = lookup[0]
+                try:
+                    await spawn_colors.register_member(
+                        root_id, new_channel_id,
+                        child_forum_project, _bot._store, _bot._forums,
+                    )
+                except Exception:
+                    log.warning(
+                        "Failed to register spawn-color member %s for root %s",
+                        new_channel_id, root_id, exc_info=True,
+                    )
             # Wave cap accounting: bump the parent's counter so the next
             # /spawn from the same orchestration run sees an incremented
             # value. Counter resets when the user types a fresh message
@@ -1812,6 +1878,16 @@ class ClaudeBot(discord.Client):
             self._name_editing.add(thread_id)
             try:
                 new_name = channels.build_thread_name(base)
+                # Preserve any spawn-color prefix (load-bearing — without this,
+                # smart-title would strip the dot/square that links this thread
+                # to its family). Falls back to bare new_name when the thread
+                # has no family or isn't in a tracked forum.
+                forum_lookup = self._forums.thread_to_project(thread_id)
+                if forum_lookup is not None:
+                    fp, _ = forum_lookup
+                    new_name = await spawn_colors.compose_name(
+                        thread_id, new_name, fp, self._store,
+                    )
                 await thread.edit(name=new_name)
             finally:
                 self._name_editing.discard(thread_id)

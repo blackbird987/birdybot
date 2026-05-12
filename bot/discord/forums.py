@@ -69,6 +69,10 @@ class ThreadInfo:
     # (every other entry path — replay/schedule/autopilot/callback_resume/
     # spawn_dispatch — leaves it intact so the cap survives across the loop).
     spawn_wave_count: int = 0
+    # Spawn-color slot index (0..6). Stamped on every family member by
+    # spawn_colors helpers. Lets the family self-heal after state loss and
+    # keeps the historical color visible after the slot has been released.
+    color_slot: int | None = None
 
     def to_dict(self) -> dict:
         d = {
@@ -99,6 +103,8 @@ class ThreadInfo:
             d["parent_thread_id"] = self.parent_thread_id
         if self.spawn_wave_count:
             d["spawn_wave_count"] = self.spawn_wave_count
+        if self.color_slot is not None:
+            d["color_slot"] = self.color_slot
         return d
 
     @classmethod
@@ -120,6 +126,7 @@ class ThreadInfo:
             spawn_depth=data.get("spawn_depth", 0),
             parent_thread_id=data.get("parent_thread_id"),
             spawn_wave_count=data.get("spawn_wave_count", 0),
+            color_slot=data.get("color_slot"),
         )
 
 
@@ -487,11 +494,14 @@ class ForumManager:
         forum_channel_id: str | None = None,
         user_id: str | None = None,
         user_name: str | None = None,
+        name_override: str | None = None,
     ) -> discord.Thread | None:
         """Find existing thread for session, or create a new one in the repo's forum.
 
         If forum_channel_id is provided, create the thread in that forum (personal
-        user forum) instead of the repo's default forum.
+        user forum) instead of the repo's default forum. When name_override is
+        given, it replaces the sanitized topic-derived thread name (used by
+        /spawn to inject a color prefix at create-time).
         """
         # Check if session already has a thread
         if session_id:
@@ -542,7 +552,10 @@ class ForumManager:
                     except (discord.NotFound, discord.Forbidden):
                         pass
 
-            thread_name = channels.build_channel_name(topic) if topic != "new-session" else "new-session"
+            if name_override:
+                thread_name = name_override[:100]
+            else:
+                thread_name = channels.build_channel_name(topic) if topic != "new-session" else "new-session"
             thread, _msg = await channels.create_forum_post(
                 forum, thread_name, origin=origin,
                 topic_preview=topic,
