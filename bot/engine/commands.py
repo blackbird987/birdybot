@@ -250,6 +250,12 @@ _SPAWN_ALLOWED_MODES = {"explore", "plan", "build"}
 _SPAWN_ALLOWED_EFFORTS = {"low", "medium", "high", "max"}
 _SPAWN_PROMPT_MAX_BYTES = 32 * 1024  # 32 KiB hard cap on body
 _SPAWN_TITLE_MAX = 80
+# Orchestrator wave cap: max child sessions a parent may spawn within a single
+# orchestration run (across turns, surviving callback-resume replays). Reset on
+# genuine user-typed messages. Mirrors the structural caps elsewhere in the
+# engine — pick a value high enough for real multi-phase plans, low enough that
+# a runaway parent can't fan out unbounded.
+_MAX_SPAWN_WAVES = 5
 
 
 def _parse_spawn_kv(args_str: str) -> dict[str, str] | None:
@@ -398,6 +404,29 @@ async def _handle_spawn_directive(
             pass
         return
 
+    # Wave cap — bound the orchestrator loop. Counter lives on the parent
+    # thread's ThreadInfo (turn-stable: survives callback-resume replays;
+    # resets only when the user types a fresh message). Reads via the
+    # platform-supplied accessor so the engine stays platform-agnostic.
+    if ctx.read_spawn_wave_count is not None:
+        try:
+            wave_count = ctx.read_spawn_wave_count()
+        except Exception:
+            log.exception("read_spawn_wave_count failed; defaulting to 0")
+            wave_count = 0
+        if wave_count >= _MAX_SPAWN_WAVES:
+            try:
+                await ctx.messenger.send_text(
+                    ctx.channel_id,
+                    f"⚠️ /spawn refused — orchestrator wave cap reached "
+                    f"({_MAX_SPAWN_WAVES}). Send a fresh message in this "
+                    "thread to start a new orchestration run.",
+                    silent=True,
+                )
+            except Exception:
+                pass
+            return
+
     # Budget gate.
     if not check_budget(ctx):
         try:
@@ -540,6 +569,16 @@ async def on_text(ctx: RequestContext, text: str) -> None:
     """Handle a plain text message — run as query."""
     if not text.strip():
         return
+    # Orchestrator wave-cap reset — a genuine user-typed message (not a
+    # replay, schedule, autopilot trigger, or callback-resume) means the
+    # user is re-engaging this thread. Clear the cap so the next /spawn
+    # starts a fresh orchestration run. Every other source leaves the
+    # counter intact so the cap survives across the loop.
+    if ctx.source == "user_message" and ctx.reset_spawn_wave_count is not None:
+        try:
+            ctx.reset_spawn_wave_count()
+        except Exception:
+            log.exception("reset_spawn_wave_count failed")
     # Usage-limit gate: during Anthropic throttle windows the platform offers
     # Run now / Queue for 11am PT / Cancel buttons and returns True if handled.
     if ctx.offer_usage_limit_choice is not None:

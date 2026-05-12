@@ -342,6 +342,25 @@ async def run_instance(
             silent=silent, result=result,
         )
 
+        # Orchestrator: if this thread was spawned by /spawn, post a
+        # COMPLETED/FAILED callback back into the parent thread with a
+        # Resume button. Only fires on terminal-success/failure states —
+        # KILLED (user-cancelled) does NOT callback. needs_input also
+        # suppresses: `finalize_run` flips status to COMPLETED whenever
+        # the model paused with a question (lifecycle.py:480-484), so a
+        # status-only check would falsely tell the parent "child done"
+        # while the child is actually waiting on a human reply. Wrapped
+        # so a post failure (parent archived/deleted, Discord error)
+        # never aborts child finalize.
+        if (ctx.notify_parent_on_finalize is not None
+                and not result.needs_input
+                and inst.status in (InstanceStatus.COMPLETED, InstanceStatus.FAILED)):
+            try:
+                status_label = "COMPLETED" if inst.status == InstanceStatus.COMPLETED else "FAILED"
+                await ctx.notify_parent_on_finalize(status_label, display_text)
+            except Exception:
+                log.exception("notify_parent_on_finalize failed for inst %s", inst.id)
+
         # Track API fallback spending for daily budget cap
         if result.api_fallback_used and result.cost_usd:
             ctx.store.add_fallback_cost(result.cost_usd)

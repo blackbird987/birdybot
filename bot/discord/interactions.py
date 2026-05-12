@@ -224,6 +224,34 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
         return
 
     action, instance_id = parts
+
+    # --- Orchestrator: Resume parent after child finalize callback ---
+    # custom_id format: orch_resume:<token>. The token looks up the
+    # synthesized child-summary prompt in the payload store; we feed it
+    # back into THIS thread (the parent) with source="callback_resume"
+    # so the wave-cap counter is NOT reset.
+    if action == "orch_resume":
+        await interaction.response.defer()
+        from bot.discord.orchestrator import pop_resume_payload
+        token = instance_id  # second segment is the payload token
+        synth_prompt = pop_resume_payload(bot, token)
+        if synth_prompt is None:
+            try:
+                await interaction.followup.send(
+                    "Resume payload expired or already consumed.", ephemeral=True,
+                )
+            except Exception:
+                pass
+            return
+        # Strip the button from the original message so it can't be tapped
+        # twice (Discord buttons are durable until the message is edited).
+        try:
+            await interaction.message.edit(view=None)
+        except Exception:
+            pass
+        channel_id = str(interaction.channel_id)
+        await bot._replay_to_thread(channel_id, synth_prompt, source="callback_resume")
+        return
     log.info("Discord button %s:%s in #%s", action, instance_id[:12], getattr(interaction.channel, "name", "?"))
 
     # --- Quick Task modal (must send modal as initial response, NOT defer) ---

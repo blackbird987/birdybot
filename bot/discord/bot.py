@@ -318,6 +318,7 @@ class ClaudeBot(discord.Client):
         repo_name: str | None = None,
         thread_info: ThreadInfo | None = None,
         access_result: AccessResult | None = None,
+        source: str = "system",
     ) -> RequestContext:
         ctx = RequestContext(
             messenger=self.messenger,
@@ -327,6 +328,7 @@ class ClaudeBot(discord.Client):
             runner=self._runner,
             session_id=session_id,
             repo_name=repo_name,
+            source=source,
         )
         if thread_info:
             ctx.mode = thread_info.mode
@@ -421,12 +423,26 @@ class ClaudeBot(discord.Client):
                 new_info.mode = args.mode
                 if args.effort:
                     new_info.effort = args.effort
+                # Orchestrator loop: record parent linkage on the child so
+                # _maybe_callback_parent (in engine.lifecycle) can ping back
+                # when this child finalizes.
+                new_info.parent_thread_id = ctx.channel_id
+                _bot._store.save()
+            # Wave cap accounting: bump the parent's counter so the next
+            # /spawn from the same orchestration run sees an incremented
+            # value. Counter resets when the user types a fresh message
+            # (see commands.on_text reset block).
+            parent_lookup = _bot._forums.thread_to_project(ctx.channel_id)
+            if parent_lookup is not None:
+                _, parent_info = parent_lookup
+                parent_info.spawn_wave_count += 1
                 _bot._store.save()
             new_ctx = _bot._ctx(
                 new_channel_id,
                 session_id=None,
                 repo_name=args.repo,
                 thread_info=new_info,
+                source="spawn_dispatch",
             )
             # Inherit identity + access from the parent ctx so non-owner spawns
             # carry the same gating into the child thread.
@@ -468,6 +484,36 @@ class ClaudeBot(discord.Client):
             )
 
         ctx.spawn_session = _spawn_session
+
+        # Orchestrator seam: when a spawned child finalizes (COMPLETED/FAILED),
+        # post a callback into the recorded parent thread with a Resume button.
+        # Closure captures (_bot, channel_id) — the engine just calls it.
+        async def _notify_parent(status: str, summary: str) -> None:
+            from bot.discord.orchestrator import post_parent_callback
+            await post_parent_callback(_bot, channel_id, status, summary)
+
+        ctx.notify_parent_on_finalize = _notify_parent
+
+        # Orchestrator wave-cap accessors. Both look up the thread's ForumProject
+        # entry on demand so they reflect the latest state.json contents and
+        # never operate on a stale snapshot.
+        def _read_wave_count() -> int:
+            lookup = _bot._forums.thread_to_project(channel_id)
+            if lookup is None:
+                return 0
+            return lookup[1].spawn_wave_count
+
+        def _reset_wave_count() -> None:
+            lookup = _bot._forums.thread_to_project(channel_id)
+            if lookup is None:
+                return
+            info = lookup[1]
+            if info.spawn_wave_count != 0:
+                info.spawn_wave_count = 0
+                _bot._store.save()
+
+        ctx.read_spawn_wave_count = _read_wave_count
+        ctx.reset_spawn_wave_count = _reset_wave_count
         return ctx
 
     # --- Delegation to extracted modules ---
@@ -503,10 +549,15 @@ class ClaudeBot(discord.Client):
 
     async def _replay_to_thread(
         self, channel_id: str, prompt: str, repo_name: str | None = None,
+        *, source: str = "replay",
     ) -> bool:
         """Look up a thread, build context, and dispatch a prompt through on_text.
 
         Returns True on success, False if the thread wasn't found.
+
+        *source* tags the RequestContext so the engine can distinguish
+        callback-resume replays from normal replays for the orchestrator
+        wave-cap reset. Defaults to "replay" (non-resetting).
         """
         lookup = self._forums.thread_to_project(channel_id)
         if not lookup:
@@ -519,7 +570,7 @@ class ClaudeBot(discord.Client):
         )
         self._cancel_sleep(channel_id)
         ctx = self._ctx(channel_id, session_id=session_id, repo_name=resolved_repo,
-                        thread_info=info)
+                        thread_info=info, source=source)
         # Replay bypasses the usage-limit gate: the window-end promoter already
         # classified these as queued, and "Run now" clicks have already been
         # consented to.  Re-prompting would loop.
@@ -607,7 +658,7 @@ class ClaudeBot(discord.Client):
 
         proj, info = lookup
         ctx = self._ctx(channel_id, session_id=info.session_id,
-                        thread_info=info)
+                        thread_info=info, source="replay")
         ctx.user_id = entry.get("user_id", "")
         ctx.user_name = entry.get("user_name", "")
         self._forums.attach_session_callbacks(ctx, info, channel_id)
@@ -1615,7 +1666,8 @@ class ClaudeBot(discord.Client):
                         asyncio.create_task(self._refresh_dashboard())
                         ctx = self._ctx(channel_id, session_id=session_id,
                                         repo_name=repo_name, thread_info=info,
-                                        access_result=msg_access)
+                                        access_result=msg_access,
+                                        source="user_message")
                         ctx.user_id = str(message.author.id)
                         ctx.user_name = message.author.display_name
                         ctx.pending_image_paths = list(_image_paths)
@@ -1641,7 +1693,8 @@ class ClaudeBot(discord.Client):
                         return
 
             # --- Other channel (unmapped): no session ---
-            ctx = self._ctx(channel_id, access_result=msg_access)
+            ctx = self._ctx(channel_id, access_result=msg_access,
+                            source="user_message")
             ctx.user_id = str(message.author.id)
             ctx.user_name = message.author.display_name
             ctx.pending_image_paths = list(_image_paths)
@@ -1694,7 +1747,7 @@ class ClaudeBot(discord.Client):
             lookup = self._forums.thread_to_project(tid)
             t_info = lookup[1] if lookup else None
             ctx = self._ctx(tid, repo_name=repo_name if repo_name != "_default" else None,
-                            thread_info=t_info)
+                            thread_info=t_info, source="user_message")
             if t_info:
                 self._forums.attach_session_callbacks(ctx, t_info, tid)
             try:
