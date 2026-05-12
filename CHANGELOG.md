@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## v0.92.37 — Steer/cancel no longer leaves a red FAILED embed (2026-05-12)
+
+### Fixed
+- **Steer no longer renders a red "FAILED: Exit code 1" embed for the killed in-flight run (t-4135).** Steering a Build thread (e.g. t-4126) used to produce a `❌ FAILED: Exit code 1 / 0s` card before the replacement run started, because `kill_and_wait` terminated the CLI process and `finalize_run` then read the non-zero returncode as a real failure. Fix:
+  - **Intentional-kill signal on `ClaudeRunner`** (`bot/claude/runner.py`). New `self._intentional_kills: set[str]` populated only **after** `proc.terminate()` returns without raising — never on the already-dead early-return path. `kill()` gains a keyword-only `intentional: bool = False`; `kill_and_wait()` gains `intentional: bool = True` (current callers: Steer at `interactions.py:586`, resolve-cancel at `commands.py:2808` + `commands.py:3028` — all user-initiated). `_stream_output` discards the marker at function entry to defensively clear any stale entry from a prior run that early-returned (e.g. lifetime-exceeded).
+  - **Race guard against real crashes coinciding with Steer.** After `proc.wait()`, `_stream_output` flips `result.killed_intentionally = True` only when set membership AND a kill-shape returncode are both satisfied (negative rc on POSIX = SIGTERM/SIGKILL). Read+discard runs inside `try/finally` so a downstream exception can never leak the set entry. Windows limitation is documented inline: `TerminateProcess` always yields rc=1 there, indistinguishable from a real exit-1, so the filter collapses to "we called terminate" on Windows. Mitigated by the next bullet.
+  - **Preserve underlying error_message even when classified KILLED.** `finalize_run` (`bot/engine/lifecycle.py`) branches the failure path: `if result.killed_intentionally: status = KILLED; inst.error = result.error_message or None`. A process that genuinely crashed inside the kill window still has its error string accessible via `/log` and history.
+  - **Suppress the FAILED embed + edit thinking message to a tombstone.** `run_instance` short-circuits after `finalize_run` when `result.killed_intentionally` is set — BEFORE `schedule_cooldown_retry`, `send_result`, and `notify_parent_on_finalize` — so an intentional kill cannot schedule a spurious cooldown retry nor falsely tell an orchestrator parent the child "FAILED." The completion thinking-message now reads `⚡ {id} steered ({elapsed})` instead of `❌ ... failed`. Defensive early-return added to `schedule_cooldown_retry` so any future direct caller (commands.py also calls it) can't accidentally schedule a retry of a steered run.
+
 ## v0.92.36 — Orphaned-unmerged-index recovery + kind-aware merge-failure banner (2026-05-12)
 
 ### Fixed

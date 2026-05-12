@@ -184,6 +184,15 @@ class ClaudeRunner:
         self._idle_event = asyncio.Event()
         self._idle_event.set()  # starts idle
 
+        # Intentional-kill tracking: ids of instances where we successfully
+        # fired ``proc.terminate()`` via ``kill_and_wait`` (Steer, resolve-cancel).
+        # Populated only AFTER terminate returns without raising — so the set
+        # always means "we successfully sent the kill signal," never the
+        # weaker "we intended to."  Consumed in _stream_output after
+        # proc.wait() to stamp RunResult.killed_intentionally so the
+        # lifecycle layer can classify as KILLED instead of FAILED.
+        self._intentional_kills: set[str] = set()
+
         # Reboot draining: set when a reboot is queued to block new spawns
         self._draining = False
 
@@ -727,6 +736,14 @@ class ClaudeRunner:
         kills them.  A safety-net lifetime limit (default 4h) catches truly
         orphaned processes.
         """
+        # Defensive: clear any stale intentional-kill marker from a prior
+        # run on the same instance id (e.g. a previous lifetime-exceeded
+        # early-return below skipped the consumer-side discard). Without
+        # this, a stale marker could cause a future genuinely-failed run
+        # to be misclassified as KILLED on Windows where any non-zero rc
+        # satisfies the kill-shape filter.
+        self._intentional_kills.discard(instance.id)
+
         events: list[dict] = []
         captured_session_id: str | None = None
         ask_question: str | None = None  # Set when AskUserQuestion detected
@@ -930,6 +947,36 @@ class ClaudeRunner:
             result.is_error = True
             if not result.error_message:
                 result.error_message = stderr_text or f"Exit code {proc.returncode}"
+
+        # Classify intentional kills (Steer / resolve-cancel) so the
+        # lifecycle layer can render a quiet KILLED tombstone instead of
+        # a red FAILED embed.  Wrapped in try/finally
+        # to guarantee the set entry is discarded even on downstream
+        # exceptions — prevents leaks across the runner's uptime.
+        was_intentional = instance.id in self._intentional_kills
+        try:
+            if was_intentional and result.is_error:
+                # Require a kill-shape returncode in addition to the flag,
+                # so a process that genuinely crashed in the same window we
+                # asked to terminate doesn't get reclassified as KILLED on
+                # POSIX.  Negative returncode = signal (-15 SIGTERM,
+                # -9 SIGKILL).
+                #
+                # Windows limitation: ``proc.terminate()`` on Windows calls
+                # TerminateProcess(handle, 1), which always yields
+                # returncode 1.  Real CLI failures often also exit with 1,
+                # so this returncode filter degenerates to a no-op on
+                # Windows — there it effectively classifies on "we called
+                # terminate" alone.  The mitigation is that finalize_run
+                # preserves the original error_message on the Instance
+                # even when classified as KILLED, so /log + history still
+                # surface a real crash that coincided with a Steer.
+                rc = proc.returncode
+                kill_shape = (rc is not None and rc < 0) or os.name == "nt"
+                if kill_shape:
+                    result.killed_intentionally = True
+        finally:
+            self._intentional_kills.discard(instance.id)
 
         if result.is_error:
             # Log raw events for debugging
@@ -1841,13 +1888,26 @@ class ClaudeRunner:
         self._idle_event.set()
         return count
 
-    async def kill(self, instance_id: str) -> bool:
-        """Terminate a running CLI process."""
+    async def kill(self, instance_id: str, *, intentional: bool = False) -> bool:
+        """Terminate a running CLI process.
+
+        When ``intentional=True`` the instance id is added to
+        ``_intentional_kills`` immediately after ``proc.terminate()`` returns
+        successfully — never before the kill signal is actually fired.  This
+        means the set always reflects "we successfully terminated this
+        process," and a no-op kill (process already gone) leaves the set
+        untouched.
+        """
         proc = self._processes.get(instance_id)
         if not proc:
             return False
         try:
             proc.terminate()
+            # Mark as intentional only after terminate() returns without
+            # raising — guarantees the set means "we actually sent the
+            # signal," not "we wanted to."
+            if intentional:
+                self._intentional_kills.add(instance_id)
             try:
                 await asyncio.wait_for(proc.wait(), timeout=5)
             except asyncio.TimeoutError:
@@ -1863,6 +1923,7 @@ class ClaudeRunner:
 
     async def kill_and_wait(
         self, instance_id: str, timeout: float = 10.0,
+        *, intentional: bool = True,
     ) -> bool:
         """Kill an instance and wait for its lifecycle task to fully finish.
 
@@ -1875,10 +1936,15 @@ class ClaudeRunner:
         does terminate → 5s wait → SIGKILL), poll for ``_active_tasks`` to
         drop the instance_id for up to *timeout* seconds.  On timeout,
         force-clear the task so the channel lock never stays wedged.
+
+        Defaults ``intentional=True`` because every current caller is a
+        user-initiated path (Steer at interactions.py, resolve-cancel at
+        commands.py).  Pass ``intentional=False`` from automated paths
+        that should still surface a FAILED embed.
         """
         if instance_id not in self._active_tasks and instance_id not in self._processes:
             return False
-        await self.kill(instance_id)
+        await self.kill(instance_id, intentional=intentional)
         # Wait for the lifecycle coroutine to finish its finally block
         # (end_task fires there and removes the instance from _active_tasks).
         loop = asyncio.get_running_loop()
