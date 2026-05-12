@@ -185,7 +185,7 @@ class ClaudeRunner:
         self._idle_event.set()  # starts idle
 
         # Intentional-kill tracking: ids of instances where we successfully
-        # fired ``proc.terminate()`` (Steer, resolve-cancel, deploy preflight).
+        # fired ``proc.terminate()`` via ``kill_and_wait`` (Steer, resolve-cancel).
         # Populated only AFTER terminate returns without raising — so the set
         # always means "we successfully sent the kill signal," never the
         # weaker "we intended to."  Consumed in _stream_output after
@@ -736,6 +736,14 @@ class ClaudeRunner:
         kills them.  A safety-net lifetime limit (default 4h) catches truly
         orphaned processes.
         """
+        # Defensive: clear any stale intentional-kill marker from a prior
+        # run on the same instance id (e.g. a previous lifetime-exceeded
+        # early-return below skipped the consumer-side discard). Without
+        # this, a stale marker could cause a future genuinely-failed run
+        # to be misclassified as KILLED on Windows where any non-zero rc
+        # satisfies the kill-shape filter.
+        self._intentional_kills.discard(instance.id)
+
         events: list[dict] = []
         captured_session_id: str | None = None
         ask_question: str | None = None  # Set when AskUserQuestion detected
@@ -940,9 +948,9 @@ class ClaudeRunner:
             if not result.error_message:
                 result.error_message = stderr_text or f"Exit code {proc.returncode}"
 
-        # Classify intentional kills (Steer / resolve-cancel / deploy
-        # preflight) so the lifecycle layer can render a quiet KILLED
-        # tombstone instead of a red FAILED embed.  Wrapped in try/finally
+        # Classify intentional kills (Steer / resolve-cancel) so the
+        # lifecycle layer can render a quiet KILLED tombstone instead of
+        # a red FAILED embed.  Wrapped in try/finally
         # to guarantee the set entry is discarded even on downstream
         # exceptions — prevents leaks across the runner's uptime.
         was_intentional = instance.id in self._intentional_kills
@@ -1930,9 +1938,9 @@ class ClaudeRunner:
         force-clear the task so the channel lock never stays wedged.
 
         Defaults ``intentional=True`` because every current caller is a
-        user-initiated path (Steer, resolve-cancel, deploy preflight).  Pass
-        ``intentional=False`` from automated paths that should still surface
-        a FAILED embed.
+        user-initiated path (Steer at interactions.py, resolve-cancel at
+        commands.py).  Pass ``intentional=False`` from automated paths
+        that should still surface a FAILED embed.
         """
         if instance_id not in self._active_tasks and instance_id not in self._processes:
             return False

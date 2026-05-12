@@ -339,8 +339,8 @@ async def run_instance(
         finalize_run(ctx, inst, result)
         finalized = True
 
-        # Intentional kill (Steer / resolve-cancel / deploy preflight) —
-        # finalize already wrote KILLED status and preserved error_message
+        # Intentional kill (Steer / resolve-cancel) — finalize already
+        # wrote KILLED status and preserved error_message
         # on the Instance for /log + history.  Skip the embed delivery,
         # cooldown retry, and orchestrator callback below: the replacement
         # run (Steer's whole purpose) will produce its own progress card,
@@ -507,7 +507,7 @@ def finalize_run(ctx: RequestContext, inst: Instance, result: RunResult) -> None
 
     if result.is_error and not result.needs_input:
         if result.killed_intentionally:
-            # User-initiated kill (Steer / resolve-cancel / deploy preflight).
+            # User-initiated kill (Steer / resolve-cancel via kill_and_wait).
             # Render as KILLED so the embed is suppressed by run_instance,
             # but preserve the underlying error_message so /log and history
             # still surface a real crash that happened to coincide with the
