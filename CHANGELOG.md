@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## v0.92.38 — /spawn parse no longer drops paren-titled directives (2026-05-12)
+
+### Fixed
+- **`/spawn` no longer silently drops directives whose title contains `()` `{}` `!` etc. (t-4139).** The `_parse_spawn_kv` helper was running an over-broad `_DANGEROUS_PATH_CHARS` regex against the whole args string, copy-pasted from the `/repo add <path>` handler where shell-metachar rejection is warranted. For `/spawn` no value reaches a shell — `repo` is whitelist-checked against `ctx.store.list_repos()`, `mode`/`effort` are enum-allowlisted, `title` is just a Discord thread topic, `body` is the prompt — so the model emitting `title="Backtest: limit-entry fill gate (#3)"` was getting dropped purely on the `()`. Three real-world failures in this thread alone (logs 19:07, 19:53, 20:00). Fix:
+  - Drop the shell-metachar pre-check from `_parse_spawn_kv` (`bot/engine/commands.py`). Trailing-junk and inter-match-junk guards remain — they catch genuinely malformed input.
+  - Add a narrow post-parse `_TITLE_CONTROL_CHARS = re.compile(r"[\x00-\x1f]")` sanity check on `title` only, after `.strip()` and before the 80-char truncation. Prevents control chars / newlines from polluting Discord channel lists, log lines, and embed text without re-rejecting the printable punctuation that broke things.
+  - Surface every previously-silent reject path to the user via a tiny local `_reject(log_msg, user_msg)` helper inside `_handle_spawn_directive`. Seven reject sites now log AND post a short `silent=True` warning into the parent thread: parse failure, unknown keys, missing repo/title, control-char title (new check), invalid mode, invalid effort, empty body. User messages stay short and don't echo `args_str` back (avoids 2000-char overflow on malformed model output and avoids leaking the BOT_CMD wire shape to anyone reading the thread).
+
 ## v0.92.37 — Steer/cancel no longer leaves a red FAILED embed (2026-05-12)
 
 ### Fixed
