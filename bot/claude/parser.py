@@ -158,6 +158,30 @@ def extract_usage(event: dict) -> dict | None:
     return out
 
 
+def last_assistant_text(events: list[dict]) -> str:
+    """Return concatenated text of the most recent main-agent assistant message.
+
+    Skips events where ``isSidechain`` is true — those belong to Task
+    sub-agents and would otherwise mask the main agent's last text.
+    """
+    for event in reversed(events):
+        if event.get("type") != "assistant":
+            continue
+        if event.get("isSidechain") is True:
+            continue
+        msg = event.get("message") or event
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, list):
+            continue
+        parts = [
+            b.get("text", "") for b in content
+            if isinstance(b, dict) and b.get("type") == "text"
+        ]
+        if parts:
+            return "\n".join(parts).strip()
+    return ""
+
+
 def extract_result(events: list[dict]) -> RunResult:
     """Extract the final result from accumulated stream-json events.
 

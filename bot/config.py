@@ -79,6 +79,12 @@ DAILY_BUDGET_USD: float = float(os.getenv("DAILY_BUDGET_USD", "20.0"))
 PC_NAME: str = os.getenv("PC_NAME", "") or __import__("platform").node()
 STALL_TIMEOUT_SECS: int = int(os.getenv("STALL_TIMEOUT_SECS", "60"))
 MAX_PROCESS_LIFETIME_SECS: int = int(os.getenv("MAX_PROCESS_LIFETIME_SECS", "14400"))
+# Grace period after the LLM emits stop_reason="end_turn" with no
+# tool_use blocks.  If the CLI stays silent for this long, we treat
+# the session as complete and force-terminate.  Catches a `claude -p`
+# bug where stdout stays open after end_turn.  30s gives any post-stop
+# hook (default 30s timeout) room to fire.
+END_OF_TURN_GRACE_SECS: int = int(os.getenv("END_OF_TURN_GRACE_SECS", "30"))
 REBOOT_DRAIN_TIMEOUT_SECS: int = int(os.getenv("REBOOT_DRAIN_TIMEOUT_SECS", "600"))
 # Deferred-reboot retention TTL: when an assistant- or auto-update-initiated
 # reboot defers because another session was active, the deferred file is

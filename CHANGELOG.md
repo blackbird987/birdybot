@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## v0.92.41 — End-of-turn watchdog recovers CLI post-end_turn hangs (2026-05-13)
+
+### Fixed
+- **End-of-turn watchdog recovers CLI hangs after `stop_reason=end_turn` (t-4174).** `claude -p` occasionally finishes its work, emits the final assistant message with `stop_reason="end_turn"` and no `tool_use` blocks, then fails to close stdout — the runner used to wait until the 4h lifetime limit or a user kill, reporting a phantom FAILED with empty result text even though the work had already landed (see incident: aiagent SoC1 stage 5, session `9800f400-...`, 35 min silent hang after committing `v1.3.0.314`). `bot/claude/runner.py` `_stream_output` now arms an `end_of_turn_seen` flag when an assistant turn ends cleanly with no pending tool calls; if stdout then stays silent for `END_OF_TURN_GRACE_SECS` (default 30s, env-tunable), the runner terminates the process and synthesises a successful `RunResult` from the captured events. Silence is anchored on `last_output_time` (which already updates on every stdout line), so streaming `system`/`hook_started`/`hook_response` events keep the watchdog disarmed during legit post-stop hook execution. The fallback text comes from a new `last_assistant_text` helper in `bot/claude/parser.py` that walks events in reverse and skips `isSidechain: true` so a Task sub-agent's trailing chatter can't shadow the main agent's final reply. The watchdog log line carries `session_id` and recovered-text length so `grep "End-of-turn watchdog"` answers both "how often does this fire?" and "did we actually recover content?" without cross-referencing the session JSONL. Coverage: new regression test `scripts/test_runner_watchdog.py` (4 contracts: trips on silence, doesn't trip mid-hook, doesn't arm on end_turn+tool_use, sidechain filtered in fallback text).
+
 ## v0.92.40 — Stall warning shows last activity (2026-05-12)
 
 ### Changed
