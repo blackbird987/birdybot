@@ -33,6 +33,7 @@ from bot.claude.parser import (
     extract_usage,
     is_transient_error,
     iter_tool_blocks,
+    last_assistant_text,
     parse_stream_line,
 )
 from bot.claude.provider import ProviderConfig, get_provider
@@ -762,6 +763,11 @@ class ClaudeRunner:
         stall_warned = False
         lifetime_exceeded = False
         stall_check_task: asyncio.Task | None = None
+        # End-of-turn watchdog: set when the LLM signals stop_reason="end_turn"
+        # with no tool_use blocks (genuinely done).  If stdout then stays
+        # silent for END_OF_TURN_GRACE_SECS, terminate and treat as success.
+        end_of_turn_seen = False
+        end_of_turn_done = False
 
         async def check_stall():
             nonlocal stall_warned, lifetime_exceeded
@@ -802,6 +808,19 @@ class ClaudeRunner:
                 except asyncio.TimeoutError:
                     if proc.returncode is not None:
                         break
+                    if end_of_turn_seen:
+                        idle = asyncio.get_event_loop().time() - last_output_time
+                        if idle > config.END_OF_TURN_GRACE_SECS:
+                            recovered_text = last_assistant_text(events)
+                            log.warning(
+                                "End-of-turn watchdog: %s idle %ds after end_turn "
+                                "(session=%s, recovered_text=%d chars) — terminating",
+                                instance.id, int(idle),
+                                captured_session_id or "?", len(recovered_text),
+                            )
+                            end_of_turn_done = True
+                            proc.terminate()
+                            break
                     continue
                 except (ValueError, asyncio.LimitOverrunError):
                     log.warning("Oversized line from %s (>10MB), skipping", instance.id)
@@ -821,6 +840,20 @@ class ClaudeRunner:
                     # Eagerly capture session_id so it survives early termination
                     if not captured_session_id and event.get("session_id"):
                         captured_session_id = event["session_id"]
+                    # End-of-turn watchdog detection: arm only when this
+                    # assistant turn ends with stop_reason="end_turn" AND
+                    # no tool_use blocks (nothing left for the CLI to do).
+                    if event.get("type") == "assistant":
+                        _msg = event.get("message") or event
+                        if isinstance(_msg, dict) and _msg.get("stop_reason") == "end_turn":
+                            _content = _msg.get("content") or event.get("content") or []
+                            _has_tool = any(
+                                isinstance(b, dict) and b.get("type") == "tool_use"
+                                for b in (_content if isinstance(_content, list) else [])
+                            )
+                            end_of_turn_seen = not _has_tool
+                        else:
+                            end_of_turn_seen = False
                     # Per-turn usage (Claude only) — fed to progress callback
                     # so the lifecycle layer can keep the context footer live.
                     usage = extract_usage(event) if supports_live_usage else None
@@ -908,6 +941,30 @@ class ClaudeRunner:
                 result.result_text = "Claude is asking a question (text not captured)"
             if not result.session_id:
                 result.session_id = captured_session_id
+            if result.result_text:
+                result_path = config.RESULTS_DIR / f"{instance.id}.md"
+                result_path.write_text(result.result_text, encoding="utf-8")
+                instance.result_file = str(result_path)
+                instance.summary = extract_summary(result.result_text)
+            return result
+
+        # End-of-turn watchdog tripped — CLI hung after stop_reason=end_turn.
+        # Synthesise a successful result from the events we captured.
+        if end_of_turn_done:
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+            result = extract_result(events)
+            result.is_error = False
+            result.error_message = None
+            if not result.session_id:
+                result.session_id = captured_session_id
+            if not result.result_text:
+                result.result_text = last_assistant_text(events) or ""
+            if poisoning_hits:
+                result.path_poisoning = list(poisoning_hits)
             if result.result_text:
                 result_path = config.RESULTS_DIR / f"{instance.id}.md"
                 result_path.write_text(result.result_text, encoding="utf-8")
