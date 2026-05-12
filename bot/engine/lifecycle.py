@@ -617,6 +617,7 @@ def make_progress_callbacks(
     last_severity = [None]
     is_stalled = [False]
     last_activity = ["processing..."]  # tracks last known tool activity
+    has_real_activity = [False]  # False until on_progress sees a real event
     latest_usage: list[dict | None] = [None]
     near_limit_applied = [False]  # tracks current near-limit tag state
     mode_tag = f"[{inst.mode}] " if inst.mode and inst.mode != "explore" else ""
@@ -724,6 +725,7 @@ def make_progress_callbacks(
         if message:
             display = detail if verbose >= 2 and detail else message
             last_activity[0] = display
+            has_real_activity[0] = True
         # Compute footer + dispatch severity BEFORE both the verbose gate and
         # the visible-edit throttle — safety signals (near-limit tag, 95%
         # warning) must fire regardless of display preference and must not
@@ -750,8 +752,19 @@ def make_progress_callbacks(
         escaped = ctx.messenger.escape(inst.display_id())
         footer, severity = _compute_footer()
         await _dispatch_severity(severity)
+        head = (
+            f"⚠️ {escaped} quiet for {config.STALL_TIMEOUT_SECS}s "
+            f"— /kill if stuck ({_elapsed()})"
+        )
+        if has_real_activity[0]:
+            activity = " ".join(last_activity[0].split())
+            if len(activity) > 120:
+                activity = activity[:117] + "..."
+            text = f"{head}\nLast activity: {ctx.messenger.escape(activity)}"
+        else:
+            text = f"{head}\nLast activity: no events yet"
         await _edit(
-            f"⚠️ {escaped} quiet for {config.STALL_TIMEOUT_SECS}s — /kill if stuck ({_elapsed()})",
+            text,
             buttons=stall_button_specs(instance_id),
             footer=footer,
             severity=severity,
