@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable, NamedTuple
@@ -54,6 +55,31 @@ REBUILD_TIMEOUT_SECS = 30
 # Cross-account JSONL hydration: same TTL semantics as rebuild — bursts of
 # correlated resume attempts shouldn't re-scan every account on disk.
 HYDRATE_CACHE_TTL_SECS = 60
+
+
+@dataclass
+class PrecheckResult:
+    """Outcome of ``ClaudeRunner._check_main_repo_clean``.
+
+    Backwards-compatible replacement for the prior ``Optional[str]`` return
+    type. ``error`` mirrors the old "None means clean, string means bail"
+    contract for legacy callers. ``recovery_note`` carries non-fatal
+    user-facing detail (e.g. a stash sha created during orphaned-index
+    recovery) that the merge_branch success path appends to its return
+    string so the user is told what we did to their repo.
+    """
+
+    error: str | None = None
+    recovery_note: str | None = None
+
+
+# Failure-kind taxonomy for merge_branch outcomes. Persisted on
+# ``pending_merge["failure_kind"]`` so commands.py can render the right
+# user-facing banner (see §4 of the t-4114 plan). String-valued so the
+# JSON state round-trip is transparent.
+MERGE_FAIL_GENERIC = "generic_failure"
+MERGE_FAIL_ORPHANED_INDEX = "orphaned_index"
+MERGE_FAIL_RECOVERY_FAILED = "recovery_failed"
 
 
 class RebootResult(enum.Enum):
@@ -168,6 +194,13 @@ class ClaudeRunner:
         self._on_idle_callback: Callable[[], Awaitable[None]] | None = None
         self._idle_loop: asyncio.AbstractEventLoop | None = None
         self._drain_timer_task: asyncio.Task | None = None
+
+        # Side channel: classification of the most recent merge_branch
+        # failure per instance. Populated inside the per-repo locked section
+        # of merge_branch so callers can read it without racing a sibling
+        # session's in-flight merge. Values are MERGE_FAIL_* constants.
+        # See §3 of the t-4114 orphaned-index plan.
+        self._last_merge_failure_kind: dict[str, str] = {}
 
         # Per-repo lock: serializes git-metadata-mutating operations
         # (worktree add/remove, merge, branch delete) to prevent lock file races
@@ -2523,40 +2556,199 @@ class ClaudeRunner:
     # --- Merge / Discard ---
 
     @staticmethod
-    def _check_main_repo_clean(repo: str) -> str | None:
-        """Detect leftover MERGE_HEAD from a sibling session's failed merge.
+    def _check_main_repo_clean(repo: str) -> PrecheckResult:
+        """Detect and recover from leftover merge state in the main repo.
 
-        Bug 2 mitigation: when an in-process merge dies on a non-
-        CalledProcessError exception (or the bot crashes mid-merge),
-        MERGE_HEAD persists in the main repo's .git/ and poisons every
-        subsequent operation that touches it — sibling sessions then refuse
-        to commit, blame the wrong session, or worse.
+        Two failure modes are handled:
 
-        Cheap pre-flight: if MERGE_HEAD exists, try `git merge --abort` to
-        clear it (idempotent, safe when no merge is active). Only return a
-        warning string if abort failed — in which case the caller should
-        bail rather than scribble on a poisoned tree. Returns None on the
-        clean / successfully-recovered path.
+        **Path A — leftover MERGE_HEAD** (Bug 2): when an in-process merge
+        dies on a non-CalledProcessError exception (or the bot crashes
+        mid-merge), MERGE_HEAD persists in ``.git/`` and poisons every
+        subsequent operation. Run ``git merge --abort`` to clear it
+        (idempotent, safe when no merge is active).
+
+        **Path B — orphaned unmerged-index without MERGE_HEAD** (t-4114):
+        ``git merge --abort`` followed by a stash-pop that itself produced
+        conflicts can leave the index with unmerged entries while clearing
+        MERGE_HEAD. The next ``git checkout`` in the main repo then fails
+        with ``you need to resolve your current index first``, and the Try
+        Merge Again loop spins forever (the worktree-side replay always
+        succeeds; only the main-repo merge fails). Recover with
+        ``git reset --merge``; if that's blocked by dirty overlapping
+        edits, snapshot to a labeled stash and ``git reset --hard HEAD``
+        (safe nuke because work is preserved in the stash).
+
+        Returns a ``PrecheckResult`` where ``error`` is None on the clean
+        or auto-recovered path, ``recovery_note`` carries a user-facing
+        note when a stash was created during recovery (so merge_branch can
+        surface it in the success message — no silent data creation).
         """
+        # Path A: leftover MERGE_HEAD.
         merge_head = Path(repo) / ".git" / "MERGE_HEAD"
-        if not merge_head.exists():
-            return None
-        log.warning("Main repo %s has leftover MERGE_HEAD — attempting cleanup", repo)
-        try:
-            subprocess.run(
-                ["git", "merge", "--abort"],
+        if merge_head.exists():
+            log.warning(
+                "Main repo %s has leftover MERGE_HEAD — attempting cleanup", repo,
+            )
+            try:
+                subprocess.run(
+                    ["git", "merge", "--abort"],
+                    cwd=repo, capture_output=True, text=True, **_NOWND,
+                )
+            except Exception:
+                log.warning(
+                    "git merge --abort raised in %s", repo, exc_info=True,
+                )
+            if merge_head.exists():
+                return PrecheckResult(
+                    error=(
+                        f"Main repo {repo} has unresolved MERGE_HEAD that could "
+                        f"not be auto-aborted — manual resolution needed "
+                        f"(`git merge --abort` in the main repo, then retry)."
+                    ),
+                )
+            log.info("Cleared leftover MERGE_HEAD in %s", repo)
+
+        # Path B: orphaned unmerged-index without MERGE_HEAD.
+        # `git ls-files --unmerged` returns rows iff the index still has
+        # unmerged stages. After Path A's abort succeeds, the index is
+        # usually clean — but the abort+stash-pop interaction can leave
+        # residue, so always check.
+        unmerged = subprocess.run(
+            ["git", "ls-files", "--unmerged"],
+            cwd=repo, capture_output=True, text=True, **_NOWND,
+        )
+        if unmerged.returncode != 0 or not (unmerged.stdout or "").strip():
+            return PrecheckResult()
+
+        files = sorted({
+            line.split("\t", 1)[-1]
+            for line in unmerged.stdout.strip().splitlines()
+            if "\t" in line
+        })
+        log.warning(
+            "Main repo %s has orphaned unmerged index entries (%d files): %s "
+            "— attempting recovery via `git reset --merge`",
+            repo, len(files), ", ".join(files[:5]),
+        )
+
+        # First try the gentle path: `git reset --merge` keeps unrelated
+        # working-tree edits intact and just drops merge-only stages.
+        reset_r = subprocess.run(
+            ["git", "reset", "--merge"],
+            cwd=repo, capture_output=True, text=True, **_NOWND,
+        )
+        if reset_r.returncode == 0:
+            recheck = subprocess.run(
+                ["git", "ls-files", "--unmerged"],
                 cwd=repo, capture_output=True, text=True, **_NOWND,
             )
-        except Exception:
-            log.warning("git merge --abort raised in %s", repo, exc_info=True)
-        if merge_head.exists():
-            return (
-                f"Main repo {repo} has unresolved MERGE_HEAD that could not be "
-                f"auto-aborted — manual resolution needed (`git merge --abort` "
-                f"in the main repo, then retry)."
+            if not (recheck.stdout or "").strip():
+                log.info(
+                    "Cleared orphaned unmerged index in %s via `git reset --merge`",
+                    repo,
+                )
+                return PrecheckResult()
+
+        # `reset --merge` refused (dirty working-tree files overlap the
+        # conflict). Snapshot the world via `stash create` + `stash store`
+        # (no pathspec — `stash push -- <unmerged paths>` is too
+        # version-fragile), then `git reset --hard HEAD` to clear the
+        # index. The work is preserved in the labeled stash; we never
+        # auto-pop so the user can inspect deliberately.
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        label = f"auto-stash poisoned-index-recovery {timestamp}"
+
+        create_r = subprocess.run(
+            ["git", "stash", "create"],
+            cwd=repo, capture_output=True, text=True, **_NOWND,
+        )
+        stash_sha = (create_r.stdout or "").strip()
+        if create_r.returncode != 0 or not stash_sha:
+            log.error(
+                "git stash create failed in %s while recovering orphaned index: rc=%d %s",
+                repo, create_r.returncode, (create_r.stderr or "").strip(),
             )
-        log.info("Cleared leftover MERGE_HEAD in %s", repo)
-        return None
+            return PrecheckResult(
+                error=(
+                    f"Could not snapshot main repo {repo} for recovery "
+                    f"(`git stash create` failed). Manual resolution needed: "
+                    f"`cd` to the main repo and run `git reset --merge` or "
+                    f"`git status` to inspect."
+                ),
+            )
+
+        store_r = subprocess.run(
+            ["git", "stash", "store", "-m", label, stash_sha],
+            cwd=repo, capture_output=True, text=True, **_NOWND,
+        )
+        if store_r.returncode != 0:
+            # Stash object exists as a loose commit; user can still recover
+            # it via `git stash apply <sha>` even without the ref. Warn but
+            # bail — don't reset --hard without a reachable stash.
+            log.error(
+                "git stash store failed in %s (sha=%s): rc=%d %s",
+                repo, stash_sha[:8], store_r.returncode,
+                (store_r.stderr or "").strip(),
+            )
+            return PrecheckResult(
+                error=(
+                    f"Recovery aborted — `git stash store` failed for sha "
+                    f"{stash_sha[:12]} in {repo}. Your work survives as a "
+                    f"loose object until git gc; recover with "
+                    f"`git stash apply {stash_sha}`."
+                ),
+            )
+
+        # Now safe to nuke: working tree + index are captured in the stash.
+        hard_r = subprocess.run(
+            ["git", "reset", "--hard", "HEAD"],
+            cwd=repo, capture_output=True, text=True, **_NOWND,
+        )
+        if hard_r.returncode != 0:
+            log.error(
+                "git reset --hard HEAD failed in %s after stash: rc=%d %s",
+                repo, hard_r.returncode, (hard_r.stderr or "").strip(),
+            )
+            return PrecheckResult(
+                error=(
+                    f"Recovery failed — your changes are preserved in stash "
+                    f"{stash_sha[:12]} (label: '{label}'). Recover with "
+                    f"`git stash apply {stash_sha}` once the index is "
+                    f"manually unstuck."
+                ),
+            )
+
+        # Final sanity check.
+        final = subprocess.run(
+            ["git", "ls-files", "--unmerged"],
+            cwd=repo, capture_output=True, text=True, **_NOWND,
+        )
+        if (final.stdout or "").strip():
+            log.error(
+                "Orphaned unmerged index survived `git reset --hard HEAD` in %s",
+                repo,
+            )
+            return PrecheckResult(
+                error=(
+                    f"Recovery failed — index still has unmerged entries after "
+                    f"`git reset --hard HEAD` in {repo}. Your work is preserved "
+                    f"in stash {stash_sha[:12]} (label: '{label}'). Manual "
+                    f"intervention required."
+                ),
+            )
+
+        log.info(
+            "Recovered orphaned merge state in %s; stashed as %s (%s)",
+            repo, stash_sha[:8], label,
+        )
+        return PrecheckResult(
+            recovery_note=(
+                f"ℹ️ Recovered orphaned merge state; preserved local changes "
+                f"in stash `{stash_sha[:12]}` (label: '{label}'). To restore: "
+                f"`git stash apply {stash_sha}` or "
+                f"`git stash list | grep poisoned-index-recovery`."
+            ),
+        )
 
     def _release_commit_window(
         self, repo: str, branch_tip: str,
@@ -2658,6 +2850,35 @@ class ClaudeRunner:
             return tag_name, candidate_shas
         return None, candidate_shas
 
+    @staticmethod
+    def _classify_post_abort_state(repo: str) -> str:
+        """Classify a merge failure AFTER ``git merge --abort`` has run.
+
+        Reads ``git ls-files --unmerged`` — entries remaining mean the
+        abort left orphaned index stages that will poison the next merge
+        attempt (the t-4114 symptom). Caller writes the result to
+        ``self._last_merge_failure_kind[instance.id]`` so commands.py can
+        render the right banner.
+
+        Must be called AFTER the abort (not before) so legitimate mid-flight
+        conflicts — which legitimately have MERGE_HEAD + unmerged entries
+        until the abort clears them — don't get misclassified.
+        """
+        try:
+            r = subprocess.run(
+                ["git", "ls-files", "--unmerged"],
+                cwd=repo, capture_output=True, text=True, **_NOWND,
+            )
+        except Exception:
+            log.warning(
+                "ls-files --unmerged raised during classification in %s",
+                repo, exc_info=True,
+            )
+            return MERGE_FAIL_GENERIC
+        if r.returncode == 0 and (r.stdout or "").strip():
+            return MERGE_FAIL_ORPHANED_INDEX
+        return MERGE_FAIL_GENERIC
+
     async def merge_branch(self, instance: Instance) -> str:
         """Merge worktree branch into master. Returns status message."""
         if not instance.branch or not instance.original_branch:
@@ -2674,6 +2895,11 @@ class ClaudeRunner:
         stashed = False
         repo = instance.repo_path
         target = instance.original_branch
+        # Fresh attempt — clear any stale failure-kind from a prior run.
+        # Success paths intentionally don't clear: pending_merge is wiped by
+        # the platform layer on success, so the side-channel entry simply
+        # ages out the next time merge_branch is invoked for this instance.
+        self._last_merge_failure_kind.pop(instance.id, None)
         # Idempotency: if the branch ref no longer exists, a prior run already
         # merged + cleaned it up — state just didn't persist before a restart.
         # Treat as success so the resume path doesn't surface a scary "failed"
@@ -2703,8 +2929,13 @@ class ClaudeRunner:
         # crashed merge BEFORE we layer our own merge on top. Bails cleanly
         # if the leftover state can't be auto-recovered.
         precheck = self._check_main_repo_clean(repo)
-        if precheck:
-            return f"Merge skipped: {precheck}"
+        if precheck.error:
+            # Classify so the platform layer can render the right banner.
+            # If `_check_main_repo_clean` returned an error, recovery
+            # attempted and failed — distinct from a generic merge failure.
+            self._last_merge_failure_kind[instance.id] = MERGE_FAIL_RECOVERY_FAILED
+            return f"Merge failed: {precheck.error}"
+        recovery_note = precheck.recovery_note
         merge_succeeded = False
         try:
             # Copy session files back before cleanup.  account_dir=None lets
@@ -2798,10 +3029,17 @@ class ClaudeRunner:
                         ["git", "merge", "--abort"],
                         cwd=repo, capture_output=True, text=True, **_NOWND,
                     )
+                    self._last_merge_failure_kind[instance.id] = (
+                        self._classify_post_abort_state(repo)
+                    )
                     log.error("Merge failed for %s into %s in %s: %s",
                               instance.branch, target, repo, detail)
                     stash_status = self._restore_stash(repo) if stashed else ""
-                    return f"Merge failed: {detail}{stash_status}"
+                    # Surface precheck recovery_note even on failure — if Path B
+                    # stashed local changes during recovery, the user must be
+                    # told regardless of whether the subsequent merge worked.
+                    recovery_suffix = f"\n{recovery_note}" if recovery_note else ""
+                    return f"Merge failed: {detail}{stash_status}{recovery_suffix}"
 
             # --- Cleanup (reached on successful merge) ---
 
@@ -2942,18 +3180,31 @@ class ClaudeRunner:
                     )
             stash_status = self._restore_stash(repo) if stashed else ""
             merge_succeeded = True
-            return f"Merged into {target}{suffix}{dirty_note}{push_note}{stash_status}"
+            # Surface any recovery note from the precheck path (e.g. orphaned
+            # index recovery stashed local changes) so we never silently
+            # mutate the user's main repo without telling them.
+            recovery_suffix = f"\n{recovery_note}" if recovery_note else ""
+            return (
+                f"Merged into {target}{suffix}{dirty_note}{push_note}"
+                f"{stash_status}{recovery_suffix}"
+            )
         except subprocess.CalledProcessError as e:
             # Abort any in-progress merge to keep main repo clean for other sessions
             subprocess.run(
                 ["git", "merge", "--abort"],
                 cwd=instance.repo_path, capture_output=True, text=True, **_NOWND,
             )
+            self._last_merge_failure_kind[instance.id] = (
+                self._classify_post_abort_state(repo)
+            )
             detail = (e.stderr or e.stdout or "").strip()
             log.error("Merge failed for %s into %s in %s: %s",
                       instance.branch, target, repo, detail)
             stash_status = self._restore_stash(repo) if stashed else ""
-            return f"Merge failed: {detail}{stash_status}"
+            # Same rationale as the auto_resolved<0 branch above — if Path B
+            # stashed during recovery, surface it on failure too.
+            recovery_suffix = f"\n{recovery_note}" if recovery_note else ""
+            return f"Merge failed: {detail}{stash_status}{recovery_suffix}"
         finally:
             # Bug 2 fix: any non-CalledProcessError exception (OSError,
             # KeyboardInterrupt, SystemExit, etc.) raised after `git merge`
@@ -3283,8 +3534,9 @@ class ClaudeRunner:
         # those operations misbehave or attribute the residue to this
         # session's user. Auto-recover or surface an explicit error.
         precheck = self._check_main_repo_clean(repo)
-        if precheck:
-            return DiscardOutcome(f"Discard skipped: {precheck}")
+        if precheck.error:
+            return DiscardOutcome(f"Discard skipped: {precheck.error}")
+        recovery_note = precheck.recovery_note
 
         worktree_path = instance.worktree_path
         wt_exists = bool(worktree_path) and Path(worktree_path).exists()
@@ -3363,15 +3615,22 @@ class ClaudeRunner:
         if not preserved_branch:
             instance.branch = None
 
+        # Surface any Path B recovery note so a precheck-stashed change set is
+        # never invisible to the user.
+        recovery_suffix = f"\n{recovery_note}" if recovery_note else ""
         if preserved_branch:
             return DiscardOutcome(
                 f"Preserved uncommitted work on `{preserved_branch}` (WIP commit). "
-                f"Recover: `git checkout {preserved_branch}`",
+                f"Recover: `git checkout {preserved_branch}`{recovery_suffix}",
                 preserved_branch=preserved_branch,
             )
         if errors:
-            return DiscardOutcome(f"Discarded (with warnings: {'; '.join(errors)})")
-        return DiscardOutcome(f"Discarded branch, back on {instance.original_branch}")
+            return DiscardOutcome(
+                f"Discarded (with warnings: {'; '.join(errors)}){recovery_suffix}",
+            )
+        return DiscardOutcome(
+            f"Discarded branch, back on {instance.original_branch}{recovery_suffix}",
+        )
 
     def _cleanup_worktree_session_dir(self, instance: Instance) -> None:
         """Remove the worktree's CLI project directory across every configured account.
@@ -4029,8 +4288,8 @@ class ClaudeRunner:
         # ("you need to resolve your current index first"). Clear it so
         # startup HEAD recovery can actually run.
         precheck = self._check_main_repo_clean(repo_path)
-        if precheck:
-            return precheck
+        if precheck.error:
+            return precheck.error
         r = subprocess.run(
             ["git", "symbolic-ref", "--short", "HEAD"],
             cwd=repo_path, capture_output=True, text=True, **_NOWND,
