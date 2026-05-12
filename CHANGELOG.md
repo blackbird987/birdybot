@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## v0.92.39 — Spawn-family color coding in forum sidebar (2026-05-12)
+
+### Added
+- **Spawn-family color coding in the forum sidebar (t-4147).** When a `/spawn` directive fires, the family is assigned one of 7 color slots; the root parent's thread name is prefixed with a colored square (🟥🟧🟨🟩🟦🟪🟫) and each spawned child's name with the matching colored dot (🔴🟠🟡🟢🔵🟣🟤). Lets you visually cluster a parent and its children at a glance. State lives in `platform_state.discord.spawn_families` (root_thread_id → {slot, members}) plus a `color_slot` field stamped on every member's `ThreadInfo` (so families self-heal across restarts and the historical color survives a slot release). New module `bot/discord/spawn_colors.py` owns the palette, an `asyncio.Lock` serializing all reads/writes, and the public helpers `assign_slot`, `register_member`, `release_if_empty`, `compose_name`, `compose_for_slot`, `find_root`. Hookup:
+  - `bot/discord/bot.py` — `_spawn_session` calls `assign_slot` for the parent's family, renames the root once to prepend the square (guarded by the existing `_name_editing` set so it can't race `_generate_smart_title`), and passes a `name_override` carrying the dot prefix into `get_or_create_session_thread` so the child is born with its color (no extra rename consumed against Discord's 2/10-min thread-name budget). After the child thread exists, `register_member` stamps `color_slot` on the child.
+  - `bot/discord/bot.py` — `_generate_smart_title` now wraps the new name through `spawn_colors.compose_name`, which prepends the family color (live entry first, falling back to the thread's stamped `color_slot` so historical color survives even after the family is released) and respects the 100-char limit. Without this the first auto-title would strip the family prefix.
+  - `bot/discord/tags.py` — `try_apply_tags_after_run` invokes `release_if_empty` whenever a thread enters a terminal status (`completed`/`failed`/`killed`); the slot returns to the pool only when the root *and* every recorded member are non-active. Idempotent and re-entrancy-safe; the local `_is_active` peek is a pure status lookup and explicitly must not call back into `spawn_colors` (would deadlock on the module lock).
+  - `bot/discord/forums.py` — `ThreadInfo` gains `color_slot: int | None`; `get_or_create_session_thread` accepts an optional `name_override` so spawn can inject the prefixed name at create-time rather than via a post-create rename.
+- Root-revival: when a root re-spawns after its family was released, `assign_slot` re-creates the family at the same stamped slot if free; only falls back to a new slot if that slot is already taken (avoiding the visible mismatch of "root keeps its old square, new child gets a different dot").
+- Slot exhaustion (8th concurrent family) logs WARN and proceeds unprefixed; no error to the user.
+
 ## v0.92.38 — /spawn parse no longer drops paren-titled directives (2026-05-12)
 
 ### Fixed

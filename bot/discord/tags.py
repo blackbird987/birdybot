@@ -67,7 +67,9 @@ async def try_apply_tags_after_run(bot: ClaudeBot, channel_id: str) -> None:
     """Check latest instance status and apply tags to the thread.
 
     Always clears the 'active' tag — either by replacing with completion
-    tags, or as a standalone fallback if no instance is found.
+    tags, or as a standalone fallback if no instance is found. Also runs
+    a spawn-color release check when a family member transitions to a
+    terminal status.
     """
     ch = bot.get_channel(int(channel_id))
     if not ch or not isinstance(ch, discord.Thread):
@@ -75,15 +77,46 @@ async def try_apply_tags_after_run(bot: ClaudeBot, channel_id: str) -> None:
     lookup = bot._forums.thread_to_project(channel_id)
     if not lookup:
         return
-    _, info = lookup
+    forum_project, info = lookup
     mode = _thread_mode(bot, info)
+    new_status: str | None = None
     # Find the most recent instance for this session
     for inst in bot._store.list_instances()[:5]:
         if inst.session_id and inst.session_id == info.session_id:
-            await apply_thread_tags(ch, inst.status.value, info.origin, mode=mode)
-            return
-    # No matching instance — still clear "active" tag as fallback
-    await set_thread_active_tag(bot, ch, False)
+            new_status = inst.status.value
+            await apply_thread_tags(ch, new_status, info.origin, mode=mode)
+            break
+    if new_status is None:
+        # No matching instance — still clear "active" tag as fallback
+        await set_thread_active_tag(bot, ch, False)
+
+    # Spawn-color release: when a thread reaches a terminal status, check if
+    # its entire family is now idle and release the slot back to the pool.
+    # The historical color stays on thread names; we only free the index.
+    if new_status in ("completed", "failed", "killed"):
+        from bot.discord import spawn_colors
+
+        def _is_active(tid: str) -> bool:
+            sublookup = bot._forums.thread_to_project(tid)
+            if not sublookup:
+                return False
+            _, sub_info = sublookup
+            if not sub_info.session_id:
+                return False
+            for sub_inst in bot._store.list_instances():
+                if sub_inst.session_id == sub_info.session_id:
+                    return sub_inst.status.value in ("queued", "running")
+            return False
+
+        try:
+            await spawn_colors.release_if_empty(
+                channel_id, _is_active, forum_project, bot._store, bot._forums,
+            )
+        except Exception:
+            log.debug(
+                "Spawn-color release check failed for thread %s",
+                channel_id, exc_info=True,
+            )
 
 
 async def set_thread_near_limit_tag(
