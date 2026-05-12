@@ -75,11 +75,9 @@ class _FakeStream:
         self._queue.put_nowait(b"")
 
     async def readline(self) -> bytes:
-        # If queue has data, return it.  Otherwise block "forever" so the
-        # runner's 5s wait_for kicks in and exercises the watchdog path.
-        if self._queue.empty() and not self._eof:
-            # Park here until something is pushed.
-            return await self._queue.get()
+        # Queue.get blocks when empty, which is exactly what we want:
+        # the runner's 5s wait_for kicks in and exercises the watchdog
+        # path.  push_eof enqueues b"" so EOF unblocks the read.
         return await self._queue.get()
 
     async def read(self) -> bytes:
