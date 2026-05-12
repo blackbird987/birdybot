@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- **Stall warning now shows the last known activity (t-4163).** The "quiet for 60s — /kill if stuck" thinking embed gains a second line: `Last activity: Turn N — Editing foo.py` (or whatever `on_progress` last reported), so you can see where the run hung before deciding to kill or wait. `bot/engine/lifecycle.py` — `on_stall` reads `last_activity[0]` (already tracked for the rotating ticker), truncates to 120 chars, and routes through `messenger.escape`. A new `has_real_activity` flag suppresses the placeholder `"processing..."` when stall fires before the first progress event (slow auth/account-switch case) — that line reads `Last activity: no events yet` instead.
+
 ## v0.92.39 — Spawn-family color coding in forum sidebar (2026-05-12)
 
 ### Added
