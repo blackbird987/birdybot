@@ -1858,7 +1858,7 @@ class ClaudeBot(discord.Client):
             lookup = self._forums.thread_to_project(thread_id)
             if not lookup:
                 return
-            _, info = lookup
+            forum_project, info = lookup
             if info._title_generated:
                 return
 
@@ -1880,14 +1880,10 @@ class ClaudeBot(discord.Client):
                 new_name = channels.build_thread_name(base)
                 # Preserve any spawn-color prefix (load-bearing — without this,
                 # smart-title would strip the dot/square that links this thread
-                # to its family). Falls back to bare new_name when the thread
-                # has no family or isn't in a tracked forum.
-                forum_lookup = self._forums.thread_to_project(thread_id)
-                if forum_lookup is not None:
-                    fp, _ = forum_lookup
-                    new_name = await spawn_colors.compose_name(
-                        thread_id, new_name, fp, self._store,
-                    )
+                # to its family).
+                new_name = await spawn_colors.compose_name(
+                    thread_id, new_name, forum_project, self._store,
+                )
                 await thread.edit(name=new_name)
             finally:
                 self._name_editing.discard(thread_id)
