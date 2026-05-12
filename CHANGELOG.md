@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.92.37 — Steer/cancel no longer leaves a red FAILED embed (2026-05-12)
+
 ### Fixed
 - **Steer no longer renders a red "FAILED: Exit code 1" embed for the killed in-flight run (t-4135).** Steering a Build thread (e.g. t-4126) used to produce a `❌ FAILED: Exit code 1 / 0s` card before the replacement run started, because `kill_and_wait` terminated the CLI process and `finalize_run` then read the non-zero returncode as a real failure. Fix:
   - **Intentional-kill signal on `ClaudeRunner`** (`bot/claude/runner.py`). New `self._intentional_kills: set[str]` populated only **after** `proc.terminate()` returns without raising — never on the already-dead early-return path. `kill()` gains a keyword-only `intentional: bool = False`; `kill_and_wait()` gains `intentional: bool = True` (current callers: Steer at `interactions.py:586`, resolve-cancel at `commands.py:2808` + `commands.py:3028` — all user-initiated). `_stream_output` discards the marker at function entry to defensively clear any stale entry from a prior run that early-returned (e.g. lifetime-exceeded).
