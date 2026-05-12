@@ -36,7 +36,7 @@ from bot.claude.parser import (
 )
 from bot.claude.provider import ProviderConfig, get_provider
 from bot.claude.types import (
-    Instance, InstanceOrigin, InstanceStatus, InstanceType,
+    Instance, InstanceOrigin, InstanceStatus, InstanceType, merge_msg_is_failure,
 )
 from bot.store import history as history_mod
 
@@ -4000,7 +4000,7 @@ class ClaudeRunner:
             try:
                 msg = await self.merge_branch(inst)
                 store.update_instance(inst)
-                if "failed" not in msg.lower():
+                if not merge_msg_is_failure(msg):
                     self._clear_stale_branches_static(store, branch_name)
                 messages.append(f"merge {branch_name}: {msg}")
             except Exception as e:

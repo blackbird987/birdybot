@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from bot import config
-from bot.claude.types import Instance, InstanceOrigin, InstanceStatus, InstanceType
+from bot.claude.types import Instance, InstanceOrigin, InstanceStatus, InstanceType, merge_msg_is_failure
 from bot.engine import lifecycle, pending as pending_mod, sessions as sessions_mod, workflows
 from bot.platform.base import ButtonSpec, RequestContext, SpawnArgs
 from bot.platform.formatting import (
@@ -1487,7 +1487,7 @@ async def on_merge(ctx: RequestContext, text: str) -> None:
     branch_name = inst.branch  # Save before merge clears it
     msg = await ctx.runner.merge_branch(inst)
     ctx.store.update_instance(inst)
-    if "failed" not in msg.lower():
+    if not merge_msg_is_failure(msg):
         ctx.store.clear_pending_merge(inst.id)
         # Resolve branch name for history cleanup (None when "already merged")
         if not branch_name:
@@ -2583,7 +2583,7 @@ async def _on_resolve_merge(
         )
         msg = await ctx.runner.merge_branch(inst)
         ctx.store.update_instance(inst)
-        if "failed" not in msg.lower():
+        if not merge_msg_is_failure(msg):
             ctx.store.clear_pending_merge(inst.id)
             workflows.clear_stale_branches(ctx.store, inst.branch or "")
         await ctx.messenger.send_text(ctx.channel_id, ctx.messenger.escape(msg))
@@ -2699,7 +2699,7 @@ async def _on_resolve_merge(
             log.debug("Could not edit source message after resolve success", exc_info=True)
     msg = await ctx.runner.merge_branch(inst)
     ctx.store.update_instance(inst)
-    if "failed" not in msg.lower():
+    if not merge_msg_is_failure(msg):
         ctx.store.clear_pending_merge(inst.id)
         if inst.branch:
             workflows.clear_stale_branches(ctx.store, inst.branch)
@@ -2953,7 +2953,7 @@ async def handle_callback(
         msg = await ctx.runner.merge_branch(inst)
         ctx.store.update_instance(inst)
         # Clear stale branch refs on all sibling instances
-        if branch_name and "failed" not in msg.lower():
+        if branch_name and not merge_msg_is_failure(msg):
             ctx.store.clear_pending_merge(inst.id)
             workflows.clear_stale_branches(ctx.store, branch_name)
             from bot.engine.deploy import update_after_merge, rescan_deploy_config_after_merge
