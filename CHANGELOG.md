@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## v0.92.35 — Auto-merge classifier: "Merge failed:" prefix, not "failed" substring (2026-05-12)
+
+### Fixed
+- **Auto-merge false-positive on stash-pop noise.** `_finalize_merge` (and 5 other merge-classification sites) used `"failed" in merge_msg.lower()` to decide whether a `merge_branch` call had failed. The check was a substring match, so a `"Merged into master ... ⚠️ Stash pop conflicted AND rollback failed — your tree may contain conflict markers"` message — where the merge had actually landed and been pushed, with `inst.branch` / `inst.worktree_path` already cleared by the runner — got misread as a merge failure. The autopilot then posted the "Auto-merge failed" buttons; tapping **Resolve with Claude** hit `_on_resolve_merge`'s "no live branch/worktree" early-exit and dead-ended the user even though the merge was already on master (real-world hit: AIAgent repo, `claude-bot/t-4073` + tag `v1.3.0.303`, thread `1503697100863569951`). New `bot.claude.types.merge_msg_is_failure(msg)` helper matches only the explicit `"Merge failed:"` prefix that `_merge_branch_sync` actually produces on failure. The helper deliberately preserves prior substring-check semantics for `"Merge skipped: ..."`, `"No branch to merge"`, and `"No repo path"` — all of which previously flowed through as non-failure and continue to — so the change is bug-fix-only at the 6 call sites that swap to it (`bot/engine/workflows.py:_finalize_merge`, four `merge_branch` follow-ups in `bot/engine/commands.py`, and the startup auto-merge path at `bot/claude/runner.py:4003`). Helper lives in `bot/claude/types.py` to avoid any `workflows ↔ runner` import cycle (both modules already import from `types`). Regression test at `scripts/test_merge_msg_is_failure.py` pins the eight observed message classes (success, success+stash-noise, success+auto-resolved, already-merged, merge-failed, merge-skipped, no-branch, no-repo) so the same substring/prefix bug can't be reintroduced.
+
 ## v0.92.34 — Orchestrator loop: child→parent callback + spawn-wave cap (2026-05-12)
 
 ### Added

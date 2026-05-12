@@ -49,6 +49,27 @@ class InstanceOrigin(str, Enum):
 PLAN_ORIGINS = frozenset({InstanceOrigin.PLAN, InstanceOrigin.REVIEW_PLAN, InstanceOrigin.APPLY_REVISIONS})
 
 
+def merge_msg_is_failure(msg: str) -> bool:
+    """Did ``ClaudeRunner.merge_branch`` report an actual merge failure?
+
+    ``merge_branch`` returns success-prefixed strings (``"Merged into ..."``,
+    ``"Already merged ..."``) that may carry trailing stash / push / tag
+    warnings containing the word ``"failed"`` (e.g. a stash-pop rollback
+    error after a successful merge). A naive ``"failed" in msg.lower()``
+    substring check misreads those as merge failures and triggers the
+    "Resolve with Claude" flow on a branch that has already landed —
+    leaving the user with a "no live branch/worktree" dead-end.
+
+    Only the explicit ``"Merge failed:"`` prefix signals that the branch
+    did not land. Other non-failure outputs (``"Merge skipped: ..."``,
+    ``"No branch to merge"``, ``"No repo path"``) intentionally match
+    none of these and flow through as non-failure — preserving the prior
+    substring check's behaviour at every call site that gates cleanup on
+    this classifier.
+    """
+    return msg.startswith("Merge failed:")
+
+
 def _migrate_message_ids(d: dict) -> dict[str, list[str]]:
     """Backward compat: convert old telegram_message_ids list[int] to new dict format.
 

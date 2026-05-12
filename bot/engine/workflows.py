@@ -15,7 +15,7 @@ from typing import Literal
 from bot import config
 from bot.claude.types import (
     CODE_CHANGE_TOOLS, ChainPhaseState, Instance, InstanceOrigin, InstanceStatus,
-    InstanceType, PHASE_GATES, Phase,
+    InstanceType, PHASE_GATES, Phase, merge_msg_is_failure,
 )
 from bot.engine import lifecycle, sessions as sessions_mod
 from bot.platform.base import ButtonSpec, RequestContext
@@ -1608,7 +1608,7 @@ async def _finalize_merge(
     merge_msg = await ctx.runner.merge_branch(merge_target)
     ctx.store.update_instance(merge_target)
     log.info("Auto-merge: %s", merge_msg)
-    if "failed" in merge_msg.lower():
+    if merge_msg_is_failure(merge_msg):
         return False
     clear_stale_branches(ctx.store, branch_name)
     from bot.engine.deploy import update_after_merge, rescan_deploy_config_after_merge
