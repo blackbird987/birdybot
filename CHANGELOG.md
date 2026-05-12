@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.92.39 — Spawn-family color coding in forum sidebar (2026-05-12)
+
 ### Added
 - **Spawn-family color coding in the forum sidebar (t-4147).** When a `/spawn` directive fires, the family is assigned one of 7 color slots; the root parent's thread name is prefixed with a colored square (🟥🟧🟨🟩🟦🟪🟫) and each spawned child's name with the matching colored dot (🔴🟠🟡🟢🔵🟣🟤). Lets you visually cluster a parent and its children at a glance. State lives in `platform_state.discord.spawn_families` (root_thread_id → {slot, members}) plus a `color_slot` field stamped on every member's `ThreadInfo` (so families self-heal across restarts and the historical color survives a slot release). New module `bot/discord/spawn_colors.py` owns the palette, an `asyncio.Lock` serializing all reads/writes, and the public helpers `assign_slot`, `register_member`, `release_if_empty`, `compose_name`, `compose_for_slot`, `find_root`. Hookup:
   - `bot/discord/bot.py` — `_spawn_session` calls `assign_slot` for the parent's family, renames the root once to prepend the square (guarded by the existing `_name_editing` set so it can't race `_generate_smart_title`), and passes a `name_override` carrying the dot prefix into `get_or_create_session_thread` so the child is born with its color (no extra rename consumed against Discord's 2/10-min thread-name budget). After the child thread exists, `register_member` stamps `color_slot` on the child.
