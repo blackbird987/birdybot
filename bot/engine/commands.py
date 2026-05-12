@@ -29,6 +29,7 @@ from bot.platform.formatting import (
     format_result_md,
     format_schedule_list_md,
     format_status_md,
+    merge_failed_banner,
     merge_failed_button_specs,
     mode_label,
     queued_button_specs,
@@ -1499,6 +1500,10 @@ async def on_merge(ctx: RequestContext, text: str) -> None:
         update_after_merge(ctx.store, inst)
         rescan_deploy_config_after_merge(ctx.store, inst.repo_name, inst.repo_path)
         await ctx.messenger.on_deploy_state_changed(inst.repo_name)
+    else:
+        failure_kind = ctx.runner._last_merge_failure_kind.get(inst.id)
+        ctx.store.set_pending_merge_failure_kind(inst.id, failure_kind)
+        msg = f"{msg}\n\n{merge_failed_banner(failure_kind)}"
     await ctx.messenger.send_text(ctx.channel_id, msg)
 
 
@@ -2583,10 +2588,20 @@ async def _on_resolve_merge(
         )
         msg = await ctx.runner.merge_branch(inst)
         ctx.store.update_instance(inst)
+        banner_suffix = ""
         if not merge_msg_is_failure(msg):
             ctx.store.clear_pending_merge(inst.id)
             workflows.clear_stale_branches(ctx.store, inst.branch or "")
-        await ctx.messenger.send_text(ctx.channel_id, ctx.messenger.escape(msg))
+        else:
+            failure_kind = ctx.runner._last_merge_failure_kind.get(inst.id)
+            ctx.store.set_pending_merge_failure_kind(inst.id, failure_kind)
+            banner_suffix = f"\n\n{merge_failed_banner(failure_kind)}"
+        # Escape only the runner output (may contain conflict file paths with
+        # underscores etc.); the banner is trusted formatting and must keep
+        # its **bold** + `code` markdown intact.
+        await ctx.messenger.send_text(
+            ctx.channel_id, f"{ctx.messenger.escape(msg)}{banner_suffix}",
+        )
         return
 
     # Build prompt, consume any deferred user-typed guidance.
@@ -2699,6 +2714,7 @@ async def _on_resolve_merge(
             log.debug("Could not edit source message after resolve success", exc_info=True)
     msg = await ctx.runner.merge_branch(inst)
     ctx.store.update_instance(inst)
+    banner_suffix = ""
     if not merge_msg_is_failure(msg):
         ctx.store.clear_pending_merge(inst.id)
         if inst.branch:
@@ -2709,7 +2725,13 @@ async def _on_resolve_merge(
         await ctx.messenger.on_deploy_state_changed(inst.repo_name)
         if ctx.on_merged:
             await ctx.on_merged()
-    await ctx.messenger.send_text(ctx.channel_id, ctx.messenger.escape(msg))
+    else:
+        failure_kind = ctx.runner._last_merge_failure_kind.get(inst.id)
+        ctx.store.set_pending_merge_failure_kind(inst.id, failure_kind)
+        banner_suffix = f"\n\n{merge_failed_banner(failure_kind)}"
+    await ctx.messenger.send_text(
+        ctx.channel_id, f"{ctx.messenger.escape(msg)}{banner_suffix}",
+    )
 
 
 async def _post_resolver_failure(
@@ -2952,6 +2974,7 @@ async def handle_callback(
         branch_name = inst.branch  # Save before merge clears it
         msg = await ctx.runner.merge_branch(inst)
         ctx.store.update_instance(inst)
+        banner_suffix = ""
         # Clear stale branch refs on all sibling instances
         if branch_name and not merge_msg_is_failure(msg):
             ctx.store.clear_pending_merge(inst.id)
@@ -2963,7 +2986,17 @@ async def handle_callback(
             # Apply "merged" tag before close (tag must land before archive)
             if ctx.on_merged:
                 await ctx.on_merged()
-        escaped = ctx.messenger.escape(msg)
+        elif merge_msg_is_failure(msg):
+            # Refresh the pending_merge failure_kind so the banner the user
+            # sees next time matches this attempt's symptom, not the original
+            # failure that opened the pending_merge entry.
+            failure_kind = ctx.runner._last_merge_failure_kind.get(inst.id)
+            ctx.store.set_pending_merge_failure_kind(inst.id, failure_kind)
+            banner_suffix = f"\n\n{merge_failed_banner(failure_kind)}"
+        # Escape the runner output but append the banner unescaped — its
+        # **bold** + `code` markdown is intentional. Same escape model as the
+        # /merge slash and resolve_merge follow-ups above.
+        escaped = f"{ctx.messenger.escape(msg)}{banner_suffix}"
         # Pass updated buttons when branch was resolved (strips Merge/Discard)
         buttons = action_button_specs(inst) if not inst.branch else None
         if source_msg_id:

@@ -878,12 +878,19 @@ class StateStore:
         channel_id: str,
         repo_name: str,
         message: str,
+        failure_kind: str | None = None,
     ) -> None:
         """Record that an auto-merge failed and is awaiting user action.
 
         Set when autopilot or standalone-Done auto-merge fails. While present,
         any plain-text message in the channel is prefixed with a system note
         in on_text so Claude doesn't reinterpret it as a fresh task.
+
+        ``failure_kind`` is one of the ``MERGE_FAIL_*`` constants in
+        ``bot/claude/runner.py``. When supplied, the platform layer can
+        render a more accurate banner (e.g. orphaned-index recovery
+        guidance vs a generic conflict resolver). ``None`` means
+        "unclassified" and callers fall back to the generic banner copy.
         """
         if not instance_id:
             return
@@ -900,7 +907,25 @@ class StateStore:
             or datetime.now(timezone.utc).isoformat(),
             "resolver_instance_id": existing.get("resolver_instance_id", ""),
             "deferred_text": existing.get("deferred_text", ""),
+            "failure_kind": failure_kind or existing.get("failure_kind", ""),
         }
+        self.save()
+
+    def set_pending_merge_failure_kind(
+        self, instance_id: str, failure_kind: str | None,
+    ) -> None:
+        """Update the failure_kind on an existing pending_merge entry.
+
+        Used by Try-Merge-Again flows: the original set_pending_merge call
+        already captured channel/session context; a follow-up merge attempt
+        may classify differently (e.g. generic conflict on retry resolves to
+        an orphaned-index leak) and needs to refresh the banner copy without
+        re-running the full setter.
+        """
+        meta = self._pending_merges.get(instance_id)
+        if not meta:
+            return
+        meta["failure_kind"] = failure_kind or ""
         self.save()
 
     def set_pending_merge_resolver(

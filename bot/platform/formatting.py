@@ -307,6 +307,39 @@ def merge_failed_button_specs(instance_id: str) -> list[list[ButtonSpec]]:
     ]]
 
 
+def merge_failed_banner(failure_kind: str | None) -> str:
+    """Compose the user-facing banner for a failed auto-merge.
+
+    Branches on the ``MERGE_FAIL_*`` taxonomy from ``bot/claude/runner.py``
+    (kept as string constants so this module can stay platform-agnostic
+    without importing runner). Empty / unknown kinds fall back to the
+    generic conflict copy — same as before the t-4114 work landed.
+    """
+    if failure_kind == "orphaned_index":
+        return (
+            "⚠️ Auto-merge failed because the main repo has an orphaned "
+            "merge in its index. Tap **Try Merge Again** — the next "
+            "attempt will detect and auto-recover the leftover state "
+            "(any local changes are preserved in a stash). **Resolve "
+            "with Claude** also works. **Discard** drops the branch."
+        )
+    if failure_kind == "recovery_failed":
+        return (
+            "⚠️ Auto-merge failed and automatic recovery couldn't unstick "
+            "the main repo. **Manual intervention needed** — open a "
+            "terminal in the repo and run `git reset --merge` or "
+            "`git status` to inspect. Any work the bot preserved is "
+            "recorded in a labeled stash (see the failure detail above). "
+            "Once unstuck, tap **Try Merge Again**."
+        )
+    return (
+        "⚠️ Auto-merge failed. Tap **Try Merge Again** to retry "
+        "(useful if a parallel build just completed) or **Discard** "
+        "to drop the branch. Plain-text replies in this thread are "
+        "ignored until you choose."
+    )
+
+
 def resolver_running_button_specs(instance_id: str) -> list[list[ButtonSpec]]:
     """Buttons shown while the merge-conflict resolver is in flight.
 
