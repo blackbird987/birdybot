@@ -445,7 +445,8 @@ class ClaudeBot(discord.Client):
                     if root_id not in _bot._name_editing:
                         _bot._name_editing.add(root_id)
                         try:
-                            new_root_name = f"{square} {root_channel.name}"[:100]
+                            stripped = spawn_colors.strip_color_prefix(root_channel.name)
+                            new_root_name = f"{square} {stripped}"[:100]
                             await root_channel.edit(name=new_root_name)
                         except Exception:
                             log.warning(

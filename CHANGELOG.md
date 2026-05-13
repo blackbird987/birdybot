@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## v0.92.42 — Spawn-color round-robin fix (2026-05-13)
+
+- Spawn-color round-robin: persistent cursor so fresh families cycle the palette instead of always landing on slot 0 (red). Migration (run-first inside `assign_slot`, gated by its own flag, defers if families are live) clears stale `color_slot` stamps assigned by the buggy picker so root-revival no longer drags spawns back to red. Rename strips any existing PALETTE prefix before prepending the new color so colors don't stack (no more `🟧 🟥 thread`).
+
 ## v0.92.41 — End-of-turn watchdog recovers CLI post-end_turn hangs (2026-05-13)
 
 ### Fixed
