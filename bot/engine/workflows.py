@@ -103,7 +103,6 @@ _CHAIN_EXIT_MESSAGES: dict[str, str] = {
     ),
     "budget_exhausted": "Cost budget reached.",
     "merge_failed": "Merge failed — needs resolution.",
-    "abandoned": "Build had no changes.",
     "review_did_not_converge": "Plan review didn't converge — needs your attention.",
 }
 
@@ -118,7 +117,7 @@ async def _exit_chain_needs_input(
     result: Instance | None,
     outcome: Literal[
         "needs_input", "failed", "phantom_detected",
-        "budget_exhausted", "merge_failed", "abandoned",
+        "budget_exhausted", "merge_failed",
         "review_did_not_converge",
     ],
     *,
@@ -197,6 +196,91 @@ def _enforce_readonly_floor(
 
 
 # --- Helpers ---
+
+_FENCE_LINE_RE = re.compile(r"^\s*```.*$", re.MULTILINE)
+
+
+def _stop_reason_snippet(summary: str | None, max_chars: int = 280) -> str | None:
+    """First paragraph of an agent's final message, trimmed for chat embeds.
+
+    Fence lines (```...) are stripped before paragraph splitting so the
+    `> `-prefix quoting in `_build_halted_text` can't break Discord's
+    code-fence rendering.
+    """
+    if not summary or not summary.strip():
+        return None
+    cleaned = _FENCE_LINE_RE.sub("", summary).strip()
+    if not cleaned:
+        return None
+    para = cleaned.split("\n\n", 1)[0].strip()
+    if len(para) > max_chars:
+        para = para[:max_chars].rsplit(" ", 1)[0] + "…"
+    return para or None
+
+
+def _build_halted_text(
+    *,
+    header: str,
+    summary: str | None,
+    preserved: str | None,
+    path_poisoning: list[str] | None = None,
+    phase_label: str | None = None,
+) -> tuple[str, str]:
+    """Build the embed body + mention text for a no-commit halt.
+
+    Returns (halt_embed_text, mention_text). The mention is short enough to
+    fit in a Discord ping; the embed body quotes the agent's stopping reason
+    when one is available so the user can act on the actual blocker instead
+    of a generic "no changes" notice.
+
+    CTA selection is deferred to the trailing block and suppressed when
+    `path_poisoning` is set — the poisoning recovery copy says to start a
+    fresh build, which directly contradicts "reply to continue".
+    """
+    reason = _stop_reason_snippet(summary)
+    prefix = f"{phase_label} paused" if phase_label else "Build paused"
+
+    if reason:
+        quoted = "\n".join(f"> {line}" for line in reason.splitlines())
+        body = f"⏸ {header} Here's what the agent said:\n{quoted}"
+        first_line = reason.splitlines()[0][:140].rstrip()
+        mention = (
+            f"{prefix}: {first_line}" if first_line
+            else f"{prefix} — needs your input."
+        )
+    else:
+        body = f"⏸ {header}"
+        mention = f"{prefix} — needs your input."
+
+    if preserved:
+        body += (
+            f"\nUncommitted changes preserved on `{preserved}` (WIP commit). "
+            f"Recover: `git checkout {preserved}`"
+        )
+
+    if path_poisoning:
+        sample = path_poisoning[:5]
+        more = len(path_poisoning) - len(sample)
+        path_lines = "\n".join(f"  • `{p}`" for p in sample)
+        if more > 0:
+            path_lines += f"\n  • ...and {more} more"
+        body += (
+            "\n\n**Path poisoning detected** — the build tried to edit the "
+            "main repo instead of the worktree. These writes were blocked, "
+            "which is why the worktree branch is empty:\n"
+            f"{path_lines}\n"
+            "Likely cause: the build resumed a planning session whose context "
+            "referenced main-repo paths. Start a fresh build (without `--resume` "
+            "from the plan session) or re-target the edits manually."
+        )
+        # Poisoning case: structural fix needed, not a reply. Don't tell the
+        # user to "continue" when continuing will re-trip the worktree-guard.
+        return body, mention
+
+    cta = "Reply to continue." if reason else "No reason given — reply to continue."
+    halt = f"{body}\n\n{cta}" if reason else f"{body} {cta}"
+    return halt, mention
+
 
 _REVIEW_STATUS_RE = re.compile(r'```review-status\s*\n(.*?)```', re.DOTALL)
 _HIGH_PRIO_RE = re.compile(r'(?:Critical|High)\s*[·|]', re.IGNORECASE)
@@ -2567,15 +2651,12 @@ async def _run_autopilot_chain(
                             return phase_result
 
                         # Per-phase empty-diff guard: phase finished but git
-                        # HEAD didn't move — abandon the chain. This IS terminal,
-                        # so completed_steps gets the append (matches the
-                        # single-shot empty-diff path further below).
+                        # HEAD didn't move. Reroute to needs_input so the user
+                        # can reply with guidance and resume the same phase —
+                        # set_phase_pause("pre") keeps the cursor consistent
+                        # with the sibling needs_input branch above.
                         post_head = await _git_head(phase_result.worktree_path)
                         if pre_head and post_head and pre_head == post_head:
-                            halt_text = (
-                                f"⚠️ Phase `{phase.id}` produced no commits. "
-                                f"Halting chain."
-                            )
                             preserved: str | None = None
                             # Only the first phase owns the worktree lifecycle —
                             # tear it down so Merge/Discard don't appear empty.
@@ -2585,21 +2666,30 @@ async def _run_autopilot_chain(
                                 )
                                 preserved = outcome.preserved_branch
                                 ctx.store.update_instance(phase_result)
-                            if preserved:
-                                halt_text += (
-                                    f"\nUncommitted changes preserved on "
-                                    f"`{preserved}` (WIP commit). "
-                                    f"Recover: `git checkout {preserved}`"
-                                )
-                            await ctx.messenger.send_text(
-                                ctx.channel_id, halt_text, silent=True,
+                            halt_text, mention = _build_halted_text(
+                                header=f"Phase `{phase.id}` stopped before committing.",
+                                summary=phase_result.summary,
+                                preserved=preserved,
+                                path_poisoning=phase_result.path_poisoning,
+                                phase_label=f"Phase `{phase.id}`",
                             )
+                            try:
+                                await ctx.messenger.send_text(
+                                    ctx.channel_id, halt_text, silent=True,
+                                )
+                            except Exception:
+                                log.exception(
+                                    "Phase halt notice failed to send for %s",
+                                    ctx.channel_id,
+                                )
                             completed_steps.append(step)
+                            ctx.store.set_phase_pause(session_id, "pre")
                             await _exit_chain(
                                 ctx, source_id, session_id, steps, completed_steps,
-                                chain_instances, phase_result, "abandoned",
-                                f"Phase `{phase.id}` had no changes.",
-                                clear_state=True,
+                                chain_instances, phase_result, "needs_input",
+                                mention,
+                                clear_state=False,
+                                intervention=True,
                             )
                             return phase_result
 
@@ -2849,35 +2939,12 @@ async def _run_autopilot_chain(
                         )
                         preserved = outcome.preserved_branch
                         ctx.store.update_instance(result)
-                    halt_text = "⚠️ Build produced no commits. Halting chain."
-                    if preserved:
-                        halt_text += (
-                            f"\nUncommitted changes preserved on `{preserved}` "
-                            f"(WIP commit). Recover: `git checkout {preserved}`"
-                        )
-                    # Path-poisoning: the build silently tried to edit the
-                    # main repo instead of the worktree (e.g. resumed planning
-                    # context carried main-repo paths). The worktree-guard
-                    # hook should have blocked the writes, but in either case
-                    # the zero-diff outcome here is explained by these paths
-                    # — surface them so the user can see what went wrong.
-                    if result.path_poisoning:
-                        sample = result.path_poisoning[:5]
-                        more = len(result.path_poisoning) - len(sample)
-                        path_lines = "\n".join(f"  • `{p}`" for p in sample)
-                        if more > 0:
-                            path_lines += f"\n  • ...and {more} more"
-                        halt_text += (
-                            "\n\n**Path poisoning detected** — the build tried "
-                            "to edit the main repo instead of the worktree. "
-                            "These writes were blocked, which is why the "
-                            "worktree branch is empty:\n"
-                            f"{path_lines}\n"
-                            "Likely cause: the build resumed a planning "
-                            "session whose context referenced main-repo paths. "
-                            "Start a fresh build (without `--resume` from the "
-                            "plan session) or re-target the edits manually."
-                        )
+                    halt_text, mention = _build_halted_text(
+                        header="Build stopped before committing.",
+                        summary=result.summary,
+                        preserved=preserved,
+                        path_poisoning=result.path_poisoning,
+                    )
                     try:
                         await ctx.messenger.send_text(
                             ctx.channel_id, halt_text, silent=True,
@@ -2890,7 +2957,8 @@ async def _run_autopilot_chain(
                     completed_steps.append(step)
                     await _exit_chain_needs_input(
                         ctx, source_id, session_id, steps, completed_steps,
-                        chain_instances, result, "abandoned",
+                        chain_instances, result, "needs_input",
+                        suffix_override=mention,
                     )
                     return result
             chain_instances.append(result)
