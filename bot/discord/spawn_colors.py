@@ -34,6 +34,11 @@ PALETTE: list[tuple[str, str]] = [
 ]
 _DISCORD_NAME_LIMIT = 100
 
+# First-spawn cursor seed. Set to 1 (orange) rather than 0 (red) so the first
+# spawn after deploying the round-robin fix differs visually from the buggy
+# slot-0-only era. Do not "simplify" to 0 — that defeats the seed's purpose.
+_INITIAL_CURSOR = 1
+
 # Module-level lock. Serializes all reads/writes to spawn_families and to
 # ThreadInfo.color_slot. Never held across Discord API awaits.
 _LOCK = asyncio.Lock()
@@ -49,6 +54,67 @@ def _families(store: "StateStore") -> dict:
         state["spawn_families"] = {}
         store.set_platform_state("discord", state, persist=False)
     return state["spawn_families"]
+
+
+def _all_palette_chars() -> str:
+    return "".join(emo for pair in PALETTE for emo in pair)
+
+
+def strip_color_prefix(name: str) -> str:
+    """Drop a leading PALETTE emoji + optional space. Idempotent."""
+    if not name:
+        return name
+    if name[0] in _all_palette_chars():
+        return name[1:].lstrip(" ")
+    return name
+
+
+def _maybe_clear_stale_stamps(
+    store: "StateStore",
+    forum_manager: "ForumManager",
+) -> None:
+    """One-shot migration: wipe color_slot stamps assigned by the buggy
+    lowest-unused picker. Gated by its own flag so it survives upgrades
+    that happen mid-family — skips silently while any family is live,
+    runs and self-disables the first time families are idle.
+    """
+    state = store.get_platform_state("discord")
+    if state.get("spawn_color_stamps_cleared"):
+        return
+    fams = _families(store)
+    if fams:
+        return  # try again later when families have drained
+    cleared = 0
+    for fp in forum_manager._forum_projects.values():
+        for ti in fp.threads.values():
+            if ti.color_slot is not None:
+                ti.color_slot = None
+                cleared += 1
+    state["spawn_color_stamps_cleared"] = True
+    store.set_platform_state("discord", state, persist=False)
+    if cleared:
+        log.info("Spawn-color migration: cleared %d stale color_slot stamps", cleared)
+
+
+def _get_next_slot(store: "StateStore") -> int:
+    """Read the cursor; seed on first use. Caller is responsible for
+    invoking save_forum_map() before returning so the seed write persists —
+    assign_slot saves on both the success and exhaustion paths.
+    """
+    state = store.get_platform_state("discord")
+    if "spawn_next_slot" not in state:
+        state["spawn_next_slot"] = _INITIAL_CURSOR
+        store.set_platform_state("discord", state, persist=False)
+    raw = state.get("spawn_next_slot", 0)
+    if isinstance(raw, int) and 0 <= raw < len(PALETTE):
+        return raw
+    return 0
+
+
+def _set_next_slot(store: "StateStore", value: int) -> None:
+    state = store.get_platform_state("discord")
+    state["spawn_next_slot"] = value % len(PALETTE)
+    store.set_platform_state("discord", state, persist=False)
 
 
 def prefix_for_root(slot: int) -> str:
@@ -110,9 +176,15 @@ async def assign_slot(
 
     Returns (slot, root_id), or None when all 7 slots are in use.
     Reuses an existing live family, then falls back to the root's
-    stamped color_slot (root-revival), then picks the lowest unused.
+    stamped color_slot (root-revival), then picks via the persistent
+    round-robin cursor.
     """
     async with _LOCK:
+        # Run-first: must clear stale stamps BEFORE reading root_info.color_slot
+        # below, otherwise root-revival would still drag fresh spawns back to
+        # the buggy slot 0.
+        _maybe_clear_stale_stamps(store, forum_manager)
+
         root_id = find_root(thread_id, forum_project)
         fams = _families(store)
 
@@ -134,12 +206,18 @@ async def assign_slot(
         if stamped is not None and 0 <= stamped < len(PALETTE) and stamped not in in_use:
             chosen = int(stamped)
         else:
-            for i in range(len(PALETTE)):
+            start = _get_next_slot(store)
+            for offset in range(len(PALETTE)):
+                i = (start + offset) % len(PALETTE)
                 if i not in in_use:
                     chosen = i
                     break
+            if chosen is not None:
+                _set_next_slot(store, chosen + 1)
 
         if chosen is None:
+            # Exhausted: still persist migration/seed writes so they're not lost.
+            forum_manager.save_forum_map()
             log.warning(
                 "Spawn-color slots exhausted (7 in use); thread %s family unprefixed",
                 thread_id,
