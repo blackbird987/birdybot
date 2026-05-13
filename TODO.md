@@ -88,3 +88,4 @@
 - [ ] [DRY/Cleanup] Centralize merge-failed message rendering (Low)
 - [ ] [Reliability] Automated tests for lock and hydration paths (Medium)
 - [ ] [UX/UI] Worktree creation latency needs progress feedback (Medium)
+- [ ] [Modularity] Migration peeks at `forum_manager._forum_projects` private (Low)
