@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.92.43 — No-commit halt surfaces agent stop reason (2026-05-13)
+
 - **No-commit halt now surfaces the agent's stopping reason (t-4264).** When a build (or build phase) finishes without committing, the user used to see two generic messages — `⚠️ Build produced no commits. Halting chain.` and `@you Build had no changes.` — that ignored whatever the agent had just said in its final embed (e.g. "Stopping. Two hard blockers… Bash is disabled in this turn…"). The halt path now extracts the first paragraph of `result.summary` and shows it inline (`⏸ Build stopped before committing. Here's what the agent said: > …`), with the mention summarizing the first line so the ping points at the actual blocker. Multi-phase halts use `Phase \`<id>\` paused: …` so the phase context isn't lost. Behavior changes: outcome rerouted from `"abandoned"` (terminal, cleared chain state) to `"needs_input"` (resumable) so the new "Reply to continue." CTA actually works; per-phase site also calls `set_phase_pause("pre")` so the cursor stays consistent and a reply resumes the same phase. The `"abandoned"` outcome key and its mention string are removed (dead after the reroute; only callsites were the two halt sites). Path-poisoning case suppresses the "Reply to continue." CTA — the existing "Start a fresh build" recovery copy would otherwise contradict it. Code-fence lines (` ``` `) are stripped from the snippet before `> `-prefix quoting so agent stop messages that include code don't break Discord's fence rendering. Coverage: new `scripts/test_halt_text.py` (15 assertions over the helper matrix — reason present/absent, preserved, poisoning, phase_label, fence stripping).
 
 ## v0.92.42 — Spawn-color round-robin fix (2026-05-13)
