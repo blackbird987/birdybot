@@ -21,6 +21,7 @@ import discord
 
 from bot import config
 from bot.discord import channels
+from bot.discord import spawn_colors
 from bot.discord import access as access_mod
 from bot.discord.access import load_access_config
 from bot.engine import sessions as sessions_mod
@@ -715,15 +716,27 @@ class ForumManager:
                             log.info("Renamed thread %s: %s -> %s", thread.id, old_name, new_name)
                         except Exception:
                             log.debug("Failed to rename thread %s", thread.id, exc_info=True)
-                # Legacy migration: strip old emoji prefixes
-                _, topic = channels.parse_thread_name(thread.name)
-                clean_name = channels.build_thread_name(topic)
+                # Legacy migration: strip old emoji prefixes AND normalize
+                # stacked spawn-color + 💤 prefixes into the single-emoji form.
+                # parse_thread_name now returns a bare topic, so we must
+                # re-apply the active family color (or sleep marker) on rebuild
+                # — otherwise this loop would strip live spawn colors every boot.
+                is_sleeping, topic = channels.parse_thread_name(thread.name)
+                if is_sleeping:
+                    clean_name = channels.build_sleeping_thread_name(topic)
+                else:
+                    clean_name = await spawn_colors.compose_name(
+                        str(thread.id),
+                        channels.build_thread_name(topic),
+                        proj,
+                        self._store,
+                    )
                 if clean_name != thread.name:
                     try:
                         await thread.edit(name=clean_name)
-                        log.info("Stripped legacy emoji from thread: %s", thread.id)
+                        log.info("Normalized thread name: %s", thread.id)
                     except Exception:
-                        log.debug("Failed to strip legacy emoji", exc_info=True)
+                        log.debug("Failed to normalize thread name", exc_info=True)
                 # Clear stale "active" tag
                 if active_tag and active_tag in thread.applied_tags:
                     info = proj.threads.get(str(thread.id))

@@ -435,19 +435,23 @@ class ClaudeBot(discord.Client):
                         assigned_slot, sanitized, is_root=False,
                     )
 
-            # Rename the family root to prepend the square emoji, but only if
-            # it isn't already prefixed. Reuses the existing _name_editing
-            # guard so we don't race with _generate_smart_title.
+            # Rename the family root to prepend the square emoji. A /spawn
+            # event implies activity, so we treat the rename as a wake: any
+            # existing 💤 prefix is dropped, and only the color square remains.
+            # Reuses the _name_editing guard to not race _generate_smart_title.
             if assigned_slot is not None and root_id is not None:
                 square = spawn_colors.prefix_for_root(assigned_slot)
                 root_channel = _bot.get_channel(int(root_id))
-                if isinstance(root_channel, discord.Thread) and not root_channel.name.startswith(square):
-                    if root_id not in _bot._name_editing:
+                if isinstance(root_channel, discord.Thread):
+                    _is_sleeping, bare_topic = channels.parse_thread_name(root_channel.name)
+                    new_root_name = f"{square} {bare_topic}"[:100]
+                    if root_channel.name != new_root_name and root_id not in _bot._name_editing:
                         _bot._name_editing.add(root_id)
                         try:
-                            stripped = spawn_colors.strip_color_prefix(root_channel.name)
-                            new_root_name = f"{square} {stripped}"[:100]
                             await root_channel.edit(name=new_root_name)
+                            # Activity implies awake — cancel any pending sleep
+                            # timer so it doesn't immediately reapply 💤.
+                            idle_mod.cancel_sleep(_bot, root_id)
                         except Exception:
                             log.warning(
                                 "Failed to prepend spawn-color square to root thread %s",

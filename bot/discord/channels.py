@@ -177,11 +177,20 @@ _SLEEP_EMOJI = "\U0001f4a4"  # 💤
 
 
 def parse_thread_name(name: str) -> tuple[bool, str]:
-    """Parse thread name -> (is_sleeping, base_topic)."""
+    """Parse thread name -> (is_sleeping, bare_topic).
+
+    Topic is stripped of legacy, sleep, and palette-color prefixes regardless
+    of stack order. Composition via ``spawn_colors.strip_color_prefix`` handles
+    both ``🟧 💤 | topic`` and ``💤 | 🟧 topic`` self-healing into ``topic``.
+    """
+    from bot.discord import spawn_colors
+
     # Strip legacy prefixes (🔄, mode circles)
     for legacy in _LEGACY_PREFIXES:
         if name.startswith(legacy):
             name = name[len(legacy):].lstrip()
+    # Palette-then-sleep stack order
+    name = spawn_colors.strip_color_prefix(name)
     # Strip sleep prefix
     is_sleeping = False
     if name.startswith(_SLEEP_EMOJI):
@@ -189,6 +198,8 @@ def parse_thread_name(name: str) -> tuple[bool, str]:
         name = name[len(_SLEEP_EMOJI):].lstrip()
         if name.startswith("|"):
             name = name[1:].lstrip()
+    # Sleep-then-palette stack order
+    name = spawn_colors.strip_color_prefix(name)
     return is_sleeping, name
 
 
