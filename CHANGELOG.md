@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.92.44 — Single-emoji thread name prefix (2026-05-15)
+
 - **Thread name no longer stacks spawn-color and 💤 prefixes (t-4416).** Sidebar tiles like `🟧 💤 ...` and `💤 | 🟧 ...` ate the narrow Discord sidebar width before any topic text could render. Two paths stacked emoji: `/spawn` on a sleeping root prepended the color square on top of `💤 | topic` (because `strip_color_prefix` only knew palette emoji), and the sleep timer firing on a colored root wrapped 💤 around `🟧 topic` (because `parse_thread_name` didn't recognize palette emoji as a strippable prefix). Once a name had both, the parser also reported `is_sleeping=False`, so wake no-oped and a re-sleep stacked a third emoji. New invariant: a thread name carries **either** the color square/dot (awake) **or** 💤 (sleeping), never both — family identity stays in `ThreadInfo.color_slot` and `compose_name` restores the color on wake. `parse_thread_name` now strips palette emoji on both sides of the sleep marker so legacy stacked names self-heal on the next sleep/wake/spawn. `PALETTE_CHARS` is now public in `spawn_colors` (was the private `_all_palette_chars()` helper) and `channels.parse_thread_name` delegates palette stripping to the public `strip_color_prefix` rather than reimplementing the check. The startup legacy-prefix migration in `forums.py` re-applies the family color via `compose_name` on rebuild (otherwise the new bare-topic semantic would strip live spawn colors on every boot) and doubles as an eager normalization pass. `/spawn` rename treats spawn activity as a wake — it composes `{square} {bare_topic}` and cancels any pending sleep timer.
 
 ## v0.92.43 — No-commit halt surfaces agent stop reason (2026-05-13)
