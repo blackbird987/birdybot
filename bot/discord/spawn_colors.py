@@ -56,15 +56,14 @@ def _families(store: "StateStore") -> dict:
     return state["spawn_families"]
 
 
-def _all_palette_chars() -> str:
-    return "".join(emo for pair in PALETTE for emo in pair)
+PALETTE_CHARS: frozenset[str] = frozenset(emo for pair in PALETTE for emo in pair)
 
 
 def strip_color_prefix(name: str) -> str:
     """Drop a leading PALETTE emoji + optional space. Idempotent."""
     if not name:
         return name
-    if name[0] in _all_palette_chars():
+    if name[0] in PALETTE_CHARS:
         return name[1:].lstrip(" ")
     return name
 

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 import discord
 
-from bot.discord import channels
+from bot.discord import channels, spawn_colors
 
 if TYPE_CHECKING:
     from bot.discord.bot import ClaudeBot
@@ -134,7 +134,15 @@ async def clear_thread_sleeping(
         return
     bot._name_editing.add(tid)
     try:
-        new_name = channels.build_thread_name(topic)
+        # Restore the family color (if any) on wake; sleep had replaced it.
+        lookup = bot._forums.thread_to_project(tid)
+        if lookup is not None:
+            forum_project, _info = lookup
+            new_name = await spawn_colors.compose_name(
+                tid, channels.build_thread_name(topic), forum_project, bot._store,
+            )
+        else:
+            new_name = channels.build_thread_name(topic)
         try:
             await channel.edit(name=new_name)
             log.debug("Thread %s woke up", channel.id)
