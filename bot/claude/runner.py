@@ -106,13 +106,159 @@ _RELEASE_COMMIT_RE = re.compile(r'^(v\d+\.\d+\.\d+(?:\.\d+)?):\s')
 _TAG_WALKBACK_CAP = 50
 
 ProgressCallback = Callable  # async callback(message: str, detail: str)
-StallCallback = Callable[[str], None]     # async callback(instance_id)
+# Stall callback: legacy single-arg form is still accepted via TypeError
+# fallback at the call site, so platform layers that haven't been updated
+# don't break. New form: async callback(instance_id, snapshot).
+StallCallback = Callable     # async callback(instance_id: str, snapshot: StallSnapshot | None = None)
 # Recovery callback: fires once per Layer 3 recovery event so the platform
 # layer can post a visible thread warning (the silent session-clear was half
 # of the t-3541 confusion — user couldn't see why context vanished).
 # Signature: async callback(reason: str, lost_session_id: str | None,
 #                            worktree_path: str | None)
 RecoveryCallback = Callable
+
+
+@dataclass
+class StallSnapshot:
+    """Diagnostic snapshot captured when a CLI run goes silent.
+
+    Built by ``_capture_process_snapshot`` and surfaced both in the bot.log
+    stall warning and in the user-visible Discord stall message. Fields are
+    optional because process introspection (psutil) may be unavailable or
+    blocked by OS perms — in that case the event-derived fields still render.
+    """
+
+    cpu_percent: float | None = None
+    rss_mb: float | None = None
+    conn_count: int | None = None
+    https_conn_count: int | None = None
+    children_count: int | None = None
+    last_event_type: str | None = None
+    last_tool_name: str | None = None
+    total_events: int = 0
+    end_of_turn_seen: bool = False
+    error: str | None = None  # set when psutil capture failed
+
+    def summary_line(self) -> str:
+        parts: list[str] = []
+        if self.cpu_percent is not None:
+            parts.append(f"CPU {self.cpu_percent:.0f}%")
+        if self.rss_mb is not None:
+            parts.append(f"{self.rss_mb:.0f}MB")
+        if self.conn_count is not None:
+            parts.append(f"{self.conn_count} conns ({self.https_conn_count or 0}×:443)")
+        if self.children_count is not None:
+            parts.append(f"{self.children_count} children")
+        if self.last_event_type:
+            evt = self.last_event_type
+            if self.last_tool_name:
+                evt = f"{evt}/{self.last_tool_name}"
+            parts.append(f"last={evt}")
+        parts.append(f"events={self.total_events}")
+        if self.end_of_turn_seen:
+            parts.append("end_turn_seen")
+        if self.error:
+            parts.append(f"err={self.error}")
+        return " · ".join(parts)
+
+
+def _last_tool_name(events: list[dict]) -> str | None:
+    """Walk back through recent events to find the most recent tool name.
+
+    Handles both ``tool_use`` (assistant-issued) and ``tool_result`` (user
+    role) blocks. Bounded to the last 30 events so a long session doesn't
+    pay an O(n) scan on every stall log tick.
+    """
+    for ev in reversed(events[-30:]):
+        for tool_name, _ in iter_tool_blocks(ev):
+            if tool_name:
+                return tool_name
+        msg = ev.get("message")
+        if isinstance(msg, dict):
+            content = msg.get("content")
+            if isinstance(content, list):
+                for b in content:
+                    if isinstance(b, dict) and b.get("type") == "tool_result":
+                        return "tool_result"
+    return None
+
+
+async def _capture_process_snapshot(
+    pid: int | None,
+    events: list[dict],
+    end_of_turn_seen: bool,
+) -> StallSnapshot:
+    """Build a StallSnapshot for the given CLI process + event stream.
+
+    Event-derived fields (last_event_type, last_tool_name, totals) are always
+    populated. psutil-derived fields populate on a best-effort basis: missing
+    psutil, NoSuchProcess, AccessDenied, or any unexpected exception
+    degrades cleanly to ``snapshot.error`` instead of raising.
+    """
+    snapshot = StallSnapshot(
+        total_events=len(events),
+        end_of_turn_seen=end_of_turn_seen,
+    )
+    if events:
+        last = events[-1]
+        snapshot.last_event_type = last.get("type") or None
+        snapshot.last_tool_name = _last_tool_name(events)
+
+    if pid is None:
+        snapshot.error = "no pid"
+        return snapshot
+
+    try:
+        import psutil  # type: ignore[import-not-found]
+    except ImportError:
+        snapshot.error = "psutil not installed"
+        return snapshot
+
+    def _sample() -> tuple[float | None, float | None, int | None, int | None, int | None, str | None]:
+        try:
+            proc = psutil.Process(pid)
+            # 2s sample is the smallest interval that gives a meaningful CPU%
+            # reading from psutil. Runs in a worker thread so the runner's
+            # event loop isn't blocked while we measure.
+            cpu = proc.cpu_percent(interval=2.0)
+            rss_mb = proc.memory_info().rss / (1024 * 1024)
+            try:
+                conns = proc.net_connections(kind="tcp")
+                established = [c for c in conns if c.status == psutil.CONN_ESTABLISHED]
+                https = [
+                    c for c in established
+                    if c.raddr and getattr(c.raddr, "port", None) == 443
+                ]
+                conn_n: int | None = len(established)
+                https_n: int | None = len(https)
+            except (psutil.AccessDenied, OSError):
+                conn_n = None
+                https_n = None
+            try:
+                children_n: int | None = len(proc.children(recursive=True))
+            except (psutil.AccessDenied, OSError):
+                children_n = None
+            return cpu, rss_mb, conn_n, https_n, children_n, None
+        except psutil.NoSuchProcess:
+            return None, None, None, None, None, "NoSuchProcess"
+        except psutil.AccessDenied:
+            return None, None, None, None, None, "AccessDenied"
+        except Exception as exc:  # defensive — never let psutil crash the runner
+            return None, None, None, None, None, f"{type(exc).__name__}"
+
+    try:
+        cpu, rss_mb, conn_n, https_n, children_n, err = await asyncio.to_thread(_sample)
+    except Exception as exc:
+        snapshot.error = f"to_thread failed: {type(exc).__name__}"
+        return snapshot
+    snapshot.cpu_percent = cpu
+    snapshot.rss_mb = rss_mb
+    snapshot.conn_count = conn_n
+    snapshot.https_conn_count = https_n
+    snapshot.children_count = children_n
+    if err:
+        snapshot.error = err
+    return snapshot
 
 
 class WorktreeRecoveryEvent(NamedTuple):
@@ -771,6 +917,11 @@ class ClaudeRunner:
 
         async def check_stall():
             nonlocal stall_warned, lifetime_exceeded
+            # Re-log a fresh snapshot every STALL_DIAG_RELOG_SECS while still
+            # stalled — gives a paper trail of CPU/conn state over the silent
+            # period so we can tell "thinking with API call open" from
+            # "actually hung with nothing in flight" after the fact.
+            stall_last_logged = 0.0
             while True:
                 await asyncio.sleep(10)
                 now = asyncio.get_event_loop().time()
@@ -788,13 +939,34 @@ class ClaudeRunner:
                     return
 
                 # Stall warning (no auto-kill)
-                if elapsed_since_output > config.STALL_TIMEOUT_SECS and not stall_warned:
-                    stall_warned = True
-                    if on_stall:
-                        try:
-                            await on_stall(instance.id)
-                        except Exception:
-                            log.exception("Stall callback error")
+                if elapsed_since_output > config.STALL_TIMEOUT_SECS:
+                    is_first = not stall_warned
+                    should_log = is_first or (
+                        now - stall_last_logged >= config.STALL_DIAG_RELOG_SECS
+                    )
+                    if should_log:
+                        snapshot = await _capture_process_snapshot(
+                            proc.pid, events, end_of_turn_seen,
+                        )
+                        log.warning(
+                            "Stall %s: elapsed=%ds since_output=%ds | %s",
+                            instance.id, int(elapsed_since_start),
+                            int(elapsed_since_output), snapshot.summary_line(),
+                        )
+                        stall_last_logged = now
+                        if is_first:
+                            stall_warned = True
+                            if on_stall:
+                                try:
+                                    await on_stall(instance.id, snapshot)
+                                except TypeError:
+                                    # Legacy single-arg callback — keep compat.
+                                    try:
+                                        await on_stall(instance.id)
+                                    except Exception:
+                                        log.exception("Stall callback error")
+                                except Exception:
+                                    log.exception("Stall callback error")
 
         stall_check_task = asyncio.create_task(check_stall())
 

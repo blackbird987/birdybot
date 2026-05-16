@@ -747,7 +747,7 @@ def make_progress_callbacks(
             severity=severity,
         )
 
-    async def on_stall(instance_id: str):
+    async def on_stall(instance_id: str, snapshot=None):
         is_stalled[0] = True
         escaped = ctx.messenger.escape(inst.display_id())
         footer, severity = _compute_footer()
@@ -756,13 +756,26 @@ def make_progress_callbacks(
             f"⚠️ {escaped} quiet for {config.STALL_TIMEOUT_SECS}s "
             f"— /kill if stuck ({_elapsed()})"
         )
+        lines = [head]
+        # Diagnostic line — added when the runner passes a StallSnapshot.
+        # Tells you at a glance whether the CLI is busy (CPU>0, possibly
+        # waiting on Anthropic if HTTPS conns are open) or genuinely idle.
+        diag_line = ""
+        if snapshot is not None and hasattr(snapshot, "summary_line"):
+            try:
+                diag_line = snapshot.summary_line()
+            except Exception:
+                diag_line = ""
+        if diag_line:
+            lines.append(f"Diagnostic: {ctx.messenger.escape(diag_line)}")
         if has_real_activity[0]:
             activity = " ".join(last_activity[0].split())
             if len(activity) > 120:
                 activity = activity[:117] + "..."
-            text = f"{head}\nLast activity: {ctx.messenger.escape(activity)}"
+            lines.append(f"Last activity: {ctx.messenger.escape(activity)}")
         else:
-            text = f"{head}\nLast activity: no events yet"
+            lines.append("Last activity: no events yet")
+        text = "\n".join(lines)
         await _edit(
             text,
             buttons=stall_button_specs(instance_id),
