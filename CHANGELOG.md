@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.92.45 — Stall diagnostics: process snapshot in warnings + bot.log (2026-05-16)
+
 - **Stall diagnostics: process-state snapshot in stall warnings + bot.log (t-4457).** When the 60s stall threshold trips, `bot/claude/runner.py:check_stall` now builds a `StallSnapshot` (CPU% over a 2s sample, RSS, established TCP conn count + count to port 443, child process count, last event type, last tool name, total events, `end_of_turn_seen` flag) and emits it both as a structured `WARNING` log line (`Stall <id>: elapsed=…s since_output=…s | CPU 0% · 1 conns (1×:443) · last=user/tool_result · events=1247`) and as a new `Diagnostic:` line on the existing Discord stall warning. Re-logs every `STALL_DIAG_RELOG_SECS` (default 60s, env-tunable) for the duration of the silence, so a long stall leaves a forensic paper trail showing whether the CLI was idle (CPU 0%, 0 conns) or waiting on Anthropic (CPU 0%, HTTPS conn open) or genuinely thinking (CPU >0). psutil-derived fields degrade cleanly on `NoSuchProcess`/`AccessDenied`/missing-psutil — the event-derived fields still render. `StallCallback` accepts an optional `snapshot` second arg with a `TypeError` fallback to the legacy single-arg signature so any out-of-tree callbacks keep working. New dep: `psutil>=5.9`.
 
 ## v0.92.44 — Single-emoji thread name prefix (2026-05-15)
