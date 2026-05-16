@@ -78,6 +78,11 @@ MAX_CONCURRENT: int = int(os.getenv("MAX_CONCURRENT", "5"))
 DAILY_BUDGET_USD: float = float(os.getenv("DAILY_BUDGET_USD", "20.0"))
 PC_NAME: str = os.getenv("PC_NAME", "") or __import__("platform").node()
 STALL_TIMEOUT_SECS: int = int(os.getenv("STALL_TIMEOUT_SECS", "60"))
+# Re-log a fresh stall snapshot every N seconds while a session is still
+# silent. Lets us correlate CPU%, conn count, and last event type over the
+# silent period so a forensic read of bot.log can distinguish "thinking
+# with API call open" from "actually hung locally".
+STALL_DIAG_RELOG_SECS: int = int(os.getenv("STALL_DIAG_RELOG_SECS", "60"))
 MAX_PROCESS_LIFETIME_SECS: int = int(os.getenv("MAX_PROCESS_LIFETIME_SECS", "14400"))
 # Grace period after the LLM emits stop_reason="end_turn" with no
 # tool_use blocks.  If the CLI stays silent for this long, we treat
