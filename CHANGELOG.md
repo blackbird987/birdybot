@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.92.46 — Merge-stuck threads accept plain text (2026-05-17)
+
 - **Merge-stuck threads no longer swallow plain text (t-4527).** Previously, while an auto-merge was unresolved, every message typed in the thread was intercepted into `pending_merge.deferred_text` and the action buttons were re-posted — you could not actually talk to Claude about the merge, only feed accumulated guidance into the next "Resolve with Claude" spawn. When the resolver couldn't help (e.g. an untracked-file collision in master, where git aborts before `MERGE_HEAD` so there's nothing to resolve), the thread became unconversable. `bot/engine/commands.py:on_text` now falls through to the normal CLI flow when `pending_merge` is set but no resolver is in flight, prepending a system-note prefix built from `pending_merge.message` + `failure_kind` so the resumed session doesn't reinterpret the message as a fresh task (matches the design already documented on `set_pending_merge` in `bot/store/state.py`). The resolver-in-flight branch preserves the existing UX — text is still captured as deferred guidance with the Cancel button, since spawning a parallel Claude session against the same instance state would race the resolver. New helper `_merge_context_prefix(meta)` lives next to `_resolver_in_flight` and truncates the failure excerpt to 400 chars with a defensive fallback when `message` is empty. Generic `merge_failed_banner` in `bot/platform/formatting.py` no longer falsely claims "Plain-text replies in this thread are ignored until you choose" — replaced with copy inviting the user to describe the situation in chat.
 
 ## v0.92.45 — Stall diagnostics: process snapshot in warnings + bot.log (2026-05-16)
