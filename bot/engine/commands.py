@@ -628,45 +628,35 @@ async def on_text(ctx: RequestContext, text: str) -> None:
         handled = await ctx.offer_usage_limit_choice(ctx, text)
         if handled:
             return
-    # Pending-merge guard: if auto-merge failed in this channel, plain text
-    # would otherwise resume a stale CLI session and (with recent review
-    # context) get reinterpreted as "do another review". Capture the message
-    # into pending_merge.deferred_text so the next Resolve spawn picks it up
-    # as guidance, and re-surface the action buttons.
+    # Pending-merge handling: when auto-merge has failed but no resolver is in
+    # flight, fall through to the normal CLI flow with a merge-context prefix
+    # prepended to the user's text. The prefix replaces the previous
+    # intercept's role of preventing the resumed session from reinterpreting
+    # the message as a fresh task (e.g. "do another review"). If a resolver
+    # IS in flight, still capture the text as deferred guidance — spawning a
+    # parallel session would race the resolver on the same instance state.
     pending_merge = ctx.store.get_pending_merge_by_channel(ctx.channel_id)
     if pending_merge:
-        pm_iid, _meta = pending_merge
-        accumulated = ctx.store.append_pending_merge_deferred_text(pm_iid, text)
-        # If a resolver is already running, the user's text won't reach this
-        # run — it'll be picked up by the next Resolve. Make that explicit.
-        live = _resolver_in_flight(ctx, pm_iid)
-        if live:
+        pm_iid, pm_meta = pending_merge
+        if _resolver_in_flight(ctx, pm_iid):
+            accumulated = ctx.store.append_pending_merge_deferred_text(pm_iid, text)
             note = (
                 "Resolver is already running — saved your message as guidance "
                 "for the next Resolve attempt. Tap **Cancel** below to stop "
                 "the current run and start over."
             )
             buttons = resolver_running_button_specs(pm_iid)
-        else:
-            note = (
-                "Auto-merge is still unresolved — saved your message as "
-                "guidance. Tap **Resolve with Claude** to apply it, "
-                "**Try Merge Again**, or **Discard**."
-            )
-            buttons = merge_failed_button_specs(pm_iid)
-        if accumulated and len(accumulated) > 200:
-            preview = accumulated[:200] + "…"
-        else:
-            preview = accumulated
-        if preview:
-            note += f"\n\nGuidance so far:\n```\n{preview}\n```"
-        try:
-            await ctx.messenger.send_text(
-                ctx.channel_id, note, buttons=buttons, silent=True,
-            )
-        except Exception:
-            log.debug("Failed to re-post merge-failed buttons", exc_info=True)
-        return
+            preview = accumulated[:200] + "…" if accumulated and len(accumulated) > 200 else accumulated
+            if preview:
+                note += f"\n\nGuidance so far:\n```\n{preview}\n```"
+            try:
+                await ctx.messenger.send_text(
+                    ctx.channel_id, note, buttons=buttons, silent=True,
+                )
+            except Exception:
+                log.debug("Failed to re-post resolver-running buttons", exc_info=True)
+            return
+        text = f"{_merge_context_prefix(pm_meta)}\n{text}"
     lock = _get_channel_lock(ctx.channel_id)
     pending = await _enqueue_with_pending_ui(ctx, text)
     async with lock:
@@ -2797,6 +2787,24 @@ async def _post_resolver_failure(
         except Exception:
             log.debug("Could not edit source message for resolver failure", exc_info=True)
     await ctx.messenger.send_text(ctx.channel_id, text, buttons=buttons)
+
+
+def _merge_context_prefix(meta: dict) -> str:
+    """Build a system-note prefix for user text in a merge-stuck thread.
+
+    Tells the resumed CLI session that auto-merge is unresolved so it doesn't
+    reinterpret the message as a fresh task (e.g. "do another review" because
+    the prior turn was a review). Sources `message` + `failure_kind` from the
+    pending_merge meta; falls back to a generic note if `message` is missing.
+    """
+    msg = (meta.get("message") or "").strip()
+    kind = (meta.get("failure_kind") or "").strip()
+    kind_part = f" (kind={kind})" if kind else ""
+    if not msg:
+        return f"[system note: auto-merge still unresolved{kind_part}. User message follows.]"
+    if len(msg) > 400:
+        msg = msg[:400] + "…"
+    return f"[system note: auto-merge still unresolved{kind_part}. Last failure: {msg}. User message follows.]"
 
 
 def _resolver_in_flight(ctx: RequestContext, instance_id: str) -> str | None:
