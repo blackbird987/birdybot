@@ -335,8 +335,8 @@ def merge_failed_banner(failure_kind: str | None) -> str:
     return (
         "⚠️ Auto-merge failed. Tap **Try Merge Again** to retry "
         "(useful if a parallel build just completed) or **Discard** "
-        "to drop the branch. Plain-text replies in this thread are "
-        "ignored until you choose."
+        "to drop the branch. Or describe the situation here to talk "
+        "it through with Claude."
     )
 
 
