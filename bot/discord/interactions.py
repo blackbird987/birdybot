@@ -583,7 +583,18 @@ async def _handle_pending_action(
     )
     if live_active:
         try:
-            await bot._runner.kill_and_wait(live_active)
+            outcome = await bot._runner.kill_and_wait(live_active, reason="steer")
+            # FORCE_CLEARED: lifecycle was wedged and never ran finalize, so
+            # the instance stays in RUNNING status. Flip it manually before
+            # the replacement run starts — otherwise stale RUNNING state
+            # confuses dashboards and channel-lock recovery.
+            from bot.claude.types import InstanceStatus, KillOutcome
+            if outcome == KillOutcome.FORCE_CLEARED:
+                stuck_inst = bot._store.get_instance(live_active)
+                if stuck_inst and stuck_inst.status == InstanceStatus.RUNNING:
+                    stuck_inst.status = InstanceStatus.KILLED
+                    stuck_inst.finished_at = datetime.now(timezone.utc).isoformat()
+                    bot._store.update_instance(stuck_inst, critical=True)
         except Exception:
             log.exception("kill_and_wait failed during Steer")
 

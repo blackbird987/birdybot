@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from bot import config
-from bot.claude.types import Instance, InstanceOrigin, InstanceStatus, InstanceType, merge_msg_is_failure
+from bot.claude.types import Instance, InstanceOrigin, InstanceStatus, InstanceType, KillOutcome, merge_msg_is_failure
 from bot.engine import lifecycle, pending as pending_mod, sessions as sessions_mod, workflows
 from bot.platform.base import ButtonSpec, RequestContext, SpawnArgs
 from bot.platform.formatting import (
@@ -2855,7 +2855,16 @@ async def _on_resolve_cancel(
     # may race us to the verify-fail message. The cleared flag is the signal
     # that tells the merge handler this was externally handled.
     ctx.store.set_pending_merge_resolver(inst.id, None)
-    await ctx.runner.kill_and_wait(resolver_id, timeout=10)
+    outcome = await ctx.runner.kill_and_wait(resolver_id, timeout=10)
+    # FORCE_CLEARED: lifecycle wedged, never ran finalize — flip the
+    # resolver instance status manually so it doesn't show stuck-RUNNING
+    # forever in /list and history.
+    if outcome == KillOutcome.FORCE_CLEARED:
+        resolver_inst = ctx.store.get_instance(resolver_id)
+        if resolver_inst and resolver_inst.status == InstanceStatus.RUNNING:
+            resolver_inst.status = InstanceStatus.KILLED
+            resolver_inst.finished_at = datetime.now(timezone.utc).isoformat()
+            ctx.store.update_instance(resolver_inst, critical=True)
     # Abort any half-merge so subsequent attempts start clean.
     if inst.worktree_path and Path(inst.worktree_path).is_dir():
         await asyncio.to_thread(
@@ -2892,20 +2901,32 @@ async def handle_callback(
         if not inst:
             await ctx.messenger.send_text(ctx.channel_id, "Instance not found.")
             return
-        killed = await ctx.runner.kill(instance_id)
-        if killed:
+        # kill_and_wait (not kill) so the channel lock is always released —
+        # either via lifecycle's finally block, or via the 10s force-clear
+        # safety net.  reason="kill" routes finalize to suppress the
+        # lifecycle's terminal thinking-edit so the visible "Killed <id>"
+        # message we render below isn't overwritten.
+        outcome = await ctx.runner.kill_and_wait(instance_id, reason="kill")
+        if outcome == KillOutcome.NOT_RUNNING:
+            await ctx.messenger.send_text(ctx.channel_id, "Process not found or already stopped.")
+            return
+        # On FORCE_CLEARED the lifecycle never ran finalize (genuinely wedged),
+        # so the engine layer must own the status flip — runner.py is
+        # store-agnostic by design.
+        if outcome == KillOutcome.FORCE_CLEARED:
             inst.status = InstanceStatus.KILLED
             inst.finished_at = datetime.now(timezone.utc).isoformat()
             ctx.store.update_instance(inst, critical=True)
-            buttons = action_button_specs(inst)
-            escaped = ctx.messenger.escape(inst.display_id())
-            markup = f"Killed {escaped}"
-            if source_msg_id:
-                await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, markup, buttons)
-            else:
-                await ctx.messenger.send_text(ctx.channel_id, markup, buttons)
+        # Re-fetch in case finalize_run wrote new fields (status, finished_at,
+        # error) — use the freshest view when rendering action buttons.
+        inst = ctx.store.get_instance(instance_id) or inst
+        buttons = action_button_specs(inst)
+        escaped = ctx.messenger.escape(inst.display_id())
+        markup = f"Killed {escaped}"
+        if source_msg_id:
+            await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, markup, buttons)
         else:
-            await ctx.messenger.send_text(ctx.channel_id, "Process not found or already stopped.")
+            await ctx.messenger.send_text(ctx.channel_id, markup, buttons)
 
     elif action == "retry":
         inst = ctx.store.get_instance(instance_id)
@@ -3075,7 +3096,13 @@ async def handle_callback(
         live_resolver = _resolver_in_flight(ctx, inst.id)
         if live_resolver:
             ctx.store.set_pending_merge_resolver(inst.id, None)
-            await ctx.runner.kill_and_wait(live_resolver, timeout=10)
+            outcome = await ctx.runner.kill_and_wait(live_resolver, timeout=10)
+            if outcome == KillOutcome.FORCE_CLEARED:
+                resolver_inst = ctx.store.get_instance(live_resolver)
+                if resolver_inst and resolver_inst.status == InstanceStatus.RUNNING:
+                    resolver_inst.status = InstanceStatus.KILLED
+                    resolver_inst.finished_at = datetime.now(timezone.utc).isoformat()
+                    ctx.store.update_instance(resolver_inst, critical=True)
         _clear_chain_on_manual_finalize(ctx.store, inst.session_id, "Discard button")
         # Early guard: branch already cleared by a prior merge/discard
         if not inst.branch:

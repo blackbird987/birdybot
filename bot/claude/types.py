@@ -371,6 +371,22 @@ class RunResult:
     # this collapses to "we called terminate" — see runner._stream_output
     # for the rationale and Windows limitation.
     killed_intentionally: bool = False
+    # Kill reason set when an intentional kill fired via kill_and_wait.
+    # "steer" — user asked for a replacement run (suppress kill embed entirely)
+    # "kill"  — user asked to terminate, no replacement (suppress lifecycle's
+    #           thinking edit; the button handler renders the visible state
+    #           with action buttons attached)
+    # None    — automatic kill (timeout, watchdog) or no intentional kill
+    kill_reason: str | None = None
+
+
+class KillOutcome(str, Enum):
+    """Return value from runner.kill_and_wait — tells the caller whether the
+    lifecycle finalize ran (status flip already happened) or whether the 10s
+    force-clear fired (caller must flip status itself)."""
+    NOT_RUNNING = "not_running"   # instance wasn't active
+    FINALIZED = "finalized"       # lifecycle's finally block ran
+    FORCE_CLEARED = "force_cleared"  # 10s timeout — caller owns status flip
 
 
 # Valid gate types for autopilot phase boundaries.

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## v0.92.49 — Kill button releases stuck threads (2026-05-18)
+
+- **Kill button reliably ends "stuck" threads after a terminal `result` event (t-4674).** Threads where the Claude CLI emitted `result` but the subprocess hung (orphan child holding stdout) used to stay in "Killed…" purgatory until the user typed `/steer`, because the Kill handler called `runner.kill()` (subprocess only) while the wrapping `run_instance` coroutine and channel lock stayed wedged. Four-part fix in `bot/claude/runner.py`, `bot/claude/types.py`, `bot/engine/commands.py`, `bot/engine/lifecycle.py`, `bot/discord/interactions.py`:
+  1. End-of-turn watchdog now also arms on the CLI's `result` event (previously only `assistant + stop_reason=end_turn`), so a terminal `result` followed by silence trips the existing `END_OF_TURN_GRACE_SECS` timeout instead of waiting forever for EOF on a wedged pipe.
+  2. Kill button calls `runner.kill_and_wait(reason="kill")` — same 10s force-clear safety net Steer already used — so the channel lock always releases. New `kill_reason: str | None` field on `RunResult` flows the intent into lifecycle.
+  3. `kill_and_wait` returns a `KillOutcome` enum (`NOT_RUNNING` / `FINALIZED` / `FORCE_CLEARED`) instead of a bool. Engine-layer Kill, Steer, and resolve-cancel callers flip status → `KILLED` + `finished_at` when force-clear fires (lifecycle never ran its `finally`). Runner stays store-agnostic — all instance writes still flow through the engine layer.
+  4. Lifecycle skips its terminal thinking-message edit when `kill_reason == "kill"` so the Kill button handler's "Killed <id>" + action-buttons render wins cleanly (no double-edit race).
+
 ## v0.92.48 — Registered repo name in Working Location (2026-05-18)
 
 - **Working Location block now includes the registered repo name (t-4648).** The LLM was told the CWD path and main repo path but never the registry name, so anywhere a registry name is required (`/spawn repo=…`, `/repo switch`, etc.) it had to guess from the path. The directory basename and the registry name can differ — this repo lives at `claude-telegram-bot/` but is registered as `bot`. `_build_location_block` in `bot/claude/runner.py` now emits `Repo name: <instance.repo_name> (use this for /spawn, /repo switch, etc.)` in both the worktree branch and the main-repo branch, gated on `instance.repo_name` being truthy so unregistered contexts (e.g. ad-hoc CLI sessions) don't print a stray `Repo name: None` line. Zero behavior change — pure system-prompt augmentation.
