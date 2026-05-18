@@ -312,8 +312,11 @@ async def run_instance(
             if heartbeat_task:
                 heartbeat_task.cancel()
 
-        # Update thinking message to show completion
-        if handle:
+        # Update thinking message to show completion.
+        # Skip entirely when kill_reason == "kill" — the Kill button handler
+        # in commands.py edits the same message id to "Killed <id>" with
+        # action buttons (Retry/Log), and we don't want to race that edit.
+        if handle and result.kill_reason != "kill":
             elapsed = asyncio.get_event_loop().time() - start_time
             if elapsed >= 60:
                 elapsed_str = f"{elapsed / 60:.1f}m"
