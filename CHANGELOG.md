@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.92.48 — Registered repo name in Working Location (2026-05-18)
+
 - **Working Location block now includes the registered repo name (t-4648).** The LLM was told the CWD path and main repo path but never the registry name, so anywhere a registry name is required (`/spawn repo=…`, `/repo switch`, etc.) it had to guess from the path. The directory basename and the registry name can differ — this repo lives at `claude-telegram-bot/` but is registered as `bot`. `_build_location_block` in `bot/claude/runner.py` now emits `Repo name: <instance.repo_name> (use this for /spawn, /repo switch, etc.)` in both the worktree branch and the main-repo branch, gated on `instance.repo_name` being truthy so unregistered contexts (e.g. ad-hoc CLI sessions) don't print a stray `Repo name: None` line. Zero behavior change — pure system-prompt augmentation.
 
 ## v0.92.47 — Cross-account session freshness sync (2026-05-18)
