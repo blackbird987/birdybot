@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.92.49 — Kill button releases stuck threads (2026-05-18)
+
 - **Kill button reliably ends "stuck" threads after a terminal `result` event (t-4674).** Threads where the Claude CLI emitted `result` but the subprocess hung (orphan child holding stdout) used to stay in "Killed…" purgatory until the user typed `/steer`, because the Kill handler called `runner.kill()` (subprocess only) while the wrapping `run_instance` coroutine and channel lock stayed wedged. Four-part fix in `bot/claude/runner.py`, `bot/claude/types.py`, `bot/engine/commands.py`, `bot/engine/lifecycle.py`, `bot/discord/interactions.py`:
   1. End-of-turn watchdog now also arms on the CLI's `result` event (previously only `assistant + stop_reason=end_turn`), so a terminal `result` followed by silence trips the existing `END_OF_TURN_GRACE_SECS` timeout instead of waiting forever for EOF on a wedged pipe.
   2. Kill button calls `runner.kill_and_wait(reason="kill")` — same 10s force-clear safety net Steer already used — so the channel lock always releases. New `kill_reason: str | None` field on `RunResult` flows the intent into lifecycle.
