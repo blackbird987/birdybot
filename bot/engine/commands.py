@@ -904,6 +904,7 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
     inst.is_owner_session = ctx.is_owner
     if not ctx.is_owner and ctx.bash_policy:
         inst.bash_policy = ctx.bash_policy
+        inst.bash_policy_baseline = ctx.bash_policy
     # Stamp spawn_depth on this Instance so the recursion cap in /spawn
     # fires when the spawned session itself tries to spawn. One-shot per
     # request: cleared after consumption. Subsequent prompts in the same
