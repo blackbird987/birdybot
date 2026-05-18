@@ -672,9 +672,14 @@ async def spawn_from(
     # Apply permission_mode floor BEFORE create_instance so the new mode
     # is what gets persisted from the start (no race window where a parent's
     # build mode leaks into the child's command line).
-    inherited_bash_policy = source.bash_policy
+    #
+    # Feed the BASELINE (un-clamped policy) into the floor, not source.bash_policy.
+    # Otherwise a triage parent clamped to "none" would leak that clamp into
+    # every subsequent child — including a later build child — and the build
+    # would run with --disallowed-tools Bash.
+    inherited_baseline = source.bash_policy_baseline
     effective_spawn_mode, inherited_bash_policy = _enforce_readonly_floor(
-        cfg.permission_mode, effective_spawn_mode, inherited_bash_policy,
+        cfg.permission_mode, effective_spawn_mode, inherited_baseline,
     )
 
     new_inst = ctx.store.create_instance(
@@ -698,6 +703,7 @@ async def spawn_from(
     new_inst.user_name = source.user_name or (ctx.user_name or "")
     new_inst.is_owner_session = source.is_owner_session
     new_inst.bash_policy = inherited_bash_policy
+    new_inst.bash_policy_baseline = inherited_baseline
     new_inst.deferred_revisions = source.deferred_revisions
     # Carry the conceptual session's baseline forward — what was on master
     # when this thread of work first started. Resumed/chained spawns inherit
@@ -847,7 +853,11 @@ async def spawn_resolver_detached(
     new_inst.user_id = source.user_id or (ctx.user_id or "")
     new_inst.user_name = source.user_name or (ctx.user_name or "")
     new_inst.is_owner_session = source.is_owner_session
-    new_inst.bash_policy = source.bash_policy
+    # Resolver always spawns build mode (no floor), so the effective policy
+    # is the un-clamped baseline — restoring Bash if the source had been
+    # clamped by an upstream triage floor.
+    new_inst.bash_policy = source.bash_policy_baseline
+    new_inst.bash_policy_baseline = source.bash_policy_baseline
     new_inst.master_baseline_head = source.master_baseline_head
     new_inst.branch = source.branch
     new_inst.original_branch = source.original_branch

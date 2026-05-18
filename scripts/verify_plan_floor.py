@@ -1,11 +1,19 @@
-"""Deterministic check: plan-text spawns clamp Bash via permission_mode=explore.
+"""Deterministic checks for the read-only triage floor + build-child restore.
 
-Builds a synthetic Instance with the same shape spawn_from would produce after
-``_enforce_readonly_floor`` runs (mode="explore", bash_policy="none"), calls
-``provider.build_command``, and asserts ``Bash`` appears in the value of
-``--disallowed-tools``. Independent of log infrastructure or live runtime.
+Two assertions, both built from synthetic Instances and the real provider:
 
-Exit 0 = floor is wired correctly. Exit 1 = regression.
+1. triage-clamp: ``_enforce_readonly_floor(permission_mode="explore", ...)``
+   produces an instance whose provider command line strips Bash + the
+   code-change tools via ``--disallowed-tools``.
+
+2. build-restore: ``_enforce_readonly_floor(permission_mode=None, "build",
+   baseline="full")`` returns ``("build", "full")``, and a build-mode
+   instance carrying that result (simulating a build child spawned from a
+   triage-clamped parent whose baseline was preserved) does NOT have
+   ``Bash`` in its provider ``--disallowed-tools``. This is the regression
+   that caused t-4696.
+
+Exit 0 = both checks pass. Exit 1 = regression.
 
 Run: ``python scripts/verify_plan_floor.py``
 """
@@ -60,10 +68,51 @@ def _disallowed_tokens(cmd: list[str]) -> list[str]:
     return [t.strip() for t in cmd[idx + 1].split(",") if t.strip()]
 
 
+def _build_synthetic_build_child() -> Instance:
+    """Simulate a build child spawned from a triage-clamped parent.
+
+    The parent was clamped (bash_policy="none") but its baseline remained
+    "full". The chained spawn passes baseline (not the clamp) through the
+    floor with permission_mode=None, so the new build child must end up
+    with bash_policy="full" — restoring Bash.
+    """
+    parent_baseline = "full"
+    parent_bash_policy = "none"  # simulating a triage-clamped parent
+
+    spawn_mode, child_bash_policy = _enforce_readonly_floor(
+        permission_mode=None,
+        spawn_mode="build",
+        bash_policy=parent_baseline,
+    )
+    if spawn_mode != "build" or child_bash_policy != "full":
+        raise AssertionError(
+            f"build-restore regression: expected ('build','full'), "
+            f"got ({spawn_mode!r},{child_bash_policy!r}); "
+            f"parent had bash_policy={parent_bash_policy!r}, "
+            f"baseline={parent_baseline!r}"
+        )
+
+    return Instance(
+        id="verify-build-restore",
+        name=None,
+        instance_type=InstanceType.TASK,
+        prompt="(synthetic)",
+        repo_name="(synthetic)",
+        repo_path=str(ROOT),
+        status=InstanceStatus.RUNNING,
+        mode=spawn_mode,
+        origin=InstanceOrigin.DIRECT,
+        bash_policy=child_bash_policy,
+        bash_policy_baseline=parent_baseline,
+        effort="high",
+    )
+
+
 def main() -> int:
     provider = get_provider("claude")
-    instance = _build_synthetic_instance()
 
+    # Assertion 1: triage subagent still gets Bash (and code-change tools) stripped.
+    instance = _build_synthetic_instance()
     cmd = provider.build_command(
         instance,
         binary="claude",
@@ -72,22 +121,40 @@ def main() -> int:
         api_fallback=False,
         api_key_file=None,
     )
-
     tokens = _disallowed_tokens(cmd)
     # Derive expected set from the provider so future code_change_tools
     # additions (e.g. MultiEdit) are automatically required, not silently
     # missed. Bash is the floor's specific contribution.
     required = set(provider.code_change_tools) | {"Bash"}
     missing = required - set(tokens)
-
     if missing:
-        print("FAIL: --disallowed-tools missing tokens:", sorted(missing))
+        print("FAIL [triage-clamp]: --disallowed-tools missing tokens:", sorted(missing))
         print("  full disallowed value:", tokens)
         print("  full cmd:", cmd)
         return 1
-
-    print(f"PASS: --disallowed-tools contains {sorted(required)}")
+    print(f"PASS [triage-clamp]: --disallowed-tools contains {sorted(required)}")
     print(f"  observed: {tokens}")
+
+    # Assertion 2: build child spawned from a triage-clamped parent restores Bash.
+    # This is the regression that caused the t-4696 incident.
+    build_child = _build_synthetic_build_child()
+    build_cmd = provider.build_command(
+        build_child,
+        binary="claude",
+        system_prompt_file=None,
+        system_prompt_inline=None,
+        api_fallback=False,
+        api_key_file=None,
+    )
+    build_tokens = _disallowed_tokens(build_cmd)
+    if "Bash" in build_tokens:
+        print("FAIL [build-restore]: build child still has Bash disallowed")
+        print("  disallowed:", build_tokens)
+        print("  full cmd:", build_cmd)
+        return 1
+    print("PASS [build-restore]: build child spawned from clamped parent has Bash")
+    print(f"  disallowed: {build_tokens or '(none)'}")
+
     return 0
 
 

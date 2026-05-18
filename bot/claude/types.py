@@ -135,7 +135,8 @@ class Instance:
     jsonl_uuid_by_msg_id: dict[str, str] = field(default_factory=dict)  # Discord msg_id -> JSONL assistant uuid (for "Branch from here")
     # Access control fields (non-owner sessions)
     is_owner_session: bool = True     # False for granted user sessions
-    bash_policy: str = "full"         # "full"=Bash unrestricted; "allowlist"=non-owner allowlist guard; "none"=Bash disabled for ANY session
+    bash_policy: str = "full"         # current effective policy: "full"=Bash unrestricted; "allowlist"=non-owner allowlist guard; "none"=Bash disabled (e.g. read-only triage floor)
+    bash_policy_baseline: str = "full" # un-clamped policy. Inherited verbatim by spawned children so a triage floor on the parent does not propagate forward into a build child.
     effort: str = "high"             # reasoning effort: low/medium/high/max
     model: str | None = None         # CLI model override (e.g. "sonnet" for plan steps)
     cooldown_retry_at: str | None = None   # ISO datetime — auto-retry after usage limit
@@ -240,6 +241,7 @@ class Instance:
             "jsonl_uuid_by_msg_id": self.jsonl_uuid_by_msg_id,
             "is_owner_session": self.is_owner_session,
             "bash_policy": self.bash_policy,
+            "bash_policy_baseline": self.bash_policy_baseline,
             "effort": self.effort,
             "model": self.model,
             "cooldown_retry_at": self.cooldown_retry_at,
@@ -307,6 +309,12 @@ class Instance:
             jsonl_uuid_by_msg_id=d.get("jsonl_uuid_by_msg_id", {}),
             is_owner_session=d.get("is_owner_session", True),
             bash_policy=d.get("bash_policy", "full"),
+            # Default missing baseline to "full" — NOT to the loaded bash_policy.
+            # Legacy state from a triage-clamped chain has bash_policy="none"
+            # persisted; mirroring that into baseline would freeze the leak we
+            # are fixing. For non-owner instances the grant is the source of
+            # truth and re-asserts before the next spawn.
+            bash_policy_baseline=d.get("bash_policy_baseline", "full"),
             effort=d.get("effort", "high"),
             model=d.get("model"),
             cooldown_retry_at=d.get("cooldown_retry_at"),
