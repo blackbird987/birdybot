@@ -1614,6 +1614,16 @@ class ClaudeRunner:
         # the chain so we never lie to the LLM about a master branch
         # that doesn't exist.
         default_branch = instance.original_branch or "the default branch"
+        # Registry name is what /spawn, /repo switch, etc. expect — directory
+        # basename and registered name can differ (e.g. `claude-telegram-bot`
+        # vs registered `bot`). Surface it explicitly so the LLM doesn't have
+        # to guess from the path.
+        repo_name_line = (
+            f"  Repo name: {instance.repo_name} "
+            "(use this for /spawn, /repo switch, etc.)\n"
+            if instance.repo_name
+            else ""
+        )
         if instance.worktree_path:
             return (
                 "--- Working Location ---\n"
@@ -1622,6 +1632,7 @@ class ClaudeRunner:
                 f"  Branch:    {instance.branch or '(unknown)'}\n"
                 f"  Main repo: {instance.repo_path} "
                 f"(stays on {default_branch} — do NOT cd there)\n"
+                f"{repo_name_line}"
                 "\n"
                 "If files look unexpectedly missing or different from what you remember:\n"
                 "1. Run `pwd` and `git branch --show-current` to verify your location.\n"
@@ -1640,6 +1651,7 @@ class ClaudeRunner:
                 "--- Working Location ---\n"
                 f"You are running in the main repo at {instance.repo_path}.\n"
                 f"Branch: {current_branch}.\n"
+                f"{repo_name_line}"
                 "No worktree is in use for this session.\n"
                 "\n"
             )
