@@ -92,3 +92,5 @@
 - [ ] [UX/UI] Worktree creation latency needs progress feedback (Medium)
 - [ ] [Modularity] Migration peeks at `forum_manager._forum_projects` private (Low)
 - [ ] [UX/UI] Button-aware CTA wording (Medium)
+- [ ] [Reliability] Wake + smart-title rename rate-limit collision (Medium)
+- [ ] [UX/UI] Drop pipe separator from sleep name (Low)
