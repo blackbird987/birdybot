@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.92.50 — Build child restores Bash after triage clamp (2026-05-19)
+
 - **Build child no longer inherits the read-only triage clamp (t-4699).** When an autopilot chain ran a review-plan → apply-revisions cycle, `_enforce_readonly_floor` clamped the triage subagent to `bash_policy="none"` (correct), but every subsequent chained spawn — including the eventual build — blindly inherited the clamped value from `source.bash_policy`. The build then launched `claude.exe ... --disallowed-tools Bash` and refused to do work ("this session doesn't have Bash"). Fixed by splitting effective vs un-clamped policy on `Instance`: new `bash_policy_baseline` field holds the un-clamped policy and is inherited verbatim by children. Chained spawn in `bot/engine/workflows.py` now feeds the *baseline* (not the parent's clamped policy) through `_enforce_readonly_floor`, so a build child spawned with no permission_mode floor restores `bash_policy="full"`. Resolver spawn (always build mode, no floor) reads `source.bash_policy_baseline` directly. Grant sites in `bot/engine/commands.py` also write the baseline. Legacy `state.json` without the new field defaults `bash_policy_baseline="full"` rather than mirroring the persisted `bash_policy` — otherwise an in-flight clamped instance would freeze the leak across restart. `scripts/verify_plan_floor.py` extended with a second assertion that catches the regression class (build child from clamped parent must not have `--disallowed-tools Bash`).
 
 ## v0.92.49 — Kill button releases stuck threads (2026-05-18)
