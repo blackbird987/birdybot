@@ -433,7 +433,7 @@ def action_button_specs(
                     ])
                 rows.append([
                     ButtonSpec("Review Plan", f"review_plan:{iid}"),
-                    ButtonSpec("Build It", f"build:{iid}"),
+                    ButtonSpec("Build & Ship", f"build_and_ship:{iid}"),
                     ButtonSpec("Done", f"done:{iid}"),
                 ])
         elif made_code_changes:
@@ -461,7 +461,7 @@ def action_button_specs(
                 ])
             rows.append([
                 ButtonSpec("Review Plan", f"review_plan:{iid}"),
-                ButtonSpec("Build It", f"build:{iid}"),
+                ButtonSpec("Build & Ship", f"build_and_ship:{iid}"),
                 ButtonSpec("Done", f"done:{iid}"),
             ])
         else:
@@ -473,7 +473,7 @@ def action_button_specs(
             if instance.session_id:
                 rows.append([
                     ButtonSpec("Plan", f"plan:{iid}"),
-                    ButtonSpec("Build", f"build:{iid}"),
+                    ButtonSpec("Build & Ship", f"build_and_ship:{iid}"),
                     ButtonSpec("Done", f"done:{iid}"),
                 ])
 

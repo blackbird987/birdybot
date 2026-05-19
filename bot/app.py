@@ -1126,8 +1126,11 @@ async def _resume_interrupted_chains(
                 # completed.  This differs from resume_autopilot_chain()
                 # which skips [0] (designed for needs_input pauses where
                 # [0] DID complete).
+                label, silent_close = store.get_chain_kwargs(session_id)
                 await workflows._run_autopilot_chain(
                     ctx, source.id, None, steps, session_id,
+                    silent_close=silent_close,
+                    chain_label=label,
                 )
             except Exception:
                 log.exception(

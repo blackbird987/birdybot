@@ -95,15 +95,15 @@ async def _exit_chain(
 # Mention text per chain-pause outcome — keeps wording consistent and ensures
 # the send_text fallback inside _notify_user is never empty.
 _CHAIN_EXIT_MESSAGES: dict[str, str] = {
-    "needs_input": "Needs your attention.",
-    "failed": "Chain failed — needs your attention.",
+    "needs_input": "⚠ Needs your attention.",
+    "failed": "⛔ Chain blocked — needs your attention.",
     "phantom_detected": (
-        "Release verifier flagged phantom claims. "
+        "⚠ Release verifier flagged phantom claims. "
         "Tap Amend to fix, or Continue to ship anyway."
     ),
-    "budget_exhausted": "Cost budget reached.",
-    "merge_failed": "Merge failed — needs resolution.",
-    "review_did_not_converge": "Plan review didn't converge — needs your attention.",
+    "budget_exhausted": "⛔ Cost budget reached.",
+    "merge_failed": "⚠ Merge conflict — tap Resolve / Retry / Discard.",
+    "review_did_not_converge": "⛔ Plan review didn't converge — needs your attention.",
 }
 
 
@@ -1472,11 +1472,15 @@ async def on_done(
         if not merged_ok:
             failure_kind = ctx.runner._last_merge_failure_kind.get(result.id)
             msg = merge_failed_banner(failure_kind)
+            # silent=False: this path has no follow-up _exit_chain mention, so
+            # the banner post itself must ping or the user never learns the
+            # merge failed (the t-4736-class invisible-rot bug).
+            lead = "⚠ Done hit a merge conflict — needs your attention.\n\n"
             try:
                 await ctx.messenger.send_text(
-                    ctx.channel_id, msg,
+                    ctx.channel_id, lead + msg,
                     buttons=merge_failed_button_specs(result.id),
-                    silent=True,
+                    silent=False,
                 )
             except Exception:
                 log.debug("Failed to send merge-failed hint", exc_info=True)
@@ -2411,8 +2415,19 @@ async def _run_autopilot_chain(
     steps: list[str],
     session_id: str | None,
     cost_budget_usd: float | None = None,
+    *,
+    silent_close: bool = False,
+    chain_label: str = "Autopilot",
 ) -> Instance | None:
-    """Execute a sequence of autopilot steps. Pauses on failure/needs_input."""
+    """Execute a sequence of autopilot steps. Pauses on failure/needs_input.
+
+    silent_close — when True, the merge step's close-conversation handshake
+    skips the participant mention (Build & Ship: ship quietly on success).
+    Default False matches loud-close autopilot behavior.
+
+    chain_label — human-readable name used to prefix outcome-varied failure
+    messages (e.g. "Build & Ship blocked at review").
+    """
     current_id = source_id
     current_msg = source_msg_id
     result: Instance | None = None
@@ -2853,10 +2868,12 @@ async def _run_autopilot_chain(
                     merge_target = _find_mergeable_instance(ctx.store, session_id)
 
                 if merge_target and merge_target.branch and merge_target.original_branch:
-                    # close_silent=False: chain-completion close should ping
-                    # the user so they see the autopilot finished.
+                    # close_silent is driven by the chain entry point:
+                    # Autopilot keeps the loud chain-completion ping; Build &
+                    # Ship opts into a silent close (the in-thread "✅
+                    # {merge_msg}" summary + tag flip carry the signal).
                     merged_ok = await _finalize_merge(
-                        ctx, merge_target, close_silent=False,
+                        ctx, merge_target, close_silent=silent_close,
                     )
                     if not merged_ok:
                         failure_kind = ctx.runner._last_merge_failure_kind.get(
@@ -2877,9 +2894,17 @@ async def _run_autopilot_chain(
                             failure_kind=failure_kind,
                         )
                         completed_steps.append(step)
+                        repo_ref = merge_target.repo_name or "repo"
+                        branch_ref = merge_target.branch or "branch"
+                        merge_suffix = (
+                            f"⚠ {chain_label} hit a merge conflict on "
+                            f"{repo_ref}:{branch_ref} — "
+                            f"tap Resolve / Retry / Discard."
+                        )
                         await _exit_chain_needs_input(
                             ctx, source_id, session_id, steps, completed_steps,
                             chain_instances, None, "merge_failed",
+                            suffix_override=merge_suffix,
                         )
                         return result
                 completed_steps.append(step)
@@ -2914,9 +2939,21 @@ async def _run_autopilot_chain(
                     except Exception:
                         pass
 
+                # Outcome-varied mention: lead with chain label + which step
+                # failed so the Discord notification preview alone tells the
+                # user what happened (phantom/needs_input keep their generic
+                # _CHAIN_EXIT_MESSAGES copy — they're already specific).
+                suffix_override: str | None = None
+                if outcome == "failed":
+                    icon = "⛔"
+                    suffix_override = (
+                        f"{icon} {chain_label} blocked at {step} — "
+                        f"needs your attention."
+                    )
                 await _exit_chain_needs_input(
                     ctx, source_id, session_id, steps, completed_steps,
                     chain_instances, result, outcome,
+                    suffix_override=suffix_override,
                 )
                 return result
 
@@ -3089,8 +3126,11 @@ async def resume_autopilot_chain(
         remaining = chain
     else:
         remaining = chain[1:] if len(chain) >= 2 else chain
+    label, silent_close = ctx.store.get_chain_kwargs(session_id)
     return await _run_autopilot_chain(
         ctx, source_id, source_msg_id, remaining, session_id,
+        silent_close=silent_close,
+        chain_label=label,
     )
 
 
@@ -3101,6 +3141,9 @@ async def _launch_chain(
     steps: list[str],
     start_from: str,
     cost_budget_usd: float | None = None,
+    *,
+    silent_close: bool = False,
+    chain_label: str = "Autopilot",
 ) -> Instance | None:
     """Shared setup for chain entry points: look up source, slice steps, dispatch."""
     source = ctx.store.get_instance(source_id)
@@ -3112,10 +3155,22 @@ async def _launch_chain(
         idx = steps.index(start_from)
     except ValueError:
         idx = 0
+    # Persist entry-point kwargs so resume paths (Continue button +
+    # `app._resume_interrupted_chains`) restore the originating chain label
+    # and silent_close preference, instead of defaulting to "Autopilot" /
+    # loud close on continuation.
+    if source.session_id:
+        ctx.store.set_chain_kwargs(
+            source.session_id,
+            label=chain_label,
+            silent_close=silent_close,
+        )
     return await _run_autopilot_chain(
         ctx, source_id, source_msg_id,
         steps[idx:], source.session_id,
         cost_budget_usd=cost_budget_usd,
+        silent_close=silent_close,
+        chain_label=chain_label,
     )
 
 
@@ -3139,10 +3194,17 @@ async def on_build_and_ship(
     source_msg_id: str | None = None,
     start_from: str = "build",
 ) -> Instance | None:
-    """Build → Review Code → Verify → Done → Merge."""
+    """Build → Review Code → Verify → Done → Merge.
+
+    Ships quietly on success (silent_close=True): the close-conversation
+    handshake skips the participant mention, while in-thread summary + tag
+    flip provide visibility. Failures still ping via _exit_chain mention.
+    """
     return await _launch_chain(
         ctx, source_id, source_msg_id,
         _BUILD_AND_SHIP_STEPS, start_from,
+        silent_close=True,
+        chain_label="Build & Ship",
     )
 
 

@@ -44,6 +44,10 @@ class StateStore:
         self._platform_state: dict[str, dict] = {}  # platform -> arbitrary state
         self._autopilot_chains: dict[str, list[str]] = {}  # session_id -> remaining steps
         self._autopilot_chain_meta: dict[str, dict] = {}  # session_id -> {status, updated_at}
+        # Chain entry-point kwargs (label + silent_close), persisted so a
+        # resumed chain (Continue button or reboot recovery) restores the
+        # originating identity rather than defaulting back to "Autopilot".
+        self._chain_kwargs: dict[str, dict] = {}  # session_id -> {label, silent_close}
         self._pending_merges: dict[str, dict] = {}  # instance_id -> pending merge metadata
         self._chain_deferred: dict[str, list[str]] = {}  # session_id -> deferred revisions
         self._chain_phases: dict[str, dict] = {}  # session_id -> ChainPhaseState dict
@@ -92,6 +96,7 @@ class StateStore:
             self._platform_state = data.get("platform_state", {})
             self._autopilot_chains = data.get("autopilot_chains", {})
             self._autopilot_chain_meta = data.get("autopilot_chain_meta", {})
+            self._chain_kwargs = data.get("chain_kwargs", {})
             # Migration: pre-meta chain queues have no status record. Drop them
             # rather than guess — a stale unmetered chain that resumes after
             # reboot is exactly the bug this field exists to prevent.
@@ -250,6 +255,7 @@ class StateStore:
             "platform_state": self._platform_state,
             "autopilot_chains": self._autopilot_chains,
             "autopilot_chain_meta": self._autopilot_chain_meta,
+            "chain_kwargs": self._chain_kwargs,
             "pending_merges": self._pending_merges,
             "chain_deferred": self._chain_deferred,
             "chain_phases": self._chain_phases,
@@ -844,7 +850,47 @@ class StateStore:
             return
         self._autopilot_chains.pop(session_id, None)
         self._autopilot_chain_meta.pop(session_id, None)
+        self._chain_kwargs.pop(session_id, None)
         self.mark_dirty()
+
+    def set_chain_kwargs(
+        self,
+        session_id: str | None,
+        *,
+        label: str,
+        silent_close: bool,
+    ) -> None:
+        """Persist chain entry-point kwargs so resume can restore them.
+
+        Written once at chain launch (see `_launch_chain` in workflows.py).
+        Resume paths read via `get_chain_kwargs` so a paused Build & Ship that
+        the user taps Continue on doesn't revert to "Autopilot" labeling and
+        loud close. Unconditional write — no chain-queue guard — because the
+        launch path writes kwargs before the chain queue exists, and
+        clear_autopilot_chain reaps both fields together so orphan kwargs
+        without a queue can't accumulate.
+        """
+        if not session_id:
+            return
+        self._chain_kwargs[session_id] = {
+            "label": label,
+            "silent_close": silent_close,
+        }
+        self.mark_dirty()
+
+    def get_chain_kwargs(
+        self, session_id: str | None,
+    ) -> tuple[str, bool]:
+        """Return (label, silent_close); falls back to Autopilot defaults."""
+        if not session_id:
+            return ("Autopilot", False)
+        data = self._chain_kwargs.get(session_id)
+        if not data:
+            return ("Autopilot", False)
+        return (
+            data.get("label", "Autopilot"),
+            bool(data.get("silent_close", False)),
+        )
 
     def get_autopilot_chain_meta(self, session_id: str | None) -> dict | None:
         """Return {status, updated_at} for a session's chain, or None."""
