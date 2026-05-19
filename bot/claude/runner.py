@@ -1594,11 +1594,31 @@ class ClaudeRunner:
                     parts.append(f"`{instance.branch}` vs `{default_branch}`:")
                     parts.append(stat)
                 else:
-                    parts.append(
-                        f"WARNING: branch `{instance.branch}` has no diff vs "
-                        f"`{default_branch}` — the work may already be merged. "
-                        f"Verify with the user before re-implementing."
-                    )
+                    # Distinguish "fresh/behind" (branch is an ancestor of
+                    # default — empty diff is expected, not a signal) from
+                    # "diverged with empty diff" (squash-merged / shipped —
+                    # the case this warning was designed for). Without this
+                    # gate every freshly created build worktree branch trips
+                    # the warning and a cautious LLM bails before touching
+                    # any files. See thread 1506256492884660256.
+                    try:
+                        anc_r = subprocess.run(
+                            ["git", "merge-base", "--is-ancestor",
+                             instance.branch, default_branch],
+                            cwd=repo, capture_output=True, text=True, **_NOWND,
+                        )
+                    except Exception:
+                        anc_r = None
+                    # Emit only on returncode 1 (diverged). Suppress on 0
+                    # (ancestor) and on any other code or subprocess failure
+                    # — conservative path that avoids re-introducing the
+                    # false positive on edge cases like a vanished ref.
+                    if anc_r is not None and anc_r.returncode == 1:
+                        parts.append(
+                            f"WARNING: branch `{instance.branch}` has no diff vs "
+                            f"`{default_branch}` — the work may already be merged. "
+                            f"Verify with the user before re-implementing."
+                        )
 
         parts.append("")
         parts.append(
