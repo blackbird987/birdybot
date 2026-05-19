@@ -3126,8 +3126,11 @@ async def resume_autopilot_chain(
         remaining = chain
     else:
         remaining = chain[1:] if len(chain) >= 2 else chain
+    label, silent_close = ctx.store.get_chain_kwargs(session_id)
     return await _run_autopilot_chain(
         ctx, source_id, source_msg_id, remaining, session_id,
+        silent_close=silent_close,
+        chain_label=label,
     )
 
 
@@ -3152,6 +3155,16 @@ async def _launch_chain(
         idx = steps.index(start_from)
     except ValueError:
         idx = 0
+    # Persist entry-point kwargs so resume paths (Continue button +
+    # `app._resume_interrupted_chains`) restore the originating chain label
+    # and silent_close preference, instead of defaulting to "Autopilot" /
+    # loud close on continuation.
+    if source.session_id:
+        ctx.store.set_chain_kwargs(
+            source.session_id,
+            label=chain_label,
+            silent_close=silent_close,
+        )
     return await _run_autopilot_chain(
         ctx, source_id, source_msg_id,
         steps[idx:], source.session_id,
