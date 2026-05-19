@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.92.51 — Suppress no-diff warning on fresh build branches (2026-05-19)
+
 - **Build child no longer pauses on a bogus "branch may already be merged" warning (t-4738).** `_build_master_context_block` in `bot/claude/runner.py` appended `WARNING: branch \`{branch}\` has no diff vs \`master\` — the work may already be merged. Verify with the user before re-implementing.` whenever `git diff --stat master...branch` came back empty. That was true for **every freshly created build worktree branch** (branch HEAD == master HEAD ⇒ empty diff), so the warning fired on every fresh build and combined with the `--- Sibling Sessions ---` block to spook the LLM into bailing before touching files — observed in t-4735 (thread 1506256492884660256) which paused 23s in saying "there's a conflict signal I need to flag before touching any files." Gated the warning on `git merge-base --is-ancestor {branch} {default_branch}`: emit only on returncode 1 (truly diverged with an empty diff — the squash-merged case the warning was designed for); suppress on returncode 0 (ancestor — covers both the fresh-spawn case and the stale-resume-no-work case where master moved on while the session was idle) and on any other returncode / subprocess exception (conservative path matches how the surrounding diff-stat call already swallows errors). Verified against a fresh ancestor branch via direct call to `_build_master_context_block` — WARNING no longer appears. Squash-merge path (returncode 1 → emit) unchanged.
 
 ## v0.92.50 — Build child restores Bash after triage clamp (2026-05-19)
