@@ -2159,6 +2159,11 @@ async def on_verify_release(
 
     if is_mismatch:
         result.needs_input = True
+        # Mark which sub-cause tripped the gate so the chain dispatcher can
+        # pick a ping headline that matches the body — "couldn't be parsed"
+        # vs "flagged phantom claims". Ephemeral field on Instance; see the
+        # _verifier_parse_failed declaration in bot/claude/types.py.
+        result._verifier_parse_failed = verifier_parse_failed
         ctx.store.update_instance(result)
 
         # Discord's text-message ceiling is 2000 chars. Cap each bullet
@@ -2941,14 +2946,24 @@ async def _run_autopilot_chain(
 
                 # Outcome-varied mention: lead with chain label + which step
                 # failed so the Discord notification preview alone tells the
-                # user what happened (phantom/needs_input keep their generic
-                # _CHAIN_EXIT_MESSAGES copy — they're already specific).
+                # user what happened. `needs_input` keeps its generic
+                # _CHAIN_EXIT_MESSAGES copy (already specific). `phantom_detected`
+                # has a parse-failed sub-case whose ping must match the body
+                # ("couldn't be parsed" rather than "flagged phantom claims").
                 suffix_override: str | None = None
                 if outcome == "failed":
                     icon = "⛔"
                     suffix_override = (
                         f"{icon} {chain_label} blocked at {step} — "
                         f"needs your attention."
+                    )
+                elif (
+                    outcome == "phantom_detected"
+                    and result._verifier_parse_failed
+                ):
+                    suffix_override = (
+                        "⚠ Release verifier output couldn't be parsed. "
+                        "Tap Amend to retry, or Continue to ship anyway."
                     )
                 await _exit_chain_needs_input(
                     ctx, source_id, session_id, steps, completed_steps,

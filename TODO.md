@@ -94,3 +94,5 @@
 - [ ] [UX/UI] Button-aware CTA wording (Medium)
 - [ ] [Reliability] Wake + smart-title rename rate-limit collision (Medium)
 - [ ] [UX/UI] Drop pipe separator from sleep name (Low)
+- [ ] [DRY/Cleanup] _intentional_kills set will be redundant after Step 2 (Medium)
+- [ ] [DRY/Cleanup] Deduplicate the three chain-exit mention sites (Medium)

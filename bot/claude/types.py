@@ -171,6 +171,13 @@ class Instance:
     # of state.json shows which parent instance launched which child thread.
     spawn_dispatched_thread_id: str | None = None
     _accounts_tried: set[str] = field(default_factory=set)  # Ephemeral: tracks accounts tried this run (not persisted)
+    # Ephemeral: True when on_verify_release fail-closed because the verifier
+    # output was unparseable (vs real phantom_bullets in the verdict). Read by
+    # the chain dispatcher to pick a ping headline that matches the body
+    # ("couldn't be parsed" vs "flagged phantom claims"). Not persisted — the
+    # chain doesn't re-enter verify_release on resume; the user clicks Amend /
+    # Continue instead.
+    _verifier_parse_failed: bool = False
 
     def display_id(self) -> str:
         if self.name:
