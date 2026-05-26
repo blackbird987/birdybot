@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## v0.92.55 — Detect "session limit" wording for auto-retry (2026-05-26)
+
+- **Usage-limit auto-retry now fires for the CLI's "You've hit your session limit" wording.** The Claude CLI changed its cap message to "You've hit your session limit · resets 1:10pm", which didn't contain the hardcoded phrase `"hit your limit"` in `parse_usage_limit` (`bot/claude/parser.py`), so the limit went undetected — `result.usage_limit_reset` stayed unset, no cooldown was scheduled, and the session just rendered a plain `FAILED` instead of queueing and auto-retrying at reset. Hardened detection: explicit phrases are now `usage limit` / `plan limit` / `session limit`, plus a catch-all regex `hit your\b[\w\s-]*\blimit` that matches any wording between "hit your" and "limit" (session, weekly, 5-hour, future copy tweaks) so a CLI wording change can't silently break auto-retry again. Added an explicit `rate limit` guard so a transient 429 is never misclassified as a subscription cap (which would wrongly schedule a long cooldown). Verified: new session message → UTC reset datetime; weekly/old/usage variants still detected; `rate limit` and unrelated errors → `None`.
+
 ## v0.92.54 — Preserve spawn color when thread sleeps (2026-05-26)
 
 - Preserve spawn-color prefix when a thread goes to sleep — sleeping threads now show `🟧 💤 | topic` instead of dropping the family color, and the boot-rebuild loop no longer strips the stacked form. `set_thread_sleeping` in `bot/discord/idle.py` and the boot normalization loop in `bot/discord/forums.py` now re-apply `spawn_colors.compose_name` on top of the sleeping base; the boot loop also logs the per-forum normalization count so the one-time first-boot rename burst is visible.

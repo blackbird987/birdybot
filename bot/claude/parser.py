@@ -386,9 +386,19 @@ def parse_usage_limit(error_text: str):
     if not error_text:
         return None
     lower = error_text.lower()
-    # Must look like a subscription usage cap (NOT a transient 429 rate limit)
-    limit_phrases = ["hit your limit", "usage limit", "plan limit"]
-    if not any(p in lower for p in limit_phrases):
+    # Must look like a subscription usage cap (NOT a transient 429 rate limit).
+    # Explicit subscription-cap phrases first.
+    limit_phrases = ["usage limit", "plan limit", "session limit"]
+    looks_like_limit = any(p in lower for p in limit_phrases)
+    # Catch-all for CLI wording tweaks: "hit your limit", "hit your session
+    # limit", "hit your weekly limit", "hit your 5-hour limit", etc. — any
+    # words may sit between "hit your" and "limit".
+    if not looks_like_limit and re.search(r'hit your\b[\w\s-]*\blimit', lower):
+        looks_like_limit = True
+    # Never treat a transient rate limit as a subscription cap.
+    if "rate limit" in lower:
+        looks_like_limit = False
+    if not looks_like_limit:
         return None
 
     now = datetime.now(timezone.utc)
