@@ -705,6 +705,7 @@ class ForumManager:
                 continue
             tag_map = {t.name: t for t in forum.available_tags}
             active_tag = tag_map.get("active")
+            normalized_count = 0
             for thread in forum.threads:
                 # Legacy migration: strip "repo│" prefix
                 if "\u2502" in thread.name:
@@ -723,7 +724,12 @@ class ForumManager:
                 # — otherwise this loop would strip live spawn colors every boot.
                 is_sleeping, topic = channels.parse_thread_name(thread.name)
                 if is_sleeping:
-                    clean_name = channels.build_sleeping_thread_name(topic)
+                    clean_name = await spawn_colors.compose_name(
+                        str(thread.id),
+                        channels.build_sleeping_thread_name(topic),
+                        proj,
+                        self._store,
+                    )
                 else:
                     clean_name = await spawn_colors.compose_name(
                         str(thread.id),
@@ -735,6 +741,7 @@ class ForumManager:
                     try:
                         await thread.edit(name=clean_name)
                         log.info("Normalized thread name: %s", thread.id)
+                        normalized_count += 1
                     except Exception:
                         log.debug("Failed to normalize thread name", exc_info=True)
                 # Clear stale "active" tag
@@ -747,6 +754,12 @@ class ForumManager:
                             log.info("Cleared stale active tag: %s", thread.id)
                         except Exception:
                             log.debug("Failed to clear stale active tag", exc_info=True)
+            if normalized_count:
+                log.info(
+                    "Normalized %d thread name(s) for forum %s",
+                    normalized_count,
+                    proj.repo_name,
+                )
 
         # Ensure control room posts exist for all repo forums
         for repo_name, proj in self._forum_projects.items():
