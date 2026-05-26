@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.92.54 — Preserve spawn color when thread sleeps (2026-05-26)
+
 - Preserve spawn-color prefix when a thread goes to sleep — sleeping threads now show `🟧 💤 | topic` instead of dropping the family color, and the boot-rebuild loop no longer strips the stacked form. `set_thread_sleeping` in `bot/discord/idle.py` and the boot normalization loop in `bot/discord/forums.py` now re-apply `spawn_colors.compose_name` on top of the sleeping base; the boot loop also logs the per-forum normalization count so the one-time first-boot rename burst is visible.
 
 ## v0.92.53 — Phantom-gate ping matches body for parse-failed verifier (2026-05-26)
