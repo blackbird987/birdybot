@@ -642,6 +642,15 @@ class ClaudeBot(discord.Client):
         self._cancel_sleep(channel_id)
         ctx = self._ctx(channel_id, session_id=session_id, repo_name=resolved_repo,
                         thread_info=info, source=source)
+        # Wire on_session_resolved so the session_id this replay produces
+        # gets registered to info.session_id. Without it, the replay's
+        # session lives only on disk (commands.py:995 only fires the
+        # callback when it's set) — the next user message then finds
+        # info.session_id still empty, starts cold, and loses the
+        # plan/context this replay just produced. Parity with every
+        # other entry point (user-message, lobby, callback, modal,
+        # slash, interactions, spawn, app-resume) which all attach.
+        self._forums.attach_session_callbacks(ctx, info, channel_id)
         # Replay bypasses the usage-limit gate: the window-end promoter already
         # classified these as queued, and "Run now" clicks have already been
         # consented to.  Re-prompting would loop.
