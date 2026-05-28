@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.92.56 — Surface AskUserQuestion questions + options (2026-05-28)
+
 - **AskUserQuestion now surfaces the actual questions + options, not just Claude's preamble.** Symptom: a session would post a wind-up like "…three design decisions genuinely change the code. Let me get your calls." and then cut off — the user never saw what the calls were. Cause: `runner.py` read `tool_input.get("question")` (singular), but the tool schema carries a `questions` array where each item holds `question`, `header`, and `options[]`. The singular key never existed, so `ask_question` was always empty, the result fell through to keeping only the assistant's preamble text, and the questions/options (which live in the tool call, not the text) were dropped. Added `format_ask_question` in `bot/claude/parser.py` to render the `questions` array into Discord-friendly text (`**question**` + `• **label** — description` bullets, blank-line separators between multiple questions, legacy singular-`question` fallback retained). `runner.py` now captures the whole tool input and appends the rendered questions to the preamble so the user sees both. Also fixed the cosmetic progress-chip label in `_tool_detail`. Verified: formatter renders a two-option ask correctly; module imports clean.
 
 ## v0.92.55 — Detect "session limit" wording for auto-retry (2026-05-26)
