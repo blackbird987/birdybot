@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.92.57 — Replay session-ID registration (2026-05-28)
+
 - **Replayed messages now register their session ID — fixes silent memory loss after usage-gate / post-reboot / drain replays.** Symptom (thread 1509546849005211658): a usage-gated message replayed 4.5h later produced a real plan, but the next user message in the thread (3h after the plan) couldn't recall any of it — q-10579 produced the plan, q-10582 started cold with a 678-char "1 user / 1 bot" prime briefing, and q-10595 then resumed q-10582 (which never had the plan). Cause: `_replay_to_thread` in `bot/discord/bot.py` built the `RequestContext` but never called `self._forums.attach_session_callbacks(ctx, info, channel_id)`, unlike every other entry point (normal user-message path, lobby route, `_replay_callback`, modal / slash / interactions / spawn / app resume). Without it, `ctx.on_session_resolved` stays `None`, so `commands.py:995` skips the registration and the session ID lives only on disk under `~/.claude/projects/...` — unreachable from `--resume` because `info.session_id` is still empty when the next message lands. This affected four code paths that funnel through `_replay_to_thread`: post-reboot resume (`dispatch_resume`), drain-queue replay at startup (`dispatch_drain_queue`), window-end auto-promotion of queued entries (`_fire_due_entries`), and the "Run now" button click (`_handle_usage_action` in `bot/discord/interactions.py`). Added the missing `attach_session_callbacks` call right after the `ctx` is built, with an inline comment explaining the regression and pointing at `commands.py:995` so future refactors don't drop it again.
 
 ## v0.92.56 — Surface AskUserQuestion questions + options (2026-05-28)
