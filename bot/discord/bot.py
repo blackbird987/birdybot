@@ -642,6 +642,12 @@ class ClaudeBot(discord.Client):
         self._cancel_sleep(channel_id)
         ctx = self._ctx(channel_id, session_id=session_id, repo_name=resolved_repo,
                         thread_info=info, source=source)
+        # Wire on_session_resolved so the session_id this run produces gets
+        # registered to info.session_id. Without this, the first run after a
+        # usage-gate / post-reboot / drain replay completes with its session
+        # only on disk — the next user message starts cold and loses the
+        # plan/context the replay just produced.
+        self._forums.attach_session_callbacks(ctx, info, channel_id)
         # Replay bypasses the usage-limit gate: the window-end promoter already
         # classified these as queued, and "Run now" clicks have already been
         # consented to.  Re-prompting would loop.
