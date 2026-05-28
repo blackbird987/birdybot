@@ -31,6 +31,7 @@ from bot.claude.parser import (
     extract_result,
     extract_summary,
     extract_usage,
+    format_ask_question,
     is_transient_error,
     iter_tool_blocks,
     last_assistant_text,
@@ -909,7 +910,7 @@ class ClaudeRunner:
 
         events: list[dict] = []
         captured_session_id: str | None = None
-        ask_question: str | None = None  # Set when AskUserQuestion detected
+        ask_question_input: dict | None = None  # Set when AskUserQuestion detected
         # Path-poisoning hits observed during streaming (Edit/Write/MultiEdit/
         # NotebookEdit targeting the main repo instead of the worktree). The
         # worktree-guard hook should be blocking these at the syscall level,
@@ -1098,17 +1099,20 @@ class ClaudeRunner:
                                 )
 
                     # Detect AskUserQuestion — Claude is blocking on stdin
-                    if ask_question is None:
+                    if ask_question_input is None:
                         for tool_name, tool_input in iter_tool_blocks(event):
                             if tool_name == "AskUserQuestion":
-                                ask_question = tool_input.get("question", "")
+                                ask_question_input = (
+                                    tool_input if isinstance(tool_input, dict) else {}
+                                )
                                 log.warning(
-                                    "AskUserQuestion detected for %s: %.100s",
-                                    instance.id, ask_question,
+                                    "AskUserQuestion detected for %s: %.150s",
+                                    instance.id,
+                                    format_ask_question(ask_question_input),
                                 )
                                 proc.terminate()
                                 break
-                        if ask_question is not None:
+                        if ask_question_input is not None:
                             break
         finally:
             if stall_check_task:
@@ -1119,7 +1123,7 @@ class ClaudeRunner:
                     pass
 
         # AskUserQuestion — wait for process to die, then return question as result
-        if ask_question is not None:
+        if ask_question_input is not None:
             try:
                 await asyncio.wait_for(proc.wait(), timeout=5)
             except asyncio.TimeoutError:
@@ -1130,8 +1134,14 @@ class ClaudeRunner:
             result.is_error = False
             if poisoning_hits:
                 result.path_poisoning = list(poisoning_hits)
-            if ask_question:
-                result.result_text = ask_question
+            # The questions + options live in the tool call, not the assistant
+            # text — append them to whatever preamble Claude wrote so the user
+            # sees both the wind-up and the actual choices.
+            formatted_q = format_ask_question(ask_question_input)
+            if formatted_q and result.result_text:
+                result.result_text = result.result_text.rstrip() + "\n\n" + formatted_q
+            elif formatted_q:
+                result.result_text = formatted_q
             elif not result.result_text:
                 result.result_text = "Claude is asking a question (text not captured)"
             if not result.session_id:

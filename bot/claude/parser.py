@@ -182,6 +182,46 @@ def last_assistant_text(events: list[dict]) -> str:
     return ""
 
 
+def format_ask_question(tool_input: dict) -> str:
+    """Render an AskUserQuestion tool input into readable text.
+
+    The tool schema carries a ``questions`` array — each item has
+    ``question``, ``header``, ``options`` (``label``/``description``) and
+    ``multiSelect``.  The questions and their options live in the tool call,
+    NOT in the assistant's text, so without rendering them here the user only
+    ever sees Claude's preamble and never the actual choices.
+
+    Falls back to a legacy singular ``question`` string if that's all present.
+    """
+    if not isinstance(tool_input, dict):
+        return ""
+    questions = tool_input.get("questions")
+    if not isinstance(questions, list):
+        legacy = tool_input.get("question", "")
+        return legacy if isinstance(legacy, str) else ""
+    blocks: list[str] = []
+    for q in questions:
+        if not isinstance(q, dict):
+            continue
+        lines: list[str] = []
+        text = q.get("question", "")
+        if text:
+            lines.append(f"**{text}**")
+        opts = q.get("options")
+        if isinstance(opts, list):
+            for opt in opts:
+                if not isinstance(opt, dict):
+                    continue
+                label = opt.get("label", "")
+                desc = opt.get("description", "")
+                if not label:
+                    continue
+                lines.append(f"• **{label}** — {desc}" if desc else f"• {label}")
+        if lines:
+            blocks.append("\n".join(lines))
+    return "\n\n".join(blocks).strip()
+
+
 def extract_result(events: list[dict]) -> RunResult:
     """Extract the final result from accumulated stream-json events.
 
@@ -541,8 +581,10 @@ def _tool_detail(tool: str, tool_input: dict) -> str:
         desc = tool_input.get("description", "")
         return f"task: {desc[:40]}" if desc else ""
     if tool == "AskUserQuestion":
-        q = tool_input.get("question", "")
-        return f"question: {q[:60]}" if q else ""
+        q = format_ask_question(tool_input)
+        first = q.splitlines()[0] if q else ""
+        first = first.replace("**", "").strip()
+        return f"question: {first[:60]}" if first else "asking a question"
     return ""
 
 
