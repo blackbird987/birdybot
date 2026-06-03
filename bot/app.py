@@ -757,6 +757,21 @@ async def run() -> None:
         ))
     scheduler.start()
 
+    # Sweep orphaned self-wake files. A wake file is consumed (deleted) at the
+    # writing turn's end (check_wake_request); any file still present at startup
+    # means that turn was cancelled/crashed before consuming it (e.g. a reboot
+    # caught it mid-finalize, before lifecycle.py's check_wake_request call). The
+    # real pending wake, if any, already lives in state.json as a Schedule, so
+    # the leftover file is a dead hand-off — drop it to keep data/wakes/ bounded.
+    try:
+        orphan_wakes = list(config.WAKE_DIR.glob("*.json"))
+        for wf in orphan_wakes:
+            wf.unlink(missing_ok=True)
+        if orphan_wakes:
+            log.info("Swept %d orphaned self-wake file(s)", len(orphan_wakes))
+    except Exception:
+        log.debug("Wake-file sweep failed", exc_info=True)
+
     # Scan for orphaned branches and worktrees across all repos
     active_branches = {inst.branch for inst in store.list_instances(all_=True) if inst.branch}
     active_worktrees = {inst.worktree_path for inst in store.list_instances(all_=True) if inst.worktree_path}
