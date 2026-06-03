@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.92.58 — Self-wake for waiting sessions (2026-06-03)
+
 ### Self-wake — sessions can re-invoke themselves instead of falsely "polling in the background"
 
 - **A session waiting on a long external job (backtest, deploy, CI) can now schedule a real wake-up instead of claiming it'll "poll in the background" and never returning.** Symptom (thread 1511317946423578807): the bot kicked off a backtest, said it would report back, then went idle — the user had to keep typing "update?" to drag each step forward. Cause: an inner Claude session is a one-shot CLI subprocess — it runs a single turn and exits, with no primitive to re-invoke itself, yet nothing in the system prompt told the model that, so it freely promised background polling it couldn't deliver. Fix has two parts:
