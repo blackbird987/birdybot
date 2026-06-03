@@ -713,6 +713,42 @@ class StateStore:
         self.save()
         return sched
 
+    def add_wake(self, prompt: str, channel_id: str, next_run_at: str,
+                 repo_name: str = "", repo_path: str = "") -> Schedule:
+        """Register a one-shot, thread-bound self-wake.
+
+        Unlike ``add_schedule`` (which spawns a fresh instance and broadcasts to
+        The Ark), a wake is pinned to ``channel_id`` and fires by resuming that
+        thread's session via ``_replay_to_thread`` — see
+        ``Scheduler._execute_schedule`` and ``check_wake_request``.
+
+        Invariant: at most one pending wake per thread. Any existing pending wake
+        for this channel is superseded so interleaved turns or a busy re-arm
+        racing an active turn can't accumulate multiple pollers. Superseded wakes
+        are deleted (not just disabled) — they're machine-generated ephemera with
+        no post-supersede value, so lingering disabled rows would bloat state.json
+        for a heavily-polling bot.
+        """
+        stale = [sid for sid, s in self._schedules.items()
+                 if s.resume_thread and s.channel_id == channel_id and s.enabled]
+        for sid in stale:
+            del self._schedules[sid]
+        self._schedule_counter += 1
+        sid = f"sch-{self._schedule_counter:03d}"
+        sched = Schedule(
+            id=sid,
+            prompt=prompt,
+            repo_name=repo_name or "",
+            repo_path=repo_path or "",
+            is_recurring=False,
+            next_run_at=next_run_at,
+            resume_thread=True,
+            channel_id=channel_id,
+        )
+        self._schedules[sid] = sched
+        self.save()
+        return sched
+
     def get_schedule(self, sid: str) -> Schedule | None:
         return self._schedules.get(sid)
 

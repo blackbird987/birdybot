@@ -1041,6 +1041,9 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
         # checks for pending reboots on idle.  Safe because check_reboot_request
         # just queues (no waiting) — the actual reboot fires from end_task.
         await lifecycle.check_reboot_request(ctx)
+        # Self-wake: schedule a thread-bound resume if this session wrote a wake
+        # file (or reset the runaway counter if it didn't).
+        await lifecycle.check_wake_request(ctx, inst)
     finally:
         ctx.runner.end_task(inst.id)
 

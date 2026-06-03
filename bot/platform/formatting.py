@@ -747,6 +747,10 @@ def format_schedule_list_md(schedules: list[Schedule]) -> str:
         elif s.run_at:
             interval = f"at {s.run_at}"
 
+        # Thread-bound self-wake (resume_thread) — distinguish from user crons.
+        if s.resume_thread:
+            interval = f"⏰ wake → <#{s.channel_id}>" if s.channel_id else "⏰ wake"
+
         next_run = ""
         if s.next_run_at:
             next_run = f" next: {s.next_run_at[:16]}"

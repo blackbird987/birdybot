@@ -266,6 +266,12 @@ class RequestContext:
     # when a genuine user-typed message arrives (source == "user_message") so
     # the cap allows a fresh orchestration loop after the user re-engages.
     reset_spawn_wave_count: Callable[[], None] | None = None
+    # Self-wake runaway-cap accessors (forum threads only; None on Telegram).
+    # Mirror the spawn-wave pattern: a per-thread counter on ThreadInfo, read/
+    # written by lifecycle.check_wake_request. bump increments and returns the
+    # new count; reset zeroes it. Used to cap an endless self-wake poll loop.
+    bump_wake_count: Callable[[], int] | None = None
+    reset_wake_count: Callable[[], None] | None = None
 
     @property
     def effective_mode(self) -> str:

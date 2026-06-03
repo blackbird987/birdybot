@@ -624,7 +624,30 @@ async def run() -> None:
                 silent=True, ttl=15,
             )
 
-    scheduler = Scheduler(store, runner, on_result=on_schedule_result)
+    # Self-wake callback — resumes a thread's session for a thread-bound wake.
+    # `discord_bot` is assigned later in this function; the closure binds it
+    # late (only ever called at runtime on the 30s tick, well after startup).
+    async def on_self_wake(channel_id: str, prompt: str) -> str:
+        if discord_bot is None:
+            return "drop"          # Discord disabled — nothing will ever resume it
+        # Not ready yet (bot still connecting / forum map not loaded). A persisted
+        # overdue wake can come due on the first tick before this is true — re-arm
+        # rather than drop it, since thread_to_project returns None for ALL
+        # channels until the map loads (indistinguishable from "thread gone").
+        if not discord_bot._ready_event.is_set() or not discord_bot._forums.forum_projects:
+            return "busy"
+        lookup = discord_bot._forums.thread_to_project(channel_id)
+        if lookup is None or not lookup[1].session_id:
+            log.info("Self-wake: thread %s gone/sessionless, dropping", channel_id)
+            return "drop"          # dead/merged/closed thread — don't resurface
+        if runner.active_instance_for_channel(channel_id):
+            return "busy"          # mid-turn — scheduler re-arms instead of colliding
+        ok = await discord_bot._replay_to_thread(channel_id, prompt, source="wake")
+        return "done" if ok else "drop"
+
+    scheduler = Scheduler(
+        store, runner, on_result=on_schedule_result, on_wake=on_self_wake,
+    )
     scheduler.recalculate_next_runs()
 
     # Background tasks
@@ -733,6 +756,21 @@ async def run() -> None:
             run_triage_service(discord_bot, stop_event),
         ))
     scheduler.start()
+
+    # Sweep orphaned self-wake files. A wake file is consumed (deleted) at the
+    # writing turn's end (check_wake_request); any file still present at startup
+    # means that turn was cancelled/crashed before consuming it (e.g. a reboot
+    # caught it mid-finalize, before lifecycle.py's check_wake_request call). The
+    # real pending wake, if any, already lives in state.json as a Schedule, so
+    # the leftover file is a dead hand-off — drop it to keep data/wakes/ bounded.
+    try:
+        orphan_wakes = list(config.WAKE_DIR.glob("*.json"))
+        for wf in orphan_wakes:
+            wf.unlink(missing_ok=True)
+        if orphan_wakes:
+            log.info("Swept %d orphaned self-wake file(s)", len(orphan_wakes))
+    except Exception:
+        log.debug("Wake-file sweep failed", exc_info=True)
 
     # Scan for orphaned branches and worktrees across all repos
     active_branches = {inst.branch for inst in store.list_instances(all_=True) if inst.branch}

@@ -24,10 +24,14 @@ class Scheduler:
         store: StateStore,
         runner: ClaudeRunner,
         on_result: Callable | None = None,
+        on_wake: Callable | None = None,
     ) -> None:
         self._store = store
         self._runner = runner
         self._on_result = on_result  # async callback(instance, result, changed)
+        # async callback(channel_id, prompt) -> str for thread-bound self-wakes;
+        # returns "busy" (re-arm), "drop"/"done" (consume). See _execute_schedule.
+        self._on_wake = on_wake
         self._task: asyncio.Task | None = None
         self._running = False
 
@@ -69,6 +73,18 @@ class Scheduler:
                 await self._execute_schedule(sched)
 
     async def _execute_schedule(self, sched: Schedule) -> None:
+        # Thread-bound self-wake: resume the originating thread's session via
+        # _replay_to_thread instead of spawning a fresh instance + Ark broadcast.
+        # Awaited inline (like the normal scheduled-task path below awaits
+        # runner.run), so wakes are processed one at a time per tick. That's an
+        # intentional tradeoff: polling re-checks are non-urgent, and inlining
+        # avoids re-firing a still-in-flight wake on the next 30s tick. It never
+        # blocks user chat — Discord message handlers run off the event loop,
+        # independent of this scheduler task.
+        if sched.resume_thread and sched.channel_id:
+            await self._fire_wake(sched)
+            return
+
         log.info("Executing schedule %s: %s", sched.id, sched.prompt[:60])
 
         # Create instance
@@ -133,6 +149,36 @@ class Scheduler:
                 await self._on_result(instance, result, changed)
             except Exception:
                 log.exception("Schedule result callback error")
+
+    async def _fire_wake(self, sched: Schedule) -> None:
+        """Fire a thread-bound self-wake via the on_wake callback.
+
+        on_wake resumes the thread's session. It returns "busy" if a turn is
+        already active there — in which case we re-arm 60s out rather than
+        interleaving with a live exchange. Any other outcome (handled, dropped,
+        or an exception) consumes the one-shot. The try/finally guarantees the
+        schedule is always settled, so a throwing callback can't leave it
+        enabled and retrying every 30s. Consumed wakes are deleted (not disabled)
+        so they don't accumulate in state.json — note the resumed turn may have
+        already superseded this row via add_wake, so delete_schedule tolerates a
+        missing id.
+        """
+        log.info("Firing self-wake %s -> thread %s", sched.id, sched.channel_id)
+        rearm = False
+        try:
+            if self._on_wake is not None:
+                outcome = await self._on_wake(sched.channel_id, sched.prompt)
+                rearm = outcome == "busy"
+        except Exception:
+            log.exception("Self-wake callback error for %s", sched.id)
+        finally:
+            if rearm:
+                sched.next_run_at = (
+                    datetime.now(timezone.utc) + timedelta(seconds=60)
+                ).isoformat()
+                self._store.update_schedule(sched)
+            else:
+                self._store.delete_schedule(sched.id)
 
     def recalculate_next_runs(self) -> None:
         """On startup, recalculate next run times from last execution."""
