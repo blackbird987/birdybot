@@ -1786,6 +1786,14 @@ class ClaudeRunner:
         # and matches the same gate in lifecycle.check_wake_request. The path is
         # absolute + per-instance so the model can write it from any cwd without
         # colliding with sibling sessions.
+        #
+        # Load-bearing dependency: the wake file lives in the bot's own DATA_DIR,
+        # outside the session's working repo. That cross-dir write only succeeds
+        # because sessions run with --permission-mode bypassPermissions
+        # (provider.py) and the worktree-guard hook is worktree-scoped (it no-ops
+        # without a worktree, and non-worktree sessions are exactly the ones that
+        # get this guidance). If either changes, wake writes from other repos
+        # would break — keep them in sync.
         if not instance.branch:
             wake_path = str(config.WAKE_DIR / f"{instance.id}.json")
             parts.append(config.WAKE_GUIDANCE.replace("__WAKE_FILE__", wake_path))
