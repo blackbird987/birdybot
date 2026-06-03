@@ -1741,6 +1741,19 @@ class ClaudeRunner:
         # Bot capability context so Claude knows what the user can do
         parts.append(config.BOT_CONTEXT)
 
+        # Spawn capability is depth-gated: a spawned (depth>=1) thread cannot
+        # spawn again (commands.py recursion cap), so telling it the full
+        # /spawn instructions just makes it propose directives that get
+        # refused. spawn_depth is stamped on the Instance (commands.py:913)
+        # before this runs, so it's reliable even for a spawned thread's
+        # first message. BOT_CONTEXT_TAIL follows so reboot/wake guidance
+        # keeps its original position.
+        if instance.spawn_depth >= 1:
+            parts.append(config.SPAWN_CAPPED_NOTICE)
+        else:
+            parts.append(config.SPAWN_CONTEXT)
+        parts.append(config.BOT_CONTEXT_TAIL)
+
         # Universal working context — workflow, Discord UI, branch model, design principles
         parts.append(config.WORKING_CONTEXT)
 

@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Spawned (depth-1) threads no longer propose `/spawn` directives they can't run.** Symptom: a sub-session would offer to spawn another session for a follow-up phase, unaware the depth-1 recursion cap (`commands.py`) refuses any `/spawn` it emits — so the directive bounced and only the resumed *parent* thread could actually spawn. Cause: the `/spawn` instructions lived inside `config.BOT_CONTEXT`, which `runner.py:_build_system_prompt` appends to *every* session unconditionally, with no depth gate. Fix: split the spawn block out of `BOT_CONTEXT` into `SPAWN_CONTEXT` (full capability) and a new `SPAWN_CAPPED_NOTICE` (states spawning is disabled here + gives a copy-ready handoff format for the parent/user to launch), plus a `BOT_CONTEXT_TAIL` so the reboot/wake guidance keeps its original prompt position. `_build_system_prompt` now appends the variant chosen by `instance.spawn_depth` (stamped on the Instance before the prompt builds, so it's correct even on a spawned thread's first message). Added `scripts/test_spawn_depth_gate.py` locking the gate against silent regressions.
+
 ## v0.92.58 — Self-wake for waiting sessions (2026-06-03)
 
 ### Self-wake — sessions can re-invoke themselves instead of falsely "polling in the background"
