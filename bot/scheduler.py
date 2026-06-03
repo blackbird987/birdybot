@@ -152,7 +152,10 @@ class Scheduler:
         interleaving with a live exchange. Any other outcome (handled, dropped,
         or an exception) consumes the one-shot. The try/finally guarantees the
         schedule is always settled, so a throwing callback can't leave it
-        enabled and retrying every 30s.
+        enabled and retrying every 30s. Consumed wakes are deleted (not disabled)
+        so they don't accumulate in state.json — note the resumed turn may have
+        already superseded this row via add_wake, so delete_schedule tolerates a
+        missing id.
         """
         log.info("Firing self-wake %s -> thread %s", sched.id, sched.channel_id)
         rearm = False
@@ -167,10 +170,9 @@ class Scheduler:
                 sched.next_run_at = (
                     datetime.now(timezone.utc) + timedelta(seconds=60)
                 ).isoformat()
+                self._store.update_schedule(sched)
             else:
-                sched.enabled = False
-                sched.next_run_at = None
-            self._store.update_schedule(sched)
+                self._store.delete_schedule(sched.id)
 
     def recalculate_next_runs(self) -> None:
         """On startup, recalculate next run times from last execution."""

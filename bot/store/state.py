@@ -724,12 +724,15 @@ class StateStore:
 
         Invariant: at most one pending wake per thread. Any existing pending wake
         for this channel is superseded so interleaved turns or a busy re-arm
-        racing an active turn can't accumulate multiple pollers.
+        racing an active turn can't accumulate multiple pollers. Superseded wakes
+        are deleted (not just disabled) — they're machine-generated ephemera with
+        no post-supersede value, so lingering disabled rows would bloat state.json
+        for a heavily-polling bot.
         """
-        for s in self._schedules.values():
-            if s.resume_thread and s.channel_id == channel_id and s.enabled:
-                s.enabled = False
-                s.next_run_at = None
+        stale = [sid for sid, s in self._schedules.items()
+                 if s.resume_thread and s.channel_id == channel_id and s.enabled]
+        for sid in stale:
+            del self._schedules[sid]
         self._schedule_counter += 1
         sid = f"sch-{self._schedule_counter:03d}"
         sched = Schedule(
