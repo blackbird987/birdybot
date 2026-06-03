@@ -192,10 +192,20 @@ DRAIN_QUEUE_FILE: Path = DATA_DIR / "drain_queue.json"
 PENDING_PROMPTS_FILE: Path = DATA_DIR / "pending_prompts.json"
 USAGE_QUEUE_FILE: Path = DATA_DIR / "usage_queue.json"
 PENDING_IMAGES_DIR: Path = DATA_DIR / "pending_images"
+# Self-wake: an inner session writes data/wakes/<instance_id>.json to have the
+# bot re-invoke it in the same thread after a delay (see WAKE_GUIDANCE). Per
+# instance-id so concurrent sessions never clobber a shared file, and absolute
+# so it works regardless of the session's cwd (worktree builds run elsewhere).
+WAKE_DIR: Path = DATA_DIR / "wakes"
+# Self-wake delay clamp and runaway cap.
+WAKE_MIN_DELAY_SECS: int = 30
+WAKE_MAX_DELAY_SECS: int = 86400          # 24h
+MAX_CONSEC_WAKES: int = 25                # stop a never-completing poll loop
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 PENDING_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+WAKE_DIR.mkdir(parents=True, exist_ok=True)
 
 # System prompt appended via --append-system-prompt
 MOBILE_HINT = (
@@ -362,6 +372,11 @@ Post-reboot verification (MANDATORY in every resume_prompt):
   3. Run a feature-specific check for whatever you just changed (e.g., `python scripts/discord_test.py read <thread_id> 3`)
   4. Report results with evidence to the user — include pass/fail, relevant log lines, and what you verified
 - If smoke_test.py reports UNHEALTHY, diagnose and fix the issue before telling the user the change is done.
+
+Continuing after your turn (IMPORTANT):
+- Your turn ENDS when you send your final message. You do NOT keep running, polling, or watching anything in the background afterward — the process exits.
+- NEVER tell the user "I'm polling in the background", "I'll report back when it's done", or "I'll keep checking" — nothing will happen and they'll be left waiting.
+- If you're waiting on a long external job (backtest, deploy, build, CI), either finish now and tell the user to reply or tap a button to get an update, OR schedule a real self-wake (see the "Continuing After Your Turn" section below, when present).
 """
 
 
@@ -816,6 +831,30 @@ short subject, then the check, imperative mood.
 - If nothing needs human verification, omit the block entirely.
 - Write items based on WHAT YOU DID THIS SESSION. Do NOT copy the \
 example items above — they are illustrative only.
+"""
+
+
+# Self-wake guidance — injected per-session (non-build origins only) with the
+# instance's absolute wake-file path substituted for __WAKE_FILE__. Lets a
+# session waiting on a long external job re-invoke ITSELF in THIS thread after a
+# delay instead of falsely promising to "poll in the background".
+WAKE_GUIDANCE = """\
+
+--- Continuing After Your Turn (self-wake) ---
+Your turn ENDS when you send your final message — you do NOT keep running or \
+polling afterward. When you're waiting on a long external job (backtest, \
+deploy, build, CI), you have two honest options:
+
+1. Finish now and tell the user to reply "update" or tap a button to check.
+2. Schedule a real self-wake: write JSON to this EXACT absolute path:
+   __WAKE_FILE__
+   {"delay_secs": 300, "prompt": "<what to do when you wake>", \
+"reason": "<short why, shown to the user>"}
+   The bot re-invokes THIS session in THIS thread after the delay with your \
+prompt. To poll, just write a fresh wake file each time you wake until the job \
+is done; stop writing it when you're done. delay_secs is clamped to \
+[30, 86400] (30s–24h). Use this instead of ever claiming you'll poll in the \
+background.
 """
 
 

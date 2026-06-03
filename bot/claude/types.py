@@ -491,6 +491,12 @@ class Schedule:
     next_run_at: str | None = None
     last_summary: str | None = None     # For smart diffing
     enabled: bool = True
+    # Self-wake (resume_thread=True): instead of spawning a fresh instance and
+    # broadcasting to The Ark, fire this schedule by resuming the session in
+    # channel_id via _replay_to_thread. Set by check_wake_request; always a
+    # one-shot (is_recurring=False).
+    resume_thread: bool = False
+    channel_id: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -506,6 +512,8 @@ class Schedule:
             "next_run_at": self.next_run_at,
             "last_summary": self.last_summary,
             "enabled": self.enabled,
+            "resume_thread": self.resume_thread,
+            "channel_id": self.channel_id,
         }
 
     @classmethod
@@ -523,4 +531,6 @@ class Schedule:
             next_run_at=d.get("next_run_at"),
             last_summary=d.get("last_summary"),
             enabled=d.get("enabled", True),
+            resume_thread=d.get("resume_thread", False),
+            channel_id=d.get("channel_id"),
         )

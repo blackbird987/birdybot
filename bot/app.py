@@ -624,7 +624,24 @@ async def run() -> None:
                 silent=True, ttl=15,
             )
 
-    scheduler = Scheduler(store, runner, on_result=on_schedule_result)
+    # Self-wake callback — resumes a thread's session for a thread-bound wake.
+    # `discord_bot` is assigned later in this function; the closure binds it
+    # late (only ever called at runtime on the 30s tick, well after startup).
+    async def on_self_wake(channel_id: str, prompt: str) -> str:
+        if discord_bot is None:
+            return "drop"
+        lookup = discord_bot._forums.thread_to_project(channel_id)
+        if lookup is None or not lookup[1].session_id:
+            log.info("Self-wake: thread %s gone/sessionless, dropping", channel_id)
+            return "drop"          # dead/merged/closed thread — don't resurface
+        if runner.active_instance_for_channel(channel_id):
+            return "busy"          # mid-turn — scheduler re-arms instead of colliding
+        ok = await discord_bot._replay_to_thread(channel_id, prompt, source="wake")
+        return "done" if ok else "drop"
+
+    scheduler = Scheduler(
+        store, runner, on_result=on_schedule_result, on_wake=on_self_wake,
+    )
     scheduler.recalculate_next_runs()
 
     # Background tasks

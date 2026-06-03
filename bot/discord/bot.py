@@ -585,6 +585,29 @@ class ClaudeBot(discord.Client):
 
         ctx.read_spawn_wave_count = _read_wave_count
         ctx.reset_spawn_wave_count = _reset_wave_count
+
+        # Self-wake runaway-cap accessors — same on-demand lookup so they track
+        # the latest state.json. bump increments + persists; reset zeroes it.
+        def _bump_wake_count() -> int:
+            lookup = _bot._forums.thread_to_project(channel_id)
+            if lookup is None:
+                return 0
+            info = lookup[1]
+            info.wake_count += 1
+            _bot._store.save()
+            return info.wake_count
+
+        def _reset_wake_count() -> None:
+            lookup = _bot._forums.thread_to_project(channel_id)
+            if lookup is None:
+                return
+            info = lookup[1]
+            if info.wake_count != 0:
+                info.wake_count = 0
+                _bot._store.save()
+
+        ctx.bump_wake_count = _bump_wake_count
+        ctx.reset_wake_count = _reset_wake_count
         return ctx
 
     # --- Delegation to extracted modules ---

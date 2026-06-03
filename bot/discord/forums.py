@@ -74,6 +74,11 @@ class ThreadInfo:
     # spawn_colors helpers. Lets the family self-heal after state loss and
     # keeps the historical color visible after the slot has been released.
     color_slot: int | None = None
+    # Self-wake runaway guard: consecutive wake-driven resumes on this thread.
+    # Incremented each time a wake fires (ctx.source == "wake"), reset to 0 on
+    # any turn that doesn't request a wake (genuine completion / human reply).
+    # Caps a never-completing poll loop at config.MAX_CONSEC_WAKES.
+    wake_count: int = 0
 
     def to_dict(self) -> dict:
         d = {
@@ -106,6 +111,8 @@ class ThreadInfo:
             d["spawn_wave_count"] = self.spawn_wave_count
         if self.color_slot is not None:
             d["color_slot"] = self.color_slot
+        if self.wake_count:
+            d["wake_count"] = self.wake_count
         return d
 
     @classmethod
@@ -128,6 +135,7 @@ class ThreadInfo:
             parent_thread_id=data.get("parent_thread_id"),
             spawn_wave_count=data.get("spawn_wave_count", 0),
             color_slot=data.get("color_slot"),
+            wake_count=data.get("wake_count", 0),
         )
 
 

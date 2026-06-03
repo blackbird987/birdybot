@@ -395,6 +395,9 @@ async def run_instance(
         # checks for pending reboots on idle.  Safe because check_reboot_request
         # just queues (no waiting) — the actual reboot fires from end_task.
         await check_reboot_request(ctx)
+        # Self-wake: convert any wake file this session wrote into a thread-bound
+        # one-shot schedule (or reset the runaway counter if none was written).
+        await check_wake_request(ctx, inst)
 
     except asyncio.CancelledError:
         # Shutdown cancelled this task. The 30s drain in app.py keeps the
@@ -1156,4 +1159,140 @@ async def check_reboot_request(ctx: RequestContext) -> None:
         "Queued reboot request (reason: %s, total pending: %d)",
         data.get("message", "reboot requested"),
         len(ctx.runner.pending_reboots()),
+    )
+
+
+def _wake_schedule_at(data: dict) -> tuple[str, int] | None:
+    """Parse a wake request's timing into (next_run_iso, clamped_delay_secs).
+
+    Accepts ``delay_secs`` (preferred) or an absolute ISO ``wake_at``. The
+    effective delay is clamped to [WAKE_MIN_DELAY_SECS, WAKE_MAX_DELAY_SECS].
+    Returns None if neither field is present/valid.
+    """
+    now = datetime.now(timezone.utc)
+    secs: int | None = None
+    if data.get("delay_secs") is not None:
+        try:
+            secs = int(float(data["delay_secs"]))
+        except (TypeError, ValueError):
+            return None
+    elif data.get("wake_at"):
+        try:
+            target = datetime.fromisoformat(str(data["wake_at"]).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if target.tzinfo is None:
+            target = target.replace(tzinfo=timezone.utc)
+        secs = int((target - now).total_seconds())
+    if secs is None:
+        return None
+    secs = max(config.WAKE_MIN_DELAY_SECS, min(secs, config.WAKE_MAX_DELAY_SECS))
+    return (now + timedelta(seconds=secs)).isoformat(), secs
+
+
+def _human_delay(secs: int) -> str:
+    if secs < 90:
+        return f"{secs}s"
+    if secs < 5400:
+        return f"{round(secs / 60)} min"
+    return f"{round(secs / 3600, 1)} h"
+
+
+async def check_wake_request(ctx: RequestContext, instance: Instance) -> None:
+    """Handle a self-wake file written by the just-finished session.
+
+    A session waiting on a long external job can write
+    ``data/wakes/<instance_id>.json`` to be re-invoked in THIS thread after a
+    delay (see config.WAKE_GUIDANCE). We convert that into a one-shot,
+    thread-bound Schedule; the Scheduler later fires it via
+    ``_replay_to_thread``. Mirrors ``check_reboot_request``'s
+    read-delete-process shape.
+
+    No wake file ⇒ the turn ended without asking to poll, so reset the runaway
+    counter (covers genuine completion and plain human replies). Worktree builds
+    can't safely self-wake — their dir may be merged/discarded by fire time — so
+    they're refused with a note (parity with the runner guidance gate).
+    """
+    path = config.WAKE_DIR / f"{instance.id}.json"
+
+    if not path.exists():
+        if ctx.reset_wake_count is not None:
+            try:
+                ctx.reset_wake_count()
+            except Exception:
+                log.debug("reset_wake_count raised", exc_info=True)
+        return
+
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except Exception:
+        log.warning("Failed to read wake request %s", path, exc_info=True)
+        path.unlink(missing_ok=True)
+        return
+    # Delete immediately so a crash/restart can't double-process it.
+    path.unlink(missing_ok=True)
+
+    async def _notice(text: str) -> None:
+        try:
+            await ctx.messenger.send_text(ctx.channel_id, text, silent=True)
+        except Exception:
+            log.debug("wake notice send failed", exc_info=True)
+
+    if instance.branch:
+        if ctx.reset_wake_count is not None:
+            try:
+                ctx.reset_wake_count()
+            except Exception:
+                pass
+        await _notice(
+            "(Can't self-wake from a build/worktree session — reply or tap a "
+            "button when you want me to continue.)"
+        )
+        return
+
+    try:
+        data = json.loads(raw)
+    except Exception:
+        log.warning("Malformed wake request, ignoring", exc_info=True)
+        return
+    if not isinstance(data, dict):
+        return
+
+    prompt = (data.get("prompt") or "").strip()
+    sched_at = _wake_schedule_at(data)
+    if not prompt or sched_at is None:
+        log.info("Wake request missing prompt or valid delay; ignoring")
+        return
+    next_run_at, secs = sched_at
+
+    # Runaway guard: every wake request bumps the per-thread counter (reset above
+    # whenever a turn ends without a wake). Cap stops an endless poll loop.
+    count = ctx.bump_wake_count() if ctx.bump_wake_count is not None else 1
+    if count > config.MAX_CONSEC_WAKES:
+        if ctx.reset_wake_count is not None:
+            try:
+                ctx.reset_wake_count()
+            except Exception:
+                pass
+        await _notice(
+            f"⏸ Stopped auto-checking after {config.MAX_CONSEC_WAKES} rounds — "
+            "reply when you want me to keep going."
+        )
+        return
+
+    ctx.store.add_wake(
+        prompt=prompt,
+        channel_id=ctx.channel_id,
+        next_run_at=next_run_at,
+        repo_name=instance.repo_name or "",
+        repo_path=instance.repo_path or "",
+    )
+    reason = (data.get("reason") or "").strip()
+    msg = f"⏰ I'll check back in ~{_human_delay(secs)}"
+    if reason:
+        msg += f" — {reason}"
+    await _notice(msg + ".")
+    log.info(
+        "Scheduled self-wake for thread %s in %ds (count=%d)",
+        ctx.channel_id, secs, count,
     )

@@ -713,6 +713,31 @@ class StateStore:
         self.save()
         return sched
 
+    def add_wake(self, prompt: str, channel_id: str, next_run_at: str,
+                 repo_name: str = "", repo_path: str = "") -> Schedule:
+        """Register a one-shot, thread-bound self-wake.
+
+        Unlike ``add_schedule`` (which spawns a fresh instance and broadcasts to
+        The Ark), a wake is pinned to ``channel_id`` and fires by resuming that
+        thread's session via ``_replay_to_thread`` — see
+        ``Scheduler._execute_schedule`` and ``check_wake_request``.
+        """
+        self._schedule_counter += 1
+        sid = f"sch-{self._schedule_counter:03d}"
+        sched = Schedule(
+            id=sid,
+            prompt=prompt,
+            repo_name=repo_name or "",
+            repo_path=repo_path or "",
+            is_recurring=False,
+            next_run_at=next_run_at,
+            resume_thread=True,
+            channel_id=channel_id,
+        )
+        self._schedules[sid] = sched
+        self.save()
+        return sched
+
     def get_schedule(self, sid: str) -> Schedule | None:
         return self._schedules.get(sid)
 
