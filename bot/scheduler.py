@@ -75,6 +75,12 @@ class Scheduler:
     async def _execute_schedule(self, sched: Schedule) -> None:
         # Thread-bound self-wake: resume the originating thread's session via
         # _replay_to_thread instead of spawning a fresh instance + Ark broadcast.
+        # Awaited inline (like the normal scheduled-task path below awaits
+        # runner.run), so wakes are processed one at a time per tick. That's an
+        # intentional tradeoff: polling re-checks are non-urgent, and inlining
+        # avoids re-firing a still-in-flight wake on the next 30s tick. It never
+        # blocks user chat — Discord message handlers run off the event loop,
+        # independent of this scheduler task.
         if sched.resume_thread and sched.channel_id:
             await self._fire_wake(sched)
             return
