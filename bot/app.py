@@ -629,7 +629,13 @@ async def run() -> None:
     # late (only ever called at runtime on the 30s tick, well after startup).
     async def on_self_wake(channel_id: str, prompt: str) -> str:
         if discord_bot is None:
-            return "drop"
+            return "drop"          # Discord disabled — nothing will ever resume it
+        # Not ready yet (bot still connecting / forum map not loaded). A persisted
+        # overdue wake can come due on the first tick before this is true — re-arm
+        # rather than drop it, since thread_to_project returns None for ALL
+        # channels until the map loads (indistinguishable from "thread gone").
+        if not discord_bot._ready_event.is_set() or not discord_bot._forums.forum_projects:
+            return "busy"
         lookup = discord_bot._forums.thread_to_project(channel_id)
         if lookup is None or not lookup[1].session_id:
             log.info("Self-wake: thread %s gone/sessionless, dropping", channel_id)

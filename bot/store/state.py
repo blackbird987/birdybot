@@ -721,7 +721,15 @@ class StateStore:
         The Ark), a wake is pinned to ``channel_id`` and fires by resuming that
         thread's session via ``_replay_to_thread`` — see
         ``Scheduler._execute_schedule`` and ``check_wake_request``.
+
+        Invariant: at most one pending wake per thread. Any existing pending wake
+        for this channel is superseded so interleaved turns or a busy re-arm
+        racing an active turn can't accumulate multiple pollers.
         """
+        for s in self._schedules.values():
+            if s.resume_thread and s.channel_id == channel_id and s.enabled:
+                s.enabled = False
+                s.next_run_at = None
         self._schedule_counter += 1
         sid = f"sch-{self._schedule_counter:03d}"
         sched = Schedule(
