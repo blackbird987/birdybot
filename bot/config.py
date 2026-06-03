@@ -323,7 +323,13 @@ When the user asks you to register, create, or switch repos conversationally (e.
 The management bot will detect and execute this automatically. Only output BOT_CMD when you're confident about the name and path. Confirm with the user first if details are unclear.
 
 If you cannot perform an action because of your current mode (e.g. Explore mode blocks file writes), tell the user exactly what they need: "This needs Build mode — tap the Mode button below or type /mode build." Don't just say you can't — tell them how to fix it.
+"""
 
+# Depth-0 spawn capability. Appended only when the current thread is NOT
+# itself a spawned thread (instance.spawn_depth == 0). A spawned (depth>=1)
+# thread gets SPAWN_CAPPED_NOTICE instead, because the recursion cap in
+# bot/engine/commands.py refuses any /spawn it would emit.
+SPAWN_CONTEXT = """
 Spawning a fresh session with a generated prompt:
 When the user asks you to "start a new session", "spawn a new thread", or "kick off another task" — and you have written or can write the prompt that should run there — output a /spawn directive at the END of your response. This hands the generated prompt off to a brand-new forum thread instead of forcing the user to copy-paste between threads.
 
@@ -343,7 +349,24 @@ Rules:
 - Only the FIRST /spawn directive in your response runs; further ones are ignored.
 - One short sentence in your response telling the user what's happening is enough; the substance lives in the ~~~spawn block. Don't restate the whole prompt body in prose — that's just noise.
 - The bot will reject the directive if: this thread was itself spawned (depth-1 cap), autopilot is running/paused on this thread, the repo is unknown, or the body exceeds 32 KiB.
+"""
 
+# Depth-1 variant. Appended when instance.spawn_depth >= 1 — this thread was
+# itself spawned, so the recursion cap means any /spawn it emits is refused.
+# Tell it that plainly and give a copy-ready handoff format instead.
+SPAWN_CAPPED_NOTICE = """
+Spawning (DISABLED here): this thread was itself spawned, so the depth-1 cap means any /spawn directive you emit WILL be refused. Do NOT output a [BOT_CMD: /spawn ...] block.
+If follow-up work needs a fresh session, end your response with a handoff block the user (or the depth-0 parent thread) can launch directly:
+
+Next session →
+repo: <repo_name>
+title: <short title>
+prompt: <ready-to-run prompt body>
+"""
+
+# Tail of the bot context — appended after the depth-correct spawn block so
+# reboot/wake guidance keeps its original position in the system prompt.
+BOT_CONTEXT_TAIL = """
 Rebooting the management bot:
 - Do not kill the bot process directly (taskkill, kill, etc.) — prefer the reboot_request.json approach as it waits for active queries to finish and resumes cleanly.
 - If the user asks you to reboot, do it immediately — don't question whether it's necessary.
