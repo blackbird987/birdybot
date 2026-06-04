@@ -396,10 +396,10 @@ Post-reboot verification (MANDATORY in every resume_prompt):
   4. Report results with evidence to the user — include pass/fail, relevant log lines, and what you verified
 - If smoke_test.py reports UNHEALTHY, diagnose and fix the issue before telling the user the change is done.
 
-Continuing after your turn (IMPORTANT):
-- Your turn ENDS when you send your final message. You do NOT keep running, polling, or watching anything in the background afterward — the process exits.
-- NEVER tell the user "I'm polling in the background", "I'll report back when it's done", or "I'll keep checking" — nothing will happen and they'll be left waiting.
-- If you're waiting on a long external job (backtest, deploy, build, CI), either finish now and tell the user to reply or tap a button to get an update, OR schedule a real self-wake (see the "Continuing After Your Turn" section below, when present).
+Continuing after your turn (CRITICAL — read before you promise to "watch" anything):
+- Your turn ENDS when you send your final message. The process EXITS. You do NOT keep running, polling, watching, or waiting afterward. NOTHING resumes you — not the deploy system, not CI, not a webhook, not a "notification". There is exactly ONE way to continue after an external event: YOU schedule a self-wake (see the self-wake section below, present for non-worktree sessions).
+- Therefore these are ALL false promises and are BANNED unless you have JUST written a wake file this turn — never say any of them: "I'm polling in the background", "I'll report back when it's done", "I'll keep checking", "I'll monitor X and update you", "I'll wait for the deploy/build/CI", "I'll get notified when it lands", "I'll trigger the next step once X finishes". Saying any of these without a wake file means the user waits forever for something that will never happen.
+- If you intend to continue after a long external job (backtest, deploy, build, CI — anything you are "waiting" on), that intent IS your cue to write a wake file NOW, before you finish. If the self-wake section below is absent (worktree build), you cannot self-wake — finish and explicitly tell the user to reply or tap a button to continue.
 """
 
 
@@ -864,20 +864,35 @@ example items above — they are illustrative only.
 WAKE_GUIDANCE = """\
 
 --- Continuing After Your Turn (self-wake) ---
-Your turn ENDS when you send your final message — you do NOT keep running or \
-polling afterward. When you're waiting on a long external job (backtest, \
-deploy, build, CI), you have two honest options:
+HARD FACT: when this turn ends your process EXITS and NOTHING resumes you — not \
+the deploy system, not CI, not a webhook, not a "notification". There is no \
+passive way to "get notified" or "be told when it's done"; that silently never \
+happens and leaves the user waiting. The ONLY way to continue after an external \
+event is to schedule a self-wake by writing the file below.
 
-1. Finish now and tell the user to reply "update" or tap a button to check.
-2. Schedule a real self-wake: write JSON to this EXACT absolute path:
+So whenever you catch yourself about to tell the user you'll "poll", "monitor", \
+"watch", "wait for", "check back on", "report back when", "get notified when", \
+or "continue once X finishes" — STOP. That sentence is your cue to write a wake \
+file RIGHT NOW, before your final message. Don't describe the intent; act on it.
+
+Write JSON to this EXACT absolute path:
    __WAKE_FILE__
-   {"delay_secs": 300, "prompt": "<what to do when you wake>", \
-"reason": "<short why, shown to the user>"}
-   The bot re-invokes THIS session in THIS thread after the delay with your \
-prompt. To poll, just write a fresh wake file each time you wake until the job \
-is done; stop writing it when you're done. delay_secs is clamped to \
-[30, 86400] (30s–24h). Use this instead of ever claiming you'll poll in the \
-background.
+   {"delay_secs": 300, "prompt": "<concrete next step when you wake — e.g. \
+'re-check whether the deploy is live; if it is, run the planned tests and \
+report the result, otherwise write a fresh wake file'>", "reason": "<short \
+why, shown to the user>"}
+
+The bot re-invokes THIS session in THIS thread after the delay with your \
+prompt — that IS how you continue; it is not optional decoration. To poll a \
+still-running job, write a fresh wake file each time you wake, and stop writing \
+it once the job is done and you've reported the result. delay_secs is clamped \
+to [30, 86400] (30s–24h) — pick a delay that fits the job (~120-300s for a \
+deploy to land, longer for a long backtest).
+
+The ONLY time you skip self-wake is when the wait is trivial or the user is \
+clearly right there — then finish now and tell them to reply "update" or tap a \
+button. Never promise to watch something passively: either self-wake, or hand \
+it back to the user explicitly.
 """
 
 
