@@ -878,8 +878,9 @@ file RIGHT NOW, before your final message. Don't describe the intent; act on it.
 Write JSON to this EXACT absolute path:
    __WAKE_FILE__
    {"delay_secs": 300, "prompt": "<concrete next step when you wake — e.g. \
-'re-check deploy v1.3.1.112; if live, run the rule 426 backtests and inspect \
-tool choices'>", "reason": "<short why, shown to the user>"}
+'re-check whether the deploy is live; if it is, run the planned tests and \
+report the result, otherwise write a fresh wake file'>", "reason": "<short \
+why, shown to the user>"}
 
 The bot re-invokes THIS session in THIS thread after the delay with your \
 prompt — that IS how you continue; it is not optional decoration. To poll a \
