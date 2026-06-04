@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.92.60 — Stronger self-wake prompt (2026-06-04)
+
 - **Strengthened self-wake prompt so the model actually schedules wakes instead of falsely promising to "poll".** Live diagnosis (thread, aiagent deploy session): the v0.92.58 self-wake mechanism was deployed and working, sessions were getting `WAKE_GUIDANCE` injected (direct/non-worktree, confirmed by reconstructing the assembled prompt), but `data/wakes/` stayed empty across the bot's entire history — the model never once wrote a wake file. It instead said *"I'll get notified when it lands"* and went idle. Root cause was prompt-side, not code: the guidance framed self-wake as an optional "option 2" and never killed the model's false belief that something would notify/resume it. Rewrote `WAKE_GUIDANCE` and the `BOT_CONTEXT` "Continuing after your turn" note in `bot/config.py` to (1) state flatly that NOTHING resumes a session — no deploy system, CI, webhook, or notification — so a wake file is the only mechanism; (2) make writing the wake file mandatory when the model intends to continue, not an option; (3) enumerate the exact trigger phrases ("I'll poll / monitor / wait for / report back when / get notified when / continue once X finishes") as the cue to write the file immediately. Prompt-only change — the verified mechanism (scheduler, `check_wake_request`, `_replay_to_thread`) is untouched. Per the "fix causes, not symptoms" rule, deliberately did NOT add a regex-on-prose detection net (that would patch the wrong LLM output instead of the upstream prompt).
 
 ## v0.92.59 — Depth-gated spawn instructions (2026-06-03)
