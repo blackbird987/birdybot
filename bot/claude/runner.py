@@ -3629,9 +3629,15 @@ class ClaudeRunner:
             attrs_dir = Path(gd) / "info"
             attrs_dir.mkdir(exist_ok=True)
             attrs_file = attrs_dir / "attributes"
-            attrs_content = attrs_file.read_text() if attrs_file.exists() else ""
+            # errors="replace": a stray non-UTF8 byte in a user's attributes
+            # file must not abort the merge — UnicodeDecodeError is a
+            # ValueError and would sail past the except below.
+            attrs_content = (
+                attrs_file.read_text(encoding="utf-8", errors="replace")
+                if attrs_file.exists() else ""
+            )
             if "CHANGELOG.md" not in attrs_content:
-                with open(attrs_file, "a") as f:
+                with open(attrs_file, "a", encoding="utf-8") as f:
                     f.write("CHANGELOG.md merge=union\n")
         except OSError:
             log.debug("Could not set up merge driver for %s", repo)
