@@ -332,6 +332,16 @@ def merge_failed_banner(failure_kind: str | None) -> str:
             "recorded in a labeled stash (see the failure detail above). "
             "Once unstuck, tap **Try Merge Again**."
         )
+    if failure_kind == "diverged":
+        # Deliberately does NOT suggest Resolve with Claude — the resolver
+        # fixes branch-vs-master conflict markers inside the worktree and
+        # never touches local-vs-origin divergence, so it can't help here.
+        return (
+            "⚠️ Auto-merge stopped before merging: local master and "
+            "origin have diverged (commits exist on both sides — see the "
+            "counts above). Nothing was changed. Run `git pull --rebase` "
+            "in the main repo to reconcile, then tap **Try Merge Again**."
+        )
     return (
         "⚠️ Auto-merge failed. Tap **Try Merge Again** to retry "
         "(useful if a parallel build just completed) or **Discard** "

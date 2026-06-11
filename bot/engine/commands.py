@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from bot import config
+from bot.claude.gitpaths import git_toplevel
 from bot.claude.types import Instance, InstanceOrigin, InstanceStatus, InstanceType, KillOutcome, merge_msg_is_failure
 from bot.engine import lifecycle, pending as pending_mod, sessions as sessions_mod, workflows
 from bot.platform.base import ButtonSpec, RequestContext, SpawnArgs
@@ -39,7 +40,7 @@ from bot.platform.formatting import (
     strip_markdown,
 )
 
-from bot.claude.runner import ClaudeRunner, _NOWND
+from bot.claude.runner import ClaudeRunner, MERGE_FAIL_DIVERGED, _NOWND
 
 log = logging.getLogger(__name__)
 
@@ -2047,14 +2048,25 @@ async def _create_repo(ctx: RequestContext, text: str) -> None:
             return
         repo_path, path_source = resolved
 
-    # --- Handle existing directory with .git ---
-    if repo_path.exists() and (repo_path / ".git").exists():
+    # --- Handle existing directory already under version control ---
+    # rev-parse (not a `.git` stat) so a path registered at a subdirectory
+    # of a larger repo is recognised instead of getting a nested `git init`,
+    # which would break the parent repo's view of those files.
+    toplevel = git_toplevel(str(repo_path)) if repo_path.exists() else None
+    if toplevel is not None:
         ctx.store.add_repo(name, str(repo_path.resolve()))
         ctx.store.switch_repo(name)
-        await ctx.messenger.send_text(
-            ctx.channel_id,
-            f"'{name}' already a git repo — registered and switched: {repo_path}",
-        )
+        # Be explicit when the path is a subdirectory of a larger repo —
+        # silent registration of e.g. a dir under an umbrella repo would
+        # surprise the user.
+        if Path(toplevel).resolve() == repo_path.resolve():
+            note = f"'{name}' already a git repo — registered and switched: {repo_path}"
+        else:
+            note = (
+                f"'{name}' is inside the git repo at {toplevel} — registered "
+                f"this subdirectory and switched: {repo_path}"
+            )
+        await ctx.messenger.send_text(ctx.channel_id, note)
         await ctx.messenger.on_repo_added(name)
         return
 
@@ -2595,6 +2607,19 @@ async def _on_resolve_merge(
     if not pending:
         await ctx.messenger.send_text(
             ctx.channel_id, "No pending merge to resolve.",
+        )
+        return
+    if pending.get("failure_kind") == MERGE_FAIL_DIVERGED:
+        # The resolver fixes branch-vs-master conflict markers inside the
+        # worktree; it never touches local-vs-origin divergence, so
+        # spawning it here is a guaranteed no-op round-trip.
+        await ctx.messenger.send_text(
+            ctx.channel_id,
+            "This failure isn't a merge conflict — local master and origin "
+            "have diverged, which the resolver can't fix. Run "
+            "`git pull --rebase` in the main repo to reconcile, then tap "
+            "Try Merge Again.",
+            buttons=merge_failed_button_specs(inst.id),
         )
         return
     if _resolver_in_flight(ctx, inst.id):

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Literal
 
 from bot import config
+from bot.claude.gitpaths import git_dir_stat
 from bot.claude.types import (
     CODE_CHANGE_TOOLS, ChainPhaseState, Instance, InstanceOrigin, InstanceStatus,
     InstanceType, PHASE_GATES, Phase, merge_msg_is_failure,
@@ -1748,7 +1749,10 @@ def _is_worktree_live(repo_path: str, worktree_path: str) -> bool:
         if not Path(worktree_path).is_dir():
             return False
         basename = Path(worktree_path).name
-        return (Path(repo_path) / ".git" / "worktrees" / basename).is_dir()
+        gd = git_dir_stat(repo_path)
+        if gd is None:
+            return False
+        return (Path(gd) / "worktrees" / basename).is_dir()
     except OSError:
         return False
 
@@ -1826,8 +1830,10 @@ def _find_recoverable_session_predecessor(
         wt_dir = Path(inst.worktree_path)
         if not wt_dir.is_dir():
             continue
+        _gd = git_dir_stat(inst.repo_path)
         meta_dir = (
-            Path(inst.repo_path) / ".git" / "worktrees" / wt_dir.name
+            Path(_gd) / "worktrees" / wt_dir.name if _gd
+            else Path(inst.repo_path) / ".git" / "worktrees" / wt_dir.name
         )
         if meta_dir.is_dir():
             continue
@@ -2681,47 +2687,58 @@ async def _run_autopilot_chain(
                             return phase_result
 
                         # Per-phase empty-diff guard: phase finished but git
-                        # HEAD didn't move. Reroute to needs_input so the user
-                        # can reply with guidance and resume the same phase —
-                        # set_phase_pause("pre") keeps the cursor consistent
-                        # with the sibling needs_input branch above.
+                        # HEAD didn't move. Two cases:
+                        #   (a) Worktree dirty → agent forgot to commit.
+                        #       Auto-commit in place and continue silently.
+                        #   (b) Worktree clean → genuinely no work done.
+                        #       Reroute to needs_input with rich halt context.
                         post_head = await _git_head(phase_result.worktree_path)
                         if pre_head and post_head and pre_head == post_head:
-                            preserved: str | None = None
-                            # Only the first phase owns the worktree lifecycle —
-                            # tear it down so Merge/Discard don't appear empty.
-                            if is_first and phase_result.branch:
-                                outcome = await ctx.runner.discard_branch(
-                                    phase_result, preserve_if_dirty=True,
-                                )
-                                preserved = outcome.preserved_branch
+                            rescued_sha = await ctx.runner.auto_commit_dirty_worktree(phase_result)
+                            if rescued_sha:
                                 ctx.store.update_instance(phase_result)
-                            halt_text, mention = _build_halted_text(
-                                header=f"Phase `{phase.id}` stopped before committing.",
-                                summary=phase_result.summary,
-                                preserved=preserved,
-                                path_poisoning=phase_result.path_poisoning,
-                                phase_label=f"Phase `{phase.id}`",
-                            )
-                            try:
-                                await ctx.messenger.send_text(
-                                    ctx.channel_id, halt_text, silent=True,
+                                log.info(
+                                    "Phase %s had no commit but dirty worktree — "
+                                    "auto-committed %s, continuing chain",
+                                    phase.id, rescued_sha[:8],
                                 )
-                            except Exception:
-                                log.exception(
-                                    "Phase halt notice failed to send for %s",
-                                    ctx.channel_id,
+                                # Fall through to post-phase gate / next phase.
+                            else:
+                                preserved: str | None = None
+                                # Only the first phase owns the worktree lifecycle —
+                                # tear it down so Merge/Discard don't appear empty.
+                                if is_first and phase_result.branch:
+                                    outcome = await ctx.runner.discard_branch(
+                                        phase_result, preserve_if_dirty=True,
+                                    )
+                                    preserved = outcome.preserved_branch
+                                    ctx.store.update_instance(phase_result)
+                                halt_text, mention = _build_halted_text(
+                                    header=f"Phase `{phase.id}` stopped before committing.",
+                                    summary=phase_result.summary,
+                                    preserved=preserved,
+                                    path_poisoning=phase_result.path_poisoning,
+                                    phase_label=f"Phase `{phase.id}`",
                                 )
-                            completed_steps.append(step)
-                            ctx.store.set_phase_pause(session_id, "pre")
-                            await _exit_chain(
-                                ctx, source_id, session_id, steps, completed_steps,
-                                chain_instances, phase_result, "needs_input",
-                                mention,
-                                clear_state=False,
-                                intervention=True,
-                            )
-                            return phase_result
+                                try:
+                                    await ctx.messenger.send_text(
+                                        ctx.channel_id, halt_text, silent=True,
+                                    )
+                                except Exception:
+                                    log.exception(
+                                        "Phase halt notice failed to send for %s",
+                                        ctx.channel_id,
+                                    )
+                                completed_steps.append(step)
+                                ctx.store.set_phase_pause(session_id, "pre")
+                                await _exit_chain(
+                                    ctx, source_id, session_id, steps, completed_steps,
+                                    chain_instances, phase_result, "needs_input",
+                                    mention,
+                                    clear_state=False,
+                                    intervention=True,
+                                )
+                                return phase_result
 
                         # Post-phase gate (risk = human review before next phase
                         # ships). Skip on the final phase — the rest of the
@@ -2972,13 +2989,19 @@ async def _run_autopilot_chain(
                 )
                 return result
 
-            # Guard: build produced no commits — halt chain.
+            # Guard: build produced no commits.
             # HEAD movement is authoritative; the prior `code_active` check
             # gave false positives because that flag inherits from session
             # siblings (lifecycle.py:441) — a build that wrote nothing in a
             # session that previously made edits would still report True.
             # Skipped for multi-phase: each phase ran its own per-phase
             # HEAD-movement check at line ~1867.
+            #
+            # Two cases when HEAD didn't move:
+            #   (a) Worktree dirty → agent wrote files but forgot to commit.
+            #       Auto-commit in place and continue the chain silently.
+            #   (b) Worktree clean → agent genuinely did nothing.
+            #       Halt the chain and surface to the user.
             if step == "build" and result and not multi_phase_ran:
                 post_build_head = await _git_head(
                     result.worktree_path or result.repo_path
@@ -2988,41 +3011,50 @@ async def _run_autopilot_chain(
                     and pre_build_head == post_build_head
                 )
                 if no_changes:
-                    preserved: str | None = None
-                    # Clean up empty branch/worktree so Merge/Discard don't appear.
-                    # preserve_if_dirty=True is the safety net: if the build
-                    # agent forgot to commit (the original "build had no
-                    # changes but the worktree is full of edits" bug), we
-                    # roll its work into a WIP commit on the branch instead
-                    # of force-removing the worktree and losing the changes.
-                    if result.branch:
-                        outcome = await ctx.runner.discard_branch(
-                            result, preserve_if_dirty=True,
-                        )
-                        preserved = outcome.preserved_branch
+                    rescued_sha = await ctx.runner.auto_commit_dirty_worktree(result)
+                    if rescued_sha:
+                        # Case (a): silent rescue — fall through to normal
+                        # chain continuation. No user-visible halt.
                         ctx.store.update_instance(result)
-                    halt_text, mention = _build_halted_text(
-                        header="Build stopped before committing.",
-                        summary=result.summary,
-                        preserved=preserved,
-                        path_poisoning=result.path_poisoning,
-                    )
-                    try:
-                        await ctx.messenger.send_text(
-                            ctx.channel_id, halt_text, silent=True,
+                        log.info(
+                            "Build %s had no commit but dirty worktree — "
+                            "auto-committed %s, continuing chain",
+                            result.id, rescued_sha[:8],
                         )
-                    except Exception:
-                        log.exception(
-                            "Empty-diff halt notice failed to send for %s",
-                            ctx.channel_id,
+                    else:
+                        # Case (b): genuinely empty build — preserve any
+                        # uncommitted edits as a WIP branch (safety net), then
+                        # halt with a rich notice routed to needs_input so the
+                        # user can reply with guidance.
+                        preserved: str | None = None
+                        if result.branch:
+                            outcome = await ctx.runner.discard_branch(
+                                result, preserve_if_dirty=True,
+                            )
+                            preserved = outcome.preserved_branch
+                            ctx.store.update_instance(result)
+                        halt_text, mention = _build_halted_text(
+                            header="Build stopped before committing.",
+                            summary=result.summary,
+                            preserved=preserved,
+                            path_poisoning=result.path_poisoning,
                         )
-                    completed_steps.append(step)
-                    await _exit_chain_needs_input(
-                        ctx, source_id, session_id, steps, completed_steps,
-                        chain_instances, result, "needs_input",
-                        suffix_override=mention,
-                    )
-                    return result
+                        try:
+                            await ctx.messenger.send_text(
+                                ctx.channel_id, halt_text, silent=True,
+                            )
+                        except Exception:
+                            log.exception(
+                                "Empty-diff halt notice failed to send for %s",
+                                ctx.channel_id,
+                            )
+                        completed_steps.append(step)
+                        await _exit_chain_needs_input(
+                            ctx, source_id, session_id, steps, completed_steps,
+                            chain_instances, result, "needs_input",
+                            suffix_override=mention,
+                        )
+                        return result
             chain_instances.append(result)
             completed_steps.append(step)
             current_id = result.id
