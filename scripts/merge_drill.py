@@ -65,6 +65,9 @@ def build_fixture(top: Path) -> Path:
     proj = top / "Proj"
     proj.mkdir()
     (proj / "app.py").write_text("VALUE = 0\n", encoding="utf-8")
+    # Non-ASCII filename: porcelain v1 C-quotes such paths, which broke the
+    # old line-based conflict parser — the -z parser must handle it.
+    (proj / "nötes.txt").write_text("base\n", encoding="utf-8")
     (proj / "CHANGELOG.md").write_text(
         "# Changelog\n\n## [Unreleased]\n", encoding="utf-8",
     )
@@ -74,6 +77,7 @@ def build_fixture(top: Path) -> Path:
     # Feature branch: change app.py and add a CHANGELOG bullet.
     git(top, "checkout", "-b", "feature")
     (proj / "app.py").write_text("VALUE = 1  # feature\n", encoding="utf-8")
+    (proj / "nötes.txt").write_text("feature\n", encoding="utf-8")
     (proj / "CHANGELOG.md").write_text(
         "# Changelog\n\n## [Unreleased]\n- feature-side entry\n",
         encoding="utf-8",
@@ -84,6 +88,7 @@ def build_fixture(top: Path) -> Path:
     # Master: conflicting change to the same line, different bullet.
     git(top, "checkout", "master")
     (proj / "app.py").write_text("VALUE = 2  # master\n", encoding="utf-8")
+    (proj / "nötes.txt").write_text("master\n", encoding="utf-8")
     (proj / "CHANGELOG.md").write_text(
         "# Changelog\n\n## [Unreleased]\n- master-side entry\n",
         encoding="utf-8",
@@ -126,19 +131,23 @@ def main() -> int:
                       "-m", "Merge feature (drill)")
         check("merge conflicts as expected", merge_r.returncode != 0)
 
-        status = git(top, "status", "--porcelain").stdout
-        conflicted = [
-            line[3:] for line in status.splitlines()
-            if line[:2] in ("UU", "AA", "DU", "UD", "DD", "AU", "UA")
-        ]
+        status = subprocess.run(
+            ["git", "status", "--porcelain", "-z"],
+            cwd=top, capture_output=True, text=True,
+            encoding="utf-8", **_NOWND,
+        ).stdout
+        conflicted = sorted(
+            e[3:] for e in status.split("\0")
+            if len(e) >= 4 and e[:2] in ("UU", "AA", "DU", "UD", "DD", "AU", "UA")
+        )
         check(
             "CHANGELOG absorbed by union driver (not conflicted)",
             "Proj/CHANGELOG.md" not in conflicted,
             f"conflicted: {conflicted}",
         )
         check(
-            "app.py is the remaining conflict",
-            conflicted == ["Proj/app.py"],
+            "app.py + non-ASCII file are the remaining conflicts",
+            conflicted == ["Proj/app.py", "Proj/nötes.txt"],
             f"conflicted: {conflicted}",
         )
 
@@ -146,7 +155,7 @@ def main() -> int:
         resolved = runner._auto_resolve_merge_conflicts(
             registered, "feature", "(drill)",
         )
-        check("auto-resolve reports success", resolved > 0,
+        check("auto-resolve reports success (both conflicts)", resolved == 2,
               f"returned {resolved}")
 
         # MERGE_HEAD is per-worktree state — resolved via git_dir, matching
@@ -158,6 +167,9 @@ def main() -> int:
         app = (top / "Proj" / "app.py").read_text(encoding="utf-8")
         check("conflict resolved to feature side", "feature" in app,
               f"content: {app!r}")
+        notes = (top / "Proj" / "nötes.txt").read_text(encoding="utf-8")
+        check("non-ASCII-named conflict resolved to feature side",
+              "feature" in notes, f"content: {notes!r}")
         changelog = (top / "Proj" / "CHANGELOG.md").read_text(encoding="utf-8")
         check(
             "CHANGELOG kept both sides' entries",

@@ -4304,17 +4304,30 @@ class ClaudeRunner:
         never once succeeded before this fix.
         """
         toplevel = git_toplevel(repo) or repo
+        # -z: NUL-separated, paths never C-quoted — porcelain v1 lines quote
+        # paths with non-ASCII/special chars, which would feed literal
+        # quotes into the pathspecs below and miss the file.  utf-8 matches
+        # git's on-disk path encoding so the round-trip survives non-ASCII.
         status_r = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=toplevel, capture_output=True, text=True, **_NOWND,
+            ["git", "status", "--porcelain", "-z"],
+            cwd=toplevel, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", **_NOWND,
         )
 
         conflicts: list[tuple[str, str]] = []
-        for line in status_r.stdout.splitlines():
-            if len(line) < 3:
+        entries = (status_r.stdout or "").split("\0")
+        i = 0
+        while i < len(entries):
+            entry = entries[i]
+            i += 1
+            if len(entry) < 4 or entry[2] != " ":
                 continue
-            code = line[:2]
-            filepath = line[3:]
+            code = entry[:2]
+            filepath = entry[3:]
+            if code[0] in ("R", "C"):
+                # Rename/copy entries carry the original path as an extra
+                # NUL field — consume it so it isn't parsed as an entry.
+                i += 1
             if code in ("UU", "AA", "DU", "UD", "DD", "AU", "UA"):
                 conflicts.append((code, filepath))
 
