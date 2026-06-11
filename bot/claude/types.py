@@ -162,6 +162,12 @@ class Instance:
     # post-run). Surfaces in the zero-diff halt notice so the user sees what
     # actually happened instead of "Build had no changes." (t-3920)
     path_poisoning: list[str] = field(default_factory=list)
+    # Finishup-nudge counter: number of corrective continuation turns already
+    # spent on this conceptual build (parent's count + 1 on the nudged child).
+    # The no-commit guard refuses to nudge an instance whose counter is >= 1,
+    # so a build that still won't commit after its one nudge falls through to
+    # the rescue → WIP-preserve → halt path instead of looping. (t-5592)
+    finishup_nudges: int = 0
     # [BOT_CMD: /spawn] — depth of this conceptual session in a spawn chain.
     # Top-level session = 0; spawned by depth-0 = 1; etc. The directive handler
     # caps recursion at depth 1 to prevent fan-out runaway.
@@ -261,6 +267,7 @@ class Instance:
             "manual_recovery_reason": self.manual_recovery_reason,
             "master_baseline_head": self.master_baseline_head,
             "path_poisoning": self.path_poisoning,
+            "finishup_nudges": self.finishup_nudges,
             "spawn_depth": self.spawn_depth,
             "spawn_dispatched_thread_id": self.spawn_dispatched_thread_id,
         }
@@ -334,6 +341,7 @@ class Instance:
             manual_recovery_reason=d.get("manual_recovery_reason"),
             master_baseline_head=d.get("master_baseline_head"),
             path_poisoning=d.get("path_poisoning", []),
+            finishup_nudges=d.get("finishup_nudges", 0),
             spawn_depth=d.get("spawn_depth", 0),
             spawn_dispatched_thread_id=d.get("spawn_dispatched_thread_id"),
         )

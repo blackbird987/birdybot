@@ -283,6 +283,99 @@ def _build_halted_text(
     return halt, mention
 
 
+async def _attempt_finishup_nudge(
+    ctx: RequestContext,
+    parent: Instance,
+    baseline_head: str | None,
+    source_msg_id: str | None,
+    phase_label: str | None = None,
+) -> tuple[Instance | None, bool]:
+    """Spawn one corrective continuation turn for a build whose HEAD didn't move.
+
+    Dominant cause (t-5592): the agent started its test suite with
+    run_in_background and ended its turn expecting to be re-invoked — but
+    headless -p processes exit with the turn, the background job dies, and
+    nothing resumes the session. This resumes the same session in the same
+    worktree once, with a self-contained corrective prompt (post-compact-safe:
+    the parent typically died near the context ceiling, so the prompt
+    re-states worktree, branch, and the parent's own final words instead of
+    relying on in-memory history). The nudged instance runs under the same
+    step label as the turn it continues — callers adopt it as the step result
+    so step-keyed logic, eval, and downstream steps see a normal build turn.
+
+    Returns (nudged, head_moved):
+      (None, False)   — no nudge attempted: counter exhausted, session/branch/
+                        worktree missing, or the spawn refused/raised. Caller
+                        falls through to the rescue/halt path on `parent`.
+      (nudged, True)  — nudge completed and HEAD moved off `baseline_head`:
+                        caller continues the chain on `nudged`.
+      (nudged, False) — a nudge turn ran but didn't converge (killed/failed/
+                        needs_input, or completed with HEAD still parked).
+                        Caller picks the exit from `nudged.status`.
+    Never raises.
+    """
+    if parent.finishup_nudges >= 1:
+        return (None, False)
+    if not (parent.session_id and parent.branch and parent.worktree_path
+            and Path(parent.worktree_path).is_dir()):
+        log.info(
+            "Finishup nudge skipped for %s: no resumable session/worktree",
+            parent.id,
+        )
+        return (None, False)
+    summary = (parent.summary or "").strip()
+    if len(summary) > 600:
+        summary = summary[:600].rsplit(" ", 1)[0] + "…"
+    # .replace, not .format — summaries routinely contain `{...}`.
+    prompt = (
+        config.FINISHUP_NUDGE_PROMPT
+        .replace("{worktree}", parent.worktree_path)
+        .replace("{branch}", parent.branch)
+        .replace("{summary}", summary or "(no final message captured)")
+    )
+    label = phase_label or "build"
+    try:
+        nudged = await spawn_from(
+            ctx, parent.id,
+            SpawnConfig(
+                instance_type=InstanceType.TASK,
+                prompt=prompt,
+                mode="build",
+                origin=InstanceOrigin.BUILD,
+                status_text=f"continuing {label} — finishing tests + commit...",
+                resume_session=True,
+                copy_branch=True,
+                silent=True,
+            ),
+            source_msg_id=source_msg_id,
+        )
+    except Exception:
+        log.exception(
+            "Finishup nudge spawn raised for %s — falling back to halt path",
+            parent.id,
+        )
+        return (None, False)
+    if not nudged:
+        log.warning(
+            "Finishup nudge spawn refused for %s — falling back to halt path",
+            parent.id,
+        )
+        return (None, False)
+    nudged.finishup_nudges = parent.finishup_nudges + 1
+    ctx.store.update_instance(nudged)
+    post_head = await _git_head(nudged.worktree_path or nudged.repo_path)
+    head_moved = bool(
+        nudged.status == InstanceStatus.COMPLETED
+        and not nudged.needs_input
+        and baseline_head and post_head and baseline_head != post_head
+    )
+    log.info(
+        "Finishup nudge for %s ran as %s (status=%s, head_moved=%s)",
+        parent.id, nudged.id, nudged.status.value, head_moved,
+    )
+    return (nudged, head_moved)
+
+
 _REVIEW_STATUS_RE = re.compile(r'```review-status\s*\n(.*?)```', re.DOTALL)
 _HIGH_PRIO_RE = re.compile(r'(?:Critical|High)\s*[·|]', re.IGNORECASE)
 _TRIAGE_RESULT_RE = re.compile(r'```triage-result\s*\n(.*?)```', re.DOTALL)
@@ -2687,13 +2780,48 @@ async def _run_autopilot_chain(
                             return phase_result
 
                         # Per-phase empty-diff guard: phase finished but git
-                        # HEAD didn't move. Two cases:
+                        # HEAD didn't move. First spend the one finishup nudge
+                        # (orphaned-background-job recovery), then:
                         #   (a) Worktree dirty → agent forgot to commit.
                         #       Auto-commit in place and continue silently.
                         #   (b) Worktree clean → genuinely no work done.
                         #       Reroute to needs_input with rich halt context.
                         post_head = await _git_head(phase_result.worktree_path)
-                        if pre_head and post_head and pre_head == post_head:
+                        head_parked = bool(
+                            pre_head and post_head and pre_head == post_head
+                        )
+                        if head_parked:
+                            # Finishup nudge first — same orphaned-background
+                            # hole as the single-build guard (see
+                            # _attempt_finishup_nudge). Each phase passes its
+                            # own per-phase baseline; on success the phase
+                            # loop continues to the next phase as normal.
+                            nudged, head_moved = await _attempt_finishup_nudge(
+                                ctx, phase_result, pre_head, current_msg,
+                                phase_label=f"phase {phase.id}",
+                            )
+                            if nudged is not None:
+                                phase_result = nudged
+                                result = nudged
+                                if (nudged.status != InstanceStatus.COMPLETED
+                                        or nudged.needs_input):
+                                    # Mirror the mid-phase failure exit: pause
+                                    # at "pre" so resume re-runs this phase.
+                                    outcome = (
+                                        "needs_input" if nudged.needs_input
+                                        else "failed"
+                                    )
+                                    ctx.store.set_phase_pause(session_id, "pre")
+                                    await _exit_chain(
+                                        ctx, source_id, session_id, steps,
+                                        completed_steps, chain_instances,
+                                        nudged, outcome,
+                                        f"Phase `{phase.id}` needs your attention.",
+                                        intervention=True,
+                                    )
+                                    return nudged
+                                head_parked = not head_moved
+                        if head_parked:
                             rescued_sha = await ctx.runner.auto_commit_dirty_worktree(phase_result)
                             if rescued_sha:
                                 ctx.store.update_instance(phase_result)
@@ -2997,7 +3125,9 @@ async def _run_autopilot_chain(
             # Skipped for multi-phase: each phase ran its own per-phase
             # HEAD-movement check at line ~1867.
             #
-            # Two cases when HEAD didn't move:
+            # When HEAD didn't move, first spend the one finishup nudge
+            # (orphaned-background-job recovery — _attempt_finishup_nudge),
+            # then fall back to the two legacy cases:
             #   (a) Worktree dirty → agent wrote files but forgot to commit.
             #       Auto-commit in place and continue the chain silently.
             #   (b) Worktree clean → agent genuinely did nothing.
@@ -3010,6 +3140,38 @@ async def _run_autopilot_chain(
                     pre_build_head and post_build_head
                     and pre_build_head == post_build_head
                 )
+                if no_changes:
+                    # Finishup nudge first: the usual cause is an orphaned
+                    # background job (t-5592 — the agent backgrounded its test
+                    # suite and ended the turn expecting to be re-invoked).
+                    # Resume the session once for a corrective foreground turn
+                    # before falling back to rescue/halt.
+                    nudged, head_moved = await _attempt_finishup_nudge(
+                        ctx, result, pre_build_head, current_msg,
+                    )
+                    if nudged is not None:
+                        result = nudged
+                        current_msg = _last_msg_id(result, ctx.platform)
+                        if (result.status != InstanceStatus.COMPLETED
+                                or result.needs_input):
+                            # Nudge turn killed/failed/asked a question —
+                            # generic step-failure exit. No rescue cycle on
+                            # top of it, no extra halt notice.
+                            outcome = (
+                                "needs_input" if result.needs_input
+                                else "failed"
+                            )
+                            suffix_override = (
+                                f"⛔ {chain_label} blocked at {step} — "
+                                f"needs your attention."
+                            ) if outcome == "failed" else None
+                            await _exit_chain_needs_input(
+                                ctx, source_id, session_id, steps,
+                                completed_steps, chain_instances, result,
+                                outcome, suffix_override=suffix_override,
+                            )
+                            return result
+                        no_changes = not head_moved
                 if no_changes:
                     rescued_sha = await ctx.runner.auto_commit_dirty_worktree(result)
                     if rescued_sha:
