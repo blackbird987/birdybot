@@ -4491,21 +4491,70 @@ class ClaudeRunner:
         worktree is clean / missing / commit failed. Used by the autopilot
         no-commits guard to silently rescue builds where the agent wrote
         files but forgot to run `git commit`, instead of halting the chain.
+
+        Runs under the per-repo lock: on t-5592 the `git status` here came
+        back clean/failing while a release chain was mutating the same
+        repo's shared gitdir — one second later the (locked) discard saw
+        the very same worktree dirty and WIP-preserved it. Lock-safety
+        audit: both call sites (the autopilot no-commit guards in
+        workflows.py) hold no repo lock themselves, and the discard_branch
+        that may follow on rescue failure acquires the lock only after
+        this helper has returned — sequential, never nested, no
+        re-entrancy hazard.
         """
         if not instance.worktree_path:
+            log.warning(
+                "auto_commit_dirty_worktree: %s has no worktree_path — "
+                "nothing to rescue", instance.id,
+            )
             return None
         wt = instance.worktree_path
         if not Path(wt).exists():
+            log.warning(
+                "auto_commit_dirty_worktree: worktree %s missing for %s — "
+                "nothing to rescue", wt, instance.id,
+            )
             return None
+        if instance.repo_path:
+            repo_lock = self._get_repo_lock(instance.repo_path)
+            async with repo_lock:
+                return await asyncio.to_thread(
+                    self._auto_commit_dirty_worktree_sync, instance,
+                )
+        log.warning(
+            "auto_commit_dirty_worktree: %s has no repo_path — rescuing "
+            "without the per-repo lock", instance.id,
+        )
         return await asyncio.to_thread(self._auto_commit_dirty_worktree_sync, instance)
 
     def _auto_commit_dirty_worktree_sync(self, instance: Instance) -> str | None:
         wt = instance.worktree_path
-        status = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=wt, capture_output=True, text=True, **_NOWND,
-        )
+        # Transient-race guard: retry once after a short pause when status
+        # fails or reports clean — t-5592's rescue bailed on exactly one of
+        # these previously-silent exits while the worktree was demonstrably
+        # dirty seconds later.
+        status = None
+        for attempt in (1, 2):
+            status = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=wt, capture_output=True, text=True, **_NOWND,
+            )
+            if status.returncode == 0 and status.stdout.strip():
+                break
+            log.warning(
+                "auto_commit_dirty_worktree: status attempt %d for %s: "
+                "rc=%d, dirty=%s, stderr=%s",
+                attempt, wt, status.returncode,
+                bool(status.stdout.strip()),
+                (status.stderr or "").strip() or "(none)",
+            )
+            if attempt == 1:
+                time.sleep(2.0)
         if status.returncode != 0 or not status.stdout.strip():
+            log.warning(
+                "auto_commit_dirty_worktree: giving up for %s — worktree "
+                "clean or status failing after retry", instance.id,
+            )
             return None
         add_r = subprocess.run(
             ["git", "add", "-A"],

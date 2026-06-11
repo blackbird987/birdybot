@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Auto-resume builds that orphan background jobs (t-5592)
+
+- **Finishup nudge: a build that ends its turn without committing now resumes itself once instead of halting on the user.** Live failure (thread 1514599073947062322): build t-5592 started its test suite with `run_in_background` and ended its turn at ~95% context saying "I'll be notified when it finishes" — headless `-p` processes exit with the turn, the background job died, and the chain halted with "⏸ Build stopped before committing" + ping. Both no-commit guards (single-build and per-phase) now route through `_attempt_finishup_nudge` (workflows.py): one corrective continuation turn via the normal spawn machinery — same session/worktree/branch and step label, own instance ID + progress card, post-compact-safe prompt (`config.FINISHUP_NUDGE_PROMPT`) that re-states worktree, branch, and the agent's own final words, and orders foreground re-runs + commit. HEAD re-checked against the caller's baseline afterwards: moved → chain continues silently; parked → existing rescue → WIP-preserve → halt. Capped at 1 via new persisted `Instance.finishup_nudges`; nudge spawn failure or a killed/failed nudge degrades to the existing failure/halt exits (no second rescue cycle, no double ping).
+- **Silent-rescue hardening (`auto_commit_dirty_worktree`).** On t-5592 the v0.93.1 rescue returned None on a worktree that `discard_branch` found dirty one second later — all three early exits were unlogged and the helper ran without the per-repo lock while a release chain mutated the same repo. It now runs under the per-repo lock (call-site audit: guards hold no lock; the follow-up discard locks only after the helper returns — never nested), logs every early exit (missing worktree_path/dir, status rc + stderr, clean tree), and retries the status check once after 2s on failure/clean.
+- **Build-prompt tightening.** `WORKFLOW_GUIDANCE["build"]` now states explicitly: never start tests/builds with `run_in_background` and then end your turn — background processes die with the turn in this headless environment; run them in the foreground and wait.
+
 ## v0.93.2 — Merge reliability: real git paths + origin sync guard (2026-06-11)
 
 ### Merge reliability — fix the repo-dir ≠ git-root root cause

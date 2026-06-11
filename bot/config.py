@@ -478,6 +478,9 @@ WORKFLOW_GUIDANCE: dict[str, str] = {
         "1. Run `git status` — if the working tree has any changes, `git add` and `git commit` them.\n"
         "2. Run `git log -1 --oneline` and confirm your new commit is on the current branch.\n"
         "3. Never claim 'committed locally' or 'implementation complete' unless step 2 shows your commit.\n"
+        "4. Never start tests or builds with run_in_background and then end your turn — "
+        "background processes die the moment your turn ends in this headless environment "
+        "(nothing notifies you, nothing resumes you). Run them in the foreground and wait.\n"
         "If the chain detects zero new commits when you finish, it will halt and your work "
         "will be rolled into a WIP commit you'll have to recover by hand — so just commit before saying done."
     ),
@@ -618,6 +621,35 @@ BUILD_FROM_PLAN_PROMPT = (
 
 BUILD_FROM_QUERY_PROMPT = (
     "Now implement the above. You have full build permissions."
+)
+
+# Finishup nudge — one corrective continuation turn for a build that ended
+# without moving HEAD, typically because it started its test suite with
+# run_in_background and ended the turn expecting to be re-invoked (t-5592:
+# headless -p processes exit with the turn; the background job dies and
+# nothing resumes the session). Post-compact-safe and self-contained: the
+# parent usually died near the context ceiling, so the prompt re-states the
+# worktree, branch, and the parent's own final words instead of relying on
+# the resumed session's in-memory history. Placeholders are substituted via
+# .replace() at the call site (fail-soft, same convention as
+# BUILD_PLAN_INJECTION_PREFIX).
+FINISHUP_NUDGE_PROMPT = (
+    "--- Build continuation (automatic) ---\n"
+    "Your previous turn ended while a job was still running in the background. "
+    "Background processes die the moment your turn ends in this environment — "
+    "nothing notifies you and nothing resumes you, so that job never finished.\n\n"
+    "Working location (verify with `pwd` before doing anything):\n"
+    "- Worktree: {worktree}\n"
+    "- Branch: {branch}\n\n"
+    "Your final message before the turn ended:\n"
+    "{summary}\n\n"
+    "Finish the build NOW, in this turn:\n"
+    "1. Re-run the unfinished work in the FOREGROUND — do NOT use "
+    "run_in_background; wait for completion synchronously.\n"
+    "2. Fix any failures it surfaces.\n"
+    "3. Commit ALL work on the current branch with a descriptive message "
+    "(`git add -A`, then `git commit`), and confirm with `git log -1 --oneline`.\n"
+    "Do not end your turn until the commit exists."
 )
 
 BUILD_PHASE_PROMPT = (
