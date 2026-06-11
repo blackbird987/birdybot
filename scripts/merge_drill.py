@@ -32,7 +32,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from bot import config  # noqa: E402
-from bot.claude.gitpaths import git_dir, git_toplevel  # noqa: E402
+from bot.claude.gitpaths import git_common_dir, git_dir, git_toplevel  # noqa: E402
 from bot.claude.runner import ClaudeRunner  # noqa: E402
 
 _NOWND: dict = config.NOWND
@@ -93,20 +93,6 @@ def build_fixture(top: Path) -> Path:
     return proj
 
 
-def install_union_driver(registered: str) -> None:
-    """Mirror merge_branch's union-driver setup (real gitdir, not
-    <registered>/.git)."""
-    gd = git_dir(registered)
-    assert gd is not None, "git_dir failed to resolve fixture repo"
-    attrs_dir = Path(gd) / "info"
-    attrs_dir.mkdir(exist_ok=True)
-    attrs_file = attrs_dir / "attributes"
-    content = attrs_file.read_text() if attrs_file.exists() else ""
-    if "CHANGELOG.md" not in content:
-        with open(attrs_file, "a") as f:
-            f.write("CHANGELOG.md merge=union\n")
-
-
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="merge_drill_") as tmp:
         top = Path(tmp) / "repo"
@@ -125,8 +111,9 @@ def main() -> int:
             not (Path(registered) / ".git").exists(),
         )
 
-        install_union_driver(registered)
-        gd = git_dir(registered)
+        # Production code path — the same setup merge_branch runs.
+        ClaudeRunner._ensure_union_merge_driver(registered)
+        gd = git_common_dir(registered)
         check(
             "union driver written to the real gitdir",
             gd is not None
@@ -162,9 +149,12 @@ def main() -> int:
         check("auto-resolve reports success", resolved > 0,
               f"returned {resolved}")
 
-        gd_path = Path(gd) if gd else top / ".git"
+        # MERGE_HEAD is per-worktree state — resolved via git_dir, matching
+        # the production MERGE_HEAD checks.
+        merge_head_dir = git_dir(registered)
         check("merge committed (no MERGE_HEAD left)",
-              not (gd_path / "MERGE_HEAD").exists())
+              merge_head_dir is not None
+              and not (Path(merge_head_dir) / "MERGE_HEAD").exists())
         app = (top / "Proj" / "app.py").read_text(encoding="utf-8")
         check("conflict resolved to feature side", "feature" in app,
               f"content: {app!r}")

@@ -38,9 +38,33 @@ def git_dir(repo: str) -> str | None:
 
     For a linked worktree this is the per-worktree gitdir
     (``.git/worktrees/<name>``), which is where MERGE_HEAD lives —
-    exactly what merge-state checks need.
+    exactly what merge-state checks need.  For *shared* paths
+    (``info/attributes``, ``worktrees/<name>`` metadata) use
+    :func:`git_common_dir` instead.
     """
     return _rev_parse(repo, "--absolute-git-dir")
+
+
+def git_common_dir(repo: str) -> str | None:
+    """Absolute common gitdir for ``repo``, or None if unresolvable.
+
+    The common dir holds state shared across all worktrees of a repo:
+    ``info/attributes``, ``worktrees/<name>/`` metadata, refs, tags.
+    Identical to :func:`git_dir` for a main repo; differs inside a
+    linked worktree.
+    """
+    out = _rev_parse(repo, "--git-common-dir")
+    if out is None:
+        return None
+    # Unlike --absolute-git-dir, --git-common-dir may print a path
+    # relative to the subprocess cwd (e.g. ".git" at the toplevel).
+    p = Path(out)
+    if not p.is_absolute():
+        try:
+            p = (Path(repo) / p).resolve()
+        except OSError:
+            return None
+    return str(p)
 
 
 def git_dir_stat(repo: str) -> str | None:

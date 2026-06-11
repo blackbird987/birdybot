@@ -2052,13 +2052,21 @@ async def _create_repo(ctx: RequestContext, text: str) -> None:
     # rev-parse (not a `.git` stat) so a path registered at a subdirectory
     # of a larger repo is recognised instead of getting a nested `git init`,
     # which would break the parent repo's view of those files.
-    if repo_path.exists() and git_toplevel(str(repo_path)) is not None:
+    toplevel = git_toplevel(str(repo_path)) if repo_path.exists() else None
+    if toplevel is not None:
         ctx.store.add_repo(name, str(repo_path.resolve()))
         ctx.store.switch_repo(name)
-        await ctx.messenger.send_text(
-            ctx.channel_id,
-            f"'{name}' already a git repo — registered and switched: {repo_path}",
-        )
+        # Be explicit when the path is a subdirectory of a larger repo —
+        # silent registration of e.g. a dir under an umbrella repo would
+        # surprise the user.
+        if Path(toplevel).resolve() == repo_path.resolve():
+            note = f"'{name}' already a git repo — registered and switched: {repo_path}"
+        else:
+            note = (
+                f"'{name}' is inside the git repo at {toplevel} — registered "
+                f"this subdirectory and switched: {repo_path}"
+            )
+        await ctx.messenger.send_text(ctx.channel_id, note)
         await ctx.messenger.on_repo_added(name)
         return
 

@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
 from bot import config
 from bot.claude.branch_utils import canonical_branch
-from bot.claude.gitpaths import git_dir, git_toplevel
+from bot.claude.gitpaths import git_common_dir, git_dir, git_toplevel
 from bot.claude.parser import (
     RunResult,
     detect_path_poisoning,
@@ -3609,6 +3609,34 @@ class ClaudeRunner:
         return None, candidate_shas
 
     @staticmethod
+    def _ensure_union_merge_driver(repo: str) -> None:
+        """Mark CHANGELOG.md ``merge=union`` in the repo's shared gitdir.
+
+        Resolves the real common gitdir — the registered repo dir may be a
+        subdirectory of the repo, where ``<repo>/.git`` does not exist and
+        writing it would create a junk dir git ignores (found literally on
+        disk in the AIAgent subdir before this fix).  Skips quietly when
+        the gitdir can't be resolved rather than mkdir-ing a fake one.
+
+        Also exercised directly by ``scripts/merge_drill.py`` so the drill
+        tests this exact code path, not a hand-mirrored copy.
+        """
+        try:
+            gd = git_common_dir(repo)
+            if gd is None:
+                log.debug("No gitdir resolvable for %s — skipping merge driver", repo)
+                return
+            attrs_dir = Path(gd) / "info"
+            attrs_dir.mkdir(exist_ok=True)
+            attrs_file = attrs_dir / "attributes"
+            attrs_content = attrs_file.read_text() if attrs_file.exists() else ""
+            if "CHANGELOG.md" not in attrs_content:
+                with open(attrs_file, "a") as f:
+                    f.write("CHANGELOG.md merge=union\n")
+        except OSError:
+            log.debug("Could not set up merge driver for %s", repo)
+
+    @staticmethod
     def _rev_count(repo: str, range_spec: str) -> int:
         """Count commits in ``range_spec`` (e.g. ``master..origin/master``).
 
@@ -3632,7 +3660,9 @@ class ClaudeRunner:
         except ValueError:
             return 0
 
-    def _stale_version_warning(self, repo: str, tag_name: str | None) -> str:
+    def _stale_version_warning(
+        self, repo: str, tag_name: str | None, branch_tip: str,
+    ) -> str:
         """Warn when the just-merged release's version trails existing tags.
 
         Build sessions mint versions from worktree-local tags, so a stale
@@ -3642,25 +3672,41 @@ class ClaudeRunner:
         below the actual latest.  Either way the user must be told —
         untagged releases have already gone missing this way (v0.92.53).
 
+        ``branch_tip`` must match the value passed to ``_tag_release_at``
+        so both walk the same commit window.
+
         Returns "" when there is nothing to warn about (no release commit
         in the window, or the version is the new maximum).
         """
         if tag_name is None:
             # Distinguish "no release commit" (fine) from "release commit
-            # present but tagging was refused" (no-clobber) by re-walking
-            # the window for a release subject.
+            # present but not tagged" by re-walking the window for a
+            # release subject.
             try:
-                window = self._release_commit_window(repo, "HEAD^2")
+                window = self._release_commit_window(repo, branch_tip)
             except Exception:
                 return ""
             for _sha, subject in window:
                 m = _RELEASE_COMMIT_RE.match(subject)
-                if m:
+                if not m:
+                    continue
+                ver_name = m.group(1)
+                # Untagged for one of two reasons — name taken (no-clobber)
+                # or tag creation failed. Tell the user which.
+                tag_exists = subprocess.run(
+                    ["git", "rev-parse", "--verify", f"refs/tags/{ver_name}"],
+                    cwd=repo, capture_output=True, text=True, **_NOWND,
+                ).returncode == 0
+                if tag_exists:
                     return (
-                        f"\n⚠️ Release commit {m.group(1)} was not tagged "
+                        f"\n⚠️ Release commit {ver_name} was not tagged "
                         f"(a tag with that name already exists elsewhere) — "
                         f"version numbering may be stale"
                     )
+                return (
+                    f"\n⚠️ Release commit {ver_name} was not tagged "
+                    f"(tag creation failed — see bot.log)"
+                )
             return ""
         ver = _parse_version_tag(tag_name)
         if ver is None:
@@ -3816,23 +3862,8 @@ class ClaudeRunner:
                     stashed = True
 
             # Set up union merge driver for changelog (prevents conflict
-            # failures).  Resolve the real gitdir — the registered repo dir
-            # may be a subdirectory of the repo, where ``<repo>/.git`` does
-            # not exist and writing it would create a junk dir git ignores.
-            try:
-                gd = git_dir(repo)
-                if gd is None:
-                    log.debug("No gitdir resolvable for %s — skipping merge driver", repo)
-                else:
-                    attrs_dir = Path(gd) / "info"
-                    attrs_dir.mkdir(exist_ok=True)
-                    attrs_file = attrs_dir / "attributes"
-                    attrs_content = attrs_file.read_text() if attrs_file.exists() else ""
-                    if "CHANGELOG.md" not in attrs_content:
-                        with open(attrs_file, "a") as f:
-                            f.write("CHANGELOG.md merge=union\n")
-            except OSError:
-                log.debug("Could not set up merge driver for %s", repo)
+            # failures).
+            self._ensure_union_merge_driver(repo)
 
             # Ensure main repo is on the correct branch before merging
             subprocess.run(
@@ -4004,7 +4035,7 @@ class ClaudeRunner:
             tag_warning = ""
             try:
                 tag_name, candidate_shas = self._tag_release_at(repo, "HEAD^2")
-                tag_warning = self._stale_version_warning(repo, tag_name)
+                tag_warning = self._stale_version_warning(repo, tag_name, "HEAD^2")
             except Exception:
                 log.exception("Tag-release step raised in %s", repo)
                 candidate_shas = []
@@ -4964,7 +4995,7 @@ class ClaudeRunner:
             wt_path = inst.worktree_path
             wt_dir = Path(wt_path)
             basename = wt_dir.name
-            _gd = git_dir(repo_path)
+            _gd = git_common_dir(repo_path)
             meta_dir = (
                 Path(_gd) / "worktrees" / basename if _gd
                 else Path(repo_path) / ".git" / "worktrees" / basename
