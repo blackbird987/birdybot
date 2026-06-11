@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.93.3 — Auto-resume builds that orphan background jobs (2026-06-11)
+
 ### Auto-resume builds that orphan background jobs (t-5592)
 
 - **Finishup nudge: a build that ends its turn without committing now resumes itself once instead of halting on the user.** Live failure (thread 1514599073947062322): build t-5592 started its test suite with `run_in_background` and ended its turn at ~95% context saying "I'll be notified when it finishes" — headless `-p` processes exit with the turn, the background job died, and the chain halted with "⏸ Build stopped before committing" + ping. Both no-commit guards (single-build and per-phase) now route through `_attempt_finishup_nudge` (workflows.py): one corrective continuation turn via the normal spawn machinery — same session/worktree/branch and step label, own instance ID + progress card, post-compact-safe prompt (`config.FINISHUP_NUDGE_PROMPT`) that re-states worktree, branch, and the agent's own final words, and orders foreground re-runs + commit. HEAD re-checked against the caller's baseline afterwards: moved → chain continues silently; parked → existing rescue → WIP-preserve → halt. Capped at 1 via new persisted `Instance.finishup_nudges`; nudge spawn failure or a killed/failed nudge degrades to the existing failure/halt exits (no second rescue cycle, no double ping).
