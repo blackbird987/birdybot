@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.93.2 — Merge reliability: real git paths + origin sync guard (2026-06-11)
+
 ### Merge reliability — fix the repo-dir ≠ git-root root cause
 
 - **Auto-resolve now actually works (was 0-for-69).** The bot assumed a registered repo dir is the git toplevel. For repos registered at a subdirectory (AIAgent at `DegenAI/AIAgent/AIAgent`, real root one level up), `git status --porcelain` returns toplevel-relative paths, so every pathspec-consuming resolve command (`checkout --theirs`, `add`, `rm`, merge-file write-back) missed with "pathspec did not match" — auto-resolve had never once succeeded (69 attempts, 0 successes, 79 failed merges in the current log). New `bot/claude/gitpaths.py` (`git_toplevel`/`git_dir`/`git_common_dir` via `rev-parse`, plus stat-only `git_dir_stat`) and `_auto_resolve_merge_conflicts` now runs everything from the real toplevel. Conflict listing also switched to `status --porcelain -z` (UTF-8) — v1 line output C-quotes non-ASCII/special paths, which would have fed literal quotes into the pathspecs.
