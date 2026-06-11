@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
 from bot import config
 from bot.claude.branch_utils import canonical_branch
+from bot.claude.gitpaths import git_dir, git_toplevel
 from bot.claude.parser import (
     RunResult,
     detect_path_poisoning,
@@ -83,6 +84,7 @@ class PrecheckResult:
 MERGE_FAIL_GENERIC = "generic_failure"
 MERGE_FAIL_ORPHANED_INDEX = "orphaned_index"
 MERGE_FAIL_RECOVERY_FAILED = "recovery_failed"
+MERGE_FAIL_DIVERGED = "diverged"
 
 
 class RebootResult(enum.Enum):
@@ -106,6 +108,16 @@ class RebootResult(enum.Enum):
 # a stacked Build chain ever balloons.
 _RELEASE_COMMIT_RE = re.compile(r'^(v\d+\.\d+\.\d+(?:\.\d+)?):\s')
 _TAG_WALKBACK_CAP = 50
+
+_VERSION_TAG_RE = re.compile(r'^v(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?$')
+
+
+def _parse_version_tag(name: str) -> tuple[int, int, int, int] | None:
+    """Parse ``vX.Y.Z[.W]`` into a comparable tuple, else None."""
+    m = _VERSION_TAG_RE.match(name)
+    if not m:
+        return None
+    return tuple(int(g) if g else 0 for g in m.groups())  # type: ignore[return-value]
 
 ProgressCallback = Callable  # async callback(message: str, detail: str)
 # Stall callback: legacy single-arg form is still accepted via TypeError
@@ -3324,8 +3336,13 @@ class ClaudeRunner:
         note when a stash was created during recovery (so merge_branch can
         surface it in the success message — no silent data creation).
         """
-        # Path A: leftover MERGE_HEAD.
-        merge_head = Path(repo) / ".git" / "MERGE_HEAD"
+        # Path A: leftover MERGE_HEAD.  The registered repo dir may be a
+        # subdirectory of the actual repo, so resolve the real gitdir.
+        gd = git_dir(repo)
+        merge_head = (
+            Path(gd) / "MERGE_HEAD" if gd
+            else Path(repo) / ".git" / "MERGE_HEAD"
+        )
         if merge_head.exists():
             log.warning(
                 "Main repo %s has leftover MERGE_HEAD — attempting cleanup", repo,
@@ -3592,6 +3609,84 @@ class ClaudeRunner:
         return None, candidate_shas
 
     @staticmethod
+    def _rev_count(repo: str, range_spec: str) -> int:
+        """Count commits in ``range_spec`` (e.g. ``master..origin/master``).
+
+        Returns 0 on any failure — including a missing remote-tracking ref
+        (branch never pushed), where "no sync information" should behave
+        like "in sync" rather than block the merge.
+        """
+        try:
+            r = subprocess.run(
+                ["git", "rev-list", "--count", range_spec],
+                cwd=repo, capture_output=True, text=True, timeout=10, **_NOWND,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            log.warning("rev-list --count %s failed in %s", range_spec, repo,
+                        exc_info=True)
+            return 0
+        if r.returncode != 0:
+            return 0
+        try:
+            return int((r.stdout or "").strip())
+        except ValueError:
+            return 0
+
+    def _stale_version_warning(self, repo: str, tag_name: str | None) -> str:
+        """Warn when the just-merged release's version trails existing tags.
+
+        Build sessions mint versions from worktree-local tags, so a stale
+        clone can produce e.g. ``v0.92.61`` after origin already shipped
+        ``v0.93.1``.  ``_tag_release_at``'s no-clobber logic then either
+        skips tagging silently (same-name tag elsewhere) or creates a tag
+        below the actual latest.  Either way the user must be told —
+        untagged releases have already gone missing this way (v0.92.53).
+
+        Returns "" when there is nothing to warn about (no release commit
+        in the window, or the version is the new maximum).
+        """
+        if tag_name is None:
+            # Distinguish "no release commit" (fine) from "release commit
+            # present but tagging was refused" (no-clobber) by re-walking
+            # the window for a release subject.
+            try:
+                window = self._release_commit_window(repo, "HEAD^2")
+            except Exception:
+                return ""
+            for _sha, subject in window:
+                m = _RELEASE_COMMIT_RE.match(subject)
+                if m:
+                    return (
+                        f"\n⚠️ Release commit {m.group(1)} was not tagged "
+                        f"(a tag with that name already exists elsewhere) — "
+                        f"version numbering may be stale"
+                    )
+            return ""
+        ver = _parse_version_tag(tag_name)
+        if ver is None:
+            return ""
+        try:
+            r = subprocess.run(
+                ["git", "tag", "-l", "v*"],
+                cwd=repo, capture_output=True, text=True, timeout=10, **_NOWND,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+        if r.returncode != 0:
+            return ""
+        newest_name, newest_ver = None, ver
+        for name in (r.stdout or "").splitlines():
+            other = _parse_version_tag(name.strip())
+            if other is not None and other > newest_ver:
+                newest_name, newest_ver = name.strip(), other
+        if newest_name is not None:
+            return (
+                f"\n⚠️ Release {tag_name} is below existing {newest_name} — "
+                f"version numbering may be stale"
+            )
+        return ""
+
+    @staticmethod
     def _classify_post_abort_state(repo: str) -> str:
         """Classify a merge failure AFTER ``git merge --abort`` has run.
 
@@ -3720,15 +3815,22 @@ class ClaudeRunner:
                 if stash_r.returncode == 0:
                     stashed = True
 
-            # Set up union merge driver for changelog (prevents conflict failures)
+            # Set up union merge driver for changelog (prevents conflict
+            # failures).  Resolve the real gitdir — the registered repo dir
+            # may be a subdirectory of the repo, where ``<repo>/.git`` does
+            # not exist and writing it would create a junk dir git ignores.
             try:
-                attrs_dir = Path(repo) / ".git" / "info"
-                attrs_dir.mkdir(parents=True, exist_ok=True)
-                attrs_file = attrs_dir / "attributes"
-                attrs_content = attrs_file.read_text() if attrs_file.exists() else ""
-                if "CHANGELOG.md" not in attrs_content:
-                    with open(attrs_file, "a") as f:
-                        f.write("CHANGELOG.md merge=union\n")
+                gd = git_dir(repo)
+                if gd is None:
+                    log.debug("No gitdir resolvable for %s — skipping merge driver", repo)
+                else:
+                    attrs_dir = Path(gd) / "info"
+                    attrs_dir.mkdir(exist_ok=True)
+                    attrs_file = attrs_dir / "attributes"
+                    attrs_content = attrs_file.read_text() if attrs_file.exists() else ""
+                    if "CHANGELOG.md" not in attrs_content:
+                        with open(attrs_file, "a") as f:
+                            f.write("CHANGELOG.md merge=union\n")
             except OSError:
                 log.debug("Could not set up merge driver for %s", repo)
 
@@ -3737,6 +3839,82 @@ class ClaudeRunner:
                 ["git", "checkout", target],
                 cwd=repo, capture_output=True, text=True, check=True, **_NOWND,
             )
+
+            # Sync target with origin before merging: releases can land on
+            # origin from another machine first, and merging/tagging against
+            # a stale local target mints versions below the remote's.
+            # Offline-tolerant — a failed fetch degrades to a local merge
+            # with a visible note rather than blocking.
+            sync_note = ""
+            has_remote = subprocess.run(
+                ["git", "remote", "get-url", "origin"],
+                cwd=repo, capture_output=True, text=True, **_NOWND,
+            ).returncode == 0
+            if has_remote:
+                fetch_err: str | None = None
+                try:
+                    fetch_r = subprocess.run(
+                        ["git", "fetch", "origin", "--tags", "--prune"],
+                        cwd=repo, capture_output=True, text=True,
+                        timeout=30, **_NOWND,
+                    )
+                    if fetch_r.returncode != 0:
+                        fetch_err = (fetch_r.stderr or fetch_r.stdout or "").strip()
+                except subprocess.TimeoutExpired:
+                    fetch_err = "timed out (30s)"
+                except Exception as e:
+                    fetch_err = f"{type(e).__name__}"
+                if fetch_err is not None:
+                    log.warning("Fetch origin failed in %s before merge: %s",
+                                repo, fetch_err)
+                    sync_note = (
+                        "\n⚠️ Could not sync with origin — merged against local state"
+                    )
+                else:
+                    ahead = self._rev_count(repo, f"origin/{target}..{target}")
+                    behind = self._rev_count(repo, f"{target}..origin/{target}")
+                    if ahead and behind:
+                        # Local target and origin have diverged — merging
+                        # now would build on a history origin rejects.
+                        self._last_merge_failure_kind[instance.id] = (
+                            MERGE_FAIL_DIVERGED
+                        )
+                        log.error(
+                            "Local %s and origin/%s diverged in %s "
+                            "(+%d local / +%d remote) — aborting merge",
+                            target, target, repo, ahead, behind,
+                        )
+                        stash_status = self._restore_stash(repo) if stashed else ""
+                        recovery_suffix = (
+                            f"\n{recovery_note}" if recovery_note else ""
+                        )
+                        return (
+                            f"Merge failed: local {target} and origin/{target} "
+                            f"have diverged (+{ahead} local / +{behind} remote). "
+                            f"Run `git pull --rebase` in the main repo, then "
+                            f"Try Merge Again."
+                            f"{stash_status}{recovery_suffix}"
+                        )
+                    if behind and not ahead:
+                        ff_r = subprocess.run(
+                            ["git", "merge", "--ff-only", f"origin/{target}"],
+                            cwd=repo, capture_output=True, text=True, **_NOWND,
+                        )
+                        if ff_r.returncode != 0:
+                            ff_detail = (ff_r.stderr or ff_r.stdout or "").strip()
+                            log.warning(
+                                "Fast-forward of %s to origin failed in %s: %s",
+                                target, repo, ff_detail,
+                            )
+                            sync_note = (
+                                "\n⚠️ Could not fast-forward to origin — "
+                                "merged against local state"
+                            )
+                        else:
+                            log.info(
+                                "Fast-forwarded %s to origin/%s (+%d) in %s",
+                                target, target, behind, repo,
+                            )
 
             # Merge the worktree's branch.  No -X ours: real conflicts
             # surface and flow through _auto_resolve_merge_conflicts, which
@@ -3823,21 +4001,18 @@ class ClaudeRunner:
             # release commit. Wrapped in defense-in-depth so a future bug
             # in the helper can't poison the merge push path.
             candidate_shas: list[str] = []
+            tag_warning = ""
             try:
-                _, candidate_shas = self._tag_release_at(repo, "HEAD^2")
+                tag_name, candidate_shas = self._tag_release_at(repo, "HEAD^2")
+                tag_warning = self._stale_version_warning(repo, tag_name)
             except Exception:
                 log.exception("Tag-release step raised in %s", repo)
                 candidate_shas = []
 
-            # Push merged result to origin
+            # Push merged result to origin.  `has_remote` was probed by the
+            # pre-merge sync block above.
             push_note = ""
             try:
-                # Check if remote exists before attempting push
-                has_remote = subprocess.run(
-                    ["git", "remote", "get-url", "origin"],
-                    cwd=repo, capture_output=True, text=True, **_NOWND,
-                ).returncode == 0
-
                 if not has_remote:
                     log.info("No remote 'origin' in %s — skipping push", repo)
                     push_note = "\nℹ️ No remote configured — local merge is fine"
@@ -3926,8 +4101,8 @@ class ClaudeRunner:
             # mutate the user's main repo without telling them.
             recovery_suffix = f"\n{recovery_note}" if recovery_note else ""
             return (
-                f"Merged into {target}{suffix}{dirty_note}{push_note}"
-                f"{stash_status}{recovery_suffix}"
+                f"Merged into {target}{suffix}{dirty_note}{sync_note}"
+                f"{tag_warning}{push_note}{stash_status}{recovery_suffix}"
             )
         except subprocess.CalledProcessError as e:
             # Abort any in-progress merge to keep main repo clean for other sessions
@@ -3954,7 +4129,12 @@ class ClaudeRunner:
             # later session's view of the repo. Catch-all unconditional
             # cleanup. Idempotent — `git merge --abort` is a no-op when no
             # merge is active.
-            if not merge_succeeded and (Path(repo) / ".git" / "MERGE_HEAD").exists():
+            _gd = git_dir(repo)
+            _merge_head = (
+                Path(_gd) / "MERGE_HEAD" if _gd
+                else Path(repo) / ".git" / "MERGE_HEAD"
+            )
+            if not merge_succeeded and _merge_head.exists():
                 try:
                     subprocess.run(
                         ["git", "merge", "--abort"],
@@ -4085,10 +4265,17 @@ class ClaudeRunner:
         For UU (both-modified) files, attempts a three-way merge-file first
         to preserve both sides' changes. Falls back to --theirs for remaining
         conflicts. Returns number of resolved files, or -1 on failure.
+
+        All pathspec-consuming commands run from the git toplevel, NOT the
+        registered repo dir: ``status --porcelain`` paths are
+        toplevel-relative, so resolving them from a subdirectory-registered
+        repo missed every file ("pathspec did not match") and auto-resolve
+        never once succeeded before this fix.
         """
+        toplevel = git_toplevel(repo) or repo
         status_r = subprocess.run(
             ["git", "status", "--porcelain"],
-            cwd=repo, capture_output=True, text=True, **_NOWND,
+            cwd=toplevel, capture_output=True, text=True, **_NOWND,
         )
 
         conflicts: list[tuple[str, str]] = []
@@ -4114,7 +4301,7 @@ class ClaudeRunner:
                 # Feature branch deleted — accept deletion
                 r = subprocess.run(
                     ["git", "rm", "--", filepath],
-                    cwd=repo, capture_output=True, text=True, **_NOWND,
+                    cwd=toplevel, capture_output=True, text=True, **_NOWND,
                 )
                 if r.returncode != 0:
                     log.warning("git rm failed for %s: %s",
@@ -4122,18 +4309,18 @@ class ClaudeRunner:
                     return -1
             elif code == "UU":
                 # Both modified — try three-way merge-file to keep both sides
-                if not self._try_merge_file(repo, filepath):
+                if not self._try_merge_file(toplevel, filepath):
                     # Fallback: accept feature branch version
-                    if not self._checkout_theirs(repo, filepath):
+                    if not self._checkout_theirs(toplevel, filepath):
                         return -1
             else:
                 # AA, AU, UA, DU — accept feature branch version
-                if not self._checkout_theirs(repo, filepath):
+                if not self._checkout_theirs(toplevel, filepath):
                     return -1
 
         commit_r = subprocess.run(
             ["git", "commit", "--no-edit"],
-            cwd=repo, capture_output=True, text=True, **_NOWND,
+            cwd=toplevel, capture_output=True, text=True, **_NOWND,
         )
         if commit_r.returncode != 0:
             log.warning("Failed to commit auto-resolved merge for %s: %s",
@@ -4143,11 +4330,14 @@ class ClaudeRunner:
         log.info("Auto-resolved merge for %s completed successfully", branch)
         return len(conflicts)
 
-    def _try_merge_file(self, repo: str, filepath: str) -> bool:
+    def _try_merge_file(self, toplevel: str, filepath: str) -> bool:
         """Attempt three-way merge-file for a UU conflict.
 
         Extracts base/ours/theirs from index stages, runs git merge-file,
         and writes the result back if successful. Returns True on success.
+
+        ``toplevel`` must be the git working-tree root — ``filepath`` comes
+        from porcelain output and is toplevel-relative.
         """
         tmp_base = tmp_ours = tmp_theirs = None
         try:
@@ -4171,7 +4361,7 @@ class ClaudeRunner:
             for ref, dest in stages:
                 r = subprocess.run(
                     ["git", "show", ref],
-                    cwd=repo, capture_output=True, **_NOWND,
+                    cwd=toplevel, capture_output=True, **_NOWND,
                 )
                 if r.returncode != 0:
                     log.debug("Could not extract %s for merge-file", ref)
@@ -4192,11 +4382,11 @@ class ClaudeRunner:
 
             if mf.returncode == 0:
                 # Clean merge — write result back
-                target = Path(repo) / filepath
+                target = Path(toplevel) / filepath
                 target.write_bytes(mf.stdout)
                 subprocess.run(
                     ["git", "add", "--", filepath],
-                    cwd=repo, capture_output=True, text=True, **_NOWND,
+                    cwd=toplevel, capture_output=True, text=True, **_NOWND,
                 )
                 log.info("merge-file resolved %s cleanly", filepath)
                 return True
@@ -4216,11 +4406,15 @@ class ClaudeRunner:
                     except OSError:
                         pass
 
-    def _checkout_theirs(self, repo: str, filepath: str) -> bool:
-        """Resolve a conflict by accepting the feature branch version."""
+    def _checkout_theirs(self, toplevel: str, filepath: str) -> bool:
+        """Resolve a conflict by accepting the feature branch version.
+
+        ``toplevel`` must be the git working-tree root — ``filepath`` is
+        toplevel-relative porcelain output.
+        """
         r1 = subprocess.run(
             ["git", "checkout", "--theirs", "--", filepath],
-            cwd=repo, capture_output=True, text=True, **_NOWND,
+            cwd=toplevel, capture_output=True, text=True, **_NOWND,
         )
         if r1.returncode != 0:
             log.warning("checkout --theirs failed for %s: %s",
@@ -4228,7 +4422,7 @@ class ClaudeRunner:
             return False
         r2 = subprocess.run(
             ["git", "add", "--", filepath],
-            cwd=repo, capture_output=True, text=True, **_NOWND,
+            cwd=toplevel, capture_output=True, text=True, **_NOWND,
         )
         if r2.returncode != 0:
             log.warning("git add failed for %s: %s",
@@ -4770,7 +4964,11 @@ class ClaudeRunner:
             wt_path = inst.worktree_path
             wt_dir = Path(wt_path)
             basename = wt_dir.name
-            meta_dir = Path(repo_path) / ".git" / "worktrees" / basename
+            _gd = git_dir(repo_path)
+            meta_dir = (
+                Path(_gd) / "worktrees" / basename if _gd
+                else Path(repo_path) / ".git" / "worktrees" / basename
+            )
             # Metadata present? Nothing to recover.
             if meta_dir.is_dir():
                 continue

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Literal
 
 from bot import config
+from bot.claude.gitpaths import git_dir_stat
 from bot.claude.types import (
     CODE_CHANGE_TOOLS, ChainPhaseState, Instance, InstanceOrigin, InstanceStatus,
     InstanceType, PHASE_GATES, Phase, merge_msg_is_failure,
@@ -1748,7 +1749,10 @@ def _is_worktree_live(repo_path: str, worktree_path: str) -> bool:
         if not Path(worktree_path).is_dir():
             return False
         basename = Path(worktree_path).name
-        return (Path(repo_path) / ".git" / "worktrees" / basename).is_dir()
+        gd = git_dir_stat(repo_path)
+        if gd is None:
+            return False
+        return (Path(gd) / "worktrees" / basename).is_dir()
     except OSError:
         return False
 
@@ -1826,8 +1830,10 @@ def _find_recoverable_session_predecessor(
         wt_dir = Path(inst.worktree_path)
         if not wt_dir.is_dir():
             continue
+        _gd = git_dir_stat(inst.repo_path)
         meta_dir = (
-            Path(inst.repo_path) / ".git" / "worktrees" / wt_dir.name
+            Path(_gd) / "worktrees" / wt_dir.name if _gd
+            else Path(inst.repo_path) / ".git" / "worktrees" / wt_dir.name
         )
         if meta_dir.is_dir():
             continue

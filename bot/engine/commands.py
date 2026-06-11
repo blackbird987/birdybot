@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from bot import config
+from bot.claude.gitpaths import git_toplevel
 from bot.claude.types import Instance, InstanceOrigin, InstanceStatus, InstanceType, KillOutcome, merge_msg_is_failure
 from bot.engine import lifecycle, pending as pending_mod, sessions as sessions_mod, workflows
 from bot.platform.base import ButtonSpec, RequestContext, SpawnArgs
@@ -2047,8 +2048,11 @@ async def _create_repo(ctx: RequestContext, text: str) -> None:
             return
         repo_path, path_source = resolved
 
-    # --- Handle existing directory with .git ---
-    if repo_path.exists() and (repo_path / ".git").exists():
+    # --- Handle existing directory already under version control ---
+    # rev-parse (not a `.git` stat) so a path registered at a subdirectory
+    # of a larger repo is recognised instead of getting a nested `git init`,
+    # which would break the parent repo's view of those files.
+    if repo_path.exists() and git_toplevel(str(repo_path)) is not None:
         ctx.store.add_repo(name, str(repo_path.resolve()))
         ctx.store.switch_repo(name)
         await ctx.messenger.send_text(
