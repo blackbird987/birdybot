@@ -519,6 +519,47 @@ def is_transient_error(error_text: str) -> bool:
     return any(p in lower for p in transient_patterns)
 
 
+def is_account_unusable_error(error_text: str) -> bool:
+    """Account-level auth/subscription failure (cancelled sub, logged out).
+
+    Distinct from transient blips and usage limits — carries no reset time, so
+    the caller applies a fixed cooldown and fails over to another account.
+    Transient/network errors and usage caps are explicitly excluded so neither
+    can be misread as a dead account.
+    """
+    if not error_text:
+        return False
+    lower = error_text.lower()
+    if is_transient_error(lower) or parse_usage_limit(lower):
+        return False
+    patterns = [
+        "invalid api key", "/login", "oauth", "token has expired",
+        "token expired", "authentication", "unauthorized", "not authorized",
+        "no active subscription", "subscription has expired",
+        "subscription expired", "credit balance is too low",
+        "log in again", "re-authenticate", "please sign in",
+    ]
+    return any(p in lower for p in patterns)
+
+
+def is_account_agnostic_error(error_text: str) -> bool:
+    """Errors switching accounts can't fix — both accounts share model access
+    and CLI version (e.g. model unavailable, bad CLI flag).
+
+    Suppresses only the no-turns failover heuristic, NOT a confident
+    ``is_account_unusable_error`` match.
+    """
+    if not error_text:
+        return False
+    lower = error_text.lower()
+    patterns = [
+        "currently unavailable", "is unavailable", "model not found",
+        "unknown model", "unrecognized arguments", "unknown option",
+        "invalid argument", "no such option", "usage:",
+    ]
+    return any(p in lower for p in patterns)
+
+
 def _friendly_tool(tool: str) -> str:
     """Convert tool names to friendly descriptions."""
     mapping = {

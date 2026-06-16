@@ -131,6 +131,15 @@ CLAUDE_ACCOUNTS: list[str] = [
     p.strip() for p in os.getenv("CLAUDE_ACCOUNTS", "").split(",") if p.strip()
 ]
 
+# Cooldown for an account that fails auth / can't start (e.g. a cancelled
+# subscription). Unlike a usage limit this carries no reset time, so we skip
+# the account for a fixed window then re-probe — auto-recovering if it's
+# reinstated. 30 min default; floored at 60s so a stray 0 can't turn every
+# confident match into a per-task double-spawn.
+ACCOUNT_FAILOVER_COOLDOWN_SECS: int = max(
+    60, int(os.getenv("ACCOUNT_FAILOVER_COOLDOWN_SECS", "1800"))
+)
+
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
 
 # ccusage cache TTL in seconds (adaptive: shortened near rate limits)

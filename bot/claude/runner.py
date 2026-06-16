@@ -15,7 +15,7 @@ import tempfile
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable, NamedTuple
 
@@ -33,6 +33,8 @@ from bot.claude.parser import (
     extract_summary,
     extract_usage,
     format_ask_question,
+    is_account_agnostic_error,
+    is_account_unusable_error,
     is_transient_error,
     iter_tool_blocks,
     last_assistant_text,
@@ -515,6 +517,13 @@ class ClaudeRunner:
         on_recovery: RecoveryCallback | None = None,
     ) -> RunResult:
         """Run CLI for an instance. Blocks until completion or timeout."""
+        # Fresh failover state per top-level run. The set is mutated via .add()
+        # during in-run failover and never otherwise cleared; without this, a
+        # no-cooldown no-turns failover in a prior run would silently keep an
+        # account excluded on the next run of a reused Instance. Reset HERE
+        # only, never in _run_impl (recursion relies on the set persisting
+        # across failover hops within a single run).
+        instance._accounts_tried = set()
         async with self._semaphore:
             return await self._run_impl(
                 instance, on_progress, on_stall, context, sibling_context,
@@ -865,6 +874,79 @@ class ClaudeRunner:
                     _recovery_state=recovery_state,
                     on_recovery=on_recovery,
                 )
+
+            # Account-level failure (auth / cancelled subscription / can't start):
+            # no reset time, so fail over to another account.
+            #  - confident auth-pattern match -> persisted cooldown + failover
+            #    ALWAYS (a definite signal beats the agnostic guard, even if
+            #    both phrases co-occur).
+            #  - else no-turns fallback (hard error before turn 1, wording we
+            #    don't match yet) -> failover ONCE, NO cooldown, and ONLY when
+            #    NOT account-agnostic (model unavailable / bad flag), so a blip
+            #    can't cascade-cool both accounts. (usage-limit and "No
+            #    conversation found" are handled above.)
+            # NOTE: this path deliberately returns the raw error rather than
+            # setting usage_limit_reset, so it does NOT trigger app.py's
+            # paid-API billing fallback — we don't silently spend API credits
+            # to paper over an auth fault.
+            if result.is_error and provider.supports_account_failover and account_dir:
+                confident = is_account_unusable_error(error_text)
+                no_turns = (not (result.result_text or "").strip()
+                            and not result.num_turns
+                            and not is_account_agnostic_error(error_text))
+                if confident or no_turns:
+                    # A confident auth failure cools the account down so it's
+                    # skipped while dead — even when there's no failover target
+                    # left, so an all-dead fleet lands on the clean "all accounts
+                    # cooled" spawn-refusal instead of re-spawning the last dead
+                    # account every task. Guarded by >1 account so a SOLE account
+                    # is never self-sidelined into that refusal. The no-turns
+                    # heuristic never cools down (cascade guard: a model/flag blip
+                    # that zero-turns on every account can't take the fleet dark).
+                    if confident and len(config.CLAUDE_ACCOUNTS) > 1:
+                        cooldown = datetime.now(timezone.utc) + timedelta(
+                            seconds=config.ACCOUNT_FAILOVER_COOLDOWN_SECS
+                        )
+                        self._set_account_cooldown(account_dir, cooldown)
+                    elif not confident:
+                        # Unmatched wording — log the text so we can graduate it
+                        # to a confident pattern (and a real cooldown) once the
+                        # real cancellation error finally surfaces.
+                        log.warning(
+                            "Account failover via no-turns heuristic (wording "
+                            "unmatched) for %s: %s",
+                            instance.id, (error_text or "")[:300],
+                        )
+                    next_account = self._pick_account(
+                        exclude=instance._accounts_tried | {account_dir}
+                    )
+                    if next_account:  # only fail over when there's somewhere to go
+                        instance._accounts_tried.add(account_dir)
+                        log.warning(
+                            "Account %s unusable (confident=%s); %s, failing over "
+                            "to %s for %s",
+                            account_dir[-20:], confident,
+                            "cooled down" if confident else "no cooldown",
+                            next_account[-20:], instance.id,
+                        )
+                        if on_progress:
+                            try:
+                                await on_progress(
+                                    "Switching to backup account",
+                                    "An account looks unavailable",
+                                )
+                            except Exception:
+                                log.exception(
+                                    "Progress callback error during failover"
+                                )
+                        return await self._run_impl(
+                            instance, on_progress, on_stall,
+                            context, sibling_context,
+                            api_fallback=api_fallback,
+                            _provider=provider, _binary=binary,
+                            _recovery_state=recovery_state,
+                            on_recovery=on_recovery,
+                        )
 
             return result
 

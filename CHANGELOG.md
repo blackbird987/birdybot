@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Multi-account failover survives a cancelled subscription
+
+- **Cross-account failover now triggers on auth/subscription failures, not just usage limits.** Before, failover at `runner.py` fired only when `parse_usage_limit()` returned a reset time; a cancelled subscription throws an auth error (no reset), so the run just errored and ~half of new tasks (which rotate from the first account) would fail. New `is_account_unusable_error` classifier (auth/login/subscription/credit wording, excludes transient + usage-limit) drives a second failover trigger. On a confident match the dead account is put on a fixed cooldown (new `ACCOUNT_FAILOVER_COOLDOWN_SECS`, default 30 min, floored 60s) and the task transparently re-runs on the next account — auto-recovering when the subscription is reinstated, no config change needed.
+- **No-turns fallback for unmatched wording.** The exact cancelled-sub error text can't be captured until a billing period lapses, so a hard error before turn 1 (no successful output) also fails over — once, with NO cooldown — and logs the unmatched text so it can graduate to a confident pattern later. `is_account_agnostic_error` (model unavailable, bad CLI flag) suppresses only this heuristic so a blip that zero-turns on every account can't cascade-cool the whole fleet dark.
+- **Confident cooldown is fleet-aware.** A confidently-dead account is cooled even with no failover target left, so an all-dead fleet lands on the existing "all accounts cooled" spawn-refusal instead of re-spawning the last dead account per task; guarded by `>1` account so a sole account is never self-sidelined. Auth exhaustion deliberately returns the raw error rather than falling through to paid-API billing.
+- **`_accounts_tried` reset per top-level run** (`run()`), so a prior run's no-cooldown failover can't silently pin a reused Instance to one account. New `scripts/test_account_failover.py` covers the classifiers and the failover/cooldown/termination/reset paths.
+
 ## v0.93.3 — Auto-resume builds that orphan background jobs (2026-06-11)
 
 ### Auto-resume builds that orphan background jobs (t-5592)
