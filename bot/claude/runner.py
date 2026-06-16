@@ -601,7 +601,8 @@ class ClaudeRunner:
                 return RunResult(
                     is_error=True,
                     error_message=(
-                        "All configured Claude accounts are on usage-limit cooldown."
+                        "All configured Claude accounts are on cooldown "
+                        "(usage limit or unavailable)."
                     ),
                     result_text="",
                     session_id=instance.session_id,
