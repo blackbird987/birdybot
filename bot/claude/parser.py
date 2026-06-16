@@ -530,8 +530,6 @@ def is_account_unusable_error(error_text: str) -> bool:
     if not error_text:
         return False
     lower = error_text.lower()
-    if is_transient_error(lower) or parse_usage_limit(lower):
-        return False
     patterns = [
         "invalid api key", "/login", "oauth", "token has expired",
         "token expired", "authentication", "unauthorized", "not authorized",
@@ -539,7 +537,13 @@ def is_account_unusable_error(error_text: str) -> bool:
         "subscription expired", "credit balance is too low",
         "log in again", "re-authenticate", "please sign in",
     ]
-    return any(p in lower for p in patterns)
+    if not any(p in lower for p in patterns):
+        return False
+    # Matched an auth phrase — but never sideline an account for a transient
+    # blip or a usage cap that merely co-mentions one. Guards run only after a
+    # match so this predicate stays side-effect-free for non-auth text
+    # (parse_usage_limit log-warns when it sees unparseable limit wording).
+    return not (is_transient_error(lower) or parse_usage_limit(lower))
 
 
 def is_account_agnostic_error(error_text: str) -> bool:
