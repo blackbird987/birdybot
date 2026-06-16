@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Sessions stay visible longer before Discord archives them
+
+- **Forum auto-archive bumped 3 days → 7 days** (`DEFAULT_AUTO_ARCHIVE = 10080`, Discord's max). Session threads inherit this from their forum, so an idle session now stays in the active sidebar for a full week before Discord hides it (we still auto-unarchive on the next post). Both the per-repo and per-user forum creators use the shared constant.
+- **Existing forums get reconciled on startup.** The code default only applies at forum-creation time, so `ensure_forum`/`ensure_user_forum` now call `_reconcile_auto_archive` when a forum already exists — bumping forums made under the old 3-day setting up to 7 days. Threads created earlier keep their own duration until recreated (harmless — they auto-unarchive on post).
+
 ## v0.93.4 — Failover survives a cancelled subscription (2026-06-16)
 
 ### Multi-account failover survives a cancelled subscription

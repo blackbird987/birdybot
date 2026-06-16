@@ -18,6 +18,11 @@ ARCHIVE_NAME = "🗄 Archive"
 MONITOR_NAME = "📊 Monitor"
 VERIFY_BOARD_NAME = "✅ Verify Board"
 
+# Discord only accepts 60 / 1440 / 4320 / 10080 minutes. 10080 (7 days) is the
+# max — session threads inherit this from their forum, so it's how long an idle
+# session stays visible before Discord archives it (we auto-unarchive on post).
+DEFAULT_AUTO_ARCHIVE = 10080
+
 
 def _private_overwrites(
     guild: discord.Guild,
@@ -231,16 +236,36 @@ def build_title_name(text: str) -> str:
 # --- Forum Channel Helpers ---
 
 
+async def _reconcile_auto_archive(forum: discord.ForumChannel, target: int) -> None:
+    """Bump an existing forum's default auto-archive to ``target`` if it differs.
+
+    The code default only applies when a forum is first created, so forums made
+    under the old 3-day setting need this nudge to pick up the 7-day window.
+    New threads inherit the forum default; threads created earlier keep their
+    own duration until recreated (they auto-unarchive on the next post anyway).
+    """
+    if forum.default_auto_archive_duration == target:
+        return
+    try:
+        await forum.edit(default_auto_archive_duration=target)
+        log.info(
+            "Reconciled forum %s auto-archive %s → %s min",
+            forum.id, forum.default_auto_archive_duration, target,
+        )
+    except Exception:
+        log.debug("Failed to reconcile auto-archive for forum %s", forum.id, exc_info=True)
+
+
 async def ensure_forum(
     guild: discord.Guild,
     category: discord.CategoryChannel,
     name: str,
-    auto_archive: int = 4320,
+    auto_archive: int = DEFAULT_AUTO_ARCHIVE,
 ) -> discord.ForumChannel:
     """Find or create a ForumChannel under the category (inherits private perms).
 
     Args:
-        auto_archive: Default auto-archive duration in minutes (4320 = 3 days).
+        auto_archive: Default auto-archive duration in minutes (10080 = 7 days).
     """
     sanitized = sanitize_channel_name(name)
 
@@ -248,6 +273,7 @@ async def ensure_forum(
     for ch in category.channels:
         if isinstance(ch, discord.ForumChannel) and ch.name == sanitized:
             log.info("Found existing forum %s (%s)", ch.id, ch.name)
+            await _reconcile_auto_archive(ch, auto_archive)
             return ch
 
     forum = await guild.create_forum(
@@ -379,7 +405,7 @@ async def ensure_user_forum(
     display_name: str,
     repo_names: list[str],
     owner_id: int | None = None,
-    auto_archive: int = 4320,
+    auto_archive: int = DEFAULT_AUTO_ARCHIVE,
 ) -> discord.ForumChannel:
     """Create or find a personal forum channel for a granted user.
 
@@ -392,6 +418,7 @@ async def ensure_user_forum(
     for ch in category.channels:
         if isinstance(ch, discord.ForumChannel) and ch.name == forum_name:
             log.info("Found existing user forum %s (%s)", ch.id, ch.name)
+            await _reconcile_auto_archive(ch, auto_archive)
             # Sync tags
             await sync_user_forum_tags(ch, repo_names)
             return ch

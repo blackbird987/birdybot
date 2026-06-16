@@ -96,3 +96,5 @@
 - [ ] [UX/UI] Drop pipe separator from sleep name (Low)
 - [ ] [DRY/Cleanup] _intentional_kills set will be redundant after Step 2 (Medium)
 - [ ] [DRY/Cleanup] Deduplicate the three chain-exit mention sites (Medium)
+- [ ] [UX/UI] Notify user when an account looks cancelled (Medium)
+- [ ] [Bug Risk] Classifier patterns may match task error content (Low)
