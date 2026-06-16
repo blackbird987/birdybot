@@ -877,9 +877,10 @@ class ClaudeRunner:
 
             # Account-level failure (auth / cancelled subscription / can't start):
             # no reset time, so fail over to another account.
-            #  - confident auth-pattern match -> persisted cooldown + failover
-            #    ALWAYS (a definite signal beats the agnostic guard, even if
-            #    both phrases co-occur).
+            #  - confident auth-pattern match -> failover + cooldown. The match
+            #    is computed independently of the agnostic guard, so it fires
+            #    even if both phrases co-occur; the cooldown itself is gated by
+            #    >1 account (inline note below).
             #  - else no-turns fallback (hard error before turn 1, wording we
             #    don't match yet) -> failover ONCE, NO cooldown, and ONLY when
             #    NOT account-agnostic (model unavailable / bad flag), so a blip
@@ -909,12 +910,13 @@ class ClaudeRunner:
                         )
                         self._set_account_cooldown(account_dir, cooldown)
                     elif not confident:
-                        # Unmatched wording — log the text so we can graduate it
-                        # to a confident pattern (and a real cooldown) once the
-                        # real cancellation error finally surfaces.
+                        # Unmatched wording — log the text (whether or not a
+                        # failover target exists) so we can graduate it to a
+                        # confident pattern (and a real cooldown) once the real
+                        # cancellation error finally surfaces.
                         log.warning(
-                            "Account failover via no-turns heuristic (wording "
-                            "unmatched) for %s: %s",
+                            "Account error unmatched by auth patterns "
+                            "(no-turns heuristic) for %s: %s",
                             instance.id, (error_text or "")[:300],
                         )
                     next_account = self._pick_account(
