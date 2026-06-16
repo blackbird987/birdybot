@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.93.5 — Sessions stay visible a week before archiving (2026-06-16)
+
 ### Sessions stay visible longer before Discord archives them
 
 - **Forum auto-archive bumped 3 days → 7 days** (`DEFAULT_AUTO_ARCHIVE = 10080`, Discord's max). Session threads inherit this from their forum, so an idle session now stays in the active sidebar for a full week before Discord hides it (we still auto-unarchive on the next post). Both the per-repo and per-user forum creators use the shared constant.
