@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.93.4 — Failover survives a cancelled subscription (2026-06-16)
+
 ### Multi-account failover survives a cancelled subscription
 
 - **Cross-account failover now triggers on auth/subscription failures, not just usage limits.** Before, failover at `runner.py` fired only when `parse_usage_limit()` returned a reset time; a cancelled subscription throws an auth error (no reset), so the run just errored and ~half of new tasks (which rotate from the first account) would fail. New `is_account_unusable_error` classifier (auth/login/subscription/credit wording, excludes transient + usage-limit) drives a second failover trigger. On a confident match the dead account is put on a fixed cooldown (new `ACCOUNT_FAILOVER_COOLDOWN_SECS`, default 30 min, floored 60s) and the task transparently re-runs on the next account — auto-recovering when the subscription is reinstated, no config change needed.
