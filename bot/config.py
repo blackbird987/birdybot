@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -210,6 +210,24 @@ WAKE_DIR: Path = DATA_DIR / "wakes"
 WAKE_MIN_DELAY_SECS: int = 30
 WAKE_MAX_DELAY_SECS: int = 86400          # 24h
 MAX_CONSEC_WAKES: int = 25                # stop a never-completing poll loop
+# Broken-promise safety net: a turn can end PROMISING to keep watching a job
+# (deploy/build/CI/probe) but write no wake file — a silent dead-end where the
+# chain just stops. When that contradiction is detected we auto-arm one fallback
+# re-check this far out instead of assuming the work finished. Counts toward
+# MAX_CONSEC_WAKES, so it can't loop forever.
+WAKE_FALLBACK_DELAY_SECS: int = 180
+# Conservative: requires a watch/poll VERB near a machine/job NOUN, so human-
+# directed waits ("I'll let you know", "wait for your reply") don't trip it.
+# "continue once" is deliberately excluded — it's usually human-directed
+# ("continue once you confirm") and the noun gate can't tell that apart.
+WAKE_PROMISE_RE = re.compile(
+    r"(poll|monitor|watch|keep checking|check back|report back|wait for|"
+    r"get notified|keep an eye)"
+    r"[^.]{0,40}"
+    r"(deploy|build|ci\b|pipeline|probe|job|run\b|test|backtest|finish|"
+    r"complete|land|done)",
+    re.IGNORECASE,
+)
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
