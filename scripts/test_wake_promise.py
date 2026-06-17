@@ -6,12 +6,15 @@ watching a job (deploy/CI/build) but writes no wake file, check_wake_request
 auto-arms one fallback re-check instead of silently stalling. That detection is
 config.WAKE_PROMISE_RE, scanned after verify blocks are stripped.
 
-This locks the regex so a future edit can't (a) start matching human-directed
+This locks the heuristic so a future edit can't (a) start matching human-directed
 waits ("wait for your reply", "continue once you confirm"), which would re-invoke
 a session that's actually waiting on the user, or (b) stop matching genuine
 job-watching promises, which would reopen the silent dead-end. It also guards the
 verify-board stripping so a ```verify-board``` item describing "watch a job" can't
 false-trigger the fallback.
+
+Calls the real production predicate (``lifecycle.looks_like_watch_promise``) so
+the test can't drift from what ``check_wake_request`` actually evaluates.
 
 Run: python scripts/test_wake_promise.py
 Exit 0 = all pass, exit 1 = failures.
@@ -26,19 +29,13 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
 sys.path.insert(0, _ROOT)
 
-from bot import config
-from bot.engine.verify import strip_verify_blocks
+from bot.engine.lifecycle import looks_like_watch_promise
 
 _failures: list[str] = []
 
 
-def _promised(text: str) -> bool:
-    """Mirror check_wake_request's detection: strip verify blocks, then match."""
-    return bool(config.WAKE_PROMISE_RE.search(strip_verify_blocks(text or "")))
-
-
 def _check(text: str, expected: bool) -> None:
-    got = _promised(text)
+    got = looks_like_watch_promise(text)
     if got == expected:
         print(f"  ok:   want={expected!s:5} :: {text!r}")
     else:

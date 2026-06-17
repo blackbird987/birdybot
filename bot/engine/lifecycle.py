@@ -1200,6 +1200,18 @@ def _human_delay(secs: int) -> str:
     return f"{round(secs / 3600, 1)} h"
 
 
+def looks_like_watch_promise(text: str) -> bool:
+    """True if *text* reads as a promise to keep watching a job (deploy/CI/build)
+    without scheduling a re-check.
+
+    Single source of truth for the broken-promise heuristic so the detection
+    used by ``check_wake_request`` and its regression test can't drift. Verify
+    blocks are stripped first, so a ``verify-board`` item that happens to
+    describe watching a job can't false-trigger it.
+    """
+    return bool(config.WAKE_PROMISE_RE.search(strip_verify_blocks(text or "")))
+
+
 async def check_wake_request(
     ctx: RequestContext, instance: Instance, *, final_text: str = "",
 ) -> None:
@@ -1249,10 +1261,8 @@ async def check_wake_request(
         # No wake file. Normally the turn just ended (real completion or a plain
         # human reply) — reset the runaway counter and move on. BUT if the final
         # message PROMISED to keep watching a job yet scheduled nothing, that's a
-        # silent dead-end we want to catch rather than stall on. Strip verify
-        # blocks first so a ```verify-board``` item that happens to describe
-        # watching a job can't false-trigger the heuristic.
-        promised = bool(config.WAKE_PROMISE_RE.search(strip_verify_blocks(final_text or "")))
+        # silent dead-end we want to catch rather than stall on.
+        promised = looks_like_watch_promise(final_text)
         if promised and instance.branch:
             # Worktree build can't self-wake (its dir may be merged/discarded by
             # fire time), so we can't auto-arm — but say so instead of stalling,
