@@ -218,9 +218,11 @@ MAX_CONSEC_WAKES: int = 25                # stop a never-completing poll loop
 WAKE_FALLBACK_DELAY_SECS: int = 180
 # Conservative: requires a watch/poll VERB near a machine/job NOUN, so human-
 # directed waits ("I'll let you know", "wait for your reply") don't trip it.
+# "continue once" is deliberately excluded — it's usually human-directed
+# ("continue once you confirm") and the noun gate can't tell that apart.
 _WAKE_PROMISE_RE = re.compile(
     r"(poll|monitor|watch|keep checking|check back|report back|wait for|"
-    r"get notified|continue once|keep an eye)"
+    r"get notified|keep an eye)"
     r"[^.]{0,40}"
     r"(deploy|build|ci\b|pipeline|probe|job|run\b|test|backtest|finish|"
     r"complete|land|done)",
