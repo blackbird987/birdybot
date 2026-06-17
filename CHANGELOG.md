@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.93.6 — Self-wake survives a promised-but-unscheduled watch (2026-06-18)
+
 ### Self-wake no longer silently dies when a turn promises to keep watching
 
 - **Broken-promise safety net** (`check_wake_request`, lifecycle.py). The only way a turn continues after it ends is a self-wake *timer* — there's no completion event for an external probe (deploy/CI/build/diagnostic endpoint the bot doesn't own). If a turn ended *promising* to "keep watching / poll / report back" on a job but wrote no wake file, the no-file branch unconditionally assumed completion and the chain just stopped — "it waits for the probe but never proceeds whether it finishes or not." Now that contradiction is caught: when the final message matches a watch/poll-a-job pattern and no wake file was written, the bot auto-arms **one** fallback re-check (`WAKE_FALLBACK_DELAY_SECS`, default 180s) with a prompt that tells the session to report if done, write a fresh wake file if still running, or ask the user if it can't tell.
