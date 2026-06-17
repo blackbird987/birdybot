@@ -397,7 +397,9 @@ async def run_instance(
         await check_reboot_request(ctx)
         # Self-wake: convert any wake file this session wrote into a thread-bound
         # one-shot schedule (or reset the runaway counter if none was written).
-        await check_wake_request(ctx, inst)
+        # display_text is the final assistant message — used to catch a turn that
+        # promised to keep watching a job but wrote no wake file.
+        await check_wake_request(ctx, inst, final_text=display_text)
 
     except asyncio.CancelledError:
         # Shutdown cancelled this task. The 30s drain in app.py keeps the
@@ -1198,7 +1200,9 @@ def _human_delay(secs: int) -> str:
     return f"{round(secs / 3600, 1)} h"
 
 
-async def check_wake_request(ctx: RequestContext, instance: Instance) -> None:
+async def check_wake_request(
+    ctx: RequestContext, instance: Instance, *, final_text: str = "",
+) -> None:
     """Handle a self-wake file written by the just-finished session.
 
     A session waiting on a long external job can write
@@ -1209,18 +1213,67 @@ async def check_wake_request(ctx: RequestContext, instance: Instance) -> None:
     read-delete-process shape.
 
     No wake file ⇒ the turn ended without asking to poll, so reset the runaway
-    counter (covers genuine completion and plain human replies). Worktree builds
+    counter (covers genuine completion and plain human replies) — UNLESS
+    ``final_text`` shows the turn promised to keep watching a job (a silent
+    dead-end), in which case we auto-arm one fallback re-check. Worktree builds
     can't safely self-wake — their dir may be merged/discarded by fire time — so
     they're refused with a note (parity with the runner guidance gate).
     """
     path = config.WAKE_DIR / f"{instance.id}.json"
 
-    if not path.exists():
+    async def _notice(text: str) -> None:
+        try:
+            await ctx.messenger.send_text(ctx.channel_id, text, silent=True)
+        except Exception:
+            log.debug("wake notice send failed", exc_info=True)
+
+    def _reset() -> None:
         if ctx.reset_wake_count is not None:
             try:
                 ctx.reset_wake_count()
             except Exception:
                 log.debug("reset_wake_count raised", exc_info=True)
+
+    if not path.exists():
+        # No wake file. Normally the turn just ended (real completion or a plain
+        # human reply) — reset the runaway counter and move on. BUT if the final
+        # message promised to keep watching a job yet scheduled nothing, that's a
+        # silent dead-end: auto-arm ONE fallback re-check so the chain survives.
+        # Worktree builds can't self-wake (dir may be merged/discarded), so they
+        # fall through to the normal reset.
+        if (not instance.branch
+                and config._WAKE_PROMISE_RE.search(final_text or "")
+                and ctx.bump_wake_count is not None):
+            count = ctx.bump_wake_count()
+            if count <= config.MAX_CONSEC_WAKES:
+                secs = config.WAKE_FALLBACK_DELAY_SECS
+                next_run_at = (
+                    datetime.now(timezone.utc) + timedelta(seconds=secs)
+                ).isoformat()
+                ctx.store.add_wake(
+                    prompt=(
+                        "Earlier you said you'd keep watching for a job to finish "
+                        "but didn't schedule a re-check. Check now: if it's done, "
+                        "report the result and stop. If it's still running, write a "
+                        "fresh wake file to keep polling. If you can't tell, ask the "
+                        "user instead of waiting silently."
+                    ),
+                    channel_id=ctx.channel_id,
+                    next_run_at=next_run_at,
+                    repo_name=instance.repo_name or "",
+                    repo_path=instance.repo_path or "",
+                )
+                log.info(
+                    "Auto-armed fallback wake (promise w/o file) for thread %s in ~%ds",
+                    ctx.channel_id, secs,
+                )
+                await _notice(
+                    "⏰ You said you'd keep watching but didn't schedule a check — "
+                    f"auto-arming a re-check in ~{_human_delay(secs)}."
+                )
+                return
+            # Over the cap — fall through and reset like a normal end.
+        _reset()
         return
 
     try:
@@ -1232,18 +1285,8 @@ async def check_wake_request(ctx: RequestContext, instance: Instance) -> None:
     # Delete immediately so a crash/restart can't double-process it.
     path.unlink(missing_ok=True)
 
-    async def _notice(text: str) -> None:
-        try:
-            await ctx.messenger.send_text(ctx.channel_id, text, silent=True)
-        except Exception:
-            log.debug("wake notice send failed", exc_info=True)
-
     if instance.branch:
-        if ctx.reset_wake_count is not None:
-            try:
-                ctx.reset_wake_count()
-            except Exception:
-                pass
+        _reset()
         await _notice(
             "(Can't self-wake from a build/worktree session — reply or tap a "
             "button when you want me to continue.)"
