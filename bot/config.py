@@ -220,7 +220,7 @@ WAKE_FALLBACK_DELAY_SECS: int = 180
 # directed waits ("I'll let you know", "wait for your reply") don't trip it.
 # "continue once" is deliberately excluded — it's usually human-directed
 # ("continue once you confirm") and the noun gate can't tell that apart.
-_WAKE_PROMISE_RE = re.compile(
+WAKE_PROMISE_RE = re.compile(
     r"(poll|monitor|watch|keep checking|check back|report back|wait for|"
     r"get notified|keep an eye)"
     r"[^.]{0,40}"

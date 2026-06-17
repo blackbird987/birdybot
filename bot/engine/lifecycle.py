@@ -397,9 +397,9 @@ async def run_instance(
         await check_reboot_request(ctx)
         # Self-wake: convert any wake file this session wrote into a thread-bound
         # one-shot schedule (or reset the runaway counter if none was written).
-        # display_text is the final assistant message — used to catch a turn that
+        # Pass the raw result text so the no-file path can catch a turn that
         # promised to keep watching a job but wrote no wake file.
-        await check_wake_request(ctx, inst, final_text=display_text)
+        await check_wake_request(ctx, inst, final_text=result.result_text)
 
     except asyncio.CancelledError:
         # Shutdown cancelled this task. The 30s drain in app.py keeps the
@@ -1214,8 +1214,9 @@ async def check_wake_request(
 
     No wake file ⇒ the turn ended without asking to poll, so reset the runaway
     counter (covers genuine completion and plain human replies) — UNLESS
-    ``final_text`` shows the turn promised to keep watching a job (a silent
-    dead-end), in which case we auto-arm one fallback re-check. Worktree builds
+    ``final_text`` (the model's raw result text; verify blocks are stripped
+    here before scanning) shows the turn promised to keep watching a job (a
+    silent dead-end), in which case we auto-arm one fallback. Worktree builds
     can't safely self-wake — their dir may be merged/discarded by fire time — so
     they're refused with a note (parity with the runner guidance gate).
     """
@@ -1248,8 +1249,10 @@ async def check_wake_request(
         # No wake file. Normally the turn just ended (real completion or a plain
         # human reply) — reset the runaway counter and move on. BUT if the final
         # message PROMISED to keep watching a job yet scheduled nothing, that's a
-        # silent dead-end we want to catch rather than stall on.
-        promised = bool(config._WAKE_PROMISE_RE.search(final_text or ""))
+        # silent dead-end we want to catch rather than stall on. Strip verify
+        # blocks first so a ```verify-board``` item that happens to describe
+        # watching a job can't false-trigger the heuristic.
+        promised = bool(config.WAKE_PROMISE_RE.search(strip_verify_blocks(final_text or "")))
         if promised and instance.branch:
             # Worktree build can't self-wake (its dir may be merged/discarded by
             # fire time), so we can't auto-arm — but say so instead of stalling,

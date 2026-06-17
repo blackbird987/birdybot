@@ -1043,8 +1043,10 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
         # just queues (no waiting) — the actual reboot fires from end_task.
         await lifecycle.check_reboot_request(ctx)
         # Self-wake: schedule a thread-bound resume if this session wrote a wake
-        # file (or reset the runaway counter if it didn't).
-        await lifecycle.check_wake_request(ctx, inst)
+        # file (or reset the runaway counter if it didn't). Pass the raw result
+        # text so a "I'll keep watching the job" promise with no wake file can
+        # auto-arm a fallback re-check instead of silently stalling.
+        await lifecycle.check_wake_request(ctx, inst, final_text=result.result_text)
     finally:
         ctx.runner.end_task(inst.id)
 
