@@ -115,11 +115,13 @@ def read_ai_title(session_id: str) -> str | None:
     # module load would pull the engine into the discord layer eagerly.
     from bot.engine.sessions import find_session_file
 
-    fpath = find_session_file(session_id)
-    if not fpath:
-        return None
+    # Synchronous file I/O — callers on the event loop must dispatch this via
+    # asyncio.to_thread so a large jsonl can't stall the loop.
     title: str | None = None
     try:
+        fpath = find_session_file(session_id)
+        if not fpath:
+            return None
         with open(fpath, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
                 line = line.strip()
@@ -133,7 +135,7 @@ def read_ai_title(session_id: str) -> str | None:
                     val = (record.get("aiTitle") or "").strip()
                     if val:
                         title = val
-    except OSError:
+    except Exception:
         return None
     return title if title and len(title) >= 3 else None
 

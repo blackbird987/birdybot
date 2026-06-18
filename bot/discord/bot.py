@@ -1904,7 +1904,11 @@ class ClaudeBot(discord.Client):
             # Prefer the CLI's native, structured session title (clean — no
             # codename prefixes). Only spawn our own title-gen subprocess when
             # the jsonl has no ai-title yet (rare: very short/errored sessions).
-            title = read_ai_title(info.session_id) if info.session_id else None
+            # read_ai_title does blocking file I/O — keep it off the event loop.
+            title = (
+                await asyncio.to_thread(read_ai_title, info.session_id)
+                if info.session_id else None
+            )
             if not title:
                 title = await generate_title_text(prompt, summary)
             if not title:
