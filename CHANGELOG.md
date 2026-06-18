@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.93.7 — Thread titles use the CLI's native ai-title (2026-06-18)
+
 ### Thread titles use the CLI's native title — no more random codename prefixes
 
 - **Smart title now reads the CLI's `ai-title` instead of generating our own** (`_generate_smart_title`, `bot.py`). Threads were occasionally named with a Docker-style codename prefix — "Glimmering Church Session Title Generation", "Magical Dawn Trading Bot Options", "Merry Thacker Plasma iPhone Offer Workaround". Root cause: our bespoke title-gen subprocess (`generate_title_text`) asks an LLM for a free-text title and trusts whatever comes back; on conversational (non-coding) sessions the model intermittently prepends a whimsical codename, echoes the prompt, or returns commentary. The bot accepted it verbatim. Claude Code already writes a clean, structured `{"type":"ai-title","aiTitle":"…"}` record to each session's jsonl (e.g. "Access Plasma One without iPhone") — so we now read that (new `read_ai_title` in `titles.py`, last record wins since the CLI refines it as the session grows). The subprocess remains only as a fallback for the rare session with no ai-title yet (very short/errored runs). No prompt-engineering or heuristic filtering — just the field the platform already gives us. The jsonl read runs in a worker thread (`asyncio.to_thread`) so a large session file can't stall the Discord event loop. New `scripts/test_ai_title.py` locks the behavior.
