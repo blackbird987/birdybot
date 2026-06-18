@@ -41,7 +41,7 @@ from bot.discord import slash_commands as slash_commands_mod
 from bot.discord import spawn_colors
 from bot.discord import tags as tags_mod
 from bot.discord.forums import ForumManager, ThreadInfo
-from bot.discord.titles import generate_title_text
+from bot.discord.titles import generate_title_text, read_ai_title
 from bot.engine import commands
 from bot.platform.base import RequestContext, SpawnArgs, SpawnResult
 from bot.services.twitter import enrich_with_tweets
@@ -1901,7 +1901,12 @@ class ClaudeBot(discord.Client):
 
             info._title_generated = True
 
-            title = await generate_title_text(prompt, summary)
+            # Prefer the CLI's native, structured session title (clean — no
+            # codename prefixes). Only spawn our own title-gen subprocess when
+            # the jsonl has no ai-title yet (rare: very short/errored sessions).
+            title = read_ai_title(info.session_id) if info.session_id else None
+            if not title:
+                title = await generate_title_text(prompt, summary)
             if not title:
                 log.warning("Title generation returned empty for thread %s", thread_id)
                 info._title_generated = False

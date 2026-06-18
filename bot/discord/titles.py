@@ -7,6 +7,7 @@ Spawns a lightweight Claude CLI subprocess to generate concise
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -95,6 +96,46 @@ def cleanup_stale_temp_jsonls() -> int:
     except OSError:
         log.debug("Stale title-gen jsonl scan failed", exc_info=True)
     return removed
+
+
+def read_ai_title(session_id: str) -> str | None:
+    """Return the CLI's native session title from the session jsonl, or None.
+
+    Claude Code writes ``{"type":"ai-title","aiTitle":"…"}`` records to each
+    session's jsonl, refining the value as the conversation grows. We read the
+    *last* one — it's clean, structured, and computed for free by the CLI,
+    which is why this is preferred over spawning our own title-gen subprocess
+    (that path occasionally emits Docker-style codename prefixes like
+    "Glimmering Church …"). Best-effort: returns None on any miss so the
+    caller can fall back to generate_title_text().
+    """
+    if not session_id:
+        return None
+    # Lazy import: engine.sessions is the file-locating layer; importing it at
+    # module load would pull the engine into the discord layer eagerly.
+    from bot.engine.sessions import find_session_file
+
+    fpath = find_session_file(session_id)
+    if not fpath:
+        return None
+    title: str | None = None
+    try:
+        with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line or '"ai-title"' not in line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if record.get("type") == "ai-title":
+                    val = (record.get("aiTitle") or "").strip()
+                    if val:
+                        title = val
+    except OSError:
+        return None
+    return title if title and len(title) >= 3 else None
 
 
 async def generate_title_text(prompt: str, summary: str = "") -> str | None:
