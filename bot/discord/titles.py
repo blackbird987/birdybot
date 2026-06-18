@@ -136,6 +136,10 @@ def read_ai_title(session_id: str) -> str | None:
                     if val:
                         title = val
     except Exception:
+        # Best-effort: caller falls back to generate_title_text. Log at debug
+        # so a real bug here (which would silently disable the ai-title path)
+        # leaves a breadcrumb instead of vanishing.
+        log.debug("read_ai_title failed for %s", session_id, exc_info=True)
         return None
     return title if title and len(title) >= 3 else None
 
