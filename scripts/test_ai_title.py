@@ -52,8 +52,13 @@ def main() -> int:
         "none": none_title,
         "empty": empty_title,
     }
+    def _lookup(sid):
+        if sid == "boom":
+            raise OSError("simulated iterdir race")
+        return files.get(sid)
+
     orig = sessions_mod.find_session_file
-    sessions_mod.find_session_file = lambda sid: files.get(sid)
+    sessions_mod.find_session_file = _lookup
     try:
         cases = [
             ("good", "Final Refined Title"),   # picks LAST ai-title
@@ -61,6 +66,7 @@ def main() -> int:
             ("empty", None),                   # blank value rejected
             ("missing", None),                 # unknown session
             ("", None),                        # empty id short-circuits
+            ("boom", None),                    # lookup raises -> best-effort None
         ]
         for sid, expected in cases:
             got = read_ai_title(sid)
