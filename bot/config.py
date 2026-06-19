@@ -490,7 +490,14 @@ WORKFLOW_GUIDANCE: dict[str, str] = {
         "verify something in the codebase, answer directly from conversation "
         "context without using tools. Opinions, follow-ups, confirmations, "
         "explanations, and 'what about X?' messages do not need file reads or "
-        "commands — just reply."
+        "commands — just reply.\n\n"
+        "Do NOT end a reply by asking 'want me to dig into it?', 'should I "
+        "investigate?', or 'want me to look into that?'. If the next step is "
+        "read-only — reading files, searching, running diagnostics — just do it "
+        "and report what you found. The user almost always says yes, so the "
+        "question only adds a round-trip. Still ask first ONLY when the next step "
+        "is destructive, outward-facing, or expensive (deploys, deletes, "
+        "force-push, sending external messages, long builds)."
     ),
     "plan": (
         "You're creating an implementation plan. Research thoroughly, do NOT implement. "
