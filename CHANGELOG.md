@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## v0.93.8 — Direct replies stop asking to investigate (2026-06-19)
+
+### Direct replies stop asking "want me to dig into it?"
+
+- **No more permission round-trip for read-only follow-up** (`WORKFLOW_GUIDANCE["direct"]`, `config.py`). Sessions habitually ended a reply with "want me to dig into it / investigate / look into that?" — and the user said yes ~99% of the time, so the question was pure friction. The `"direct"` step guidance now tells sessions to just do the read-only next step (reading files, searching, running diagnostics) and report what they found, instead of asking. The existing confirm-before-risk intent is preserved: it still asks first when the next step is destructive, outward-facing, or expensive (deploys, deletes, force-push, sending external messages, long builds).
+
 ## v0.93.7 — Thread titles use the CLI's native ai-title (2026-06-18)
 
 ### Thread titles use the CLI's native title — no more random codename prefixes
