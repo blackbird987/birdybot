@@ -609,8 +609,17 @@ class ClaudeRunner:
                     usage_limit_reset=earliest_reset,
                 )
 
+        # Run the whole prompt-build off the event loop: _build_command makes
+        # several synchronous `git` subprocess calls via _build_master_context_block
+        # (invoked up to twice on the resume path) plus file reads/writes.  On the
+        # loop, a burst of spawns (mass-tapping Build/Review) blocks it past
+        # Discord's 3s interaction-ack window, surfacing as "interaction failed"
+        # on otherwise-healthy clicks.  The instance is owned by this coroutine
+        # under the channel lock here, so the in-thread mutation of instance
+        # fields is race-free.
         cmd, prompt_text, system_prompt_file, api_key_file, rules_file = (
-            self._build_command(
+            await asyncio.to_thread(
+                self._build_command,
                 instance, context, sibling_context,
                 api_fallback=api_fallback, provider=provider, binary=binary,
             )
@@ -1482,6 +1491,12 @@ class ClaudeRunner:
                 rules_dir = Path(working_dir) / provider.config_dir_name / "rules"
                 rules_dir.mkdir(parents=True, exist_ok=True)
                 rf = rules_dir / "_bot_system.mdc"
+                # TODO(cursor-concurrency): this is a fixed path, but since
+                # _build_command now runs in a worker thread (run-off-loop fix),
+                # two concurrent same-working_dir Cursor spawns can race on this
+                # write. Currently degrades gracefully (OSError -> skip), but the
+                # robust fix is write-temp-then-os.replace for an atomic swap.
+                # Claude path is unaffected (unique NamedTemporaryFile names).
                 try:
                     rf.write_text(system_prompt, encoding="utf-8")
                     rules_file = str(rf)

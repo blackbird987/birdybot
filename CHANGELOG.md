@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## v0.93.9 — Interaction-ack no longer stalls under spawn bursts (2026-06-22)
+
+### Fixed
+- **"Interaction failed" under spawn bursts — git prompt-build moved off the event loop** (`_run_impl`, `runner.py`). Mass-tapping Build/Review across several threads showed Discord's red "interaction failed" on otherwise-healthy clicks. Root cause: `_build_command` ran synchronously on the asyncio loop during every spawn, and it makes several blocking `git` subprocess calls via `_build_master_context_block` (invoked up to twice on the resume path) plus system-prompt assembly and temp-file writes. A burst of spawns serialized on the loop and blocked it past Discord's 3-second interaction-ack window, so concurrent clicks couldn't get `defer()` scheduled — the clicks still executed, but Discord had already shown the error. Wrapped the whole `_build_command` call in `asyncio.to_thread` so all its git/file I/O leaves the loop (matching how worktree create, merge, diff save, and session copy are already threaded). No throughput cost; the instance is owned by the coroutine under the channel lock, so its in-thread field mutation is race-free. (Cursor provider's fixed `_bot_system.mdc` rules-file write is now reachable concurrently — degrades gracefully today, atomic-swap fix tracked inline.)
+
 ## v0.93.8 — Direct replies stop asking to investigate (2026-06-19)
 
 ### Direct replies stop asking "want me to dig into it?"
