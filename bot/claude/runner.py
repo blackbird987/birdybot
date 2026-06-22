@@ -609,8 +609,16 @@ class ClaudeRunner:
                     usage_limit_reset=earliest_reset,
                 )
 
+        # Run the whole prompt-build off the event loop: _build_command makes
+        # ~14 synchronous `git` subprocess calls (two _build_master_context_block
+        # invocations) plus file reads/writes.  On the loop, a burst of spawns
+        # (mass-tapping Build/Review) blocks it past Discord's 3s interaction-ack
+        # window, surfacing as "interaction failed" on otherwise-healthy clicks.
+        # The instance is owned by this coroutine under the channel lock here, so
+        # the in-thread mutation of instance fields is race-free.
         cmd, prompt_text, system_prompt_file, api_key_file, rules_file = (
-            self._build_command(
+            await asyncio.to_thread(
+                self._build_command,
                 instance, context, sibling_context,
                 api_fallback=api_fallback, provider=provider, binary=binary,
             )

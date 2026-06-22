@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **"Interaction failed" under spawn bursts — git prompt-build moved off the event loop** (`_run_impl`, `runner.py`). Mass-tapping Build/Review across several threads showed Discord's red "interaction failed" on otherwise-healthy clicks. Root cause: `_build_command` ran synchronously on the asyncio loop during every spawn, and it makes ~14 blocking `git` subprocess calls (two `_build_master_context_block` invocations × ~7 commands) plus file reads/writes. A burst of spawns serialized on the loop and blocked it past Discord's 3-second interaction-ack window, so concurrent clicks couldn't get `defer()` scheduled — the clicks still executed, but Discord had already shown the error. Wrapped the whole `_build_command` call in `asyncio.to_thread` so all its git/file I/O leaves the loop (matching how worktree create, merge, diff save, and session copy are already threaded). No throughput or concurrency cost; the instance is owned by the coroutine under the channel lock, so the in-thread field mutation is race-free.
+
 ## v0.93.8 — Direct replies stop asking to investigate (2026-06-19)
 
 ### Direct replies stop asking "want me to dig into it?"
