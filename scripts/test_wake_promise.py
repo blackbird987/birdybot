@@ -29,7 +29,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
 sys.path.insert(0, _ROOT)
 
-from bot.engine.lifecycle import looks_like_watch_promise
+from bot.engine.lifecycle import claims_self_wake, looks_like_watch_promise
 
 _failures: list[str] = []
 
@@ -40,6 +40,15 @@ def _check(text: str, expected: bool) -> None:
         print(f"  ok:   want={expected!s:5} :: {text!r}")
     else:
         _failures.append(f"want={expected} got={got} :: {text!r}")
+        print(f"  FAIL: want={expected!s:5} got={got!s:5} :: {text!r}")
+
+
+def _check_claim(text: str, expected: bool) -> None:
+    got = claims_self_wake(text)
+    if got == expected:
+        print(f"  ok:   want={expected!s:5} :: {text!r}")
+    else:
+        _failures.append(f"claim want={expected} got={got} :: {text!r}")
         print(f"  FAIL: want={expected!s:5} got={got!s:5} :: {text!r}")
 
 
@@ -76,6 +85,31 @@ _check(
     "I'll keep watching the deploy.\n\n```verify-board\n- unrelated item\n```\n",
     True,
 )
+
+
+# ---- claims_self_wake: turn ASSERTS it armed a self-wake (no file) ----
+print("Claims of a queued/scheduled self-wake must arm")
+_check_claim("Self-wake queued (~4 min); I'll report the verdict.", True)
+_check_claim("I scheduled a self-wake for 5 min", True)
+_check_claim("Wrote the wake file, will re-check after the deploy", True)
+# The real q-11865 result text that slipped through WAKE_PROMISE_RE.
+# Don't echo its (unicode-laden) content to a cp1252 console — just assert.
+try:
+    _real = open(
+        os.path.join(_ROOT, "data", "results", "q-11865.md"), encoding="utf-8"
+    ).read()
+    if claims_self_wake(_real):
+        print("  ok:   want=True  :: <real q-11865.md>")
+    else:
+        _failures.append("claim want=True got=False :: <real q-11865.md>")
+        print("  FAIL: want=True  got=False :: <real q-11865.md>")
+except OSError:
+    print("  skip: data/results/q-11865.md not present")
+
+print("Meta-explanation / completions must NOT arm a claim")
+_check_claim("self-wake lets you continue after a deploy finishes", False)
+_check_claim("All done - tests pass, nothing else to do.", False)
+_check_claim("", False)
 
 
 # ---- Summary ----

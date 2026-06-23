@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Self-wake safety net catches a *claimed* self-wake with no file, and stops re-arm loops** (`WAKE_CLAIM_RE`, `claims_self_wake`, `check_wake_request`). A turn that ended saying "Self-wake queued… I'll report the verdict" but never wrote the wake file slipped past `WAKE_PROMISE_RE` (no watch-verb + job-noun pair), so the thread silently slept. Added `WAKE_CLAIM_RE` / `claims_self_wake` to detect a turn that *asserts* it armed a self-wake but left no file, and OR'd it into the fallback trigger. Also added a loop guard: a turn fired BY a self-wake (`ctx.source == "wake"`) that only *talks* about watching again no longer re-arms — it ends the chain and hands back to the user, instead of looping to `MAX_CONSEC_WAKES`.
+
 ## v0.93.9 — Interaction-ack no longer stalls under spawn bursts (2026-06-22)
 
 ### Fixed

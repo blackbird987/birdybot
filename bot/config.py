@@ -228,6 +228,20 @@ WAKE_PROMISE_RE = re.compile(
     r"complete|land|done)",
     re.IGNORECASE,
 )
+# Companion to WAKE_PROMISE_RE: a turn that CLAIMS it queued/scheduled/wrote a
+# self-wake but left no wake file is a false promise — narration of the action
+# without the action. High-precision (a genuinely finished turn never claims a
+# self-wake), so it catches phrasings WAKE_PROMISE_RE misses — no watch-verb +
+# job-noun pair — e.g. "Self-wake queued (~4 min); I'll report the verdict."
+# Requires a scheduling VERB adjacent to "wake" so a meta-explanation of the
+# feature ("self-wake lets you continue after a deploy") doesn't trip it.
+WAKE_CLAIM_RE = re.compile(
+    r"(self.?wake|wake[\s-]?file)s?\s+"
+    r"(queued|scheduled|armed|set|written|wrote|created|in\s+place)"
+    r"|(queued|scheduled|armed|wrote|written|set|created)\s+"
+    r"(a\s+|the\s+|one\s+)?(self.?)?wake",
+    re.IGNORECASE,
+)
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)

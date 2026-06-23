@@ -1212,6 +1212,18 @@ def looks_like_watch_promise(text: str) -> bool:
     return bool(config.WAKE_PROMISE_RE.search(strip_verify_blocks(text or "")))
 
 
+def claims_self_wake(text: str) -> bool:
+    """True if the final text CLAIMS a self-wake was queued/scheduled/written.
+
+    Distinct from looks_like_watch_promise: catches a turn that asserts it
+    already armed the wake (narration of the action) but wrote no file — a
+    higher-precision false-promise signal, since a finished turn never mentions
+    self-wake. Verify blocks are stripped first so a verify-board item can't
+    false-trigger.
+    """
+    return bool(config.WAKE_CLAIM_RE.search(strip_verify_blocks(text or "")))
+
+
 async def check_wake_request(
     ctx: RequestContext, instance: Instance, *, final_text: str = "",
 ) -> None:
@@ -1262,7 +1274,25 @@ async def check_wake_request(
         # human reply) — reset the runaway counter and move on. BUT if the final
         # message PROMISED to keep watching a job yet scheduled nothing, that's a
         # silent dead-end we want to catch rather than stall on.
-        promised = looks_like_watch_promise(final_text)
+        promised = (
+            looks_like_watch_promise(final_text)
+            or claims_self_wake(final_text)
+        )
+        # Loop guard: a turn that was ITSELF a self-wake re-check (source ==
+        # "wake") already got one explicit chance to write a fresh wake file
+        # (the fallback prompt says exactly that). If it instead only *talks*
+        # about watching/self-waking again, re-arming would loop on phrase-
+        # matches — especially when the conversation is ABOUT this feature —
+        # until MAX_CONSEC_WAKES. End the chain and hand back to the user. A
+        # genuinely still-running job continues via a real wake FILE (handled
+        # below), never via this phrase fallback.
+        if promised and ctx.source == "wake":
+            _reset()
+            await _notice(
+                "(Auto-check ran but nothing new was scheduled — reply when "
+                "you want me to keep going.)"
+            )
+            return
         if promised and instance.branch:
             # Worktree build can't self-wake (its dir may be merged/discarded by
             # fire time), so we can't auto-arm — but say so instead of stalling,
