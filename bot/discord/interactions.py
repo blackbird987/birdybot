@@ -284,7 +284,16 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
         await _handle_effort_set(bot, interaction, instance_id, btn_access)
         return
 
-    await interaction.response.defer()
+    try:
+        await interaction.response.defer()
+    except discord.NotFound:
+        # 10062 Unknown interaction — the 3s ack window already closed (Discord
+        # showed the user "interaction failed"). Nothing to recover; bail quietly
+        # instead of raising an unhandled exception.
+        log.debug("interaction %s expired before defer", custom_id)
+        return
+    except discord.InteractionResponded:
+        pass  # already acked elsewhere (e.g. double-dispatch) — continue
 
     # --- Pending-prompt interactions (Steer / Cancel on Queued embed) ---
     # Here the trailing portion of the custom_id is a pending_id, not an

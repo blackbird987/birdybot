@@ -423,6 +423,7 @@ async def run() -> None:
         state_file=config.STATE_FILE,
         results_dir=config.RESULTS_DIR,
         retention_days=config.INSTANCE_RETENTION_DAYS,
+        max_retained=config.INSTANCE_MAX_RETAINED,
     )
 
     orphans = store.mark_orphans()
@@ -652,10 +653,20 @@ async def run() -> None:
 
     # Background tasks
     async def auto_save_loop():
+        tick = 0
         while True:
             await asyncio.sleep(60)
+            tick += 1
             try:
-                store.save_if_dirty()
+                # Prune accumulated terminal instances every ~30 min so
+                # state.json stays small and saves stay cheap.
+                if tick % 30 == 0:
+                    pruned = store.archive_old()
+                    if pruned:
+                        log.info("Auto-pruned %d old instances", pruned)
+                # Write off the event loop; refresh the .bak backup here (not on
+                # every hot-path save).
+                await store.save_if_dirty_async(backup=True)
             except Exception:
                 log.exception("Auto-save failed")
 
