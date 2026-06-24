@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -236,16 +235,10 @@ class StateStore:
         if self._dirty:
             self.save(backup=backup)
 
-    async def save_if_dirty_async(self, backup: bool = False) -> None:
-        """Async variant: serialize on the loop, write off it (see save_async)."""
-        if self._dirty:
-            await self.save_async(backup=backup)
-
     def _serialize(self) -> str:
-        """Build a detached JSON snapshot of all state. Must run on the event
-        loop (reads live mutable structures); the resulting string is safe to
-        hand to a worker thread for the file write. Compact separators — the
-        file is machine-read, so pretty-printing 4 MB is pure CPU waste."""
+        """Build a JSON snapshot of all state. Compact separators — the file is
+        machine-read, so pretty-printing several MB is pure CPU waste (cuts
+        serialize time ~4x vs indent=2)."""
         data = {
             "instances": [i.to_dict() for i in self._instances.values()],
             "repos": self._repos,
@@ -282,8 +275,7 @@ class StateStore:
         return json.dumps(data, separators=(",", ":"))
 
     def _write_payload(self, payload: str, backup: bool) -> None:
-        """Atomically write a pre-serialized snapshot to disk. Safe to call in
-        a worker thread (touches only the immutable string + filesystem)."""
+        """Atomically write a pre-serialized snapshot to disk (temp + replace)."""
         try:
             self._file.parent.mkdir(parents=True, exist_ok=True)
             fd, tmp_path = tempfile.mkstemp(
@@ -309,16 +301,12 @@ class StateStore:
             log.exception("Failed to save state")
 
     def save(self, backup: bool = False) -> None:
-        """Atomic save: serialize then write via temp + rename."""
+        """Atomic save: serialize then write via temp + replace. Cheap enough to
+        stay on the event loop now that state.json is pruned and JSON is compact
+        (~12ms, no per-call 4 MB backup copy); pass ``backup=True`` to also
+        refresh the periodic .bak."""
         self._dirty = False
         self._write_payload(self._serialize(), backup)
-
-    async def save_async(self, backup: bool = False) -> None:
-        """Serialize on the loop (consistent snapshot, no await mid-build), then
-        write off the loop so the file I/O never stalls interaction acks."""
-        self._dirty = False
-        payload = self._serialize()
-        await asyncio.to_thread(self._write_payload, payload, backup)
 
     # --- Instance Management ---
 

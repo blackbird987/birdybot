@@ -664,9 +664,8 @@ async def run() -> None:
                     pruned = store.archive_old()
                     if pruned:
                         log.info("Auto-pruned %d old instances", pruned)
-                # Write off the event loop; refresh the .bak backup here (not on
-                # every hot-path save).
-                await store.save_if_dirty_async(backup=True)
+                # Refresh the .bak backup here (not on every hot-path save).
+                store.save_if_dirty(backup=True)
             except Exception:
                 log.exception("Auto-save failed")
 
