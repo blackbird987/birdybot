@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## v0.93.11 — Bounded state.json stops interaction-ack stalls (2026-06-24)
+
+### Fixed
+- **"Interaction failed" (10062) from a bloated state.json stalling the event loop** (`state.py`, `app.py`, `config.py`, `interactions.py`). Buttons increasingly showed Discord's red "interaction failed". Root cause: `data/state.json` had grown to ~4 MB (704 accumulated instances — age-based `archive_old` ran only at startup and left 318 stale ones), and `State.save()` did a synchronous `json.dump(indent=2)` **plus** a `shutil.copy2` of the whole 4 MB file on the event loop, fired from ~49 call sites and the 60s auto-save. A finish-burst stacked those saves and blocked the loop past Discord's 3-second window, so `interaction.response.defer()` ran after the token expired → unhandled `NotFound`. Fixes: (1) `archive_old` now enforces a hard cap (`INSTANCE_MAX_RETAINED`, default 250) on retained terminal instances, not just age, and the auto-save loop prunes every ~30 min — file dropped from ~4 MB to ~1.6 MB; (2) saves use compact JSON (45 ms → ~12 ms serialize) and no longer copy a 4 MB backup on every call — the `.bak` is refreshed periodically by the auto-save loop (`backup=True`) instead, and writes use atomic `os.replace`; (3) `defer()` is wrapped to swallow `NotFound`/`InteractionResponded` so an expired token degrades quietly instead of throwing an unhandled exception.
+
 ## v0.93.10 — Self-wake catches claimed-but-unwritten wakes (2026-06-23)
 
 ### Fixed

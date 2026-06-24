@@ -20,10 +20,12 @@ log = logging.getLogger(__name__)
 class StateStore:
     """In-memory state with atomic JSON persistence."""
 
-    def __init__(self, state_file: Path, results_dir: Path, retention_days: int = 7):
+    def __init__(self, state_file: Path, results_dir: Path, retention_days: int = 7,
+                 max_retained: int = 250):
         self._file = state_file
         self._results_dir = results_dir
         self._retention_days = retention_days
+        self._max_retained = max_retained
 
         self._instances: dict[str, Instance] = {}
         self._repos: dict[str, str] = {}       # name -> path
@@ -228,14 +230,15 @@ class StateStore:
         """Mark state as changed — actual write deferred to auto-save loop."""
         self._dirty = True
 
-    def save_if_dirty(self) -> None:
+    def save_if_dirty(self, backup: bool = False) -> None:
         """Write to disk only if state has changed since last save."""
         if self._dirty:
-            self.save()
+            self.save(backup=backup)
 
-    def save(self) -> None:
-        """Atomic save: write to temp then rename."""
-        self._dirty = False
+    def _serialize(self) -> str:
+        """Build a JSON snapshot of all state. Compact separators — the file is
+        machine-read, so pretty-printing several MB is pure CPU waste (cuts
+        serialize time ~4x vs indent=2)."""
         data = {
             "instances": [i.to_dict() for i in self._instances.values()],
             "repos": self._repos,
@@ -269,6 +272,10 @@ class StateStore:
             "account_cooldowns": self._account_cooldowns,
             "schedules": [s.to_dict() for s in self._schedules.values()],
         }
+        return json.dumps(data, separators=(",", ":"))
+
+    def _write_payload(self, payload: str, backup: bool) -> None:
+        """Atomically write a pre-serialized snapshot to disk (temp + replace)."""
         try:
             self._file.parent.mkdir(parents=True, exist_ok=True)
             fd, tmp_path = tempfile.mkstemp(
@@ -276,22 +283,30 @@ class StateStore:
             )
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    json.dump(data, f, indent=2)
-                # Backup the current (last-known-good) file before replacing
-                if self._file.exists():
-                    backup = self._file.with_suffix(".bak")
+                    f.write(payload)
+                # Refresh the last-known-good backup only when asked (periodic),
+                # so the 4 MB copy stays off the per-save hot path.
+                if backup and self._file.exists():
                     try:
-                        shutil.copy2(str(self._file), str(backup))
+                        shutil.copy2(str(self._file),
+                                     str(self._file.with_suffix(".bak")))
                     except Exception:
                         pass  # best-effort backup
-                    self._file.unlink()
-                Path(tmp_path).rename(self._file)
+                os.replace(tmp_path, str(self._file))  # atomic overwrite
                 self._update_mtime()
             except Exception:
                 Path(tmp_path).unlink(missing_ok=True)
                 raise
         except Exception:
             log.exception("Failed to save state")
+
+    def save(self, backup: bool = False) -> None:
+        """Atomic save: serialize then write via temp + replace. Cheap enough to
+        stay on the event loop now that state.json is pruned and JSON is compact
+        (~12ms, no per-call 4 MB backup copy); pass ``backup=True`` to also
+        refresh the periodic .bak."""
+        self._dirty = False
+        self._write_payload(self._serialize(), backup)
 
     # --- Instance Management ---
 
@@ -401,19 +416,31 @@ class StateStore:
         return orphans
 
     def archive_old(self) -> int:
-        """Delete instances older than retention period."""
+        """Prune terminal instances: first by age (older than retention), then
+        enforce a hard cap so only the most-recent N survive. The cap bounds
+        state.json size regardless of churn — without it, a busy week leaves
+        hundreds of instances and every save stalls the event loop."""
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(days=self._retention_days)
+        terminal = (InstanceStatus.COMPLETED, InstanceStatus.FAILED,
+                    InstanceStatus.KILLED)
         to_remove = []
         for inst in self._instances.values():
-            if inst.status in (InstanceStatus.COMPLETED, InstanceStatus.FAILED,
-                               InstanceStatus.KILLED):
+            if inst.status in terminal:
                 try:
                     created = datetime.fromisoformat(inst.created_at)
                     if created < cutoff:
                         to_remove.append(inst)
                 except (ValueError, TypeError):
                     pass
+        # Hard cap: of the terminal instances that survived the age pass, keep
+        # only the most-recent _max_retained (by created_at); drop the oldest.
+        removing = {i.id for i in to_remove}
+        survivors = [i for i in self._instances.values()
+                     if i.status in terminal and i.id not in removing]
+        if len(survivors) > self._max_retained:
+            survivors.sort(key=lambda i: i.created_at or "")  # oldest first
+            to_remove.extend(survivors[: len(survivors) - self._max_retained])
         for inst in to_remove:
             # Clean up result files
             for fpath in (inst.result_file, inst.diff_file):

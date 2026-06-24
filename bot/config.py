@@ -99,6 +99,11 @@ REBOOT_DRAIN_TIMEOUT_SECS: int = int(os.getenv("REBOOT_DRAIN_TIMEOUT_SECS", "600
 REBOOT_DEFERRED_TTL_SECS: int = int(os.getenv("REBOOT_DEFERRED_TTL_SECS", "3600"))
 TITLE_TIMEOUT_SECS: int = int(os.getenv("TITLE_TIMEOUT_SECS", "15"))
 INSTANCE_RETENTION_DAYS: int = int(os.getenv("INSTANCE_RETENTION_DAYS", "7"))
+# Hard cap on retained terminal (completed/failed/killed) instances. Even if
+# they are younger than the retention window, only the most-recent N survive a
+# prune. Bounds state.json size so per-save serialization can't grow unbounded
+# and stall the event loop (root cause of "interaction failed" 10062 errors).
+INSTANCE_MAX_RETAINED: int = int(os.getenv("INSTANCE_MAX_RETAINED", "250"))
 
 # Install a PreToolUse hook into each build worktree to mechanically block
 # tools (Bash, Edit, Write, MultiEdit, NotebookEdit) from touching the main
