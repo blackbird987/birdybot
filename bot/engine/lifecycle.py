@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import subprocess
 from datetime import datetime, timedelta, timezone
 
@@ -395,10 +396,11 @@ async def run_instance(
         # checks for pending reboots on idle.  Safe because check_reboot_request
         # just queues (no waiting) — the actual reboot fires from end_task.
         await check_reboot_request(ctx)
-        # Self-wake: convert any wake file this session wrote into a thread-bound
-        # one-shot schedule (or reset the runaway counter if none was written).
-        # Pass the raw result text so the no-file path can catch a turn that
-        # promised to keep watching a job but wrote no wake file.
+        # Self-wake: convert a [BOT_CMD: /wake] directive in this turn's output
+        # (or the legacy wake file) into a thread-bound one-shot schedule, else
+        # reset the runaway counter. Pass the raw result text so the directive
+        # can be parsed and a turn that promised to keep watching a job but
+        # scheduled nothing can auto-arm a fallback instead of stalling.
         await check_wake_request(ctx, inst, final_text=result.result_text)
 
     except asyncio.CancelledError:
@@ -1224,25 +1226,93 @@ def claims_self_wake(text: str) -> bool:
     return bool(config.WAKE_CLAIM_RE.search(strip_verify_blocks(text or "")))
 
 
+# --- [BOT_CMD: /wake] directive (primary self-wake channel) ----------------
+# A finished turn schedules a self-wake by emitting this directive in its
+# output, parsed here post-turn — the same proven path as [BOT_CMD: /spawn],
+# and strictly more reliable than the legacy data/wakes/<id>.json file: the
+# directive IS the action (text in the response), so the model can't narrate
+# "self-wake queued" while skipping a separate file-write tool call.
+_WAKE_DIRECTIVE_RE = re.compile(r"\[BOT_CMD:\s*/wake\s+(.+?)\]")
+# Tilde-fenced body carries the (possibly multiline) resume prompt. Tildes
+# avoid colliding with the ``` code fences a prompt body may itself contain.
+_WAKE_BODY_RE = re.compile(r"~~~wake\s*\n(.*?)\n~~~", re.DOTALL)
+_WAKE_KV_RE = re.compile(r'''(\w+)=(?:"([^"]*)"|'([^']*)'|(\S+))''')
+# A directive on a quoted/code/heading line is an EXAMPLE (this guidance quoted
+# back, or a fenced snippet), not a real request — skip it. Mirrors the guard in
+# commands._execute_bot_commands so meta-discussion can't self-trigger a wake.
+_WAKE_QUOTED_PREFIX = re.compile(r"^\s*(?:>|`|```|#{1,3}\s)")
+
+
+def _parse_wake_directive(text: str) -> dict | None:
+    """Extract a ``[BOT_CMD: /wake ...]`` directive from a turn's output.
+
+    Returns a dict shaped like the legacy wake file
+    (``{"prompt", "delay_secs", "reason"}``) so the downstream scheduling path
+    is identical, or ``None`` if no real (unquoted) directive is present. The
+    resume prompt comes from the adjacent ``~~~wake ... ~~~`` body (preferred)
+    or an inline ``prompt=`` kv. A missing delay defaults to
+    ``WAKE_FALLBACK_DELAY_SECS`` so a directive that carries a prompt always
+    arms rather than silently dropping.
+    """
+    if not text:
+        return None
+    for m in _WAKE_DIRECTIVE_RE.finditer(text):
+        line_start = text.rfind("\n", 0, m.start()) + 1
+        # Skip EXAMPLES, not real requests. Three ways a directive can be a
+        # quoted demo rather than a live request — all common when the feature
+        # itself is being discussed (the meta-loop we hit): (1) the line is
+        # quoted/code/heading-prefixed; (2) it sits inside an open ``` fenced
+        # block (odd number of fences precede it — the fence marker is on a
+        # different line, so the prefix check alone misses it); (3) it's wrapped
+        # in inline backticks in prose. The first REAL (unquoted) directive wins,
+        # so an example shown ABOVE a real one doesn't shadow it. (~~~wake bodies
+        # use tildes, so they never disturb the ``` fence count.)
+        if _WAKE_QUOTED_PREFIX.match(text[line_start:m.start()]):
+            continue
+        if text.count("```", 0, m.start()) % 2 == 1:
+            continue
+        if m.start() > 0 and text[m.start() - 1] == "`":
+            continue
+        kv: dict[str, str] = {}
+        for kvm in _WAKE_KV_RE.finditer(m.group(1)):
+            val = kvm.group(2) if kvm.group(2) is not None else (
+                kvm.group(3) if kvm.group(3) is not None else kvm.group(4)
+            )
+            kv[kvm.group(1)] = val or ""
+        body_match = _WAKE_BODY_RE.search(text, m.end())
+        prompt = (body_match.group(1).strip() if body_match
+                  else (kv.get("prompt") or "").strip())
+        delay = (kv.get("delay") or kv.get("delay_secs")
+                 or str(config.WAKE_FALLBACK_DELAY_SECS))
+        return {
+            "prompt": prompt,
+            "delay_secs": delay,
+            "reason": kv.get("reason", ""),
+        }
+    return None
+
+
 async def check_wake_request(
     ctx: RequestContext, instance: Instance, *, final_text: str = "",
 ) -> None:
-    """Handle a self-wake file written by the just-finished session.
+    """Schedule a thread-bound self-wake requested by the just-finished turn.
 
-    A session waiting on a long external job can write
-    ``data/wakes/<instance_id>.json`` to be re-invoked in THIS thread after a
-    delay (see config.WAKE_GUIDANCE). We convert that into a one-shot,
-    thread-bound Schedule; the Scheduler later fires it via
-    ``_replay_to_thread``. Mirrors ``check_reboot_request``'s
-    read-delete-process shape.
+    Primary channel: a ``[BOT_CMD: /wake ...]`` directive in the turn's output
+    (parsed by ``_parse_wake_directive``). Legacy channel: a
+    ``data/wakes/<instance_id>.json`` file (still honored so a session running
+    on cached older guidance isn't dropped). Either is converted into a
+    one-shot, thread-bound Schedule that the Scheduler later fires via
+    ``_replay_to_thread``.
 
-    No wake file ⇒ the turn ended without asking to poll, so reset the runaway
-    counter (covers genuine completion and plain human replies) — UNLESS
-    ``final_text`` (the model's raw result text; verify blocks are stripped
-    here before scanning) shows the turn promised to keep watching a job (a
-    silent dead-end), in which case we auto-arm one fallback. Worktree builds
-    can't safely self-wake — their dir may be merged/discarded by fire time — so
-    they're refused with a note (parity with the runner guidance gate).
+    Neither present ⇒ the turn ended without asking to poll, so reset the
+    runaway counter (covers genuine completion and plain human replies) —
+    UNLESS ``final_text`` (verify blocks stripped before scanning) shows the
+    turn promised to keep watching a job or claimed a self-wake yet scheduled
+    nothing (a silent dead-end), in which case we auto-arm one fallback. A turn
+    that was itself a wake re-check (``ctx.source == "wake"``) does NOT re-arm
+    off a bare phrase match, to stop a poll loop spinning on prose. Worktree
+    builds can't safely self-wake — their dir may be merged/discarded by fire
+    time — so they're refused with a note (parity with the runner gate).
     """
     path = config.WAKE_DIR / f"{instance.id}.json"
 
@@ -1269,23 +1339,46 @@ async def check_wake_request(
             "reply when you want me to keep going."
         )
 
-    if not path.exists():
-        # No wake file. Normally the turn just ended (real completion or a plain
-        # human reply) — reset the runaway counter and move on. BUT if the final
-        # message PROMISED to keep watching a job yet scheduled nothing, that's a
-        # silent dead-end we want to catch rather than stall on.
+    # Resolve the wake request: a [BOT_CMD: /wake] directive (primary) takes
+    # precedence over the legacy data/wakes/<id>.json file (kept so a session on
+    # cached older guidance still works). A directive supersedes any stale file
+    # left from an earlier turn.
+    data = _parse_wake_directive(final_text)
+    if data is not None:
+        path.unlink(missing_ok=True)
+    elif path.exists():
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except Exception:
+            log.warning("Failed to read wake request %s", path, exc_info=True)
+            path.unlink(missing_ok=True)
+            return
+        # Delete immediately so a crash/restart can't double-process it.
+        path.unlink(missing_ok=True)
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            log.warning("Malformed wake request, ignoring", exc_info=True)
+            return
+        if isinstance(parsed, dict):
+            data = parsed
+
+    if data is None:
+        # No wake request. Normally the turn just ended (real completion or a
+        # plain human reply) — reset the runaway counter and move on. BUT if the
+        # final message PROMISED to keep watching a job (or claimed a self-wake)
+        # yet scheduled nothing, that's a silent dead-end we catch instead.
         promised = (
             looks_like_watch_promise(final_text)
             or claims_self_wake(final_text)
         )
         # Loop guard: a turn that was ITSELF a self-wake re-check (source ==
-        # "wake") already got one explicit chance to write a fresh wake file
-        # (the fallback prompt says exactly that). If it instead only *talks*
-        # about watching/self-waking again, re-arming would loop on phrase-
-        # matches — especially when the conversation is ABOUT this feature —
-        # until MAX_CONSEC_WAKES. End the chain and hand back to the user. A
-        # genuinely still-running job continues via a real wake FILE (handled
-        # below), never via this phrase fallback.
+        # "wake") already got one explicit chance to schedule a fresh wake. If
+        # it instead only *talks* about watching/self-waking again, re-arming
+        # would loop on phrase-matches — especially when the conversation is
+        # ABOUT this feature — until MAX_CONSEC_WAKES. End the chain and hand
+        # back to the user. A genuinely still-running job continues via a real
+        # wake request (directive/file, handled above), never via this fallback.
         if promised and ctx.source == "wake":
             _reset()
             await _notice(
@@ -1296,7 +1389,7 @@ async def check_wake_request(
         if promised and instance.branch:
             # Worktree build can't self-wake (its dir may be merged/discarded by
             # fire time), so we can't auto-arm — but say so instead of stalling,
-            # mirroring the file-path worktree notice below.
+            # mirroring the worktree notice below.
             _reset()
             await _notice(
                 "(You said you'd keep watching, but a build/worktree session "
@@ -1305,7 +1398,7 @@ async def check_wake_request(
             return
         if promised and ctx.bump_wake_count is not None:
             # Auto-arm ONE fallback re-check so the poll chain survives the
-            # missing file (bounded by the same runaway cap as real wakes).
+            # missing request (bounded by the same runaway cap as real wakes).
             count = ctx.bump_wake_count()
             if count > config.MAX_CONSEC_WAKES:
                 await _stop_capped()
@@ -1318,9 +1411,9 @@ async def check_wake_request(
                 prompt=(
                     "Earlier you said you'd keep watching for a job to finish "
                     "but didn't schedule a re-check. Check now: if it's done, "
-                    "report the result and stop. If it's still running, write a "
-                    "fresh wake file to keep polling. If you can't tell, ask the "
-                    "user instead of waiting silently."
+                    "report the result and stop. If it's still running, emit a "
+                    "fresh [BOT_CMD: /wake] directive to keep polling. If you "
+                    "can't tell, ask the user instead of waiting silently."
                 ),
                 channel_id=ctx.channel_id,
                 next_run_at=next_run_at,
@@ -1328,7 +1421,7 @@ async def check_wake_request(
                 repo_path=instance.repo_path or "",
             )
             log.info(
-                "Auto-armed fallback wake (promise w/o file) for thread %s in ~%ds (count=%d)",
+                "Auto-armed fallback wake (promise w/o request) for thread %s in ~%ds (count=%d)",
                 ctx.channel_id, secs, count,
             )
             await _notice(
@@ -1339,29 +1432,12 @@ async def check_wake_request(
         _reset()
         return
 
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except Exception:
-        log.warning("Failed to read wake request %s", path, exc_info=True)
-        path.unlink(missing_ok=True)
-        return
-    # Delete immediately so a crash/restart can't double-process it.
-    path.unlink(missing_ok=True)
-
     if instance.branch:
         _reset()
         await _notice(
             "(Can't self-wake from a build/worktree session — reply or tap a "
             "button when you want me to continue.)"
         )
-        return
-
-    try:
-        data = json.loads(raw)
-    except Exception:
-        log.warning("Malformed wake request, ignoring", exc_info=True)
-        return
-    if not isinstance(data, dict):
         return
 
     prompt = (data.get("prompt") or "").strip()
@@ -1371,8 +1447,8 @@ async def check_wake_request(
         return
     next_run_at, secs = sched_at
 
-    # Runaway guard: every wake request bumps the per-thread counter (reset above
-    # whenever a turn ends without a wake). Cap stops an endless poll loop.
+    # Runaway guard: every wake request bumps the per-thread counter (reset
+    # whenever a turn ends without one). Cap stops an endless poll loop.
     count = ctx.bump_wake_count() if ctx.bump_wake_count is not None else 1
     if count > config.MAX_CONSEC_WAKES:
         await _stop_capped()

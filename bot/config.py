@@ -942,10 +942,12 @@ example items above — they are illustrative only.
 """
 
 
-# Self-wake guidance — injected per-session (non-build origins only) with the
-# instance's absolute wake-file path substituted for __WAKE_FILE__. Lets a
+# Self-wake guidance — injected per-session (non-build origins only). Lets a
 # session waiting on a long external job re-invoke ITSELF in THIS thread after a
-# delay instead of falsely promising to "poll in the background".
+# delay instead of falsely promising to "poll in the background". Scheduling is
+# done with a [BOT_CMD: /wake] directive in the turn's output (parsed by
+# lifecycle._parse_wake_directive) — the same proven channel as /spawn, and
+# more reliable than a separate file-write the model can narrate but skip.
 WAKE_GUIDANCE = """\
 
 --- Continuing After Your Turn (self-wake) ---
@@ -953,26 +955,32 @@ HARD FACT: when this turn ends your process EXITS and NOTHING resumes you — no
 the deploy system, not CI, not a webhook, not a "notification". There is no \
 passive way to "get notified" or "be told when it's done"; that silently never \
 happens and leaves the user waiting. The ONLY way to continue after an external \
-event is to schedule a self-wake by writing the file below.
+event is to schedule a self-wake.
 
 So whenever you catch yourself about to tell the user you'll "poll", "monitor", \
 "watch", "wait for", "check back on", "report back when", "get notified when", \
-or "continue once X finishes" — STOP. That sentence is your cue to write a wake \
-file RIGHT NOW, before your final message. Don't describe the intent; act on it.
+or "continue once X finishes" — STOP. That sentence is your cue to schedule a \
+self-wake RIGHT NOW, in your final message. Don't describe the intent; act on it.
 
-Write JSON to this EXACT absolute path:
-   __WAKE_FILE__
-   {"delay_secs": 300, "prompt": "<concrete next step when you wake — e.g. \
-'re-check whether the deploy is live; if it is, run the planned tests and \
-report the result, otherwise write a fresh wake file'>", "reason": "<short \
-why, shown to the user>"}
+Schedule it by ending your response with this directive — the bot reads it \
+straight from your output, so there is no file to write and no tool to call:
 
-The bot re-invokes THIS session in THIS thread after the delay with your \
-prompt — that IS how you continue; it is not optional decoration. To poll a \
-still-running job, write a fresh wake file each time you wake, and stop writing \
-it once the job is done and you've reported the result. delay_secs is clamped \
-to [30, 86400] (30s–24h) — pick a delay that fits the job (~120-300s for a \
-deploy to land, longer for a long backtest).
+[BOT_CMD: /wake delay=300 reason="<short why, shown to the user>"]
+~~~wake
+<concrete next step when you wake — e.g. re-check whether the deploy is live; \
+if it is, run the planned tests and report the result; if it's still running, \
+emit a fresh [BOT_CMD: /wake] to keep polling>
+~~~
+
+- delay is in seconds, clamped to [30, 86400] (30s–24h). Pick one that fits the \
+job (~120-300s for a deploy to land, longer for a long backtest).
+- The ~~~wake body IS the prompt that re-invokes THIS session in THIS thread \
+after the delay — that is how you continue; it is not optional decoration.
+- To poll a still-running job, emit a fresh [BOT_CMD: /wake] each time you wake, \
+and stop once the job is done and you've reported the result.
+- Put the [BOT_CMD: /wake] line at the top level of your message — NOT indented \
+inside a ``` code block or quoted with > (a fenced/quoted example is ignored on \
+purpose, so it can be discussed without firing).
 
 The ONLY time you skip self-wake is when the wait is trivial or the user is \
 clearly right there — then finish now and tell them to reply "update" or tap a \
