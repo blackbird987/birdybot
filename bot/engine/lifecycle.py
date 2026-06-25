@@ -1228,11 +1228,12 @@ def claims_self_wake(text: str) -> bool:
 
 # --- [BOT_CMD: /wake] directive (primary self-wake channel) ----------------
 # A finished turn schedules a self-wake by emitting this directive in its
-# output, parsed here post-turn — the same proven path as [BOT_CMD: /spawn],
-# and strictly more reliable than the legacy data/wakes/<id>.json file: the
+# output, parsed here post-turn — the same proven mechanism as [BOT_CMD: /spawn]
+# (a separate parser, mirroring its kv + quoted-line-skip approach), and
+# strictly more reliable than the legacy data/wakes/<id>.json file: the
 # directive IS the action (text in the response), so the model can't narrate
 # "self-wake queued" while skipping a separate file-write tool call.
-_WAKE_DIRECTIVE_RE = re.compile(r"\[BOT_CMD:\s*/wake\s+(.+?)\]")
+_WAKE_DIRECTIVE_RE = re.compile(r"\[BOT_CMD:\s*/wake(?:\s+(.+?))?\s*\]")
 # Tilde-fenced body carries the (possibly multiline) resume prompt. Tildes
 # avoid colliding with the ``` code fences a prompt body may itself contain.
 _WAKE_BODY_RE = re.compile(r"~~~wake\s*\n(.*?)\n~~~", re.DOTALL)
@@ -1248,11 +1249,13 @@ def _parse_wake_directive(text: str) -> dict | None:
 
     Returns a dict shaped like the legacy wake file
     (``{"prompt", "delay_secs", "reason"}``) so the downstream scheduling path
-    is identical, or ``None`` if no real (unquoted) directive is present. The
-    resume prompt comes from the adjacent ``~~~wake ... ~~~`` body (preferred)
-    or an inline ``prompt=`` kv. A missing delay defaults to
-    ``WAKE_FALLBACK_DELAY_SECS`` so a directive that carries a prompt always
-    arms rather than silently dropping.
+    is identical, or ``None`` if no real (unquoted) directive with a usable
+    prompt is present. The resume prompt comes from the adjacent
+    ``~~~wake ... ~~~`` body (preferred) or an inline ``prompt=`` kv. A missing
+    or non-numeric delay defaults to ``WAKE_FALLBACK_DELAY_SECS`` so a directive
+    that carries a prompt always arms with a sane delay rather than dropping. A
+    directive with no prompt is treated as absent (returns ``None``) so the
+    promise/claim backstop can still engage instead of a silent drop.
     """
     if not text:
         return None
@@ -1274,7 +1277,7 @@ def _parse_wake_directive(text: str) -> dict | None:
         if m.start() > 0 and text[m.start() - 1] == "`":
             continue
         kv: dict[str, str] = {}
-        for kvm in _WAKE_KV_RE.finditer(m.group(1)):
+        for kvm in _WAKE_KV_RE.finditer(m.group(1) or ""):
             val = kvm.group(2) if kvm.group(2) is not None else (
                 kvm.group(3) if kvm.group(3) is not None else kvm.group(4)
             )
@@ -1282,11 +1285,22 @@ def _parse_wake_directive(text: str) -> dict | None:
         body_match = _WAKE_BODY_RE.search(text, m.end())
         prompt = (body_match.group(1).strip() if body_match
                   else (kv.get("prompt") or "").strip())
-        delay = (kv.get("delay") or kv.get("delay_secs")
-                 or str(config.WAKE_FALLBACK_DELAY_SECS))
+        if not prompt:
+            # No resume prompt (no ~~~wake body, no prompt= kv) — not a usable
+            # request. Skip so a later real directive, or the promise/claim
+            # backstop, can engage instead of dropping at the downstream guard.
+            continue
+        # Coerce delay to a sane int here (default on absent/garbage) so a
+        # typo'd delay can't silently drop a directive that carries a prompt.
+        raw_delay = kv.get("delay") or kv.get("delay_secs")
+        try:
+            delay_secs = (int(float(raw_delay)) if raw_delay is not None
+                          else config.WAKE_FALLBACK_DELAY_SECS)
+        except (TypeError, ValueError):
+            delay_secs = config.WAKE_FALLBACK_DELAY_SECS
         return {
             "prompt": prompt,
-            "delay_secs": delay,
+            "delay_secs": delay_secs,
             "reason": kv.get("reason", ""),
         }
     return None

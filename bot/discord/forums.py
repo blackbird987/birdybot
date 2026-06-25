@@ -75,10 +75,11 @@ class ThreadInfo:
     # keeps the historical color visible after the slot has been released.
     color_slot: int | None = None
     # Self-wake runaway guard: consecutive turns that requested a wake on this
-    # thread. check_wake_request bumps it on every turn that writes a wake file
-    # (regardless of source — the first is usually the human-initiated turn) and
-    # resets it to 0 on any turn that doesn't (genuine completion or a plain
-    # reply). Caps a never-completing poll loop at config.MAX_CONSEC_WAKES.
+    # thread. check_wake_request bumps it on every turn that requests a wake (a
+    # [BOT_CMD: /wake] directive or the legacy file; regardless of source — the
+    # first is usually the human-initiated turn) and resets it to 0 on any turn
+    # that doesn't (genuine completion or a plain reply). Caps a never-completing
+    # poll loop at config.MAX_CONSEC_WAKES.
     wake_count: int = 0
 
     def to_dict(self) -> dict:

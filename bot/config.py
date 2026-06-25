@@ -216,8 +216,9 @@ WAKE_MIN_DELAY_SECS: int = 30
 WAKE_MAX_DELAY_SECS: int = 86400          # 24h
 MAX_CONSEC_WAKES: int = 25                # stop a never-completing poll loop
 # Broken-promise safety net: a turn can end PROMISING to keep watching a job
-# (deploy/build/CI/probe) but write no wake file — a silent dead-end where the
-# chain just stops. When that contradiction is detected we auto-arm one fallback
+# (deploy/build/CI/probe) but schedule no wake (no [BOT_CMD: /wake] directive,
+# no file) — a silent dead-end where the chain just stops. When that
+# contradiction is detected we auto-arm one fallback
 # re-check this far out instead of assuming the work finished. Counts toward
 # MAX_CONSEC_WAKES, so it can't loop forever.
 WAKE_FALLBACK_DELAY_SECS: int = 180
@@ -234,7 +235,8 @@ WAKE_PROMISE_RE = re.compile(
     re.IGNORECASE,
 )
 # Companion to WAKE_PROMISE_RE: a turn that CLAIMS it queued/scheduled/wrote a
-# self-wake but left no wake file is a false promise — narration of the action
+# self-wake but scheduled none (no directive, no file) is a false promise —
+# narration of the action
 # without the action. High-precision (a genuinely finished turn never claims a
 # self-wake), so it catches phrasings WAKE_PROMISE_RE misses — no watch-verb +
 # job-noun pair — e.g. "Self-wake queued (~4 min); I'll report the verdict."
@@ -444,8 +446,8 @@ Post-reboot verification (MANDATORY in every resume_prompt):
 
 Continuing after your turn (CRITICAL — read before you promise to "watch" anything):
 - Your turn ENDS when you send your final message. The process EXITS. You do NOT keep running, polling, watching, or waiting afterward. NOTHING resumes you — not the deploy system, not CI, not a webhook, not a "notification". There is exactly ONE way to continue after an external event: YOU schedule a self-wake (see the self-wake section below, present for non-worktree sessions).
-- Therefore these are ALL false promises and are BANNED unless you have JUST written a wake file this turn — never say any of them: "I'm polling in the background", "I'll report back when it's done", "I'll keep checking", "I'll monitor X and update you", "I'll wait for the deploy/build/CI", "I'll get notified when it lands", "I'll trigger the next step once X finishes". Saying any of these without a wake file means the user waits forever for something that will never happen.
-- If you intend to continue after a long external job (backtest, deploy, build, CI — anything you are "waiting" on), that intent IS your cue to write a wake file NOW, before you finish. If the self-wake section below is absent (worktree build), you cannot self-wake — finish and explicitly tell the user to reply or tap a button to continue.
+- Therefore these are ALL false promises and are BANNED unless you have JUST scheduled a self-wake this turn — never say any of them: "I'm polling in the background", "I'll report back when it's done", "I'll keep checking", "I'll monitor X and update you", "I'll wait for the deploy/build/CI", "I'll get notified when it lands", "I'll trigger the next step once X finishes". Saying any of these without a scheduled self-wake means the user waits forever for something that will never happen.
+- If you intend to continue after a long external job (backtest, deploy, build, CI — anything you are "waiting" on), that intent IS your cue to schedule a self-wake NOW, before you finish (see the self-wake section below for how). If that section is absent (worktree build), you cannot self-wake — finish and explicitly tell the user to reply or tap a button to continue.
 """
 
 

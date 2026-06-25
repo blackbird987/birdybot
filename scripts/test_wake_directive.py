@@ -47,27 +47,45 @@ _d = _parse_wake_directive(
 )
 _check("returns a dict", isinstance(_d, dict))
 _check("prompt from body", _d and _d["prompt"] == "Re-check the deploy; run the tests if live.")
-_check("delay parsed", _d and _d["delay_secs"] == "240")
+_check("delay parsed as int", _d and _d["delay_secs"] == 240)
 _check("reason parsed", _d and _d["reason"] == "deploy landing")
 
-# ---- delay default when omitted ----
-print("Missing delay defaults (still arms)")
+# ---- delay default when omitted / non-numeric ----
+print("Missing or garbage delay defaults to int (still arms)")
 _d2 = _parse_wake_directive(
     "[BOT_CMD: /wake reason=x]\n~~~wake\nkeep going\n~~~"
 )
-_check("defaults to fallback delay",
-       _d2 and _d2["delay_secs"] == str(config.WAKE_FALLBACK_DELAY_SECS))
+_check("missing delay -> fallback int",
+       _d2 and _d2["delay_secs"] == config.WAKE_FALLBACK_DELAY_SECS)
+_dg = _parse_wake_directive("[BOT_CMD: /wake delay=soon]\n~~~wake\ngo\n~~~")
+_check("garbage delay -> fallback int (no drop)",
+       _dg and _dg["delay_secs"] == config.WAKE_FALLBACK_DELAY_SECS)
 
 # ---- delay_secs alias accepted ----
 print("delay_secs alias")
 _d3 = _parse_wake_directive("[BOT_CMD: /wake delay_secs=600]\n~~~wake\np\n~~~")
-_check("delay_secs alias parsed", _d3 and _d3["delay_secs"] == "600")
+_check("delay_secs alias parsed", _d3 and _d3["delay_secs"] == 600)
+
+# ---- args-less directive (body carries the prompt) ----
+print("Args-less directive parses from body")
+_d4 = _parse_wake_directive("[BOT_CMD: /wake]\n~~~wake\njust keep going\n~~~")
+_check("[BOT_CMD: /wake] + body parses", _d4 and _d4["prompt"] == "just keep going")
+_check("args-less delay -> fallback int",
+       _d4 and _d4["delay_secs"] == config.WAKE_FALLBACK_DELAY_SECS)
+
+# ---- directive with NO prompt is treated as absent ----
+print("Prompt-less directive -> None (lets backstop engage)")
+_check("no body, no prompt= -> None",
+       _parse_wake_directive("[BOT_CMD: /wake delay=300 reason=x]") is None)
 
 # ---- No directive present ----
 print("No directive -> None")
 _check("plain completion is None",
        _parse_wake_directive("All done, tests pass. Nothing pending.") is None)
 _check("empty is None", _parse_wake_directive("") is None)
+# A different /BOT_CMD token must not match the /wake parser.
+_check("/wakeup is not /wake",
+       _parse_wake_directive("[BOT_CMD: /wakeup now]\n~~~wake\nx\n~~~") is None)
 
 # ---- Fenced / quoted example must NOT parse (meta-discussion guard) ----
 print("Fenced/quoted example must NOT fire")
