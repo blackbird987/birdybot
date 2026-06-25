@@ -1863,11 +1863,12 @@ class ForumManager:
                     ln for ln in text.splitlines()
                     if not ln.lstrip().startswith("[BOT_CMD:")
                 ).strip()
-                # Drop ~~~spawn ... ~~~ payload blocks — same threat model as
-                # BOT_CMD lines: a quoted spawn body could otherwise re-issue
-                # a spawn by riding the next response back into the dispatcher.
+                # Drop ~~~spawn / ~~~wake payload blocks — same threat model as
+                # BOT_CMD lines: a quoted directive body could otherwise re-issue
+                # a spawn/wake by riding the next response back into the
+                # dispatcher, and either way it's stale prose bloating context.
                 text = re.sub(
-                    r"~~~spawn\s*\n.*?\n~~~", "", text, flags=re.DOTALL,
+                    r"~~~(?:spawn|wake)\s*\n.*?\n~~~", "", text, flags=re.DOTALL,
                 ).strip()
                 if not text:
                     continue
