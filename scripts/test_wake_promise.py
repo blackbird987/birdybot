@@ -1,17 +1,20 @@
-"""Regression test for the self-wake broken-claim safety net.
+"""Regression test for the self-wake claim detector (notice-only).
 
 Background: a turn only continues after it ends via a self-wake *timer* — there
-is no completion event for an external probe. If a turn ends CLAIMING it queued
-a self-wake ("Self-wake queued (~4 min)") but no directive parsed and no file
-was written, check_wake_request auto-arms one fallback re-check instead of
-silently stalling. That detection is config.WAKE_CLAIM_RE, scanned after verify
-blocks are stripped.
+is no completion event for an external probe. The only way a turn arms one is
+an explicit ``[BOT_CMD: /wake]`` directive parsed from its output. If a turn
+instead ASSERTS it armed a self-wake while nothing parsed (e.g. a malformed
+directive), check_wake_request sends a notice-only heads-up so the dead-end
+isn't silent — it never schedules anything. That detection is
+config.WAKE_CLAIM_RE, scanned after verify blocks, code spans, and quoted
+phrases are stripped (lifecycle._CLAIM_META_RE).
 
-A broader heuristic (WAKE_PROMISE_RE / looks_like_watch_promise — watch-verb
-near job-noun) used to auto-arm too, but it kept false-firing on prose that
-merely DISCUSSED builds/backtests/monitoring, arming phantom 3-min wakes. It
-was removed; the "must NOT arm" section below locks that removal in: none of
-those phrasings may trip the claim detector either.
+History locked in below: heuristic wake SCHEDULING is gone. WAKE_PROMISE_RE
+(watch-verb near job-noun) armed phantom 3-min wakes off prose that merely
+discussed builds/backtests and was deleted; the claim auto-arm then misfired
+on a report QUOTING the phrase "self-wake queued/scheduled" and was downgraded
+to notice-only with quote/code stripping. The "must NOT match" sections keep
+both failure modes dead.
 
 Calls the real production predicate (``lifecycle.claims_self_wake``) so the
 test can't drift from what ``check_wake_request`` actually evaluates.
@@ -43,8 +46,8 @@ def _check(text: str, expected: bool) -> None:
         print(f"  FAIL: want={expected!s:5} got={got!s:5} :: {text!r}")
 
 
-# ---- Turn ASSERTS it armed a self-wake but scheduled nothing → must arm ----
-print("Claims of a queued/scheduled self-wake must arm")
+# ---- Turn ASSERTS it armed a self-wake but nothing parsed → must notify ----
+print("First-person claims of an armed self-wake must match")
 _check("Self-wake queued (~4 min); I'll report the verdict.", True)
 _check("I scheduled a self-wake for 5 min", True)
 _check("Wrote the wake file, will re-check after the deploy", True)
@@ -62,23 +65,41 @@ try:
 except OSError:
     print("  skip: data/results/q-11865.md not present")
 
-# ---- Meta-explanations / completions → must NOT arm ----
-print("Meta-explanation / completions must NOT arm")
+# ---- Meta-explanations / completions → must NOT match ----
+print("Meta-explanation / completions must NOT match")
 _check("self-wake lets you continue after a deploy finishes", False)
 _check("All done - tests pass, nothing else to do.", False)
 _check("", False)
 
-# ---- Removed promise heuristic: watch-verb + job-noun prose must NOT arm ----
+# ---- Quoted / code-span mentions of trigger phrases → must NOT match ----
+# The real misfire (2026-07-02, thread 1521927445689794624's sibling): a
+# verification report QUOTING the detector's own trigger phrase armed a
+# phantom re-check. Quoting is discussion, not a first-person assertion.
+print("Quoted/backticked trigger phrases must NOT match")
+_check(
+    'if a turn literally claims "self-wake queued/scheduled" but no valid '
+    "directive parsed, the bot notices",
+    False,
+)
+_check("the log line says `Self-wake queued` when the directive parses", False)
+_check(
+    "```\nSelf-wake queued (~4 min); I'll report the verdict.\n```\n"
+    "That example never fires from a code block.",
+    False,
+)
+# ...but a real claim NEXT TO a quoted phrase still matches.
+_check('Self-wake queued for 5 min — unlike "wake file written" of old.', True)
+
+# ---- Removed promise heuristic: watch-verb + job-noun prose must NOT match ----
 # These all tripped the deleted WAKE_PROMISE_RE and armed phantom re-checks.
-# Locks in the removal: ordinary prose about jobs never schedules a wake.
-print("Watch-promise prose (old WAKE_PROMISE_RE) must NOT arm")
+print("Watch-promise prose (old WAKE_PROMISE_RE) must NOT match")
 _check("I will monitor the deploy and report back", False)
 _check("I'll keep watching the build and let you know", False)
 _check("I'll poll the CI pipeline until it finishes", False)
 _check("I can run a P&L backtest audit against your monitoring dashboard", False)
 _check("I'll wait for your reply", False)
 
-# ---- Verify-board stripping: a verify item mentioning a wake claim ----
+# ---- Verify-board stripping ----
 print("Verify-board item must not false-trigger")
 _vb = (
     "Done, nothing pending.\n\n"
@@ -87,7 +108,7 @@ _vb = (
     "```\n"
 )
 _check(_vb, False)
-# ...but a real claim alongside a verify block still arms.
+# ...but a real claim alongside a verify block still matches.
 _check(
     "Self-wake queued for 5 min.\n\n```verify-board\n- unrelated item\n```\n",
     True,

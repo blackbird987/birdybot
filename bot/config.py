@@ -215,23 +215,24 @@ WAKE_DIR: Path = DATA_DIR / "wakes"
 WAKE_MIN_DELAY_SECS: int = 30
 WAKE_MAX_DELAY_SECS: int = 86400          # 24h
 MAX_CONSEC_WAKES: int = 25                # stop a never-completing poll loop
-# Broken-claim safety net: a turn can end CLAIMING it queued/scheduled a
-# self-wake ("Self-wake queued (~4 min); I'll report the verdict.") while no
-# directive parsed and no file was written — narration of the action without
-# the action, a silent dead-end where the chain just stops. When that
-# contradiction is detected we auto-arm one fallback re-check this far out.
-# Counts toward MAX_CONSEC_WAKES, so it can't loop forever. Also the default
-# delay for a /wake directive that omits delay=.
+# Default delay for a /wake directive that carries a prompt but omits (or
+# typos) delay= — arm with something sane instead of dropping the request.
 #
-# NOTE: a broader heuristic used to live here too (WAKE_PROMISE_RE — a
-# watch/poll verb near a job noun, e.g. "I'll monitor the build"). It kept
-# false-firing on prose that merely DISCUSSED builds/backtests/monitoring,
-# arming phantom 3-min wakes, so it was removed: an explicit [BOT_CMD: /wake]
-# directive is the only way a turn schedules a wake from prose.
+# NOTE: heuristics used to SCHEDULE wakes off this value too — WAKE_PROMISE_RE
+# (watch-verb near job-noun, "I'll monitor the build") and an auto-armed
+# re-check when WAKE_CLAIM_RE matched. Both kept firing phantom 3-min wakes on
+# prose that merely DISCUSSED builds/backtests or this very feature, so
+# heuristic scheduling is gone entirely: an explicit parsed [BOT_CMD: /wake]
+# directive is the only thing that arms a wake. WAKE_CLAIM_RE below survives
+# as a notice-only check.
 WAKE_FALLBACK_DELAY_SECS: int = 180
-# High-precision (a genuinely finished turn never mentions self-wake).
-# Requires a scheduling VERB adjacent to "wake" so a meta-explanation of the
-# feature ("self-wake lets you continue after a deploy") doesn't trip it.
+# Notice-only contradiction check: a turn that ASSERTS it armed a self-wake
+# ("Self-wake queued (~4 min)") while no directive parsed is narration of the
+# action without the action — the user gets a heads-up that nothing is
+# scheduled (never an auto-armed wake). Requires a scheduling VERB adjacent to
+# "wake" so a meta-explanation ("self-wake lets you continue after a deploy")
+# doesn't trip it; code spans and quoted phrases are stripped before matching
+# (lifecycle._CLAIM_META_RE) so quoting a trigger phrase doesn't either.
 WAKE_CLAIM_RE = re.compile(
     r"(self.?wake|wake[\s-]?file)s?\s+"
     r"(queued|scheduled|armed|set|written|wrote|created|in\s+place)"
