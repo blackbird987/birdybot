@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- **Session reports must tell a plain-language story, not recite code identifiers** (`config.CHAT_APP_CONSTRAINT`). Reports were narrated developer-style — numbered lists where every step led with a function/class name (`TrackBatchCloidsAsync` → `PendingExitWatchCloids`), meaningless to a reader on a phone without the code open. New "Plain-language storytelling" subsection in the Communication Model block: describe components by what they DO not what they're CALLED, tell findings as a story (expected → checked → found → means), use literal identifiers only when the user needs the exact string to act (and then parenthetically), rewrite identifier-led lists as prose about behavior. Applies to every session across all repos.
+
 ## v0.93.12 — Self-wake via [BOT_CMD: /wake] directive (2026-06-25)
 
 ### Changed

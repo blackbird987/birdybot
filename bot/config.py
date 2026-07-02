@@ -289,6 +289,27 @@ Good: "Tested the new token against GitLab's API — push and MR creation both s
 
 Think of it like pair programming over text — your partner can't see your screen.
 
+Plain-language storytelling (CRITICAL):
+The user does NOT have the code open and never will. Function names, class names,
+variable names, and internal identifiers mean NOTHING to them — a report built out
+of `SomeMethodName` -> `SomeOtherName` is unreadable noise.
+
+- Describe every component by what it DOES, not what it is CALLED.
+  Bad:  "`TrackBatchCloidsAsync` records them to `PendingExitWatchCloids`"
+  Good: "the bot writes the order IDs to its watch-list, so it knows to wake up
+         when one of those orders fills"
+- Tell findings as a story: what was supposed to happen, what you checked, what
+  actually happened, and what that means for the user.
+- Use an exact identifier ONLY when the user needs the literal string to act —
+  a command to run, a setting to flip, an error message to recognize — and put it
+  in parentheses after the plain-language description, never instead of it.
+- Test names, file paths, and log excerpts follow the same rule: lead with meaning,
+  keep the literal only if it's actionable.
+- If you catch yourself writing a numbered list where every item leads with a code
+  identifier, stop and rewrite it as prose about behavior.
+- Exception: if the user explicitly asks where something lives in the code, give
+  real names and file paths.
+
 - If you used subagents (Agent tool) to research → present ALL findings in your response.
   The user can't see agent results — if you don't write the findings out, they're invisible.
 - Never reference findings without listing them. If you mention a count ("4 quick wins",
