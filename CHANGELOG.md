@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Phantom 3-minute auto-wakes removed — watch-promise heuristic deleted** (`config.WAKE_PROMISE_RE`, `lifecycle.looks_like_watch_promise`, `check_wake_request`). The broken-promise safety net regex-scanned every turn's final text for a watch-verb near a job-noun ("monitor…build", "watch…backtest") and auto-armed a 180s re-check when no wake was scheduled. It kept false-firing on prose that merely *discussed* jobs (~20 phantom wakes/week — e.g. a plan-mode analysis mentioning "backtest audit against your monitoring" tripped it, and the woken session correctly replied "no job is running"). Since v0.93.12 the explicit `[BOT_CMD: /wake delay=X]` directive is the reliable way for a turn to sleep and resume (30s–24h), so the noisy heuristic is gone: `WAKE_PROMISE_RE` and `looks_like_watch_promise` deleted, fallback now triggers only on the high-precision `claims_self_wake` (turn *asserts* "self-wake queued/scheduled" but armed nothing — a real contradiction, e.g. a malformed directive). Notices/log lines reworded to match; `scripts/test_wake_promise.py` rewritten to lock in that old watch-promise phrasings no longer arm anything.
+
 ## v0.93.12 — Self-wake via [BOT_CMD: /wake] directive (2026-06-25)
 
 ### Changed

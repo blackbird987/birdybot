@@ -399,8 +399,8 @@ async def run_instance(
         # Self-wake: convert a [BOT_CMD: /wake] directive in this turn's output
         # (or the legacy wake file) into a thread-bound one-shot schedule, else
         # reset the runaway counter. Pass the raw result text so the directive
-        # can be parsed and a turn that promised to keep watching a job but
-        # scheduled nothing can auto-arm a fallback instead of stalling.
+        # can be parsed and a turn that CLAIMED a self-wake but scheduled
+        # nothing can auto-arm a fallback instead of stalling.
         await check_wake_request(ctx, inst, final_text=result.result_text)
 
     except asyncio.CancelledError:
@@ -1202,26 +1202,17 @@ def _human_delay(secs: int) -> str:
     return f"{round(secs / 3600, 1)} h"
 
 
-def looks_like_watch_promise(text: str) -> bool:
-    """True if *text* reads as a promise to keep watching a job (deploy/CI/build)
-    without scheduling a re-check.
-
-    Single source of truth for the broken-promise heuristic so the detection
-    used by ``check_wake_request`` and its regression test can't drift. Verify
-    blocks are stripped first, so a ``verify-board`` item that happens to
-    describe watching a job can't false-trigger it.
-    """
-    return bool(config.WAKE_PROMISE_RE.search(strip_verify_blocks(text or "")))
-
-
 def claims_self_wake(text: str) -> bool:
     """True if the final text CLAIMS a self-wake was queued/scheduled/written.
 
-    Distinct from looks_like_watch_promise: catches a turn that asserts it
-    already armed the wake (narration of the action) but wrote no file — a
-    higher-precision false-promise signal, since a finished turn never mentions
-    self-wake. Verify blocks are stripped first so a verify-board item can't
-    false-trigger.
+    Catches a turn that asserts it already armed the wake (narration of the
+    action) but scheduled nothing — a high-precision false-promise signal,
+    since a genuinely finished turn never mentions self-wake. Verify blocks
+    are stripped first so a verify-board item can't false-trigger.
+
+    (A softer companion heuristic, ``looks_like_watch_promise`` — watch-verb
+    near job-noun — was removed: it kept phrase-matching ordinary prose that
+    merely discussed builds/backtests, arming phantom re-checks.)
     """
     return bool(config.WAKE_CLAIM_RE.search(strip_verify_blocks(text or "")))
 
@@ -1255,7 +1246,7 @@ def _parse_wake_directive(text: str) -> dict | None:
     or non-numeric delay defaults to ``WAKE_FALLBACK_DELAY_SECS`` so a directive
     that carries a prompt always arms with a sane delay rather than dropping. A
     directive with no prompt is treated as absent (returns ``None``) so the
-    promise/claim backstop can still engage instead of a silent drop.
+    claim backstop can still engage instead of a silent drop.
     """
     if not text:
         return None
@@ -1287,7 +1278,7 @@ def _parse_wake_directive(text: str) -> dict | None:
                   else (kv.get("prompt") or "").strip())
         if not prompt:
             # No resume prompt (no ~~~wake body, no prompt= kv) — not a usable
-            # request. Skip so a later real directive, or the promise/claim
+            # request. Skip so a later real directive, or the claim
             # backstop, can engage instead of dropping at the downstream guard.
             continue
         # Coerce delay to a sane int here (default on absent/garbage) so a
@@ -1321,12 +1312,14 @@ async def check_wake_request(
     Neither present ⇒ the turn ended without asking to poll, so reset the
     runaway counter (covers genuine completion and plain human replies) —
     UNLESS ``final_text`` (verify blocks stripped before scanning) shows the
-    turn promised to keep watching a job or claimed a self-wake yet scheduled
-    nothing (a silent dead-end), in which case we auto-arm one fallback. A turn
-    that was itself a wake re-check (``ctx.source == "wake"``) does NOT re-arm
-    off a bare phrase match, to stop a poll loop spinning on prose. Worktree
-    builds can't safely self-wake — their dir may be merged/discarded by fire
-    time — so they're refused with a note (parity with the runner gate).
+    turn CLAIMED it scheduled a self-wake yet scheduled nothing (a silent
+    dead-end), in which case we auto-arm one fallback. Mere watch-promises
+    ("I'll monitor the build") no longer auto-arm — that heuristic kept
+    false-firing on prose that only discussed jobs. A turn that was itself a
+    wake re-check (``ctx.source == "wake"``) does NOT re-arm off a bare phrase
+    match, to stop a poll loop spinning on prose. Worktree builds can't safely
+    self-wake — their dir may be merged/discarded by fire time — so they're
+    refused with a note (parity with the runner gate).
     """
     path = config.WAKE_DIR / f"{instance.id}.json"
 
@@ -1380,37 +1373,37 @@ async def check_wake_request(
     if data is None:
         # No wake request. Normally the turn just ended (real completion or a
         # plain human reply) — reset the runaway counter and move on. BUT if the
-        # final message PROMISED to keep watching a job (or claimed a self-wake)
-        # yet scheduled nothing, that's a silent dead-end we catch instead.
-        promised = (
-            looks_like_watch_promise(final_text)
-            or claims_self_wake(final_text)
-        )
+        # final message CLAIMED it scheduled a self-wake yet scheduled nothing
+        # (e.g. a malformed directive), that's a silent dead-end we catch
+        # instead. Bare watch-promises ("I'll monitor the build") deliberately
+        # do NOT auto-arm — that heuristic false-fired on prose that merely
+        # discussed jobs, arming phantom 3-min re-checks.
+        claimed = claims_self_wake(final_text)
         # Loop guard: a turn that was ITSELF a self-wake re-check (source ==
         # "wake") already got one explicit chance to schedule a fresh wake. If
-        # it instead only *talks* about watching/self-waking again, re-arming
-        # would loop on phrase-matches — especially when the conversation is
-        # ABOUT this feature — until MAX_CONSEC_WAKES. End the chain and hand
-        # back to the user. A genuinely still-running job continues via a real
-        # wake request (directive/file, handled above), never via this fallback.
-        if promised and ctx.source == "wake":
+        # it instead only *talks* about self-waking again, re-arming would loop
+        # on phrase-matches — especially when the conversation is ABOUT this
+        # feature — until MAX_CONSEC_WAKES. End the chain and hand back to the
+        # user. A genuinely still-running job continues via a real wake request
+        # (directive/file, handled above), never via this fallback.
+        if claimed and ctx.source == "wake":
             _reset()
             await _notice(
                 "(Auto-check ran but nothing new was scheduled — reply when "
                 "you want me to keep going.)"
             )
             return
-        if promised and instance.branch:
+        if claimed and instance.branch:
             # Worktree build can't self-wake (its dir may be merged/discarded by
             # fire time), so we can't auto-arm — but say so instead of stalling,
             # mirroring the worktree notice below.
             _reset()
             await _notice(
-                "(You said you'd keep watching, but a build/worktree session "
-                "can't self-wake — reply or tap a button to continue.)"
+                "(You said a self-wake was scheduled, but a build/worktree "
+                "session can't self-wake — reply or tap a button to continue.)"
             )
             return
-        if promised and ctx.bump_wake_count is not None:
+        if claimed and ctx.bump_wake_count is not None:
             # Auto-arm ONE fallback re-check so the poll chain survives the
             # missing request (bounded by the same runaway cap as real wakes).
             count = ctx.bump_wake_count()
@@ -1423,11 +1416,11 @@ async def check_wake_request(
             ).isoformat()
             ctx.store.add_wake(
                 prompt=(
-                    "Earlier you said you'd keep watching for a job to finish "
-                    "but didn't schedule a re-check. Check now: if it's done, "
-                    "report the result and stop. If it's still running, emit a "
-                    "fresh [BOT_CMD: /wake] directive to keep polling. If you "
-                    "can't tell, ask the user instead of waiting silently."
+                    "Earlier you said a self-wake was scheduled, but none was "
+                    "actually armed. Check the job now: if it's done, report "
+                    "the result and stop. If it's still running, emit a fresh "
+                    "[BOT_CMD: /wake] directive to keep polling. If you can't "
+                    "tell, ask the user instead of waiting silently."
                 ),
                 channel_id=ctx.channel_id,
                 next_run_at=next_run_at,
@@ -1435,11 +1428,11 @@ async def check_wake_request(
                 repo_path=instance.repo_path or "",
             )
             log.info(
-                "Auto-armed fallback wake (promise w/o request) for thread %s in ~%ds (count=%d)",
+                "Auto-armed fallback wake (claim w/o request) for thread %s in ~%ds (count=%d)",
                 ctx.channel_id, secs, count,
             )
             await _notice(
-                "⏰ You said you'd keep watching but didn't schedule a check — "
+                "⏰ You said a self-wake was scheduled but none was armed — "
                 f"auto-arming a re-check in ~{_human_delay(secs)}."
             )
             return
