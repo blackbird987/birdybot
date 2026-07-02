@@ -1,20 +1,23 @@
-"""Regression test for the self-wake broken-promise heuristic.
+"""Regression test for the self-wake claim detector (notice-only).
 
 Background: a turn only continues after it ends via a self-wake *timer* — there
-is no completion event for an external probe. If a turn ends PROMISING to keep
-watching a job (deploy/CI/build) but writes no wake file, check_wake_request
-auto-arms one fallback re-check instead of silently stalling. That detection is
-config.WAKE_PROMISE_RE, scanned after verify blocks are stripped.
+is no completion event for an external probe. The only way a turn arms one is
+an explicit ``[BOT_CMD: /wake]`` directive parsed from its output. If a turn
+instead ASSERTS it armed a self-wake while nothing parsed (e.g. a malformed
+directive), check_wake_request sends a notice-only heads-up so the dead-end
+isn't silent — it never schedules anything. That detection is
+config.WAKE_CLAIM_RE, scanned after verify blocks, code spans, and quoted
+phrases are stripped (lifecycle._CLAIM_META_RE).
 
-This locks the heuristic so a future edit can't (a) start matching human-directed
-waits ("wait for your reply", "continue once you confirm"), which would re-invoke
-a session that's actually waiting on the user, or (b) stop matching genuine
-job-watching promises, which would reopen the silent dead-end. It also guards the
-verify-board stripping so a ```verify-board``` item describing "watch a job" can't
-false-trigger the fallback.
+History locked in below: heuristic wake SCHEDULING is gone. WAKE_PROMISE_RE
+(watch-verb near job-noun) armed phantom 3-min wakes off prose that merely
+discussed builds/backtests and was deleted; the claim auto-arm then misfired
+on a report QUOTING the phrase "self-wake queued/scheduled" and was downgraded
+to notice-only with quote/code stripping. The "must NOT match" sections keep
+both failure modes dead.
 
-Calls the real production predicate (``lifecycle.looks_like_watch_promise``) so
-the test can't drift from what ``check_wake_request`` actually evaluates.
+Calls the real production predicate (``lifecycle.claims_self_wake``) so the
+test can't drift from what ``check_wake_request`` actually evaluates.
 
 Run: python scripts/test_wake_promise.py
 Exit 0 = all pass, exit 1 = failures.
@@ -29,13 +32,13 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
 sys.path.insert(0, _ROOT)
 
-from bot.engine.lifecycle import claims_self_wake, looks_like_watch_promise
+from bot.engine.lifecycle import claims_self_wake
 
 _failures: list[str] = []
 
 
 def _check(text: str, expected: bool) -> None:
-    got = looks_like_watch_promise(text)
+    got = claims_self_wake(text)
     if got == expected:
         print(f"  ok:   want={expected!s:5} :: {text!r}")
     else:
@@ -43,56 +46,12 @@ def _check(text: str, expected: bool) -> None:
         print(f"  FAIL: want={expected!s:5} got={got!s:5} :: {text!r}")
 
 
-def _check_claim(text: str, expected: bool) -> None:
-    got = claims_self_wake(text)
-    if got == expected:
-        print(f"  ok:   want={expected!s:5} :: {text!r}")
-    else:
-        _failures.append(f"claim want={expected} got={got} :: {text!r}")
-        print(f"  FAIL: want={expected!s:5} got={got!s:5} :: {text!r}")
-
-
-# ---- Genuine job-watching promises → must arm ----
-print("Promises that SHOULD arm a fallback")
-_check("I will monitor the deploy and report back", True)
-_check("I'll keep watching the build and let you know", True)
-_check("I'll poll the CI pipeline until it finishes", True)
-_check("I'll check back on the backtest when it completes", True)
-_check("I'll wait for the build to finish, then report", True)
-_check("I'll keep an eye on the deploy", True)
-_check("I'll get notified when CI is done", True)
-
-# ---- Human-directed waits / completions → must NOT arm ----
-print("Waits/completions that must NOT arm")
-_check("I'll wait for your reply", False)
-_check("I'll let you know if anything else comes up", False)
-_check("I'll continue once you confirm the deploy plan", False)  # human, not a job
-_check("All done - tests pass, nothing else to do.", False)
-_check("Ran the tests, everything green. Ship it.", False)
-_check("", False)
-
-# ---- Verify-board stripping: prose says done, a verify item mentions a job ----
-print("Verify-board item must not false-trigger")
-_vb = (
-    "Done, nothing pending.\n\n"
-    "```verify-board\n"
-    "- Self-wake: end a turn promising to watch a job w/o a wake file\n"
-    "```\n"
-)
-_check(_vb, False)
-# ...but a real promise alongside a verify block still arms.
-_check(
-    "I'll keep watching the deploy.\n\n```verify-board\n- unrelated item\n```\n",
-    True,
-)
-
-
-# ---- claims_self_wake: turn ASSERTS it armed a self-wake (no file) ----
-print("Claims of a queued/scheduled self-wake must arm")
-_check_claim("Self-wake queued (~4 min); I'll report the verdict.", True)
-_check_claim("I scheduled a self-wake for 5 min", True)
-_check_claim("Wrote the wake file, will re-check after the deploy", True)
-# The real q-11865 result text that slipped through WAKE_PROMISE_RE.
+# ---- Turn ASSERTS it armed a self-wake but nothing parsed → must notify ----
+print("First-person claims of an armed self-wake must match")
+_check("Self-wake queued (~4 min); I'll report the verdict.", True)
+_check("I scheduled a self-wake for 5 min", True)
+_check("Wrote the wake file, will re-check after the deploy", True)
+# The real q-11865 result text that motivated the claim detector.
 # Don't echo its (unicode-laden) content to a cp1252 console — just assert.
 try:
     _real = open(
@@ -101,15 +60,59 @@ try:
     if claims_self_wake(_real):
         print("  ok:   want=True  :: <real q-11865.md>")
     else:
-        _failures.append("claim want=True got=False :: <real q-11865.md>")
+        _failures.append("want=True got=False :: <real q-11865.md>")
         print("  FAIL: want=True  got=False :: <real q-11865.md>")
 except OSError:
     print("  skip: data/results/q-11865.md not present")
 
-print("Meta-explanation / completions must NOT arm a claim")
-_check_claim("self-wake lets you continue after a deploy finishes", False)
-_check_claim("All done - tests pass, nothing else to do.", False)
-_check_claim("", False)
+# ---- Meta-explanations / completions → must NOT match ----
+print("Meta-explanation / completions must NOT match")
+_check("self-wake lets you continue after a deploy finishes", False)
+_check("All done - tests pass, nothing else to do.", False)
+_check("", False)
+
+# ---- Quoted / code-span mentions of trigger phrases → must NOT match ----
+# The real misfire (2026-07-02, thread 1521927445689794624's sibling): a
+# verification report QUOTING the detector's own trigger phrase armed a
+# phantom re-check. Quoting is discussion, not a first-person assertion.
+print("Quoted/backticked trigger phrases must NOT match")
+_check(
+    'if a turn literally claims "self-wake queued/scheduled" but no valid '
+    "directive parsed, the bot notices",
+    False,
+)
+_check("the log line says `Self-wake queued` when the directive parses", False)
+_check(
+    "```\nSelf-wake queued (~4 min); I'll report the verdict.\n```\n"
+    "That example never fires from a code block.",
+    False,
+)
+# ...but a real claim NEXT TO a quoted phrase still matches.
+_check('Self-wake queued for 5 min — unlike "wake file written" of old.', True)
+
+# ---- Removed promise heuristic: watch-verb + job-noun prose must NOT match ----
+# These all tripped the deleted WAKE_PROMISE_RE and armed phantom re-checks.
+print("Watch-promise prose (old WAKE_PROMISE_RE) must NOT match")
+_check("I will monitor the deploy and report back", False)
+_check("I'll keep watching the build and let you know", False)
+_check("I'll poll the CI pipeline until it finishes", False)
+_check("I can run a P&L backtest audit against your monitoring dashboard", False)
+_check("I'll wait for your reply", False)
+
+# ---- Verify-board stripping ----
+print("Verify-board item must not false-trigger")
+_vb = (
+    "Done, nothing pending.\n\n"
+    "```verify-board\n"
+    "- Self-wake queued: end a turn asserting this w/o a real directive\n"
+    "```\n"
+)
+_check(_vb, False)
+# ...but a real claim alongside a verify block still matches.
+_check(
+    "Self-wake queued for 5 min.\n\n```verify-board\n- unrelated item\n```\n",
+    True,
+)
 
 
 # ---- Summary ----
