@@ -40,6 +40,7 @@ async def main() -> int:
         runner = ClaudeRunner.__new__(ClaudeRunner)
         runner._hydrate_cache = {}
         runner._rebuild_cache = {}
+        runner._freshness_cache = {}
 
         encoded_repo = runner._encode_project_path(str(repo))
         encoded_worktree = runner._encode_project_path(str(worktree))

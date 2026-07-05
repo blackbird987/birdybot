@@ -19,6 +19,9 @@ Two layers:
    - both accounts dead -> each tried once, error returned, terminates
      (no infinite recursion / all-cooled deadlock).
    - run() resets a stale _accounts_tried from a prior run.
+   - usage limit on primary + auth-dead backup -> result carries the
+     original usage_limit_reset (auto-retry countdown, not a raw 401)
+     and the backup gets the long ACCOUNT_AUTH_COOLDOWN_SECS sideline.
 
 Run: ``python scripts/test_account_failover.py``  (exit 0 on pass).
 """
@@ -267,6 +270,58 @@ async def _test_both_dead_terminates() -> list[str]:
     return failures
 
 
+async def _test_limit_then_dead_backup_keeps_reset() -> list[str]:
+    """Usage limit on primary, backup auth-dead (paused subscription).
+
+    The final result must carry the primary's usage_limit_reset so the
+    caller schedules the normal auto-retry countdown instead of surfacing
+    the backup's raw 401 — the exact t-5925 incident (2026-07-05).
+    """
+    failures: list[str] = []
+    results = [
+        RunResult(is_error=True,
+                  error_message=(
+                      "You've hit your usage limit · resets 5pm"
+                  ),
+                  result_text=""),
+        RunResult(is_error=True,
+                  error_message=(
+                      "Failed to authenticate. API Error: 401 "
+                      "Invalid authentication credentials"
+                  ),
+                  result_text=""),
+    ]
+    result, instance, runner, accts, spawns = await _run_with_streams(
+        results, accounts=["primary", "backup"]
+    )
+    primary, backup = accts
+    if spawns != 2:
+        failures.append(f"limit+dead: expected exactly 2 spawns, got {spawns}")
+    if not result.is_error:
+        failures.append("limit+dead: expected an error result")
+    if not result.usage_limit_reset:
+        failures.append(
+            "limit+dead: usage_limit_reset missing — user would see the raw "
+            "401 instead of the auto-retry countdown"
+        )
+    elif result.usage_limit_reset != runner._account_cooldowns.get(primary):
+        failures.append(
+            "limit+dead: usage_limit_reset should be the PRIMARY's reset time"
+        )
+    backup_cd = runner._account_cooldowns.get(backup)
+    if backup_cd is None:
+        failures.append("limit+dead: backup not put on cooldown")
+    else:
+        from datetime import datetime, timezone
+        secs = (backup_cd - datetime.now(timezone.utc)).total_seconds()
+        if abs(secs - config.ACCOUNT_AUTH_COOLDOWN_SECS) > 60:
+            failures.append(
+                f"limit+dead: backup cooldown {secs:.0f}s, expected "
+                f"~ACCOUNT_AUTH_COOLDOWN_SECS ({config.ACCOUNT_AUTH_COOLDOWN_SECS}s)"
+            )
+    return failures
+
+
 async def _test_run_resets_accounts_tried() -> list[str]:
     """run() clears a stale _accounts_tried from a prior run."""
     failures: list[str] = []
@@ -311,6 +366,8 @@ async def _amain() -> int:
     all_failures.append(("confident-failover", await _test_confident_failover()))
     all_failures.append(("agnostic-no-failover", await _test_agnostic_no_failover()))
     all_failures.append(("both-dead-terminates", await _test_both_dead_terminates()))
+    all_failures.append(("limit-then-dead-backup",
+                         await _test_limit_then_dead_backup_keeps_reset()))
     all_failures.append(("run-resets-tried", await _test_run_resets_accounts_tried()))
 
     total = sum(len(f) for _, f in all_failures)

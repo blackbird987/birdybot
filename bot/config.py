@@ -136,13 +136,15 @@ CLAUDE_ACCOUNTS: list[str] = [
     p.strip() for p in os.getenv("CLAUDE_ACCOUNTS", "").split(",") if p.strip()
 ]
 
-# Cooldown for an account that fails auth / can't start (e.g. a cancelled
-# subscription). Unlike a usage limit this carries no reset time, so we skip
-# the account for a fixed window then re-probe — auto-recovering if it's
-# reinstated. 30 min default; floored at 60s so a stray 0 can't turn every
-# confident match into a per-task double-spawn.
-ACCOUNT_FAILOVER_COOLDOWN_SECS: int = max(
-    60, int(os.getenv("ACCOUNT_FAILOVER_COOLDOWN_SECS", "1800"))
+# Cooldown for an account that fails auth / can't start (e.g. a cancelled or
+# paused subscription). Unlike a usage limit this carries no reset time, so we
+# sideline the account for a fixed window then re-probe — the probe is the
+# auto-recovery path if the subscription is reinstated. 24h default: an
+# inactive account kept in CLAUDE_ACCOUNTS costs at most one failed attempt
+# per day instead of one per limit-hit. Floored at 60s so a stray 0 can't
+# turn every confident match into a per-task double-spawn.
+ACCOUNT_AUTH_COOLDOWN_SECS: int = max(
+    60, int(os.getenv("ACCOUNT_AUTH_COOLDOWN_SECS", "86400"))
 )
 
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()

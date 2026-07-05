@@ -858,7 +858,7 @@ class ClaudeRunner:
                                 )
                             except Exception:
                                 log.exception("Progress callback error during failover")
-                        return await self._run_impl(
+                        inner = await self._run_impl(
                             instance, on_progress, on_stall,
                             context, sibling_context,
                             api_fallback=api_fallback,
@@ -866,6 +866,23 @@ class ClaudeRunner:
                             _recovery_state=recovery_state,
                             on_recovery=on_recovery,
                         )
+                        # If the failover target died before doing any work
+                        # (e.g. paused/cancelled subscription -> 401), the turn
+                        # is still fundamentally usage-limited. Carry the
+                        # original reset time so the caller schedules the
+                        # normal auto-retry countdown instead of surfacing the
+                        # backup's raw auth error. Guarded on empty output so a
+                        # real mid-work failure on the backup is never masked.
+                        if (
+                            inner.is_error
+                            and not inner.usage_limit_reset
+                            and not (inner.result_text or "").strip()
+                        ):
+                            inner.usage_limit_reset = reset_at
+                            inner.session_id = (
+                                inner.session_id or instance.session_id
+                            )
+                        return inner
                     # All accounts exhausted — fall through to cooldown/PPU
                     result.usage_limit_reset = reset_at
                     return result
@@ -899,7 +916,10 @@ class ClaudeRunner:
             # NOTE: this path deliberately returns the raw error rather than
             # setting usage_limit_reset, so it does NOT trigger app.py's
             # paid-API billing fallback — we don't silently spend API credits
-            # to paper over an auth fault.
+            # to paper over an auth fault. (Exception: when the run arrived
+            # here VIA the usage-limit failover above, that caller stamps its
+            # original reset time onto this raw error — the turn really is
+            # usage-limited, the backup just couldn't take it.)
             if result.is_error and provider.supports_account_failover and account_dir:
                 confident = is_account_unusable_error(error_text)
                 no_turns = (not (result.result_text or "").strip()
@@ -916,7 +936,7 @@ class ClaudeRunner:
                     # that zero-turns on every account can't take the fleet dark).
                     if confident and len(config.CLAUDE_ACCOUNTS) > 1:
                         cooldown = datetime.now(timezone.utc) + timedelta(
-                            seconds=config.ACCOUNT_FAILOVER_COOLDOWN_SECS
+                            seconds=config.ACCOUNT_AUTH_COOLDOWN_SECS
                         )
                         self._set_account_cooldown(account_dir, cooldown)
                     elif not confident:

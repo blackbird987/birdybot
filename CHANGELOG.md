@@ -8,7 +8,14 @@
 - **Parent audit marker now records every child, not just the last** (`Instance.spawn_dispatched_thread_ids`). The write-only parent → child link in `state.json` was a single field that each spawn overwrote; it's now an append-only list in dispatch order. Legacy `spawn_dispatched_thread_id` values migrate into the list on load.
 - **/spawn prompt instructions updated** (`config.SPAWN_CONTEXT`): documents multi-spawn format (directive+body pairs back-to-back), the 5-per-response cap, and the 12-children run cap.
 
+### Fixed
+- **Usage-limit failover to a dead backup account no longer surfaces a raw 401** (`runner.py` usage-limit branch). When the primary hits its limit and the failover target fails auth before doing any work (e.g. a paused/cancelled subscription), the result now carries the original usage-limit reset time, so the thread shows the normal "⏳ auto-retrying at X" countdown instead of "API Error: 401" that needed a manual Retry tap (t-5925 incident, 2026-07-05). Guarded on empty output so a real mid-work failure on the backup is never masked.
+
+### Changed
+- **Auth-failed accounts are sidelined for 24h instead of 30min** (`ACCOUNT_AUTH_COOLDOWN_SECS`, replaces `ACCOUNT_FAILOVER_COOLDOWN_SECS`, env-overridable). An inactive subscription kept in `CLAUDE_ACCOUNTS` now costs at most one failed probe per day instead of one per limit-hit; the periodic probe doubles as auto-recovery when the subscription is reinstated — no `.env` edit needed in either direction.
+
 ### Added
+- `scripts/test_account_failover.py`: new `limit-then-dead-backup` case — usage limit on primary + auth-dead backup must yield a result with the primary's reset time and put the backup on the long auth cooldown.
 - `scripts/test_multi_spawn.py` — locks the pairing rules (N directives/N bodies → N spawns in order, shared body → one spawn + one rejection, 6 directives → 5 + over-cap notice, quoted lines ignored, legacy audit-key migration) and the handler's continue/stop contract (thread-level gates return stop, per-directive rejections return continue, success records the child in the audit list).
 ## v0.94.0 — Verify Board removed (2026-07-05)
 
