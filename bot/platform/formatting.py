@@ -9,11 +9,30 @@ from dataclasses import dataclass, field
 
 from bot import config
 from bot.claude.types import CODE_CHANGE_TOOLS, PLAN_ORIGINS, Instance, InstanceOrigin, InstanceStatus, Schedule
-from bot.engine.verify import strip_verify_blocks
 from bot.platform.base import ButtonSpec
 
 
 # --- Shared Helpers ---
+
+
+# Legacy ```verify-board``` fences — the Verify Board feature is gone, but a
+# resumed session whose context predates the removal can still emit the block.
+# Strip it from displayed text so users never see the raw fence.
+_VERIFY_BLOCK_RE = re.compile(r"```verify-board\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
+_EXCESS_BLANK_RE = re.compile(r"\n{3,}")
+
+
+def strip_verify_blocks(text: str) -> str:
+    """Remove leftover ```verify-board``` fences from displayed text.
+
+    Collapses the ≥3 consecutive newlines that surrounding blank lines
+    leave behind so the stripped result doesn't show a visible gap.
+    """
+    if not text:
+        return text
+    out = _VERIFY_BLOCK_RE.sub("", text)
+    out = _EXCESS_BLANK_RE.sub("\n\n", out)
+    return out.rstrip()
 
 
 def format_duration(ms: int | float | None) -> str:
@@ -242,14 +261,6 @@ _WORKFLOW_ORIGINS = frozenset({
     InstanceOrigin.BUILD_AND_SHIP,
 })
 
-# Origins that plausibly produce things a human needs to eyeball in-app —
-# drives whether `Send to Verify Board` button appears on the result embed.
-_VERIFY_BOARD_ORIGINS = frozenset({
-    InstanceOrigin.VERIFY, InstanceOrigin.DONE, InstanceOrigin.COMMIT,
-    InstanceOrigin.BUILD, InstanceOrigin.BUILD_AND_SHIP,
-    InstanceOrigin.APPLY_REVISIONS,
-})
-
 
 def mode_name(mode: str) -> str:
     """Human-readable mode name."""
@@ -387,7 +398,6 @@ def action_button_specs(
                 ButtonSpec("Merge", f"merge:{iid}"),
                 ButtonSpec("Discard", f"discard:{iid}"),
             ])
-        rows.append([ButtonSpec("Send to Verify Board", f"verify_board:{iid}")])
         return rows
 
     if instance.status == InstanceStatus.COMPLETED:
@@ -548,16 +558,6 @@ def action_button_specs(
             expand_row.append(ButtonSpec("\U0001f4ce Share", f"share:{iid}"))
         rows.append(expand_row)
 
-    # "Send to Verify Board" \u2014 offered on meaningful completions that a human
-    # might want to eyeball. Gated on origin to keep it off trivial results.
-    # Dropped silently when all 5 View rows are used.
-    if (instance.status == InstanceStatus.COMPLETED
-            and instance.origin in _VERIFY_BOARD_ORIGINS
-            and len(rows) < 5):
-        rows.append([
-            ButtonSpec("Send to Verify Board", f"verify_board:{iid}"),
-        ])
-
     return rows
 
 
@@ -632,9 +632,8 @@ def format_result_md(instance: Instance) -> str:
 def format_expanded_result_md(instance: Instance, result_text: str, budget: int = 3900) -> str:
     """Format full result text for expanded view, truncated to budget.
 
-    Strips ```verify-board``` fences — they're instructional markers
-    already parsed into the repo's Verify Board, not content the user
-    needs to re-read in the Expand view.
+    Strips leftover ```verify-board``` fences — legacy markers a
+    stale-context session may still emit, not content the user needs.
     """
     header = f"**{instance.display_id()}**\n\n"
     text = strip_verify_blocks(redact_secrets(result_text))

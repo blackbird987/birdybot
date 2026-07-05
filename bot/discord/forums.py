@@ -166,10 +166,10 @@ class ForumProject:
     # Legacy — kept only for migration from text channel to forum thread
     archive_channel_id: str | None = None
     monitor_thread_id: str | None = None
-    # Verify Board — per-repo pinned thread with living verification list
-    verify_board_thread_id: str | None = None
-    verify_board_message_id: str | None = None
-    verify_items: list[dict] = field(default_factory=list)
+    # Legacy Verify Board thread id — loaded from old state.json entries so
+    # reconcile can delete the pinned thread, never re-serialized. The stored
+    # verify_items list is intentionally dropped on load (feature removed).
+    legacy_verify_thread_id: str | None = None
 
     def to_dict(self) -> dict:
         d = {
@@ -189,12 +189,6 @@ class ForumProject:
             d["archive_channel_id"] = self.archive_channel_id
         if self.monitor_thread_id:
             d["monitor_thread_id"] = self.monitor_thread_id
-        if self.verify_board_thread_id:
-            d["verify_board_thread_id"] = self.verify_board_thread_id
-        if self.verify_board_message_id:
-            d["verify_board_message_id"] = self.verify_board_message_id
-        if self.verify_items:
-            d["verify_items"] = self.verify_items
         return d
 
     @classmethod
@@ -213,9 +207,7 @@ class ForumProject:
             archive_migrated=data.get("archive_migrated", False),
             archive_channel_id=data.get("archive_channel_id"),
             monitor_thread_id=data.get("monitor_thread_id"),
-            verify_board_thread_id=data.get("verify_board_thread_id"),
-            verify_board_message_id=data.get("verify_board_message_id"),
-            verify_items=list(data.get("verify_items", [])),
+            legacy_verify_thread_id=data.get("verify_board_thread_id"),
         )
 
 
@@ -250,9 +242,6 @@ class ForumManager:
         self._archive_channel_ids: set[int] = set()
         # Cache: repo_path -> has git remote (remotes rarely change at runtime)
         self._remote_cache: dict[str, bool] = {}
-        # Verify Board: per-repo debounce + lock for item mutations
-        self._verify_debounce: dict[str, asyncio.Task] = {}
-        self._verify_locks: dict[str, asyncio.Lock] = {}
         # Per-thread cached priming digest (raw user text — kept in-memory only,
         # never serialized to state.json; cleared on session rebind or failed run).
         self._prime_cache: dict[str, str] = {}
@@ -788,21 +777,30 @@ class ForumManager:
                     log.debug("Failed to create archive thread for %s",
                               repo_name, exc_info=True)
 
-        # Ensure Verify Board threads exist for all repo forums (one-shot migration)
+        # Verify Board removal cleanup — delete the legacy pinned board thread
+        # in each forum, then persist so the stored ids and items drop out of
+        # state.json (to_dict no longer serializes them). Best-effort: a failed
+        # delete just leaves an orphaned pinned thread to remove by hand.
+        legacy_boards = False
         for repo_name, proj in self._forum_projects.items():
-            if proj.forum_channel_id and not proj.verify_board_thread_id:
-                try:
-                    await self.ensure_verify_board(repo_name)
-                except Exception:
-                    log.debug("Failed to create verify-board for %s",
-                              repo_name, exc_info=True)
-            elif proj.verify_board_thread_id:
-                # Re-render on startup so view buttons are re-registered
-                try:
-                    await self.refresh_verify_board(repo_name)
-                except Exception:
-                    log.debug("Failed to refresh verify-board for %s",
-                              repo_name, exc_info=True)
+            if not proj.legacy_verify_thread_id:
+                continue
+            legacy_boards = True
+            try:
+                ch = await self._client.fetch_channel(
+                    int(proj.legacy_verify_thread_id))
+                if isinstance(ch, discord.Thread):
+                    await ch.delete()
+                    log.info("Deleted legacy verify-board thread for %s",
+                             repo_name)
+            except discord.NotFound:
+                pass
+            except Exception:
+                log.warning("Could not delete legacy verify-board thread "
+                            "for %s", repo_name, exc_info=True)
+            proj.legacy_verify_thread_id = None
+        if legacy_boards:
+            self.save_forum_map()
 
         # Migrate old archive text channels → forum threads
         for repo_name, proj in self._forum_projects.items():
@@ -851,13 +849,6 @@ class ForumManager:
             if proj.monitor_thread_id:
                 try:
                     ch = await self._client.fetch_channel(int(proj.monitor_thread_id))
-                    if isinstance(ch, discord.Thread):
-                        tasks.append(self._auto_follow_thread(ch, repo_name))
-                except Exception:
-                    pass
-            if proj.verify_board_thread_id:
-                try:
-                    ch = await self._client.fetch_channel(int(proj.verify_board_thread_id))
                     if isinstance(ch, discord.Thread):
                         tasks.append(self._auto_follow_thread(ch, repo_name))
                 except Exception:
@@ -953,180 +944,6 @@ class ForumManager:
         access_mod.save_access_config(cfg)
         await self._auto_follow_user_thread(thread, user_id)
         return thread
-
-    # --- Verify Board ---
-
-    def verify_lock(self, repo_name: str) -> asyncio.Lock:
-        """Per-repo lock for verify_items mutations. Created on first use."""
-        lock = self._verify_locks.get(repo_name)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._verify_locks[repo_name] = lock
-        return lock
-
-    async def ensure_verify_board(self, repo_name: str) -> discord.Thread | None:
-        """Get or create the Verify Board pinned thread in a repo forum."""
-        proj = self._forum_projects.get(repo_name)
-        if not proj or not proj.forum_channel_id:
-            return None
-
-        if proj.verify_board_thread_id:
-            try:
-                ch = await self._client.fetch_channel(int(proj.verify_board_thread_id))
-                if isinstance(ch, discord.Thread):
-                    if ch.archived:
-                        try:
-                            await ch.edit(archived=False)
-                        except Exception:
-                            log.debug("Could not unarchive verify-board", exc_info=True)
-                    if ch.name != channels.VERIFY_BOARD_NAME and ch.name in ("verify-board", "Verify Board"):
-                        try:
-                            await ch.edit(name=channels.VERIFY_BOARD_NAME)
-                            log.info("Renamed %s -> %s (thread=%s)", ch.name, channels.VERIFY_BOARD_NAME, ch.id)
-                        except Exception:
-                            log.debug("Failed to rename verify-board thread", exc_info=True)
-                    return ch
-            except discord.NotFound:
-                log.info(
-                    "Verify-board thread %s for %s was deleted, recreating",
-                    proj.verify_board_thread_id, repo_name,
-                )
-                proj.verify_board_thread_id = None
-                proj.verify_board_message_id = None
-
-        forum = self._client.get_channel(int(proj.forum_channel_id))
-        if not forum or not isinstance(forum, discord.ForumChannel):
-            return None
-
-        # Pass current items so the initial create renders them in one
-        # API call (avoids a redundant edit for the crash-recovery case
-        # where items exist in state before the board was provisioned).
-        thread, msg = await channels.create_verify_board_post(
-            forum, repo_name, proj.verify_items,
-        )
-        proj.verify_board_thread_id = str(thread.id)
-        proj.verify_board_message_id = str(msg.id)
-        self.save_forum_map()
-        try:
-            await self._auto_follow_thread(thread, repo_name)
-        except Exception:
-            log.debug("Failed to auto-follow verify-board thread", exc_info=True)
-        return thread
-
-    def schedule_verify_refresh(self, repo_name: str, *, delay: float = 0.5) -> None:
-        """Debounced refresh — coalesces rapid mutations into one edit.
-
-        Cancels any in-flight debounce for this repo and schedules a
-        fresh `refresh_verify_board()` call after `delay` seconds.
-        """
-        existing = self._verify_debounce.get(repo_name)
-        if existing and not existing.done():
-            existing.cancel()
-
-        async def _run() -> None:
-            try:
-                await asyncio.sleep(delay)
-            except asyncio.CancelledError:
-                return
-            try:
-                await self.refresh_verify_board(repo_name)
-            except Exception:
-                log.debug(
-                    "Debounced verify-board refresh failed for %s",
-                    repo_name, exc_info=True,
-                )
-
-        self._verify_debounce[repo_name] = asyncio.create_task(_run())
-
-    async def refresh_verify_board(self, repo_name: str) -> None:
-        """Re-render the Verify Board embed + view in place.
-
-        Lazily creates the board thread if missing — items can
-        accumulate before `reconcile_forums` runs (fresh repo added +
-        session completes in the startup gap), and we don't want them
-        to silently disappear from the UI.
-
-        On NotFound (thread/message deleted) we clear the stored IDs
-        and recreate the thread so the board stays reachable.
-        """
-        proj = self._forum_projects.get(repo_name)
-        if not proj or not proj.forum_channel_id:
-            return
-        from bot.discord.verify_board import build_board_embed, build_board_view
-        from bot.engine.verify import prune_old
-
-        # Prune expired items before render (cheap, mutates in place)
-        pruned = prune_old(proj.verify_items)
-        if pruned:
-            self.save_forum_map()
-
-        # Lazy create if the board thread isn't provisioned yet.
-        # `ensure_verify_board` now renders current items on create, so
-        # once it returns we're done — no follow-up edit needed.
-        # Mutations that happened during ensure's `await` will schedule
-        # their own refresh and arrive via the normal edit path next.
-        if not proj.verify_board_thread_id:
-            try:
-                await self.ensure_verify_board(repo_name)
-            except Exception:
-                log.debug(
-                    "Lazy verify-board creation failed for %s",
-                    repo_name, exc_info=True,
-                )
-            return
-
-        thread = None
-        try:
-            try:
-                thread = await self._client.fetch_channel(int(proj.verify_board_thread_id))
-            except discord.NotFound:
-                thread = None
-            if not thread or not isinstance(thread, discord.Thread):
-                log.info(
-                    "Verify-board thread for %s was deleted, clearing stale IDs",
-                    repo_name,
-                )
-                proj.verify_board_thread_id = None
-                proj.verify_board_message_id = None
-                self.save_forum_map()
-                try:
-                    await self.ensure_verify_board(repo_name)
-                except Exception:
-                    log.debug(
-                        "Failed to recreate verify-board for %s",
-                        repo_name, exc_info=True,
-                    )
-                return
-
-            if thread.archived:
-                try:
-                    await thread.edit(archived=False)
-                except Exception:
-                    log.debug("Could not unarchive verify-board", exc_info=True)
-
-            embed = build_board_embed(repo_name, proj.verify_items)
-            view = build_board_view(repo_name, proj.verify_items)
-
-            if not proj.verify_board_message_id:
-                # No message yet — send and pin
-                msg = await thread.send(embed=embed, view=view)
-                proj.verify_board_message_id = str(msg.id)
-                self.save_forum_map()
-                return
-
-            try:
-                msg = await thread.fetch_message(int(proj.verify_board_message_id))
-            except discord.NotFound:
-                msg = await thread.send(embed=embed, view=view)
-                proj.verify_board_message_id = str(msg.id)
-                self.save_forum_map()
-                return
-
-            await msg.edit(embed=embed, view=view)
-        except Exception:
-            log.debug(
-                "Failed to refresh verify-board for %s", repo_name, exc_info=True,
-            )
 
     async def _migrate_archive_channel(
         self, repo_name: str, proj: ForumProject, guild: discord.Guild,
@@ -1668,30 +1485,6 @@ class ForumManager:
                 log.debug("Failed to recreate control room for user %s", user_id, exc_info=True)
         except Exception:
             log.debug("Failed to refresh control room for user %s", user_id, exc_info=True)
-
-    async def _mutate_verify(self, repo_name: str, mutator):
-        """Run `mutator(proj.verify_items)` under the repo lock, then save + refresh.
-
-        The mutator runs in-memory only — no Discord awaits inside the lock.
-        Pruning happens under the same lock so it can't clobber concurrent
-        appends. After release, `refresh_verify_board` is fired as a background
-        task so the caller doesn't block on a Discord edit.
-        Returns whatever the mutator returns.
-        """
-        from bot.engine import verify as verify_mod
-
-        proj = self._forum_projects.get(repo_name)
-        if not proj:
-            return None
-        async with self.verify_lock(repo_name):
-            result = mutator(proj.verify_items)
-            try:
-                verify_mod.prune_old(proj.verify_items)
-            except Exception:
-                log.debug("verify prune failed for %s", repo_name, exc_info=True)
-            self.save_forum_map()
-        asyncio.create_task(self.refresh_verify_board(repo_name))
-        return result
 
     # --- Session Callbacks ---
 
