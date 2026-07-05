@@ -915,8 +915,8 @@ VERIFY_PROMPT = (
     'If verification was IMPOSSIBLE this run (no diagnostic surface, UI-only '
     'change you cannot script, external service unreachable, app would not '
     'start, port stuck despite Step 0 cleanup), emit RESULT: manual and a '
-    'WHY: line — do NOT mark fail. The chain will proceed and a Verify Board '
-    'item will be auto-created so a human can eyeball it.\n\n'
+    'WHY: line — do NOT mark fail. The chain will proceed and surface the '
+    'WHY line in the thread so a human can eyeball it.\n\n'
     'Output a structured block at the end:\n'
     '```verify\n'
     'RESULT: pass | fail | manual\n'
@@ -927,34 +927,6 @@ VERIFY_PROMPT = (
     'SUMMARY: <one line>\n'
     '```'
 )
-
-VERIFY_BOARD_GUIDANCE = """\
-
---- Verify Board items ---
-When you finish a task, think about whether a HUMAN needs to eyeball \
-something in a running app to confirm it works (UI rendering, data \
-correctness live, a deploy actually succeeded, chart output, tweet \
-preview, etc.).
-
-If yes, emit a fenced block at the END of your response (after any other \
-required output):
-
-```verify-board
-- Orderbook heatmap no longer flickers on pair switch
-- OI indicator renders on the right sidebar of perp charts
-```
-
-Rules:
-- Emit ONLY for things a human must check in a running app.
-- Do NOT emit items that tests, typecheck, or lint already cover.
-- Do NOT emit for code refactors, rename-only PRs, or doc changes.
-- Max 2 items per session. Each item under 100 chars, starts with a \
-short subject, then the check, imperative mood.
-- If nothing needs human verification, omit the block entirely.
-- Write items based on WHAT YOU DID THIS SESSION. Do NOT copy the \
-example items above — they are illustrative only.
-"""
-
 
 # Self-wake guidance — injected per-session (non-build origins only). Lets a
 # session waiting on a long external job re-invoke ITSELF in THIS thread after a

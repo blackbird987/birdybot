@@ -16,7 +16,6 @@ log = logging.getLogger(__name__)
 CONTROL_ROOM_NAME = "⚙️ Control Room"
 ARCHIVE_NAME = "🗄 Archive"
 MONITOR_NAME = "📊 Monitor"
-VERIFY_BOARD_NAME = "✅ Verify Board"
 
 # Discord only accepts 60 / 1440 / 4320 / 10080 minutes. 10080 (7 days) is the
 # max — session threads inherit this from their forum, so it's how long an idle
@@ -107,36 +106,6 @@ async def create_archive_post(
         log.debug("Could not pin archive thread", exc_info=True)
     log.info("Created archive post %s in forum %s", thread.id, forum.name)
     return thread, msg
-
-
-async def create_verify_board_post(
-    forum: discord.ForumChannel,
-    repo_name: str,
-    items: list[dict] | None = None,
-) -> tuple[discord.Thread, discord.Message]:
-    """Create the pinned Verify Board post inside a repo forum.
-
-    When `items` is provided, the initial embed renders them directly —
-    saves a follow-up edit round-trip on crash-recovery (state had
-    items, but the board thread was never provisioned).
-    """
-    # Local import — verify_board transitively imports discord, which
-    # is already in flight here; keeping this function-scoped avoids
-    # noise on module-load ordering concerns.
-    from bot.discord.verify_board import build_board_embed, build_board_view
-
-    items = items or []
-    embed = build_board_embed(repo_name, items)
-    view = build_board_view(repo_name, items)
-    result = await forum.create_thread(
-        name=VERIFY_BOARD_NAME, embed=embed, view=view,
-    )
-    try:
-        await result.thread.edit(pinned=True)
-    except Exception:
-        log.debug("Could not pin verify-board thread", exc_info=True)
-    log.info("Created verify-board post %s in forum %s", result.thread.id, forum.name)
-    return result.thread, result.message
 
 
 async def create_monitor_post(

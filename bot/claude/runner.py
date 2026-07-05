@@ -1899,11 +1899,6 @@ class ClaudeRunner:
         if origin_key == "build" and self._diagnostics_enabled(instance):
             parts.append(config.DIAGNOSTIC_GUIDANCE)
 
-        # Verify Board emission guidance — opt-in per build-origin session.
-        # Keeps prompt footprint off plan/explore steps where items never apply.
-        if origin_key in ("build", "build_and_ship", "apply_revisions", "done"):
-            parts.append(config.VERIFY_BOARD_GUIDANCE)
-
         # Self-wake guidance — only for non-worktree sessions. A worktree build
         # runs in an isolated dir that may be merged/discarded before a wake
         # could fire, so a resumed wake would land on a dead session. instance.

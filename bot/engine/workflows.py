@@ -1340,41 +1340,6 @@ def _verify_why(inst: Instance) -> str | None:
     return why or None
 
 
-async def _enroll_verify_board(
-    ctx: RequestContext, inst: Instance, why: str,
-) -> None:
-    """Push a Verify Board item for this instance + reason.
-
-    Delegates to the platform's `add_verify_item` callback (Discord populates
-    it; Telegram is None → no-op). Lock-protected mutation + state save +
-    debounced board refresh all happen inside the callback. The engine never
-    touches forum_projects directly.
-
-    Picks the best human-readable origin label available without breaking
-    platform agnosticism: `inst.summary` > `inst.name` > `inst.display_id()`.
-    The Discord side may further enrich this with the actual thread title.
-    """
-    if not ctx.add_verify_item or not inst.repo_name:
-        return
-    label = (
-        (inst.summary or "").strip()
-        or (inst.name or "").strip()
-        or inst.display_id()
-    )
-    if len(label) > 60:
-        label = label[:59].rstrip() + "…"
-    thread_id = str(ctx.channel_id) if ctx.channel_id else None
-    try:
-        await ctx.add_verify_item(
-            inst.repo_name, why, thread_id, label, inst.id,
-        )
-    except Exception:
-        log.exception(
-            "Failed to enroll Verify Board item for %s in %s",
-            inst.id, inst.repo_name,
-        )
-
-
 def _load_verify_policy(source_inst: Instance | None) -> str:
     """Read verify_policy from .claude/test.json. Default: 'warn'."""
     if not source_inst or not source_inst.repo_path:
@@ -1395,13 +1360,14 @@ async def on_verify(ctx: RequestContext, source_id: str, source_msg_id: str | No
     Outcomes (`_verify_outcome`):
       pass    — break, chain advances
       skip    — break, chain advances (verify legitimately had nothing to run)
-      manual  — verification was impossible. Under `warn`, enroll Verify Board
-                + flag the instance + advance. Under `block`, halt with
-                needs_input (block opt-in exists to refuse "I couldn't verify").
-      fail    — re-enter the fix-loop; after MAX_FIX_ROUNDS, enroll under `warn`
+      manual  — verification was impossible. Under `warn`, flag the instance
+                for manual check + advance (surfaced in the chain summary).
+                Under `block`, halt with needs_input (block opt-in exists to
+                refuse "I couldn't verify").
+      fail    — re-enter the fix-loop; after MAX_FIX_ROUNDS, flag under `warn`
                 or halt under `block`.
       crashed — verify environment died (status != COMPLETED). Under `warn`,
-                enroll + advance. Under `block`, halt.
+                post a notice in the thread + advance. Under `block`, halt.
 
     Respects verify_policy from .claude/test.json (default: "warn").
     """
@@ -1436,7 +1402,6 @@ async def on_verify(ctx: RequestContext, source_id: str, source_msg_id: str | No
         if outcome == "manual":
             why = _verify_why(result) or "verification couldn't run automatically"
             if verify_policy == "warn":
-                await _enroll_verify_board(ctx, result, why)
                 result.needs_manual_verification = True
                 result.manual_verify_reason = why
                 ctx.store.update_instance(result)
@@ -1454,9 +1419,17 @@ async def on_verify(ctx: RequestContext, source_id: str, source_msg_id: str | No
         if outcome == "crashed":
             why = "verify environment crashed — manual check needed"
             if verify_policy == "warn":
-                await _enroll_verify_board(ctx, result, why)
-                # Note: status != COMPLETED so we cannot persist the flag
-                # on this instance — the Verify Board entry is the signal.
+                # status != COMPLETED so the manual-verify flag can't ride
+                # on this instance — a thread notice is the only signal.
+                try:
+                    await ctx.messenger.send_text(
+                        ctx.channel_id,
+                        f"⚠️ Verify environment crashed — proceeding; "
+                        f"give this one a manual check. {why}",
+                        silent=True,
+                    )
+                except Exception:
+                    log.debug("Crashed-verify notice failed", exc_info=True)
             else:
                 # block: halt. The instance already failed so needs_input
                 # would not be reached by the chain guard; surface the reason.
@@ -1475,14 +1448,13 @@ async def on_verify(ctx: RequestContext, source_id: str, source_msg_id: str | No
                     f"verify failed after {MAX_FIX_ROUNDS + 1} rounds — "
                     "manual check needed"
                 )
-                await _enroll_verify_board(ctx, result, why)
                 result.needs_manual_verification = True
                 result.manual_verify_reason = why
                 ctx.store.update_instance(result)
                 await ctx.messenger.send_text(
                     ctx.channel_id,
                     f"⚠️ Verification failed after {round_num + 1} rounds — "
-                    "proceeding; item posted to Verify Board.",
+                    "proceeding; give this one a manual check.",
                     silent=True,
                 )
             else:
@@ -3243,8 +3215,6 @@ async def _run_autopilot_chain(
 
         # Terminal-state handoff: if any chain instance is flagged for manual
         # verification, surface the WHY lines so the user knows what to eyeball.
-        # Sent silently — the colored Verify Board is the loud signal; this
-        # message is just contextual breadcrumb pointing at it.
         manual_items = [
             i for i in chain_instances if i.needs_manual_verification
         ]
@@ -3253,12 +3223,11 @@ async def _run_autopilot_chain(
                 f"• {i.manual_verify_reason}"
                 for i in manual_items if i.manual_verify_reason
             )
-            repo_label = result.repo_name if result and result.repo_name else "this repo"
             try:
                 await ctx.messenger.send_text(
                     ctx.channel_id,
-                    f"ℹ️ Pending manual verification — items "
-                    f"posted to Verify Board for {repo_label}:\n{why_lines}",
+                    f"ℹ️ Couldn't be verified automatically — worth "
+                    f"eyeballing by hand:\n{why_lines}",
                     silent=True,
                 )
             except Exception:

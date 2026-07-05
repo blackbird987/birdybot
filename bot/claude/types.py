@@ -129,8 +129,8 @@ class Instance:
     plan_active: bool = False  # Session has an active plan (for button context)
     code_active: bool = False  # Session has uncommitted code changes (for button context)
     needs_input: bool = False  # AskUserQuestion detected — waiting for user reply
-    needs_manual_verification: bool = False  # Verify outcome was `manual` or unrecoverable `fail` under warn — handed off to Verify Board
-    manual_verify_reason: str | None = None  # WHY: line (or chain summary) for the Verify Board entry
+    needs_manual_verification: bool = False  # Verify outcome was `manual` or unrecoverable `fail` under warn — needs a human eyeball
+    manual_verify_reason: str | None = None  # WHY: line surfaced in the chain-completion summary
     deferred_revisions: list[str] = field(default_factory=list)  # Medium/Low revisions from plan review
     jsonl_uuid_by_msg_id: dict[str, str] = field(default_factory=dict)  # Discord msg_id -> JSONL assistant uuid (for "Branch from here")
     # Access control fields (non-owner sessions)
