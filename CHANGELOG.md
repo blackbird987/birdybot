@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Changed
+- **A single response can now spawn up to 5 subsessions** (`_pair_spawn_directives`, `_MAX_SPAWNS_PER_RESPONSE`). Previously only the FIRST `[BOT_CMD: /spawn]` directive per response ran and the rest were logged-and-skipped, forcing multi-child fan-out to go one turn at a time. The parser now pairs every directive with its own adjacent `~~~spawn` body (a body must sit between its directive and the next one, so one body can never satisfy two directives), dispatches them in order, and posts a notice for anything it drops: directives missing their own body, and directives beyond the 5-per-response cap. Quoted directive lines are still skipped silently. Dispatch stays sequential (thread creation and state writes remain race-free) while the child sessions themselves run in parallel once created. When a thread-level gate rejects (autopilot running, depth cap, wave cap, budget), dispatch stops at the first refusal instead of posting the identical notice once per remaining directive; per-directive rejections (bad repo, malformed args, oversized body) skip just that directive and continue.
+- **Orchestration run cap raised 5 → 12** (`_MAX_SPAWN_WAVES`). The old cap of 5 children per run would have been exhausted by one full wave under multi-spawn, leaving no room for follow-up spawns after children report back. 12 fits two full waves plus stragglers; still bounded so a runaway parent can't fan out forever. Resets on genuine user-typed messages, as before.
+- **Parent audit marker now records every child, not just the last** (`Instance.spawn_dispatched_thread_ids`). The write-only parent → child link in `state.json` was a single field that each spawn overwrote; it's now an append-only list in dispatch order. Legacy `spawn_dispatched_thread_id` values migrate into the list on load.
+- **/spawn prompt instructions updated** (`config.SPAWN_CONTEXT`): documents multi-spawn format (directive+body pairs back-to-back), the 5-per-response cap, and the 12-children run cap.
+
+### Added
+- `scripts/test_multi_spawn.py` — locks the pairing rules (N directives/N bodies → N spawns in order, shared body → one spawn + one rejection, 6 directives → 5 + over-cap notice, quoted lines ignored, legacy audit-key migration) and the handler's continue/stop contract (thread-level gates return stop, per-directive rejections return continue, success records the child in the audit list).
+
 ## v0.93.13 — Plain-language reports; heuristic wakes fully removed (2026-07-02)
 
 ### Changed
