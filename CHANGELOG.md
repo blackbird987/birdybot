@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.94.0 — Verify Board removed (2026-07-05)
+
 ### Removed
 - **Verify Board feature deleted entirely** (`bot/engine/verify.py`, `bot/discord/verify_board.py`, plus hooks in lifecycle, workflows, forums, channels, interactions, modals, formatting, adapter, bot, base, runner, config, state). It was a write-only queue: 111 pending items had accumulated across repos with zero ever marked done or dismissed — the pinned per-repo board thread sat outside the actual reading flow. Removal covers: the `verify-board` fenced-block collection on session finalize, autopilot enrollment on `manual`/`crashed`/unrecoverable-`fail` verify outcomes, the "Send to Verify Board" result buttons, board buttons/select/modal handlers, the per-session `VERIFY_BOARD_GUIDANCE` prompt injection (token cost on every build-origin session), and the aiagent one-shot item-cleanup migration. On next boot, reconcile deletes each repo's legacy pinned board thread (best-effort) and the stored items + thread ids drop out of `state.json` on the next save. What survives, relocated to where it's actually read: a `manual` verify outcome under `warn` policy still flags the instance and the chain-completion summary lists the WHY lines in the thread ("Couldn't be verified automatically — worth eyeballing by hand"); a crashed verify environment posts a thread notice. A small `strip_verify_blocks` remains in `platform/formatting.py` so a resumed session on stale pre-removal context that still emits the fence never shows it raw.
 
