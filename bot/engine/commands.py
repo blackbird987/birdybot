@@ -200,41 +200,47 @@ async def _execute_bot_commands(ctx: RequestContext, result_text: str) -> None:
         except Exception:
             log.warning("Failed to execute bot command: /repo %s", repo_args)
 
-    # /spawn — only the FIRST directive in the response is honored, even if the
-    # model emitted several. Subsequent ones are logged-and-skipped so a single
-    # confused turn can't fan out into N parallel sessions.
-    spawn_match = _SPAWN_DIRECTIVE_RE.search(result_text)
-    if spawn_match:
-        line_start = result_text.rfind('\n', 0, spawn_match.start()) + 1
-        line_prefix = result_text[line_start:spawn_match.start()]
-        if _QUOTED_LINE_PREFIX.match(line_prefix):
-            log.debug("BOT_CMD /spawn skipped — inside quoted content")
-        else:
-            args_str = spawn_match.group(1).strip()
-            body_match = _SPAWN_BODY_RE.search(result_text, spawn_match.end())
-            if not body_match:
-                log.warning("BOT_CMD /spawn blocked — no adjacent ~~~spawn body found")
-                try:
-                    await ctx.messenger.send_text(
-                        ctx.channel_id,
-                        "⚠️ /spawn directive ignored — must be followed by a "
-                        "`~~~spawn ... ~~~` body block.",
-                        silent=True,
-                    )
-                except Exception:
-                    pass
-            else:
-                body = body_match.group(1).strip()
-                try:
-                    await _handle_spawn_directive(ctx, args_str, body)
-                except Exception:
-                    log.exception("Failed to dispatch /spawn directive")
-        # Note: we don't iterate further — first match wins.
-        for extra in list(_SPAWN_DIRECTIVE_RE.finditer(result_text))[1:]:
-            log.warning(
-                "BOT_CMD /spawn — extra directive at offset %d ignored "
-                "(only first per response)", extra.start(),
+    # /spawn — up to _MAX_SPAWNS_PER_RESPONSE directives per response run, in
+    # order of appearance. Each directive is paired with the ~~~spawn body that
+    # sits between it and the next directive, so bodies can't be shared or
+    # stolen across directives. Directives are dispatched sequentially (thread
+    # creation + state writes stay race-free); the child sessions themselves
+    # run in parallel once created.
+    pairs, no_body, over_cap = _pair_spawn_directives(result_text)
+    if no_body:
+        log.warning(
+            "BOT_CMD /spawn — %d directive(s) had no adjacent ~~~spawn body",
+            no_body,
+        )
+        try:
+            await ctx.messenger.send_text(
+                ctx.channel_id,
+                f"⚠️ {no_body} /spawn directive(s) ignored — each directive "
+                "must be immediately followed by its own `~~~spawn ... ~~~` "
+                "body block.",
+                silent=True,
             )
+        except Exception:
+            pass
+    if over_cap:
+        log.warning(
+            "BOT_CMD /spawn — %d directive(s) beyond the per-response cap "
+            "(%d) ignored", over_cap, _MAX_SPAWNS_PER_RESPONSE,
+        )
+        try:
+            await ctx.messenger.send_text(
+                ctx.channel_id,
+                f"⚠️ Only the first {_MAX_SPAWNS_PER_RESPONSE} /spawn "
+                f"directives per response run — {over_cap} ignored.",
+                silent=True,
+            )
+        except Exception:
+            pass
+    for args_str, body in pairs:
+        try:
+            await _handle_spawn_directive(ctx, args_str, body)
+        except Exception:
+            log.exception("Failed to dispatch /spawn directive")
 
 
 # --- /spawn directive (Tier-2 BOT_CMD — assistant-issued session handoff) ---
@@ -253,12 +259,53 @@ _SPAWN_ALLOWED_EFFORTS = {"low", "medium", "high", "max"}
 _SPAWN_PROMPT_MAX_BYTES = 32 * 1024  # 32 KiB hard cap on body
 _SPAWN_TITLE_MAX = 80
 _TITLE_CONTROL_CHARS = re.compile(r"[\x00-\x1f]")
-# Orchestrator wave cap: max child sessions a parent may spawn within a single
+# Per-response fan-out cap: max /spawn directives honored in one assistant
+# response. Bounds a single confused turn without blocking legitimate
+# parallel fan-out (the common case is 2-5 subsessions at once).
+_MAX_SPAWNS_PER_RESPONSE = 5
+# Orchestrator run cap: max child sessions a parent may spawn within a single
 # orchestration run (across turns, surviving callback-resume replays). Reset on
-# genuine user-typed messages. Mirrors the structural caps elsewhere in the
-# engine — pick a value high enough for real multi-phase plans, low enough that
-# a runaway parent can't fan out unbounded.
-_MAX_SPAWN_WAVES = 5
+# genuine user-typed messages. Sized so a full per-response wave of
+# _MAX_SPAWNS_PER_RESPONSE still leaves room for follow-up waves after the
+# children report back, while a runaway parent can't fan out unbounded.
+_MAX_SPAWN_WAVES = 12
+
+
+def _pair_spawn_directives(
+    result_text: str,
+) -> tuple[list[tuple[str, str]], int, int]:
+    """Pair each /spawn directive with its own adjacent ~~~spawn body.
+
+    A directive's body must appear between it and the next directive, so a
+    single body can never satisfy two directives. Directives on quoted lines
+    are skipped silently (same guard as single-spawn had).
+
+    Returns ``(pairs, no_body, over_cap)``: ``pairs`` is the ordered list of
+    ``(args_str, body)`` ready for dispatch (capped at
+    _MAX_SPAWNS_PER_RESPONSE), ``no_body`` counts directives that lacked
+    their own body block, ``over_cap`` counts directives dropped by the cap.
+    """
+    matches = list(_SPAWN_DIRECTIVE_RE.finditer(result_text))
+    pairs: list[tuple[str, str]] = []
+    no_body = 0
+    over_cap = 0
+    for i, m in enumerate(matches):
+        line_start = result_text.rfind('\n', 0, m.start()) + 1
+        if _QUOTED_LINE_PREFIX.match(result_text[line_start:m.start()]):
+            log.debug("BOT_CMD /spawn skipped — inside quoted content")
+            continue
+        if len(pairs) >= _MAX_SPAWNS_PER_RESPONSE:
+            over_cap += 1
+            continue
+        region_end = (
+            matches[i + 1].start() if i + 1 < len(matches) else len(result_text)
+        )
+        body_match = _SPAWN_BODY_RE.search(result_text, m.end(), region_end)
+        if not body_match:
+            no_body += 1
+            continue
+        pairs.append((m.group(1).strip(), body_match.group(1).strip()))
+    return pairs, no_body, over_cap
 
 
 def _parse_spawn_kv(args_str: str) -> dict[str, str] | None:
@@ -506,9 +553,9 @@ async def _handle_spawn_directive(
         return
 
     # Audit marker on the parent instance — write-only; surfaces the
-    # parent → child link in state.json for post-hoc inspection.
+    # parent → child links in state.json for post-hoc inspection.
     if parent_inst:
-        parent_inst.spawn_dispatched_thread_id = result.thread_id
+        parent_inst.spawn_dispatched_thread_ids.append(result.thread_id)
         ctx.store.update_instance(parent_inst, critical=True)
 
     # Confirm in the parent thread.

@@ -172,10 +172,11 @@ class Instance:
     # Top-level session = 0; spawned by depth-0 = 1; etc. The directive handler
     # caps recursion at depth 1 to prevent fan-out runaway.
     spawn_depth: int = 0
-    # Audit marker — set to the dispatched thread_id once /spawn fires
-    # successfully. Persisted alongside the instance so post-hoc inspection
-    # of state.json shows which parent instance launched which child thread.
-    spawn_dispatched_thread_id: str | None = None
+    # Audit marker — thread_ids of every child /spawn dispatched from this
+    # instance, in dispatch order (a single response may spawn several).
+    # Persisted alongside the instance so post-hoc inspection of state.json
+    # shows which parent instance launched which child threads.
+    spawn_dispatched_thread_ids: list[str] = field(default_factory=list)
     _accounts_tried: set[str] = field(default_factory=set)  # Ephemeral: tracks accounts tried this run (not persisted)
     # Ephemeral: True when on_verify_release fail-closed because the verifier
     # output was unparseable (vs real phantom_bullets in the verdict). Read by
@@ -269,7 +270,7 @@ class Instance:
             "path_poisoning": self.path_poisoning,
             "finishup_nudges": self.finishup_nudges,
             "spawn_depth": self.spawn_depth,
-            "spawn_dispatched_thread_id": self.spawn_dispatched_thread_id,
+            "spawn_dispatched_thread_ids": self.spawn_dispatched_thread_ids,
         }
 
     @classmethod
@@ -343,7 +344,12 @@ class Instance:
             path_poisoning=d.get("path_poisoning", []),
             finishup_nudges=d.get("finishup_nudges", 0),
             spawn_depth=d.get("spawn_depth", 0),
-            spawn_dispatched_thread_id=d.get("spawn_dispatched_thread_id"),
+            # Legacy single-value key migrates into the list form.
+            spawn_dispatched_thread_ids=(
+                d.get("spawn_dispatched_thread_ids")
+                or ([d["spawn_dispatched_thread_id"]]
+                    if d.get("spawn_dispatched_thread_id") else [])
+            ),
         )
 
 

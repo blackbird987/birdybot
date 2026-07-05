@@ -406,9 +406,9 @@ Rules:
 - `mode` (optional, default "build"): explore | plan | build.
 - `effort` (optional): low | medium | high | max.
 - The fenced body MUST use tilde fences (`~~~spawn` / `~~~`), not backticks — this avoids colliding with backtick code blocks in the prompt.
-- Only the FIRST /spawn directive in your response runs; further ones are ignored.
-- One short sentence in your response telling the user what's happening is enough; the substance lives in the ~~~spawn block. Don't restate the whole prompt body in prose — that's just noise.
-- The bot will reject the directive if: this thread was itself spawned (depth-1 cap), autopilot is running/paused on this thread, the repo is unknown, or the body exceeds 32 KiB.
+- Up to 5 /spawn directives may run per response. To fan out parallel subsessions, emit multiple directive+body pairs back-to-back — each directive IMMEDIATELY followed by its own ~~~spawn body, then the next directive. A directive without its own body block is skipped; directives beyond 5 are ignored.
+- One short sentence in your response telling the user what's happening is enough; the substance lives in the ~~~spawn blocks. Don't restate the prompt bodies in prose — that's just noise.
+- The bot will reject a directive if: this thread was itself spawned (depth-1 cap), autopilot is running/paused on this thread, the repo is unknown, the body exceeds 32 KiB, or this thread has already spawned 12 children since your last real user message (run cap).
 """
 
 # Depth-1 variant. Appended when instance.spawn_depth >= 1 — this thread was
