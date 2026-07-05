@@ -26,12 +26,17 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
 sys.path.insert(0, _ROOT)
 
+import asyncio
+from types import SimpleNamespace
+
 from bot.engine.commands import (
     _MAX_SPAWNS_PER_RESPONSE,
     _MAX_SPAWN_WAVES,
+    _handle_spawn_directive,
     _pair_spawn_directives,
 )
 from bot.claude.types import Instance
+from bot.platform.base import SpawnResult
 
 _failures: list[str] = []
 
@@ -141,6 +146,114 @@ def test_legacy_audit_key_migrates() -> None:
     _check(inst3.spawn_dispatched_thread_ids == [], "absent key defaults to []")
 
 
+class _FakeMessenger:
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+
+    async def send_text(self, channel_id, text, **kw):
+        self.sent.append(text)
+        return "msg-1"
+
+
+def _fake_ctx(
+    *,
+    autopilot_status: str | None = None,
+    parent_depth: int = 0,
+    wave_count: int = 0,
+    daily_cost: float = 0.0,
+    with_spawn_session: bool = True,
+) -> tuple[SimpleNamespace, _FakeMessenger, list, Instance]:
+    """Minimal stand-in for RequestContext — just what the handler touches."""
+    messenger = _FakeMessenger()
+    spawned: list = []
+    parent = Instance(
+        id="t-parent", name=None,
+        instance_type="task", prompt="x",  # type: ignore[arg-type]
+        repo_name="bot", repo_path="", status="running",  # type: ignore[arg-type]
+        spawn_depth=parent_depth,
+    )
+    chain_meta = (
+        {"status": autopilot_status} if autopilot_status else None
+    )
+    store = SimpleNamespace(
+        get_autopilot_chain_meta=lambda sid: chain_meta,
+        list_repos=lambda: ["bot"],
+        get_instance=lambda iid: parent,
+        update_instance=lambda inst, critical=False: None,
+        get_daily_cost=lambda: daily_cost,
+    )
+    runner = SimpleNamespace(
+        active_instance_for_session=lambda sid: "t-parent",
+        active_instance_for_channel=lambda cid: "t-parent",
+    )
+
+    async def _spawn(args):
+        spawned.append(args)
+        return SpawnResult(
+            thread_id=f"thread-{len(spawned)}",
+            thread_mention="<#x>", thread_url=None,
+        )
+
+    ctx = SimpleNamespace(
+        channel_id="chan-1",
+        session_id="sess-1",
+        store=store,
+        runner=runner,
+        messenger=messenger,
+        spawn_session=_spawn if with_spawn_session else None,
+        read_spawn_wave_count=lambda: wave_count,
+    )
+    return ctx, messenger, spawned, parent
+
+
+def _dispatch(ctx, args_str='repo=bot title="Kid"', body="do the thing"):
+    return asyncio.run(_handle_spawn_directive(ctx, args_str, body))
+
+
+def test_handler_stop_vs_continue() -> None:
+    print("handler continue/stop contract (multi-spawn loop control):")
+
+    ctx, msgr, spawned, parent = _fake_ctx()
+    _check(_dispatch(ctx) is True, "success returns True (keep dispatching)")
+    _check(len(spawned) == 1, "success actually spawned")
+    _check(
+        parent.spawn_dispatched_thread_ids == ["thread-1"],
+        "audit list records the child",
+    )
+
+    ctx, msgr, spawned, _ = _fake_ctx(autopilot_status="running")
+    _check(
+        _dispatch(ctx) is False,
+        "autopilot gate returns False (stop the wave)",
+    )
+    _check(len(spawned) == 0 and len(msgr.sent) == 1, "one refusal, no spawn")
+
+    ctx, _, spawned, _ = _fake_ctx(parent_depth=1)
+    _check(_dispatch(ctx) is False, "depth cap returns False")
+
+    ctx, _, spawned, _ = _fake_ctx(wave_count=_MAX_SPAWN_WAVES)
+    _check(_dispatch(ctx) is False, "wave cap returns False")
+
+    ctx, _, spawned, _ = _fake_ctx(daily_cost=10**9)
+    _check(_dispatch(ctx) is False, "budget gate returns False")
+
+    ctx, _, spawned, _ = _fake_ctx(with_spawn_session=False)
+    _check(_dispatch(ctx) is False, "missing platform seam returns False")
+
+    ctx, _, spawned, _ = _fake_ctx()
+    _check(
+        _dispatch(ctx, args_str="???not kv???") is True,
+        "malformed args return True (skip just this directive)",
+    )
+    _check(len(spawned) == 0, "malformed args did not spawn")
+
+    ctx, _, spawned, _ = _fake_ctx()
+    _check(
+        _dispatch(ctx, args_str='repo=nope title="Kid"') is True,
+        "unknown repo returns True (skip just this directive)",
+    )
+
+
 def main() -> int:
     test_three_pairs()
     test_shared_body_rejected()
@@ -149,6 +262,7 @@ def main() -> int:
     test_no_directives()
     test_run_cap_headroom()
     test_legacy_audit_key_migrates()
+    test_handler_stop_vs_continue()
     if _failures:
         print(f"\n{len(_failures)} FAILURE(S):")
         for f in _failures:

@@ -9,7 +9,7 @@
 - **/spawn prompt instructions updated** (`config.SPAWN_CONTEXT`): documents multi-spawn format (directive+body pairs back-to-back), the 5-per-response cap, and the 12-children run cap.
 
 ### Added
-- `scripts/test_multi_spawn.py` — locks the pairing rules: N directives/N bodies → N spawns in order, shared body → one spawn + one rejection, 6 directives → 5 + over-cap notice, quoted lines ignored, legacy audit-key migration.
+- `scripts/test_multi_spawn.py` — locks the pairing rules (N directives/N bodies → N spawns in order, shared body → one spawn + one rejection, 6 directives → 5 + over-cap notice, quoted lines ignored, legacy audit-key migration) and the handler's continue/stop contract (thread-level gates return stop, per-directive rejections return continue, success records the child in the audit list).
 
 ## v0.93.13 — Plain-language reports; heuristic wakes fully removed (2026-07-02)
 
