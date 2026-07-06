@@ -1,5 +1,10 @@
 # TODO
 
+## Fable-5 Capitalization — Wave 2 (after wave-1 spawns land)
+
+- [ ] **Judgment-distillation skills for aiagent and The-Citadel** — same pattern as the bot-repo skill from wave 1: capture debugging playbooks, failure modes, and verification standards while a top-tier model can still write them.
+- [ ] **Post-Fable model policy decision** — decide what model new bot sessions default to once Fable goes pay-per-use: when to spend PPU credits vs. use Sonnet/Opus, per task type (plan vs build vs review).
+
 ## Features
 
 - [ ] **Structured actions framework for multi-user** — Instead of giving non-owners raw Claude Code access (Edit/Write/Bash), expose pre-built actions (update spreadsheet, search products, generate report) as tools. Claude orchestrates between them but can't run arbitrary commands. Basically an MCP-style tool layer between the user and the filesystem. Needed when more people get access to different projects.
