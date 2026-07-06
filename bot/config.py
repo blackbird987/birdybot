@@ -117,6 +117,16 @@ INSTANCE_MAX_RETAINED: int = int(os.getenv("INSTANCE_MAX_RETAINED", "250"))
 # adds that flag automatically). Set WORKTREE_HOOK_ENABLED=0 to disable.
 WORKTREE_HOOK_ENABLED: bool = os.getenv("WORKTREE_HOOK_ENABLED", "1") == "1"
 
+# Serialize full test-suite runs across parallel sessions on the same repo
+# (t-5976). Worktrees isolate files but not ports, databases, or CPU — five
+# parallel `dotnet test` runs starved each other into orphaned/hung suites.
+# Installed as PreToolUse (acquire/wait/block) + PostToolUse (release)
+# hooks per worktree, piggybacking on the worktree-guard install; requires
+# WORKTREE_HOOK_ENABLED. Lock lives at {repo}/.worktrees/.test-mutex/.
+# Per-repo opt-out / pattern overrides: {repo}/.claude/parallel.json.
+# Set TEST_MUTEX_ENABLED=0 to disable globally.
+TEST_MUTEX_ENABLED: bool = os.getenv("TEST_MUTEX_ENABLED", "1") == "1"
+
 # API billing fallback (used when subscription limits are hit)
 ANTHROPIC_API_KEY: str | None = os.getenv("ANTHROPIC_API_KEY")
 API_FALLBACK_MODEL: str = os.getenv("API_FALLBACK_MODEL", "haiku")

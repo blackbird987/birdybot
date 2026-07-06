@@ -1646,6 +1646,13 @@ class ClaudeRunner:
             await asyncio.to_thread(
                 self._copy_session_from_worktree, instance, account_dir,
             )
+            # The CLI process has exited, so no test run from this session
+            # can still be in flight — free the per-repo test-suite mutex
+            # if this session was killed/crashed while holding it.
+            await asyncio.to_thread(
+                self._release_test_mutex,
+                instance.repo_path, instance.worktree_path,
+            )
 
         # Mirror the JSONL the CLI just wrote to every other configured
         # account.  Keeps cross-account session storage in lockstep so a
@@ -2292,7 +2299,14 @@ class ClaudeRunner:
         if sibling_context:
             parts.append(
                 f"\n\n--- Sibling Sessions ---\n{sibling_context}\n"
-                "Avoid editing files these sessions are likely working on."
+                "Avoid editing files these sessions are likely working on.\n"
+                "These sessions share one machine: full test suites, app "
+                "launches, and fixed ports can collide even across "
+                "worktrees. Prefer narrow test filters (single test "
+                "class/file) over full-suite runs. Full-suite runs are "
+                "serialized per repo — if a test command is blocked "
+                "because another session holds the test lock, do other "
+                "work first and retry in a few minutes."
             )
 
         return "".join(parts)
@@ -2915,6 +2929,39 @@ class ClaudeRunner:
             ],
         }
 
+        # Test-suite mutex (t-5976): serialize full test-suite runs across
+        # parallel sessions on the same repo (they share ports, databases,
+        # and CPU — worktrees only isolate files). Pre-phase acquires or
+        # blocks; post-phase releases. The pre timeout must exceed the
+        # script's internal 120s wait so the script, not the hook reaper,
+        # decides the outcome.
+        mutex_entries: list[tuple[str, dict]] = []
+        if config.TEST_MUTEX_ENABLED:
+            mutex_script = (
+                Path(__file__).resolve().parent / "hooks" / "test_mutex.py"
+            )
+            if mutex_script.is_file():
+                for event, phase, timeout in (
+                    ("PreToolUse", "pre", 150),
+                    ("PostToolUse", "post", 15),
+                ):
+                    mutex_entries.append((event, {
+                        "matcher": "Bash",
+                        "_owner": "claude-telegram-bot-test-mutex",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": (
+                                    f'"{python_exe}" "{mutex_script}" {phase} '
+                                    f'"{wt_dir}" "{repo_path}"'
+                                ),
+                                "timeout": timeout,
+                            }
+                        ],
+                    }))
+            else:
+                log.warning("test_mutex.py not found at %s", mutex_script)
+
         settings_dir = Path(wt_dir) / ".claude"
         settings_dir.mkdir(parents=True, exist_ok=True)
         settings_path = settings_dir / "settings.local.json"
@@ -2948,19 +2995,28 @@ class ClaudeRunner:
                 "leaving it untouched", wt_dir,
             )
             return
-        pre_list = hooks_block.setdefault("PreToolUse", [])
-        if not isinstance(pre_list, list):
-            log.warning(
-                "Worktree %s settings.local.json `PreToolUse` is not an "
-                "array; leaving it untouched", wt_dir,
-            )
-            return
-        # Drop any prior bot-owned entry, then append the fresh one.
-        pre_list[:] = [
-            e for e in pre_list
-            if not (isinstance(e, dict) and e.get("_owner") == "claude-telegram-bot")
-        ]
-        pre_list.append(bot_hook_entry)
+        # Group the bot's entries by hook event, then for each event drop
+        # any prior bot-owned entries (all `_owner` values share the
+        # "claude-telegram-bot" prefix) and append the fresh ones.
+        new_entries: dict[str, list[dict]] = {"PreToolUse": [bot_hook_entry]}
+        for event, entry in mutex_entries:
+            new_entries.setdefault(event, []).append(entry)
+
+        def _bot_owned(e: object) -> bool:
+            return isinstance(e, dict) and str(
+                e.get("_owner", "")
+            ).startswith("claude-telegram-bot")
+
+        for event, entries in new_entries.items():
+            ev_list = hooks_block.setdefault(event, [])
+            if not isinstance(ev_list, list):
+                log.warning(
+                    "Worktree %s settings.local.json `%s` is not an "
+                    "array; leaving it untouched", wt_dir, event,
+                )
+                return
+            ev_list[:] = [e for e in ev_list if not _bot_owned(e)]
+            ev_list.extend(entries)
 
         settings_path.write_text(
             _json_mod.dumps(existing, indent=2),
@@ -3018,6 +3074,39 @@ class ClaudeRunner:
             "Installed worktree hook for %s; excluded %s in %s",
             wt_dir, exclude_line, exclude_path,
         )
+
+    @staticmethod
+    def _release_test_mutex(
+        repo_path: str | None, worktree_path: str | None,
+    ) -> None:
+        """Free the per-repo test-suite mutex if *worktree_path* holds it.
+
+        Backstop for the PostToolUse release in hooks/test_mutex.py:
+        called from the post-run path once a session's CLI process has
+        exited, so a session killed or crashed mid-test-run frees the
+        lock immediately instead of stalling siblings until the hook's
+        stale TTL. No-op when the lock is free or held by someone else.
+        """
+        if not repo_path or not worktree_path:
+            return
+        lock_dir = Path(repo_path) / ".worktrees" / ".test-mutex"
+        try:
+            data = _json_mod.loads(
+                (lock_dir / "owner.json").read_text(encoding="utf-8")
+            )
+            holder = str(data.get("worktree", ""))
+        except (OSError, ValueError):
+            return
+
+        def _norm(p: str) -> str:
+            return p.replace("\\", "/").rstrip("/").lower()
+
+        if holder and _norm(holder) == _norm(str(worktree_path)):
+            shutil.rmtree(lock_dir, ignore_errors=True)
+            log.info(
+                "Released test-suite mutex for %s (was held by %s)",
+                repo_path, worktree_path,
+            )
 
     @staticmethod
     def _get_default_branch(repo_path: str) -> str:
