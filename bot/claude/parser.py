@@ -527,8 +527,13 @@ def parse_usage_limit(error_text: str):
 _MODEL_LIMIT_NAME_HINTS = ("fable", "mythos", "opus", "sonnet", "haiku")
 
 # Label words that mean the cap is account-wide, not model-specific.
+# Includes time-window wording ("5-hour limit", "7 day limit") so a general
+# cap message can't slip through via the marker fallback below even if the
+# CLI someday appends "/usage-credits" to it.
 _GENERIC_LIMIT_WORDS = frozenset({
     "usage", "plan", "session", "weekly", "daily", "monthly",
+    "hour", "hours", "hourly", "5-hour", "5h", "day", "days",
+    "week", "weeks", "month", "months",
 })
 
 

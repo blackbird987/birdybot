@@ -89,6 +89,10 @@ def _test_parser() -> list[str]:
         "hit your plan limit",                          # account-wide
         "rate limit exceeded",                          # transient
         "Some normal completion text",
+        # Time-window caps stay account-wide even with a model-limit marker:
+        "You've hit your 5-hour limit. Run /usage-credits to continue",
+        "You've hit your 5 hour limit. Run /usage-credits to continue",
+        "You've reached your weekly limit — switch models with /model",
     ]
     for s in model_no:
         if parse_model_limit(s):
@@ -163,11 +167,14 @@ async def _run_with_streams(
     accounts,
     model_cooldowns: dict[int, datetime] | None = None,
     instance_model: str | None = None,
+    collect_progress: list | None = None,
 ):
     """Run a fresh instance through runner.run(), faking _stream_output.
 
     ``model_cooldowns`` maps account INDEX -> reset datetime, applied to the
     fresh runner before the run (simulates persisted state).
+    ``collect_progress`` (if given) receives (headline, detail) tuples from
+    the runner's on_progress notices.
 
     Returns (result, instance, runner, acct_dirs, spawn_calls) where
     spawn_calls is a list of (cmd_args, env) per spawn.
@@ -204,9 +211,16 @@ async def _run_with_streams(
 
     runner._stream_output = fake_stream_output  # type: ignore[assignment]
 
+    async def on_progress(headline, detail=None):
+        if collect_progress is not None:
+            collect_progress.append((headline, detail))
+
     instance = _make_instance(repo_dir, model=instance_model)
     try:
-        result = await runner.run(instance)
+        result = await runner.run(
+            instance,
+            on_progress=on_progress if collect_progress is not None else None,
+        )
     finally:
         asyncio.create_subprocess_exec = saved_spawn  # type: ignore[assignment]
         config.CLAUDE_ACCOUNTS[:] = saved_accounts
@@ -263,13 +277,29 @@ async def _test_all_limited_downgrades() -> list[str]:
     no account cooldowns, run succeeds."""
     failures: list[str] = []
     results = [_fable_err(), _fable_err(), RunResult(is_error=False, result_text="ok")]
+    progress: list = []
     try:
         result, instance, runner, accts, spawns = await asyncio.wait_for(
-            _run_with_streams(results, accounts=["primary", "backup"]),
+            _run_with_streams(
+                results, accounts=["primary", "backup"],
+                collect_progress=progress,
+            ),
             timeout=10,
         )
     except asyncio.TimeoutError:
         return ["downgrade: run did NOT terminate (possible infinite recursion)"]
+
+    # Exactly ONE downgrade warning: the retry's pre-emptive path must not
+    # post a second, near-identical "Running on <fallback>" notice.
+    fallback_notices = [
+        (h, d) for h, d in progress
+        if config.MODEL_FALLBACK in f"{h} {d}"
+    ]
+    if len(fallback_notices) != 1:
+        failures.append(
+            f"downgrade: expected exactly 1 fallback-model notice, "
+            f"got {len(fallback_notices)}: {fallback_notices}"
+        )
 
     primary, backup = accts
     if len(spawns) != 3:

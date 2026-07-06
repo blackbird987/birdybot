@@ -990,6 +990,11 @@ class ClaudeRunner:
                         on the primary model again this run.
                         """
                         recovery_state.add("model_downgrade")
+                        # Also claim the notice key: the retry's pre-emptive
+                        # downgrade would otherwise post a second, near-
+                        # identical "Running on <fallback>" message right
+                        # after this one.
+                        recovery_state.add("model_downgrade_notice")
                         instance._accounts_tried = set()
                         if on_progress:
                             try:
