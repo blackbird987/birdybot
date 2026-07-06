@@ -2998,7 +2998,13 @@ class ClaudeRunner:
         # Group the bot's entries by hook event, then for each event drop
         # any prior bot-owned entries (all `_owner` values share the
         # "claude-telegram-bot" prefix) and append the fresh ones.
-        new_entries: dict[str, list[dict]] = {"PreToolUse": [bot_hook_entry]}
+        # PostToolUse starts present-but-empty so a re-install with the
+        # test mutex flipped OFF sweeps stale mutex entries instead of
+        # leaving them active.
+        new_entries: dict[str, list[dict]] = {
+            "PreToolUse": [bot_hook_entry],
+            "PostToolUse": [],
+        }
         for event, entry in mutex_entries:
             new_entries.setdefault(event, []).append(entry)
 
@@ -3099,7 +3105,10 @@ class ClaudeRunner:
             return
 
         def _norm(p: str) -> str:
-            return p.replace("\\", "/").rstrip("/").lower()
+            # Case-fold only on Windows — mirrors _norm in hooks/test_mutex.py
+            # so both sides agree on what "same worktree" means.
+            p = p.replace("\\", "/").rstrip("/")
+            return p.lower() if os.name == "nt" else p
 
         if holder and _norm(holder) == _norm(str(worktree_path)):
             shutil.rmtree(lock_dir, ignore_errors=True)

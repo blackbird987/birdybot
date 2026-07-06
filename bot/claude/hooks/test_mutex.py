@@ -146,7 +146,10 @@ def _write_owner(lock_dir: str, worktree_path: str, command: str) -> None:
         "acquired_at": time.time(),
         "command": command[:200],
     })
-    tmp = os.path.join(lock_dir, "owner.json.tmp")
+    # PID-unique tmp name: the same session can fire parallel Bash calls
+    # whose hooks both refresh the owner file; a shared tmp path would
+    # collide (PermissionError on Windows while the peer holds it open).
+    tmp = os.path.join(lock_dir, f"owner.json.{os.getpid()}.tmp")
     dst = os.path.join(lock_dir, "owner.json")
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(payload)
@@ -168,6 +171,36 @@ def _is_stale(lock_dir: str, owner: dict | None) -> bool:
     holder_wt = owner.get("worktree")
     if isinstance(holder_wt, str) and holder_wt and not os.path.isdir(holder_wt):
         return True  # holder's worktree was merged/discarded — it's gone
+    return False
+
+
+def _try_steal(lock_dir: str) -> bool:
+    """Atomically claim a stale lock and delete it. True if we freed it.
+
+    A plain rmtree has a double-steal race: two contenders can both
+    judge the same lock stale, and the slower one's rmtree may land on
+    a FRESH lock re-acquired in between — silently letting two suites
+    run at once. rename is atomic, so exactly one contender claims the
+    tombstone; re-validating the tombstone's owner catches the case
+    where the path already holds a fresh lock, which is renamed back.
+    """
+    tomb = f"{lock_dir}.stale.{os.getpid()}.{int(time.time() * 1000)}"
+    try:
+        os.rename(lock_dir, tomb)
+    except OSError:
+        return False  # another contender claimed the steal, or dir vanished
+    owner = _read_owner(tomb)
+    if _is_stale(tomb, owner):
+        shutil.rmtree(tomb, ignore_errors=True)
+        return True
+    # We grabbed a lock that was re-acquired after our stale read —
+    # restore it. If the restore fails (the path was re-created in the
+    # meantime), drop the tombstone; the affected holder is covered by
+    # the no-owner grace / TTL recovery.
+    try:
+        os.rename(tomb, lock_dir)
+    except OSError:
+        shutil.rmtree(tomb, ignore_errors=True)
     return False
 
 
@@ -211,8 +244,16 @@ def _acquire(worktree_path: str, repo_path: str, command: str) -> None:
             _allow()
 
         if _is_stale(lock_dir, owner):
-            shutil.rmtree(lock_dir, ignore_errors=True)
-            continue  # race back to mkdir; exactly one contender wins
+            freed = _try_steal(lock_dir)
+            if freed or time.time() < deadline:
+                # Brief settle before racing back to mkdir — also keeps a
+                # persistently-failing steal (e.g. Windows refusing the
+                # rename/rmtree) from tight-spinning past the deadline
+                # check, which sits below this branch.
+                time.sleep(0.05)
+                continue
+            # Deadline passed and the steal didn't free the lock — fall
+            # through to the block below.
 
         if time.time() >= deadline:
             holder = os.path.basename(holder_wt) if holder_wt else "another session"
