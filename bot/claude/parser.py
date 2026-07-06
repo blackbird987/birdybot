@@ -556,13 +556,19 @@ def parse_model_limit(error_text: str):
     if not m:
         return None
     label = m.group(1).strip()
-    if set(label.split()) & _GENERIC_LIMIT_WORDS:
-        return None  # "usage limit" / "weekly limit" → account-wide cap
+    # A model name in the label wins outright — "Fable 5 usage limit" is
+    # still a MODEL limit even though it contains a generic cap word.
+    # Misreading it as account-wide would sideline the whole account and
+    # block fallback-model runs for no reason.
     named_model = any(h in label for h in _MODEL_LIMIT_NAME_HINTS)
-    # "switch models" / "/usage-credits" only appear in model-limit wording —
-    # accept them as a fallback signal so a renamed model still matches.
-    if not named_model and "switch models" not in lower and "/usage-credits" not in lower:
-        return None
+    if not named_model:
+        if set(label.split()) & _GENERIC_LIMIT_WORDS:
+            return None  # "usage limit" / "weekly limit" → account-wide cap
+        # Unrecognized label — require a model-limit marker ("switch models"
+        # / "/usage-credits" only appear in model-limit wording) so a
+        # renamed future model still matches.
+        if "switch models" not in lower and "/usage-credits" not in lower:
+            return None
 
     reset_at = _extract_reset_time(lower)
     if reset_at is None:

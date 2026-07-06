@@ -47,6 +47,11 @@ from bot.claude.types import (
 )
 from bot.store import history as history_mod
 
+log = logging.getLogger(__name__)
+
+# On Windows, prevent subprocess console windows from popping up
+_NOWND: dict = config.NOWND
+
 
 def _is_primary_model(model: str | None) -> bool:
     """True when *model* resolves to the accounts' default primary model.
@@ -59,11 +64,6 @@ def _is_primary_model(model: str | None) -> bool:
     if not model:
         return True
     return config.PRIMARY_MODEL.lower() in model.lower()
-
-log = logging.getLogger(__name__)
-
-# On Windows, prevent subprocess console windows from popping up
-_NOWND: dict = config.NOWND
 
 # Tunable knobs for the cross-account session-recovery path (step 3 of the
 # dementia fix).  60s cache window dedupes rebuild_project_index calls when a
@@ -979,6 +979,39 @@ class ClaudeRunner:
                     )
                     self._set_model_cooldown(account_dir, m_reset)
                     instance._accounts_tried.add(account_dir)
+
+                    async def _downgrade_retry(headline: str) -> RunResult:
+                        """Rerun on the fallback model.  Accounts are only
+                        model-limited, not dead, so the tried-set is cleared
+                        for the retry.  Loop-safe: gated on the
+                        model_downgrade recovery key by the caller, and the
+                        pre-emptive downgrade at the top of _run_impl sees
+                        the cooldown just recorded, so the retry cannot land
+                        on the primary model again this run.
+                        """
+                        recovery_state.add("model_downgrade")
+                        instance._accounts_tried = set()
+                        if on_progress:
+                            try:
+                                await on_progress(
+                                    headline,
+                                    f"Continuing on {config.MODEL_FALLBACK} "
+                                    f"until ~{m_reset.strftime('%H:%M')} UTC — "
+                                    "switching back automatically",
+                                )
+                            except Exception:
+                                log.exception(
+                                    "Progress callback error during failover",
+                                )
+                        return await self._run_impl(
+                            instance, on_progress, on_stall,
+                            context, sibling_context,
+                            api_fallback=api_fallback,
+                            _provider=provider, _binary=binary,
+                            _recovery_state=recovery_state,
+                            on_recovery=on_recovery,
+                        )
+
                     next_account = self._pick_account(
                         exclude=instance._accounts_tried,
                         avoid_model_cooldown=True,
@@ -1000,7 +1033,7 @@ class ClaudeRunner:
                                 log.exception(
                                     "Progress callback error during failover",
                                 )
-                        return await self._run_impl(
+                        inner = await self._run_impl(
                             instance, on_progress, on_stall,
                             context, sibling_context,
                             api_fallback=api_fallback,
@@ -1008,34 +1041,32 @@ class ClaudeRunner:
                             _recovery_state=recovery_state,
                             on_recovery=on_recovery,
                         )
+                        # Backup died before doing any work (auth-dead, or
+                        # its own account-wide cap): this account can still
+                        # run the fallback model — keep working instead of
+                        # surfacing a raw error or stalling until a reset.
+                        # Guarded on empty output so a real mid-work failure
+                        # on the backup is never masked.
+                        if (
+                            inner.is_error
+                            and not (inner.result_text or "").strip()
+                        ):
+                            if "model_downgrade" not in recovery_state:
+                                return await _downgrade_retry(
+                                    f"{m_label} limit + backup unavailable"
+                                )
+                            if not inner.usage_limit_reset:
+                                # Downgrade already spent — carry the model
+                                # reset so the caller schedules the auto-retry
+                                # countdown instead of a raw error.
+                                inner.usage_limit_reset = m_reset
+                                inner.session_id = (
+                                    inner.session_id or instance.session_id
+                                )
+                        return inner
                     if "model_downgrade" not in recovery_state:
-                        recovery_state.add("model_downgrade")
-                        # Accounts are only model-limited, not dead: clear
-                        # the tried-set so the fallback-model retry may
-                        # revisit them.  Loop-safe — the pre-emptive
-                        # downgrade above sees the cooldown just recorded,
-                        # so the retry cannot land on the primary model
-                        # again this run.
-                        instance._accounts_tried = set()
-                        if on_progress:
-                            try:
-                                await on_progress(
-                                    f"{m_label} limit reached on all accounts",
-                                    f"Continuing on {config.MODEL_FALLBACK} "
-                                    f"until ~{m_reset.strftime('%H:%M')} UTC — "
-                                    "switching back automatically",
-                                )
-                            except Exception:
-                                log.exception(
-                                    "Progress callback error during failover",
-                                )
-                        return await self._run_impl(
-                            instance, on_progress, on_stall,
-                            context, sibling_context,
-                            api_fallback=api_fallback,
-                            _provider=provider, _binary=binary,
-                            _recovery_state=recovery_state,
-                            on_recovery=on_recovery,
+                        return await _downgrade_retry(
+                            f"{m_label} limit reached on all accounts"
                         )
                     # Downgrade guard already used this run — return with the
                     # model reset stamped so the caller schedules a retry

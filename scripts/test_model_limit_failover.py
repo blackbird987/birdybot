@@ -72,6 +72,15 @@ def _test_parser() -> list[str]:
     elif timed[1].minute != 0:
         failures.append("timed variant should parse the explicit reset time")
 
+    # A model name in the label must win over generic cap words: a future
+    # "Fable 5 usage limit" wording is still a MODEL limit — misreading it
+    # as account-wide would sideline the whole account.
+    if not parse_model_limit("You've reached your Fable 5 usage limit · resets 8pm"):
+        failures.append(
+            "parse_model_limit should match 'Fable 5 usage limit' "
+            "(model name beats generic words)"
+        )
+
     model_no = [
         "",
         "You've hit your usage limit · resets 5pm",   # account-wide
@@ -282,6 +291,76 @@ async def _test_all_limited_downgrades() -> list[str]:
     return failures
 
 
+async def _test_dead_backup_downgrades() -> list[str]:
+    """Fable limit on primary + auth-dead backup -> instead of a raw 401 or
+    a stall, rerun on the fallback model on the primary account."""
+    failures: list[str] = []
+    results = [
+        _fable_err(),
+        RunResult(is_error=True,
+                  error_message=(
+                      "Failed to authenticate. API Error: 401 "
+                      "Invalid authentication credentials"
+                  ),
+                  result_text=""),
+        RunResult(is_error=False, result_text="ok"),
+    ]
+    try:
+        result, instance, runner, accts, spawns = await asyncio.wait_for(
+            _run_with_streams(results, accounts=["primary", "backup"]),
+            timeout=10,
+        )
+    except asyncio.TimeoutError:
+        return ["dead-backup: run did NOT terminate"]
+
+    primary, backup = accts
+    if len(spawns) != 3:
+        failures.append(f"dead-backup: expected 3 spawns, got {len(spawns)}")
+    else:
+        if spawns[2][1].get("CLAUDE_CONFIG_DIR") != primary:
+            failures.append(
+                "dead-backup: third spawn should return to the primary account"
+            )
+        if _model_flag(spawns[2][0]) != config.MODEL_FALLBACK:
+            failures.append(
+                f"dead-backup: third spawn should use --model "
+                f"{config.MODEL_FALLBACK}, got {_model_flag(spawns[2][0])!r}"
+            )
+    if primary not in runner._model_cooldowns:
+        failures.append("dead-backup: primary should carry a model cooldown")
+    if backup not in runner._account_cooldowns:
+        failures.append("dead-backup: auth-dead backup should be account-cooled")
+    if result.is_error:
+        failures.append(f"dead-backup: final result errored: {result.error_message!r}")
+    return failures
+
+
+async def _test_single_account_downgrades() -> list[str]:
+    """Only one account configured, Fable-limited -> downgrade in place."""
+    failures: list[str] = []
+    results = [_fable_err(), RunResult(is_error=False, result_text="ok")]
+    try:
+        result, instance, runner, accts, spawns = await asyncio.wait_for(
+            _run_with_streams(results, accounts=["primary"]),
+            timeout=10,
+        )
+    except asyncio.TimeoutError:
+        return ["single: run did NOT terminate"]
+
+    if len(spawns) != 2:
+        failures.append(f"single: expected 2 spawns, got {len(spawns)}")
+    elif _model_flag(spawns[1][0]) != config.MODEL_FALLBACK:
+        failures.append(
+            f"single: second spawn should use --model {config.MODEL_FALLBACK}, "
+            f"got {_model_flag(spawns[1][0])!r}"
+        )
+    if runner._account_cooldowns:
+        failures.append("single: account cooldowns must stay empty")
+    if result.is_error:
+        failures.append(f"single: final result errored: {result.error_message!r}")
+    return failures
+
+
 async def _test_preemptive_downgrade() -> list[str]:
     """Both accounts already model-cooled (e.g. after reboot) -> a new run
     spawns ONCE, directly on the fallback model."""
@@ -376,6 +455,9 @@ async def _amain() -> int:
     all_failures.append(("parser", _test_parser()))
     all_failures.append(("hop-to-backup", await _test_model_limit_hops_account()))
     all_failures.append(("all-limited-downgrade", await _test_all_limited_downgrades()))
+    all_failures.append(("dead-backup-downgrade", await _test_dead_backup_downgrades()))
+    all_failures.append(("single-account-downgrade",
+                         await _test_single_account_downgrades()))
     all_failures.append(("preemptive-downgrade", await _test_preemptive_downgrade()))
     all_failures.append(("route-to-free-account",
                          await _test_preemptive_routes_to_free_account()))
