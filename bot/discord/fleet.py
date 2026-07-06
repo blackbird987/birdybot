@@ -348,7 +348,12 @@ async def _ship_one(bot: ClaudeBot, t: ShipTarget) -> bool:
         # Clear any stale failed-merge record from an earlier attempt —
         # while one exists, every prompt dispatched into the thread gets
         # the "[system note: auto-merge still unresolved]" prefix, which
-        # would wrap the verify prompt in a false warning.
+        # would wrap the verify prompt in a false warning. Cleared by all
+        # three keyings: the prompt-prefix reads by CHANNEL (survives
+        # session-id rotation), resume flows read by session/instance.
+        pm_ch = ctx.store.get_pending_merge_by_channel(t.thread_id)
+        if pm_ch:
+            ctx.store.clear_pending_merge(pm_ch[0])
         pm = ctx.store.get_pending_merge_by_session(t.session_id)
         if pm:
             ctx.store.clear_pending_merge(pm[0])
