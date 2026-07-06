@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from bot.claude.parser import parse_usage_limit as _claude_parse_usage_limit
+from bot.claude.parser import (
+    parse_model_limit as _claude_parse_model_limit,
+    parse_usage_limit as _claude_parse_usage_limit,
+)
 
 
 @dataclass(frozen=True)
@@ -43,17 +46,29 @@ class ProviderConfig:
         system_prompt_inline: str | None,
         api_fallback: bool,
         api_key_file: str | None,
+        model_override: str | None = None,
     ) -> list[str]:
         """Build the CLI command args. Subclass-style dispatch via provider name.
 
         *binary* overrides config.CLAUDE_BINARY — use when the caller has
         snapshotted the binary path for in-flight session safety.
+        *model_override* takes precedence over instance.model — used by the
+        model-limit failover to run on the fallback model while the primary
+        (e.g. Fable) is on its own cooldown.
         Returns the command list.  Prompt is always piped via stdin by the caller.
         """
         raise NotImplementedError(f"build_command not implemented for {self.name}")
 
     def parse_usage_limit(self, error_text: str) -> object | None:
         """Detect subscription usage-limit errors.  Returns datetime or None."""
+        return None
+
+    def parse_model_limit(self, error_text: str) -> object | None:
+        """Detect MODEL-specific limit errors (e.g. Fable 5 quota).
+
+        Returns (model_label, reset_datetime) or None.  Distinct from
+        parse_usage_limit: the account stays usable for other models.
+        """
         return None
 
 
@@ -69,6 +84,7 @@ class _ClaudeProvider(ProviderConfig):
         system_prompt_inline: str | None,
         api_fallback: bool,
         api_key_file: str | None,
+        model_override: str | None = None,
     ) -> list[str]:
         import json as _json
         import sys
@@ -91,9 +107,11 @@ class _ClaudeProvider(ProviderConfig):
         if self.supports_effort:
             cmd.extend(["--effort", instance.effort])  # type: ignore[attr-defined]
 
-        # Model override (e.g. Sonnet for explore/plan steps)
-        if instance.model and not api_fallback:  # type: ignore[attr-defined]
-            cmd.extend(["--model", instance.model])  # type: ignore[attr-defined]
+        # Model override: model-limit failover (model_override) beats the
+        # per-instance choice (e.g. Sonnet for explore/plan steps)
+        model = model_override or instance.model  # type: ignore[attr-defined]
+        if model and not api_fallback:
+            cmd.extend(["--model", model])
 
         # API billing fallback: --bare + apiKeyHelper for secure key passing
         if api_fallback and api_key_file and config.ANTHROPIC_API_KEY:
@@ -138,6 +156,9 @@ class _ClaudeProvider(ProviderConfig):
     def parse_usage_limit(self, error_text: str) -> object | None:
         return _claude_parse_usage_limit(error_text)
 
+    def parse_model_limit(self, error_text: str) -> object | None:
+        return _claude_parse_model_limit(error_text)
+
 
 class _CursorProvider(ProviderConfig):
     """Cursor CLI provider (agent binary)."""
@@ -151,6 +172,7 @@ class _CursorProvider(ProviderConfig):
         system_prompt_inline: str | None,
         api_fallback: bool,
         api_key_file: str | None,
+        model_override: str | None = None,  # unused — Claude-only feature
     ) -> list[str]:
         from bot import config
 

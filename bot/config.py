@@ -128,6 +128,15 @@ API_FALLBACK_ENABLED: bool = bool(ANTHROPIC_API_KEY)
 # Set to e.g. "sonnet" to route plan/review_plan/apply_revisions to Sonnet.
 EXPLORE_MODEL: str | None = os.getenv("EXPLORE_MODEL")
 
+# Model-specific limit failover: some models (Fable 5) have their own quota
+# on top of the account-wide 5h/weekly caps.  PRIMARY_MODEL is a substring
+# key naming the accounts' default model (matched case-insensitively against
+# --model values and used as the cooldown label); MODEL_FALLBACK is what
+# runs while the primary is limited.  Subscription-only — this path never
+# routes to pay-per-use.
+PRIMARY_MODEL: str = os.getenv("PRIMARY_MODEL", "fable")
+MODEL_FALLBACK: str = os.getenv("MODEL_FALLBACK", "opus")
+
 # Multi-account failover: comma-separated list of Claude config dirs.
 # When the active account hits its usage limit, the bot automatically
 # retries on the next available account.

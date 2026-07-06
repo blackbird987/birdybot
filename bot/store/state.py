@@ -64,6 +64,11 @@ class StateStore:
         # reboots so a build triggered immediately after restart doesn't waste
         # a CLI invocation on a known-cooldown account (the t-3452 dementia).
         self._account_cooldowns: dict[str, str] = {}
+        # account_dir -> ISO timestamp of the PRIMARY model's own limit reset
+        # (e.g. Fable 5 quota).  Separate from _account_cooldowns: the account
+        # stays usable for other models, so this only downgrades — never
+        # refuses spawns.
+        self._model_cooldowns: dict[str, str] = {}
         self._dirty: bool = False  # Dirty flag — mark_dirty() defers save to auto-save loop
         self._last_mtime: float = 0.0  # Track file mtime for external change detection
 
@@ -131,6 +136,7 @@ class StateStore:
             self._fallback_cost = data.get("fallback_cost", 0.0)
             self._fallback_cost_date = data.get("fallback_cost_date", "")
             self._account_cooldowns = data.get("account_cooldowns", {})
+            self._model_cooldowns = data.get("model_cooldowns", {})
             for d in data.get("schedules", []):
                 sched = Schedule.from_dict(d)
                 self._schedules[sched.id] = sched
@@ -204,6 +210,7 @@ class StateStore:
             "fallback_cost": self._fallback_cost,
             "fallback_cost_date": self._fallback_cost_date,
             "account_cooldowns": self._account_cooldowns,
+            "model_cooldowns": self._model_cooldowns,
             "schedules": [s.to_dict() for s in self._schedules.values()],
         }
         return json.dumps(data, separators=(",", ":"))
@@ -583,6 +590,27 @@ class StateStore:
             self._account_cooldowns.pop(account_dir, None)
         else:
             self._account_cooldowns[account_dir] = reset_iso
+        self.save()
+
+    def get_model_cooldowns(self) -> dict[str, str]:
+        """Return a copy of {account_dir -> ISO reset} for the primary model.
+
+        Same string-based contract as get_account_cooldowns — caller parses
+        and purges elapsed entries.
+        """
+        return dict(self._model_cooldowns)
+
+    def set_model_cooldown(self, account_dir: str, reset_iso: str | None) -> None:
+        """Record (or clear with None) a model-specific limit reset.
+
+        Persists immediately for the same reason as account cooldowns: a
+        reboot must not forget the primary model is limited, or the first
+        post-restart spawn burns a doomed CLI invocation on it.
+        """
+        if reset_iso is None:
+            self._model_cooldowns.pop(account_dir, None)
+        else:
+            self._model_cooldowns[account_dir] = reset_iso
         self.save()
 
     # --- Platform State ---
