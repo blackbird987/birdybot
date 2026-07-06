@@ -410,36 +410,15 @@ def extract_summary(text: str, max_len: int = 500) -> str:
     return summary
 
 
-def parse_usage_limit(error_text: str):
-    """Detect Claude subscription usage-limit errors and extract reset time.
+def _extract_reset_time(lower: str):
+    """Parse a reset time out of limit-message wording.
 
-    Returns a datetime (UTC) when the limit resets, or None if this isn't a
-    usage-limit error.  Handles patterns like:
-      - "resets 12pm" / "resets 3:00 PM"
-      - "resets Mar 20, 12pm"
-      - "resets in 2 hours"
-    Falls back to 4 hours from now if the limit is detected but the reset
-    time can't be parsed (conservative to avoid retry storms).
+    Returns a datetime (UTC) or None when the text carries no parseable
+    reset time.  Shared by parse_usage_limit (account-wide caps) and
+    parse_model_limit (model-specific caps) — the CLI uses the same
+    "resets ..." wording for both.
     """
     from datetime import datetime, timedelta, timezone
-
-    if not error_text:
-        return None
-    lower = error_text.lower()
-    # Must look like a subscription usage cap (NOT a transient 429 rate limit).
-    # Explicit subscription-cap phrases first.
-    limit_phrases = ["usage limit", "plan limit", "session limit"]
-    looks_like_limit = any(p in lower for p in limit_phrases)
-    # Catch-all for CLI wording tweaks: "hit your limit", "hit your session
-    # limit", "hit your weekly limit", "hit your 5-hour limit", etc. — any
-    # words may sit between "hit your" and "limit".
-    if not looks_like_limit and re.search(r'hit your\b[\w\s-]*\blimit', lower):
-        looks_like_limit = True
-    # Never treat a transient rate limit as a subscription cap.
-    if "rate limit" in lower:
-        looks_like_limit = False
-    if not looks_like_limit:
-        return None
 
     now = datetime.now(timezone.utc)
 
@@ -493,9 +472,106 @@ def parse_usage_limit(error_text: str):
         # Convert to UTC
         return reset_local.astimezone(timezone.utc)
 
+    return None
+
+
+def parse_usage_limit(error_text: str):
+    """Detect Claude subscription usage-limit errors and extract reset time.
+
+    Returns a datetime (UTC) when the limit resets, or None if this isn't a
+    usage-limit error.  Handles patterns like:
+      - "resets 12pm" / "resets 3:00 PM"
+      - "resets Mar 20, 12pm"
+      - "resets in 2 hours"
+    Falls back to 4 hours from now if the limit is detected but the reset
+    time can't be parsed (conservative to avoid retry storms).
+
+    NOTE: this also matches MODEL-specific limit wording ("reached your
+    Fable 5 limit") — callers that need to distinguish must check
+    parse_model_limit FIRST (the runner does).  Matching here is deliberate
+    so guards like is_account_unusable_error treat model caps as caps.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    if not error_text:
+        return None
+    lower = error_text.lower()
+    # Must look like a subscription usage cap (NOT a transient 429 rate limit).
+    # Explicit subscription-cap phrases first.
+    limit_phrases = ["usage limit", "plan limit", "session limit"]
+    looks_like_limit = any(p in lower for p in limit_phrases)
+    # Catch-all for CLI wording tweaks: "hit your limit", "reached your
+    # Fable 5 limit", "hit your weekly limit", "hit your 5-hour limit",
+    # etc. — any words may sit between "hit/reached your" and "limit".
+    if not looks_like_limit and re.search(
+        r'(?:hit|reached) your\b[\w\s.-]*\blimit', lower,
+    ):
+        looks_like_limit = True
+    # Never treat a transient rate limit as a subscription cap.
+    if "rate limit" in lower:
+        looks_like_limit = False
+    if not looks_like_limit:
+        return None
+
+    reset = _extract_reset_time(lower)
+    if reset is not None:
+        return reset
+
     # Detected limit but couldn't parse reset time — conservative fallback
     log.warning("Usage limit detected but couldn't parse reset time: %s", error_text[:200])
-    return now + timedelta(hours=4)
+    return datetime.now(timezone.utc) + timedelta(hours=4)
+
+
+# Model names that identify a model-specific limit message.  Substring
+# match against the captured label ("fable 5" contains "fable").
+_MODEL_LIMIT_NAME_HINTS = ("fable", "mythos", "opus", "sonnet", "haiku")
+
+# Label words that mean the cap is account-wide, not model-specific.
+_GENERIC_LIMIT_WORDS = frozenset({
+    "usage", "plan", "session", "weekly", "daily", "monthly",
+})
+
+
+def parse_model_limit(error_text: str):
+    """Detect a MODEL-specific limit, distinct from the account-wide cap.
+
+    The Claude CLI emits e.g. "You've reached your Fable 5 limit. Run
+    /usage-credits to continue or switch models with /model." — the
+    subscription itself keeps working for other models, so the runner must
+    NOT sideline the whole account for this.
+
+    Returns (model_label, reset_at_utc) or None.  When the message carries
+    no reset time, falls back to 5 hours (model quotas ride the same block
+    cadence; if the real reset is longer, the next attempt just re-detects
+    the limit and re-arms the cooldown — self-healing).
+    """
+    from datetime import datetime, timedelta, timezone
+
+    if not error_text:
+        return None
+    lower = error_text.lower()
+    if "rate limit" in lower:
+        return None
+    m = re.search(r"(?:reached|hit) your\s+([\w][\w .+-]*?)\s+limit", lower)
+    if not m:
+        return None
+    label = m.group(1).strip()
+    if set(label.split()) & _GENERIC_LIMIT_WORDS:
+        return None  # "usage limit" / "weekly limit" → account-wide cap
+    named_model = any(h in label for h in _MODEL_LIMIT_NAME_HINTS)
+    # "switch models" / "/usage-credits" only appear in model-limit wording —
+    # accept them as a fallback signal so a renamed model still matches.
+    if not named_model and "switch models" not in lower and "/usage-credits" not in lower:
+        return None
+
+    reset_at = _extract_reset_time(lower)
+    if reset_at is None:
+        log.warning(
+            "Model limit detected but couldn't parse reset time: %s",
+            error_text[:200],
+        )
+        reset_at = datetime.now(timezone.utc) + timedelta(hours=5)
+    return label.title(), reset_at
 
 
 def is_transient_error(error_text: str) -> bool:

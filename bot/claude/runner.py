@@ -47,6 +47,19 @@ from bot.claude.types import (
 )
 from bot.store import history as history_mod
 
+
+def _is_primary_model(model: str | None) -> bool:
+    """True when *model* resolves to the accounts' default primary model.
+
+    None means "no --model flag": the CLI runs the account's configured
+    default, which is the primary model on this deployment (PRIMARY_MODEL).
+    Explicit non-primary overrides (e.g. EXPLORE_MODEL="sonnet") are exempt
+    from model-limit downgrades — their model has its own quota.
+    """
+    if not model:
+        return True
+    return config.PRIMARY_MODEL.lower() in model.lower()
+
 log = logging.getLogger(__name__)
 
 # On Windows, prevent subprocess console windows from popping up
@@ -412,6 +425,27 @@ class ClaudeRunner:
                 if reset > now:
                     self._account_cooldowns[acct] = reset
 
+        # Model-specific cooldowns (account_dir -> reset): tracks when each
+        # account's PRIMARY_MODEL quota (e.g. Fable 5) resets.  Separate from
+        # _account_cooldowns — a model limit leaves the account usable for
+        # other models, so it must never refuse spawns, only downgrade the
+        # run to MODEL_FALLBACK until the reset passes.
+        self._model_cooldowns: dict[str, datetime] = {}
+        if store is not None:
+            try:
+                persisted_model = store.get_model_cooldowns()
+            except Exception:
+                log.exception("Failed to load persisted model cooldowns")
+                persisted_model = {}
+            now = datetime.now(timezone.utc)
+            for acct, iso in persisted_model.items():
+                try:
+                    reset = datetime.fromisoformat(iso)
+                except (TypeError, ValueError):
+                    continue
+                if reset > now:
+                    self._model_cooldowns[acct] = reset
+
         # Last-rebuild timestamp per (account_dir, project_dir) — dedupes the
         # auto-rebuild recovery layer so a flurry of failed resumes doesn't
         # re-scan the same project multiple times.
@@ -460,6 +494,7 @@ class ClaudeRunner:
         self,
         exclude: set[str] | None = None,
         prefer: str | None = None,
+        avoid_model_cooldown: bool = False,
     ) -> str | None:
         """Return the first configured account not on cooldown/excluded, or None.
 
@@ -467,6 +502,14 @@ class ClaudeRunner:
         not on cooldown, and not in ``exclude``.  Falls through to normal
         rotation otherwise — never blocks waiting for the preferred account.
         Used by the dementia fix to honor per-instance session ownership.
+
+        ``avoid_model_cooldown`` prefers accounts whose primary model (e.g.
+        Fable) is not on a model-specific cooldown, so runs land where they
+        can still use the best model — even ahead of ``prefer`` (session
+        hydration copies the JSONL cross-account, so model quality wins over
+        session-home convenience).  When every candidate is model-cooled it
+        falls back to normal rotation; the caller then applies the
+        fallback-model override instead of blocking.
         """
         if not config.CLAUDE_ACCOUNTS:
             return None
@@ -476,19 +519,32 @@ class ClaudeRunner:
             k: v for k, v in self._account_cooldowns.items() if v > now
         }
         exclude = exclude or set()
-        if (
-            prefer
-            and prefer in config.CLAUDE_ACCOUNTS
-            and prefer not in exclude
-            and prefer not in self._account_cooldowns
-        ):
-            return prefer
-        for acct in config.CLAUDE_ACCOUNTS:
-            if acct in exclude:
-                continue
-            if acct not in self._account_cooldowns:
+
+        def _first(skip_model_cooled: bool) -> str | None:
+            if (
+                prefer
+                and prefer in config.CLAUDE_ACCOUNTS
+                and prefer not in exclude
+                and prefer not in self._account_cooldowns
+                and not (skip_model_cooled and prefer in self._model_cooldowns)
+            ):
+                return prefer
+            for acct in config.CLAUDE_ACCOUNTS:
+                if acct in exclude:
+                    continue
+                if acct in self._account_cooldowns:
+                    continue
+                if skip_model_cooled and acct in self._model_cooldowns:
+                    continue
                 return acct
-        return None
+            return None
+
+        if avoid_model_cooldown:
+            self._purge_model_cooldowns()
+            candidate = _first(skip_model_cooled=True)
+            if candidate:
+                return candidate
+        return _first(skip_model_cooled=False)
 
     def _set_account_cooldown(self, account_dir: str, reset_at: datetime) -> None:
         """Record cooldown both in memory and on disk via the StateStore.
@@ -506,6 +562,35 @@ class ClaudeRunner:
                     "Failed to persist account cooldown for %s",
                     account_dir[-20:] if account_dir else "?",
                 )
+
+    def _set_model_cooldown(self, account_dir: str, reset_at: datetime) -> None:
+        """Record a primary-model (e.g. Fable) cooldown in memory + on disk.
+
+        Same single-source-of-truth routing as _set_account_cooldown.
+        """
+        self._model_cooldowns[account_dir] = reset_at
+        if self._store is not None:
+            try:
+                self._store.set_model_cooldown(account_dir, reset_at.isoformat())
+            except Exception:
+                log.exception(
+                    "Failed to persist model cooldown for %s",
+                    account_dir[-20:] if account_dir else "?",
+                )
+
+    def _purge_model_cooldowns(self) -> None:
+        """Drop elapsed model cooldowns (memory + disk) — this is what makes
+        the switch BACK to the primary model automatic once its limit resets.
+        """
+        now = datetime.now(timezone.utc)
+        expired = [k for k, v in self._model_cooldowns.items() if v <= now]
+        for k in expired:
+            self._model_cooldowns.pop(k, None)
+            if self._store is not None:
+                try:
+                    self._store.set_model_cooldown(k, None)
+                except Exception:
+                    log.exception("Failed to clear model cooldown for %s", k[-20:])
 
     async def run(
         self,
@@ -576,6 +661,7 @@ class ClaudeRunner:
             account_dir = self._pick_account(
                 exclude=instance._accounts_tried,
                 prefer=instance.session_account if instance.session_id else None,
+                avoid_model_cooldown=_is_primary_model(instance.model),
             )
             if not account_dir and config.CLAUDE_ACCOUNTS:
                 # Refuse to spawn when every configured account is on cooldown
@@ -609,6 +695,42 @@ class ClaudeRunner:
                     usage_limit_reset=earliest_reset,
                 )
 
+        # Pre-emptive model downgrade: when the chosen account's primary
+        # model (e.g. Fable) is on its own limit cooldown, don't burn a spawn
+        # on a doomed attempt — go straight to the fallback model on the
+        # subscription.  Expiry is automatic: _purge_model_cooldowns drops
+        # elapsed entries, so the next run is back on the primary without
+        # any manual action.  Never applies to PPU runs (they pin their own
+        # model) or to explicit non-primary overrides like EXPLORE_MODEL.
+        model_override: str | None = None
+        if (
+            account_dir
+            and not api_fallback
+            and _is_primary_model(instance.model)
+        ):
+            self._purge_model_cooldowns()
+            m_reset = self._model_cooldowns.get(account_dir)
+            if m_reset:
+                model_override = config.MODEL_FALLBACK
+                log.info(
+                    "Primary model on cooldown for %s until %s — using %s for %s",
+                    account_dir[-20:], m_reset.isoformat(),
+                    model_override, instance.id,
+                )
+                if on_progress and "model_downgrade_notice" not in recovery_state:
+                    recovery_state.add("model_downgrade_notice")
+                    try:
+                        await on_progress(
+                            f"Running on {model_override}",
+                            f"{config.PRIMARY_MODEL.title()} limit until "
+                            f"~{m_reset.strftime('%H:%M')} UTC — "
+                            "switching back automatically",
+                        )
+                    except Exception:
+                        log.exception(
+                            "Progress callback error during model downgrade",
+                        )
+
         # Run the whole prompt-build off the event loop: _build_command makes
         # several synchronous `git` subprocess calls via _build_master_context_block
         # (invoked up to twice on the resume path) plus file reads/writes.  On the
@@ -622,6 +744,7 @@ class ClaudeRunner:
                 self._build_command,
                 instance, context, sibling_context,
                 api_fallback=api_fallback, provider=provider, binary=binary,
+                model_override=model_override,
             )
         )
 
@@ -831,6 +954,96 @@ class ClaudeRunner:
                     fresh.session_id = original_session_id
                     instance.session_id = original_session_id
                 return fresh
+
+            # Model-specific limit (e.g. "You've reached your Fable 5
+            # limit"): the account is still healthy for every other model,
+            # so never cool the WHOLE account down for this.  Route: another
+            # account's quota for the same model first; when every account
+            # is model-limited, downgrade to MODEL_FALLBACK and keep going.
+            # Subscription-only — this path never touches pay-per-use.
+            # MUST run before the generic usage-limit branch below: that
+            # parser also matches this wording and would sideline the
+            # account (blocking fallback-model runs too).
+            if (
+                result.is_error
+                and provider.supports_account_failover
+                and account_dir
+                and _is_primary_model(model_override or instance.model)
+            ):
+                model_hit = provider.parse_model_limit(error_text)
+                if model_hit:
+                    m_label, m_reset = model_hit
+                    log.info(
+                        "%s limit for %s on %s, resets at %s",
+                        m_label, instance.id, account_dir[-20:], m_reset,
+                    )
+                    self._set_model_cooldown(account_dir, m_reset)
+                    instance._accounts_tried.add(account_dir)
+                    next_account = self._pick_account(
+                        exclude=instance._accounts_tried,
+                        avoid_model_cooldown=True,
+                    )
+                    if next_account and next_account not in self._model_cooldowns:
+                        # Backup still has primary-model quota — same model
+                        # there (hydration copies the session JSONL across).
+                        log.info(
+                            "Model-limit failover from %s to %s for %s",
+                            account_dir[-20:], next_account[-20:], instance.id,
+                        )
+                        if on_progress:
+                            try:
+                                await on_progress(
+                                    "Switching to backup account",
+                                    f"{m_label} limit on current account",
+                                )
+                            except Exception:
+                                log.exception(
+                                    "Progress callback error during failover",
+                                )
+                        return await self._run_impl(
+                            instance, on_progress, on_stall,
+                            context, sibling_context,
+                            api_fallback=api_fallback,
+                            _provider=provider, _binary=binary,
+                            _recovery_state=recovery_state,
+                            on_recovery=on_recovery,
+                        )
+                    if "model_downgrade" not in recovery_state:
+                        recovery_state.add("model_downgrade")
+                        # Accounts are only model-limited, not dead: clear
+                        # the tried-set so the fallback-model retry may
+                        # revisit them.  Loop-safe — the pre-emptive
+                        # downgrade above sees the cooldown just recorded,
+                        # so the retry cannot land on the primary model
+                        # again this run.
+                        instance._accounts_tried = set()
+                        if on_progress:
+                            try:
+                                await on_progress(
+                                    f"{m_label} limit reached on all accounts",
+                                    f"Continuing on {config.MODEL_FALLBACK} "
+                                    f"until ~{m_reset.strftime('%H:%M')} UTC — "
+                                    "switching back automatically",
+                                )
+                            except Exception:
+                                log.exception(
+                                    "Progress callback error during failover",
+                                )
+                        return await self._run_impl(
+                            instance, on_progress, on_stall,
+                            context, sibling_context,
+                            api_fallback=api_fallback,
+                            _provider=provider, _binary=binary,
+                            _recovery_state=recovery_state,
+                            on_recovery=on_recovery,
+                        )
+                    # Downgrade guard already used this run — return with the
+                    # model reset stamped so the caller schedules a retry
+                    # countdown instead of hard-failing.  Deliberately skips
+                    # the generic branch below: an account cooldown here
+                    # would block fallback-model runs for no reason.
+                    result.usage_limit_reset = m_reset
+                    return result
 
             # Usage limit: try next account before falling through to cooldown/PPU
             if result.is_error:
@@ -1442,8 +1655,13 @@ class ClaudeRunner:
         api_fallback: bool = False,
         provider: ProviderConfig | None = None,
         binary: str | None = None,
+        model_override: str | None = None,
     ) -> tuple[list[str], str, str | None, str | None, str | None]:
         """Build CLI command and prompt.  Prompt returned separately for stdin piping.
+
+        *model_override* forces the CLI --model flag past instance.model —
+        set by the model-limit failover while the primary model's own quota
+        (e.g. Fable 5) is on cooldown.
 
         Returns (cmd, prompt_text, system_prompt_file, api_key_file, rules_file)
         — caller must clean up the temp files via os.unlink when done.
@@ -1542,6 +1760,7 @@ class ClaudeRunner:
             system_prompt_inline=system_prompt_inline,
             api_fallback=api_fallback,
             api_key_file=api_key_file,
+            model_override=model_override,
         )
 
         # Prompt piped via stdin (not CLI arg) to avoid Windows command-line
