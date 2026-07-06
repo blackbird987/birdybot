@@ -375,18 +375,34 @@ async def _deploy_and_verify(
     add_pending_verify(store, repo_name, origin, targets, deploy=method)
 
     if method == "self":
+        # Say it BEFORE requesting: a queued reboot on an idle runner can
+        # shut the process down before a follow-up message would send.
         await _say(
             bot, origin,
             f"♻️ **{repo_name}**: self-managed — reboot requested; verify "
             f"prompts for {len(targets)} thread(s) fire after it's back online.",
         )
+        from bot.claude.runner import RebootResult
+
         # Coalesced reboot: executes when the runner goes idle, so any
         # verify turns already running for other repos finish first.
-        bot._runner.request_reboot({
+        result = bot._runner.request_reboot({
             "message": f"Fleet ship: deploy {repo_name}",
             "channel_id": origin,
             "platform": "discord",
         })
+        if result is RebootResult.DEFERRED:
+            # Deferred = other work active; safe to send a follow-up. The
+            # deferred file auto-promotes at the next idle session-end but
+            # is dropped as stale after REBOOT_DEFERRED_TTL_SECS — tell the
+            # user the fallback, since the verify set survives either way.
+            await _say(
+                bot, origin,
+                f"⏳ **{repo_name}**: reboot deferred until current work "
+                f"finishes (auto-retries for ~1 h). If it gets dropped as "
+                f"stale, tap Reboot in the control room — the verify "
+                f"prompts are saved and fire at the next boot.",
+            )
         return  # boot-time drain_pending_verify handles the rest
 
     if method == "command":
