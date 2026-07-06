@@ -53,8 +53,9 @@ _PENDING_KEY = "fleet_pending_verify"
 #     repo_name: {
 #         "origin": channel_id,      # where fleet progress is reported
 #         "deploy": "self" | "command" | "none",
-#         # instance_id = the SHIPPED instance; the verify turn must produce
-#         # a NEWER instance before the thread may be auto-closed.
+#         # instance_id = the SHIPPED instance — fallback baseline for the
+#         # close guard when no pre-replay instance can be found; the verify
+#         # replay must produce a NEWER instance before auto-close.
 #         "entries": [{"thread_id", "session_id", "title", "instance_id"}],
 #     }
 # }
@@ -483,12 +484,32 @@ async def drain_pending_verify(bot: ClaudeBot, repo_name: str | None = None) -> 
     return count
 
 
+def _newest_instance(bot: ClaudeBot, thread_id: str, fallback_sid: str | None):
+    """Newest instance for a thread's CURRENT session (replays rotate ids)."""
+    lookup = bot._forums.thread_to_project(thread_id)
+    sid = (lookup[1].session_id if lookup else None) or fallback_sid
+    return next(
+        (i for i in bot._store.list_instances(all_=True) if sid and i.session_id == sid),
+        None,
+    )
+
+
 async def _verify_one(
     bot: ClaudeBot, repo_name: str, deploy: str, origin: str | None, e: dict,
 ) -> None:
     """One thread's verify turn: replay prompt, then close on clean completion."""
     thread_id = e.get("thread_id") or ""
     title = (e.get("title") or "").strip() or f"<#{thread_id}>"
+
+    # Snapshot the newest run BEFORE the replay: past turns are COMPLETED
+    # by definition (including the shipped one), so "newest run completed"
+    # alone would false-positive when the replay dispatches but no turn
+    # actually runs (drain gate, usage limit, spawn refusal). The shipped
+    # instance id is the persisted fallback when nothing is found (e.g.
+    # instances pruned across a reboot).
+    pre = _newest_instance(bot, thread_id, e.get("session_id"))
+    pre_id = pre.id if pre is not None else e.get("instance_id")
+
     try:
         ok = await bot._replay_to_thread(
             thread_id, _verify_prompt(repo_name, deploy), source="fleet_verify",
@@ -503,21 +524,12 @@ async def _verify_one(
         )
         return
 
-    # Turn outcome: the replay may have rotated the session id, so re-read
-    # it from the thread mapping before looking up the newest instance.
-    lookup = bot._forums.thread_to_project(thread_id)
-    sid = lookup[1].session_id if lookup else e.get("session_id")
-    inst = next(
-        (i for i in bot._store.list_instances(all_=True) if sid and i.session_id == sid),
-        None,
-    )
-    # The shipped instance is COMPLETED by definition, so "newest instance
-    # completed" alone would false-positive when the replay dispatched but
-    # no turn actually ran (drain gate, usage limit, spawn refusal). Only
-    # close when a NEW instance exists — and it didn't end on a question.
+    # Only close when the replay produced a NEW run that finished cleanly
+    # and didn't end on a question for the user.
+    inst = _newest_instance(bot, thread_id, e.get("session_id"))
     verified = (
         inst is not None
-        and inst.id != e.get("instance_id")
+        and inst.id != pre_id
         and inst.status == InstanceStatus.COMPLETED
         and not inst.needs_input
     )
