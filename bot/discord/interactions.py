@@ -254,6 +254,12 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
     except discord.InteractionResponded:
         pass  # already acked elsewhere (e.g. double-dispatch) — continue
 
+    # --- Fleet ship roster (Confirm / Cancel) — trailing portion is a token ---
+    if action in ("fleet_confirm", "fleet_cancel"):
+        from bot.discord import fleet
+        await fleet.handle_fleet_button(bot, interaction, action, instance_id)
+        return
+
     # --- Pending-prompt interactions (Steer / Cancel on Queued embed) ---
     # Here the trailing portion of the custom_id is a pending_id, not an
     # instance_id, but we reuse the same ``parts`` split for consistency.
@@ -1311,14 +1317,19 @@ async def _post_deploy_healthcheck(
     repo_name: str,
     deploy_config: dict,
     healthcheck: dict,
-) -> None:
-    """Wait, then run health check commands. Trigger auto-fix if unhealthy."""
+) -> bool:
+    """Wait, then run health check commands. Trigger auto-fix if unhealthy.
+
+    Returns True when all checks pass (or none are configured), False on
+    any failure/timeout — fleet ship gates its verify-back fan-out on this.
+    Existing callers fire-and-forget via create_task and ignore the value.
+    """
     from bot.engine.auto_fix import spawn_fix_session
 
     delay = healthcheck.get("delay_secs", 30)
     commands = healthcheck.get("commands", [])
     if not commands:
-        return
+        return True
 
     await asyncio.sleep(delay)
 
@@ -1360,15 +1371,16 @@ async def _post_deploy_healthcheck(
                         max_cost_usd=1.5,
                         on_success=_redeploy if deploy_config.get("auto_fix_redeploy") else None,
                     )
-                return
+                return False
         except asyncio.TimeoutError:
             log.warning("Health check timed out for %s: %s", repo_name, cmd)
-            return
+            return False
         except Exception:
             log.exception("Health check error for %s: %s", repo_name, cmd)
-            return
+            return False
 
     log.info("All health checks passed for %s", repo_name)
+    return True
 
 
 async def _handle_reboot_repo(

@@ -192,6 +192,18 @@ def setup(bot: ClaudeBot) -> None:
             return
         await bot._run_slash(interaction, commands.on_branches)
 
+    @bot.tree.command(
+        name="fleet",
+        description="Ship all sessions: merge committed work, deploy, verify back",
+        guild=guild_obj,
+    )
+    async def cmd_fleet(interaction: discord.Interaction):
+        if not bot._is_owner(interaction.user.id):
+            await interaction.response.send_message("Unauthorized", ephemeral=True)
+            return
+        from bot.discord import fleet
+        await fleet.handle_fleet_command(bot, interaction)
+
     @bot.tree.command(name="mode", description="View/set mode", guild=guild_obj)
     @app_commands.describe(mode="explore or build")
     async def cmd_mode(interaction: discord.Interaction, mode: str = ""):
