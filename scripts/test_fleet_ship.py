@@ -28,6 +28,7 @@ sys.path.insert(0, _ROOT)
 
 import asyncio
 import inspect
+from types import SimpleNamespace
 
 from bot.discord import fleet
 from bot.discord.fleet import (
@@ -68,7 +69,8 @@ class FakeStore:
 
 def _target(tid: str, repo: str = "bot") -> ShipTarget:
     return ShipTarget(
-        thread_id=tid, session_id=f"sess-{tid}", inst=None,  # inst unused here
+        thread_id=tid, session_id=f"sess-{tid}",
+        inst=SimpleNamespace(id=f"inst-{tid}"),  # only .id is read here
         repo_name=repo, title=f"Thread {tid}",
     )
 
@@ -86,6 +88,8 @@ def test_pending_verify_roundtrip() -> None:
     _check(tids == ["100", "200"], f"both threads persisted in order (got {tids})")
     _check(entry["entries"][0]["session_id"] == "sess-100", "session_id carried")
     _check(entry["entries"][0]["title"] == "Thread 100", "title carried")
+    _check(entry["entries"][0]["instance_id"] == "inst-100",
+           "shipped instance_id carried (no-new-turn close guard)")
     _check(pop_pending_verify(store, "bot") is None, "second pop returns None")
     _check(pop_pending_verify(store, "ghost") is None, "pop of unknown repo is a no-op None")
 

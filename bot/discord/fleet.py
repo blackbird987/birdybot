@@ -53,7 +53,9 @@ _PENDING_KEY = "fleet_pending_verify"
 #     repo_name: {
 #         "origin": channel_id,      # where fleet progress is reported
 #         "deploy": "self" | "command" | "none",
-#         "entries": [{"thread_id", "session_id", "title"}],
+#         # instance_id = the SHIPPED instance; the verify turn must produce
+#         # a NEWER instance before the thread may be auto-closed.
+#         "entries": [{"thread_id", "session_id", "title", "instance_id"}],
 #     }
 # }
 
@@ -163,6 +165,7 @@ def add_pending_verify(
                 "thread_id": t.thread_id,
                 "session_id": t.session_id,
                 "title": t.title,
+                "instance_id": t.inst.id if t.inst else None,
             })
     pending[repo_name] = entry
     _set_pending(store, pending)
@@ -214,6 +217,10 @@ async def handle_fleet_command(bot: ClaudeBot, interaction: discord.Interaction)
         "thread_ids": [t.thread_id for t in targets],
         "origin": channel_id,
     }
+    # Un-tapped rosters accumulate one token each; keep only the newest few
+    # (dicts preserve insertion order, so the first key is the oldest).
+    while len(_pending_rosters) > 8:
+        _pending_rosters.pop(next(iter(_pending_rosters)))
     buttons = [[
         ButtonSpec("Confirm Ship", f"fleet_confirm:{token}"),
         ButtonSpec("Cancel", f"fleet_cancel:{token}"),
@@ -504,7 +511,17 @@ async def _verify_one(
         (i for i in bot._store.list_instances(all_=True) if sid and i.session_id == sid),
         None,
     )
-    if inst is not None and inst.status == InstanceStatus.COMPLETED:
+    # The shipped instance is COMPLETED by definition, so "newest instance
+    # completed" alone would false-positive when the replay dispatched but
+    # no turn actually ran (drain gate, usage limit, spawn refusal). Only
+    # close when a NEW instance exists — and it didn't end on a question.
+    verified = (
+        inst is not None
+        and inst.id != e.get("instance_id")
+        and inst.status == InstanceStatus.COMPLETED
+        and not inst.needs_input
+    )
+    if verified:
         # Verify turn finished cleanly — close the thread. Silent: the
         # verify report embed in-thread + the origin summary carry the signal.
         try:
