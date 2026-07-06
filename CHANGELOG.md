@@ -9,6 +9,7 @@
 - **/spawn prompt instructions updated** (`config.SPAWN_CONTEXT`): documents multi-spawn format (directive+body pairs back-to-back), the 5-per-response cap, and the 12-children run cap.
 
 ### Fixed
+- **BOT_CMD directives emitted by chain/background turns are no longer silently swallowed** (`lifecycle.run_instance`). Only the interactive chat path scanned responses for `[BOT_CMD: /repo|/spawn]` directives; a workflow chain step (Build/Review), background task, or spawned child that emitted one saw it rendered as inert text — no dispatch, no refusal notice — even though every session's system prompt documents the directive surface. `run_instance` now runs the same post-turn scan as the chat path, so the handler's existing gates (autopilot running, depth cap, wave cap, budget) decide and post their explicit refusal notices instead of nothing happening. Found when a Build-step turn emitted 5 `/spawn` directives that vanished without a trace (t-5944).
 - **Usage-limit failover to a dead backup account no longer surfaces a raw 401** (`runner.py` usage-limit branch). When the primary hits its limit and the failover target fails auth before doing any work (e.g. a paused/cancelled subscription), the result now carries the original usage-limit reset time, so the thread shows the normal "⏳ auto-retrying at X" countdown instead of "API Error: 401" that needed a manual Retry tap (t-5925 incident, 2026-07-05). Guarded on empty output so a real mid-work failure on the backup is never masked.
 
 ### Changed

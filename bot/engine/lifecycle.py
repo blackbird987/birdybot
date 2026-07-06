@@ -329,6 +329,17 @@ async def run_instance(
         if result.api_fallback_used and result.cost_usd:
             ctx.store.add_fallback_cost(result.cost_usd)
 
+        # Tier 2: scan for [BOT_CMD: /repo|/spawn] directives — same surface
+        # the chat path exposes (commands.py on_query tail). Chain/background
+        # turns get the same system prompt documenting these directives, so
+        # without this scan a directive emitted mid-chain was swallowed
+        # silently instead of dispatched or explicitly refused by the
+        # handler's gates (autopilot, depth, wave cap, budget). Local import:
+        # commands imports lifecycle at module level.
+        if result.result_text and not result.is_error:
+            from bot.engine.commands import _execute_bot_commands
+            await _execute_bot_commands(ctx, result.result_text)
+
         # Check reboot request BEFORE end_task so it's queued when end_task
         # checks for pending reboots on idle.  Safe because check_reboot_request
         # just queues (no waiting) — the actual reboot fires from end_task.
