@@ -17,6 +17,7 @@
 
 ### Added
 - `scripts/test_account_failover.py`: new `limit-then-dead-backup` case — usage limit on primary + auth-dead backup must yield a result with the primary's reset time and put the backup on the long auth cooldown.
+- `scripts/test_chain_botcmd.py` — drives the real `lifecycle.run_instance` with fakes at the platform seams and locks the new chain-turn directive scan: 2 directives in a chain result → 2 children spawned in order + audit list updated; autopilot running → explicit refusal notice, no spawn; error result → not scanned; directive-free result → no notices.
 - `scripts/test_multi_spawn.py` — locks the pairing rules (N directives/N bodies → N spawns in order, shared body → one spawn + one rejection, 6 directives → 5 + over-cap notice, quoted lines ignored, legacy audit-key migration) and the handler's continue/stop contract (thread-level gates return stop, per-directive rejections return continue, success records the child in the audit list).
 ## v0.94.0 — Verify Board removed (2026-07-05)
 
