@@ -97,17 +97,20 @@ async def collect_ship_targets(bot: ClaudeBot) -> list[ShipTarget]:
     live branch + worktree (``_find_session_branch_instance``) AND that
     branch has commits ahead of its merge base — branches with zero new
     commits are unfinished/no-op work, not shippable.
-    Sessions with a run currently in flight are skipped.
+    Skipped: sessions with a run in flight, and sessions with persisted
+    autopilot-chain state — a paused/interrupted chain owns its thread's
+    lifecycle (it will merge on resume); shipping under it would race.
     """
     from bot.engine.workflows import _find_session_branch_instance
 
     store, runner, forums = bot._store, bot._runner, bot._forums
+    chained_sessions = set((store.get_all_autopilot_chains() or {}).keys())
     targets: list[ShipTarget] = []
     seen_branches: set[str] = set()
     for proj in list(forums.forum_projects.values()):
         for tid, info in list(proj.threads.items()):
             sid = info.session_id
-            if not sid or runner.is_session_active(sid):
+            if not sid or runner.is_session_active(sid) or sid in chained_sessions:
                 continue
             inst = _find_session_branch_instance(
                 store, sid,
@@ -341,7 +344,16 @@ async def _ship_one(bot: ClaudeBot, t: ShipTarget) -> bool:
     except Exception:
         log.exception("fleet: merge crashed for %s", t.thread_id)
         return False
-    if not ok:
+    if ok:
+        # Clear any stale failed-merge record from an earlier attempt —
+        # while one exists, every prompt dispatched into the thread gets
+        # the "[system note: auto-merge still unresolved]" prefix, which
+        # would wrap the verify prompt in a false warning.
+        pm = ctx.store.get_pending_merge_by_session(t.session_id)
+        if pm:
+            ctx.store.clear_pending_merge(pm[0])
+        ctx.store.clear_pending_merge(t.inst.id)
+    else:
         failure_kind = ctx.runner._last_merge_failure_kind.get(t.inst.id)
         msg = merge_failed_banner(failure_kind)
         try:
