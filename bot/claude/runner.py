@@ -603,11 +603,13 @@ class ClaudeRunner:
     ) -> RunResult:
         """Run CLI for an instance. Blocks until completion or timeout."""
         # Fresh failover state per top-level run. The set is mutated via .add()
-        # during in-run failover and never otherwise cleared; without this, a
-        # no-cooldown no-turns failover in a prior run would silently keep an
-        # account excluded on the next run of a reused Instance. Reset HERE
-        # only, never in _run_impl (recursion relies on the set persisting
-        # across failover hops within a single run).
+        # during in-run failover; without this reset, a no-cooldown no-turns
+        # failover in a prior run would silently keep an account excluded on
+        # the next run of a reused Instance. Reset HERE, never in _run_impl
+        # (recursion relies on the set persisting across failover hops within
+        # a single run — the one in-run exception is the model-limit
+        # downgrade, which clears it deliberately so the fallback-model
+        # retry may revisit accounts that are only model-limited).
         instance._accounts_tried = set()
         async with self._semaphore:
             return await self._run_impl(
