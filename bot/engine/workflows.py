@@ -784,10 +784,16 @@ async def spawn_from(
     new_inst.origin = cfg.origin
     new_inst.origin_platform = ctx.platform
     new_inst.effort = ctx.effective_effort
-    # Route mechanical explore steps to a lighter model if configured.
-    # Plan stays on Opus (core architectural thinking); review/apply are structured follow-ups.
+    # Per-origin model routing (post-Fable-PPU policy): MODEL_ROUTING beats
+    # the legacy EXPLORE_MODEL routing for the mechanical plan-review steps,
+    # which is kept as a fallback for existing deployments. Anything still
+    # unrouted here falls through to DEFAULT_SESSION_MODEL at command-build
+    # time (provider.build_command) — the same last-resort DIRECT sessions get.
     _EXPLORE_MODEL_ORIGINS = frozenset({InstanceOrigin.REVIEW_PLAN, InstanceOrigin.APPLY_REVISIONS})
-    if cfg.origin in _EXPLORE_MODEL_ORIGINS and config.EXPLORE_MODEL:
+    routed_model = config.MODEL_ROUTING.get(cfg.origin.value)
+    if routed_model:
+        new_inst.model = routed_model
+    elif cfg.origin in _EXPLORE_MODEL_ORIGINS and config.EXPLORE_MODEL:
         new_inst.model = config.EXPLORE_MODEL
     new_inst.parent_id = source.id
     new_inst.repo_name = source.repo_name

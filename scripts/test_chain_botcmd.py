@@ -30,11 +30,24 @@ _ROOT = os.path.dirname(_HERE)
 sys.path.insert(0, _ROOT)
 
 import asyncio
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 
+from bot import config
 from bot.claude.types import Instance, InstanceOrigin, RunResult
 from bot.engine import lifecycle
 from bot.platform.base import RequestContext, SpawnResult
+
+# run_instance's turn-end hooks (check_reboot_request) read config paths at
+# call time against the REAL data dir. A test run while a real reboot request
+# was pending consumed and DELETED it (read -> unlink -> crash on the fake
+# runner's missing request_reboot), silently cancelling a queued production
+# reboot. Redirect the reboot files to a throwaway dir so this test can never
+# touch live bot state.
+_TMP_DATA = Path(tempfile.mkdtemp(prefix="chain-botcmd-test-"))
+config.REBOOT_REQUEST_FILE = _TMP_DATA / "reboot_request.json"
+config.REBOOT_REQUEST_DEFERRED_FILE = _TMP_DATA / "reboot_request.deferred.json"
 
 _failures: list[str] = []
 

@@ -2,8 +2,8 @@
 
 ## Fable-5 Capitalization — Wave 2 (after wave-1 spawns land)
 
-- [ ] **Judgment-distillation skills for aiagent and The-Citadel** — same pattern as the bot-repo skill from wave 1: capture debugging playbooks, failure modes, and verification standards while a top-tier model can still write them.
-- [ ] **Post-Fable model policy decision** — decide what model new bot sessions default to once Fable goes pay-per-use: when to spend PPU credits vs. use Sonnet/Opus, per task type (plan vs build vs review).
+- [x] **Judgment-distillation skills for aiagent and The-Citadel** — landed on both repos' main branches 2026-07-07. Bot-repo equivalent: `.claude/skills/debugging-playbook/`.
+- [x] **Post-Fable model policy decision** — decided 2026-07-07: default new sessions to Opus, spend Fable PPU only on plan/review steps. Encoded as `DEFAULT_SESSION_MODEL` + `MODEL_ROUTING` in `bot/config.py` (values documented in `.env.example`); activation scheduled for July 8 when Fable goes metered.
 
 ## Features
 

@@ -138,6 +138,54 @@ API_FALLBACK_ENABLED: bool = bool(ANTHROPIC_API_KEY)
 # Set to e.g. "sonnet" to route plan/review_plan/apply_revisions to Sonnet.
 EXPLORE_MODEL: str | None = os.getenv("EXPLORE_MODEL")
 
+# --- Post-Fable-PPU model policy (Fable 5 leaves subscription July 8, 2026) ---
+# Default model for any session that has no explicit model choice. Unset =
+# current behavior: no --model flag, the account's CLI default runs. Applied
+# as the LAST fallback at command-build time (provider.build_command) so
+# DIRECT sessions get it too — and a model-limit failover downgrade
+# (model_override) always beats it, so it can never undo an explicit
+# downgrade. _is_primary_model in runner.py resolves None through this value
+# so the Fable-limit machinery doesn't misread an Opus-defaulted run as Fable.
+DEFAULT_SESSION_MODEL: str | None = os.getenv("DEFAULT_SESSION_MODEL") or None
+
+
+def _parse_model_routing(raw: str) -> dict[str, str]:
+    """Parse ``MODEL_ROUTING=plan:fable,review_code:fable`` into a dict.
+
+    Keys must be InstanceOrigin values (bot/claude/types.py); values are
+    ``--model`` names. Malformed entries and unknown origins are skipped
+    with a warning so a typo degrades to default routing, never a crash.
+    """
+    import logging as _logging
+
+    from bot.claude.types import InstanceOrigin as _Origin
+
+    _log = _logging.getLogger(__name__)
+    valid_origins = {o.value for o in _Origin}
+    routing: dict[str, str] = {}
+    for entry in (e.strip() for e in raw.split(",")):
+        if not entry:
+            continue
+        key, sep, value = entry.partition(":")
+        key, value = key.strip(), value.strip()
+        if not sep or not key or not value:
+            _log.warning("MODEL_ROUTING: skipping malformed entry %r", entry)
+            continue
+        if key not in valid_origins:
+            _log.warning(
+                "MODEL_ROUTING: skipping unknown origin %r (valid: %s)",
+                key, ", ".join(sorted(valid_origins)),
+            )
+            continue
+        routing[key] = value
+    return routing
+
+
+# Per-workflow-step model routing. Applied at spawn time (workflows.spawn_from)
+# — beats EXPLORE_MODEL and DEFAULT_SESSION_MODEL, loses to an explicit
+# instance.model and to the model-limit failover downgrade.
+MODEL_ROUTING: dict[str, str] = _parse_model_routing(os.getenv("MODEL_ROUTING", ""))
+
 # Model-specific limit failover: some models (Fable 5) have their own quota
 # on top of the account-wide 5h/weekly caps.  PRIMARY_MODEL is a substring
 # key naming the accounts' default model (matched case-insensitively against

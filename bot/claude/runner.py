@@ -56,14 +56,18 @@ _NOWND: dict = config.NOWND
 def _is_primary_model(model: str | None) -> bool:
     """True when *model* resolves to the accounts' default primary model.
 
-    None means "no --model flag": the CLI runs the account's configured
-    default, which is the primary model on this deployment (PRIMARY_MODEL).
-    Explicit non-primary overrides (e.g. EXPLORE_MODEL="sonnet") are exempt
-    from model-limit downgrades — their model has its own quota.
+    None resolves through DEFAULT_SESSION_MODEL first (the deployment-wide
+    default that provider.build_command applies as the last --model fallback);
+    only when that is also unset does None mean "no --model flag → the
+    account's CLI default", which is the primary model on this deployment
+    (PRIMARY_MODEL). Explicit non-primary overrides (e.g. EXPLORE_MODEL=
+    "sonnet", DEFAULT_SESSION_MODEL="opus") are exempt from model-limit
+    downgrades — their model has its own quota.
     """
-    if not model:
+    effective = model or config.DEFAULT_SESSION_MODEL
+    if not effective:
         return True
-    return config.PRIMARY_MODEL.lower() in model.lower()
+    return config.PRIMARY_MODEL.lower() in effective.lower()
 
 # Tunable knobs for the cross-account session-recovery path (step 3 of the
 # dementia fix).  60s cache window dedupes rebuild_project_index calls when a

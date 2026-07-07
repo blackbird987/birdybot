@@ -13,8 +13,12 @@ dist/
 build/
 *.egg
 
-# Claude Code
-.claude/
+# Claude Code — ignore local state (settings.local.json, deploy.json, ...)
+# but keep skills trackable. Must be `.claude/*` not `.claude/`: git cannot
+# re-include (!) children of an excluded DIRECTORY, only of a glob. The old
+# `.claude/` form silently dropped skills from worktree merges.
+.claude/*
+!.claude/skills/
 
 # Git worktrees (build isolation)
 .worktrees/
