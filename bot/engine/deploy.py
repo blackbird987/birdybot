@@ -362,6 +362,20 @@ def rescan_deploy_config_after_merge(store, repo_name: str, repo_path: str) -> N
         ))
 
 
+async def apply_post_merge_deploy(messenger, store, inst) -> None:
+    """Run the standard post-merge deploy bookkeeping in lockstep.
+
+    Every merge call site must (1) refresh the repo's deploy state, (2) rescan
+    its ``.claude/deploy.json`` in case the merge added/changed it, and (3)
+    notify the repo's control room so the Deploy button reflects the new state.
+    Keeping the three steps together here prevents the sequence from drifting
+    out of sync across the four callers that used to inline it.
+    """
+    update_after_merge(store, inst)
+    rescan_deploy_config_after_merge(store, inst.repo_name, inst.repo_path)
+    await messenger.on_deploy_state_changed(inst.repo_name)
+
+
 def scan_deploy_config(repo_path: str) -> dict | None:
     """Read .claude/deploy.json from a repo if it exists.
 

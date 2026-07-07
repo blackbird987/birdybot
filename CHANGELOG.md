@@ -11,6 +11,7 @@
   - Autopilot build results gain a `Discard` escape hatch so the user can bail out after inspecting the Diff mid-chain.
   - Sleeping-thread names drop the `|` separator (`💤 topic`), buying back topic width; old names self-heal on parse.
 - Triaged the TODO "Deferred Revisions" UX/UI backlog: removed items shipped this pass and stale/moot/out-of-scope ones (already-implemented inline flag summary, contradictory archive-topic pair, dev-only setup-script prints).
+- Triaged the TODO "Deferred Revisions" [DRY/Cleanup] and [Modularity] backlog. Two real fixes: extracted `apply_post_merge_deploy(messenger, store, inst)` in `bot/engine/deploy.py` to replace four copy-pasted post-merge deploy blocks (update state → rescan `.claude/deploy.json` → notify control room) across `commands.py` (×3) and `workflows.py`; and switched `spawn_colors.py` to the public `forum_manager.forum_projects` property instead of reaching into the private `_forum_projects`. The remaining 12 items were removed as stale (already deduped upstream — chain-exit mentions via `_exit_chain`, `evaluate_instance(inst)` already single-arg, prior-deferred injection already keyed, `on_usage`/`format_usage_field` gone, ctx setup already via `bot._ctx`, merge-failed rendering already centralized) or invalidated by the deletion test (shallow send/sleep/delete helpers, `status_callback` null-guard, `_intentional_kills` still load-bearing, `PENDING_IMAGES_DIR` global is the DRY convention).
 
 ## v0.98.0 — Post-Fable model policy config; skills tracked in git (2026-07-07)
 

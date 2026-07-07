@@ -1602,10 +1602,8 @@ async def on_merge(ctx: RequestContext, text: str) -> None:
             branch_name = history_mod.get_branch_for_instance(inst.id)
         if branch_name:
             workflows.clear_stale_branches(ctx.store, branch_name)
-        from bot.engine.deploy import update_after_merge, rescan_deploy_config_after_merge
-        update_after_merge(ctx.store, inst)
-        rescan_deploy_config_after_merge(ctx.store, inst.repo_name, inst.repo_path)
-        await ctx.messenger.on_deploy_state_changed(inst.repo_name)
+        from bot.engine.deploy import apply_post_merge_deploy
+        await apply_post_merge_deploy(ctx.messenger, ctx.store, inst)
     else:
         failure_kind = ctx.runner._last_merge_failure_kind.get(inst.id)
         ctx.store.set_pending_merge_failure_kind(inst.id, failure_kind)
@@ -2849,10 +2847,8 @@ async def _on_resolve_merge(
         ctx.store.clear_pending_merge(inst.id)
         if inst.branch:
             workflows.clear_stale_branches(ctx.store, inst.branch)
-        from bot.engine.deploy import update_after_merge, rescan_deploy_config_after_merge
-        update_after_merge(ctx.store, inst)
-        rescan_deploy_config_after_merge(ctx.store, inst.repo_name, inst.repo_path)
-        await ctx.messenger.on_deploy_state_changed(inst.repo_name)
+        from bot.engine.deploy import apply_post_merge_deploy
+        await apply_post_merge_deploy(ctx.messenger, ctx.store, inst)
         if ctx.on_merged:
             await ctx.on_merged()
     else:
@@ -3148,10 +3144,8 @@ async def handle_callback(
         if branch_name and not merge_msg_is_failure(msg):
             ctx.store.clear_pending_merge(inst.id)
             workflows.clear_stale_branches(ctx.store, branch_name)
-            from bot.engine.deploy import update_after_merge, rescan_deploy_config_after_merge
-            update_after_merge(ctx.store, inst)
-            rescan_deploy_config_after_merge(ctx.store, inst.repo_name, inst.repo_path)
-            await ctx.messenger.on_deploy_state_changed(inst.repo_name)
+            from bot.engine.deploy import apply_post_merge_deploy
+            await apply_post_merge_deploy(ctx.messenger, ctx.store, inst)
             # Apply "merged" tag before close (tag must land before archive)
             if ctx.on_merged:
                 await ctx.on_merged()

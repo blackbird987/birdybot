@@ -84,7 +84,7 @@ def _maybe_clear_stale_stamps(
     if fams:
         return  # try again later when families have drained
     cleared = 0
-    for fp in forum_manager._forum_projects.values():
+    for fp in forum_manager.forum_projects.values():
         for ti in fp.threads.values():
             if ti.color_slot is not None:
                 ti.color_slot = None

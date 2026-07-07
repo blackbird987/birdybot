@@ -1784,12 +1784,8 @@ async def _finalize_merge(
     if merge_msg_is_failure(merge_msg):
         return False
     clear_stale_branches(ctx.store, branch_name)
-    from bot.engine.deploy import update_after_merge, rescan_deploy_config_after_merge
-    update_after_merge(ctx.store, merge_target)
-    rescan_deploy_config_after_merge(
-        ctx.store, merge_target.repo_name, merge_target.repo_path,
-    )
-    await ctx.messenger.on_deploy_state_changed(merge_target.repo_name)
+    from bot.engine.deploy import apply_post_merge_deploy
+    await apply_post_merge_deploy(ctx.messenger, ctx.store, merge_target)
     # Apply "merged" tag before close (tag must land before archive)
     if ctx.on_merged:
         await ctx.on_merged()
