@@ -581,6 +581,28 @@ class ClaudeBot(discord.Client):
 
         ctx.bump_wake_count = _bump_wake_count
         ctx.reset_wake_count = _reset_wake_count
+
+        # Unattended-turn nudge-cap accessors — same on-demand lookup pattern.
+        def _bump_nudge_count() -> int:
+            lookup = _bot._forums.thread_to_project(channel_id)
+            if lookup is None:
+                return 0
+            info = lookup[1]
+            info.nudge_count += 1
+            _bot._store.save()
+            return info.nudge_count
+
+        def _reset_nudge_count() -> None:
+            lookup = _bot._forums.thread_to_project(channel_id)
+            if lookup is None:
+                return
+            info = lookup[1]
+            if info.nudge_count != 0:
+                info.nudge_count = 0
+                _bot._store.save()
+
+        ctx.bump_nudge_count = _bump_nudge_count
+        ctx.reset_nudge_count = _reset_nudge_count
         return ctx
 
     # --- Delegation to extracted modules ---

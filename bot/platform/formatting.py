@@ -21,9 +21,18 @@ from bot.platform.base import ButtonSpec
 _VERIFY_BLOCK_RE = re.compile(r"```verify-board\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
 _EXCESS_BLANK_RE = re.compile(r"\n{3,}")
 
+# `[TURN_COMPLETE]` — the unattended-turn completion marker (see config and
+# lifecycle.has_turn_complete_marker). It's an engine control signal, never
+# meant for the user, so strip it from displayed text: first the lone line it's
+# instructed to sit on, then any residual inline occurrence.
+_TURN_COMPLETE_LINE_RE = re.compile(
+    r"(?m)^[ \t]*" + re.escape(config.TURN_COMPLETE_SENTINEL) + r"[ \t]*$\n?"
+)
+_TURN_COMPLETE_INLINE_RE = re.compile(re.escape(config.TURN_COMPLETE_SENTINEL))
+
 
 def strip_verify_blocks(text: str) -> str:
-    """Remove leftover ```verify-board``` fences from displayed text.
+    """Remove leftover ```verify-board``` fences and the [TURN_COMPLETE] marker.
 
     Collapses the ≥3 consecutive newlines that surrounding blank lines
     leave behind so the stripped result doesn't show a visible gap.
@@ -31,6 +40,8 @@ def strip_verify_blocks(text: str) -> str:
     if not text:
         return text
     out = _VERIFY_BLOCK_RE.sub("", text)
+    out = _TURN_COMPLETE_LINE_RE.sub("", out)
+    out = _TURN_COMPLETE_INLINE_RE.sub("", out)
     out = _EXCESS_BLANK_RE.sub("\n\n", out)
     return out.rstrip()
 

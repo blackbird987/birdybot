@@ -267,6 +267,12 @@ class RequestContext:
     # new count; reset zeroes it. Used to cap an endless self-wake poll loop.
     bump_wake_count: Callable[[], int] | None = None
     reset_wake_count: Callable[[], None] | None = None
+    # Unattended-turn nudge-cap accessors (forum threads only; None on Telegram).
+    # Same per-thread ThreadInfo counter pattern as the wake cap. bump increments
+    # and returns the new count; reset zeroes it. Used by check_wake_request to
+    # cap the auto-nudge loop that re-invokes a dead-ended unattended turn.
+    bump_nudge_count: Callable[[], int] | None = None
+    reset_nudge_count: Callable[[], None] | None = None
 
     @property
     def effective_mode(self) -> str:

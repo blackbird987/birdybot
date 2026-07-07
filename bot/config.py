@@ -309,6 +309,39 @@ WAKE_CLAIM_RE = re.compile(
     r"(a\s+|the\s+|one\s+)?(self.?)?wake",
     re.IGNORECASE,
 )
+
+# --- Unattended-turn end-of-turn protocol -----------------------------------
+# A system-initiated turn (cooldown retry, self-wake fire) runs with NOBODY
+# watching. If it ends dangling — a "next I'll..." plan with no action — the
+# thread silently dies (the q-12314 cooldown-retry dead-end that motivated this).
+# So every unattended turn must end with an EXPLICIT marker: a [BOT_CMD: /wake]
+# directive (work still pending) OR TURN_COMPLETE_SENTINEL (done / needs the
+# user). Neither ⇒ lifecycle.check_wake_request auto-nudges the session once
+# (capped at MAX_CONSEC_NUDGES) to force one of the two. This is a deterministic
+# parse of an explicit marker — NOT the phrase-sniffing heuristic that was
+# removed for firing phantom wakes on prose that merely discussed the feature.
+TURN_COMPLETE_SENTINEL = "[TURN_COMPLETE]"
+MAX_CONSEC_NUDGES: int = 2
+
+UNATTENDED_TURN_PROTOCOL = """\
+
+--- Unattended Turn — You MUST Signal How It Ends ---
+No user is watching this turn (the system fired it, nobody typed it). When it \
+ends your process EXITS and NOTHING resumes this thread unless YOU arrange it \
+now. So you must end this response with exactly ONE of:
+
+1. Work still pending (a job to poll, more steps to run after a wait) — schedule \
+a self-wake with a [BOT_CMD: /wake] directive (see the self-wake guidance). That \
+is what re-invokes you here to continue.
+2. Work finished, or you genuinely need the user before going further — put this \
+marker on its own line at the TOP LEVEL of your message (NOT inside a ``` code \
+block or quoted with >):
+[TURN_COMPLETE]
+
+Do NOT end with a "next I'll..." plan and no action — that strands the thread \
+with nothing to resume it. Either do the work now, schedule a wake, or emit \
+[TURN_COMPLETE]. If you catch yourself about to describe what you'd do next, do \
+it THIS turn instead."""
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
