@@ -414,12 +414,15 @@ def action_button_specs(
 
         if instance.branch:
             if has_autopilot_chain:
-                # Autopilot handles merge — just show review/action buttons
+                # Autopilot handles merge — show review/action buttons plus a
+                # Discard escape hatch (user may inspect the Diff and decide to
+                # bail out of the branch even mid-chain).
                 rows.append([
                     ButtonSpec("Diff", f"diff:{iid}"),
                     ButtonSpec("Review Code", f"review_code:{iid}"),
                     ButtonSpec("Commit", f"commit:{iid}"),
                     ButtonSpec("Done", f"done:{iid}"),
+                    ButtonSpec("Discard", f"discard:{iid}"),
                 ])
             else:
                 # Manual build — keep full merge workflow
@@ -544,8 +547,8 @@ def action_button_specs(
             and instance.session_id
             and len(rows) < branch_cap):
         rows.append([
-            ButtonSpec("\U0001f33f Branch", f"branch:{iid}"),
-            ButtonSpec("\U0001f4ce Share", f"share:{iid}"),
+            ButtonSpec("Branch", f"branch:{iid}"),
+            ButtonSpec("Share", f"share:{iid}"),
         ])
         share_added = True
 
@@ -555,7 +558,7 @@ def action_button_specs(
             ButtonSpec("Full Log", f"log:{iid}"),
         ]
         if instance.session_id and not share_added:
-            expand_row.append(ButtonSpec("\U0001f4ce Share", f"share:{iid}"))
+            expand_row.append(ButtonSpec("Share", f"share:{iid}"))
         rows.append(expand_row)
 
     return rows
@@ -573,7 +576,7 @@ def expanded_button_specs(instance: Instance) -> list[list[ButtonSpec]]:
         b.callback_data.startswith("share:") for row in rows for b in row
     )
     if instance.session_id and not already_has_share:
-        collapse_row.append(ButtonSpec("\U0001f4ce Share", f"share:{instance.id}"))
+        collapse_row.append(ButtonSpec("Share", f"share:{instance.id}"))
     rows.append(collapse_row)
     return rows
 
@@ -599,8 +602,8 @@ def queued_button_specs(
     """
     row: list[ButtonSpec] = []
     if supports_steer:
-        row.append(ButtonSpec("⚡ Steer now", f"steer:{pending_id}"))
-    row.append(ButtonSpec("✖ Cancel", f"cancel_pending:{pending_id}"))
+        row.append(ButtonSpec("Steer Now", f"steer:{pending_id}"))
+    row.append(ButtonSpec("Cancel", f"cancel_pending:{pending_id}"))
     return [row]
 
 
@@ -612,7 +615,7 @@ def format_result_md(instance: Instance) -> str:
 
     if instance.status == InstanceStatus.FAILED:
         error = redact_secrets(instance.error or 'Unknown error')
-        parts.append(f"FAILED: {error}")
+        parts.append(f"Failed: {error}")
     elif instance.summary:
         parts.append(redact_secrets(instance.summary))
 

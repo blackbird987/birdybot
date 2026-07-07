@@ -183,8 +183,13 @@ def build_thread_name(topic: str) -> str:
 
 
 def build_sleeping_thread_name(topic: str) -> str:
-    """Build thread name with sleep indicator: 💤 | {topic}, max 100 chars."""
-    return f"{_SLEEP_EMOJI} | {topic}"[:100]
+    """Build thread name with sleep indicator: 💤 {topic}, max 100 chars.
+
+    No pipe separator — the sleep glyph reads as a state marker on its own,
+    and dropping the ``|`` buys back two chars of topic at phone width.
+    ``parse_thread_name`` still strips a legacy ``|`` so old names self-heal.
+    """
+    return f"{_SLEEP_EMOJI} {topic}"[:100]
 
 
 def build_title_name(text: str) -> str:

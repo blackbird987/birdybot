@@ -526,7 +526,7 @@ async def _handle_pending_action(
         if pending.message_id:
             await bot.messenger.edit_text(
                 pending.channel_id, pending.message_id,
-                "⚡ Steering current run...", None,
+                "Steering current run…", None,
             )
     except Exception:
         pass
@@ -1456,7 +1456,7 @@ async def _handle_reboot_repo(
 
         # Single status message for the deploy cycle (deleted after completion)
         status = await _start_deploy_status(
-            interaction, repo_name, "\U0001f680 Pushing to origin...",
+            interaction, repo_name, "Pushing to origin…",
             store=bot._store,
         )
 

@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Changed
+- **Discord UI/UX polish pass** — mobile-first sharpening across the surfaces the user reads on their phone, no redesign.
+  - Decorative emojis stripped from interactive controls per the standing no-decorative-emoji rule: result-action buttons (`Branch`, `Share`), queued-run buttons (`Steer Now`, `Cancel`), Ark dashboard buttons (`New Repo`, `Claude Login`), the steer-in-progress notice, the deploy "Pushing to origin…" status, and the fleet-ship banner. Status marks (✅/❌/⚠️) and forum tag/colour indicators are unchanged.
+  - Dashboard prompt previews now trim on a word boundary with a trailing `…` and collapse newlines (new `_preview` helper), so a truncated or multi-line prompt reads cleanly instead of cutting mid-word; the decorative thought-bubble on Idle rows/header is gone.
+  - Voice-transcription echo is now a subtle grey "Voice message" embed instead of a plain italic line with a mic emoji.
+  - Failed-result copy softened from shouting `FAILED:` to `Failed:` (the embed is already red).
+  - Autopilot build results gain a `Discard` escape hatch so the user can bail out after inspecting the Diff mid-chain.
+  - Sleeping-thread names drop the `|` separator (`💤 topic`), buying back topic width; old names self-heal on parse.
+- Triaged the TODO "Deferred Revisions" UX/UI backlog: removed items shipped this pass and stale/moot/out-of-scope ones (already-implemented inline flag summary, contradictory archive-topic pair, dev-only setup-script prints).
+
 ## v0.98.0 — Post-Fable model policy config; skills tracked in git (2026-07-07)
 
 ### Added

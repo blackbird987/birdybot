@@ -26,6 +26,18 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+def _preview(text: str | None, limit: int = 30) -> str:
+    """One-line prompt preview, trimmed to *limit* with a … when cut.
+
+    Collapses newlines so a multi-line prompt can't break the dashboard
+    field layout, and signals truncation so the user knows there's more.
+    """
+    s = " ".join((text or "").split())
+    if not s:
+        return "session"
+    return s if len(s) <= limit else s[: limit - 1].rstrip() + "…"
+
+
 # ---------------------------------------------------------------------------
 # Persistent Ark button view
 # ---------------------------------------------------------------------------
@@ -44,7 +56,6 @@ class ArkView(discord.ui.View):
             label="New Repo",
             style=discord.ButtonStyle.green,
             custom_id="ark:new_repo",
-            emoji="\u2795",
             row=0,
         ))
         if running_count > 0:
@@ -64,7 +75,6 @@ class ArkView(discord.ui.View):
             label="Claude Login",
             style=discord.ButtonStyle.primary,
             custom_id="ark:claude_login",
-            emoji="\U0001f511",
             row=1,
         ))
         # Provider switch button — label shows current provider
@@ -119,7 +129,7 @@ def build_dashboard_embed(
             if inst.session_id:
                 attention_session_ids.add(inst.session_id)
             icon = "\u2753" if inst.needs_input else "\u274c"
-            line = f"{icon} `{inst.display_id()}` \u2014 {inst.prompt[:30]}"
+            line = f"{icon} `{inst.display_id()}` \u2014 {_preview(inst.prompt)}"
             if inst.repo_name:
                 line = f"**{inst.repo_name}** {line}"
             thread_id = session_to_thread.get(inst.session_id or "")
@@ -148,10 +158,10 @@ def build_dashboard_embed(
     if idle_with_threads and items_remaining > 0:
         idle_lines = []
         for inst, tid in idle_with_threads[:min(8, items_remaining)]:
-            label = inst.prompt[:30] if inst.prompt else "session"
+            label = _preview(inst.prompt)
             repo_prefix = f"**{inst.repo_name}** " if inst.repo_name else ""
             idle_lines.append(
-                f"\U0001f4ad {repo_prefix}`{inst.display_id()}` "
+                f"{repo_prefix}`{inst.display_id()}` "
                 f"\u2014 {label} \u2022 <#{tid}>"
             )
         items_remaining -= len(idle_lines)
@@ -159,7 +169,7 @@ def build_dashboard_embed(
         if len(field_val) > 1024:
             field_val = field_val[:1021] + "..."
         embed.add_field(
-            name=f"\U0001f4ad Idle ({len(idle_with_threads)})",
+            name=f"Idle ({len(idle_with_threads)})",
             value=field_val, inline=False,
         )
 
@@ -176,7 +186,7 @@ def build_dashboard_embed(
             link = f" \u2022 <#{tid}>" if tid else ""
             fail_lines.append(
                 f"\u274c {repo_prefix}`{inst.display_id()}` "
-                f"\u2014 {inst.prompt[:30]}{link}"
+                f"\u2014 {_preview(inst.prompt)}{link}"
             )
         items_remaining -= len(fail_lines)
         field_val = "\n".join(fail_lines)

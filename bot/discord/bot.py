@@ -1574,7 +1574,12 @@ class ClaudeBot(discord.Client):
                         # Echo is non-critical — don't lose the transcription if send fails
                         try:
                             echo = cleaned[:1900] + "…" if len(cleaned) > 1900 else cleaned
-                            await message.channel.send(f'🎙️ *"{echo}"*')
+                            echo_embed = discord.Embed(
+                                description=echo,
+                                color=discord.Color.greyple(),
+                            )
+                            echo_embed.set_author(name="Voice message")
+                            await message.channel.send(embed=echo_embed)
                         except Exception:
                             log.warning("Failed to send voice echo", exc_info=True)
                     else:

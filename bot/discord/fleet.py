@@ -299,7 +299,7 @@ async def run_fleet_ship(
 
         await _say(
             bot, origin,
-            f"🚢 Fleet ship: merging {len(targets)} session(s) "
+            f"Fleet ship: merging {len(targets)} session(s) "
             f"across {len(by_repo)} repo(s)…",
         )
 
