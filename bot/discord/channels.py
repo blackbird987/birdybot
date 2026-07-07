@@ -13,9 +13,9 @@ from bot.platform.formatting import EFFORT_DISPLAY, MODE_COLOR, MODE_DISPLAY, ef
 
 log = logging.getLogger(__name__)
 
-CONTROL_ROOM_NAME = "⚙️ Control Room"
-ARCHIVE_NAME = "🗄 Archive"
-MONITOR_NAME = "📊 Monitor"
+CONTROL_ROOM_NAME = "Control Room"
+ARCHIVE_NAME = "Archive"
+MONITOR_NAME = "Monitor"
 
 # Discord only accepts 60 / 1440 / 4320 / 10080 minutes. 10080 (7 days) is the
 # max — session threads inherit this from their forum, so it's how long an idle

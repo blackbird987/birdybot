@@ -518,7 +518,7 @@ def render_transcript_html(
 {prompt_html}
 </header>
 <div class="redaction-notice">
-⚠ Secrets auto-redacted on known token patterns (API keys, JWTs, bearer tokens, connection strings).
+Secrets auto-redacted on known token patterns (API keys, JWTs, bearer tokens, connection strings).
 Shell commands and custom env vars are best-effort &mdash; review before sharing externally.
 </div>
 <main>

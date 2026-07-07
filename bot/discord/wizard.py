@@ -286,7 +286,7 @@ def _build_auth_panel_embed(statuses: list, can_console: bool) -> discord.Embed:
     uuids = [s.account_uuid for s in statuses if s.account_uuid]
     if len(uuids) != len(set(uuids)):
         embed.add_field(
-            name="⚠️ Duplicate accounts",
+            name="Duplicate accounts",
             value=(
                 "Two config dirs map to the same Anthropic account "
                 "— failover won’t help."

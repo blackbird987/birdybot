@@ -16,7 +16,7 @@ _START_HOUR = 5   # 5am PT
 _END_HOUR = 11    # 11am PT
 
 _START_MSG = (
-    "⚠️ Anthropic usage limits are now active (5am–11am PT). "
+    "Anthropic usage limits are now active (5am–11am PT). "
     "Avoid starting new Claude sessions — heavy throttling is in effect until 11am PT."
 )
 _END_MSG = "✅ Anthropic usage limits lifted — it's past 11am PT. You can work freely now."

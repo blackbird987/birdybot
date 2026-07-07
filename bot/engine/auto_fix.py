@@ -191,7 +191,7 @@ async def spawn_fix_session(
         try:
             await ctx.messenger.send_text(
                 channel_id,
-                "⚠️ Auto-fix chain did not complete — manual intervention needed.",
+                "Auto-fix chain did not complete — manual intervention needed.",
             )
         except Exception:
             pass
@@ -206,7 +206,7 @@ async def spawn_fix_session(
             log.exception("Auto-fix on_success callback failed for %s/%s", repo_name, trigger)
             try:
                 await ctx.messenger.send_text(
-                    channel_id, "⚠️ Fix merged but post-fix action failed.",
+                    channel_id, "Fix merged but post-fix action failed.",
                 )
             except Exception:
                 pass

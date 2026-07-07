@@ -873,7 +873,7 @@ class ClaudeBot(discord.Client):
 
         unlock_ts = int(end_utc.timestamp())
         content = (
-            f"⚠️ Usage limits active until <t:{unlock_ts}:t>. "
+            f"Usage limits active until <t:{unlock_ts}:t>. "
             f"**{label}** — Run now (will be throttled) or queue?"
         )
         try:
@@ -1432,18 +1432,18 @@ class ClaudeBot(discord.Client):
             thread_id, _ = lookup
             if ev.status == "recovered":
                 text = (
-                    f"♻️ Recovered worktree for `{ev.branch}` "
+                    f"Recovered worktree for `{ev.branch}` "
                     f"after metadata loss (content matched branch tip)."
                 )
             elif ev.status == "manual_recovery_needed":
                 text = (
-                    f"⚠️ Worktree for `{ev.branch}` lost git metadata "
+                    f"Worktree for `{ev.branch}` lost git metadata "
                     f"AND has uncommitted drift ({ev.detail}). "
                     f"Inspect manually before the next Build."
                 )
             else:  # "skipped"
                 text = (
-                    f"⚠️ Skipped worktree recovery for `{ev.branch}` "
+                    f"Skipped worktree recovery for `{ev.branch}` "
                     f"({ev.detail})."
                 )
             try:
@@ -1474,7 +1474,7 @@ class ClaudeBot(discord.Client):
                 continue
             thread_id, _ = lookup
             text = (
-                f"⚠️ Release crashed mid-tag: commit `{ev.commit_sha[:8]}` "
+                f"Release crashed mid-tag: commit `{ev.commit_sha[:8]}` "
                 f"bumped to `{ev.bumped_version}` on `{ev.branch}` but no "
                 f"matching tag was created. Marked as failed — re-run "
                 f"/release if you want to retry, or revert the bump."

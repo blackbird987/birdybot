@@ -45,7 +45,7 @@ def _with_fallback_footer(text: str, result: RunResult) -> str:
     if not result.api_fallback_used:
         return text
     cost_note = f" · ~${result.cost_usd:.2f}" if result.cost_usd else ""
-    return text + f"\n\n`⚡ Responded via API billing ({config.API_FALLBACK_MODEL}){cost_note}`"
+    return text + f"\n\n`Responded via API billing ({config.API_FALLBACK_MODEL}){cost_note}`"
 
 
 def _format_reset_time(reset_utc: datetime) -> str:
@@ -267,7 +267,7 @@ async def run_instance(
                 elapsed_str = f"{elapsed:.0f}s"
             escaped = ctx.messenger.escape(inst.display_id())
             if result.killed_intentionally:
-                icon, status = "⚡", "steered"
+                icon, status = "", "steered"
             elif result.needs_input:
                 icon, status = "❓", "asking a question"
             elif result.is_error:
@@ -275,9 +275,10 @@ async def run_instance(
             else:
                 icon, status = "✅", "done"
             origin_label = _origin_label(inst.origin)
+            prefix = f"{icon} " if icon else ""
             try:
                 await ctx.messenger.edit_thinking(
-                    handle, f"{icon} {escaped} {origin_label}{status} ({elapsed_str})",
+                    handle, f"{prefix}{escaped} {origin_label}{status} ({elapsed_str})",
                 )
             except Exception:
                 pass
@@ -381,7 +382,7 @@ async def run_instance(
         if not delivered and handle:
             try:
                 await ctx.messenger.edit_thinking(
-                    handle, "⚠️ Interrupted by bot restart",
+                    handle, "Interrupted by bot restart",
                 )
             except (asyncio.CancelledError, Exception):
                 pass
@@ -655,7 +656,7 @@ def make_progress_callbacks(
             await ctx.messenger.send_text(
                 ctx.channel_id,
                 (
-                    f"⚠️ `{inst.display_id()}` context is ≥95% — consider wrapping up "
+                    f"`{inst.display_id()}` context is ≥95% — consider wrapping up "
                     "or starting a fresh session before the model degrades."
                 ),
             )
@@ -710,7 +711,7 @@ def make_progress_callbacks(
         footer, severity = _compute_footer()
         await _dispatch_severity(severity)
         head = (
-            f"⚠️ {escaped} quiet for {config.STALL_TIMEOUT_SECS}s "
+            f"{escaped} quiet for {config.STALL_TIMEOUT_SECS}s "
             f"— /kill if stuck ({_elapsed()})"
         )
         lines = [head]
@@ -785,7 +786,7 @@ def make_progress_callbacks(
             await ctx.messenger.send_text(
                 ctx.channel_id,
                 (
-                    f"⚠️ **Session context lost — recovery respawn**\n"
+                    f"**Session context lost — recovery respawn**\n"
                     f"`{inst.display_id()}` lost its conversation history.\n"
                     f"• Session id: `…{sid_tail}`\n"
                     f"• Worktree:   `{path_safe}`\n"
@@ -1092,7 +1093,7 @@ async def check_reboot_request(ctx: RequestContext) -> None:
         try:
             await ctx.messenger.send_text(
                 notice_channel,
-                f"⚠️ Reboot deferred — {blocked_str} active on another thread. "
+                f"Reboot deferred — {blocked_str} active on another thread. "
                 "It will retry automatically when they finish (within 1 h), "
                 "or you can `/kill` them to apply now.",
                 silent=True,
@@ -1382,7 +1383,7 @@ async def check_wake_request(
         repo_path=instance.repo_path or "",
     )
     reason = (data.get("reason") or "").strip()
-    msg = f"⏰ I'll check back in ~{_human_delay(secs)}"
+    msg = f"I'll check back in ~{_human_delay(secs)}"
     if reason:
         msg += f" — {reason}"
     await _notice(msg + ".")

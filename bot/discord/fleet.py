@@ -311,7 +311,7 @@ async def run_fleet_ship(
                 (merged if ok else failed).setdefault(repo, []).append(t)
 
         if failed:
-            fail_lines = ["⚠ Merge failures — deploy skipped for these repos:"]
+            fail_lines = ["Merge failures — deploy skipped for these repos:"]
             for repo, ts in failed.items():
                 for t in ts:
                     fail_lines.append(f"- {repo}: <#{t.thread_id}> (fix in-thread, then /fleet again)")
@@ -396,7 +396,7 @@ async def _deploy_and_verify(
         # shut the process down before a follow-up message would send.
         await _say(
             bot, origin,
-            f"♻️ **{repo_name}**: self-managed — reboot requested; verify "
+            f"**{repo_name}**: self-managed — reboot requested; verify "
             f"prompts for {len(targets)} thread(s) fire after it's back online.",
         )
         from bot.claude.runner import RebootResult
@@ -553,7 +553,7 @@ async def _verify_one(
     if not ok:
         await _say(
             bot, origin,
-            f"⚠ Fleet verify: couldn't resume <#{thread_id}> ({title}) — check it manually.",
+            f"Fleet verify: couldn't resume <#{thread_id}> ({title}) — check it manually.",
         )
         return
 
@@ -577,5 +577,5 @@ async def _verify_one(
     else:
         await _say(
             bot, origin,
-            f"⚠ Fleet verify: <#{thread_id}> needs attention — thread left open.",
+            f"Fleet verify: <#{thread_id}> needs attention — thread left open.",
         )

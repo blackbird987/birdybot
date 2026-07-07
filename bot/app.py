@@ -173,7 +173,7 @@ async def auto_update_loop(
                     if not failure_notified:
                         log.warning("Auto-update: git fetch failed — %s", err)
                         await notifier.broadcast(
-                            f"⚠️ Auto-update: git fetch failed — {err}",
+                            f"Auto-update: git fetch failed — {err}",
                             ttl=10,
                         )
                         failure_notified = True
@@ -196,7 +196,7 @@ async def auto_update_loop(
                     if not failure_notified:
                         log.warning("Auto-update: git rev-parse failed (branch=%s)", branch)
                         await notifier.broadcast(
-                            f"⚠️ Auto-update: can't resolve branch `{branch}` — check AUTO_UPDATE_BRANCH",
+                            f"Auto-update: can't resolve branch `{branch}` — check AUTO_UPDATE_BRANCH",
                             ttl=10,
                         )
                         failure_notified = True
@@ -229,7 +229,7 @@ async def auto_update_loop(
                             "remote commits — local may be ahead/diverged", branch,
                         )
                         await notifier.broadcast(
-                            f"⚠️ Auto-update: local HEAD differs from `origin/{branch}` "
+                            f"Auto-update: local HEAD differs from `origin/{branch}` "
                             "but remote has no new commits. Manual sync may be needed.",
                             ttl=10,
                         )
@@ -251,7 +251,7 @@ async def auto_update_loop(
                     if not failure_notified:
                         log.warning("Auto-update: git pull failed — %s", err)
                         await notifier.broadcast(
-                            f"⚠️ Auto-update: pull failed — {err}. Manual intervention needed.",
+                            f"Auto-update: pull failed — {err}. Manual intervention needed.",
                             ttl=10,
                         )
                         failure_notified = True
@@ -307,7 +307,7 @@ async def auto_update_loop(
         except Exception:
             log.exception("Auto-update: unexpected error")
             if not failure_notified:
-                await notifier.broadcast("⚠️ Auto-update: unexpected error — check logs.", ttl=10)
+                await notifier.broadcast("Auto-update: unexpected error — check logs.", ttl=10)
                 failure_notified = True
 
 
@@ -615,7 +615,7 @@ async def run() -> None:
         if instance.status == InstanceStatus.FAILED:
             escaped = redact_secrets(instance.error or 'Unknown error')
             await notifier.broadcast(
-                f"⚠️ **Scheduled task failed**\n{instance.display_id()}: {escaped}",
+                f"**Scheduled task failed**\n{instance.display_id()}: {escaped}",
                 ttl=15,
             )
         elif changed:
@@ -975,7 +975,7 @@ async def _restore_pending_prompts(discord_bot) -> None:
         try:
             await discord_bot.messenger.edit_text(
                 p.channel_id, p.message_id,
-                "⚠ Lost on restart — please resend your message.", None,
+                "Lost on restart — please resend your message.", None,
             )
         except Exception:
             log.debug("Could not edit stale pending embed %s", p.message_id)
@@ -1028,7 +1028,7 @@ async def _cleanup_orphan_messages(
                     try:
                         await messenger.edit_thinking(
                             handle,
-                            f"⚠️ {inst.display_id()} interrupted by bot restart",
+                            f"{inst.display_id()} interrupted by bot restart",
                         )
                         log.info("Updated orphan thinking msg for %s in %s:%s",
                                  inst.id, platform, channel_id)

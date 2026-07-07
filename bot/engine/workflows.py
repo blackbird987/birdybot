@@ -96,15 +96,15 @@ async def _exit_chain(
 # Mention text per chain-pause outcome — keeps wording consistent and ensures
 # the send_text fallback inside _notify_user is never empty.
 _CHAIN_EXIT_MESSAGES: dict[str, str] = {
-    "needs_input": "⚠ Needs your attention.",
-    "failed": "⛔ Chain blocked — needs your attention.",
+    "needs_input": "Needs your attention.",
+    "failed": "Chain blocked — needs your attention.",
     "phantom_detected": (
-        "⚠ Release verifier flagged phantom claims. "
+        "Release verifier flagged phantom claims. "
         "Tap Amend to fix, or Continue to ship anyway."
     ),
-    "budget_exhausted": "⛔ Cost budget reached.",
-    "merge_failed": "⚠ Merge conflict — tap Resolve / Retry / Discard.",
-    "review_did_not_converge": "⛔ Plan review didn't converge — needs your attention.",
+    "budget_exhausted": "Cost budget reached.",
+    "merge_failed": "Merge conflict — tap Resolve / Retry / Discard.",
+    "review_did_not_converge": "Plan review didn't converge — needs your attention.",
 }
 
 
@@ -1075,9 +1075,9 @@ async def _attempt_inline_worktree_recovery(
     Three outcomes, all surfaced to the thread (silent fallback was the
     failure mode of t-3700):
       - content matches branch tip → ``git worktree add --force`` →
-        thread message ``♻️ Recovered prior build {branch}``.
+        thread message ``Recovered prior build {branch}``.
       - content drifted → flag ``manual_recovery_needed=True`` →
-        thread message ``⚠️ Prior build {branch} drifted; starting fresh``.
+        thread message ``Prior build {branch} drifted; starting fresh``.
       - error during check → leave instance alone, log, post a skip notice.
 
     Mutations to the Instance are persisted via store.update_instance.
@@ -1098,7 +1098,7 @@ async def _attempt_inline_worktree_recovery(
         try:
             await ctx.messenger.send_text(
                 ctx.channel_id,
-                f"⚠️ Couldn't verify prior build `{inst.branch}` "
+                f"Couldn't verify prior build `{inst.branch}` "
                 f"({e}); starting fresh from master.",
                 silent=True,
             )
@@ -1117,7 +1117,7 @@ async def _attempt_inline_worktree_recovery(
         try:
             await ctx.messenger.send_text(
                 ctx.channel_id,
-                f"⚠️ Prior build `{inst.branch}` lost git metadata AND has "
+                f"Prior build `{inst.branch}` lost git metadata AND has "
                 f"uncommitted drift ({reason}). Starting this Build fresh "
                 f"from master — inspect the prior worktree manually before "
                 f"merging anything.",
@@ -1135,7 +1135,7 @@ async def _attempt_inline_worktree_recovery(
         try:
             await ctx.messenger.send_text(
                 ctx.channel_id,
-                f"⚠️ Couldn't verify prior build `{inst.branch}` "
+                f"Couldn't verify prior build `{inst.branch}` "
                 f"({reason}); starting fresh from master.",
                 silent=True,
             )
@@ -1162,7 +1162,7 @@ async def _attempt_inline_worktree_recovery(
         try:
             await ctx.messenger.send_text(
                 ctx.channel_id,
-                f"⚠️ Couldn't re-register prior build `{inst.branch}` "
+                f"Couldn't re-register prior build `{inst.branch}` "
                 f"({e}); starting fresh from master.",
                 silent=True,
             )
@@ -1179,7 +1179,7 @@ async def _attempt_inline_worktree_recovery(
         try:
             await ctx.messenger.send_text(
                 ctx.channel_id,
-                f"⚠️ Couldn't re-register prior build `{inst.branch}` "
+                f"Couldn't re-register prior build `{inst.branch}` "
                 f"({err}); starting fresh from master.",
                 silent=True,
             )
@@ -1191,7 +1191,7 @@ async def _attempt_inline_worktree_recovery(
     try:
         await ctx.messenger.send_text(
             ctx.channel_id,
-            f"♻️ Recovered prior build `{inst.branch}` (lost git metadata, "
+            f"Recovered prior build `{inst.branch}` (lost git metadata, "
             f"content matched branch tip). Build will chain onto it.",
             silent=True,
         )
@@ -1417,7 +1417,7 @@ async def on_verify(ctx: RequestContext, source_id: str, source_msg_id: str | No
                 ctx.store.update_instance(result)
                 await ctx.messenger.send_text(
                     ctx.channel_id,
-                    f"⛔ Verify reported `manual` under block policy — halting. {why}",
+                    f"Verify reported `manual` under block policy — halting. {why}",
                     silent=True,
                 )
             break
@@ -1430,7 +1430,7 @@ async def on_verify(ctx: RequestContext, source_id: str, source_msg_id: str | No
                 try:
                     await ctx.messenger.send_text(
                         ctx.channel_id,
-                        f"⚠️ Verify environment crashed — proceeding; "
+                        f"Verify environment crashed — proceeding; "
                         f"give this one a manual check. {why}",
                         silent=True,
                     )
@@ -1441,7 +1441,7 @@ async def on_verify(ctx: RequestContext, source_id: str, source_msg_id: str | No
                 # would not be reached by the chain guard; surface the reason.
                 await ctx.messenger.send_text(
                     ctx.channel_id,
-                    f"⛔ Verify environment crashed under block policy — halting. {why}",
+                    f"Verify environment crashed under block policy — halting. {why}",
                     silent=True,
                 )
             break
@@ -1459,7 +1459,7 @@ async def on_verify(ctx: RequestContext, source_id: str, source_msg_id: str | No
                 ctx.store.update_instance(result)
                 await ctx.messenger.send_text(
                     ctx.channel_id,
-                    f"⚠️ Verification failed after {round_num + 1} rounds — "
+                    f"Verification failed after {round_num + 1} rounds — "
                     "proceeding; give this one a manual check.",
                     silent=True,
                 )
@@ -1547,7 +1547,7 @@ async def on_done(
             # silent=False: this path has no follow-up _exit_chain mention, so
             # the banner post itself must ping or the user never learns the
             # merge failed (the t-4736-class invisible-rot bug).
-            lead = "⚠ Done hit a merge conflict — needs your attention.\n\n"
+            lead = "Done hit a merge conflict — needs your attention.\n\n"
             try:
                 await ctx.messenger.send_text(
                     ctx.channel_id, lead + msg,
@@ -2259,7 +2259,7 @@ async def on_verify_release(
             if more > 0:
                 bullets_text += f"\n• …and {more} more"
             body = (
-                f"⚠️ **Release verifier flagged a mismatch.**\n\n"
+                f"**Release verifier flagged a mismatch.**\n\n"
                 f"**Phantom claims:**\n{bullets_text}\n\n"
                 f"**Rationale:** {_cap(rationale, 400)}\n\n"
                 f"Tap **Amend** to re-run the wrap-up step with this feedback, "
@@ -2269,7 +2269,7 @@ async def on_verify_release(
             # verifier_parse_failed path: no phantoms to enumerate, just
             # tell the user the gate is fail-closed and why.
             body = (
-                f"⚠️ **Release verifier output couldn't be parsed — failing closed.**\n\n"
+                f"**Release verifier output couldn't be parsed — failing closed.**\n\n"
                 f"**Rationale:** {_cap(rationale, 400)}\n\n"
                 f"Tap **Amend** to retry the wrap-up step, "
                 f"or **Continue anyway** to proceed to release."
@@ -2542,7 +2542,7 @@ async def _run_autopilot_chain(
                 if chain_cost >= cost_budget_usd:
                     await ctx.messenger.send_text(
                         ctx.channel_id,
-                        f"⚠️ Cost budget exhausted (${chain_cost:.2f} / ${cost_budget_usd:.2f}). Pausing chain.",
+                        f"Cost budget exhausted (${chain_cost:.2f} / ${cost_budget_usd:.2f}). Pausing chain.",
                         silent=True,
                     )
                     await _exit_chain_needs_input(
@@ -2560,7 +2560,7 @@ async def _run_autopilot_chain(
                     src_ref = f" {src_for_halt.display_id()}" if src_for_halt else ""
                     await ctx.messenger.send_text(
                         ctx.channel_id,
-                        f"⚠️ Plan{src_ref} didn't converge after "
+                        f"Plan{src_ref} didn't converge after "
                         f"{_REVIEW_LOOP_MAX_ROUNDS} review rounds — "
                         f"halting chain. This usually means the plan is "
                         f"operational/advisory rather than a code change, "
@@ -3027,7 +3027,7 @@ async def _run_autopilot_chain(
                         repo_ref = merge_target.repo_name or "repo"
                         branch_ref = merge_target.branch or "branch"
                         merge_suffix = (
-                            f"⚠ {chain_label} hit a merge conflict on "
+                            f"{chain_label} hit a merge conflict on "
                             f"{repo_ref}:{branch_ref} — "
                             f"tap Resolve / Retry / Discard."
                         )
@@ -3077,9 +3077,8 @@ async def _run_autopilot_chain(
                 # ("couldn't be parsed" rather than "flagged phantom claims").
                 suffix_override: str | None = None
                 if outcome == "failed":
-                    icon = "⛔"
                     suffix_override = (
-                        f"{icon} {chain_label} blocked at {step} — "
+                        f"{chain_label} blocked at {step} — "
                         f"needs your attention."
                     )
                 elif (
@@ -3087,7 +3086,7 @@ async def _run_autopilot_chain(
                     and result._verifier_parse_failed
                 ):
                     suffix_override = (
-                        "⚠ Release verifier output couldn't be parsed. "
+                        "Release verifier output couldn't be parsed. "
                         "Tap Amend to retry, or Continue to ship anyway."
                     )
                 await _exit_chain_needs_input(
@@ -3142,7 +3141,7 @@ async def _run_autopilot_chain(
                                 else "failed"
                             )
                             suffix_override = (
-                                f"⛔ {chain_label} blocked at {step} — "
+                                f"{chain_label} blocked at {step} — "
                                 f"needs your attention."
                             ) if outcome == "failed" else None
                             await _exit_chain_needs_input(

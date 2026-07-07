@@ -4177,12 +4177,12 @@ class ClaudeRunner:
                 ).returncode == 0
                 if tag_exists:
                     return (
-                        f"\n⚠️ Release commit {ver_name} was not tagged "
+                        f"\nRelease commit {ver_name} was not tagged "
                         f"(a tag with that name already exists elsewhere) — "
                         f"version numbering may be stale"
                     )
                 return (
-                    f"\n⚠️ Release commit {ver_name} was not tagged "
+                    f"\nRelease commit {ver_name} was not tagged "
                     f"(tag creation failed — see bot.log)"
                 )
             return ""
@@ -4205,7 +4205,7 @@ class ClaudeRunner:
                 newest_name, newest_ver = name.strip(), other
         if newest_name is not None:
             return (
-                f"\n⚠️ Release {tag_name} is below existing {newest_name} — "
+                f"\nRelease {tag_name} is below existing {newest_name} — "
                 f"version numbering may be stale"
             )
         return ""
@@ -4377,7 +4377,7 @@ class ClaudeRunner:
                     log.warning("Fetch origin failed in %s before merge: %s",
                                 repo, fetch_err)
                     sync_note = (
-                        "\n⚠️ Could not sync with origin — merged against local state"
+                        "\nCould not sync with origin — merged against local state"
                     )
                 else:
                     ahead = self._rev_count(repo, f"origin/{target}..{target}")
@@ -4416,7 +4416,7 @@ class ClaudeRunner:
                                 target, repo, ff_detail,
                             )
                             sync_note = (
-                                "\n⚠️ Could not fast-forward to origin — "
+                                "\nCould not fast-forward to origin — "
                                 "merged against local state"
                             )
                         else:
@@ -4533,7 +4533,7 @@ class ClaudeRunner:
                     push_detail = (push_r.stderr or push_r.stdout or "").strip()
                     log.error("Push to origin after merge in %s: %s",
                               repo, push_detail)
-                    push_note = f"\n⚠️ Could not push to origin (exit {push_r.returncode})"
+                    push_note = f"\nCould not push to origin (exit {push_r.returncode})"
                 else:
                     log.info("Pushed %s to origin after merge in %s", target, repo)
                     # Push tags pointing at any commit in the branch-unique
@@ -4568,23 +4568,23 @@ class ClaudeRunner:
                             if tag_push_r.returncode != 0:
                                 tag_detail = (tag_push_r.stderr or tag_push_r.stdout or "").strip()
                                 log.error("Tag push to origin in %s: %s", repo, tag_detail)
-                                push_note += f"\n⚠️ Tags not pushed (exit {tag_push_r.returncode})"
+                                push_note += f"\nTags not pushed (exit {tag_push_r.returncode})"
                             else:
                                 tag_list = ", ".join(tag_names)
                                 log.info("Pushed tags [%s] to origin in %s", tag_list, repo)
                                 push_note += f"\nTags pushed: {tag_list}"
                     except subprocess.TimeoutExpired:
                         log.error("Tag push to origin timed out (30s) in %s", repo)
-                        push_note += "\n⚠️ Tag push timed out (30s)"
+                        push_note += "\nTag push timed out (30s)"
                     except Exception as e:
                         log.error("Tag push error in %s: %s", repo, e)
-                        push_note += f"\n⚠️ Tag push error: {type(e).__name__}"
+                        push_note += f"\nTag push error: {type(e).__name__}"
             except subprocess.TimeoutExpired:
                 log.error("Push to origin timed out (30s) in %s", repo)
-                push_note = "\n⚠️ Push to origin timed out (30s)"
+                push_note = "\nPush to origin timed out (30s)"
             except Exception as e:
                 log.error("Push to origin error in %s: %s", repo, e)
-                push_note = f"\n⚠️ Push to origin error: {type(e).__name__}"
+                push_note = f"\nPush to origin error: {type(e).__name__}"
 
             instance.branch = None
             instance.worktree_path = None
@@ -4662,9 +4662,9 @@ class ClaudeRunner:
         log severity is set independently per call site):
           - clean pop succeeded → ℹ️ "Stashed changes restored after merge"
           - skipped (tracked changes present) → ℹ️ "not auto-restored, recover manually"
-          - pop conflicted, rolled back → ⚠️ "pop conflicted, aborted; stash preserved"
-          - pop conflicted, rollback failed → ⚠️ "tree may contain conflict markers"
-          - subprocess raised → ⚠️ "could not verify stash state"
+          - pop conflicted, rolled back → "pop conflicted, aborted; stash preserved"
+          - pop conflicted, rollback failed → "tree may contain conflict markers"
+          - subprocess raised → "could not verify stash state"
 
         Only tracked changes block the pop. Untracked entries (`??`) are
         ignored — a stash pop only fails on them if there's a filename
@@ -4738,7 +4738,7 @@ class ClaudeRunner:
                         repo,
                     )
                     return (
-                        "\n⚠️ Stash pop conflicted — aborted. "
+                        "\nStash pop conflicted — aborted. "
                         "Your changes are safe in `stash@{0}`."
                     )
                 else:
@@ -4748,7 +4748,7 @@ class ClaudeRunner:
                         repo,
                     )
                     return (
-                        "\n⚠️ Stash pop conflicted AND rollback failed — your tree may "
+                        "\nStash pop conflicted AND rollback failed — your tree may "
                         "contain conflict markers. Run `git status` and inspect "
                         "`stash@{0}` manually before continuing."
                     )
@@ -4762,7 +4762,7 @@ class ClaudeRunner:
                 repo, exc_info=True,
             )
             return (
-                "\n⚠️ Could not verify stash state — check `git stash list` manually."
+                "\nCould not verify stash state — check `git stash list` manually."
             )
 
     def _auto_resolve_merge_conflicts(

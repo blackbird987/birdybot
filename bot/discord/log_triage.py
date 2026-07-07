@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-_TRIAGE_THREAD_NAME = "🔍 Triage"
+_TRIAGE_THREAD_NAME = "Triage"
 _MENTION_COOLDOWN_SECS = 6 * 3600  # don't re-ping owner within 6h
 _CLEAN_PATTERNS = ("clean", "no issues", "nothing notable", "no anomalies")
 
@@ -387,9 +387,8 @@ async def _post_finding(bot: ClaudeBot, verdict: str, severity: str) -> None:
                 mention = f"<@{user_id}> "
                 will_mention = True
 
-    icon = {"high": "🚨", "med": "⚠️", "low": "🔎"}.get(severity, "🔎")
     safe_verdict = verdict.strip()[:1500].replace("```", "'''")
-    body = f"{mention}{icon} **Log triage** ({severity})\n```\n{safe_verdict}\n```"
+    body = f"{mention}**Log triage** ({severity})\n```\n{safe_verdict}\n```"
 
     try:
         await thread.send(body, silent=(severity != "high"))

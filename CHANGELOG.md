@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- **Full decorative-emoji strip across the whole surface** — the v0.99.0 polish only touched buttons; this removes every remaining decorative emoji from messages, embeds, status lines, and channel names (124 occurrences across 17 files). Only the genuine status/state vocabulary is kept: the lifecycle marks `status_icon` uses (⏳ queued, 🔄 running, ✅ done, ❌ failed, 💀 killed, ❓ asking), the 💤 sleeping-thread marker, spawn/fleet colour dots, and forum-tag indicators. Stripped: ⚠ warning prefixes (severity is already carried by the red embed), ⛔ workflow-guard marks, and accent flair (⚡ ♻ 🚀 📋 🚨 🔎 🔍 📂 📦 ⏰). Channel-name prefixes dropped too — `Control Room`, `Archive`, `Monitor`, `Triage` (threads are looked up by stored ID, so existing ones keep working). Cleaned up four `icon` variables that would otherwise have left dangling leading spaces.
+
 ## v0.99.0 — Discord UI/UX polish; DRY cleanup sweep (2026-07-07)
 
 ### Changed

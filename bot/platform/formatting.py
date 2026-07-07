@@ -328,7 +328,7 @@ def merge_failed_banner(failure_kind: str | None) -> str:
     """
     if failure_kind == "orphaned_index":
         return (
-            "⚠️ Auto-merge failed because the main repo has an orphaned "
+            "Auto-merge failed because the main repo has an orphaned "
             "merge in its index. Tap **Try Merge Again** — the next "
             "attempt will detect and auto-recover the leftover state "
             "(any local changes are preserved in a stash). **Resolve "
@@ -336,7 +336,7 @@ def merge_failed_banner(failure_kind: str | None) -> str:
         )
     if failure_kind == "recovery_failed":
         return (
-            "⚠️ Auto-merge failed and automatic recovery couldn't unstick "
+            "Auto-merge failed and automatic recovery couldn't unstick "
             "the main repo. **Manual intervention needed** — open a "
             "terminal in the repo and run `git reset --merge` or "
             "`git status` to inspect. Any work the bot preserved is "
@@ -348,13 +348,13 @@ def merge_failed_banner(failure_kind: str | None) -> str:
         # fixes branch-vs-master conflict markers inside the worktree and
         # never touches local-vs-origin divergence, so it can't help here.
         return (
-            "⚠️ Auto-merge stopped before merging: local master and "
+            "Auto-merge stopped before merging: local master and "
             "origin have diverged (commits exist on both sides — see the "
             "counts above). Nothing was changed. Run `git pull --rebase` "
             "in the main repo to reconcile, then tap **Try Merge Again**."
         )
     return (
-        "⚠️ Auto-merge failed. Tap **Try Merge Again** to retry "
+        "Auto-merge failed. Tap **Try Merge Again** to retry "
         "(useful if a parallel build just completed) or **Discard** "
         "to drop the branch. Or describe the situation here to talk "
         "it through with Claude."
@@ -761,7 +761,7 @@ def format_schedule_list_md(schedules: list[Schedule]) -> str:
 
         # Thread-bound self-wake (resume_thread) — distinguish from user crons.
         if s.resume_thread:
-            interval = f"⏰ wake → <#{s.channel_id}>" if s.channel_id else "⏰ wake"
+            interval = f"wake → <#{s.channel_id}>" if s.channel_id else "wake"
 
         next_run = ""
         if s.next_run_at:

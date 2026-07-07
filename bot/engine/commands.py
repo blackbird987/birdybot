@@ -106,7 +106,7 @@ async def budget_warning(ctx: RequestContext) -> None:
     if daily >= config.DAILY_BUDGET_USD * 0.8:
         await ctx.messenger.send_text(
             ctx.channel_id,
-            f"⚠️ Budget warning: ${daily:.4f} / ${config.DAILY_BUDGET_USD:.2f} "
+            f"Budget warning: ${daily:.4f} / ${config.DAILY_BUDGET_USD:.2f} "
             f"({daily / config.DAILY_BUDGET_USD * 100:.0f}%)",
         )
 
@@ -141,7 +141,7 @@ async def _try_fast_repo_command(ctx: RequestContext, text: str) -> bool:
         if i == 0:  # add/register pattern
             name, path = m.group(1), m.group(2)
             await ctx.messenger.send_text(
-                ctx.channel_id, f"📂 Registering repo **{name}** at `{path}`…",
+                ctx.channel_id, f"Registering repo **{name}** at `{path}`…",
             )
             await on_repo(ctx, f"add {name} {path}")
             return True
@@ -149,7 +149,7 @@ async def _try_fast_repo_command(ctx: RequestContext, text: str) -> bool:
             name = m.group(1)
             path = m.group(2) or ""
             await ctx.messenger.send_text(
-                ctx.channel_id, f"📂 Creating repo **{name}**…",
+                ctx.channel_id, f"Creating repo **{name}**…",
             )
             await on_repo(ctx, f"create {name} {path}".strip())
             return True
@@ -194,7 +194,7 @@ async def _execute_bot_commands(ctx: RequestContext, result_text: str) -> None:
                     continue
         try:
             await ctx.messenger.send_text(
-                ctx.channel_id, f"⚡ Auto-executing: `/repo {repo_args}`",
+                ctx.channel_id, f"Auto-executing: `/repo {repo_args}`",
             )
             await on_repo(ctx, repo_args)
         except Exception:
@@ -215,7 +215,7 @@ async def _execute_bot_commands(ctx: RequestContext, result_text: str) -> None:
         try:
             await ctx.messenger.send_text(
                 ctx.channel_id,
-                f"⚠️ {no_body} /spawn directive(s) ignored — each directive "
+                f"{no_body} /spawn directive(s) ignored — each directive "
                 "must be immediately followed by its own `~~~spawn ... ~~~` "
                 "body block.",
                 silent=True,
@@ -230,7 +230,7 @@ async def _execute_bot_commands(ctx: RequestContext, result_text: str) -> None:
         try:
             await ctx.messenger.send_text(
                 ctx.channel_id,
-                f"⚠️ Only the first {_MAX_SPAWNS_PER_RESPONSE} /spawn "
+                f"Only the first {_MAX_SPAWNS_PER_RESPONSE} /spawn "
                 f"directives per response run — {over_cap} ignored.",
                 silent=True,
             )
@@ -375,7 +375,7 @@ async def _handle_spawn_directive(
         try:
             await ctx.messenger.send_text(
                 ctx.channel_id,
-                "⚠️ /spawn refused — autopilot is "
+                "/spawn refused — autopilot is "
                 f"{chain_meta.get('status')} on this thread. Stop or finish "
                 "the chain before handing off a fresh session.",
                 silent=True,
@@ -395,7 +395,7 @@ async def _handle_spawn_directive(
     if kv is None:
         await _reject(
             f"args failed to parse: {args_str}",
-            "⚠️ /spawn directive ignored — could not parse args. "
+            "/spawn directive ignored — could not parse args. "
             "Expected `key=value` pairs, with values containing spaces "
             "wrapped in double quotes.",
         )
@@ -404,7 +404,7 @@ async def _handle_spawn_directive(
     if extra:
         await _reject(
             f"unknown keys: {sorted(extra)}",
-            f"⚠️ /spawn directive ignored — unknown keys: "
+            f"/spawn directive ignored — unknown keys: "
             f"`{', '.join(sorted(extra))}`. Allowed: "
             f"`{', '.join(sorted(_SPAWN_ALLOWED_KEYS))}`.",
         )
@@ -414,13 +414,13 @@ async def _handle_spawn_directive(
     if not repo or not title:
         await _reject(
             "repo and title are required",
-            "⚠️ /spawn directive ignored — `repo` and `title` are both required.",
+            "/spawn directive ignored — `repo` and `title` are both required.",
         )
         return True
     if _TITLE_CONTROL_CHARS.search(title):
         await _reject(
             "title contains control characters",
-            "⚠️ /spawn directive ignored — `title` cannot contain control "
+            "/spawn directive ignored — `title` cannot contain control "
             "characters or newlines.",
         )
         return True
@@ -430,7 +430,7 @@ async def _handle_spawn_directive(
     if mode not in _SPAWN_ALLOWED_MODES:
         await _reject(
             f"invalid mode: {mode}",
-            f"⚠️ /spawn directive ignored — invalid mode `{mode}`. "
+            f"/spawn directive ignored — invalid mode `{mode}`. "
             f"Allowed: `{', '.join(sorted(_SPAWN_ALLOWED_MODES))}`.",
         )
         return True
@@ -440,7 +440,7 @@ async def _handle_spawn_directive(
         if effort not in _SPAWN_ALLOWED_EFFORTS:
             await _reject(
                 f"invalid effort: {effort}",
-                f"⚠️ /spawn directive ignored — invalid effort `{effort}`. "
+                f"/spawn directive ignored — invalid effort `{effort}`. "
                 f"Allowed: `{', '.join(sorted(_SPAWN_ALLOWED_EFFORTS))}`.",
             )
             return True
@@ -457,7 +457,7 @@ async def _handle_spawn_directive(
         try:
             await ctx.messenger.send_text(
                 ctx.channel_id,
-                f"⚠️ /spawn refused — repo `{repo}` is not registered. "
+                f"/spawn refused — repo `{repo}` is not registered. "
                 "Use `/repo list` to see registered repos.",
                 silent=True,
             )
@@ -470,7 +470,7 @@ async def _handle_spawn_directive(
     if not body:
         await _reject(
             "empty prompt body",
-            "⚠️ /spawn directive ignored — the `~~~spawn ... ~~~` body "
+            "/spawn directive ignored — the `~~~spawn ... ~~~` body "
             "block is empty.",
         )
         return True
@@ -482,7 +482,7 @@ async def _handle_spawn_directive(
         try:
             await ctx.messenger.send_text(
                 ctx.channel_id,
-                "⚠️ /spawn refused — prompt body exceeds the 32 KiB limit.",
+                "/spawn refused — prompt body exceeds the 32 KiB limit.",
                 silent=True,
             )
         except Exception:
@@ -502,7 +502,7 @@ async def _handle_spawn_directive(
         try:
             await ctx.messenger.send_text(
                 ctx.channel_id,
-                "⚠️ /spawn refused — this thread was itself created by a "
+                "/spawn refused — this thread was itself created by a "
                 "spawn directive, so it cannot spawn further. Switch to a "
                 "top-level thread (one you opened directly) and try again.",
                 silent=True,
@@ -525,7 +525,7 @@ async def _handle_spawn_directive(
             try:
                 await ctx.messenger.send_text(
                     ctx.channel_id,
-                    f"⚠️ /spawn refused — orchestrator wave cap reached "
+                    f"/spawn refused — orchestrator wave cap reached "
                     f"({_MAX_SPAWN_WAVES}). Send a fresh message in this "
                     "thread to start a new orchestration run.",
                     silent=True,
@@ -539,7 +539,7 @@ async def _handle_spawn_directive(
         try:
             await ctx.messenger.send_text(
                 ctx.channel_id,
-                "⚠️ /spawn refused — daily budget exhausted.",
+                "/spawn refused — daily budget exhausted.",
                 silent=True,
             )
         except Exception:
@@ -561,7 +561,7 @@ async def _handle_spawn_directive(
         try:
             await ctx.messenger.send_text(
                 ctx.channel_id,
-                "⚠️ /spawn failed — platform could not create the new session.",
+                "/spawn failed — platform could not create the new session.",
                 silent=True,
             )
         except Exception:
@@ -581,7 +581,7 @@ async def _handle_spawn_directive(
     try:
         await ctx.messenger.send_text(
             ctx.channel_id,
-            f"🚀 Spawned new session: {link}",
+            f"Spawned new session: {link}",
         )
     except Exception:
         log.debug("Failed to post spawn confirmation", exc_info=True)
@@ -617,7 +617,7 @@ async def _enqueue_with_pending_ui(
     pending_id = secrets.token_hex(4)
     msg_id = await ctx.messenger.send_text(
         ctx.channel_id,
-        "📋 Queued — will run after current task.",
+        "Queued — will run after current task.",
         buttons=queued_button_specs(pending_id, supports_steer),
         silent=True,
     )
@@ -850,7 +850,7 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
         if ctx.resolve_session_id is not None:
             await ctx.messenger.send_text(
                 ctx.channel_id,
-                "⚠️ Missing repo context for this thread — refusing to fall "
+                "Missing repo context for this thread — refusing to fall "
                 "back to the global active repo. This is a bug; please "
                 f"report thread id `{ctx.channel_id}`.",
             )
@@ -1075,7 +1075,7 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
             try:
                 await ctx.messenger.send_text(
                     ctx.channel_id,
-                    "⚠️ Lost prior conversation context — claude.exe couldn't "
+                    "Lost prior conversation context — claude.exe couldn't "
                     "resume the previous session even after recovery attempts. "
                     "Continuing with a fresh session. Re-paste anything important "
                     "from earlier in this thread if you need me to remember it.",
@@ -1894,7 +1894,7 @@ async def on_provider(ctx: RequestContext, text: str) -> None:
     busy_note = ""
     if ctx.runner.is_busy:
         busy_note = (
-            f"\n⚠️ {ctx.runner.active_task_count} session(s) still running — "
+            f"\n{ctx.runner.active_task_count} session(s) still running — "
             f"they will finish with **{old}**."
         )
 
@@ -2347,7 +2347,7 @@ async def on_reboot(ctx: RequestContext) -> None:
             remaining = ", ".join(ctx.runner.active_ids)
             await ctx.messenger.send_text(
                 ctx.channel_id,
-                f"⚠️ Timed out waiting. Force-rebooting with {len(ctx.runner.active_ids)} still running: {remaining}",
+                f"Timed out waiting. Force-rebooting with {len(ctx.runner.active_ids)} still running: {remaining}",
             )
 
     # Queue reboot and trigger — since we waited for idle, this fires immediately.
@@ -3392,7 +3392,7 @@ async def handle_callback(
         escaped = ctx.messenger.escape(new_inst.display_id())
         handle = await ctx.messenger.send_thinking(
             ctx.channel_id,
-            f"⚡ {escaped} continuing with {config.API_FALLBACK_MODEL} (pay-per-use)...",
+            f"{escaped} continuing with {config.API_FALLBACK_MODEL} (pay-per-use)...",
             buttons=running_button_specs(new_inst.id),
         )
         if handle.get("message_id"):

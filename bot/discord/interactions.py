@@ -1181,16 +1181,16 @@ async def execute_deploy(
         if push_proc.returncode != 0:
             push_output = push_out.decode(errors="replace")[:1500]
             await _status(
-                f"⚠️ Push failed (exit {push_proc.returncode}), deploying anyway...\n```\n{push_output}\n```"
+                f"Push failed (exit {push_proc.returncode}), deploying anyway...\n```\n{push_output}\n```"
             )
     except asyncio.TimeoutError:
         try:
             push_proc.kill()
         except ProcessLookupError:
             pass
-        await _status("⚠️ Push timed out (30s). Proceeding with deploy...")
+        await _status("Push timed out (30s). Proceeding with deploy...")
     except Exception as e:
-        await _status(f"⚠️ Push error: {e}. Proceeding with deploy...")
+        await _status(f"Push error: {e}. Proceeding with deploy...")
 
     await _status(f"\U0001f680 Running: `{command}`...")
 
@@ -1427,7 +1427,7 @@ async def _handle_reboot_repo(
             if not idle:
                 remaining = ", ".join(bot._runner.active_ids)
                 drain_text = (
-                    f"⚠️ Timed out — force-rebooting with "
+                    f"Timed out — force-rebooting with "
                     f"{bot._runner.active_count} still running: {remaining}"
                 )
                 await bot._forums.refresh_control_room(

@@ -230,8 +230,7 @@ def _flag_summary(instance: Instance) -> str:
         counts[f.category] = counts.get(f.category, 0) + 1
     # Stable order: severity-aware-ish — issues/warnings tend to read first.
     parts = [f"{n} {cat}" for cat, n in sorted(counts.items(), key=lambda kv: -kv[1])]
-    icon = "⚠" if any(f.severity in ("warning", "issue") for f in ev.flags) else "ℹ"
-    return f"{icon} flags: {', '.join(parts)}"
+    return f"flags: {', '.join(parts)}"
 
 
 def build_result_embed(

@@ -1562,7 +1562,7 @@ class ForumManager:
                 try:
                     await _ctx.messenger.send_text(
                         _ctx.channel_id,
-                        f"⚠️ Session rebind blocked — this thread is bound to "
+                        f"Session rebind blocked — this thread is bound to "
                         f"`{bound}` but the new session belongs to `{offered}`. "
                         "Recovery aborted to prevent cross-repo corruption. "
                         "If this looks wrong, check the thread's repo binding "
