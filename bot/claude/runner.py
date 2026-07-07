@@ -2865,20 +2865,25 @@ class ClaudeRunner:
 
     @staticmethod
     def _install_worktree_hook(repo_path: str, wt_dir: str) -> None:
-        """Install the per-worktree PreToolUse hook.
+        """Install the per-worktree hooks (main-repo guard + test mutex).
 
         Writes ``.claude/settings.local.json`` inside the worktree pointing
-        at the bot's worktree_guard.py script (absolute path so CWD doesn't
-        matter), and appends the settings file to ``.git/info/exclude`` in
-        the common gitdir so it can never ride into the build branch and
+        at the bot's hook scripts (absolute paths so CWD doesn't matter),
+        and appends the settings file to ``.git/info/exclude`` in the
+        common gitdir so it can never ride into the build branch and
         merge back into the repo's default branch.
 
-        Hook covers:
+        Guard hook (worktree_guard.py, PreToolUse) covers:
           - Bash: git -C <repo>, --git-dir/--work-tree <repo>, rm -r <repo>,
             git worktree remove <self>
           - Edit/Write/MultiEdit/NotebookEdit: any file_path/notebook_path
             under the main repo but not under the worktree (path-poisoning
             from a resumed planning session)
+
+        Test-mutex hook (test_mutex.py, gated on TEST_MUTEX_ENABLED):
+          - Bash PreToolUse: acquire the per-repo test-suite lock (or
+            wait/block) when the command is a full test-suite run
+          - Bash PostToolUse: release the lock when the run finishes
 
         Schema is the canonical Claude Code form:
           {"hooks": {"PreToolUse": [{"matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit",
@@ -2933,8 +2938,9 @@ class ClaudeRunner:
         # parallel sessions on the same repo (they share ports, databases,
         # and CPU — worktrees only isolate files). Pre-phase acquires or
         # blocks; post-phase releases. The pre timeout must exceed the
-        # script's internal 120s wait so the script, not the hook reaper,
-        # decides the outcome.
+        # script's internal 45s wait so the script, not the hook reaper,
+        # decides the outcome (the wait itself sits under STALL_TIMEOUT_SECS
+        # so a waiting session never trips the stall-warning embed).
         mutex_entries: list[tuple[str, dict]] = []
         if config.TEST_MUTEX_ENABLED:
             mutex_script = (
@@ -2942,7 +2948,7 @@ class ClaudeRunner:
             )
             if mutex_script.is_file():
                 for event, phase, timeout in (
-                    ("PreToolUse", "pre", 150),
+                    ("PreToolUse", "pre", 90),
                     ("PostToolUse", "post", 15),
                 ):
                     mutex_entries.append((event, {

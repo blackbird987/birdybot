@@ -64,8 +64,11 @@ import time
 
 # How long the pre-phase waits for a busy lock before blocking the tool
 # call. Must stay below the hook `timeout` in settings.local.json (the
-# runner installs 150s) so *we* decide the outcome, not the hook reaper.
-WAIT_SECS = int(os.environ.get("TEST_MUTEX_WAIT_SECS", "120"))
+# runner installs 90s) so *we* decide the outcome, not the hook reaper —
+# and below the bot's STALL_TIMEOUT_SECS (60s), so a session waiting on
+# the lock never fires the "quiet — /kill if stuck" stall warning that
+# would invite the user to kill a healthy session.
+WAIT_SECS = int(os.environ.get("TEST_MUTEX_WAIT_SECS", "45"))
 POLL_SECS = float(os.environ.get("TEST_MUTEX_POLL_SECS", "5"))
 # A holder older than this is presumed dead (crash without cleanup).
 STALE_TTL_SECS = int(os.environ.get("TEST_MUTEX_STALE_SECS", "1800"))
