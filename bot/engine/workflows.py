@@ -1748,6 +1748,7 @@ async def _review_plan_loop(
 
 async def _finalize_merge(
     ctx: RequestContext, merge_target: Instance, *, close_silent: bool = False,
+    skip_close: bool = False,
 ) -> bool:
     """Merge a build branch + post-merge bookkeeping + close the thread.
 
@@ -1763,6 +1764,10 @@ async def _finalize_merge(
     intentionally wants the close to skip the participant mention). The
     autopilot path defaults to a loud close (chain-completion notification);
     the standalone Done path opts in to silent close.
+
+    `skip_close`: merge + bookkeeping + tag, but leave the thread open.
+    Fleet ship uses this so the post-deploy verify prompt lands in a live
+    thread instead of archiving it only to immediately reopen it.
     """
     if not merge_target.branch or not merge_target.original_branch:
         return False
@@ -1785,12 +1790,13 @@ async def _finalize_merge(
     await ctx.messenger.send_text(
         ctx.channel_id, f"✅ {merge_msg}", silent=True,
     )
-    try:
-        await ctx.messenger.close_conversation(
-            ctx.channel_id, skip_mention=close_silent,
-        )
-    except Exception:
-        log.debug("Failed to close conversation after merge", exc_info=True)
+    if not skip_close:
+        try:
+            await ctx.messenger.close_conversation(
+                ctx.channel_id, skip_mention=close_silent,
+            )
+        except Exception:
+            log.debug("Failed to close conversation after merge", exc_info=True)
     return True
 
 

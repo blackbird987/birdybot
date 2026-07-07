@@ -855,6 +855,21 @@ async def run() -> None:
         asyncio.create_task(discord_bot.dispatch_drain_queue(drain_queue))
         log.info("Dispatched %d drain-queued messages for replay", len(drain_queue))
 
+    # Fleet ship: drain post-deploy verify prompts left pending by a
+    # self-managed deploy (which reboots this process mid-pipeline) or a
+    # crash between deploy and verify. Entries persist in platform_state.
+    if discord_bot:
+        _fleet_bot = discord_bot
+
+        async def _drain_fleet_verify() -> None:
+            if not await _fleet_bot._wait_for_ready("fleet_verify_drain"):
+                return
+            from bot.discord import fleet
+            n = await fleet.drain_pending_verify(_fleet_bot)
+            if n:
+                log.info("Fleet ship: dispatched %d post-deploy verify prompts", n)
+        asyncio.create_task(_drain_fleet_verify())
+
     # Collect session_ids that will be auto-resumed (chain resume or drain
     # callback) so orphan cleanup can skip those threads
     auto_resuming_sessions: set[str] = set()
