@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.99.0 — Discord UI/UX polish; DRY cleanup sweep (2026-07-07)
+
 ### Changed
 - **Discord UI/UX polish pass** — mobile-first sharpening across the surfaces the user reads on their phone, no redesign.
   - Decorative emojis stripped from interactive controls per the standing no-decorative-emoji rule: result-action buttons (`Branch`, `Share`), queued-run buttons (`Steer Now`, `Cancel`), Ark dashboard buttons (`New Repo`, `Claude Login`), the steer-in-progress notice, the deploy "Pushing to origin…" status, and the fleet-ship banner. Status marks (✅/❌/⚠️) and forum tag/colour indicators are unchanged.
