@@ -45,7 +45,6 @@
 - [ ] [Reliability] apply_thread_tags silently swallows tag-creation failures (Low)
 - [ ] [DRY/Cleanup] Merged check duplicated across two call sites (Low)
 - [ ] [DRY/Cleanup] Setup steps should be a one-shot script (Low)
-- [ ] [Bug Risk] send_text fallback for chain exits also looks empty (Medium)
 - [ ] [Integration] Verification plan assumes Cursor CLI is free to test (Low)
 - [ ] [UX/UI] Failed CI should tag thread for visibility (Medium)
 - [ ] [DRY/Cleanup] Deferred "break after merge" item resolved by this plan (Low)
