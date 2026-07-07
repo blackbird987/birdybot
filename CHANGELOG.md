@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- **Unattended-turn end-of-turn protocol + auto-nudge** (`config.TURN_COMPLETE_SENTINEL`, `MAX_CONSEC_NUDGES`, `UNATTENDED_TURN_PROTOCOL`; `lifecycle.has_turn_complete_marker` + nudge logic in `check_wake_request`; `ThreadInfo.nudge_count`). A turn fired by the system rather than typed by a person — a cooldown retry (`ctx.source="cooldown"`) or a self-wake fire (`source="wake"`) — runs with nobody watching, so when it ended on a "next I'll…" plan with no action it silently stranded the thread (the q-12314 cooldown-retry dead-end: the retry described its next steps, scheduled no wake, and nothing ever resumed it). Unattended turns now carry an explicit contract: end with a `[BOT_CMD: /wake]` directive (work pending) **or** a top-level `[TURN_COMPLETE]` marker (done / needs the user). A turn that does neither is auto-nudged — re-invoked once via the existing wake path with an instruction to finish, schedule a wake, or signal completion — capped at `MAX_CONSEC_NUDGES` (2) consecutive nudges before it hands back to the user with a notice. Detection is a deterministic parse of the explicit marker (fenced/inline-code/quoted occurrences ignored, same camouflage guard as the wake-directive parser), **not** the phrase-sniffing heuristic that was removed for firing phantom wakes. Attended (user-typed) turns are never nudged; context-exhausted sessions (`warning_pinned`) get a "start a fresh thread" notice instead of a degrading re-invocation; build/worktree sessions are excluded (their dir may be merged/discarded by fire time). The `[TURN_COMPLETE]` marker is stripped from displayed text. Covered by `scripts/test_unattended_nudge.py` (19 checks).
+
 ## v0.98.0 — Post-Fable model policy config; skills tracked in git (2026-07-07)
 
 ### Added

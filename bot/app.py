@@ -643,7 +643,12 @@ async def run() -> None:
             return "drop"          # dead/merged/closed thread — don't resurface
         if runner.active_instance_for_channel(channel_id):
             return "busy"          # mid-turn — scheduler re-arms instead of colliding
-        ok = await discord_bot._replay_to_thread(channel_id, prompt, source="wake")
+        # A fired wake runs unattended. Append the end-of-turn protocol so this
+        # turn knows to finish with [TURN_COMPLETE] or schedule a fresh wake —
+        # otherwise check_wake_request auto-nudges it. (The nudge prompt already
+        # says this; the extra copy is harmless reinforcement.)
+        wake_prompt = prompt + config.UNATTENDED_TURN_PROTOCOL
+        ok = await discord_bot._replay_to_thread(channel_id, wake_prompt, source="wake")
         return "done" if ok else "drop"
 
     scheduler = Scheduler(
@@ -1249,6 +1254,10 @@ async def _do_cooldown_retry_locked(store, runner, inst, discord_bot, channel_id
     t_info = lookup[1] if lookup else None
     repo_name = lookup[0].repo_name if lookup else inst.repo_name
     ctx = discord_bot._ctx(channel_id, thread_info=t_info, repo_name=repo_name)
+    # Mark this as an unattended turn: nobody typed it, so lifecycle's
+    # end-of-turn protocol applies (finish with [TURN_COMPLETE] or schedule a
+    # wake, else get auto-nudged rather than silently stranding the thread).
+    ctx.source = "cooldown"
 
     # Wake the thread (cancel sleep, set active tag)
     discord_bot._cancel_sleep(channel_id)
@@ -1293,6 +1302,13 @@ async def _do_cooldown_retry_locked(store, runner, inst, discord_bot, channel_id
             "from the previous turn, finish the work and commit (with "
             "`git log -1 --oneline` to confirm) before saying you're done."
         )
+    else:
+        # Non-worktree retry: this turn runs unattended, so append the
+        # end-of-turn protocol (finish with [TURN_COMPLETE] or schedule a
+        # wake). Worktree retries are excluded — they can't self-wake and get
+        # the commit-focused note above instead; they're also excluded from the
+        # nudge path by the instance.branch gate in check_wake_request.
+        new_inst.prompt = (inst.prompt or "") + config.UNATTENDED_TURN_PROTOCOL
     store.update_instance(new_inst)
 
     # Clear cooldown on the original instance

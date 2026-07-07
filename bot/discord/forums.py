@@ -81,6 +81,12 @@ class ThreadInfo:
     # that doesn't (genuine completion or a plain reply). Caps a never-completing
     # poll loop at config.MAX_CONSEC_WAKES.
     wake_count: int = 0
+    # Unattended-turn nudge guard: consecutive auto-nudges sent to an unattended
+    # turn (cooldown retry / self-wake fire) that dead-ended without a wake or a
+    # [TURN_COMPLETE] marker. check_wake_request bumps it per nudge and resets on
+    # any turn that ends cleanly (marker present, a wake scheduled, or a human
+    # reply). Caps the re-nudge loop at config.MAX_CONSEC_NUDGES.
+    nudge_count: int = 0
 
     def to_dict(self) -> dict:
         d = {
@@ -115,6 +121,8 @@ class ThreadInfo:
             d["color_slot"] = self.color_slot
         if self.wake_count:
             d["wake_count"] = self.wake_count
+        if self.nudge_count:
+            d["nudge_count"] = self.nudge_count
         return d
 
     @classmethod
@@ -138,6 +146,7 @@ class ThreadInfo:
             spawn_wave_count=data.get("spawn_wave_count", 0),
             color_slot=data.get("color_slot"),
             wake_count=data.get("wake_count", 0),
+            nudge_count=data.get("nudge_count", 0),
         )
 
 

@@ -1178,6 +1178,39 @@ def claims_self_wake(text: str) -> bool:
     return bool(config.WAKE_CLAIM_RE.search(cleaned))
 
 
+def has_turn_complete_marker(text: str) -> bool:
+    """True if the turn emitted the ``[TURN_COMPLETE]`` marker as a real signal.
+
+    An unattended turn (cooldown retry / self-wake fire) ends this way to say
+    "done or waiting on the user — don't nudge me". Fenced code blocks, inline
+    code spans, and quoted phrases are stripped first (same camouflage guard as
+    the wake-directive and claim scans) so quoting the instruction back — as the
+    guidance itself, or a report discussing this feature — doesn't false-signal
+    completion and silence a genuine nudge.
+    """
+    if not text:
+        return False
+    cleaned = _CLAIM_META_RE.sub(" ", text)
+    return config.TURN_COMPLETE_SENTINEL in cleaned
+
+
+# Injected as the resume prompt when an unattended turn dead-ends (no wake, no
+# [TURN_COMPLETE]). Fired through the ordinary wake path (add_wake → scheduler →
+# on_self_wake → replay), so the re-invoked turn is itself unattended and the
+# nudge loop stays capped by nudge_count.
+_NUDGE_PROMPT = (
+    "SYSTEM NUDGE: your previous unattended turn ended with a plan but took no "
+    "action and left nothing to resume the thread — no work committed, no "
+    "[BOT_CMD: /wake] scheduled, and no [TURN_COMPLETE] marker. Nobody is "
+    "watching this thread, so a 'next I'll...' plan just strands it. Do NOT "
+    "merely restate the plan. Pick ONE and act on it THIS turn: (a) do the "
+    "pending work now, finish it, then end with [TURN_COMPLETE]; (b) if you are "
+    "genuinely blocked waiting on a long external job, schedule a self-wake with "
+    "a [BOT_CMD: /wake] directive; or (c) if the work is actually already done "
+    "or you truly need the user, end with [TURN_COMPLETE]."
+)
+
+
 # --- [BOT_CMD: /wake] directive (primary self-wake channel) ----------------
 # A finished turn schedules a self-wake by emitting this directive in its
 # output, parsed here post-turn — the same proven mechanism as [BOT_CMD: /spawn]
@@ -1296,6 +1329,58 @@ async def check_wake_request(
             except Exception:
                 log.debug("reset_wake_count raised", exc_info=True)
 
+    def _reset_nudge() -> None:
+        if ctx.reset_nudge_count is not None:
+            try:
+                ctx.reset_nudge_count()
+            except Exception:
+                log.debug("reset_nudge_count raised", exc_info=True)
+
+    async def _nudge_or_stop() -> None:
+        # An unattended turn (cooldown retry / self-wake fire) dead-ended: no
+        # wake scheduled AND no [TURN_COMPLETE] marker. Left alone the thread
+        # silently dies (the q-12314 dead-end). Re-invoke it once (capped) with
+        # an explicit instruction to finish, wake, or signal completion.
+        if instance.warning_pinned:
+            # Context-exhausted: re-invoking only degrades it. Hand to the user.
+            _reset()
+            _reset_nudge()
+            await _notice(
+                "⚠️ This unattended turn stopped mid-plan without finishing or "
+                "scheduling a follow-up, and the session is out of context — "
+                "start a fresh thread to carry it on."
+            )
+            return
+        count = ctx.bump_nudge_count() if ctx.bump_nudge_count is not None else 1
+        if count > config.MAX_CONSEC_NUDGES:
+            _reset()
+            _reset_nudge()
+            await _notice(
+                f"⏸ Stopped after {config.MAX_CONSEC_NUDGES} nudges — this "
+                "unattended turn kept ending mid-plan without finishing or "
+                "scheduling a follow-up. Reply or tap a button to continue."
+            )
+            return
+        next_run_at = (
+            datetime.now(timezone.utc)
+            + timedelta(seconds=config.WAKE_MIN_DELAY_SECS)
+        ).isoformat()
+        ctx.store.add_wake(
+            prompt=_NUDGE_PROMPT,
+            channel_id=ctx.channel_id,
+            next_run_at=next_run_at,
+            repo_name=instance.repo_name or "",
+            repo_path=instance.repo_path or "",
+        )
+        log.info(
+            "Auto-nudge scheduled for unattended dead-end in thread %s "
+            "(nudge=%d)", ctx.channel_id, count,
+        )
+        await _notice(
+            "↻ That turn ended mid-plan with nothing to resume it — nudging "
+            "myself to finish it or hand off cleanly."
+        )
+
     async def _stop_capped() -> None:
         # Runaway cap hit: reset and tell the user we stopped (never a silent
         # stall — that's the whole failure this path guards against).
@@ -1330,16 +1415,28 @@ async def check_wake_request(
             data = parsed
 
     if data is None:
-        # No wake request — the turn ended without asking to poll (real
-        # completion or a plain human reply). Reset the runaway counter and
-        # hand back to the user. One contradiction is still worth SURFACING:
-        # the final message asserts it armed a self-wake (e.g. a malformed
-        # directive the parser rejected) yet nothing was scheduled. We only
-        # notify — this path NEVER schedules a wake. Heuristic auto-arming
-        # (first off watch-promises, then off wake-claims) kept firing on
-        # prose that merely discussed the feature; an explicit parsed
-        # directive is the sole scheduling channel now.
+        # No wake scheduled this turn. For an UNATTENDED turn (cooldown retry or
+        # self-wake fire) that ALSO omitted the [TURN_COMPLETE] marker, the
+        # thread would silently die with nothing to resume it — the exact
+        # q-12314 dead-end. Auto-nudge it once (capped) to force real work, a
+        # wake, or the marker. Build/worktree sessions are excluded: their dir
+        # may be merged/discarded by fire time, same gate as the wake path.
+        unattended = ctx.source in ("wake", "cooldown")
+        if (unattended and not instance.branch
+                and not has_turn_complete_marker(final_text)):
+            await _nudge_or_stop()
+            return
+        # Ended cleanly — an attended turn (real completion or a plain human
+        # reply), or an unattended turn that signalled [TURN_COMPLETE]. Reset
+        # both runaway counters and hand back to the user. One contradiction is
+        # still worth SURFACING: the final message asserts it armed a self-wake
+        # (e.g. a malformed directive the parser rejected) yet nothing was
+        # scheduled. We only notify — this path NEVER schedules a wake.
+        # Heuristic auto-arming (first off watch-promises, then off wake-claims)
+        # kept firing on prose that merely discussed the feature; an explicit
+        # parsed directive is the sole scheduling channel now.
         _reset()
+        _reset_nudge()
         if claims_self_wake(final_text):
             log.info(
                 "Wake claim without a parsed directive in thread %s — "
@@ -1351,6 +1448,11 @@ async def check_wake_request(
                 "scheduled. Reply or tap a button to continue.)"
             )
         return
+
+    # A real wake was requested — the turn made a genuine continue decision, so
+    # it's not a dead-end. Clear the nudge counter regardless of which sub-path
+    # below handles it.
+    _reset_nudge()
 
     if instance.branch:
         _reset()
