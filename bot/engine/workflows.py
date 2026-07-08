@@ -1239,6 +1239,16 @@ async def on_review_code(ctx: RequestContext, source_id: str, source_msg_id: str
         if not result:
             break
 
+        # Claude paused to ask the user a question. `needs_input` rides on a
+        # status=COMPLETED instance (see lifecycle finalize), so without this
+        # guard an "asked a question + edited a file" round reads as "changes
+        # made, review again": the loop resumes the waiting session and a later
+        # clean round overwrites `result`, dropping the question entirely.
+        # Return this instance so the chain guard pauses on needs_input.
+        # Mirrors the plan-review loop's guard.
+        if result.status != InstanceStatus.COMPLETED or result.needs_input:
+            break
+
         # Clean review (no code changes) — done
         if not (CODE_CHANGE_TOOLS & set(result.tools_used or [])):
             break
@@ -1347,17 +1357,26 @@ def _verify_why(inst: Instance) -> str | None:
 
 
 def _load_verify_policy(source_inst: Instance | None) -> str:
-    """Read verify_policy from .claude/test.json. Default: 'warn'."""
+    """Read verify_policy from .claude/test.json. Default: 'block_fail'.
+
+    Three-value model:
+      warn        — never halt; flag+advance on manual/crashed/fail (opt-in,
+                    for repos where autopilot should always push through).
+      block_fail  — DEFAULT. A reported `fail` (verify ran, feature is broken)
+                    halts the chain; `manual`/`crashed` (couldn't verify) still
+                    warn+advance so unconfigured repos aren't hard-stopped.
+      block       — strictest; halt on any of fail/manual/crashed.
+    """
     if not source_inst or not source_inst.repo_path:
-        return "warn"
+        return "block_fail"
     test_json = Path(source_inst.repo_path) / ".claude" / "test.json"
     if test_json.exists():
         try:
             cfg = json.loads(test_json.read_text(encoding="utf-8"))
-            return cfg.get("verify_policy", "warn")
+            return cfg.get("verify_policy", "block_fail")
         except Exception:
             pass
-    return "warn"
+    return "block_fail"
 
 
 async def on_verify(ctx: RequestContext, source_id: str, source_msg_id: str | None = None) -> Instance | None:
@@ -1366,16 +1385,19 @@ async def on_verify(ctx: RequestContext, source_id: str, source_msg_id: str | No
     Outcomes (`_verify_outcome`):
       pass    — break, chain advances
       skip    — break, chain advances (verify legitimately had nothing to run)
-      manual  — verification was impossible. Under `warn`, flag the instance
-                for manual check + advance (surfaced in the chain summary).
-                Under `block`, halt with needs_input (block opt-in exists to
-                refuse "I couldn't verify").
-      fail    — re-enter the fix-loop; after MAX_FIX_ROUNDS, flag under `warn`
-                or halt under `block`.
-      crashed — verify environment died (status != COMPLETED). Under `warn`,
-                post a notice in the thread + advance. Under `block`, halt.
+      manual  — verification was impossible ("couldn't verify"). Under `warn`
+                or `block_fail`, flag the instance for manual check + advance
+                (surfaced in the chain summary). Under `block`, halt with
+                needs_input.
+      fail    — verify ran and the feature is broken. Re-enter the fix-loop;
+                after MAX_FIX_ROUNDS, flag+advance under `warn`, else halt
+                (both `block_fail` and `block` halt so a broken feature never
+                merges to master).
+      crashed — verify environment died (status != COMPLETED). Under `warn` or
+                `block_fail`, post a notice in the thread + advance. Under
+                `block`, halt.
 
-    Respects verify_policy from .claude/test.json (default: "warn").
+    Respects verify_policy from .claude/test.json (default: "block_fail").
     """
     MAX_FIX_ROUNDS = 2
     current_source = source_id
@@ -1400,6 +1422,13 @@ async def on_verify(ctx: RequestContext, source_id: str, source_msg_id: str | No
         if not result:
             break
 
+        # Claude paused mid-verify to ask a question. `needs_input` rides on a
+        # COMPLETED instance, so _verify_outcome would misclassify it as `fail`
+        # and burn fix-loop rounds re-running a session that's actually waiting
+        # on the user. Return so the chain guard pauses on needs_input instead.
+        if result.needs_input:
+            break
+
         outcome = _verify_outcome(result)
 
         if outcome in ("pass", "skip"):
@@ -1407,7 +1436,9 @@ async def on_verify(ctx: RequestContext, source_id: str, source_msg_id: str | No
 
         if outcome == "manual":
             why = _verify_why(result) or "verification couldn't run automatically"
-            if verify_policy == "warn":
+            if verify_policy != "block":
+                # warn + block_fail: "couldn't verify" ≠ "verified broken",
+                # so flag for manual check and advance rather than hard-stop.
                 result.needs_manual_verification = True
                 result.manual_verify_reason = why
                 ctx.store.update_instance(result)
@@ -1424,7 +1455,8 @@ async def on_verify(ctx: RequestContext, source_id: str, source_msg_id: str | No
 
         if outcome == "crashed":
             why = "verify environment crashed — manual check needed"
-            if verify_policy == "warn":
+            if verify_policy != "block":
+                # warn + block_fail: environment death ≠ verified broken.
                 # status != COMPLETED so the manual-verify flag can't ride
                 # on this instance — a thread notice is the only signal.
                 try:
@@ -1464,7 +1496,8 @@ async def on_verify(ctx: RequestContext, source_id: str, source_msg_id: str | No
                     silent=True,
                 )
             else:
-                # block policy — halt the chain via needs_input
+                # block_fail / block — a broken feature must not merge to
+                # master. Halt the chain via needs_input.
                 result.needs_input = True
                 ctx.store.update_instance(result)
             break

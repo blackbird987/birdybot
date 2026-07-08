@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Autopilot no longer swallows a question asked mid-loop.** When a Claude turn stops to ask the user something, the runner sets `needs_input=True` but still reports `status=COMPLETED` — so the code-review loop (`on_review_code`) and the verify fix-loop (`on_verify`) couldn't distinguish "done" from "waiting on you". The code-review loop read an "asked a question + edited a file" round as "changes made, review again", resumed the waiting session, and a later clean round overwrote the result — dropping the question entirely (worst case: up to 4 wasted build spawns). The verify loop misclassified the same state as `fail` and burned fix rounds. Both now short-circuit on `needs_input` (and review-code also on non-COMPLETED status), returning the paused instance so the chain guard halts on it — mirroring the plan-review loop that already did this.
+
+### Changed
+- **A failed verify now blocks the merge by default.** `verify_policy` in `.claude/test.json` gains a three-value model with a new default `block_fail`: a reported `fail` (verify ran, feature is broken) halts the autopilot chain instead of merging to master and posting a quiet FYI afterward, while `manual`/`crashed` ("couldn't verify" — not "verified broken") still warn-and-advance so unconfigured repos aren't hard-stopped. Prior default was `warn` (never halted). Opt back into the old push-through behavior per-repo with `"verify_policy": "warn"`; `"block"` remains the strictest (halts on any of fail/manual/crashed).
+
 ## v0.99.1 — Full decorative-emoji strip (2026-07-07)
 
 ### Changed
