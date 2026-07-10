@@ -160,7 +160,10 @@ def main() -> None:
         )
     except (RuntimeError, OSError) as e:
         sys.exit(f"User lookup failed: {e}")
-    user = user_resp["data"]
+    user = user_resp.get("data")
+    if not user:
+        # v2 returns 200 + an errors array for unknown usernames
+        sys.exit(f"User @{args.handle} not found: {user_resp.get('errors')}")
     print(f"@{args.handle} -> id {user['id']}, "
           f"{user.get('public_metrics', {}).get('tweet_count')} total tweets")
 
