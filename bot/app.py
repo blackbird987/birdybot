@@ -1206,15 +1206,18 @@ async def _autonomy_ship_sweep(store, discord_bot) -> None:
         # A per-build veto already owns this session — let Phase 2 handle it.
         if store.get_scheduled_merge_by_session(t.session_id):
             continue
-        # Grace window: skip work the user may still be touching.
+        # Grace window: only ship work we can CONFIRM is aged past the grace
+        # period. If the timestamp is missing or unparseable, fail safe (skip)
+        # rather than auto-deploying work of unknown age.
         stamp = (t.inst.finished_at or t.inst.created_at) if t.inst else None
+        age_min: float | None = None
         if stamp:
             try:
                 age_min = (now - dt.fromisoformat(stamp)).total_seconds() / 60
             except (ValueError, TypeError):
                 age_min = None
-            if age_min is not None and age_min < policy["ship_grace_minutes"]:
-                continue
+        if age_min is None or age_min < policy["ship_grace_minutes"]:
+            continue
         ship_ids.append(t.thread_id)
 
     if not ship_ids:
