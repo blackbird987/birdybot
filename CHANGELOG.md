@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.99.2 — X voice corpus fetcher; autopilot question-pause and verify gating (2026-07-10)
+
 ### Added
 - **`scripts/fetch_x_corpus.py` — X/Twitter writing-style corpus fetcher.** Pulls a user's timeline (default @Daab1rD, 800 tweets, retweets excluded) via the Twitter API v2, reusing the DegenAI project's paid Basic-tier credentials read at runtime from its gitignored settings.json — no secrets copied into this repo. Writes `data/x_corpus/` (raw JSONL + cleaned corpus.md with per-tweet engagement stats + meta.json). Feeds the global `~/.claude/skills/x-voice` skill so any session can ghostwrite tweets in the user's authentic voice; re-run + re-distill to refresh.
 
