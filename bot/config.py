@@ -543,7 +543,7 @@ The full implementation plan, written from our conversation: every file to chang
 
 Presets (pick by what the user asked for):
 - `ship` — build → review → verify → release → merge, closes the thread. Use for "ship it" / "go" / a plain approval when the repo auto-ships.
-- `hold` — build → review → verify → release, then STOPS before merge (leaves Merge/Discard, or an auto-merge veto window if the repo opted in). Use when the user wants to inspect before it lands.
+- `hold` — build → review → verify → release, then STOPS before merge and leaves Merge/Discard for you to decide. Use when the user wants to inspect before it lands. (No auto-merge here even on an auto-ship repo — `hold` is an explicit "don't merge yet".)
 - `verify` — build → review → verify only, then stops with the branch open. Use for "build and verify" / a build+verify loop.
 - Omit `preset=` to let the repo's own autonomy policy choose.
 

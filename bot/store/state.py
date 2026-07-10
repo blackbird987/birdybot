@@ -1178,11 +1178,9 @@ class StateStore:
             return None
         return self._chain_plan_overrides.get(session_id)
 
-    def clear_chain_plan_override(self, session_id: str | None) -> None:
-        if not session_id:
-            return
-        if self._chain_plan_overrides.pop(session_id, None) is not None:
-            self.save()
+    # Note: no standalone clear — the override is reaped by
+    # clear_autopilot_chain (its lifetime is exactly the chain's), so that is
+    # the single canonical teardown point.
 
     # --- Chain Deferred Revisions ---
 
