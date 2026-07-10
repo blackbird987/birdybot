@@ -17,6 +17,7 @@ read cap that the DegenAI bot also draws from. Default of 800 = 8% of a month.
 """
 
 import argparse
+import html
 import json
 import sys
 import time
@@ -45,7 +46,7 @@ def load_bearer(settings_path: Path) -> str:
 def api_get(path: str, params: dict, bearer: str) -> dict:
     url = f"{API}{path}?{urllib.parse.urlencode(params)}"
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {bearer}"})
-    for attempt in range(3):
+    for _ in range(3):
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 return json.load(resp)
@@ -58,8 +59,8 @@ def api_get(path: str, params: dict, bearer: str) -> dict:
                 time.sleep(wait)
                 continue
             body = e.read().decode("utf-8", errors="replace")[:500]
-            sys.exit(f"API error {e.code} on {path}: {body}")
-    sys.exit(f"Gave up on {path} after repeated rate limits")
+            raise RuntimeError(f"API error {e.code} on {path}: {body}") from e
+    raise RuntimeError(f"Gave up on {path} after repeated rate limits")
 
 
 def tweet_kind(tweet: dict) -> str:
@@ -82,7 +83,12 @@ def fetch_timeline(user_id: str, bearer: str, max_tweets: int) -> list[dict]:
         }
         if pagination_token:
             params["pagination_token"] = pagination_token
-        data = api_get(f"/users/{user_id}/tweets", params, bearer)
+        try:
+            data = api_get(f"/users/{user_id}/tweets", params, bearer)
+        except (RuntimeError, urllib.error.URLError) as e:
+            # Fetched tweets cost paid API budget — keep partial results.
+            print(f"Fetch aborted early ({e}); keeping {len(tweets)} tweets")
+            break
         page = data.get("data", [])
         tweets.extend(page)
         print(f"  fetched {len(tweets)} tweets...")
@@ -116,7 +122,7 @@ def write_outputs(out_dir: Path, handle: str, user: dict, tweets: list[dict]) ->
             f"{pm.get('like_count', 0)}L/{pm.get('reply_count', 0)}R/"
             f"{pm.get('retweet_count', 0)}RT]"
         )
-        lines.append(t["text"])
+        lines.append(html.unescape(t["text"]))
         lines.append("")
     (out_dir / "corpus.md").write_text("\n".join(lines), encoding="utf-8")
 
@@ -143,16 +149,21 @@ def main() -> None:
     args = ap.parse_args()
 
     bearer = load_bearer(Path(args.settings))
-    user_resp = api_get(
-        f"/users/by/username/{args.handle}",
-        {"user.fields": "public_metrics"},
-        bearer,
-    )
+    try:
+        user_resp = api_get(
+            f"/users/by/username/{args.handle}",
+            {"user.fields": "public_metrics"},
+            bearer,
+        )
+    except (RuntimeError, urllib.error.URLError) as e:
+        sys.exit(f"User lookup failed: {e}")
     user = user_resp["data"]
     print(f"@{args.handle} -> id {user['id']}, "
           f"{user.get('public_metrics', {}).get('tweet_count')} total tweets")
 
     tweets = fetch_timeline(user["id"], bearer, args.max)
+    if not tweets:
+        sys.exit("No tweets fetched — nothing written")
     write_outputs(Path(args.out), args.handle, user, tweets)
 
 
