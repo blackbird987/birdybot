@@ -36,7 +36,10 @@ PAGE_SIZE = 100
 
 
 def load_bearer(settings_path: Path) -> str:
-    settings = json.loads(settings_path.read_text(encoding="utf-8-sig"))
+    try:
+        settings = json.loads(settings_path.read_text(encoding="utf-8-sig"))
+    except FileNotFoundError:
+        sys.exit(f"Settings file not found: {settings_path}")
     token = settings.get("Twitter", {}).get("TwitterBearerToken")
     if not token:
         sys.exit(f"No TwitterBearerToken found in {settings_path}")
@@ -85,7 +88,7 @@ def fetch_timeline(user_id: str, bearer: str, max_tweets: int) -> list[dict]:
             params["pagination_token"] = pagination_token
         try:
             data = api_get(f"/users/{user_id}/tweets", params, bearer)
-        except (RuntimeError, urllib.error.URLError) as e:
+        except (RuntimeError, OSError) as e:  # OSError: URLError + raw read timeouts
             # Fetched tweets cost paid API budget — keep partial results.
             print(f"Fetch aborted early ({e}); keeping {len(tweets)} tweets")
             break
@@ -155,7 +158,7 @@ def main() -> None:
             {"user.fields": "public_metrics"},
             bearer,
         )
-    except (RuntimeError, urllib.error.URLError) as e:
+    except (RuntimeError, OSError) as e:
         sys.exit(f"User lookup failed: {e}")
     user = user_resp["data"]
     print(f"@{args.handle} -> id {user['id']}, "
