@@ -307,6 +307,16 @@ async def run_instance(
             silent=silent, result=result,
         )
 
+        # Auto-merge veto: a completed build branch parked on Merge/Discard,
+        # under a repo that opted into merge/ship autonomy, gets a countdown to
+        # auto-merge instead of waiting on a manual tap. Never for chain steps
+        # (the chain owns its own merge) or when the agent paused with a
+        # question.
+        try:
+            await _maybe_schedule_auto_merge(ctx, inst, result)
+        except Exception:
+            log.debug("auto-merge veto scheduling failed for %s", inst.id, exc_info=True)
+
         # Orchestrator: if this thread was spawned by /spawn, post a
         # COMPLETED/FAILED callback back into the parent thread with a
         # Resume button. Only fires on terminal-success/failure states —
@@ -339,7 +349,7 @@ async def run_instance(
         # commands imports lifecycle at module level.
         if result.result_text and not result.is_error:
             from bot.engine.commands import _execute_bot_commands
-            await _execute_bot_commands(ctx, result.result_text)
+            await _execute_bot_commands(ctx, result.result_text, source_inst=inst)
 
         # Check reboot request BEFORE end_task so it's queued when end_task
         # checks for pending reboots on idle.  Safe because check_reboot_request
@@ -820,6 +830,69 @@ async def _try_apply_near_limit(
         await set_thread_near_limit_tag(bot, ctx.channel_id, apply)
     except Exception:
         log.debug("near-limit tag update failed for %s", inst.id, exc_info=True)
+
+
+# Origins that represent a parked build branch a user would otherwise have to
+# Merge by hand: manual Build, a build+verify loop's final Verify, a plain
+# message-driven build (DIRECT), or a Retry of one. Chain steps are excluded
+# separately (has_autopilot_chain).
+_AUTO_MERGE_ORIGINS = {
+    InstanceOrigin.BUILD,
+    InstanceOrigin.VERIFY,
+    InstanceOrigin.DIRECT,
+    InstanceOrigin.RETRY,
+}
+
+
+async def _maybe_schedule_auto_merge(
+    ctx: RequestContext, inst: Instance, result: RunResult | None,
+) -> None:
+    """Schedule an auto-merge veto for a parked build branch (opt-in repos).
+
+    Fires only when: the run completed, left a build branch, isn't part of an
+    active chain, the agent didn't pause with a question, and the repo's
+    ``.claude/workflow.json`` autonomy is ``merge`` or ``ship``. Posts a
+    "merging in N min — Hold" notice; the autonomy loop in app.py performs the
+    actual merge at the deadline unless Held. Deduped per session so a
+    build→verify sequence doesn't stack two countdowns.
+    """
+    if inst.status != InstanceStatus.COMPLETED or not inst.branch:
+        return
+    if inst.origin not in _AUTO_MERGE_ORIGINS:
+        return
+    if result is not None and result.needs_input:
+        return
+    if ctx.store.get_autopilot_chain(inst.session_id):
+        return
+    # Dedup: one countdown per session.
+    if ctx.store.get_scheduled_merge_by_session(inst.session_id):
+        return
+
+    from bot.engine.workflows import load_workflow_policy
+    policy = load_workflow_policy(inst.repo_path)
+    if policy["autonomy"] not in ("merge", "ship"):
+        return
+
+    veto = policy["merge_veto_minutes"]
+    merge_at = (datetime.now(timezone.utc) + timedelta(minutes=veto)).isoformat()
+    ctx.store.set_scheduled_merge(
+        inst.id,
+        session_id=inst.session_id,
+        channel_id=ctx.channel_id,
+        repo_name=inst.repo_name,
+        branch=inst.branch,
+        merge_at=merge_at,
+    )
+    try:
+        await ctx.messenger.send_text(
+            ctx.channel_id,
+            f"Auto-merging `{inst.branch}` in {veto} min — tap **Hold** to keep "
+            f"it open for review. (This repo is set to auto-{policy['autonomy']}.)",
+            buttons=[[ButtonSpec("Hold", f"hold_merge:{inst.id}")]],
+            silent=True,
+        )
+    except Exception:
+        log.debug("Failed to post auto-merge notice for %s", inst.id, exc_info=True)
 
 
 async def send_result(

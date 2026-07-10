@@ -2152,6 +2152,9 @@ class ClaudeRunner:
             parts.append(config.SPAWN_CAPPED_NOTICE)
         else:
             parts.append(config.SPAWN_CONTEXT)
+        # /chain handoff — available at any depth (a spawned thread can still
+        # ship its own work), so it's not gated behind the spawn depth check.
+        parts.append(config.CHAIN_CONTEXT)
         parts.append(config.BOT_CONTEXT_TAIL)
 
         # Universal working context — workflow, Discord UI, branch model, design principles

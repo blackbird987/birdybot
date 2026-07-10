@@ -51,6 +51,17 @@ class StateStore:
         # originating identity rather than defaulting back to "Autopilot".
         self._chain_kwargs: dict[str, dict] = {}  # session_id -> {label, silent_close}
         self._pending_merges: dict[str, dict] = {}  # instance_id -> pending merge metadata
+        # Auto-merge veto window: instance_id -> {channel_id, session_id,
+        # repo_name, branch, merge_at, held, created_at}. Distinct from
+        # _pending_merges (which is FAILED-merge recovery) — this is a
+        # SUCCESS-path countdown: a completed build branch scheduled to
+        # auto-merge unless the user taps Hold before merge_at.
+        self._scheduled_merges: dict[str, dict] = {}
+        # Conversational-chain plan handoff: session_id -> plan text the agent
+        # wrote from the conversation and handed to a /chain directive. Read as
+        # the highest-priority source by _extract_latest_plan_text; cleared when
+        # the chain finishes (queue empties).
+        self._chain_plan_overrides: dict[str, str] = {}
         self._chain_deferred: dict[str, list[str]] = {}  # session_id -> deferred revisions
         self._chain_phases: dict[str, dict] = {}  # session_id -> ChainPhaseState dict
         self._chain_entry_sha: dict[str, str] = {}  # session_id -> HEAD sha snapshot
@@ -120,6 +131,8 @@ class StateStore:
             if unmetered:
                 self.mark_dirty()
             self._pending_merges = data.get("pending_merges", {})
+            self._scheduled_merges = data.get("scheduled_merges", {})
+            self._chain_plan_overrides = data.get("chain_plan_overrides", {})
             self._chain_deferred = data.get("chain_deferred", {})
             self._chain_phases = data.get("chain_phases", {})
             self._chain_entry_sha = data.get("chain_entry_sha", {})
@@ -200,6 +213,8 @@ class StateStore:
             "autopilot_chain_meta": self._autopilot_chain_meta,
             "chain_kwargs": self._chain_kwargs,
             "pending_merges": self._pending_merges,
+            "scheduled_merges": self._scheduled_merges,
+            "chain_plan_overrides": self._chain_plan_overrides,
             "chain_deferred": self._chain_deferred,
             "chain_phases": self._chain_phases,
             "chain_entry_sha": self._chain_entry_sha,
@@ -1068,6 +1083,97 @@ class StateStore:
         if not instance_id:
             return
         if self._pending_merges.pop(instance_id, None) is not None:
+            self.save()
+
+    # --- Scheduled Merges (auto-merge veto window) ---
+
+    def set_scheduled_merge(
+        self,
+        instance_id: str,
+        *,
+        session_id: str | None,
+        channel_id: str,
+        repo_name: str | None,
+        branch: str | None,
+        merge_at: str,
+    ) -> None:
+        """Schedule a completed build branch to auto-merge at *merge_at* (ISO).
+
+        The autonomy loop in app.py fires due, un-held entries through
+        ``_finalize_merge`` — the same path the Merge button uses. Persisted so
+        a reboot mid-window resumes the countdown instead of dropping it.
+        """
+        if not instance_id:
+            return
+        self._scheduled_merges[instance_id] = {
+            "session_id": session_id or "",
+            "channel_id": channel_id,
+            "repo_name": repo_name or "",
+            "branch": branch or "",
+            "merge_at": merge_at,
+            "held": False,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self.save()
+
+    def get_scheduled_merge(self, instance_id: str) -> dict | None:
+        return self._scheduled_merges.get(instance_id)
+
+    def get_scheduled_merge_by_session(
+        self, session_id: str | None,
+    ) -> tuple[str, dict] | None:
+        """Return (instance_id, meta) for a session's scheduled merge, or None."""
+        if not session_id:
+            return None
+        for iid, meta in self._scheduled_merges.items():
+            if meta.get("session_id") == session_id:
+                return iid, meta
+        return None
+
+    def hold_scheduled_merge(self, instance_id: str) -> bool:
+        """Mark a scheduled merge as held (user vetoed). Returns True if found."""
+        meta = self._scheduled_merges.get(instance_id)
+        if not meta:
+            return False
+        meta["held"] = True
+        self.save()
+        return True
+
+    def list_due_scheduled_merges(self, now_iso: str) -> list[tuple[str, dict]]:
+        """Return (instance_id, meta) for un-held merges whose time has come."""
+        due: list[tuple[str, dict]] = []
+        for iid, meta in list(self._scheduled_merges.items()):
+            if meta.get("held"):
+                continue
+            merge_at = meta.get("merge_at")
+            if merge_at and now_iso >= merge_at:
+                due.append((iid, meta))
+        return due
+
+    def clear_scheduled_merge(self, instance_id: str) -> None:
+        if not instance_id:
+            return
+        if self._scheduled_merges.pop(instance_id, None) is not None:
+            self.save()
+
+    # --- Conversational-chain plan handoff ---
+
+    def set_chain_plan_override(self, session_id: str | None, plan_text: str) -> None:
+        """Store the plan a /chain directive handed off from the conversation."""
+        if not session_id or not plan_text:
+            return
+        self._chain_plan_overrides[session_id] = plan_text
+        self.save()
+
+    def get_chain_plan_override(self, session_id: str | None) -> str | None:
+        if not session_id:
+            return None
+        return self._chain_plan_overrides.get(session_id)
+
+    def clear_chain_plan_override(self, session_id: str | None) -> None:
+        if not session_id:
+            return
+        if self._chain_plan_overrides.pop(session_id, None) is not None:
             self.save()
 
     # --- Chain Deferred Revisions ---

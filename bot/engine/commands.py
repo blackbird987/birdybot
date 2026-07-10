@@ -164,8 +164,16 @@ _DANGEROUS_PATH_CHARS = re.compile(r'[;&|`$(){}!<>]')
 _QUOTED_LINE_PREFIX = re.compile(r'^\s*(?:>|`|```|#{1,3}\s)')
 
 
-async def _execute_bot_commands(ctx: RequestContext, result_text: str) -> None:
-    """Scan final assistant output for [BOT_CMD: /repo ...] and /spawn directives."""
+async def _execute_bot_commands(
+    ctx: RequestContext, result_text: str,
+    source_inst: "Instance | None" = None,
+) -> None:
+    """Scan final assistant output for [BOT_CMD: /repo], /spawn, /chain directives.
+
+    ``source_inst`` is the instance that produced ``result_text`` — required
+    for the /chain directive (it launches a chain rooted on that instance's
+    session). None disables /chain handling (callers with no instance context).
+    """
     if not result_text:
         return
     for m in _BOT_CMD_RE.finditer(result_text):
@@ -251,6 +259,147 @@ async def _execute_bot_commands(ctx: RequestContext, result_text: str) -> None:
                 "remaining directives in this response",
             )
             break
+
+    # /chain — assistant-issued handoff into the build→ship chain, carrying a
+    # plan the agent wrote from the conversation. Only one per response.
+    if source_inst is not None:
+        await _handle_chain_directive(ctx, result_text, source_inst)
+
+
+# --- /chain directive (Tier-2 BOT_CMD — assistant-issued build→ship handoff) ---
+
+# preset= is optional; body is a ~~~plan ... ~~~ fenced block (tilde fences,
+# same rationale as /spawn). One chain per response.
+_CHAIN_DIRECTIVE_RE = re.compile(r'\[BOT_CMD:\s*/chain(?:\s+(.+?))?\]')
+_CHAIN_BODY_RE = re.compile(r'~~~plan\s*\n(.*?)\n~~~', re.DOTALL)
+_CHAIN_ALLOWED_PRESETS = {"ship", "hold", "verify"}
+# Plan body cap — same 32 KiB ceiling as /spawn bodies.
+_CHAIN_PLAN_MAX_BYTES = 32 * 1024
+
+
+def _parse_chain_preset(args_str: str) -> str | None:
+    """Extract a valid preset from a /chain directive's args, or None.
+
+    Empty/absent args → None (means "use the repo's autonomy policy default,
+    falling back to ship"). An explicit but invalid preset also returns None
+    with a warning so a typo degrades to the default rather than silently
+    doing nothing.
+    """
+    args_str = (args_str or "").strip()
+    if not args_str:
+        return None
+    m = _SPAWN_KV_RE.search(args_str)
+    if m:
+        key = m.group(1)
+        val = m.group(2) or m.group(3) or m.group(4) or ""
+        if key == "preset" and val in _CHAIN_ALLOWED_PRESETS:
+            return val
+    # bare "ship"/"hold"/"verify" without preset= is also accepted
+    token = args_str.split()[0]
+    if token in _CHAIN_ALLOWED_PRESETS:
+        return token
+    log.warning("BOT_CMD /chain — unrecognized preset args: %r", args_str)
+    return None
+
+
+def _extract_chain_directive(result_text: str) -> tuple[str | None, str] | None:
+    """Find the first REAL (unquoted) /chain directive + its ~~~plan body.
+
+    Returns ``(preset, plan_body)`` or None if there's no usable directive.
+    ``preset`` may be None (→ policy default). Directives on quoted/code/heading
+    lines are skipped (same guard as /spawn and /wake).
+    """
+    for m in _CHAIN_DIRECTIVE_RE.finditer(result_text):
+        line_start = result_text.rfind('\n', 0, m.start()) + 1
+        if _QUOTED_LINE_PREFIX.match(result_text[line_start:m.start()]):
+            log.debug("BOT_CMD /chain skipped — inside quoted content")
+            continue
+        preset = _parse_chain_preset(m.group(1) or "")
+        body_m = _CHAIN_BODY_RE.search(result_text, m.end())
+        body = body_m.group(1).strip() if body_m else ""
+        if len(body.encode("utf-8", "ignore")) > _CHAIN_PLAN_MAX_BYTES:
+            body = body.encode("utf-8", "ignore")[:_CHAIN_PLAN_MAX_BYTES].decode(
+                "utf-8", "ignore",
+            )
+        return preset, body
+    return None
+
+
+async def _handle_chain_directive(
+    ctx: RequestContext, result_text: str, source_inst: "Instance",
+) -> None:
+    """Launch a build→ship chain from a /chain directive.
+
+    Guards: needs a session; refuses if a chain is already active on this
+    session (the paused/running chain owns the thread). Stores the plan body
+    as the session's chain-plan override so the build step injects it, then
+    dispatches the chain in a detached task that acquires the channel lock
+    (mirrors app._do_cooldown_retry — the launching turn finalizes normally,
+    then the chain picks up the lock). Never blocks the finalize path.
+    """
+    parsed = _extract_chain_directive(result_text)
+    if parsed is None:
+        return
+    preset, plan_body = parsed
+
+    session_id = source_inst.session_id
+    if not session_id:
+        log.warning("BOT_CMD /chain — no session_id on source instance; ignoring")
+        return
+
+    if ctx.store.get_autopilot_chain(session_id):
+        try:
+            await ctx.messenger.send_text(
+                ctx.channel_id,
+                "A chain is already running on this thread — ignoring the "
+                "new /chain directive. Let it finish or resolve the pause first.",
+                silent=True,
+            )
+        except Exception:
+            pass
+        return
+
+    # Resolve preset: explicit wins; else the repo's autonomy policy picks a
+    # sensible default (ship repos → ship, else hold), falling back to ship.
+    if preset is None:
+        from bot.engine.workflows import load_workflow_policy
+        policy = load_workflow_policy(source_inst.repo_path)
+        preset = "ship" if policy["autonomy"] in ("merge", "ship") else "hold"
+
+    if plan_body:
+        ctx.store.set_chain_plan_override(session_id, plan_body)
+
+    log.info(
+        "BOT_CMD /chain — launching preset=%s session=%s (plan %d chars)",
+        preset, session_id, len(plan_body),
+    )
+
+    async def _deferred_chain() -> None:
+        from bot.engine import workflows
+        lock = _get_channel_lock(ctx.channel_id)
+        async with lock:
+            try:
+                await workflows.on_conversational_chain(
+                    ctx, source_inst.id, preset,
+                )
+            except Exception:
+                log.exception(
+                    "Conversational chain failed for session %s", session_id,
+                )
+
+    try:
+        await ctx.messenger.send_text(
+            ctx.channel_id,
+            f"Starting **{preset}** chain from our plan — I'll build, review, "
+            f"verify"
+            + (", release and merge automatically." if preset == "ship"
+               else " and release." if preset == "hold"
+               else "."),
+            silent=True,
+        )
+    except Exception:
+        pass
+    asyncio.create_task(_deferred_chain())
 
 
 # --- /spawn directive (Tier-2 BOT_CMD — assistant-issued session handoff) ---
@@ -1100,7 +1249,7 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
 
         # Tier 2: scan Claude's response for [BOT_CMD: /repo ...] directives
         if result.result_text and not result.is_error:
-            await _execute_bot_commands(ctx, result.result_text)
+            await _execute_bot_commands(ctx, result.result_text, source_inst=inst)
 
         await budget_warning(ctx)
 

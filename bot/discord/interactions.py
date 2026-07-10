@@ -360,6 +360,27 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
             await interaction.followup.send("No pending auto-retry.", ephemeral=True)
         return
 
+    # --- Hold an auto-merge veto (lightweight, no channel lock needed) ---
+    if action == "hold_merge":
+        held = bot._store.hold_scheduled_merge(instance_id)
+        if held:
+            try:
+                await interaction.message.edit(
+                    content="Auto-merge held — merge manually with the Merge "
+                    "button or `/merge` when you're ready.",
+                    view=None,
+                )
+            except Exception:
+                await interaction.followup.send(
+                    "Auto-merge held.", ephemeral=True,
+                )
+        else:
+            await interaction.followup.send(
+                "No pending auto-merge to hold (already merged or cancelled).",
+                ephemeral=True,
+            )
+        return
+
     # --- Stop all running instances for a repo (owner-only) ---
     if action == "stop_all":
         await _handle_stop_all(bot, interaction, instance_id, btn_access)

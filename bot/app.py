@@ -756,10 +756,50 @@ async def run() -> None:
             except Exception:
                 log.exception("Cooldown loop error")
 
+    # Autonomy loop — fires due auto-merge vetoes (Phase 2) and sweeps
+    # ship-policy stragglers (Phase 3). Both are no-ops unless a repo opted
+    # into merge/ship autonomy via .claude/workflow.json.
+    async def autonomy_loop():
+        from datetime import datetime as dt, timezone as tz_mod
+        if not discord_bot:
+            return
+        if not await discord_bot._wait_for_ready("autonomy_loop"):
+            return
+        sweep_running = {"v": False}
+        ticks = 0
+        while True:
+            await asyncio.sleep(60)
+            try:
+                store.reload_if_changed()
+                now_iso = dt.now(tz_mod.utc).isoformat()
+                for iid, meta in store.list_due_scheduled_merges(now_iso):
+                    try:
+                        await _fire_scheduled_merge(store, runner, discord_bot, iid, meta)
+                    except Exception:
+                        log.exception("Scheduled merge fire failed for %s", iid)
+                # Ship sweep every ~5 min, guarded against overlap (a fleet
+                # ship can run for minutes and may self-deploy/reboot).
+                ticks += 1
+                if ticks % 5 == 0 and not sweep_running["v"]:
+                    sweep_running["v"] = True
+
+                    async def _sweep():
+                        try:
+                            await _autonomy_ship_sweep(store, discord_bot)
+                        except Exception:
+                            log.exception("Autonomy ship sweep failed")
+                        finally:
+                            sweep_running["v"] = False
+
+                    asyncio.create_task(_sweep())
+            except Exception:
+                log.exception("Autonomy loop error")
+
     # Start background tasks (store refs to prevent GC)
     _bg_tasks = [
         asyncio.create_task(auto_save_loop()),
         asyncio.create_task(cooldown_loop()),
+        asyncio.create_task(autonomy_loop()),
     ]
     if config.AUTO_UPDATE:
         _bg_tasks.append(asyncio.create_task(
@@ -1054,6 +1094,117 @@ def _find_last_completed_instance(store, session_id: str):
         if inst.session_id == session_id and inst.status == InstanceStatus.COMPLETED:
             return inst
     return None
+
+
+async def _fire_scheduled_merge(store, runner, discord_bot, iid: str, meta: dict) -> None:
+    """Perform one due auto-merge veto: merge the branch like a Merge tap.
+
+    Re-validates before merging (instance/branch still present, no chain took
+    over, session not active again) and drops the entry if the state is stale.
+    Uses ``_finalize_merge`` — the exact path the Merge button and autopilot
+    use, so tag/deploy/close behavior is identical. Always clears the
+    scheduled-merge record afterward so a stuck entry can't re-fire forever.
+    """
+    from bot.engine import workflows
+    from bot.engine.commands import _get_channel_lock
+
+    channel_id = meta.get("channel_id")
+    session_id = meta.get("session_id") or None
+    inst = store.get_instance(iid)
+
+    if inst is None or not inst.branch or not inst.original_branch or not channel_id:
+        store.clear_scheduled_merge(iid)
+        return
+    # A chain that started after scheduling owns the merge now; and a
+    # re-activated session means the user is back working — don't merge under
+    # either. Leave the branch for manual/chain handling.
+    if store.get_autopilot_chain(session_id) or runner.is_session_active(session_id):
+        store.clear_scheduled_merge(iid)
+        return
+
+    lookup = discord_bot._forums.thread_to_project(channel_id)
+    info = lookup[1] if lookup else None
+    ctx = discord_bot._ctx(
+        channel_id, session_id=session_id, repo_name=inst.repo_name,
+        thread_info=info, source="autonomy",
+    )
+    discord_bot._forums.attach_session_callbacks(ctx, info, channel_id)
+
+    lock = _get_channel_lock(channel_id)
+    async with lock:
+        try:
+            ok = await workflows._finalize_merge(ctx, inst, close_silent=True)
+        except Exception:
+            log.exception("Scheduled auto-merge crashed for %s", iid)
+            ok = False
+    store.clear_scheduled_merge(iid)
+    if not ok:
+        # Merge failed — surface the standard recovery UI so it isn't silent.
+        try:
+            from bot.platform.formatting import (
+                merge_failed_banner, merge_failed_button_specs,
+            )
+            failure_kind = runner._last_merge_failure_kind.get(inst.id)
+            msg = merge_failed_banner(failure_kind)
+            await ctx.messenger.send_text(
+                channel_id,
+                "Auto-merge hit a conflict — needs your attention.\n\n" + msg,
+                buttons=merge_failed_button_specs(inst.id), silent=False,
+            )
+            store.set_pending_merge(
+                inst.id, session_id=session_id, channel_id=channel_id,
+                repo_name=inst.repo_name, message=msg, failure_kind=failure_kind,
+            )
+        except Exception:
+            log.debug("Failed to post auto-merge failure UI for %s", iid, exc_info=True)
+
+
+async def _autonomy_ship_sweep(store, discord_bot) -> None:
+    """Fleet-ship stragglers for repos on ``ship`` autonomy.
+
+    Backstop for the per-build veto (Phase 2): sweeps any committed-unmerged
+    work in ship-policy repos that's aged past ``ship_grace_minutes`` and isn't
+    already covered by a scheduled merge. Runs the existing fleet pipeline
+    (merge → deploy → verify-back). No-op when nothing qualifies.
+    """
+    from datetime import datetime as dt, timezone as tz_mod
+
+    from bot.discord import fleet
+    from bot.engine.workflows import load_workflow_policy
+
+    try:
+        targets = await fleet.collect_ship_targets(discord_bot)
+    except Exception:
+        log.debug("autonomy sweep: collect_ship_targets failed", exc_info=True)
+        return
+    if not targets:
+        return
+
+    now = dt.now(tz_mod.utc)
+    ship_ids: list[str] = []
+    for t in targets:
+        policy = load_workflow_policy(t.inst.repo_path if t.inst else None)
+        if policy["autonomy"] != "ship":
+            continue
+        # A per-build veto already owns this session — let Phase 2 handle it.
+        if store.get_scheduled_merge_by_session(t.session_id):
+            continue
+        # Grace window: skip work the user may still be touching.
+        stamp = (t.inst.finished_at or t.inst.created_at) if t.inst else None
+        if stamp:
+            try:
+                age_min = (now - dt.fromisoformat(stamp)).total_seconds() / 60
+            except (ValueError, TypeError):
+                age_min = None
+            if age_min is not None and age_min < policy["ship_grace_minutes"]:
+                continue
+        ship_ids.append(t.thread_id)
+
+    if not ship_ids:
+        return
+    origin = str(getattr(discord_bot, "_lobby_channel_id", "") or "")
+    log.info("Autonomy sweep: fleet-shipping %d straggler(s)", len(ship_ids))
+    await fleet.run_fleet_ship(discord_bot, origin, ship_ids)
 
 
 async def _resume_interrupted_chains(

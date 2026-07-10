@@ -85,6 +85,7 @@ async def _exit_chain(
         ctx.store.clear_autopilot_chain(session_id)
         ctx.store.clear_chain_deferred(session_id)
         ctx.store.clear_chain_phases(session_id)
+        ctx.store.clear_chain_plan_override(session_id)
     else:
         # Chain queue stays for user-driven resume (needs_input,
         # phantom_detected, phase_gate_risk). Mark it paused so the
@@ -439,7 +440,22 @@ def _extract_latest_plan_text(
 
     Returns "" if no usable plan text is available — call sites should
     skip the inject prefix in that case (`if plan_text:`).
+
+    Highest priority: a conversational-chain plan override. When the user
+    approves scoped work mid-conversation, the agent writes the plan and
+    hands it to a `/chain` directive; that text is stored per session and
+    read here so a chain launched outside the formal Plan button still
+    injects a real plan. Cleared when the chain finishes.
     """
+    override_source = ctx.store.get_instance(source_id)
+    if override_source and override_source.session_id:
+        override = ctx.store.get_chain_plan_override(override_source.session_id)
+        if override:
+            for marker in _PLAN_METADATA_MARKERS:
+                idx = override.rfind(marker)
+                if idx != -1:
+                    override = override[:idx].rstrip()
+            return override[:_BUILD_PLAN_INJECT_MAX]
     raw = ""
     for inst in reversed(chain_instances):
         if inst.origin == InstanceOrigin.APPLY_REVISIONS:
@@ -1379,6 +1395,58 @@ def _load_verify_policy(source_inst: Instance | None) -> str:
     return "block_fail"
 
 
+_WORKFLOW_POLICY_DEFAULT = {
+    "autonomy": "hold",
+    "merge_veto_minutes": 10,
+    "ship_grace_minutes": 30,
+}
+
+
+def _safe_pos_int(value, default: int) -> int:
+    try:
+        n = int(value)
+        return n if n > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def load_workflow_policy(repo_path: str | None) -> dict:
+    """Read per-repo autonomy policy from ``.claude/workflow.json``.
+
+    Returns a dict with keys ``autonomy`` ("hold" | "merge" | "ship"),
+    ``merge_veto_minutes``, ``ship_grace_minutes``. Absent/malformed file →
+    the ``hold`` default (today's behavior — nothing auto-ships until a repo
+    explicitly opts in). Mirrors ``_load_verify_policy``'s read guardrails.
+
+      hold  — DEFAULT. Manual Merge/Discard; nothing fires on its own.
+      merge — completed build branches auto-merge after a veto window
+              (Hold to stop). Deploy rides along as it does today.
+      ship  — like merge, plus the autonomy sweep fleet-ships any stragglers
+              (deploy + verify-back) for this repo.
+    """
+    if not repo_path:
+        return dict(_WORKFLOW_POLICY_DEFAULT)
+    wf = Path(repo_path) / ".claude" / "workflow.json"
+    if wf.exists():
+        try:
+            cfg = json.loads(wf.read_text(encoding="utf-8"))
+            autonomy = cfg.get("autonomy", "hold")
+            if autonomy not in ("hold", "merge", "ship"):
+                autonomy = "hold"
+            return {
+                "autonomy": autonomy,
+                "merge_veto_minutes": _safe_pos_int(
+                    cfg.get("merge_veto_minutes"), 10,
+                ),
+                "ship_grace_minutes": _safe_pos_int(
+                    cfg.get("ship_grace_minutes"), 30,
+                ),
+            }
+        except Exception:
+            log.debug("Malformed .claude/workflow.json at %s", repo_path, exc_info=True)
+    return dict(_WORKFLOW_POLICY_DEFAULT)
+
+
 async def on_verify(ctx: RequestContext, source_id: str, source_msg_id: str | None = None) -> Instance | None:
     """Run verification. Auto-fix loop only on `fail`; other outcomes break.
 
@@ -1622,6 +1690,56 @@ _AUTOPILOT_HOLD_STEPS = [
     "review_loop", "build", "review_code", "verify",
     "done", "verify_release", "release",
 ]
+
+# Conversational-chain presets. The plan already emerged in the chat, so
+# these all START at "build" (no review_loop) and take their plan from the
+# stored override (see _extract_latest_plan_text). Keyed by the `preset=`
+# value on a /chain directive.
+_CHAIN_PRESETS: dict[str, list[str]] = {
+    # Full ship: build → review → verify → done → release → merge (quiet close).
+    "ship": [
+        "build", "review_code", "verify",
+        "done", "verify_release", "release", "merge",
+    ],
+    # Build + release but stop before merge — parks on Merge/Discard (or the
+    # auto-merge veto window if the repo opted into merge/ship autonomy).
+    "hold": [
+        "build", "review_code", "verify",
+        "done", "verify_release", "release",
+    ],
+    # Build + verify loop only — the "build and verify" flow. Stops after
+    # verify with the branch open.
+    "verify": ["build", "review_code", "verify"],
+}
+
+
+async def on_conversational_chain(
+    ctx: RequestContext,
+    source_id: str,
+    preset: str,
+    source_msg_id: str | None = None,
+) -> Instance | None:
+    """Launch a chain from a `/chain` directive the session agent emitted.
+
+    ``preset`` is one of ``_CHAIN_PRESETS``. The plan text was already stored
+    on the session (set_chain_plan_override) by the directive handler, so the
+    build step injects it via ``_extract_latest_plan_text``. Ships quietly on
+    the ``ship`` preset (silent close), mirroring Build & Ship.
+    """
+    steps = _CHAIN_PRESETS.get(preset)
+    if steps is None:
+        steps = _CHAIN_PRESETS["ship"]
+    label = {
+        "ship": "Chain (ship)",
+        "hold": "Chain (hold)",
+        "verify": "Chain (verify)",
+    }.get(preset, "Chain")
+    return await _launch_chain(
+        ctx, source_id, source_msg_id,
+        list(steps), "build",
+        silent_close=(preset == "ship"),
+        chain_label=label,
+    )
 
 
 async def _review_plan_loop(
@@ -3299,6 +3417,7 @@ async def _run_autopilot_chain(
         ctx.store.clear_autopilot_chain(session_id)
         ctx.store.clear_chain_deferred(session_id)
         ctx.store.clear_chain_entry_sha(session_id)
+        ctx.store.clear_chain_plan_override(session_id)
         return result
     finally:
         ctx.runner.end_task(chain_task_id)

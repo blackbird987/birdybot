@@ -526,6 +526,34 @@ title: <short title>
 prompt: <ready-to-run prompt body>
 """
 
+# Chain handoff — appended for every thread (independent of spawn depth). Lets
+# the session agent recognize approval mid-conversation and hand the plan it
+# already discussed into the automated build→ship chain, instead of the user
+# tapping Build/Ship or typing "merge".
+CHAIN_CONTEXT = """
+Handing work off to the build→ship chain (KEY — this is how you ship):
+When the user approves scoped work you've been discussing — "go", "ship it", "build it", "do it", "build and verify", "yes go ahead" — do NOT start building inline in this chat. Instead, END your turn with a /chain directive that carries the plan you already worked out from the conversation. The bot then runs the whole pipeline in this thread: build (in an isolated worktree) → review code → verify → (release) → (merge), pausing only if something fails or needs your input.
+
+Format (directive on its own line, immediately followed by its ~~~plan body):
+
+[BOT_CMD: /chain preset=ship]
+~~~plan
+The full implementation plan, written from our conversation: every file to change and what the change is, the approach, and anything to verify afterward. This is injected as the build's brief, so make it concrete and self-contained.
+~~~
+
+Presets (pick by what the user asked for):
+- `ship` — build → review → verify → release → merge, closes the thread. Use for "ship it" / "go" / a plain approval when the repo auto-ships.
+- `hold` — build → review → verify → release, then STOPS before merge (leaves Merge/Discard, or an auto-merge veto window if the repo opted in). Use when the user wants to inspect before it lands.
+- `verify` — build → review → verify only, then stops with the branch open. Use for "build and verify" / a build+verify loop.
+- Omit `preset=` to let the repo's own autonomy policy choose.
+
+Rules:
+- Tilde fences (`~~~plan` / `~~~`), never backticks — same reason as /spawn.
+- One /chain per response. It's refused if a chain is already running on this thread.
+- Only emit it once the user has actually approved. While still planning or asking questions, just talk — no directive.
+- One short sentence telling the user you're kicking off the chain is enough; the plan lives in the ~~~plan block, not in prose.
+"""
+
 # Tail of the bot context — appended after the depth-correct spawn block so
 # reboot/wake guidance keeps its original position in the system prompt.
 BOT_CONTEXT_TAIL = """
