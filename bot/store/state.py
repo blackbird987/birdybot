@@ -885,12 +885,20 @@ class StateStore:
         self.mark_dirty()
 
     def clear_autopilot_chain(self, session_id: str | None) -> None:
-        """Remove autopilot chain state for a session."""
+        """Remove autopilot chain state for a session.
+
+        Reaps every per-session chain field together (queue, meta, kwargs, and
+        the conversational-chain plan override) so an abandoned or reset chain
+        can't leave a stale override behind for a later chain to inject. The
+        override's lifetime is exactly the chain's; clear points are terminal
+        only (steps use set_autopilot_chain to update the queue).
+        """
         if not session_id:
             return
         self._autopilot_chains.pop(session_id, None)
         self._autopilot_chain_meta.pop(session_id, None)
         self._chain_kwargs.pop(session_id, None)
+        self._chain_plan_overrides.pop(session_id, None)
         self.mark_dirty()
 
     def set_chain_kwargs(

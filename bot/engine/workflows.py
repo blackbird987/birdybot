@@ -85,7 +85,6 @@ async def _exit_chain(
         ctx.store.clear_autopilot_chain(session_id)
         ctx.store.clear_chain_deferred(session_id)
         ctx.store.clear_chain_phases(session_id)
-        ctx.store.clear_chain_plan_override(session_id)
     else:
         # Chain queue stays for user-driven resume (needs_input,
         # phantom_detected, phase_gate_risk). Mark it paused so the
@@ -3417,7 +3416,6 @@ async def _run_autopilot_chain(
         ctx.store.clear_autopilot_chain(session_id)
         ctx.store.clear_chain_deferred(session_id)
         ctx.store.clear_chain_entry_sha(session_id)
-        ctx.store.clear_chain_plan_override(session_id)
         return result
     finally:
         ctx.runner.end_task(chain_task_id)

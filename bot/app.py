@@ -1122,13 +1122,30 @@ async def _fire_scheduled_merge(store, runner, discord_bot, iid: str, meta: dict
         store.clear_scheduled_merge(iid)
         return
 
+    # No-op guard: a build that committed nothing leaves a branch level with
+    # its base. Merging it would report "already up to date" (a non-failure)
+    # and _finalize_merge would then close the thread — silently archiving a
+    # build that did nothing. Skip and drop the entry instead.
+    from bot.discord.fleet import _commits_ahead
+    ahead = await asyncio.to_thread(
+        _commits_ahead, inst.repo_path, inst.original_branch, inst.branch,
+    )
+    if ahead <= 0:
+        store.clear_scheduled_merge(iid)
+        return
+
     lookup = discord_bot._forums.thread_to_project(channel_id)
     info = lookup[1] if lookup else None
     ctx = discord_bot._ctx(
         channel_id, session_id=session_id, repo_name=inst.repo_name,
         thread_info=info, source="autonomy",
     )
-    discord_bot._forums.attach_session_callbacks(ctx, info, channel_id)
+    # Only attach callbacks when the thread is still registered — passing a
+    # None thread_info would raise, and (outside the try below) that would
+    # leave the entry to re-fire and re-raise every tick. Without callbacks
+    # the merge still runs; only the "merged" tag is skipped.
+    if info is not None:
+        discord_bot._forums.attach_session_callbacks(ctx, info, channel_id)
 
     lock = _get_channel_lock(channel_id)
     async with lock:

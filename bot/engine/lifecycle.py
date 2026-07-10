@@ -832,15 +832,16 @@ async def _try_apply_near_limit(
         log.debug("near-limit tag update failed for %s", inst.id, exc_info=True)
 
 
-# Origins that represent a parked build branch a user would otherwise have to
-# Merge by hand: manual Build, a build+verify loop's final Verify, a plain
-# message-driven build (DIRECT), or a Retry of one. Chain steps are excluded
-# separately (has_autopilot_chain).
+# Only a completed Build (the [Build It] button) parks a branch on
+# Merge/Discard for the auto-merge veto to pick up. Deliberately narrow:
+# DIRECT would fire on any freeform message that completes in a build thread
+# (the user is likely still iterating), and VERIFY completes regardless of
+# its pass/fail verdict — auto-merging a *failed* standalone verify would push
+# broken code. Verified auto-ship goes through /chain (ship preset), which
+# runs verify before merge. Chain steps are excluded separately via the
+# active-chain guard.
 _AUTO_MERGE_ORIGINS = {
     InstanceOrigin.BUILD,
-    InstanceOrigin.VERIFY,
-    InstanceOrigin.DIRECT,
-    InstanceOrigin.RETRY,
 }
 
 
