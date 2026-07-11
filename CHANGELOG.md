@@ -2,18 +2,14 @@
 
 ## [Unreleased]
 
+## v0.99.3 — Agent-managed ship pipeline (2026-07-11)
+
 ### Added
 - **Agent-managed ship pipeline — steer and approve; the agent ships.** Four pieces so the workflow runs itself instead of waiting for you to type "ship" / "merge" / "go":
   - **`/chain` directive** (`config.CHAIN_CONTEXT`; `commands._handle_chain_directive`/`_extract_chain_directive`; `workflows.on_conversational_chain` + `_CHAIN_PRESETS`). Planning already happens in the conversation, so the session agent now recognizes your approval ("go", "ship it", "build and verify") and ends its turn with a `[BOT_CMD: /chain preset=…]` directive carrying the plan it wrote from the chat inside a `~~~plan` body. The bot runs the existing build→review→verify→release→merge machinery in-thread — no Plan button, no copy-paste. Presets: `ship` (build→…→merge, quiet close), `hold` (stops before merge), `verify` (build+verify loop). The plan text is stored per session (`set_chain_plan_override`) and injected as the build brief via `_extract_latest_plan_text` (new highest-priority source), cleared when the chain ends. Dispatched in a detached task that acquires the channel lock; refused if a chain is already running.
   - **Per-repo autonomy policy** (`.claude/workflow.json`; `workflows.load_workflow_policy`). One setting per repo — `autonomy: hold | merge | ship` (default `hold` = today's manual behavior), plus `merge_veto_minutes`/`ship_grace_minutes`. Set the policy once; stop confirming individual actions.
   - **Auto-merge veto window** (`lifecycle._maybe_schedule_auto_merge`; store `scheduled_merges`; `hold_merge` button). On `merge`/`ship` repos, a completed build branch that would otherwise park on Merge/Discard instead posts "auto-merging `branch` in N min — tap **Hold**". Silence = consent; the merge fires via the same `_finalize_merge` the Merge button uses (deploy rides along). Deduped per session, persisted so a reboot resumes the countdown.
   - **Scheduled fleet-ship sweep** (`app._autonomy_ship_sweep`/`_fire_scheduled_merge`, `autonomy_loop`). A background loop fires due auto-merge vetoes and, every ~5 min, sweeps committed-unmerged stragglers on `ship`-policy repos (aged past the grace window, not already covered by a veto) through the existing fleet pipeline: merge → deploy → verify-back.
-
-### Fixed
-- **Autopilot no longer swallows a question asked mid-loop.** When a Claude turn stops to ask the user something, the runner sets `needs_input=True` but still reports `status=COMPLETED` — so the code-review loop (`on_review_code`) and the verify fix-loop (`on_verify`) couldn't distinguish "done" from "waiting on you". The code-review loop read an "asked a question + edited a file" round as "changes made, review again", resumed the waiting session, and a later clean round overwrote the result — dropping the question entirely (worst case: up to 4 wasted build spawns). The verify loop misclassified the same state as `fail` and burned fix rounds. Both now short-circuit on `needs_input` (and review-code also on non-COMPLETED status), returning the paused instance so the chain guard halts on it — mirroring the plan-review loop that already did this.
-
-### Changed
-- **A failed verify now blocks the merge by default.** `verify_policy` in `.claude/test.json` gains a three-value model with a new default `block_fail`: a reported `fail` (verify ran, feature is broken) halts the autopilot chain instead of merging to master and posting a quiet FYI afterward, while `manual`/`crashed` ("couldn't verify" — not "verified broken") still warn-and-advance so unconfigured repos aren't hard-stopped. Prior default was `warn` (never halted). Opt back into the old push-through behavior per-repo with `"verify_policy": "warn"`; `"block"` remains the strictest (halts on any of fail/manual/crashed).
 
 ## v0.99.1 — Full decorative-emoji strip (2026-07-07)
 
