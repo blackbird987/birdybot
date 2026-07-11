@@ -28,3 +28,6 @@ build/
 .idea/
 *.swp
 *.swo
+
+# Personal one-off scripts (not bot code — kept on disk, out of the repo)
+scripts/make_hypotheek_dossier.py
