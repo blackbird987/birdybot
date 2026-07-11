@@ -2,13 +2,6 @@
 
 ## [Unreleased]
 
-## v0.99.2 — X voice corpus fetcher; autopilot question-pause and verify gating (2026-07-10)
-
-### Added
-- **`scripts/fetch_x_corpus.py` — X/Twitter writing-style corpus fetcher.** Pulls a user's timeline (default @Daab1rD, 800 tweets, retweets excluded) via the Twitter API v2, reusing the DegenAI project's paid Basic-tier credentials read at runtime from its gitignored settings.json — no secrets copied into this repo. Writes `data/x_corpus/` (raw JSONL + cleaned corpus.md with per-tweet engagement stats + meta.json). Feeds the global `~/.claude/skills/x-voice` skill so any session can ghostwrite tweets in the user's authentic voice; re-run + re-distill to refresh.
-
-### Fixed
-- **Autopilot no longer swallows a question asked mid-loop.** When a Claude turn stops to ask the user something, the runner sets `needs_input=True` but still reports `status=COMPLETED` — so the code-review loop (`on_review_code`) and the verify fix-loop (`on_verify`) couldn't distinguish "done" from "waiting on you". The code-review loop read an "asked a question + edited a file" round as "changes made, review again", resumed the waiting session, and a later clean round overwrote the result — dropping the question entirely (worst case: up to 4 wasted build spawns). The verify loop misclassified the same state as `fail` and burned fix rounds. Both now short-circuit on `needs_input` (and review-code also on non-COMPLETED status), returning the paused instance so the chain guard halts on it — mirroring the plan-review loop that already did this.
 ## v0.99.3 — Agent-managed ship pipeline (2026-07-11)
 
 ### Added
@@ -17,6 +10,14 @@
   - **Per-repo autonomy policy** (`.claude/workflow.json`; `workflows.load_workflow_policy`). One setting per repo — `autonomy: hold | merge | ship` (default `hold` = today's manual behavior), plus `merge_veto_minutes`/`ship_grace_minutes`. Set the policy once; stop confirming individual actions.
   - **Auto-merge veto window** (`lifecycle._maybe_schedule_auto_merge`; store `scheduled_merges`; `hold_merge` button). On `merge`/`ship` repos, a completed build branch that would otherwise park on Merge/Discard instead posts "auto-merging `branch` in N min — tap **Hold**". Silence = consent; the merge fires via the same `_finalize_merge` the Merge button uses (deploy rides along). Deduped per session, persisted so a reboot resumes the countdown.
   - **Scheduled fleet-ship sweep** (`app._autonomy_ship_sweep`/`_fire_scheduled_merge`, `autonomy_loop`). A background loop fires due auto-merge vetoes and, every ~5 min, sweeps committed-unmerged stragglers on `ship`-policy repos (aged past the grace window, not already covered by a veto) through the existing fleet pipeline: merge → deploy → verify-back.
+
+## v0.99.2 — X voice corpus fetcher; autopilot question-pause and verify gating (2026-07-10)
+
+### Added
+- **`scripts/fetch_x_corpus.py` — X/Twitter writing-style corpus fetcher.** Pulls a user's timeline (default @Daab1rD, 800 tweets, retweets excluded) via the Twitter API v2, reusing the DegenAI project's paid Basic-tier credentials read at runtime from its gitignored settings.json — no secrets copied into this repo. Writes `data/x_corpus/` (raw JSONL + cleaned corpus.md with per-tweet engagement stats + meta.json). Feeds the global `~/.claude/skills/x-voice` skill so any session can ghostwrite tweets in the user's authentic voice; re-run + re-distill to refresh.
+
+### Fixed
+- **Autopilot no longer swallows a question asked mid-loop.** When a Claude turn stops to ask the user something, the runner sets `needs_input=True` but still reports `status=COMPLETED` — so the code-review loop (`on_review_code`) and the verify fix-loop (`on_verify`) couldn't distinguish "done" from "waiting on you". The code-review loop read an "asked a question + edited a file" round as "changes made, review again", resumed the waiting session, and a later clean round overwrote the result — dropping the question entirely (worst case: up to 4 wasted build spawns). The verify loop misclassified the same state as `fail` and burned fix rounds. Both now short-circuit on `needs_input` (and review-code also on non-COMPLETED status), returning the paused instance so the chain guard halts on it — mirroring the plan-review loop that already did this.
 
 ## v0.99.1 — Full decorative-emoji strip (2026-07-07)
 
