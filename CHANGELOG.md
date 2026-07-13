@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.99.6 — Branch names in sibling digest (2026-07-13)
+
 ### Changed
 - **Sibling-session digest names the branch.** The "Other active sessions in this repo" block in build/system prompts now includes each sibling's git branch (`[t-6120] build on claude-bot/t-6120 3m — …`) so parallel sessions can avoid colliding branches as well as files. (The digest itself already existed — `get_sibling_summary` — this just adds the branch field.)
 - **Documented that worktree memory syncing is unnecessary.** Investigation for a planned "unify worktree project memory" fix showed the Claude CLI already resolves a git-worktree cwd to the main repository root when computing the per-project memory path (verified against v2.1.206 internals; 205 historical worktree project dirs contain zero memory dirs). A comment in `runner.py`'s session-file section now records this so nobody reimplements the sync.
