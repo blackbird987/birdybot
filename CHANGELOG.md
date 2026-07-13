@@ -2,11 +2,9 @@
 
 ## [Unreleased]
 
-### Fixed
-- **Worktree builds now share the repo's project memory.** Claude Code keys per-project auto-memory off the session cwd, so build sessions (cwd inside `.worktrees/<id>/`) started with blank memory and orphaned whatever they saved in a project dir that gets swept on merge/discard. The runner now links the worktree's `projects/<encoded>/memory` dir to the main repo's (directory junction on Windows — no admin needed — symlink on POSIX) before each spawn (`_link_worktree_memory`, called per spawn so account failover links the backup account's projects dir too). Pre-existing real memory dirs are salvaged into the shared one first; link failure is non-fatal (falls back to the old split-memory behavior). `_cleanup_worktree_session_dir` detaches the link before its `rmtree` so cleanup can never reach through into the shared memory.
-
 ### Changed
 - **Sibling-session digest names the branch.** The "Other active sessions in this repo" block in build/system prompts now includes each sibling's git branch (`[t-6120] build on claude-bot/t-6120 3m — …`) so parallel sessions can avoid colliding branches as well as files. (The digest itself already existed — `get_sibling_summary` — this just adds the branch field.)
+- **Documented that worktree memory syncing is unnecessary.** Investigation for a planned "unify worktree project memory" fix showed the Claude CLI already resolves a git-worktree cwd to the main repository root when computing the per-project memory path (verified against v2.1.206 internals; 205 historical worktree project dirs contain zero memory dirs). A comment in `runner.py`'s session-file section now records this so nobody reimplements the sync.
 
 ## v0.99.4 — Model visibility in session UI (2026-07-13)
 
