@@ -8,7 +8,8 @@ import discord
 
 from bot.claude.types import Instance, InstanceStatus
 from bot.platform.formatting import (
-    format_context_footer, format_duration, redact_secrets, status_icon,
+    format_context_footer, format_duration, redact_secrets, short_model_label,
+    status_icon,
 )
 
 
@@ -256,13 +257,18 @@ def build_result_embed(
         footer_parts.append("build")
     if instance.branch:
         footer_parts.append(f"branch: {instance.branch}")
-    # Context usage snapshot from the last assistant event
+    # Context usage snapshot from the last assistant event — includes the
+    # model label ("Fable 5 · 72k / 200k · 36%"). When no usage arrived
+    # (failed early / legacy sessions), fall back to the model alone.
+    ctx_text = ""
     if instance.context_tokens > 0:
         ctx_text, _ = format_context_footer(
             instance.context_tokens, instance.context_model, instance.repo_path,
         )
-        if ctx_text:
-            footer_parts.append(ctx_text)
+    if not ctx_text:
+        ctx_text = short_model_label(instance.context_model or instance.model)
+    if ctx_text:
+        footer_parts.append(ctx_text)
     flags_line = _flag_summary(instance)
     if flags_line:
         footer_parts.append(flags_line)

@@ -65,12 +65,41 @@ def format_tokens(count: int) -> str:
     return str(count)
 
 
+def short_model_label(model: str | None) -> str:
+    """Human-readable model label: 'claude-fable-5' -> 'Fable 5', 'opus' -> 'Opus'.
+
+    Handles full API ids ('claude-opus-4-8', 'claude-haiku-4-5-20251001',
+    Bedrock-style 'us.anthropic.claude-...'), CLI aliases ('fable', 'opus'),
+    and '-latest' suffixes.  Unrecognized shapes fall back to the raw string.
+    """
+    if not model:
+        return ""
+    name = model.strip().lower()
+    for prefix in ("us.anthropic.", "eu.anthropic.", "anthropic."):
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+            break
+    name = name.removeprefix("claude-")
+    parts = [p for p in name.split("-") if p]
+    # Drop trailing date stamps (20251001) and '-latest'/'-v1:0' style suffixes.
+    while parts and (
+        parts[-1] == "latest"
+        or (parts[-1].isdigit() and len(parts[-1]) >= 6)
+        or ":" in parts[-1]
+    ):
+        parts.pop()
+    words = [p.capitalize() for p in parts if not p.isdigit()]
+    version = ".".join(p for p in parts if p.isdigit())
+    label = " ".join(filter(None, [" ".join(words), version]))
+    return label or model.strip()
+
+
 def format_context_footer(
     context_tokens: int,
     model: str | None,
     repo_path: str | None = None,
 ) -> tuple[str, float]:
-    """Render a `"72k / 200k · 36%"` style footer string + percent (0..1).
+    """Render a `"Fable 5 · 72k / 200k · 36%"` style footer string + percent (0..1).
 
     Returns ("", 0.0) when there is nothing to show.  Model and repo are
     used to resolve the effective window (Sonnet can be 1M or 200k).
@@ -84,6 +113,9 @@ def format_context_footer(
         return "", 0.0
     percent = min(context_tokens / window, 1.0)
     text = f"{format_tokens(context_tokens)} / {format_tokens(window)} · {int(round(percent * 100))}%"
+    label = short_model_label(model)
+    if label:
+        text = f"{label} · {text}"
     return text, percent
 
 

@@ -71,6 +71,14 @@ class ProviderConfig:
         """
         return None
 
+    def default_model(self, instance: object) -> str | None:
+        """The model this provider would run for *instance* — mirrors
+        build_command's resolution minus runtime overrides (limit failover,
+        api_fallback).  Display-only: labels a session before the CLI
+        reports the model it actually ran.
+        """
+        return getattr(instance, "model", None)
+
 
 class _ClaudeProvider(ProviderConfig):
     """Claude Code CLI provider."""
@@ -168,6 +176,17 @@ class _ClaudeProvider(ProviderConfig):
     def parse_model_limit(self, error_text: str) -> object | None:
         return _claude_parse_model_limit(error_text)
 
+    def default_model(self, instance: object) -> str | None:
+        from bot import config
+
+        # PRIMARY_MODEL isn't passed to the CLI — with no --model flag the
+        # account default runs, which PRIMARY_MODEL names by convention.
+        return (
+            getattr(instance, "model", None)
+            or config.DEFAULT_SESSION_MODEL
+            or config.PRIMARY_MODEL
+        )
+
 
 class _CursorProvider(ProviderConfig):
     """Cursor CLI provider (agent binary)."""
@@ -210,6 +229,11 @@ class _CursorProvider(ProviderConfig):
 
         # System prompt handled by runner via rules dir — not passed as CLI args
         return cmd
+
+    def default_model(self, instance: object) -> str | None:
+        from bot import config
+
+        return getattr(instance, "model", None) or config.CURSOR_MODEL
 
 
 # ---------------------------------------------------------------------------
