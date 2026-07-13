@@ -961,6 +961,9 @@ async def send_result(
         session_loc = f"worktree: {inst.branch or '?'}"
     else:
         session_loc = "master"
+    model_label = short_model_label(inst.context_model or inst.model)
+    if model_label:
+        session_loc = f"{model_label} · {session_loc}"
     meta["_session_loc"] = session_loc
     if inst.deferred_revisions:
         meta["_deferred_revisions"] = inst.deferred_revisions

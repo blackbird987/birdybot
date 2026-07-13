@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## v0.99.5 — Model label on result footers (2026-07-13)
+
+### Fixed
+- **Model label now actually reaches result embeds.** v0.99.4 added the model to the result footer via `build_result_embed()` — a function with no live callers, so completed sessions still showed only `worktree: <branch>` / `master`. The label is now prepended to the session-location footer in the live path (`lifecycle.send_result`), covering all three result variants: embed footers (failed/long/finalize) and the `-# …` subtext on short inline results. Deleted the dead `build_result_embed()` plus its orphaned helpers (`result_color`, `_flag_summary`) so the two paths can't drift again.
+
 ## v0.99.4 — Model visibility in session UI (2026-07-13)
 
 ### Added
