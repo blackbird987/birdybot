@@ -3695,6 +3695,14 @@ class ClaudeRunner:
 
         return target_file.exists()
 
+    # NOTE: no memory-dir syncing is needed between worktree and main-repo
+    # project dirs.  Claude Code resolves a git-worktree cwd to the MAIN
+    # repository root when computing the per-project memory path (verified
+    # against CLI v2.1.206: it follows .git -> gitdir -> commondir and keys
+    # memory off the common root), so worktree builds already read and write
+    # the main repo's projects/<encoded>/memory.  Only session JSONLs are
+    # keyed to the worktree path and need the copy below.
+
     def _copy_session_from_worktree(
         self,
         instance: Instance,
