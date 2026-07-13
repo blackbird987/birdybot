@@ -775,6 +775,24 @@ class ClaudeRunner:
                 account_dir, working_dir, instance.session_id, instance,
             )
 
+        # Unify project auto-memory between worktree and main repo.  The CLI
+        # keys per-project memory off cwd, so a worktree build would
+        # otherwise start with blank memory and orphan whatever it saves in
+        # a project dir that _cleanup_worktree_session_dir later sweeps.
+        # Runs on every spawn (idempotent) so failover to another account
+        # links that account's projects dir too.  Non-fatal: failure just
+        # means split memory (the pre-link behavior), never a blocked spawn.
+        if (
+            instance.worktree_path
+            and instance.repo_path
+            and provider.name == "claude"
+        ):
+            await asyncio.to_thread(
+                self._link_worktree_memory,
+                instance,
+                account_dir or str(config.CLAUDE_PROJECTS_DIR.parent),
+            )
+
         acct_tag = f" [acct={account_dir[-20:]}]" if account_dir else ""
         log.info("Running %s%s (prompt: %d chars via stdin): %s",
                  instance.id, acct_tag, len(prompt_text), " ".join(cmd)[:500])
@@ -3695,6 +3713,66 @@ class ClaudeRunner:
 
         return target_file.exists()
 
+    @staticmethod
+    def _is_memory_link(path: Path) -> bool:
+        """True if path is a symlink or a Windows junction (reparse point)."""
+        if path.is_symlink():
+            return True
+        try:
+            st = os.stat(path, follow_symlinks=False)
+        except (OSError, ValueError):
+            return False
+        return bool(getattr(st, "st_reparse_tag", 0))
+
+    def _link_worktree_memory(self, instance: Instance, account_root: str) -> None:
+        """Link the worktree project dir's ``memory/`` to the main repo's.
+
+        Claude Code keys per-project auto-memory off the session cwd, so a
+        worktree build reads/writes ``projects/<wt_encoded>/memory`` — a dir
+        that starts blank and is swept on merge/discard.  Pointing it at
+        ``projects/<repo_encoded>/memory`` (directory junction on Windows —
+        works without admin — symlink elsewhere) gives builds the same
+        durable project memory as main-repo sessions.
+
+        Idempotent per spawn.  Any failure is logged and swallowed: worst
+        case is split memory, which was the behavior before this existed.
+        """
+        try:
+            wt_encoded = self._encode_project_path(instance.worktree_path)
+            repo_encoded = self._encode_project_path(instance.repo_path)
+            if wt_encoded == repo_encoded:
+                return
+            projects = Path(account_root) / "projects"
+            target = projects / repo_encoded / "memory"
+            link = projects / wt_encoded / "memory"
+            # Already linked — target path is deterministic, so an existing
+            # link never needs repointing.
+            if self._is_memory_link(link):
+                return
+            target.mkdir(parents=True, exist_ok=True)
+            link.parent.mkdir(parents=True, exist_ok=True)
+            if link.is_dir():
+                # Real dir from a pre-link build: salvage its files into the
+                # shared memory (never overwriting), then replace with a link.
+                for f in sorted(link.rglob("*")):
+                    if f.is_file():
+                        dst = target / f.relative_to(link)
+                        if not dst.exists():
+                            dst.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(str(f), str(dst))
+                shutil.rmtree(str(link))
+            if os.name == "nt":
+                import _winapi
+                _winapi.CreateJunction(str(target), str(link))
+            else:
+                os.symlink(str(target), str(link), target_is_directory=True)
+            log.info("Linked worktree memory %s -> %s", link, target)
+        except Exception:
+            log.warning(
+                "Worktree memory link failed for %s — project memory stays "
+                "split this run", instance.id, exc_info=True,
+            )
+
     def _copy_session_from_worktree(
         self,
         instance: Instance,
@@ -5222,6 +5300,19 @@ class ClaudeRunner:
         for root in sweep_roots:
             wt_proj_dir = root / wt_encoded
             if wt_proj_dir.is_dir():
+                # Detach the memory link first so no rmtree implementation
+                # can ever follow it into the main repo's shared memory.
+                # (Python 3.8+ rmtree removes junctions without recursing,
+                # but the target is irreplaceable — be explicit.)
+                mem_link = wt_proj_dir / "memory"
+                if self._is_memory_link(mem_link):
+                    try:
+                        os.rmdir(mem_link)  # junction / Windows dir-symlink
+                    except OSError:
+                        try:
+                            os.unlink(mem_link)  # POSIX symlink
+                        except OSError:
+                            pass
                 shutil.rmtree(str(wt_proj_dir), ignore_errors=True)
 
     # --- Divergence safety check (used by startup auto-merge) ---

@@ -207,10 +207,11 @@ def get_sibling_summary(store, inst: Instance) -> str | None:
     for s, age_sec in siblings[:8]:
         label = s.origin.value.replace("_", "-")
         age = _format_age(age_sec)
+        branch = f" on {s.branch}" if s.branch else ""
         # Collapse whitespace so multi-line prompts don't break the blurb
         # into phantom sibling lines when rendered in the system prompt.
         snippet = " ".join(s.prompt.split())[:60]
-        lines.append(f"{s.display_id()} {label} {age} — {snippet}")
+        lines.append(f"{s.display_id()} {label}{branch} {age} — {snippet}")
     return "Other active sessions in this repo:\n" + "\n".join(lines)
 
 
