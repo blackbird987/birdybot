@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.99.4 — Model visibility in session UI (2026-07-13)
+
 ### Added
 - **Model visibility in session UI.** The live thinking line now names the model (`🔄 [build] t-6113 · Fable 5 — Reading files… (12s)`) and every result-embed footer carries it in the context segment (`Fable 5 · 72k / 200k · 36%`). The header starts from the provider's own model resolution (new `ProviderConfig.default_model()`: routing/default/primary for Claude, `CURSOR_MODEL` for Cursor) and self-corrects to the model the CLI actually reports on the first assistant event, so a Fable-limit failover to Opus is visible at a glance. New `short_model_label()` in `platform/formatting.py` maps ids/aliases (`claude-opus-4-8` → "Opus 4.8", `fable` → "Fable"); result embeds fall back to the model alone when a run died before any usage arrived.
 
