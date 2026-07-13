@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 from bot import config
 from bot.claude.models import context_tokens_from_usage
+from bot.claude.provider import get_provider
 from bot.claude.runner import RebootResult
 from bot.claude.types import (
     CODE_CHANGE_TOOLS, PLAN_ORIGINS, Instance, InstanceOrigin, InstanceStatus,
@@ -590,13 +591,14 @@ def make_progress_callbacks(
     latest_usage: list[dict | None] = [None]
     near_limit_applied = [False]  # tracks current near-limit tag state
     mode_tag = f"[{inst.mode}] " if inst.mode and inst.mode != "explore" else ""
-    # Model shown in the live header. Starts as the *requested* model (routing/
-    # default/primary guess); _compute_footer overwrites it with the model the
-    # CLI actually reports as soon as the first assistant event arrives, so a
-    # limit-failover downgrade self-corrects within one edit cycle.
+    # Model shown in the live header. Starts as the model the run *would*
+    # use (last known from a prior resume, else the provider's own
+    # resolution — Claude and Cursor route differently); _compute_footer
+    # overwrites it with the model the CLI actually reports as soon as the
+    # first assistant event arrives, so a limit-failover downgrade
+    # self-corrects within one edit cycle.
     model_tag = [short_model_label(
-        inst.context_model or inst.model
-        or config.DEFAULT_SESSION_MODEL or config.PRIMARY_MODEL
+        inst.context_model or get_provider(config.PROVIDER).default_model(inst)
     )]
 
     def _elapsed() -> str:
@@ -644,7 +646,9 @@ def make_progress_callbacks(
 
     def _header(escaped_id: str, activity: str) -> str:
         """Live status line: `🔄 [build] t-6113 · Fable 5 — activity (12s)`."""
-        model_bit = f" · {model_tag[0]} —" if model_tag[0] else ""
+        model_bit = ""
+        if model_tag[0]:
+            model_bit = f" · {ctx.messenger.escape(model_tag[0])} —"
         return f"🔄 {mode_tag}{escaped_id}{model_bit} {activity} ({_elapsed()})"
 
     stop_buttons = running_button_specs(inst.id)
