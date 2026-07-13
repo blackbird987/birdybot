@@ -191,5 +191,3 @@ def chunk_message(text: str, limit: int = 4096) -> list[str]:
         chunks.append(chunk)
 
     return chunks
-
-
