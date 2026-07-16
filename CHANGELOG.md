@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.99.7 — Switch back to Fable after cooldown (2026-07-16)
+
 ### Fixed
 - **Resumed sessions no longer stay stuck on the fallback model after a Fable limit cooldown expires.** The downgrade to `MODEL_FALLBACK` (opus) was temporary by design, but once the cooldown lapsed the bot went back to passing no `--model` flag — and the Claude CLI restores a resumed session's last-used model, so the session silently stayed on Opus forever. `build_command` now pins `PRIMARY_MODEL` explicitly on resume when no other model resolves, so expired cooldowns actually switch back. Fresh sessions, explicit model choices, active-cooldown overrides, and PPU runs are all unchanged.
 
