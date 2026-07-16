@@ -127,6 +127,13 @@ class _ClaudeProvider(ProviderConfig):
             or instance.model  # type: ignore[attr-defined]
             or config.DEFAULT_SESSION_MODEL
         )
+        # Sticky-resume guard: the CLI restores a resumed session's last model,
+        # so a session downgraded to MODEL_FALLBACK during a primary-model limit
+        # window would stay on the fallback forever once no --model flag is
+        # passed again. Pin the primary explicitly on resume so expired
+        # cooldowns actually switch back.
+        if not model and instance.session_id and not api_fallback:  # type: ignore[attr-defined]
+            model = config.PRIMARY_MODEL
         if model and not api_fallback:
             cmd.extend(["--model", model])
 
@@ -179,8 +186,11 @@ class _ClaudeProvider(ProviderConfig):
     def default_model(self, instance: object) -> str | None:
         from bot import config
 
-        # PRIMARY_MODEL isn't passed to the CLI — with no --model flag the
-        # account default runs, which PRIMARY_MODEL names by convention.
+        # Fresh sessions get no --model flag, so the account's CLI default
+        # runs — which PRIMARY_MODEL names by convention. Resumed sessions DO
+        # get PRIMARY_MODEL pinned explicitly (see build_command's
+        # sticky-resume guard), so either way this resolution matches what
+        # actually runs.
         return (
             getattr(instance, "model", None)
             or config.DEFAULT_SESSION_MODEL
