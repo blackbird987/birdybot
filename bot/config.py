@@ -191,7 +191,10 @@ MODEL_ROUTING: dict[str, str] = _parse_model_routing(os.getenv("MODEL_ROUTING", 
 # key naming the accounts' default model (matched case-insensitively against
 # --model values and used as the cooldown label); MODEL_FALLBACK is what
 # runs while the primary is limited.  Subscription-only — this path never
-# routes to pay-per-use.
+# routes to pay-per-use.  PRIMARY_MODEL is ALSO passed verbatim as --model
+# when resuming a session that has no other model resolved (provider.py's
+# sticky-resume guard), so it must be a valid CLI model alias, not just a
+# match substring.
 PRIMARY_MODEL: str = os.getenv("PRIMARY_MODEL", "fable")
 MODEL_FALLBACK: str = os.getenv("MODEL_FALLBACK", "opus")
 
