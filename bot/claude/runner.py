@@ -58,9 +58,10 @@ def _is_primary_model(model: str | None) -> bool:
 
     None resolves through DEFAULT_SESSION_MODEL first (the deployment-wide
     default that provider.build_command applies as the last --model fallback);
-    only when that is also unset does None mean "no --model flag → the
-    account's CLI default", which is the primary model on this deployment
-    (PRIMARY_MODEL). Explicit non-primary overrides (e.g. EXPLORE_MODEL=
+    only when that is also unset does None mean the primary model runs:
+    pinned explicitly on resume (build_command's sticky-resume guard), or
+    the account's CLI default on fresh sessions — both of which PRIMARY_MODEL
+    names on this deployment. Explicit non-primary overrides (e.g. EXPLORE_MODEL=
     "sonnet", DEFAULT_SESSION_MODEL="opus") are exempt from model-limit
     downgrades — their model has its own quota.
     """
