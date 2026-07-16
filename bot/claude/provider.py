@@ -189,8 +189,9 @@ class _ClaudeProvider(ProviderConfig):
         # Fresh sessions get no --model flag, so the account's CLI default
         # runs — which PRIMARY_MODEL names by convention. Resumed sessions DO
         # get PRIMARY_MODEL pinned explicitly (see build_command's
-        # sticky-resume guard), so either way this resolution matches what
-        # actually runs.
+        # sticky-resume guard), so both paths resolve to PRIMARY_MODEL here.
+        # Runtime overrides (active limit-failover downgrade, api_fallback)
+        # are intentionally not mirrored — see the base-class docstring.
         return (
             getattr(instance, "model", None)
             or config.DEFAULT_SESSION_MODEL
