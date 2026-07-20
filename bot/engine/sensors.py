@@ -138,6 +138,11 @@ def _has_dotnet_markers(root: Path, max_depth: int = 3) -> bool:
 
 
 def _default_sensors(stacks: list[str]) -> list[dict]:
+    # "auto": True marks these for the tool-availability pre-check (skip
+    # quietly when the tool isn't installed). User-authored sensors.json
+    # commands never get that check — they may start with shell builtins or
+    # compound syntax (`cd x && ...`) that which() can't resolve, and an
+    # explicitly configured sensor that can't launch should fail loudly.
     sensors: list[dict] = []
     if "dotnet" in stacks:
         # 600s: a fresh worktree may need a full NuGet restore.
@@ -145,6 +150,7 @@ def _default_sensors(stacks: list[str]) -> list[dict]:
             "name": "dotnet build",
             "command": "dotnet build --nologo -v q",
             "timeout_s": 600,
+            "auto": True,
         })
     if "python" in stacks:
         # ruff only if installed — no compileall fallback (walks venvs).
@@ -155,12 +161,14 @@ def _default_sensors(stacks: list[str]) -> list[dict]:
             "name": "ruff",
             "command": "ruff check --select E9,F63,F7,F82 .",
             "timeout_s": 180,
+            "auto": True,
         })
     if "typescript" in stacks:
         sensors.append({
             "name": "tsc",
             "command": "npx tsc --noEmit",
             "timeout_s": 300,
+            "auto": True,
         })
     return sensors
 
@@ -272,7 +280,10 @@ async def _run_one(
             name=name, command=command, status="skipped",
             output="skipped (empty command)", blocking=blocking,
         )
-    if shutil.which(tool) is None:
+    # Availability pre-check only for auto-detected sensors: their optional
+    # tools should skip quietly. Custom sensors.json commands always run —
+    # a launch failure there is real, actionable feedback.
+    if spec.get("auto") and shutil.which(tool) is None:
         return SensorResult(
             name=name, command=command, status="skipped",
             output=f"skipped ({tool} not installed)",
@@ -329,7 +340,7 @@ async def run_sensors(
     from bot import config
 
     if total_budget_s is None:
-        total_budget_s = float(config.SENSOR_TOTAL_BUDGET_S)
+        total_budget_s = float(config.SENSOR_TOTAL_BUDGET_SECS)
 
     cfg = load_sensor_config(repo_path)
     specs = cfg["sensors"]

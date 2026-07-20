@@ -86,7 +86,7 @@ STALL_DIAG_RELOG_SECS: int = int(os.getenv("STALL_DIAG_RELOG_SECS", "60"))
 MAX_PROCESS_LIFETIME_SECS: int = int(os.getenv("MAX_PROCESS_LIFETIME_SECS", "14400"))
 # Total wall-clock budget for the post-build computational sensor step
 # (dotnet build / ruff / tsc). Sensors that don't fit are marked skipped.
-SENSOR_TOTAL_BUDGET_S: int = int(os.getenv("SENSOR_TOTAL_BUDGET_S", "900"))
+SENSOR_TOTAL_BUDGET_SECS: int = int(os.getenv("SENSOR_TOTAL_BUDGET_SECS", "900"))
 # Grace period after the LLM emits stop_reason="end_turn" with no
 # tool_use blocks.  If the CLI stays silent for this long, we treat
 # the session as complete and force-terminate.  Catches a `claude -p`
