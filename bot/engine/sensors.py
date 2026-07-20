@@ -65,10 +65,6 @@ class SensorReport:
             for r in self.results
         )
 
-    @property
-    def ran_any(self) -> bool:
-        return any(r.status != "skipped" for r in self.results)
-
     def failures(self) -> list[SensorResult]:
         return [
             r for r in self.results
@@ -152,9 +148,12 @@ def _default_sensors(stacks: list[str]) -> list[dict]:
         })
     if "python" in stacks:
         # ruff only if installed — no compileall fallback (walks venvs).
+        # Critical-errors-only selection (syntax errors, invalid constructs,
+        # undefined names): a repo that never adopted ruff must not fail its
+        # chains on pre-existing style noise. Widen via .claude/sensors.json.
         sensors.append({
             "name": "ruff",
-            "command": "ruff check .",
+            "command": "ruff check --select E9,F63,F7,F82 .",
             "timeout_s": 180,
         })
     if "typescript" in stacks:
@@ -203,20 +202,24 @@ def load_sensor_config(repo_path: str | Path | None) -> dict:
                 cfg["sensors"] = valid
         policy = raw.get("policy", _DEFAULT_POLICY)
         cfg["policy"] = policy if policy in ("block", "warn") else _DEFAULT_POLICY
-        rounds = _safe_pos_int(raw.get("max_fix_rounds"), _DEFAULT_MAX_FIX_ROUNDS)
-        cfg["max_fix_rounds"] = min(rounds, 3)
+        # 0 is meaningful here (report/halt immediately, no fix rounds), so
+        # don't route through _safe_pos_int, which treats 0 as invalid.
+        try:
+            rounds = int(raw.get("max_fix_rounds", _DEFAULT_MAX_FIX_ROUNDS))
+        except (TypeError, ValueError):
+            rounds = _DEFAULT_MAX_FIX_ROUNDS
+        cfg["max_fix_rounds"] = min(max(rounds, 0), 3)
     except Exception:
         log.debug("Malformed .claude/sensors.json at %s", repo_path, exc_info=True)
     return cfg
 
 
-def _tool_available(command: str) -> bool:
-    """Is the first token of the command resolvable on PATH?"""
+def _first_token(command: str) -> str | None:
+    """First shell token of a command, or None if it has none."""
     try:
-        first = shlex.split(command, posix=False)[0].strip('"')
+        return shlex.split(command, posix=False)[0].strip('"') or None
     except (ValueError, IndexError):
-        return False
-    return shutil.which(first) is not None
+        return None
 
 
 async def _kill_tree(proc: asyncio.subprocess.Process) -> None:
@@ -235,8 +238,15 @@ async def _kill_tree(proc: asyncio.subprocess.Process) -> None:
                 stderr=asyncio.subprocess.DEVNULL,
             )
             await asyncio.wait_for(killer.wait(), timeout=10)
-        else:
-            proc.kill()
+        elif proc.pid:
+            # start_new_session=True made the shell a group leader; killing
+            # the group takes the shell's children (the actual tool) with it.
+            import os
+            import signal
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                proc.kill()
     except (asyncio.TimeoutError, ProcessLookupError, OSError):
         pass
     try:
@@ -249,17 +259,23 @@ async def _run_one(
     spec: dict, cwd: str, budget_left: float,
 ) -> SensorResult:
     name = str(spec.get("name") or spec.get("command", "sensor"))
-    command = str(spec["command"])
+    command = str(spec.get("command", ""))
     blocking = bool(spec.get("blocking", True))
     timeout_s = min(
         float(_safe_pos_int(spec.get("timeout_s"), _DEFAULT_TIMEOUT_S)),
         max(budget_left, 1.0),
     )
 
-    if not _tool_available(command):
+    tool = _first_token(command)
+    if tool is None:
         return SensorResult(
             name=name, command=command, status="skipped",
-            output=f"skipped ({command.split()[0]} not installed)",
+            output="skipped (empty command)", blocking=blocking,
+        )
+    if shutil.which(tool) is None:
+        return SensorResult(
+            name=name, command=command, status="skipped",
+            output=f"skipped ({tool} not installed)",
             blocking=blocking,
         )
 
@@ -270,6 +286,9 @@ async def _run_one(
             cwd=cwd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            # POSIX: own process group so a timeout can kill the whole tree
+            # (Windows uses taskkill /T instead — see _kill_tree).
+            start_new_session=(sys.platform != "win32"),
         )
         try:
             out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
@@ -329,5 +348,14 @@ async def run_sensors(
                 blocking=bool(spec.get("blocking", True)),
             ))
             continue
-        report.results.append(await _run_one(spec, cwd, budget_left))
+        try:
+            report.results.append(await _run_one(spec, cwd, budget_left))
+        except Exception as exc:  # uphold the never-raise contract
+            log.warning("Sensor spec %r crashed the runner: %s", spec, exc)
+            report.results.append(SensorResult(
+                name=str(spec.get("name") or "sensor"),
+                command=str(spec.get("command", "")),
+                status="error", output=f"{type(exc).__name__}: {exc}",
+                blocking=bool(spec.get("blocking", True)),
+            ))
     return report

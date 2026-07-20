@@ -59,9 +59,9 @@ Chains run a deterministic sensor step (build → **sensors** → review_code �
 that executes fast checks in the build worktree and feeds raw tool output back
 to the build session for self-fixing (`bot/engine/sensors.py`).
 
-- Auto-detection per stack: `dotnet build` (C#), `ruff check .` (Python, only
-  if installed), `npx tsc --noEmit` (tsconfig present). No stack/tools → step
-  skips silently.
+- Auto-detection per stack: `dotnet build` (C#), ruff critical-errors-only
+  (Python, only if installed — syntax errors/undefined names, not style),
+  `npx tsc --noEmit` (tsconfig present). No stack/tools → step skips silently.
 - Per-repo override in the main repo (not the worktree), replaces auto-detect:
   ```json
   {
