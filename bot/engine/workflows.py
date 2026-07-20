@@ -1275,6 +1275,99 @@ async def on_review_code(ctx: RequestContext, source_id: str, source_msg_id: str
     return result
 
 
+# --- Sensors ---
+
+
+async def on_sensors(
+    ctx: RequestContext, source_id: str, source_msg_id: str | None = None,
+) -> Instance | None:
+    """Run deterministic post-build checks; feed failures back to the session.
+
+    All pass/skip → post a compact summary and return the SOURCE instance
+    unchanged (the chain's current_id doesn't move). Failures → resume the
+    build session with the raw tool output (max_fix_rounds), re-running the
+    sensors after each fix turn. Persistent failure halts under the default
+    ``block`` policy (via needs_input, same as verify) or warns+advances
+    under ``warn`` (.claude/sensors.json).
+    """
+    from bot.engine.sensors import load_sensor_config, run_sensors
+
+    inst = ctx.store.get_instance(source_id)
+    if not inst:
+        return None
+    cwd = inst.worktree_path or inst.repo_path
+    if not cwd:
+        return inst  # nothing to sense; chain continues
+
+    cfg = load_sensor_config(inst.repo_path)
+    report = await run_sensors(cwd, inst.repo_path)
+
+    async def _notify(text: str) -> None:
+        try:
+            await ctx.messenger.send_text(ctx.channel_id, text, silent=True)
+        except Exception:
+            log.debug("Sensor notice failed for %s", ctx.channel_id, exc_info=True)
+
+    if report.passed:
+        await _notify(report.summary_line())
+        return inst
+
+    current_source = source_id
+    current_msg = source_msg_id
+    result: Instance | None = inst
+    for round_num in range(cfg["max_fix_rounds"]):
+        result = await spawn_from(ctx, current_source, SpawnConfig(
+            instance_type=InstanceType.TASK,
+            prompt=config.SENSOR_FIX_PROMPT + "\n\n" + report.failure_text(),
+            mode="build",
+            origin=InstanceOrigin.SENSOR_FIX,
+            status_text=(
+                "Fixing sensor failures..." if round_num == 0
+                else f"Fixing sensor failures (round {round_num + 1})..."
+            ),
+            resume_session=True,
+            copy_branch=True,
+            silent=True,
+        ), source_msg_id=current_msg)
+
+        if not result:
+            return None
+
+        # Paused with a question or died — let the chain guard handle it
+        # (mirrors the review/verify loop guards).
+        if result.status != InstanceStatus.COMPLETED or result.needs_input:
+            return result
+
+        fix_cwd = result.worktree_path or result.repo_path or cwd
+        report = await run_sensors(fix_cwd, inst.repo_path)
+        if report.passed:
+            await _notify(report.summary_line())
+            return result
+
+        current_source = result.id
+        current_msg = _last_msg_id(result, ctx.platform)
+
+    # Still failing after all fix rounds.
+    tail = report.failure_text()
+    if len(tail) > 900:
+        tail = "…\n" + tail[-900:]
+    if cfg["policy"] == "warn":
+        await _notify(
+            f"{report.summary_line()} — proceeding under warn policy. "
+            f"Latest failures:\n{tail}"
+        )
+        return result
+    # block (default): halt the chain via needs_input, same as verify-fail.
+    await _notify(
+        f"{report.summary_line()} — halting (sensor failures persist after "
+        f"{cfg['max_fix_rounds']} fix rounds):\n{tail}"
+    )
+    if result and result.status == InstanceStatus.COMPLETED:
+        result.needs_input = True
+        ctx.store.update_instance(result)
+    return result
+
+
 # --- Verify ---
 
 _VERIFY_BLOCK_RE = re.compile(
@@ -1678,15 +1771,15 @@ async def on_done(
 # --- Autopilot chains ---
 
 _AUTOPILOT_STEPS = [
-    "review_loop", "build", "review_code", "verify",
+    "review_loop", "build", "sensors", "review_code", "verify",
     "done", "verify_release", "release", "merge",
 ]
 _BUILD_AND_SHIP_STEPS = [
-    "build", "review_code", "verify",
+    "build", "sensors", "review_code", "verify",
     "done", "verify_release", "release", "merge",
 ]
 _AUTOPILOT_HOLD_STEPS = [
-    "review_loop", "build", "review_code", "verify",
+    "review_loop", "build", "sensors", "review_code", "verify",
     "done", "verify_release", "release",
 ]
 
@@ -1697,18 +1790,18 @@ _AUTOPILOT_HOLD_STEPS = [
 _CHAIN_PRESETS: dict[str, list[str]] = {
     # Full ship: build → review → verify → done → release → merge (quiet close).
     "ship": [
-        "build", "review_code", "verify",
+        "build", "sensors", "review_code", "verify",
         "done", "verify_release", "release", "merge",
     ],
     # Build + release but stop before merge — parks on Merge/Discard (or the
     # auto-merge veto window if the repo opted into merge/ship autonomy).
     "hold": [
-        "build", "review_code", "verify",
+        "build", "sensors", "review_code", "verify",
         "done", "verify_release", "release",
     ],
     # Build + verify loop only — the "build and verify" flow. Stops after
     # verify with the branch open.
-    "verify": ["build", "review_code", "verify"],
+    "verify": ["build", "sensors", "review_code", "verify"],
 }
 
 
@@ -3083,6 +3176,8 @@ async def _run_autopilot_chain(
                         status_text="Building...", resume_session=True,
                         auto_branch=True, silent=True,
                     ), source_msg_id=current_msg)
+            elif step == "sensors":
+                result = await on_sensors(ctx, current_id, current_msg)
             elif step == "review_code":
                 result = await on_review_code(ctx, current_id, current_msg)
             elif step == "verify":
@@ -3346,7 +3441,11 @@ async def _run_autopilot_chain(
                             suffix_override=mention,
                         )
                         return result
-            chain_instances.append(result)
+            # An all-pass sensors step returns the build instance unchanged —
+            # don't append the same instance twice (would duplicate it in
+            # chain eval and the manual-verify handoff list).
+            if not chain_instances or chain_instances[-1].id != result.id:
+                chain_instances.append(result)
             completed_steps.append(step)
             current_id = result.id
             current_msg = _last_msg_id(result, ctx.platform)

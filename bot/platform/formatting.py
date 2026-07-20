@@ -301,7 +301,7 @@ _WORKFLOW_ORIGINS = frozenset({
     InstanceOrigin.COMMIT, InstanceOrigin.DONE,
     InstanceOrigin.APPLY_REVISIONS, InstanceOrigin.RELEASE,
     InstanceOrigin.VERIFY, InstanceOrigin.VERIFY_RELEASE,
-    InstanceOrigin.BUILD_AND_SHIP,
+    InstanceOrigin.BUILD_AND_SHIP, InstanceOrigin.SENSOR_FIX,
 })
 
 

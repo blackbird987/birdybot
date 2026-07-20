@@ -84,6 +84,9 @@ STALL_TIMEOUT_SECS: int = int(os.getenv("STALL_TIMEOUT_SECS", "60"))
 # with API call open" from "actually hung locally".
 STALL_DIAG_RELOG_SECS: int = int(os.getenv("STALL_DIAG_RELOG_SECS", "60"))
 MAX_PROCESS_LIFETIME_SECS: int = int(os.getenv("MAX_PROCESS_LIFETIME_SECS", "14400"))
+# Total wall-clock budget for the post-build computational sensor step
+# (dotnet build / ruff / tsc). Sensors that don't fit are marked skipped.
+SENSOR_TOTAL_BUDGET_S: int = int(os.getenv("SENSOR_TOTAL_BUDGET_S", "900"))
 # Grace period after the LLM emits stop_reason="end_turn" with no
 # tool_use blocks.  If the CLI stays silent for this long, we treat
 # the session as complete and force-terminate.  Catches a `claude -p`
@@ -696,6 +699,12 @@ WORKFLOW_GUIDANCE: dict[str, str] = {
         "You're reviewing code with fresh eyes. Look for bugs, edge cases, and missed "
         "requirements. If you find issues, fix them directly."
     ),
+    "sensor_fix": (
+        "Deterministic checks (compiler/linter/type checker) flagged errors in the "
+        "build you just finished. Fix the root causes — never suppress rules, add "
+        "ignore comments, or loosen tool configs to silence them. The same checks "
+        "re-run right after your turn, so commit your fixes before finishing."
+    ),
     "verify": (
         "You're verifying that the code just built actually works. "
         "Do NOT just read the code, run linters, or check types — that's not verification. "
@@ -951,6 +960,15 @@ CODE_REVIEW_PROMPT = (
     'If a CHANGELOG entry or commit message has been written, verify each '
     'bullet corresponds to a real code change in the current diff — flag '
     'and fix phantom claims.'
+)
+
+SENSOR_FIX_PROMPT = (
+    'Deterministic checks (compiler/linter/type checker) failed after your '
+    'build. Fix the ROOT CAUSES of every reported error. Do NOT suppress '
+    'rules, add ignore/noqa comments, delete tests, or loosen tool configs '
+    'to make the checks pass — the same checks re-run after your fixes, and '
+    'a suppressed error counts as a failure. Commit your fixes when done. '
+    'The raw tool output follows verbatim:'
 )
 
 VERIFY_PROMPT = (
