@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -48,6 +49,24 @@ class InstanceOrigin(str, Enum):
 
 # Origins that belong to the plan workflow (used in lifecycle + button selection)
 PLAN_ORIGINS = frozenset({InstanceOrigin.PLAN, InstanceOrigin.REVIEW_PLAN, InstanceOrigin.APPLY_REVISIONS})
+
+
+def _parse_origin(value) -> InstanceOrigin:
+    """Tolerant origin parse for state deserialization.
+
+    An unknown value (state written by a newer bot version that added an
+    origin, then rolled back) degrades to DIRECT instead of crashing the
+    whole state load at startup.
+    """
+    if value is None:
+        return InstanceOrigin.DIRECT
+    try:
+        return InstanceOrigin(value)
+    except ValueError:
+        logging.getLogger(__name__).warning(
+            "Unknown instance origin %r in state — treating as direct", value,
+        )
+        return InstanceOrigin.DIRECT
 
 
 def merge_msg_is_failure(msg: str) -> bool:
@@ -301,7 +320,7 @@ class Instance:
             message_ids=_migrate_message_ids(d),
             pid=d.get("pid"),
             schedule_id=d.get("schedule_id"),
-            origin=InstanceOrigin(d["origin"]) if "origin" in d else InstanceOrigin.DIRECT,
+            origin=_parse_origin(d.get("origin")),
             parent_id=d.get("parent_id"),
             origin_platform=d.get("origin_platform", "discord"),
             user_id=d.get("user_id", ""),

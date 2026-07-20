@@ -1308,6 +1308,11 @@ async def on_sensors(
         except Exception:
             log.debug("Sensor notice failed for %s", ctx.channel_id, exc_info=True)
 
+    # No sensors detected/configured at all (docs-only repo, unknown stack):
+    # skip truly silently — a "none ran" line on every chain is just noise.
+    if not report.results:
+        return inst
+
     if report.passed:
         await _notify(report.summary_line())
         return inst
