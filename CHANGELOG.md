@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.99.8 — Computational sensors in the build chain (2026-07-20)
+
 ### Added
 - **Computational sensor step in the build chain.** Every chain now runs deterministic checks right after build, before code review: auto-detected per stack (`dotnet build` for C#, ruff critical-errors-only for Python when installed, `npx tsc --noEmit` for TypeScript), overridable per repo via `.claude/sensors.json` (custom commands, `block`/`warn` policy, `max_fix_rounds`). Failures feed the raw tool output back into the build session for up to 2 self-fix rounds; persistent failures halt the chain under the default `block` policy. Repos with no detectable stack skip silently; installed-but-optional gaps (e.g. ruff missing) are noted in a one-line summary.
 
