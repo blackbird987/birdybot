@@ -1447,6 +1447,10 @@ async def _do_cooldown_retry_locked(store, runner, inst, discord_bot, channel_id
         mode=inst.mode,
     )
     new_inst.origin = inst.origin
+    # Faithful replay: carry the source instance's model so a cooldown auto-retry
+    # resumes on the model it was running (e.g. a build stays on BUILD_MODEL
+    # instead of dropping to DEFAULT_SESSION_MODEL). Matches the retry paths.
+    new_inst.model = inst.model
     new_inst.origin_platform = inst.origin_platform
     new_inst.effort = inst.effort
     new_inst.parent_id = inst.id

@@ -116,9 +116,10 @@ class _ClaudeProvider(ProviderConfig):
             cmd.extend(["--effort", instance.effort])  # type: ignore[attr-defined]
 
         # Model resolution: model-limit failover (model_override) beats the
-        # per-instance choice (explicit model / MODEL_ROUTING / EXPLORE_MODEL,
-        # all baked into instance.model at spawn), which beats the
-        # deployment-wide default. This is the single choke point for
+        # per-instance choice (explicit model / MODEL_ROUTING / BUILD_ORIGINS→
+        # BUILD_MODEL / EXPLORE_MODEL, all baked into instance.model at spawn by
+        # resolve_spawn_model), which beats the deployment-wide default. This is
+        # the single choke point for
         # DEFAULT_SESSION_MODEL so DIRECT sessions — which never pass through
         # workflows.spawn_from — get it too. model_override first means the
         # fallback can never undo an explicit limit-failover downgrade.
