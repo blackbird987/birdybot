@@ -31,6 +31,13 @@ _THINKING_ORIGINS = frozenset(
     {InstanceOrigin.DIRECT} | set(PLAN_ORIGINS)
 )
 
+# Button/preset actions that never become a spawned instance origin, so they
+# never reach resolve_spawn_model: Build & Ship fans out into per-step spawns,
+# and a retry preserves its source instance's origin + model.
+_NON_INSTANCE_ORIGINS = frozenset(
+    {InstanceOrigin.BUILD_AND_SHIP, InstanceOrigin.RETRY}
+)
+
 
 @contextmanager
 def _cfg(*, build_model="opus", model_routing=None, explore_model=None):
@@ -104,12 +111,29 @@ def _test_explore_model_legacy_fallback() -> list[str]:
     return failures
 
 
-def _test_no_origin_both_thinking_and_build() -> list[str]:
-    """Sanity: the two category sets must not overlap."""
-    overlap = BUILD_ORIGINS & _THINKING_ORIGINS
-    if overlap:
-        return [f"BUILD_ORIGINS and thinking origins overlap: {overlap}"]
-    return []
+def _test_every_origin_classified() -> list[str]:
+    """Every InstanceOrigin is deliberately placed: a build origin, a thinking
+    origin, or a button/meta action. A new enum member trips this until it is
+    classified — the guard against silently defaulting a build-like origin to
+    the thinking model."""
+    failures: list[str] = []
+    buckets = (BUILD_ORIGINS, _THINKING_ORIGINS, _NON_INSTANCE_ORIGINS)
+    classified = BUILD_ORIGINS | _THINKING_ORIGINS | _NON_INSTANCE_ORIGINS
+    missing = set(InstanceOrigin) - classified
+    if missing:
+        failures.append(
+            "unclassified origins (place in BUILD_ORIGINS, thinking, or meta): "
+            f"{sorted(o.value for o in missing)}"
+        )
+    # No origin may sit in two buckets.
+    for i, a in enumerate(buckets):
+        for b in buckets[i + 1:]:
+            overlap = a & b
+            if overlap:
+                failures.append(
+                    f"origin in multiple buckets: {sorted(o.value for o in overlap)}"
+                )
+    return failures
 
 
 def main() -> int:
@@ -118,7 +142,7 @@ def main() -> int:
         ("thinking-origins-unrouted", _test_thinking_origins_unrouted()),
         ("explicit-overrides-category", _test_explicit_routing_overrides_category()),
         ("explore-model-legacy", _test_explore_model_legacy_fallback()),
-        ("no-set-overlap", _test_no_origin_both_thinking_and_build()),
+        ("every-origin-classified", _test_every_origin_classified()),
     ]
     total = sum(len(f) for _, f in checks)
     if total:

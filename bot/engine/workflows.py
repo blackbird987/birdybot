@@ -987,6 +987,9 @@ async def spawn_resolver_detached(
         mode="build",
     )
     new_inst.origin = InstanceOrigin.RESOLVE_MERGE
+    # Manual spawn (bypasses spawn_from) — apply the same plan-vs-build routing
+    # so the conflict resolver runs on the strong build model, not the default.
+    new_inst.model = resolve_spawn_model(new_inst.origin)
     new_inst.origin_platform = ctx.platform
     new_inst.effort = ctx.effective_effort
     new_inst.parent_id = source.id
