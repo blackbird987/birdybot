@@ -1320,6 +1320,9 @@ async def on_bg(ctx: RequestContext, text: str) -> None:
         mode="build",
     )
     inst.origin = InstanceOrigin.BG
+    # Manual spawn (bypasses spawn_from) — route through the plan-vs-build
+    # split so a background build lands on the strong model, not the default.
+    inst.model = workflows.resolve_spawn_model(inst.origin)
     inst.origin_platform = ctx.platform
     inst.effort = ctx.effective_effort
     inst.branch = f"{config.BRANCH_PREFIX}/{inst.id}"
@@ -1395,6 +1398,9 @@ async def on_release(ctx: RequestContext, text: str) -> None:
         mode="build",
     )
     inst.origin = InstanceOrigin.RELEASE
+    # Manual spawn (bypasses spawn_from) — route through the plan-vs-build
+    # split so release surgery (changelog/version edits) runs on the strong model.
+    inst.model = workflows.resolve_spawn_model(inst.origin)
     inst.origin_platform = ctx.platform
     inst.effort = ctx.effective_effort
     inst.status = InstanceStatus.QUEUED
@@ -1556,6 +1562,9 @@ async def on_retry(ctx: RequestContext, text: str) -> None:
         mode=inst.mode,
     )
     new_inst.origin = inst.origin
+    # Faithful replay: carry the source instance's model so a retried build
+    # stays on the model it ran (routing preserved across retries).
+    new_inst.model = inst.model
     new_inst.origin_platform = ctx.platform
     new_inst.effort = ctx.effective_effort
     new_inst.parent_id = inst.id
@@ -3189,6 +3198,9 @@ async def handle_callback(
             mode=inst.mode,
         )
         new_inst.origin = inst.origin
+        # Faithful replay: carry the source instance's model so a retried build
+        # stays on the model it ran (routing preserved across retries).
+        new_inst.model = inst.model
         new_inst.origin_platform = ctx.platform
         new_inst.effort = ctx.effective_effort
         new_inst.parent_id = inst.id

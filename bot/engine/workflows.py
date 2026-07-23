@@ -15,8 +15,8 @@ from typing import Literal
 from bot import config
 from bot.claude.gitpaths import git_dir_stat
 from bot.claude.types import (
-    CODE_CHANGE_TOOLS, ChainPhaseState, Instance, InstanceOrigin, InstanceStatus,
-    InstanceType, PHASE_GATES, Phase, merge_msg_is_failure,
+    BUILD_ORIGINS, CODE_CHANGE_TOOLS, ChainPhaseState, Instance, InstanceOrigin,
+    InstanceStatus, InstanceType, PHASE_GATES, Phase, merge_msg_is_failure,
 )
 from bot.engine import lifecycle, sessions as sessions_mod
 from bot.platform.base import ButtonSpec, RequestContext
@@ -28,6 +28,38 @@ from bot.platform.formatting import (
 )
 
 log = logging.getLogger(__name__)
+
+
+# Legacy per-step routing: EXPLORE_MODEL covers the mechanical plan-review
+# steps for deployments that set it. BUILD_ORIGINS (the plan-vs-build split)
+# supersedes it for build-family origins.
+_EXPLORE_MODEL_ORIGINS = frozenset(
+    {InstanceOrigin.REVIEW_PLAN, InstanceOrigin.APPLY_REVISIONS}
+)
+
+
+def resolve_spawn_model(origin: InstanceOrigin) -> str | None:
+    """Pick the ``--model`` a spawned workflow step should carry, or None.
+
+    Precedence, highest first:
+      1. An explicit ``MODEL_ROUTING`` entry pins one specific origin.
+      2. ``BUILD_ORIGINS`` (everything that touches real code) → ``BUILD_MODEL``.
+      3. Legacy ``EXPLORE_MODEL`` for the mechanical plan-review steps.
+      4. None — unrouted (direct chat, plan, review_plan, apply_revisions).
+         The caller leaves ``instance.model`` unset so it falls through to
+         ``DEFAULT_SESSION_MODEL`` at command-build time.
+
+    All of this loses to the model-limit failover downgrade, applied later in
+    the runner (``model_override`` beats ``instance.model``).
+    """
+    routed = config.MODEL_ROUTING.get(origin.value)
+    if routed:
+        return routed
+    if origin in BUILD_ORIGINS:
+        return config.BUILD_MODEL
+    if origin in _EXPLORE_MODEL_ORIGINS and config.EXPLORE_MODEL:
+        return config.EXPLORE_MODEL
+    return None
 
 
 async def _notify_user(ctx: RequestContext, suffix: str = "") -> None:
@@ -799,17 +831,12 @@ async def spawn_from(
     new_inst.origin = cfg.origin
     new_inst.origin_platform = ctx.platform
     new_inst.effort = ctx.effective_effort
-    # Per-origin model routing (post-Fable-PPU policy): MODEL_ROUTING beats
-    # the legacy EXPLORE_MODEL routing for the mechanical plan-review steps,
-    # which is kept as a fallback for existing deployments. Anything still
-    # unrouted here falls through to DEFAULT_SESSION_MODEL at command-build
-    # time (provider.build_command) — the same last-resort DIRECT sessions get.
-    _EXPLORE_MODEL_ORIGINS = frozenset({InstanceOrigin.REVIEW_PLAN, InstanceOrigin.APPLY_REVISIONS})
-    routed_model = config.MODEL_ROUTING.get(cfg.origin.value)
+    # Per-origin model routing (plan-vs-build split). None leaves instance.model
+    # unset so it falls through to DEFAULT_SESSION_MODEL at command-build time —
+    # the same last-resort DIRECT sessions get. See resolve_spawn_model.
+    routed_model = resolve_spawn_model(cfg.origin)
     if routed_model:
         new_inst.model = routed_model
-    elif cfg.origin in _EXPLORE_MODEL_ORIGINS and config.EXPLORE_MODEL:
-        new_inst.model = config.EXPLORE_MODEL
     new_inst.parent_id = source.id
     new_inst.repo_name = source.repo_name
     new_inst.repo_path = source.repo_path
@@ -960,6 +987,9 @@ async def spawn_resolver_detached(
         mode="build",
     )
     new_inst.origin = InstanceOrigin.RESOLVE_MERGE
+    # Manual spawn (bypasses spawn_from) — apply the same plan-vs-build routing
+    # so the conflict resolver runs on the strong build model, not the default.
+    new_inst.model = resolve_spawn_model(new_inst.origin)
     new_inst.origin_platform = ctx.platform
     new_inst.effort = ctx.effective_effort
     new_inst.parent_id = source.id
