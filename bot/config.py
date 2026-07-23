@@ -184,20 +184,21 @@ def _parse_model_routing(raw: str) -> dict[str, str]:
     return routing
 
 
-# Per-workflow-step model routing. Applied at spawn time (workflows.spawn_from)
-# as an explicit *per-origin override* layered on top of the BUILD_ORIGINS
-# category default below — highest per-instance precedence, but still beneath
-# the model-limit failover downgrade. Use it to pin one specific step to a
-# model; the category default handles the plan-vs-build split for everything
-# else.
+# Per-workflow-step model routing. Applied at spawn time by
+# workflows.resolve_spawn_model (the choke point spawn_from and every manual
+# spawn site — /bg, /release, the merge resolver — funnel through) as an
+# explicit *per-origin override* layered on top of the BUILD_ORIGINS category
+# default below — highest per-instance precedence, but still beneath the
+# model-limit failover downgrade. Use it to pin one specific step to a model;
+# the category default handles the plan-vs-build split for everything else.
 MODEL_ROUTING: dict[str, str] = _parse_model_routing(os.getenv("MODEL_ROUTING", ""))
 
 # Strong model for build-family origins (see BUILD_ORIGINS in types.py).
-# Applied at spawn time in workflows.spawn_from; beats EXPLORE_MODEL and the
-# DEFAULT_SESSION_MODEL fall-through, loses to an explicit MODEL_ROUTING entry
-# and to the model-limit failover downgrade. Defaults to opus so this routing
-# is behaviour-neutral until DEFAULT_SESSION_MODEL is pointed at a lighter
-# thinking model.
+# Applied at spawn time by workflows.resolve_spawn_model (spawn_from plus the
+# manual spawn sites); beats EXPLORE_MODEL and the DEFAULT_SESSION_MODEL
+# fall-through, loses to an explicit MODEL_ROUTING entry and to the model-limit
+# failover downgrade. Defaults to opus so this routing is behaviour-neutral
+# until DEFAULT_SESSION_MODEL is pointed at a lighter thinking model.
 BUILD_MODEL: str = os.getenv("BUILD_MODEL", "opus")
 
 # Model-specific limit failover: some models (Fable 5) have their own quota
