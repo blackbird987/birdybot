@@ -51,6 +51,21 @@ class InstanceOrigin(str, Enum):
 PLAN_ORIGINS = frozenset({InstanceOrigin.PLAN, InstanceOrigin.REVIEW_PLAN, InstanceOrigin.APPLY_REVISIONS})
 
 
+# Origins that run on the strong build model (config.BUILD_MODEL, default
+# opus). Everything NOT listed — direct chat, plan, review_plan,
+# apply_revisions — falls through to DEFAULT_SESSION_MODEL (the lighter
+# "thinking" model, e.g. fable). The line: Fable owns everything that is
+# still just words; the strong model owns everything that touches real code.
+BUILD_ORIGINS: frozenset[InstanceOrigin] = frozenset({
+    InstanceOrigin.BUILD, InstanceOrigin.BUILD_AND_SHIP,
+    InstanceOrigin.COMMIT, InstanceOrigin.DONE,
+    InstanceOrigin.VERIFY, InstanceOrigin.VERIFY_RELEASE,
+    InstanceOrigin.RELEASE, InstanceOrigin.SENSOR_FIX,
+    InstanceOrigin.RESOLVE_MERGE, InstanceOrigin.BG,
+    InstanceOrigin.RETRY, InstanceOrigin.REVIEW_CODE,
+})
+
+
 def _parse_origin(value) -> InstanceOrigin:
     """Tolerant origin parse for state deserialization.
 
