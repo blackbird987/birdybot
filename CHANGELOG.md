@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.99.9 — Plan-vs-build model routing (2026-07-23)
+
 ### Added
 - **Plan-vs-build model routing.** Workflow steps now split by nature: plan/brainstorm-family origins (direct chat, plan, review_plan, apply_revisions) run on the `DEFAULT_SESSION_MODEL` "thinking" model, while build-family origins (build, verify, commit, review_code, release, sensor_fix, resolve_merge, etc.) run on the new `BUILD_MODEL` (default `opus`) via a code-level `BUILD_ORIGINS` set. The guiding line: the thinking model owns everything that is still just words; the strong model owns everything that touches real code. `MODEL_ROUTING` remains as a per-origin override escape hatch layered on top. Behaviour-neutral until `DEFAULT_SESSION_MODEL` is pointed at a lighter model.
 
