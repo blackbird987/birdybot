@@ -37,5 +37,11 @@ def flatten(value: object) -> str:
 
     Free-form markdown rendered into a single line of a list needs this, or an
     embedded newline silently splits one entry into two.
+
+    Only ``None`` becomes empty. A falsy-but-real value (``0``, ``False``) is
+    rendered, not swallowed — a shared helper that quietly drops a zero is a
+    trap for the next caller even though today's callers only pass strings.
     """
-    return " ".join(str(value or "").split())
+    if value is None:
+        return ""
+    return " ".join(str(value).split())

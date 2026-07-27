@@ -331,8 +331,12 @@ def setup(bot: ClaudeBot) -> None:
             return
         await interaction.response.defer(ephemeral=True)
         from bot.engine.report import full_report
+        # Same clamp and off-thread hop as /evals, which reads the same files:
+        # an unbounded window scans the whole eval directory, and doing that
+        # synchronously stalls every other session's progress updates.
+        days = max(1, min(days, 90))
         try:
-            text = full_report(days=days)
+            text = await asyncio.to_thread(full_report, days=days)
         except Exception as exc:
             log.warning("Report generation failed", exc_info=True)
             text = f"Report generation failed: {exc}"

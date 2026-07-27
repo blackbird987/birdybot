@@ -27,14 +27,17 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 # Substrings that identify a model-provider SDK in a dependency manifest.
-# Written lowercase; matching is case-insensitive.
+# Written lowercase with hyphens; matching is case-insensitive and treats
+# -, _ and . as interchangeable (see _marker_pattern), so each entry only
+# needs one spelling. Entries that are a substring of another are omitted:
+# "generativeai" already covers google-generativeai and google.generativeai.
 _LLM_MARKERS: tuple[str, ...] = (
     "anthropic",           # anthropic, @anthropic-ai/sdk, Anthropic.SDK
     "claude-agent-sdk", "claude-code-sdk",   # PyPI names carrying no "anthropic"
     "openai",              # openai, @openai/..., Azure.AI.OpenAI
     "langchain",
-    "llamaindex", "llama-index",
-    "google-generativeai", "google.generativeai", "generativeai",
+    "llamaindex", "llama-index",   # genuinely two spellings, not a separator swap
+    "generativeai",
     "@google/genai", "google-genai",
     "mistralai",
     "cohere",
@@ -42,6 +45,12 @@ _LLM_MARKERS: tuple[str, ...] = (
     "litellm",
     "@ai-sdk/", "vercel/ai",
 )
+
+# Package ecosystems treat these as the same character — PEP 503 says so
+# outright for Python, and npm/NuGet names vary the same way in practice. A
+# marker written one way must match all of them, or `llama-index` silently
+# misses the `llama_index` spelling that appears in half of real manifests.
+_SEPARATORS = "-_."
 
 
 def _marker_pattern(marker: str) -> str:
@@ -59,7 +68,10 @@ def _marker_pattern(marker: str) -> str:
     way. This is why the manifest text is matched case-insensitively rather
     than lowercased first — lowercasing would destroy the evidence.
     """
-    pattern = re.escape(marker)
+    pattern = "".join(
+        f"[{re.escape(_SEPARATORS)}]" if ch in _SEPARATORS else re.escape(ch)
+        for ch in marker
+    )
     if marker[-1].isalpha():
         # (?-i:...) turns IGNORECASE OFF inside the lookahead. Without it the
         # whole point is lost: under IGNORECASE, [a-z] also matches A-Z, so the
