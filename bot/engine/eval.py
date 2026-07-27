@@ -156,19 +156,38 @@ LOW_CACHE_HIT_RATE = 0.5
 def cache_hit_rate(inst: Instance) -> float | None:
     """Share of this run's prompt tokens served from the prompt cache.
 
-    ``None`` when the run reported no prompt tokens at all (errored before
-    the first request, or a provider that doesn't report usage) — that is
-    genuinely "unknown", which must not be flattened into 0.0 and then read
-    back as a cache miss.
+    ``None`` means "we have no cache accounting for this run", which must not
+    be flattened into 0.0 and read back as a cache miss. Two cases produce it:
+
+    * the run reported no prompt tokens at all (errored before the first
+      request, or a provider that doesn't report usage), and
+    * both cache counters are zero while uncached input is not. Every request
+      that carries a cache breakpoint either writes or reads, so all-zero
+      counters mean the numbers never arrived, not that nothing was cached.
+      Measured on 253 persisted instances: 3 sit in exactly this state, and
+      each one recorded 69k-167k of context — plainly served from cache. They
+      would otherwise have reported a fabricated 0% and, on a resume, tripped
+      the low-reuse flag below with a finding the raw records don't support.
+
+    A genuine total miss (a resume past the cache TTL, which rewrites the whole
+    prefix) still has a positive cache-write count, so it returns 0.0 and does
+    flag — which is the case the flag exists for.
+
+    Note on scale: the cache counters are session totals summed across every
+    assistant call, while ``input_tokens`` is the final result event's figure.
+    Measured on real transcripts, uncached input runs about 2 tokens per call
+    (~2.1k summed over 506 calls) against 53M of cache reads, so the mixed
+    scale moves the ratio by <0.01 percentage points. Not worth a second token
+    field to reconcile; recorded here so it needn't be re-derived.
     """
-    total = (
-        (inst.cache_read_tokens or 0)
-        + (inst.cache_creation_tokens or 0)
-        + (inst.input_tokens or 0)
-    )
+    read = inst.cache_read_tokens or 0
+    written = inst.cache_creation_tokens or 0
+    if read <= 0 and written <= 0:
+        return None
+    total = read + written + (inst.input_tokens or 0)
     if total <= 0:
         return None
-    return round((inst.cache_read_tokens or 0) / total, 3)
+    return round(read / total, 3)
 
 
 # --- Per-instance heuristic checks ---
@@ -535,11 +554,16 @@ def load_evals(since_hours: int = 24) -> list[SessionEval]:
 
 # --- Digest / attribution ---
 #
-# Eval results have been written to disk and never read back. Counting them is
-# only half the value: a recurring flag is evidence that a specific piece of
-# the system prompt is not doing its job, so each flag is attributed to the
-# block that was supposed to prevent it. Anything without a clear owner is
-# reported as unattributed rather than guessed at.
+# `/report` already counted these files, but only as volume — "125 flags" says
+# nothing about what to change. A recurring flag is evidence that a specific
+# piece of the system prompt is not doing its job, so each flag is attributed
+# to the block that was supposed to prevent it. Anything without a clear owner
+# is reported as unattributed rather than guessed at.
+#
+# Both session flags and chain flags are attributed through this table; the
+# rules below covering revision rounds, review loops and chain cost match
+# messages that only `evaluate_chain` produces, so a caller that skipped chain
+# flags would leave those three rules permanently dead.
 
 _ATTRIBUTION: tuple[tuple[str, str, str], ...] = (
     # (category, substring matched against the flag message, owning block)

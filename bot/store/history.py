@@ -13,10 +13,27 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from bot import config
+from bot.textutil import clip, flatten
 
 log = logging.getLogger(__name__)
 
 HISTORY_FILE: Path = config.DATA_DIR / "history.jsonl"
+
+
+def _parse_entry(line: str) -> dict | None:
+    """Parse one JSONL line into an entry, or None if it isn't usable.
+
+    A line that parses but isn't an object (`[1,2,3]`, a bare string) used to
+    reach `.get` and raise AttributeError — out of three functions this module
+    documents as best-effort, and in the runner's case out of the system-prompt
+    builder, where it would kill the session spawn. Unusable is unusable: it is
+    skipped exactly like a line that doesn't parse at all.
+    """
+    try:
+        entry = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    return entry if isinstance(entry, dict) else None
 
 
 def append_entry(entry: dict) -> None:
@@ -50,9 +67,8 @@ def clear_branch(branch_name: str) -> int:
         if not line.strip():
             updated.append(line)
             continue
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError:
+        entry = _parse_entry(line)
+        if entry is None:
             updated.append(line)
             continue
         if entry.get("branch") == branch_name:
@@ -88,9 +104,8 @@ def get_branch_for_instance(instance_id: str) -> str | None:
     for line in reversed(lines):
         if not line.strip():
             continue
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError:
+        entry = _parse_entry(line)
+        if entry is None:
             continue
         if entry.get("id") == instance_id:
             return entry.get("branch")
@@ -123,9 +138,8 @@ def load_recent(
     for line in reversed(lines):
         if not line.strip():
             continue
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError:
+        entry = _parse_entry(line)
+        if entry is None:
             continue
         if repo and entry.get("repo") != repo:
             continue
@@ -293,3 +307,91 @@ def rank_entries(
 
     scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
     return _newest_first(pinned + [e for _, _, e in scored[: limit - len(pinned)]])
+
+
+def _format_age(finished: str) -> str:
+    """Human age for a history entry, or "" if the timestamp is unusable."""
+    if not finished:
+        return ""
+    try:
+        delta = datetime.now(timezone.utc) - datetime.fromisoformat(finished)
+    except Exception:
+        return ""
+    if delta.days > 0:
+        return f"{delta.days}d ago"
+    hours = delta.seconds // 3600
+    return f"{hours}h ago" if hours else f"{delta.seconds // 60}m ago"
+
+
+def render_recent_block(
+    repo: str,
+    prompt: str,
+    pin_branches: set[str] | None = None,
+    pin_ids: set[str] | None = None,
+) -> str:
+    """Render the recent-sessions block for a system prompt. Never raises.
+
+    Lives here rather than in the runner because every input and every rule it
+    applies is about history: which entries to load, which are worth a slot,
+    and how much of each to show. The runner only needs the finished string.
+
+    Best-effort, like the rest of this module — history is context, not
+    correctness. Selection now involves tokenising and scoring free-form text
+    out of a file that is appended to by every session, and there is no version
+    of "the ranking hit an edge case" that should stop a session from starting.
+    Returns "" when there is nothing to show or anything goes wrong.
+    """
+    try:
+        # Candidate pool: always at least 20 so ranking has something to
+        # choose between, and never smaller than what we intend to keep.
+        recent = load_recent(
+            repo=repo,
+            limit=max(20, config.SESSION_HISTORY_MAX),
+            dedupe_thread=True,
+        )
+        if not recent:
+            return ""
+        if config.SESSION_HISTORY_RANKING == "relevance":
+            recent = rank_entries(
+                recent, prompt=prompt, limit=config.SESSION_HISTORY_MAX,
+                pin_branches=pin_branches, pin_ids=pin_ids,
+            )
+        else:
+            # "recency" mode — newest-first selection, as before, but still
+            # capped at SESSION_HISTORY_MAX. This is not a full revert to the
+            # old block (which injected all 20); it turns off *ranking*, not
+            # the size cap. Raise SESSION_HISTORY_MAX to widen it.
+            recent = recent[: config.SESSION_HISTORY_MAX]
+
+        lines: list[str] = []
+        for e in recent:
+            # Topics and summaries are free-form markdown with newlines in
+            # them; each renders as one line here, so flatten first.
+            line = (
+                f'- [{e.get("id", "?")}] "{clip(flatten(e.get("topic")), 80)}"'
+                f' — {e.get("status", "?")} {_format_age(e.get("finished", ""))}'
+            )
+            if e.get("branch"):
+                line += f' (branch: {e["branch"]})'
+            summary = clip(flatten(e.get("summary")), 120)
+            if summary:
+                line += f"\n  Summary: {summary}"
+            lines.append(line)
+
+        # Size backstop: drop whole entries from the end rather than slicing
+        # mid-word. The old cap cut the block at a fixed byte count, routinely
+        # severing an entry mid-sentence and leaving the model a dangling
+        # fragment to interpret.
+        kept: list[str] = []
+        used = 0
+        for line in lines:
+            cost = len(line) + 1  # +1 for the joining newline
+            if used + cost > config.SESSION_HISTORY_MAX_CHARS and kept:
+                kept.append("... (older entries omitted)")
+                break
+            kept.append(line)
+            used += cost
+        return "\n".join(kept)
+    except Exception:
+        log.warning("Failed to render session-history block", exc_info=True)
+        return ""

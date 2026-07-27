@@ -25,7 +25,6 @@ if TYPE_CHECKING:
 from bot import config
 from bot.claude.branch_utils import canonical_branch
 from bot.claude.gitpaths import git_common_dir, git_dir, git_toplevel
-from bot.textutil import clip, flatten
 from bot.claude.parser import (
     RunResult,
     detect_path_poisoning,
@@ -2274,84 +2273,23 @@ class ClaudeRunner:
         # tokens per spawn on sessions that usually had nothing to do with the
         # task in hand.
         if instance.repo_name:
-            # Candidate pool: always at least 20 so ranking has something to
-            # choose between, and never smaller than what we intend to keep.
-            recent = history_mod.load_recent(
+            history_block = history_mod.render_recent_block(
                 repo=instance.repo_name,
-                limit=max(20, config.SESSION_HISTORY_MAX),
-                dedupe_thread=True,
+                prompt=instance.prompt or "",
+                # Only the branch this session is actually working on.
+                # NOT original_branch — despite the name that is the merge
+                # TARGET (master), shared by every build in the repo, so
+                # pinning it would pin work with nothing in common.
+                pin_branches={instance.branch} if instance.branch else set(),
+                # Lineage: the steps this session was stacked on are the
+                # closest thing the runner has to "same thread" — Instance
+                # carries no channel id, but parent/chained ids identify the
+                # earlier steps of this same piece of work.
+                pin_ids={
+                    i for i in (instance.parent_id, instance.chained_from) if i
+                },
             )
-            if recent and config.SESSION_HISTORY_RANKING == "relevance":
-                recent = history_mod.rank_entries(
-                    recent,
-                    prompt=instance.prompt or "",
-                    limit=config.SESSION_HISTORY_MAX,
-                    # Only the branch this session is actually working on.
-                    # NOT original_branch — despite the name that is the merge
-                    # TARGET (master), shared by every build in the repo, so
-                    # pinning it would pin work with nothing in common.
-                    pin_branches={instance.branch} if instance.branch else set(),
-                    # Lineage: the steps this session was stacked on are the
-                    # closest thing the runner has to "same thread" — Instance
-                    # carries no channel id, but parent/chained ids identify the
-                    # earlier steps of this same piece of work.
-                    pin_ids={
-                        i for i in (instance.parent_id, instance.chained_from) if i
-                    },
-                )
-            elif recent:
-                # "recency" mode — newest-first selection, as before, but still
-                # capped at SESSION_HISTORY_MAX. This is not a full revert to
-                # the old block (which injected all 20); it turns off *ranking*,
-                # not the size cap. Raise SESSION_HISTORY_MAX to widen it.
-                recent = recent[: config.SESSION_HISTORY_MAX]
-            if recent:
-                lines = []
-                for e in recent:
-                    eid = e.get("id", "?")
-                    # Topics and summaries are free-form markdown with newlines
-                    # in them; each renders as one line here, so flatten first.
-                    topic = clip(flatten(e.get("topic")), 80)
-                    status = e.get("status", "?")
-                    finished = e.get("finished", "")
-                    branch = e.get("branch")
-                    summary = clip(flatten(e.get("summary")), 120)
-
-                    age = ""
-                    if finished:
-                        try:
-                            dt = datetime.fromisoformat(finished)
-                            delta = datetime.now(timezone.utc) - dt
-                            if delta.days > 0:
-                                age = f"{delta.days}d ago"
-                            else:
-                                hours = delta.seconds // 3600
-                                age = f"{hours}h ago" if hours else f"{delta.seconds // 60}m ago"
-                        except Exception:
-                            pass
-
-                    line = f'- [{eid}] "{topic}" — {status} {age}'
-                    if branch:
-                        line += f" (branch: {branch})"
-                    if summary:
-                        line += f"\n  Summary: {summary}"
-                    lines.append(line)
-
-                # Size backstop: drop whole entries from the end rather than
-                # slicing mid-word. The old cap cut the block at a fixed byte
-                # count, routinely severing an entry mid-sentence and leaving
-                # the model a dangling fragment to interpret.
-                kept: list[str] = []
-                used = 0
-                for line in lines:
-                    cost = len(line) + 1  # +1 for the joining newline
-                    if used + cost > config.SESSION_HISTORY_MAX_CHARS and kept:
-                        kept.append("... (older entries omitted)")
-                        break
-                    kept.append(line)
-                    used += cost
-
-                history_block = "\n".join(kept)
+            if history_block:
                 parts.append(
                     "\n\n--- Recent Sessions (this project) ---\n"
                     + history_block

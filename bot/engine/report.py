@@ -6,8 +6,8 @@ import logging
 from collections import Counter
 
 from bot.engine.eval import (
-    ChainEval, SessionEval, build_digest, load_chain_evals, load_evals,
-    normalise_flag_message,
+    ChainEval, SessionEval, attribute_flag, build_digest, load_chain_evals,
+    load_evals, normalise_flag_message,
 )
 
 log = logging.getLogger(__name__)
@@ -85,16 +85,21 @@ def full_report(days: int = 7) -> str:
 
     # Chain flags are not session evals, so they are counted separately — but
     # normalised the same way, or "3 revision loops" and "4 revision loops"
-    # would occupy two of the five slots as if they were different findings.
-    chain_flags: Counter[str] = Counter()
+    # would occupy two of the three slots as if they were different findings,
+    # and attributed the same way. Three of the attribution rules exist only
+    # for chain messages, so skipping this would leave them permanently dead
+    # and this block the only one without an owner against each line.
+    chain_flags: Counter[tuple[str, str]] = Counter()
     for c in chains:
         for f in c.flags:
-            chain_flags[normalise_flag_message(f.message)] += 1
+            chain_flags[(f.category, normalise_flag_message(f.message))] += 1
     if chain_flags:
         lines.append("")
         lines.append("**Top chain flags:**")
-        for msg, count in chain_flags.most_common(3):
-            lines.append(f"• {msg} ({count}x)")
+        for (category, msg), count in chain_flags.most_common(3):
+            lines.append(
+                f"• {msg} ({count}x) — owner: {attribute_flag(category, msg)}"
+            )
 
     # --- Chain efficiency ---
     if chains:

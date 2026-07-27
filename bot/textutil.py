@@ -1,11 +1,13 @@
 """Leaf string helpers, importable from any layer.
 
-Deliberately depends on nothing inside `bot`. `clip` is needed by both the
-runner (trimming history entries for the system prompt) and the platform
-formatters (trimming rows for Discord), and those two packages sit on opposite
-sides of a one-way dependency: `bot.platform` imports `bot.claude`, never the
-reverse. Housing a shared helper in either one would invert that edge and
-force a function-local import to dodge the resulting cycle.
+Deliberately depends on nothing inside `bot`. These helpers are needed from
+`bot.store` (trimming history entries for the system prompt) and `bot.engine`
+(trimming rows for Discord), and the packages that would otherwise host them
+sit downstream of both: `bot.platform` imports `bot.claude`, which imports
+`bot.store`, so putting a shared string helper in either would close a cycle.
+Housing them in `bot.store.history` instead would technically import, but
+"import the text clipper from the history store" is a lie about what the
+function is. A leaf module with no `bot` imports is the only honest home.
 """
 
 from __future__ import annotations
