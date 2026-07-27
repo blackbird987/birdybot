@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 from bot import config
 from bot.claude.branch_utils import canonical_branch
 from bot.claude.gitpaths import git_common_dir, git_dir, git_toplevel
+from bot.textutil import clip, flatten
 from bot.claude.parser import (
     RunResult,
     detect_path_poisoning,
@@ -2305,21 +2306,16 @@ class ClaudeRunner:
                 # not the size cap. Raise SESSION_HISTORY_MAX to widen it.
                 recent = recent[: config.SESSION_HISTORY_MAX]
             if recent:
-                from bot.platform.formatting import clip
-
-                # Topics and summaries are free-form markdown with newlines in
-                # them; each renders as one line here, so flatten first.
-                def _flat(v) -> str:
-                    return " ".join(str(v or "").split())
-
                 lines = []
                 for e in recent:
                     eid = e.get("id", "?")
-                    topic = clip(_flat(e.get("topic")), 80)
+                    # Topics and summaries are free-form markdown with newlines
+                    # in them; each renders as one line here, so flatten first.
+                    topic = clip(flatten(e.get("topic")), 80)
                     status = e.get("status", "?")
                     finished = e.get("finished", "")
                     branch = e.get("branch")
-                    summary = clip(_flat(e.get("summary")), 120)
+                    summary = clip(flatten(e.get("summary")), 120)
 
                     age = ""
                     if finished:

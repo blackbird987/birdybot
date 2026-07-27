@@ -610,21 +610,41 @@ def _median(values: list[float]) -> float | None:
     return (ordered[mid - 1] + ordered[mid]) / 2
 
 
-def build_digest(days: int = 7, min_count: int = 3) -> EvalDigest:
+_LIVE_NUMBER_RE = re.compile(r"\d+(\.\d+)?")
+
+
+def normalise_flag_message(message: str) -> str:
+    """Collapse the live numbers out of a flag message so copies group together.
+
+    Flag text embeds the values that triggered it ("took 22 turns", "took 31
+    turns"). Counted verbatim, every occurrence looks unique and nothing ever
+    reaches a reporting threshold. Shared with `report.py` so the two commands
+    that surface flags can never disagree about how many there were.
+    """
+    return _LIVE_NUMBER_RE.sub("N", message or "").strip()
+
+
+def build_digest(
+    days: int = 7,
+    min_count: int = 3,
+    evals: list[SessionEval] | None = None,
+) -> EvalDigest:
     """Aggregate recent session evals into a reportable digest.
 
     Only flags seen in `min_count` or more SESSIONS are reported — a quiet week
     should produce a short message, not a wall of one-offs. The number of
     flags held back is reported so the threshold never hides its own effect.
+
+    `evals` lets a caller that has already loaded the window pass it in rather
+    than paying for a second scan of the eval directory.
     """
-    evals = load_evals(since_hours=days * 24)
+    if evals is None:
+        evals = load_evals(since_hours=days * 24)
     digest = EvalDigest(days=days, sessions=len(evals))
     if not evals:
         return digest
 
-    # Group identical flags. Messages embed live numbers ("took 22 turns"), so
-    # group on a normalised form — otherwise every occurrence looks unique and
-    # nothing ever reaches the threshold.
+    # Group identical flags on the normalised message.
     grouped: dict[tuple[str, str], dict] = {}
     for ev in evals:
         # A flag counts once per session no matter how often it fired there.
@@ -632,7 +652,7 @@ def build_digest(days: int = 7, min_count: int = 3) -> EvalDigest:
         # let a single long session outrank a habit spread across fifty.
         seen_here: set[tuple[str, str]] = set()
         for flag in ev.flags:
-            norm = re.sub(r"\d+(\.\d+)?", "N", flag.message).strip()
+            norm = normalise_flag_message(flag.message)
             key = (flag.category, norm)
             slot = grouped.setdefault(key, {
                 "count": 0, "occurrences": 0, "severity": flag.severity,

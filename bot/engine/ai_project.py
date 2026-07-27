@@ -27,7 +27,7 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 # Substrings that identify a model-provider SDK in a dependency manifest.
-# Lowercase — manifests are lowercased before matching.
+# Written lowercase; matching is case-insensitive.
 _LLM_MARKERS: tuple[str, ...] = (
     "anthropic",           # anthropic, @anthropic-ai/sdk, Anthropic.SDK
     "claude-agent-sdk", "claude-code-sdk",   # PyPI names carrying no "anthropic"
@@ -48,19 +48,33 @@ def _marker_pattern(marker: str) -> str:
     """Marker regex that won't fire on a longer word that merely starts with it.
 
     Plain substring matching reads "coherence" as the Cohere SDK. Markers that
-    end in a letter therefore require a non-letter after them; markers ending
-    in punctuation (``@ai-sdk/``) must not, since a package name follows.
+    end in a letter therefore may not be followed by a LOWERCASE letter;
+    markers ending in punctuation (``@ai-sdk/``) get no such rule, since a
+    package name follows.
+
+    Lowercase specifically, not "any letter", because .NET and JS packages are
+    camel-cased: ``OllamaSharp`` is a genuine Ollama client and ``Coherence``
+    is not a Cohere one, and the capital is the only thing distinguishing a
+    compound package name from an English word that happens to start the same
+    way. This is why the manifest text is matched case-insensitively rather
+    than lowercased first — lowercasing would destroy the evidence.
     """
     pattern = re.escape(marker)
     if marker[-1].isalpha():
-        pattern += r"(?![a-z])"
+        # (?-i:...) turns IGNORECASE OFF inside the lookahead. Without it the
+        # whole point is lost: under IGNORECASE, [a-z] also matches A-Z, so the
+        # rule would read "not followed by any letter" and reject OllamaSharp
+        # exactly like coherence.
+        pattern += r"(?!(?-i:[a-z]))"
     return pattern
 
 
 # Empty entries are filtered out, not tolerated: one would match every file
 # and silently turn detection on everywhere — and would crash this module at
 # import time, taking the whole bot down with it.
-_MARKER_RE = re.compile("|".join(_marker_pattern(m) for m in _LLM_MARKERS if m))
+_MARKER_RE = re.compile(
+    "|".join(_marker_pattern(m) for m in _LLM_MARKERS if m), re.IGNORECASE
+)
 
 # Manifests checked at the repo root. Globs are resolved non-recursively.
 _MANIFEST_GLOBS: tuple[str, ...] = (
@@ -108,9 +122,11 @@ def is_llm_project(repo_path: str | None) -> bool:
                     if not manifest.is_file():
                         continue
                     try:
+                        # NOT lowercased — see _marker_pattern: the capital in
+                        # "OllamaSharp" is what tells it apart from "coherence".
                         text = manifest.read_text(
                             encoding="utf-8", errors="ignore",
-                        ).lower()
+                        )
                     except OSError:
                         continue
                     if _MARKER_RE.search(text):

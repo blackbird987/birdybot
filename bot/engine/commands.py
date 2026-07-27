@@ -24,7 +24,6 @@ from bot.platform.base import ButtonSpec, RequestContext, SpawnArgs
 from bot.platform.formatting import (
     VALID_MODES,
     action_button_specs,
-    clip,
     expanded_button_specs,
     format_expanded_result_md,
     format_instance_list_md,
@@ -40,6 +39,7 @@ from bot.platform.formatting import (
     running_button_specs,
     strip_markdown,
 )
+from bot.textutil import clip
 
 from bot.claude.runner import ClaudeRunner, MERGE_FAIL_DIVERGED, _NOWND
 
