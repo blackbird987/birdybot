@@ -85,7 +85,7 @@ class StateStore:
         # for auth (logged out / OAuth dead) so the Ark notice fires exactly
         # once per outage instead of once per failed task, and survives reboot.
         self._account_alerts: dict[str, dict] = {}
-        self._dirty: bool = False # Dirty flag — mark_dirty() defers save to auto-save loop
+        self._dirty: bool = False  # Dirty flag — mark_dirty() defers save to auto-save loop
         self._last_mtime: float = 0.0  # Track file mtime for external change detection
 
         self._load()
@@ -641,7 +641,7 @@ class StateStore:
         """Return a copy of {account_dir -> alert record}.
 
         Record shape: ``{"reason": str, "since": ISO, "notified": bool,
-        "resolved": bool, "snooze_until": ISO|None}``.
+        "resolved": bool, "snooze_until": ISO|None, "cred_fp": str|None}``.
 
         The record is a small state machine drained by the notifier loop:
         open+unnotified -> announce; resolved+notified -> all-clear then drop;
@@ -651,19 +651,43 @@ class StateStore:
         """
         return {k: dict(v) for k, v in self._account_alerts.items()}
 
-    def set_account_alert(self, account_dir: str, reason: str, since_iso: str) -> bool:
+    def sidelined_accounts(self) -> set[str]:
+        """Accounts with an open (unresolved) auth alert.
+
+        The only record of an account the *server* rejected — its credentials
+        file still parses fine, so no on-disk check can see it.  Read by the
+        "how healthy is the fleet?" surfaces so they agree with The Ark.
+        """
+        return {
+            k for k, v in self._account_alerts.items() if not v.get("resolved")
+        }
+
+    def set_account_alert(
+        self,
+        account_dir: str,
+        reason: str,
+        since_iso: str,
+        cred_fp: str | None = None,
+    ) -> bool:
         """Open (or re-open) an auth sideline for an account. True if new.
 
         Re-marking an already-open alert is a no-op that keeps the original
         ``since`` and the ``notified``/``snooze_until`` flags — that is what
         stops a burst of failed tasks from re-notifying.  An account that
         breaks again before its all-clear went out simply re-opens.
+
+        ``cred_fp`` fingerprints the credentials file the verdict was reached
+        against, so a later reader can tell "still the same rejected file" from
+        "someone logged in since".  It rides with ``reason`` and is replaced
+        whenever the reason changes — a stale fingerprint from a different
+        diagnosis would answer the wrong question.
         """
         existing = self._account_alerts.get(account_dir)
         if existing is not None:
             changed = False
             if existing.get("reason") != reason:
                 existing["reason"] = reason
+                existing["cred_fp"] = cred_fp
                 changed = True
             if existing.get("resolved"):
                 existing["resolved"] = False
@@ -677,6 +701,7 @@ class StateStore:
             "notified": False,
             "resolved": False,
             "snooze_until": None,
+            "cred_fp": cred_fp,
         }
         self.save()
         return True

@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+from collections.abc import Container, Iterable
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -100,6 +101,46 @@ def unusable_reason(account_dir: str | Path) -> str | None:
 def credentials_usable(account_dir: str | Path) -> bool:
     """True when *account_dir* looks able to authenticate."""
     return unusable_reason(account_dir) is None
+
+
+def credentials_fingerprint(account_dir: str | Path) -> str | None:
+    """``"<mtime_ns>:<size>"`` for the credentials file, or None if absent.
+
+    The durable "has this been re-logged-in?" signal.  A server-side 401 leaves
+    a file that still *looks* fine, so the only evidence a fix happened is the
+    file being rewritten — which is exactly what ``/login`` does.  Same
+    (mtime, size) pair the probe cache keys on, as a string so it can live in
+    ``data/state.json`` and survive a reboot.
+    """
+    cred = Path(str(account_dir)).expanduser() / ".credentials.json"
+    try:
+        st = cred.stat()
+    except OSError:
+        return None
+    return f"{st.st_mtime_ns}:{st.st_size}"
+
+
+def split_accounts(
+    accounts: Iterable[str],
+    sidelined: Container[str] = (),
+) -> tuple[list[str], list[str]]:
+    """Partition *accounts* into (usable, unusable).
+
+    ``sidelined`` covers what the on-disk probe structurally cannot see: an
+    account whose token looks fine but which the server rejected at runtime.
+    Both "how healthy is the fleet?" surfaces (``/status`` and the dashboard)
+    go through here so they can never disagree with each other — or with The
+    Ark, which is the whole point: the incident that started this was a backup
+    that read as healthy everywhere for five weeks.
+    """
+    # Materialise first: this reads *accounts* twice, and a generator caller
+    # would otherwise get an empty "usable" list — the worst possible way to
+    # be wrong here, since it reads as "every account is down".
+    items = list(accounts)
+    bad = [a for a in items if a in sidelined or not credentials_usable(a)]
+    dead = set(bad)
+    good = [a for a in items if a not in dead]
+    return good, bad
 
 
 def relogin_command(account_dir: str | Path) -> str:

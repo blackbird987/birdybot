@@ -1962,10 +1962,15 @@ async def on_usage(ctx: RequestContext, *, force: bool = False) -> str:
 
 # --- /status ---
 
-def _accounts_status_line(is_owner: bool = True) -> str | None:
+def _accounts_status_line(store, is_owner: bool = True) -> str | None:
     """`**Accounts** — 1/2 usable | signed out: `klerk`` — or None if there's
     no failover configured. Names the dead account so a silently degraded
     rotation is visible at a glance instead of only at failover time.
+
+    Counts an account the *server* rejected as down too, not just one whose
+    credentials file is visibly empty — otherwise the exact failure this whole
+    feature exists for reads as "2/2 usable" here while The Ark says the
+    opposite.
 
     The "/auth to fix" pointer is owner-only, because the command is: /status
     is open to allow-listed users, and sending them to a slash command that
@@ -1974,9 +1979,9 @@ def _accounts_status_line(is_owner: bool = True) -> str | None:
     accounts = list(config.CLAUDE_ACCOUNTS)
     if len(accounts) < 2:
         return None
-    from bot.claude.auth_health import account_label, credentials_usable
+    from bot.claude.auth_health import account_label, split_accounts
 
-    sidelined = [a for a in accounts if not credentials_usable(a)]
+    _, sidelined = split_accounts(accounts, store.sidelined_accounts())
     line = f"**Accounts** — {len(accounts) - len(sidelined)}/{len(accounts)} usable"
     if sidelined:
         names = ", ".join(f"`{account_label(a)}`" for a in sidelined)
@@ -1996,7 +2001,7 @@ async def on_status(ctx: RequestContext) -> None:
         platforms.append("Discord")
 
     text = format_status_md(
-        accounts_line=_accounts_status_line(ctx.is_owner),
+        accounts_line=_accounts_status_line(ctx.store, ctx.is_owner),
         uptime_secs=uptime,
         running=ctx.store.running_count(),
         instances_today=ctx.store.instance_count_today(),

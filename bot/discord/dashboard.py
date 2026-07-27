@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 import discord
 
 from bot import config
-from bot.claude.auth_health import credentials_usable
+from bot.claude.auth_health import split_accounts
 from bot.claude.types import InstanceStatus
 from bot.discord.access import load_access_config
 from bot.platform.formatting import format_relative_time
@@ -102,8 +102,9 @@ def build_dashboard_embed(
 
     No Discord API calls and no state mutation. Not quite pure: the account
     label stats each account's credentials file (cached on mtime+size in
-    ``auth_health``), which is what lets a signed-out backup show as ``1/2
-    accts`` here instead of only surfacing at failover time.
+    ``auth_health``) and reads the store's sideline table, which together are
+    what let a signed-out backup show as ``1/2 accts`` here instead of only
+    surfacing at failover time.
     """
     active_repo, _ = store.get_active_repo()
 
@@ -236,9 +237,10 @@ def build_dashboard_embed(
     if total_accts > 1:
         # Show usable/total when one is signed out, so a dead backup can't
         # masquerade as working failover the way klerk did for five weeks.
-        usable_accts = sum(
-            1 for a in config.CLAUDE_ACCOUNTS if credentials_usable(a)
+        healthy, _ = split_accounts(
+            config.CLAUDE_ACCOUNTS, store.sidelined_accounts(),
         )
+        usable_accts = len(healthy)
         if usable_accts < total_accts:
             usage_label += f" · {usable_accts}/{total_accts} accts"
         else:

@@ -26,6 +26,7 @@ from bot import config
 from bot.claude.auth_health import (
     REASON_RUNTIME_401,
     account_label,
+    credentials_fingerprint,
     relogin_command,
     unusable_reason,
 )
@@ -75,6 +76,12 @@ def _is_primary_model(model: str | None) -> bool:
     if not effective:
         return True
     return config.PRIMARY_MODEL.lower() in effective.lower()
+
+
+# How long to wait before re-trying a turn that had nowhere to run and no real
+# reset to wait for. Short on purpose: the only thing that can change is the
+# user signing an account back in.
+REFUSAL_GRACE_MINUTES = 15
 
 
 def _no_productive_work(res: RunResult) -> bool:
@@ -678,13 +685,35 @@ class ClaudeRunner:
             except Exception:
                 open_alerts = {}
             for acct in config.CLAUDE_ACCOUNTS:
-                if acct in found or acct in self._account_cooldowns:
+                if acct in found:
                     continue
                 # A runtime 401 means the file on disk looked fine and the
-                # server still said no — re-reading it proves nothing, so only
-                # a successful run (see _stream_output) may clear that one.
+                # server still said no — re-reading the SAME file proves
+                # nothing, so that verdict stands until either a successful run
+                # (see _stream_output) or the file being rewritten, which is
+                # what a `/login` does.  The fingerprint is what tells those
+                # two apart, and it's persisted, so this still works after a
+                # reboot — the in-memory auth-cooldown bookkeeping does not.
                 existing = open_alerts.get(acct) or {}
                 if existing.get("reason") == REASON_RUNTIME_401:
+                    fp = existing.get("cred_fp")
+                    if fp and fp == credentials_fingerprint(acct):
+                        continue
+                    log.info(
+                        "Clearing the 401 sideline on %s: %s",
+                        account_label(acct),
+                        "credentials were rewritten (re-authenticated)" if fp
+                        # No fingerprint means the record predates this check,
+                        # so there is nothing to compare against.  Give it the
+                        # benefit of the doubt rather than stranding it: if the
+                        # server still says no, the next run re-opens it.
+                        else "no fingerprint on record — cannot prove it is "
+                             "still the rejected credentials",
+                    )
+                    # Durable evidence of a fresh login, so this may override
+                    # the in-memory record of which cooldowns were auth-kind.
+                    self._clear_auth_cooldown(acct, force=True)
+                if acct in self._account_cooldowns:
                     continue
                 # Credentials look fine and the account isn't sidelined —
                 # resolve rather than delete so the notifier can post the
@@ -708,14 +737,26 @@ class ClaudeRunner:
             self._store.set_account_alert(
                 account_dir, REASON_RUNTIME_401,
                 datetime.now(timezone.utc).isoformat(),
+                # Which file the server rejected: the only way to recognise a
+                # `/login` later, since the rejected file parses fine too.
+                cred_fp=credentials_fingerprint(account_dir),
             )
         except Exception:
             log.debug("Failed to record auth alert", exc_info=True)
 
-    def _clear_auth_cooldown(self, account_dir: str) -> None:
-        """Drop a cooldown that was applied for auth (not usage), if any."""
+    def _clear_auth_cooldown(
+        self, account_dir: str, *, force: bool = False,
+    ) -> None:
+        """Drop a cooldown that was applied for auth (not usage), if any.
+
+        ``force`` skips the auth-kind check for callers holding durable proof
+        that a fresh login happened (a changed credential fingerprint).  After
+        a reboot the in-memory auth/usage split is gone, and without this an
+        account would sit out the rest of its 24h sideline despite being signed
+        back in — exactly what the Ark notice promises won't happen.
+        """
         self._auth_dead.discard(account_dir)
-        if account_dir not in self._auth_cooldowns:
+        if not force and account_dir not in self._auth_cooldowns:
             return
         self._auth_cooldowns.discard(account_dir)
         self._account_cooldowns.pop(account_dir, None)
@@ -738,6 +779,33 @@ class ClaudeRunner:
             if acct not in dead and unusable_reason(acct):
                 dead.add(acct)
         return dead
+
+    def _refusal_retry_plan(
+        self, logged_out: set[str],
+    ) -> tuple[datetime, str | None]:
+        """When to come back after refusing to spawn, and what to call it.
+
+        Only a LIVE account's cooldown is a real wall-clock moment: a dead
+        account's cooldown expiring changes nothing, and retrying then just
+        burns an attempt on the same 401 (t-6614).  With no live cooldown
+        there is nothing to wait *for*, so the retry becomes a short grace
+        window in case someone signs an account back in — bounded to roughly
+        45 minutes by MAX_COOLDOWN_RETRIES.
+
+        The reason it returns is display-only, but it has to be honest: calling
+        the grace window "waiting for your main account to reset" invents a
+        reset nobody hit, which is the same lie in a different place.
+        """
+        live = [
+            reset for acct, reset in self._account_cooldowns.items()
+            if acct not in logged_out
+        ]
+        if live:
+            return min(live), ("backup_logged_out" if logged_out else None)
+        grace = datetime.now(timezone.utc) + timedelta(
+            minutes=REFUSAL_GRACE_MINUTES
+        )
+        return grace, ("accounts_logged_out" if logged_out else "no_account_free")
 
     def _soften_auth_dead_end(
         self, result: RunResult, instance: Instance, dead_account: str,
@@ -933,24 +1001,9 @@ class ClaudeRunner:
                 # session_id intact.  Session_id is preserved on the result so
                 # finalize_run() does NOT clobber instance.session_id with None.
                 logged_out = self._known_dead_accounts()
-                # Only a LIVE account's cooldown is a real wall-clock moment
-                # to come back at. A dead account's cooldown expiring changes
-                # nothing — retrying then just burns an attempt on the same
-                # 401 (t-6614).
-                live_cooldowns = [
-                    reset for acct, reset in self._account_cooldowns.items()
-                    if acct not in logged_out
-                ]
-                if live_cooldowns:
-                    earliest_reset = min(live_cooldowns)
-                else:
-                    # Nothing real to wait on — every account is excluded for
-                    # some other reason (logged out, or already tried on this
-                    # turn).  Without a retry time this dead-ends the turn, so
-                    # come back shortly instead; MAX_COOLDOWN_RETRIES bounds it.
-                    earliest_reset = datetime.now(timezone.utc) + timedelta(
-                        minutes=15
-                    )
+                earliest_reset, retry_reason = self._refusal_retry_plan(
+                    logged_out
+                )
                 labels = ", ".join(sorted(account_label(a) for a in logged_out))
                 log.warning(
                     "Refusing spawn for %s: all %d account(s) on cooldown or "
@@ -959,8 +1012,10 @@ class ClaudeRunner:
                     labels or "none",
                 )
                 if logged_out:
-                    rest = "the rest are on cooldown" if live_cooldowns else (
-                        "and nothing else is available"
+                    rest = (
+                        "the rest are on cooldown"
+                        if retry_reason == "backup_logged_out"
+                        else "and nothing else is available"
                     )
                     message = (
                         f"No account is available right now — {labels} "
@@ -977,9 +1032,7 @@ class ClaudeRunner:
                     result_text="",
                     session_id=instance.session_id,
                     usage_limit_reset=earliest_reset,
-                    retry_reason=(
-                        "backup_logged_out" if logged_out else None
-                    ),
+                    retry_reason=retry_reason,
                 )
 
         # Pre-emptive model downgrade: when the chosen account's primary

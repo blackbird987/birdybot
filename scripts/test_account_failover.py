@@ -179,14 +179,16 @@ class _FakeStore:
     def get_account_alerts(self):
         return {k: dict(v) for k, v in self.alerts.items()}
 
-    def set_account_alert(self, account_dir, reason, since_iso):
+    def set_account_alert(self, account_dir, reason, since_iso, cred_fp=None):
         rec = self.alerts.get(account_dir)
         if rec is not None:
+            if rec.get("reason") != reason:
+                rec["cred_fp"] = cred_fp
             rec["reason"] = reason
             rec["resolved"] = False
             return False
         self.alerts[account_dir] = {
-            "reason": reason, "since": since_iso,
+            "reason": reason, "since": since_iso, "cred_fp": cred_fp,
             "notified": False, "resolved": False, "snooze_until": None,
         }
         return True
@@ -217,26 +219,36 @@ def _make_instance(repo_dir: str) -> Instance:
     )
 
 
-def _write_credentials(account_dir: str, *, logged_in: bool) -> None:
+def _write_credentials(
+    account_dir: str, *, logged_in: bool, token: str = "rt-test",
+) -> None:
     """Fake a CLAUDE_CONFIG_DIR that the credential preflight accepts/rejects.
 
     ``logged_in=False`` reproduces the real t-6614 shape: the file exists (so
     the old existence-only check passed) but carries no refresh token.
+
+    ``token`` varies the refresh token so a simulated ``/login`` changes the
+    file's *size* — the fingerprint then differs regardless of the filesystem's
+    mtime resolution, which two writes in the same millisecond would not.
     """
     payload = {"claudeAiOauth": {"accessToken": "at-test"}}
     if logged_in:
-        payload["claudeAiOauth"]["refreshToken"] = "rt-test"
+        payload["claudeAiOauth"]["refreshToken"] = token
     Path(account_dir, ".credentials.json").write_text(
         json.dumps(payload), encoding="utf-8",
     )
 
 
-async def _run_with_streams(stream_results, *, accounts, logged_out=()):
+async def _run_with_streams(
+    stream_results, *, accounts, logged_out=(), setup=None,
+):
     """Run a fresh instance through runner.run(), faking _stream_output to
     yield ``stream_results`` (a list of RunResult) per spawn in order; the
     last entry is reused if more spawns happen.
 
     ``logged_out`` names accounts whose credentials file has no refresh token.
+    ``setup(runner, instance, acct_dirs)`` runs just before the turn starts,
+    for tests that need pre-existing cooldowns or already-tried accounts.
 
     Returns (result, instance, runner, acct_dirs, spawn_count).
     """
@@ -272,6 +284,8 @@ async def _run_with_streams(stream_results, *, accounts, logged_out=()):
     runner._stream_output = fake_stream_output  # type: ignore[assignment]
 
     instance = _make_instance(repo_dir)
+    if setup:
+        setup(runner, instance, acct_dirs)
     try:
         result = await runner.run(instance)
     finally:
@@ -665,6 +679,91 @@ async def _test_logged_out_backup_never_spawned() -> list[str]:
     return failures
 
 
+async def _test_refusal_countdown_tells_the_truth() -> list[str]:
+    """The "nothing is available" retry notice must name the real cause.
+
+    Three ways to reach it, and only one of them is a reset the user is
+    genuinely waiting on. Announcing "waiting for your main account to reset"
+    when every account is signed out invents a reset nobody hit — the exact
+    dishonesty this branch set out to remove, one layer further down.
+    """
+    failures: list[str] = []
+    later = datetime.now(timezone.utc) + timedelta(hours=5)
+    never_run = [RunResult(is_error=False, result_text="should never happen")]
+
+    def _cool_both(runner, _inst, accts):
+        for a in accts:
+            runner._set_account_cooldown(a, later)
+
+    cases = [
+        # (label, setup, expected reason, must the retry time be `later`?)
+        (
+            "one live account cooling down, backup rejected by the server",
+            lambda r, i, a: (_cool_both(r, i, a), r._auth_dead.add(a[1])),
+            "backup_logged_out", True,
+        ),
+        (
+            "every account signed out",
+            lambda r, i, a: (_cool_both(r, i, a),
+                             r._auth_dead.update(a)),
+            "accounts_logged_out", False,
+        ),
+    ]
+    for label, setup, expected, expect_real_reset in cases:
+        result, _inst, _runner, _accts, spawns = await _run_with_streams(
+            never_run, accounts=["primary", "backup"], setup=setup,
+        )
+        if spawns:
+            failures.append(f"refusal ({label}): spawned {spawns} time(s) anyway")
+        if result.retry_reason != expected:
+            failures.append(
+                f"refusal ({label}): retry_reason was "
+                f"{result.retry_reason!r}, expected {expected!r}"
+            )
+        if expect_real_reset and result.usage_limit_reset != later:
+            failures.append(
+                f"refusal ({label}): retry time isn't the live account's "
+                "reset — the countdown would point at nothing"
+            )
+        if not expect_real_reset and result.usage_limit_reset == later:
+            failures.append(
+                f"refusal ({label}): scheduled the retry against a dead "
+                "account's cooldown, which changes nothing when it expires"
+            )
+        if not result.usage_limit_reset:
+            failures.append(
+                f"refusal ({label}): no retry at all — the turn dead-ends"
+            )
+
+    # The third shape — nothing signed out, nothing free either — can only be
+    # reached mid-turn, so exercise the decision itself.
+    runner = ClaudeRunner(store=_FakeStore())
+    when, reason = runner._refusal_retry_plan(set())
+    if reason != "no_account_free":
+        failures.append(
+            f"refusal (nothing free): reason was {reason!r} — with no account "
+            "signed out, blaming a usage limit is guesswork"
+        )
+    if when <= datetime.now(timezone.utc):
+        failures.append("refusal (nothing free): retry time is already past")
+
+    # And the wording each reason produces must actually differ.
+    from bot.engine.lifecycle import _AUTH_RETRY_REASONS, _RETRY_HEADLINES
+
+    if "reset" in _RETRY_HEADLINES["accounts_logged_out"]:
+        failures.append(
+            "refusal: the all-signed-out headline still talks about a reset"
+        )
+    if len(set(_RETRY_HEADLINES.values())) != len(_RETRY_HEADLINES):
+        failures.append("refusal: two retry reasons render the same headline")
+    if "no_account_free" in _AUTH_RETRY_REASONS:
+        failures.append(
+            "refusal: offered the auth panel for a wait that has nothing to "
+            "do with being signed out"
+        )
+    return failures
+
+
 async def _test_all_accounts_probe_dead_safety_valve() -> list[str]:
     """Every account fails the probe -> ignore the probe, don't go dark.
 
@@ -728,26 +827,41 @@ async def _test_sole_account_dead_gives_actionable_message() -> list[str]:
 
 
 async def _test_runtime_401_alert_not_auto_cleared() -> list[str]:
-    """A runtime 401 sideline survives a credentials file that looks fine.
+    """A server-rejected account clears on a re-login, not on a re-read.
 
-    Re-reading the same file proves nothing — only a successful run may post
-    the all-clear, otherwise the bot cheerfully announces recovery and then
-    fails on the very next task.
+    Two opposite failures to avoid. Re-reading the SAME file proves nothing —
+    clearing on that would announce recovery and then fail on the very next
+    task. But the file being REWRITTEN is a `/login`, and the notice promises
+    the account rejoins the moment it's signed in, so that must clear the
+    sideline (including the 24h cooldown that came with it) without waiting
+    for a successful run that may never be scheduled on a backup account.
     """
     failures: list[str] = []
     tmp = tempfile.mkdtemp(prefix="acct_alert_")
     acct = os.path.join(tmp, "primary")
-    os.makedirs(acct, exist_ok=True)
+    other = os.path.join(tmp, "other")
+    for d in (acct, other):
+        os.makedirs(d, exist_ok=True)
     _write_credentials(acct, logged_in=True)
+    _write_credentials(other, logged_in=True)
     clear_auth_cache()
     saved = list(config.CLAUDE_ACCOUNTS)
-    config.CLAUDE_ACCOUNTS[:] = [acct]
+    config.CLAUDE_ACCOUNTS[:] = [acct, other]
     try:
         runner = ClaudeRunner(store=_FakeStore())
         runner._record_auth_alert(acct)
+        runner._set_account_cooldown(
+            acct, datetime.now(timezone.utc) + timedelta(hours=24),
+        )
+        runner._auth_cooldowns.add(acct)
         runner._store.alerts[acct]["notified"] = True
         if runner._store.alerts[acct]["reason"] != REASON_RUNTIME_401:
             failures.append("runtime-401: wrong reason recorded")
+        if not runner._store.alerts[acct].get("cred_fp"):
+            failures.append(
+                "runtime-401: no credential fingerprint recorded, so a later "
+                "login can't be told from the same rejected file"
+            )
         runner._unusable_accounts()
         rec = runner._store.alerts.get(acct)
         if rec is None or rec.get("resolved"):
@@ -755,10 +869,30 @@ async def _test_runtime_401_alert_not_auto_cleared() -> list[str]:
                 "runtime-401: alert was auto-cleared by re-reading the same "
                 "credentials file — a false all-clear"
             )
-        # A successful run is the real all-clear.
-        runner._store.resolve_account_alert(acct)
-        if not runner._store.alerts[acct].get("resolved"):
-            failures.append("runtime-401: a successful run failed to resolve it")
+        if acct not in runner._account_cooldowns:
+            failures.append(
+                "runtime-401: sideline cooldown dropped without any new "
+                "evidence the account works"
+            )
+
+        # ...now the user actually signs in: the file is rewritten.
+        _write_credentials(acct, logged_in=True, token="rt-fresh-and-longer")
+        clear_auth_cache()
+        runner._unusable_accounts()
+        if acct in runner._account_cooldowns:
+            failures.append(
+                "runtime-401: signed back in but still sitting out the 24h "
+                "auth cooldown — the Ark notice's promise is a lie"
+            )
+        if acct in runner._known_dead_accounts():
+            failures.append(
+                "runtime-401: still counted as dead after a re-login, so a "
+                "retry would refuse to wait on it"
+            )
+        if not (runner._store.alerts.get(acct) or {}).get("resolved"):
+            failures.append(
+                "runtime-401: no all-clear queued after the re-login"
+            )
     finally:
         config.CLAUDE_ACCOUNTS[:] = saved
         clear_auth_cache()
@@ -834,6 +968,8 @@ async def _amain() -> int:
                          await _test_dead_backup_401_in_result_text()))
     all_failures.append(("logged-out-backup-not-spawned",
                          await _test_logged_out_backup_never_spawned()))
+    all_failures.append(("refusal-countdown-honest",
+                         await _test_refusal_countdown_tells_the_truth()))
     all_failures.append(("all-probe-dead-safety-valve",
                          await _test_all_accounts_probe_dead_safety_valve()))
     all_failures.append(("dead-end-actionable-message",
