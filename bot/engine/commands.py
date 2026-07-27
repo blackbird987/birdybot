@@ -39,6 +39,7 @@ from bot.platform.formatting import (
     running_button_specs,
     strip_markdown,
 )
+from bot.textutil import clip
 
 from bot.claude.runner import ClaudeRunner, MERGE_FAIL_DIVERGED, _NOWND
 
@@ -1842,6 +1843,85 @@ async def on_branches(ctx: RequestContext) -> None:
     await ctx.messenger.send_text(ctx.channel_id, markup)
 
 
+# --- /evals ---
+
+async def on_evals(ctx: RequestContext, days: int = 7) -> None:
+    """Report which quality flags keep recurring, and what owns each one."""
+    from bot.engine import eval as eval_mod
+
+    if not config.EVAL_ENABLED:
+        await ctx.messenger.send_text(
+            ctx.channel_id,
+            "Session evaluation is disabled (`EVAL_ENABLED=0`) — nothing to report.",
+        )
+        return
+
+    days = max(1, min(days, 90))
+    digest = await asyncio.to_thread(eval_mod.build_digest, days)
+
+    lines: list[str] = [f"**Eval digest — last {digest.days}d**"]
+    lines.append(f"{digest.sessions} session(s) evaluated")
+
+    if digest.median_cache_hit_rate is not None:
+        lines.append(
+            f"Prompt cache: {digest.median_cache_hit_rate * 100:.0f}% median reuse "
+            f"across {digest.resumed_sessions} resumed session(s)"
+        )
+    elif digest.sessions:
+        lines.append("Prompt cache: no resumed sessions in this window")
+
+    # send_text hard-truncates at Discord's 2000 chars — it does not split. So
+    # fill rows against a character budget, not a fixed row count: a fixed count
+    # of long rows overflows, and the thing cut off is the "...and N more"
+    # footer, which is exactly the line that says the list is incomplete.
+    ROW_BUDGET = 1700
+    if digest.rows:
+        lines.append("")
+        lines.append("**Recurring flags**")
+        used = sum(len(ln) + 1 for ln in lines)
+        shown = 0
+        for row in digest.rows:
+            mark = {"issue": "✗", "warning": "!", "info": "·"}.get(row.severity, "·")
+            share = f"{row.count}/{digest.sessions} sessions"
+            # Occurrences only add information when a flag fires repeatedly
+            # inside the same session — otherwise it's the same number twice.
+            if row.occurrences > row.count:
+                share += f", {row.occurrences} hits"
+            pair = [
+                f"{mark} **{share}** — {clip(row.message, 110)}",
+                f"   owner: `{row.owner}` · e.g. {', '.join(row.examples)}",
+            ]
+            cost = sum(len(ln) + 1 for ln in pair)
+            # `shown` guard: always emit at least one row, even a huge one.
+            if shown and used + cost > ROW_BUDGET:
+                break
+            lines.extend(pair)
+            used += cost
+            shown += 1
+        if shown < len(digest.rows):
+            lines.append(f"_...and {len(digest.rows) - shown} more._")
+    elif digest.sessions:
+        lines.append("")
+        lines.append("No flag recurred often enough to report.")
+    else:
+        lines.append("")
+        lines.append(
+            "No sessions were evaluated in this window — try a longer one, "
+            "e.g. `/evals days:30`."
+        )
+
+    if digest.suppressed_rows:
+        lines.append("")
+        lines.append(
+            f"_{digest.suppressed_rows} one-off flag(s) below the reporting "
+            f"threshold not shown._"
+        )
+
+    text = "\n".join(lines)
+    markup = ctx.messenger.markdown_to_markup(text)
+    await ctx.messenger.send_text(ctx.channel_id, markup)
+
+
 # --- /cost ---
 
 async def on_cost(ctx: RequestContext) -> None:
@@ -2639,6 +2719,7 @@ async def on_help(ctx: RequestContext) -> None:
         "`/discard` — delete branch\n"
         "`/branches` — list orphaned branches\n"
         "`/cost` — spending breakdown\n"
+        "`/evals` — recurring session-quality flags\n"
         "`/status` — health dashboard\n"
         "`/logs` — bot log\n"
         "`/mode` — explore|plan|build\n"

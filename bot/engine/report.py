@@ -5,7 +5,10 @@ from __future__ import annotations
 import logging
 from collections import Counter
 
-from bot.engine.eval import load_evals, load_chain_evals, SessionEval, ChainEval
+from bot.engine.eval import (
+    ChainEval, SessionEval, attribute_flag, build_digest, load_chain_evals,
+    load_evals, normalise_flag_message,
+)
 
 log = logging.getLogger(__name__)
 
@@ -63,19 +66,40 @@ def full_report(days: int = 7) -> str:
             lines.append(f"• **{repo}:** {', '.join(parts)}")
 
     # --- Top flags by frequency ---
-    flag_messages: Counter[str] = Counter()
-    for e in evals:
-        for f in e.flags:
-            flag_messages[f.message] += 1
-    for c in chains:
-        for f in c.flags:
-            flag_messages[f.message] += 1
-
-    if flag_messages:
+    # Session flags come from the shared digest rather than a private counter,
+    # so /report and /evals can never quote different numbers for the same
+    # flag: both group on the normalised message and both count SESSIONS
+    # (a per-command check fires on every tool call, and raw occurrences let
+    # one talkative session outrank a habit spread across fifty). min_count=1
+    # because /report's window is short — a threshold would empty it.
+    digest = build_digest(days=days, min_count=1, evals=evals)
+    if digest.rows:
         lines.append("")
         lines.append("**Top flags:**")
-        for msg, count in flag_messages.most_common(5):
-            lines.append(f"• {msg} ({count}x)")
+        for row in digest.rows[:5]:
+            hits = f", {row.occurrences} hits" if row.occurrences > row.count else ""
+            lines.append(
+                f"• {row.message} ({row.count}/{digest.sessions} sessions{hits})"
+                f" — owner: {row.owner}"
+            )
+
+    # Chain flags are not session evals, so they are counted separately — but
+    # normalised the same way, or "3 revision loops" and "4 revision loops"
+    # would occupy two of the three slots as if they were different findings,
+    # and attributed the same way. Three of the attribution rules exist only
+    # for chain messages, so skipping this would leave them permanently dead
+    # and this block the only one without an owner against each line.
+    chain_flags: Counter[tuple[str, str]] = Counter()
+    for c in chains:
+        for f in c.flags:
+            chain_flags[(f.category, normalise_flag_message(f.message))] += 1
+    if chain_flags:
+        lines.append("")
+        lines.append("**Top chain flags:**")
+        for (category, msg), count in chain_flags.most_common(3):
+            lines.append(
+                f"• {msg} ({count}x) — owner: {attribute_flag(category, msg)}"
+            )
 
     # --- Chain efficiency ---
     if chains:

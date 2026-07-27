@@ -59,6 +59,14 @@ def setup(bot: ClaudeBot) -> None:
             return
         await bot._run_slash(interaction, commands.on_cost)
 
+    @bot.tree.command(name="evals", description="Recurring session-quality flags and what owns them", guild=guild_obj)
+    @app_commands.describe(days="Window in days (default 7)")
+    async def cmd_evals(interaction: discord.Interaction, days: int = 7):
+        if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
+            await interaction.response.send_message("Unauthorized", ephemeral=True)
+            return
+        await bot._run_slash(interaction, lambda ctx: commands.on_evals(ctx, days))
+
     @bot.tree.command(name="usage", description="Token usage & rate limit estimates", guild=guild_obj)
     @app_commands.describe(force="Force refresh (bypass cache)")
     async def cmd_usage(interaction: discord.Interaction, force: bool = False):
@@ -323,8 +331,12 @@ def setup(bot: ClaudeBot) -> None:
             return
         await interaction.response.defer(ephemeral=True)
         from bot.engine.report import full_report
+        # Same clamp and off-thread hop as /evals, which reads the same files:
+        # an unbounded window scans the whole eval directory, and doing that
+        # synchronously stalls every other session's progress updates.
+        days = max(1, min(days, 90))
         try:
-            text = full_report(days=days)
+            text = await asyncio.to_thread(full_report, days=days)
         except Exception as exc:
             log.warning("Report generation failed", exc_info=True)
             text = f"Report generation failed: {exc}"
