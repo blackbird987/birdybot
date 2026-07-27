@@ -45,6 +45,7 @@ import os
 import shutil
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -353,6 +354,24 @@ async def _test_both_dead_terminates() -> list[str]:
         failures.append("both-dead: expected BOTH accounts on cooldown")
     if not result.is_error:
         failures.append("both-dead: expected final error result")
+    # Every account is logged out, so their auth cooldowns are NOT wall-clock
+    # moments when anything frees up. Scheduling a retry against them would
+    # burn all three attempts on the same 401 while telling the user we're
+    # "waiting for a reset" they never hit.
+    if result.usage_limit_reset is not None:
+        failures.append(
+            "both-dead: scheduled a retry against accounts that are all "
+            "logged out — that waits a day and then fails identically"
+        )
+    if "logged out" not in (result.error_message or ""):
+        failures.append(
+            f"both-dead: message isn't actionable: {result.error_message!r}"
+        )
+    for label in ("primary", "backup"):
+        if label not in (result.error_message or ""):
+            failures.append(
+                f"both-dead: message doesn't name the {label} account"
+            )
     return failures
 
 
@@ -405,6 +424,49 @@ async def _test_limit_then_dead_backup_keeps_reset() -> list[str]:
                 f"limit+dead: backup cooldown {secs:.0f}s, expected "
                 f"~ACCOUNT_AUTH_COOLDOWN_SECS ({config.ACCOUNT_AUTH_COOLDOWN_SECS}s)"
             )
+    return failures
+
+
+async def _test_long_output_never_sidelines_account() -> list[str]:
+    """A failed session that WRITES about 401s must not sideline its account.
+
+    The classifier reads ``error_message or result_text``, which is the only
+    reason the t-6570 401 was found at all — and also why a session in this
+    very repo, whose output discusses expired OAuth tokens at length, could
+    have cooled its own account down for 24 hours and posted a "signed out"
+    notice about an account that is perfectly fine.
+    """
+    failures: list[str] = []
+    essay = (
+        "I traced the failover bug. The CLI emits 'Failed to authenticate. "
+        "API Error: 401 OAuth access token has expired. Re-authenticate to "
+        "continue.' into the result stream rather than the error field, so "
+        "the runner counted it as a productive turn. " + "Notes. " * 40
+    )
+    results = [
+        RunResult(is_error=True, result_text=essay, num_turns=14),
+    ]
+    result, instance, runner, accts, spawns = await _run_with_streams(
+        results, accounts=["primary", "backup"],
+    )
+    primary, backup = accts
+    if spawns != 1:
+        failures.append(
+            f"long-output: failed over on a real session failure ({spawns} spawns)"
+        )
+    if runner._account_cooldowns:
+        failures.append(
+            "long-output: cooled an account down because its session text "
+            "mentioned OAuth — the account is fine"
+        )
+    if runner._store.alerts:
+        failures.append(
+            "long-output: posted a signed-out alert for a healthy account"
+        )
+    if result.usage_limit_reset is not None:
+        failures.append(
+            "long-output: replaced a genuine failure with a retry countdown"
+        )
     return failures
 
 
@@ -471,6 +533,16 @@ def _test_no_productive_work() -> list[str]:
         (RunResult(is_error=True, result_text="I edited three files then hit "
                    "a compile error", num_turns=9), False,
          "genuine work that ended in an error"),
+        # This repo's own sessions write about OAuth and 401s constantly, so
+        # the auth check must key on "this output IS a fatal error" (short),
+        # not "this output mentions auth" — or a real answer gets swallowed as
+        # "the backup never ran" and replaced with a retry countdown.
+        (RunResult(is_error=True, num_turns=1, result_text=(
+            "I traced the failure: the CLI reports 'Failed to authenticate. "
+            "API Error: 401 OAuth access token has expired.' whenever the "
+            "refresh token is missing from .credentials.json, and the runner "
+            "was treating that as a productive turn. " + "Details follow. " * 20
+        )), False, "a one-turn answer that merely discusses 401s"),
     ]
     for res, expected, label in cases:
         got = _no_productive_work(res)
@@ -694,6 +766,56 @@ async def _test_runtime_401_alert_not_auto_cleared() -> list[str]:
     return failures
 
 
+def _test_login_clears_auth_cooldown() -> list[str]:
+    """Signing in must put the account straight back into rotation.
+
+    The Ark notice promises "rejoins on its own the moment it's signed in — no
+    restart needed". A 24h auth cooldown left over from the last 401 would make
+    that a lie. A *usage* cooldown must survive the same event: that one really
+    does end on the clock, and clearing it would just burn a doomed spawn.
+    """
+    failures: list[str] = []
+    tmp = tempfile.mkdtemp(prefix="acct_relogin_")
+    dead = os.path.join(tmp, "dead")
+    limited = os.path.join(tmp, "limited")
+    for d in (dead, limited):
+        os.makedirs(d, exist_ok=True)
+    _write_credentials(dead, logged_in=False)
+    _write_credentials(limited, logged_in=True)
+    clear_auth_cache()
+    saved = list(config.CLAUDE_ACCOUNTS)
+    config.CLAUDE_ACCOUNTS[:] = [dead, limited]
+    try:
+        runner = ClaudeRunner(store=_FakeStore())
+        later = datetime.now(timezone.utc) + timedelta(hours=24)
+        runner._set_account_cooldown(dead, later)
+        runner._auth_cooldowns.add(dead)          # sidelined for auth
+        runner._set_account_cooldown(limited, later)  # sidelined for usage
+
+        runner._unusable_accounts()               # sees `dead` as logged out
+        _write_credentials(dead, logged_in=True)  # ...user runs /login
+        clear_auth_cache()
+        runner._unusable_accounts()               # next spawn notices
+
+        if dead in runner._account_cooldowns:
+            failures.append(
+                "relogin: the account is signed in again but still sitting "
+                "out a stale auth cooldown"
+            )
+        if limited not in runner._account_cooldowns:
+            failures.append(
+                "relogin: cleared a usage-limit cooldown, which a login "
+                "cannot fix — the next spawn would be wasted"
+            )
+        if runner._pick_account() != dead:
+            failures.append("relogin: the recovered account wasn't picked")
+    finally:
+        config.CLAUDE_ACCOUNTS[:] = saved
+        clear_auth_cache()
+        shutil.rmtree(tmp, ignore_errors=True)
+    return failures
+
+
 async def _amain() -> int:
     all_failures: list[tuple[str, list[str]]] = []
 
@@ -706,6 +828,8 @@ async def _amain() -> int:
     all_failures.append(("limit-then-dead-backup",
                          await _test_limit_then_dead_backup_keeps_reset()))
     all_failures.append(("run-resets-tried", await _test_run_resets_accounts_tried()))
+    all_failures.append(("long-output-not-a-dead-account",
+                         await _test_long_output_never_sidelines_account()))
     all_failures.append(("t-6570-401-in-result-text",
                          await _test_dead_backup_401_in_result_text()))
     all_failures.append(("logged-out-backup-not-spawned",
@@ -716,6 +840,8 @@ async def _amain() -> int:
                          await _test_sole_account_dead_gives_actionable_message()))
     all_failures.append(("runtime-401-not-auto-cleared",
                          await _test_runtime_401_alert_not_auto_cleared()))
+    all_failures.append(("relogin-clears-auth-cooldown",
+                         _test_login_clears_auth_cooldown()))
 
     total = sum(len(f) for _, f in all_failures)
     if total:

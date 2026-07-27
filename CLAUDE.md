@@ -112,7 +112,9 @@ credentials per `CLAUDE_CONFIG_DIR`, so two accounts cannot share `~/.claude`.
 - `/auth` — per-account panel (identity, cooldown, re-login)
 - `/status` — `**Accounts** — N/M usable`, naming any signed-out account
 - Dashboard usage label shows `· N accts`, or `· N/M accts` when one is down
-- The Ark gets a one-time notice per outage (`bot/discord/account_alerts.py`)
+- The Ark gets one notice per outage, plus one all-clear on recovery
+  (`bot/discord/account_alerts.py`); "Ignore for 7d" mutes it and lets it
+  return once when the week is up
 - Harnesses: `python scripts/test_account_failover.py`,
   `python scripts/test_account_alerts.py`
 

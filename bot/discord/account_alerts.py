@@ -29,6 +29,14 @@ log = logging.getLogger(__name__)
 
 POLL_SECS = 60
 SNOOZE_DAYS = 7
+# Discord caps custom_id at 100 chars; the label suffix is a safety check, not
+# data, so truncating it on both sides keeps the comparison honest.
+LABEL_ID_MAX = 40
+
+
+def snooze_deadline() -> str:
+    """ISO timestamp for the 'Ignore for now' button."""
+    return (datetime.now(timezone.utc) + timedelta(days=SNOOZE_DAYS)).isoformat()
 
 
 def _account_index(account_dir: str) -> int | None:
@@ -37,6 +45,17 @@ def _account_index(account_dir: str) -> int | None:
         if acct == account_dir:
             return i
     return None
+
+
+def button_id(action: str, account_dir: str, idx: int) -> str:
+    """``auth:<action>:<idx>:<label>`` — index to act on, label to verify it.
+
+    This notice lives in The Ark forever (no view timeout), so its buttons can
+    outlive an edit to CLAUDE_ACCOUNTS. Carrying the label lets the handler
+    notice that position 1 is no longer the account the button names, instead
+    of silently opening a login terminal for the wrong one.
+    """
+    return f"auth:{action}:{idx}:{account_label(account_dir)[:LABEL_ID_MAX]}"
 
 
 def build_alert_embed(account_dir: str, reason: str) -> discord.Embed:
@@ -91,14 +110,14 @@ def build_alert_view(account_dir: str, can_console: bool) -> discord.ui.View:
         view.add_item(discord.ui.Button(
             label=f"Log in {account_label(account_dir)} on this PC"[:80],
             style=discord.ButtonStyle.secondary,
-            custom_id=f"auth:login:{idx}",
+            custom_id=button_id("login", account_dir, idx),
             row=0,
         ))
     if idx is not None:
         view.add_item(discord.ui.Button(
-            label="Ignore for now",
+            label=f"Ignore for {SNOOZE_DAYS}d",
             style=discord.ButtonStyle.secondary,
-            custom_id=f"auth:snooze:{idx}",
+            custom_id=button_id("snooze", account_dir, idx),
             row=0,
         ))
     return view
@@ -145,16 +164,21 @@ async def _drain_once(bot: ClaudeBot) -> None:
                 store.drop_account_alert(account_dir)
                 continue
 
-            if meta.get("notified"):
-                continue
-
+            # "notified" means the user has seen this outage; "snooze_until"
+            # means they asked for it back later. So: stay quiet while a snooze
+            # is running, speak once when it lapses, and otherwise speak only
+            # if they've never been told. mark_account_alert_notified clears
+            # the snooze, which is what makes "Ignore" repeatable rather than
+            # a one-shot that silences the account forever.
             snooze_until = meta.get("snooze_until")
             if snooze_until:
                 try:
                     if datetime.fromisoformat(snooze_until) > now:
                         continue
                 except (TypeError, ValueError):
-                    pass
+                    snooze_until = None
+            if meta.get("notified") and not snooze_until:
+                continue
 
             if can_console is None:
                 can_console = host_can_show_console()
@@ -182,13 +206,14 @@ async def run_account_alert_notifier(
     if not await bot._wait_for_ready("account_alerts"):
         return
     while not stop_event.is_set():
-        await asyncio.sleep(POLL_SECS)
+        # Wait on the stop event rather than sleeping blind, so shutdown isn't
+        # held up for a minute by a loop that has nothing to do.
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=POLL_SECS)
+            return
+        except asyncio.TimeoutError:
+            pass
         try:
             await _drain_once(bot)
         except Exception:
             log.exception("Account alert notifier error")
-
-
-def snooze_deadline() -> str:
-    """ISO timestamp for the 'Ignore for now' button."""
-    return (datetime.now(timezone.utc) + timedelta(days=SNOOZE_DAYS)).isoformat()

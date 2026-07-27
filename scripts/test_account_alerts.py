@@ -150,12 +150,37 @@ async def _test_drain(store: StateStore) -> list[str]:
         if len(channel.sent) != 2:
             failures.append("drain: posted something after the record was dropped")
 
-        # A snoozed alert stays quiet even though it was never announced.
+        # "Ignore for now" means later, not never: quiet while the snooze
+        # runs, one reminder once it lapses, and snoozable again after that.
         store.set_account_alert(ACCT, REASON_NO_TOKEN, "2026-07-27T14:00:00+00:00")
-        store.snooze_account_alert(ACCT, alerts_mod.snooze_deadline())
+        if not store.snooze_account_alert(ACCT, alerts_mod.snooze_deadline()):
+            failures.append("snooze: refused to mute an open alert")
         await alerts_mod._drain_once(bot)
         if len(channel.sent) != 2:
             failures.append("drain: a snoozed alert still nagged")
+
+        store.snooze_account_alert(ACCT, "2020-01-01T00:00:00+00:00")  # lapsed
+        await alerts_mod._drain_once(bot)
+        if len(channel.sent) != 3:
+            failures.append(
+                "drain: the snooze never lapsed — 'Ignore for now' silently "
+                "became 'ignore forever'"
+            )
+        await alerts_mod._drain_once(bot)
+        if len(channel.sent) != 3:
+            failures.append(
+                "drain: kept nagging after the post-snooze reminder — the "
+                "lapsed snooze wasn't cleared when the notice went out"
+            )
+        if not store.snooze_account_alert(ACCT, alerts_mod.snooze_deadline()):
+            failures.append("snooze: couldn't be re-armed after the reminder")
+
+        # Nothing to mute once the account is healthy again.
+        store.resolve_account_alert(ACCT)
+        if store.snooze_account_alert(ACCT, alerts_mod.snooze_deadline()):
+            failures.append(
+                "snooze: claimed to mute an alert that was already resolved"
+            )
     finally:
         config.CLAUDE_ACCOUNTS[:] = saved
     return failures
@@ -187,9 +212,27 @@ def _test_rendering() -> list[str]:
             failures.append("render: no 'log in on this PC' button")
         if not any((i or "").startswith("auth:snooze:") for i in ids):
             failures.append("render: no way to dismiss the notice")
-        rows = {getattr(i, "row", 0) for i in view.children}
-        if len(rows) > 5:
-            failures.append("render: exceeds Discord's 5-row button limit")
+        rows: dict[int, int] = {}
+        for item in view.children:
+            rows[getattr(item, "row", 0)] = rows.get(getattr(item, "row", 0), 0) + 1
+        if len(rows) > 5 or any(n > 5 for n in rows.values()):
+            failures.append(
+                f"render: breaks Discord's 5-rows-of-5 button limit: {rows}"
+            )
+        # The notice never expires, so its buttons can outlive an .env edit.
+        # The label rides along so the handler can refuse a stale index rather
+        # than logging into whichever account now sits at that position.
+        if not all(
+            (i or "").endswith(":klerk")
+            for i in ids
+            if (i or "").startswith(("auth:login:", "auth:snooze:"))
+        ):
+            failures.append(
+                "render: account buttons don't carry the account label, so a "
+                "reordered CLAUDE_ACCOUNTS would silently retarget them"
+            )
+        if any(len(i or "") > 100 for i in ids):
+            failures.append("render: custom_id exceeds Discord's 100-char cap")
 
         # Console-less host: the terminal button must disappear, not sit dead.
         view2 = alerts_mod.build_alert_view(ACCT, can_console=False)

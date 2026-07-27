@@ -703,25 +703,33 @@ class StateStore:
             self.save()
 
     def mark_account_alert_notified(self, account_dir: str) -> None:
-        """Record that the sideline notice was delivered for this account."""
-        record = self._account_alerts.get(account_dir)
-        if record is None:
-            return
-        record["notified"] = True
-        self.save()
+        """Record that the sideline notice was delivered for this account.
 
-    def snooze_account_alert(self, account_dir: str, until_iso: str) -> None:
-        """Suppress further notices for this account until *until_iso*.
-
-        Marks it notified too, so the snooze holds even if the account flaps
-        between cooldown windows while the user is ignoring it on purpose.
+        Clears any elapsed snooze at the same time — the reminder the user
+        asked for has now been delivered, so the next "Ignore for now" starts
+        a fresh window instead of finding a stale one already in the past.
         """
         record = self._account_alerts.get(account_dir)
         if record is None:
             return
+        record["notified"] = True
+        record["snooze_until"] = None
+        self.save()
+
+    def snooze_account_alert(self, account_dir: str, until_iso: str) -> bool:
+        """Suppress further notices for this account until *until_iso*.
+
+        False when there is no open alert to snooze — the account recovered
+        between the notice being posted and the button being pressed, so the
+        caller should say that rather than claim it muted something.
+        """
+        record = self._account_alerts.get(account_dir)
+        if record is None or record.get("resolved"):
+            return False
         record["snooze_until"] = until_iso
         record["notified"] = True
         self.save()
+        return True
 
     # --- Platform State ---
 

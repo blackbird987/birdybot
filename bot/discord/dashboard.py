@@ -100,7 +100,10 @@ def build_dashboard_embed(
     Shows actionable items (attention, idle, failed) with clickable thread
     links, global stats, project navigation, cost, and system health.
 
-    Pure function — no side effects, no Discord API calls.
+    No Discord API calls and no state mutation. Not quite pure: the account
+    label stats each account's credentials file (cached on mtime+size in
+    ``auth_health``), which is what lets a signed-out backup show as ``1/2
+    accts`` here instead of only surfacing at failover time.
     """
     active_repo, _ = store.get_active_repo()
 

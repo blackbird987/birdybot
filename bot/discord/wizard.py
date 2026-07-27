@@ -352,6 +352,37 @@ def _build_auth_panel_view(statuses: list, can_console: bool) -> discord.ui.View
     return view
 
 
+def _resolve_auth_target(parts: list[str]) -> tuple[str, str | None]:
+    """(account_dir, error) for an ``auth:<action>:<idx>[:<label>]`` press.
+
+    The account-sidelined notice in The Ark has no view timeout, so its buttons
+    can outlive an edit to CLAUDE_ACCOUNTS. When the id carries a label we check
+    it against whatever now sits at that index, so a reordered list can't turn
+    "log in klerk" into "log in the primary account". Older ids without a label
+    still resolve by index, exactly as before.
+    """
+    from bot.claude.auth_health import account_label
+    from bot.discord.account_alerts import LABEL_ID_MAX
+
+    try:
+        idx = int(parts[2])
+    except (IndexError, ValueError):
+        return "", "Invalid account index."
+    account_dirs = list(config.CLAUDE_ACCOUNTS) or [
+        str(Path.home() / config.PROVIDER_DIR_NAME)
+    ]
+    if idx < 0 or idx >= len(account_dirs):
+        return "", "Account no longer in config."
+    target = account_dirs[idx]
+    expected = ":".join(parts[3:])
+    if expected and account_label(target)[:LABEL_ID_MAX] != expected:
+        return "", (
+            "The account list changed since this message was posted — open "
+            "`/auth` so you're acting on the right account."
+        )
+    return target, None
+
+
 async def handle_auth_button(
     bot: ClaudeBot,
     interaction: discord.Interaction,
@@ -367,24 +398,15 @@ async def handle_auth_button(
 
     if action == "login" and len(parts) >= 3:
         await interaction.response.defer(ephemeral=True)
-        try:
-            idx = int(parts[2])
-        except ValueError:
-            await interaction.followup.send("Invalid login index.", ephemeral=True)
+        target, problem = _resolve_auth_target(parts)
+        if problem:
+            await interaction.followup.send(problem, ephemeral=True)
             return
 
+        from bot.claude.auth_health import account_label
         from bot.services.auth_sync import (
             host_can_show_console, launch_login_terminal,
         )
-
-        account_dirs = list(config.CLAUDE_ACCOUNTS) or [
-            str(Path.home() / config.PROVIDER_DIR_NAME)
-        ]
-        if idx >= len(account_dirs):
-            await interaction.followup.send(
-                "Account no longer in config.", ephemeral=True,
-            )
-            return
 
         if not host_can_show_console():
             await interaction.followup.send(
@@ -394,13 +416,13 @@ async def handle_auth_button(
             )
             return
 
-        target = account_dirs[idx]
         ok = launch_login_terminal(target)
         if ok:
             await interaction.followup.send(
-                f"Opened a terminal for `{Path(target).name}` on "
+                f"Opened a terminal for `{account_label(target)}` on "
                 f"**{config.PC_NAME}**.\n"
-                f"Run `/login` inside, then tap **Refresh** here.",
+                f"Run `/login` inside — the account rejoins rotation on its "
+                f"own once it's signed in. `/auth` shows the live state.",
                 ephemeral=True,
             )
         else:
@@ -412,29 +434,27 @@ async def handle_auth_button(
 
     if action == "snooze" and len(parts) >= 3:
         await interaction.response.defer(ephemeral=True)
-        try:
-            idx = int(parts[2])
-        except ValueError:
-            await interaction.followup.send("Invalid account index.", ephemeral=True)
-            return
-        account_dirs = list(config.CLAUDE_ACCOUNTS)
-        if idx >= len(account_dirs):
-            await interaction.followup.send(
-                "Account no longer in config.", ephemeral=True,
-            )
+        target, problem = _resolve_auth_target(parts)
+        if problem:
+            await interaction.followup.send(problem, ephemeral=True)
             return
 
         from bot.claude.auth_health import account_label
         from bot.discord.account_alerts import SNOOZE_DAYS, snooze_deadline
 
-        target = account_dirs[idx]
-        bot._store.snooze_account_alert(target, snooze_deadline())
-        await interaction.followup.send(
-            f"Muted for {SNOOZE_DAYS} days. `{account_label(target)}` stays out "
-            f"of rotation until it's signed in — the bot keeps working on the "
-            f"accounts that are.",
-            ephemeral=True,
-        )
+        label = account_label(target)
+        if bot._store.snooze_account_alert(target, snooze_deadline()):
+            await interaction.followup.send(
+                f"Muted for {SNOOZE_DAYS} days. `{label}` stays out of "
+                f"rotation until it's signed in — the bot keeps working on "
+                f"the accounts that are.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.followup.send(
+                f"Nothing to mute — `{label}` is already back in rotation.",
+                ephemeral=True,
+            )
         return
 
     if action == "sync":

@@ -1962,10 +1962,14 @@ async def on_usage(ctx: RequestContext, *, force: bool = False) -> str:
 
 # --- /status ---
 
-def _accounts_status_line() -> str | None:
+def _accounts_status_line(is_owner: bool = True) -> str | None:
     """`**Accounts** — 1/2 usable | signed out: `klerk`` — or None if there's
     no failover configured. Names the dead account so a silently degraded
     rotation is visible at a glance instead of only at failover time.
+
+    The "/auth to fix" pointer is owner-only, because the command is: /status
+    is open to allow-listed users, and sending them to a slash command that
+    will just reject them is worse than saying nothing.
     """
     accounts = list(config.CLAUDE_ACCOUNTS)
     if len(accounts) < 2:
@@ -1976,7 +1980,8 @@ def _accounts_status_line() -> str | None:
     line = f"**Accounts** — {len(accounts) - len(sidelined)}/{len(accounts)} usable"
     if sidelined:
         names = ", ".join(f"`{account_label(a)}`" for a in sidelined)
-        line += f" | signed out: {names} — run /auth to fix"
+        line += f" | signed out: {names}"
+        line += " — run /auth to fix" if is_owner else " — failover unavailable"
     return line
 
 
@@ -1991,7 +1996,7 @@ async def on_status(ctx: RequestContext) -> None:
         platforms.append("Discord")
 
     text = format_status_md(
-        accounts_line=_accounts_status_line(),
+        accounts_line=_accounts_status_line(ctx.is_owner),
         uptime_secs=uptime,
         running=ctx.store.running_count(),
         instances_today=ctx.store.instance_count_today(),

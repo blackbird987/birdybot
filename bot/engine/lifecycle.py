@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 from bot import config
 from bot.claude.models import context_tokens_from_usage
-from bot.claude.parser import is_account_unusable_error
+from bot.claude.parser import looks_like_fatal_auth_error
 from bot.claude.provider import get_provider
 from bot.claude.runner import RebootResult
 from bot.claude.types import (
@@ -52,9 +52,11 @@ def humanize_failure(text: str | None) -> str | None:
     as the headline of a build failure reads like the task broke, when in fact
     an account is simply signed out.  Messages the bot composed itself already
     name the account and the fix (they carry the re-auth command), so those
-    pass through untouched.
+    pass through untouched — as does any longer output, which is a work product
+    that merely mentions auth rather than an account failure (this repo's own
+    sessions write about 401s all the time).
     """
-    if not text or not is_account_unusable_error(text):
+    if not text or not looks_like_fatal_auth_error(text):
         return text
     if "CLAUDE_CONFIG_DIR" in text:
         return text
