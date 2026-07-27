@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.99.11 — One-line bot-command directives (2026-07-27)
+
 ### Changed
 - **`[BOT_CMD: ...]` directives now collapse to a single line in the thread.** They are the machine-readable control channel between a turn's output and the dispatchers, but they were being displayed verbatim — the directive line plus its whole `~~~wake` / `~~~spawn` / `~~~plan` body. That was pure duplicate noise (every dispatch path already posts its own outcome notice: "I'll check back in ~12 min — …", "Spawned new session: <link>", or an explicit refusal) and a multi-KB plan body regularly blew the display budget, truncating the actual answer. `formatting.collapse_bot_directives` now folds each one into a `-#` subtext line naming the command, its params and its why — e.g. ``-# `/wake` · in 12 min · collecting the last Gemini fixture`` or ``-# `/chain` · ship · build → review → verify → release → merge``. Applied at the three display seams only (`lifecycle.send_result`'s normal and shutdown paths, and `format_expanded_result_md` behind the Expand button); the dispatchers still read the raw text, and `/log` still ships the untouched result file. Quoted/fenced example directives are left verbatim so the feature stays discussable — the same line-prefix rule the dispatchers use to decide what fires.
 
