@@ -46,6 +46,124 @@ def strip_verify_blocks(text: str) -> str:
     return out.rstrip()
 
 
+# --- [BOT_CMD: ...] directive collapsing (display only) --------------------
+#
+# Directives are the machine-readable control channel between a turn's output
+# and the dispatchers (commands._execute_bot_commands, lifecycle.check_wake_
+# request). They were never meant to be READ — every dispatch path already
+# posts its own human-facing outcome ("I'll check back in ~12 min — …",
+# "Spawned new session: <link>", or an explicit refusal). Left in the displayed
+# text the raw directive plus its multi-KB ~~~ body is pure duplicate noise
+# that also blows past the display budget and truncates the real answer.
+#
+# So at DISPLAY time each directive collapses to one `-#` subtext line naming
+# the command, its params, and its why. Dispatch still reads the RAW text —
+# these transforms only ever touch the copy being shown.
+#
+# Deliberately broader than the dispatchers' strict parsers (any /verb, no
+# allow-lists, no caps): a malformed directive should still collapse to one
+# line, because the refusal notice posted right after is what explains it.
+# Deliberately NARROWER in one respect: the directive must own its whole line.
+# That's the documented format; a mid-sentence directive is left visible rather
+# than mangling the sentence around it.
+#
+# Line-prefix parity with the dispatchers matters. Their guard skips lines
+# starting with `>` / backtick / `#` (commands._QUOTED_LINE_PREFIX), so a
+# quoted example never fires — and the `[ \t]*` prefix below likewise refuses
+# to match those lines, leaving them verbatim. Display shows exactly the set of
+# directives that will actually be acted on.
+_BOT_CMD_DIRECTIVE_RE = re.compile(
+    r"(?m)^[ \t]*\[BOT_CMD:\s*/(\w+)([^\]\n]*)\][ \t]*$"
+)
+# The tilde-fenced payload (~~~wake / ~~~spawn / ~~~plan). Matched from the end
+# of the directive line, tolerating a blank line or two in between; a body
+# further away than that belongs to prose, not this directive.
+_BOT_CMD_BODY_RE = re.compile(
+    r"\n(?:[ \t]*\n){0,2}[ \t]*~~~[a-zA-Z]*[ \t]*\n.*?\n[ \t]*~~~[ \t]*(?=\n|\Z)",
+    re.DOTALL,
+)
+# kv pair: key=value, bare or quoted — mirrors commands._SPAWN_KV_RE.
+_BOT_CMD_KV_RE = re.compile(r'''(\w+)=(?:"([^"]*)"|'([^']*)'|(\S+))''')
+# What each chain preset actually runs, so the one-liner explains itself
+# without the reader having to remember the preset table.
+_CHAIN_PRESET_FLOW = {
+    "ship": "build → review → verify → release → merge",
+    "hold": "build → review → verify → release, then wait on Merge/Discard",
+    "verify": "build → review → verify, then stop",
+}
+# Chip budget — one line on a phone. Reasons/titles are trimmed to fit.
+_CHIP_MAX = 180
+
+
+def _chip_value(raw: str) -> str:
+    """Flatten a directive value into inline-safe one-line text."""
+    return re.sub(r"\s+", " ", (raw or "").replace("`", "")).strip()
+
+
+def _render_directive_chip(verb: str, args: str) -> str:
+    """One-line summary of a directive: which command, its params, and why."""
+    kv = {
+        k: (d or s or b or "")
+        for k, d, s, b in _BOT_CMD_KV_RE.findall(args or "")
+    }
+    parts: list[str] = []
+
+    if verb == "wake":
+        try:
+            parts.append(f"in {format_delay_secs(int(kv.get('delay', '')))}")
+        except ValueError:
+            pass  # missing/garbage delay — the reason still carries the why
+        if kv.get("reason"):
+            parts.append(_chip_value(kv["reason"]))
+    elif verb == "spawn":
+        parts += [
+            _chip_value(kv[k]) for k in ("repo", "mode", "effort") if kv.get(k)
+        ]
+        if kv.get("title"):
+            parts.append(f'"{_chip_value(kv["title"])}"')
+    elif verb == "chain":
+        # `preset=ship` and a bare `ship` are both accepted by the dispatcher.
+        preset = kv.get("preset") or (args or "").strip().split(" ")[0]
+        preset = _chip_value(preset)
+        if preset in _CHAIN_PRESET_FLOW:
+            parts += [preset, _CHAIN_PRESET_FLOW[preset]]
+        else:
+            parts.append("repo default policy")
+    else:
+        # /repo and anything added later: show the args as written.
+        if _chip_value(args):
+            parts.append(_chip_value(args))
+
+    chip = " · ".join([f"`/{verb}`", *parts]) if parts else f"`/{verb}`"
+    if len(chip) > _CHIP_MAX:
+        chip = chip[: _CHIP_MAX - 1].rstrip() + "…"
+    return f"-# {chip}"
+
+
+def collapse_bot_directives(text: str) -> str:
+    """Replace each [BOT_CMD: ...] directive + its ~~~body~~~ with one line.
+
+    Display-only: callers must pass the copy being shown, never the text handed
+    to the dispatchers. See the module comment above for why this exists and
+    which directives it deliberately leaves untouched.
+    """
+    if not text or "[BOT_CMD:" not in text:
+        return text
+    out: list[str] = []
+    pos = 0
+    for m in _BOT_CMD_DIRECTIVE_RE.finditer(text):
+        if m.start() < pos:
+            continue  # already swallowed as a previous directive's body
+        out.append(text[pos:m.start()])
+        out.append(_render_directive_chip(m.group(1), m.group(2)))
+        body = _BOT_CMD_BODY_RE.match(text, m.end())
+        pos = body.end() if body else m.end()
+    if not out:
+        return text
+    out.append(text[pos:])
+    return _EXCESS_BLANK_RE.sub("\n\n", "".join(out)).rstrip()
+
+
 def format_duration(ms: int | float | None) -> str:
     """Format duration in milliseconds to a human-readable string."""
     if ms is None:
@@ -54,6 +172,20 @@ def format_duration(ms: int | float | None) -> str:
     if secs >= 60:
         return f"{secs / 60:.1f}m"
     return f"{secs:.0f}s"
+
+
+def format_delay_secs(secs: int) -> str:
+    """Human-readable wait, e.g. ``45s`` / ``12 min`` / ``2.5 h``.
+
+    Lives here (not in lifecycle) so the collapsed ``/wake`` directive chip and
+    the "I'll check back in ~X" confirmation notice that follows it render the
+    SAME delay wording — two different modules describing one scheduled wake.
+    """
+    if secs < 90:
+        return f"{secs}s"
+    if secs < 5400:
+        return f"{round(secs / 60)} min"
+    return f"{round(secs / 3600, 1)} h"
 
 
 def format_tokens(count: int) -> str:
@@ -679,10 +811,14 @@ def format_expanded_result_md(instance: Instance, result_text: str, budget: int 
     """Format full result text for expanded view, truncated to budget.
 
     Strips leftover ```verify-board``` fences — legacy markers a
-    stale-context session may still emit, not content the user needs.
+    stale-context session may still emit, not content the user needs — and
+    collapses [BOT_CMD: ...] directives to one line each. This path reads the
+    raw result FILE, so without the collapse a folded ~~~plan body would eat
+    the whole budget and truncate the answer the user tapped Expand to see.
+    (`/log` still ships the file untouched — that's the full-fidelity copy.)
     """
     header = f"**{instance.display_id()}**\n\n"
-    text = strip_verify_blocks(redact_secrets(result_text))
+    text = collapse_bot_directives(strip_verify_blocks(redact_secrets(result_text)))
 
     if len(text) > budget:
         cut = text.rfind('\n', 0, budget)

@@ -1,0 +1,58 @@
+{
+  "_comment": [
+    "Diagnostic surface for the verify step. This project is a Discord bot, and",
+    "it is a SINGLETON: one Discord token, one data/state.json, one data/bot.pid.",
+    "Starting a second instance from a build worktree would fight the live bot",
+    "for the gateway connection and corrupt shared state.",
+    "",
+    "So verification here does NOT boot its own copy. It drives the bot that is",
+    "already running (scripts/discord_test.py talks to it over real webhooks and",
+    "reads back what it actually rendered), checks health from the log, and runs",
+    "the standalone harnesses for pure display/parse logic.",
+    "",
+    "Only use 'start'/'stop' if the log check reports the bot is DOWN."
+  ],
+
+  "project_type": "bot",
+  "singleton": true,
+
+  "health": "python scripts/smoke_test.py",
+  "start": "scripts/start_bot.bat",
+  "stop": "scripts/stop_bot.bat",
+
+  "logs": {
+    "file": "data/logs/bot.log",
+    "tail": "tail -n 50 data/logs/bot.log",
+    "failure_markers": ["ERROR", "CRITICAL", "Traceback"]
+  },
+
+  "interact": {
+    "list_channels": "python scripts/discord_test.py list-channels",
+    "list_threads": "python scripts/discord_test.py list-threads <forum_id>",
+    "send": "python scripts/discord_test.py send <channel_or_thread_id> <message>",
+    "read": "python scripts/discord_test.py read <channel_or_thread_id> [limit]",
+    "wait_response": "python scripts/discord_test.py wait-response <channel_id> [timeout]",
+    "suite": "python scripts/discord_test.py run-suite",
+    "_note": [
+      "send/read go through TEST_WEBHOOK_URL / TEST_LOBBY_WEBHOOK_URL and are",
+      "treated as user messages (TEST_WEBHOOK_IDS bypasses the bot-author guard),",
+      "so this is a genuine end-to-end action -> observe loop against the live bot.",
+      "'read' returns message content, embeds and buttons — which is how you check",
+      "what a result message actually RENDERED, not just that it was sent."
+    ]
+  },
+
+  "harnesses": {
+    "_note": "Standalone runners for logic with no live surface. Exit 0 = pass.",
+    "botcmd_collapse": "python scripts/test_botcmd_collapse.py",
+    "wake_directive": "python scripts/test_wake_directive.py",
+    "wake_promise": "python scripts/test_wake_promise.py",
+    "multi_spawn": "python scripts/test_multi_spawn.py",
+    "chain_botcmd": "python scripts/test_chain_botcmd.py",
+    "unattended_nudge": "python scripts/test_unattended_nudge.py"
+  },
+
+  "auth": {
+    "_note": "No HTTP admin surface. Credentials live in .env (DISCORD_TOKEN, TEST_WEBHOOK_URL, TEST_LOBBY_WEBHOOK_URL, TEST_WEBHOOK_IDS) and are read by the scripts above — never pass them on the command line."
+  }
+}

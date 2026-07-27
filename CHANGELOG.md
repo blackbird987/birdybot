@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Changed
+- **`[BOT_CMD: ...]` directives now collapse to a single line in the thread.** They are the machine-readable control channel between a turn's output and the dispatchers, but they were being displayed verbatim — the directive line plus its whole `~~~wake` / `~~~spawn` / `~~~plan` body. That was pure duplicate noise (every dispatch path already posts its own outcome notice: "I'll check back in ~12 min — …", "Spawned new session: <link>", or an explicit refusal) and a multi-KB plan body regularly blew the display budget, truncating the actual answer. `formatting.collapse_bot_directives` now folds each one into a `-#` subtext line naming the command, its params and its why — e.g. ``-# `/wake` · in 12 min · collecting the last Gemini fixture`` or ``-# `/chain` · ship · build → review → verify → release → merge``. Applied at the three display seams only (`lifecycle.send_result`'s normal and shutdown paths, and `format_expanded_result_md` behind the Expand button); the dispatchers still read the raw text, and `/log` still ships the untouched result file. Quoted/fenced example directives are left verbatim so the feature stays discussable — the same line-prefix rule the dispatchers use to decide what fires.
+
+### Added
+- **`.claude/test.json`** declaring the diagnostic surface that already existed but was undeclared (live-bot interaction via `scripts/discord_test.py`, health via `scripts/smoke_test.py`, log path and failure markers, standalone harnesses). Records that this bot is a singleton, so verification drives the running instance rather than booting a second one from a build worktree.
+- **`scripts/test_botcmd_collapse.py`** — locks the collapse: one line per directive, bodies gone, quoted examples untouched, and — the failure that would be silent — asserts the dispatch-side parsers still fire on raw text and go quiet on collapsed text, so nobody "simplifies" this by collapsing before dispatch and disarming every directive.
+
+### Fixed
+- **Self-wake delay wording is now shared.** `lifecycle._human_delay` moved to `formatting.format_delay_secs`, so the collapsed `/wake` chip and the "I'll check back in ~X" confirmation that follows it can't drift apart on the same scheduled wake.
+
 ## v0.99.9 — Plan-vs-build model routing (2026-07-23)
 
 ### Added

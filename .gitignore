@@ -17,8 +17,13 @@ build/
 # but keep skills trackable. Must be `.claude/*` not `.claude/`: git cannot
 # re-include (!) children of an excluded DIRECTORY, only of a glob. The old
 # `.claude/` form silently dropped skills from worktree merges.
+#
+# test.json is shared repo config, not local state: build/verify steps run in
+# a fresh worktree, so an untracked copy would simply not be there — the same
+# silent drop the skills note above describes.
 .claude/*
 !.claude/skills/
+!.claude/test.json
 
 # Git worktrees (build isolation)
 .worktrees/
