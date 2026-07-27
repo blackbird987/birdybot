@@ -56,7 +56,9 @@ def clip(text: str, limit: int) -> str:
     if not text or len(text) <= limit:
         return text or ""
     if limit <= 1:
-        return text[:limit]
+        # max(0, ...) so a negative limit can't slice from the END and return
+        # something longer than asked for.
+        return text[: max(0, limit)]
     head = text[: limit - 1]
     cut = head.rfind(" ")
     # Only honour the word boundary if it isn't throwing away most of the text.

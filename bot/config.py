@@ -504,6 +504,7 @@ Settings:
 - /alias set|list|delete — saved command shortcuts
 - /new — start a fresh conversation
 - /cost — spending breakdown
+- /evals — recurring session-quality flags and which prompt block owns each
 - /status — health dashboard
 
 If the user asks to do something the bot handles (like scheduling, switching repos, etc.), guide them to the right command rather than saying you can't do it.

@@ -1843,7 +1843,7 @@ async def on_branches(ctx: RequestContext) -> None:
     await ctx.messenger.send_text(ctx.channel_id, markup)
 
 
-# --- /cost ---
+# --- /evals ---
 
 async def on_evals(ctx: RequestContext, days: int = 7) -> None:
     """Report which quality flags keep recurring, and what owns each one."""
@@ -1902,6 +1902,8 @@ async def on_evals(ctx: RequestContext, days: int = 7) -> None:
     markup = ctx.messenger.markdown_to_markup(text)
     await ctx.messenger.send_text(ctx.channel_id, markup)
 
+
+# --- /cost ---
 
 async def on_cost(ctx: RequestContext) -> None:
     from bot.engine.usage import _fetch_daily_range, _pct_label
@@ -2698,6 +2700,7 @@ async def on_help(ctx: RequestContext) -> None:
         "`/discard` — delete branch\n"
         "`/branches` — list orphaned branches\n"
         "`/cost` — spending breakdown\n"
+        "`/evals` — recurring session-quality flags\n"
         "`/status` — health dashboard\n"
         "`/logs` — bot log\n"
         "`/mode` — explore|plan|build\n"

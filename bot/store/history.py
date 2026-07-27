@@ -179,6 +179,10 @@ _RECENCY_WEIGHT = 0.25
 # alone makes short prompts unable to beat the recency bonus at all. The floor
 # stops a two-word entry from scoring 1.0 on a single common token.
 _MIN_ENTRY_TOKENS = 8
+# Recent failures are pinned, but capped. One account cooldown fails every
+# running session at once, and an uncapped pin would then fill the entire block
+# with copies of the same infrastructure failure and evict everything relevant.
+_MAX_FAILURE_PINS = 2
 
 
 def _tokenize(text: str) -> set[str]:
@@ -217,12 +221,15 @@ def rank_entries(
 ) -> list[dict]:
     """Pick the `limit` most useful history entries for the current prompt.
 
-    Pinned entries claim slots first and keep their newest-first order:
+    Pinned entries claim slots first, in this priority order (so if the pins
+    alone overflow `limit`, the weakest reason to pin is what gets dropped):
       * anything on a branch this session is working on, and
       * anything whose id this session descends from (parent / stacked build),
         which is how the earlier steps of the *same* piece of work stay visible,
-      * anything that failed in the last 24h — a fresh failure is worth knowing
-        about even when it looks topically unrelated.
+      * up to `_MAX_FAILURE_PINS` sessions that failed in the last 24h — a
+        fresh failure is worth knowing about even when it looks topically
+        unrelated, but a cooldown that failed ten sessions at once must not
+        crowd out everything else.
 
     Remaining slots go to the highest-scoring entries by keyword overlap with
     the current prompt, with a decaying recency bonus as a tiebreaker.
@@ -234,19 +241,28 @@ def rank_entries(
     pin_branches = {b for b in (pin_branches or set()) if b}
     pin_ids = {i for i in (pin_ids or set()) if i}
 
-    def _is_pinned(e: dict) -> bool:
+    def _is_lineage(e: dict) -> bool:
+        """Same branch, or an earlier step of this same piece of work."""
         if e.get("branch") and e["branch"] in pin_branches:
             return True
-        if e.get("id") and e["id"] in pin_ids:
-            return True
-        if e.get("status") == "failed":
-            # Recent failures only — a month-old failure is just history.
-            return _recency_score(e.get("finished", ""), now) > (
-                1.0 - (1.0 / _RECENCY_HORIZON_DAYS)
-            )
-        return False
+        return bool(e.get("id") and e["id"] in pin_ids)
 
-    pinned = [e for e in entries if _is_pinned(e)]
+    def _is_fresh_failure(e: dict) -> bool:
+        if e.get("status") != "failed":
+            return False
+        # Recent failures only — a month-old failure is just history.
+        return _recency_score(e.get("finished", ""), now) > (
+            1.0 - (1.0 / _RECENCY_HORIZON_DAYS)
+        )
+
+    # Lineage pins are precise, so they are uncapped; failure pins are a
+    # heuristic and take at most a couple of slots. Order matters: if the pins
+    # alone overflow `limit`, the failures are the ones dropped.
+    pinned = [e for e in entries if _is_lineage(e)]
+    if len(pinned) < limit:
+        pinned += [
+            e for e in entries if not _is_lineage(e) and _is_fresh_failure(e)
+        ][:_MAX_FAILURE_PINS]
     if len(pinned) >= limit:
         return pinned[:limit]
 

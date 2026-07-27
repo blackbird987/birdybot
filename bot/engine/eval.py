@@ -357,11 +357,16 @@ def _check_efficiency(inst: Instance) -> list[EvalFlag]:
     if inst.resumed_session:
         rate = cache_hit_rate(inst)
         if rate is not None and rate < LOW_CACHE_HIT_RATE:
+            # Two causes look identical from here: a prefix that changes
+            # between turns, and a thread left idle past the cache TTL. Say so
+            # rather than pointing the reader at the first one as if it were
+            # established — a single low reading is not evidence of a bug.
             flags.append(EvalFlag(
                 category="efficiency", severity="info",
                 message=(
                     f"Low prompt-cache reuse on resume ({rate * 100:.0f}% of prompt "
-                    f"tokens cached) — the cached prefix may be breaking between turns"
+                    f"tokens cached) — either the cached prefix is changing "
+                    f"between turns or the thread sat idle past the cache TTL"
                 ),
                 evidence=(
                     f"{inst.cache_read_tokens} cache-read, "
@@ -538,6 +543,9 @@ def load_evals(since_hours: int = 24) -> list[SessionEval]:
 
 _ATTRIBUTION: tuple[tuple[str, str, str], ...] = (
     # (category, substring matched against the flag message, owning block)
+    # First match wins, so ORDER IS LOAD-BEARING within a category: the
+    # prompt-cache message also contains the word "turns", and must be matched
+    # by its own rule before the generic turn-count rule below.
     ("claim_grounding", "verification", "HONESTY_CONSTRAINT"),
     ("claim_grounding", "url", "HONESTY_CONSTRAINT"),
     ("narration", "doesn't describe", "CHAT_APP_CONSTRAINT"),

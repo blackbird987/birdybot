@@ -10,11 +10,18 @@ harness instead: cheap, read-only, and correct to skip when unsure.
 Deliberately shallow: it reads dependency manifests at the repo root only. A
 recursive content grep would be both slower and more prone to false positives
 (a README mentioning "openai" is not an LLM project).
+
+Known blind spot: a repo that drives a model by shelling out to a CLI declares
+no SDK, so it reads as "not an LLM project" — this bot itself is the example.
+Closing that would mean grepping source for subprocess invocations, which is
+exactly the fuzzy content search this module exists to avoid. Detection stays
+manifest-based and conservative; the cost of a miss is one review lens.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -23,6 +30,7 @@ log = logging.getLogger(__name__)
 # Lowercase — manifests are lowercased before matching.
 _LLM_MARKERS: tuple[str, ...] = (
     "anthropic",           # anthropic, @anthropic-ai/sdk, Anthropic.SDK
+    "claude-agent-sdk", "claude-code-sdk",   # PyPI names carrying no "anthropic"
     "openai",              # openai, @openai/..., Azure.AI.OpenAI
     "langchain",
     "llamaindex", "llama-index",
@@ -31,8 +39,28 @@ _LLM_MARKERS: tuple[str, ...] = (
     "mistralai",
     "cohere",
     "ollama",
+    "litellm",
     "@ai-sdk/", "vercel/ai",
 )
+
+
+def _marker_pattern(marker: str) -> str:
+    """Marker regex that won't fire on a longer word that merely starts with it.
+
+    Plain substring matching reads "coherence" as the Cohere SDK. Markers that
+    end in a letter therefore require a non-letter after them; markers ending
+    in punctuation (``@ai-sdk/``) must not, since a package name follows.
+    """
+    pattern = re.escape(marker)
+    if marker[-1].isalpha():
+        pattern += r"(?![a-z])"
+    return pattern
+
+
+# Empty entries are filtered out, not tolerated: one would match every file
+# and silently turn detection on everywhere — and would crash this module at
+# import time, taking the whole bot down with it.
+_MARKER_RE = re.compile("|".join(_marker_pattern(m) for m in _LLM_MARKERS if m))
 
 # Manifests checked at the repo root. Globs are resolved non-recursively.
 _MANIFEST_GLOBS: tuple[str, ...] = (
@@ -49,6 +77,8 @@ _MANIFEST_GLOBS: tuple[str, ...] = (
 
 # repo_path -> verdict, for the life of the process. Dependencies change on a
 # scale of days; re-reading manifests on every review round would be waste.
+# Callers pass the registered repo path, which is stable per repo — never a
+# build worktree path, which would make this grow once per build forever.
 _cache: dict[str, bool] = {}
 
 
@@ -66,9 +96,11 @@ def is_llm_project(repo_path: str | None) -> bool:
         return cached
 
     verdict = False
+    resolved = False
     try:
         root = Path(repo_path)
-        if root.is_dir():
+        resolved = root.is_dir()
+        if resolved:
             for pattern in _MANIFEST_GLOBS:
                 if verdict:
                     break
@@ -81,7 +113,7 @@ def is_llm_project(repo_path: str | None) -> bool:
                         ).lower()
                     except OSError:
                         continue
-                    if any(marker in text for marker in _LLM_MARKERS):
+                    if _MARKER_RE.search(text):
                         log.debug(
                             "LLM project detected: %s matched in %s",
                             repo_path, manifest.name,
@@ -91,8 +123,13 @@ def is_llm_project(repo_path: str | None) -> bool:
     except Exception:
         log.debug("LLM-project detection failed for %s", repo_path, exc_info=True)
         verdict = False
+        resolved = False
 
-    _cache[repo_path] = verdict
+    # Only memoise a verdict we actually reached. Caching the "couldn't read
+    # the repo" answer would make one transient failure (a detached drive, a
+    # path not yet checked out) permanent for the life of the process.
+    if resolved:
+        _cache[repo_path] = verdict
     return verdict
 
 
