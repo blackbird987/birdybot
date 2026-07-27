@@ -21,7 +21,9 @@ from bot.claude.types import (
 from bot.platform.base import ButtonSpec, MessageHandle, RequestContext
 from bot.platform.formatting import (
     action_button_specs,
+    collapse_bot_directives,
     format_context_footer,
+    format_delay_secs,
     format_duration,
     format_tokens,
     format_result_md,
@@ -304,7 +306,13 @@ async def run_instance(
         if await schedule_cooldown_retry(ctx, inst, result, silent=silent):
             return  # Timer loop in app.py picks this up
 
-        display_text = strip_verify_blocks(result.result_text)
+        # Displayed copy only — engine control markers stripped and [BOT_CMD:]
+        # directives collapsed to one line each. The dispatchers below are
+        # deliberately handed result.result_text (RAW): collapsing before them
+        # would silently disarm every directive this turn emitted.
+        display_text = collapse_bot_directives(
+            strip_verify_blocks(result.result_text)
+        )
         await send_result(
             ctx, inst, _with_fallback_footer(display_text, result),
             silent=silent, result=result,
@@ -376,7 +384,9 @@ async def run_instance(
             try:
                 if not finalized:
                     finalize_run(ctx, inst, result)
-                display_text = strip_verify_blocks(result.result_text)
+                display_text = collapse_bot_directives(
+                    strip_verify_blocks(result.result_text)
+                )
                 await send_result(
                     ctx, inst, _with_fallback_footer(display_text, result),
                     silent=silent, result=result,
@@ -1239,14 +1249,6 @@ def _wake_schedule_at(data: dict) -> tuple[str, int] | None:
     return (now + timedelta(seconds=secs)).isoformat(), secs
 
 
-def _human_delay(secs: int) -> str:
-    if secs < 90:
-        return f"{secs}s"
-    if secs < 5400:
-        return f"{round(secs / 60)} min"
-    return f"{round(secs / 3600, 1)} h"
-
-
 # Meta-discussion camouflage for the claim scan: fenced/inline code and
 # double-quoted phrases are someone TALKING ABOUT a wake claim (docs, reviews,
 # reports quoting the detector's own trigger phrases), never a first-person
@@ -1582,7 +1584,9 @@ async def check_wake_request(
         repo_path=instance.repo_path or "",
     )
     reason = (data.get("reason") or "").strip()
-    msg = f"I'll check back in ~{_human_delay(secs)}"
+    # Same formatter the collapsed `/wake` chip uses, so the directive's
+    # one-liner and this confirmation quote an identical delay.
+    msg = f"I'll check back in ~{format_delay_secs(secs)}"
     if reason:
         msg += f" — {reason}"
     await _notice(msg + ".")
