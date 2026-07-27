@@ -167,6 +167,11 @@ class Instance:
     cache_creation_tokens: int = 0
     context_tokens: int = 0       # input + cache_read + cache_creation
     context_model: str | None = None  # Model name reported in usage (for window lookup)
+    # True when this run was launched with --resume (i.e. a session_id already
+    # existed at command-build time). session_id is ALWAYS populated after a
+    # run, so it can't be used post-hoc to tell a resume from a fresh spawn —
+    # eval needs this distinction to judge prompt-cache reuse fairly.
+    resumed_session: bool = False
     warning_pinned: bool = False      # 95% context warning already fired (idempotent)
     plan_active: bool = False  # Session has an active plan (for button context)
     code_active: bool = False  # Session has uncommitted code changes (for button context)
@@ -287,6 +292,7 @@ class Instance:
             "cache_creation_tokens": self.cache_creation_tokens,
             "context_tokens": self.context_tokens,
             "context_model": self.context_model,
+            "resumed_session": self.resumed_session,
             "warning_pinned": self.warning_pinned,
             "plan_active": self.plan_active,
             "code_active": self.code_active,
@@ -356,6 +362,7 @@ class Instance:
             cache_creation_tokens=d.get("cache_creation_tokens", 0),
             context_tokens=d.get("context_tokens", 0),
             context_model=d.get("context_model"),
+            resumed_session=d.get("resumed_session", False),
             warning_pinned=d.get("warning_pinned", False),
             plan_active=d.get("plan_active", False),
             code_active=d.get("code_active", False),

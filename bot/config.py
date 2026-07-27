@@ -247,6 +247,26 @@ PLAN_BLOCK_LIMIT_USD: float = float(os.getenv("PLAN_BLOCK_LIMIT_USD", "0"))
 # Session evaluation
 EVAL_ENABLED: bool = os.getenv("EVAL_ENABLED", "1").lower() in ("1", "true", "yes")
 
+# Recent-session history injected into every system prompt.
+# SESSION_HISTORY_RANKING="relevance" keeps the entries most related to the
+# current prompt; "recency" selects newest-first instead, and exists as a
+# no-deploy revert switch if relevance ranking ever hides something useful.
+SESSION_HISTORY_MAX: int = int(os.getenv("SESSION_HISTORY_MAX", "6"))
+SESSION_HISTORY_RANKING: str = os.getenv("SESSION_HISTORY_RANKING", "relevance").strip().lower()
+if SESSION_HISTORY_RANKING not in ("relevance", "recency"):
+    # A typo must not silently disable ranking — that is a behaviour change
+    # nobody asked for and nothing would report. Warn and use the default.
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "Unknown SESSION_HISTORY_RANKING=%r — using 'relevance'",
+        SESSION_HISTORY_RANKING,
+    )
+    SESSION_HISTORY_RANKING = "relevance"
+# Backstop on the rendered block. Trims whole entries, never mid-word — the
+# real constraint is context cost, not command-line length (the system prompt
+# goes to the CLI via --append-system-prompt-file, not as an argv string).
+SESSION_HISTORY_MAX_CHARS: int = int(os.getenv("SESSION_HISTORY_MAX_CHARS", "6000"))
+
 # Outlook integration (optional — Windows only, requires pywin32 + Outlook installed)
 OUTLOOK_ENABLED: bool = os.getenv("OUTLOOK_ENABLED", "").lower() in ("1", "true", "yes")
 
@@ -493,6 +513,7 @@ Settings:
 - /alias set|list|delete — saved command shortcuts
 - /new — start a fresh conversation
 - /cost — spending breakdown
+- /evals — recurring session-quality flags and which prompt block owns each
 - /status — health dashboard
 
 If the user asks to do something the bot handles (like scheduling, switching repos, etc.), guide them to the right command rather than saying you can't do it.
@@ -972,6 +993,33 @@ CODE_REVIEW_PROMPT = (
     'If a CHANGELOG entry or commit message has been written, verify each '
     'bullet corresponds to a real code change in the current diff — flag '
     'and fix phantom claims.'
+)
+
+# Appended to CODE_REVIEW_PROMPT only when the repo declares a model-provider
+# SDK (see bot/engine/ai_project.py). These are the failure modes that generic
+# review misses in LLM-shaped code — most of them are ones we have actually
+# shipped, including a simulator whose summary fields reported a closed winning
+# trade while the raw records showed the position still open.
+AI_PROJECT_REVIEW_LENS = (
+    '\n\nThis repo calls an LLM. Also review the diff through these lenses, '
+    'and report on any that apply:\n'
+    '- Evals: does anything assert on the SHAPE and QUALITY of model output, '
+    'or do the tests only prove the call did not throw?\n'
+    '- Output contract: is model output parsed into a validated structure, or '
+    'regex-scraped out of prose?\n'
+    '- Derived-data honesty: are headline/summary/aggregate fields computed '
+    'from the raw records, or written independently where they can drift? '
+    'Flag any summary field that could report success while the underlying '
+    'records disagree.\n'
+    '- Failure taxonomy: are refusal, truncation, rate limit, tool error and '
+    'timeout distinguished, or all swallowed as one generic exception?\n'
+    '- Prompt assembly: is stable content (system prompt, tool definitions, '
+    'static context) assembled BEFORE volatile content, so the cached prefix '
+    'survives between turns?\n'
+    '- Tool surface: scoped per task, or does every call get everything?\n'
+    '- Model IDs: pinned, and current?\n'
+    'Only raise these where the diff actually touches them — do not pad the '
+    'review with lenses that do not apply.'
 )
 
 SENSOR_FIX_PROMPT = (

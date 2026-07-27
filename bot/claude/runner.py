@@ -1718,6 +1718,14 @@ class ClaudeRunner:
         """
         provider = provider or self.provider
 
+        # Stamp the resume flag before anything can clear session_id.  The CLI
+        # always returns a session_id, so after the run there is no way to tell
+        # a resumed turn from a fresh spawn — but prompt-cache reuse can only
+        # be judged against a resume.  Mutating the instance here is race-free
+        # for the same reason documented at the _build_command call site: the
+        # instance is owned by the calling coroutine under the channel lock.
+        instance.resumed_session = bool(instance.session_id)
+
         # Build prompt — never mutated on the instance.
         # Resume fallback (t-3541): when a Layer 3 recovery clears session_id
         # and respawns, the LLM may not see Layer 1's system-prompt preamble
@@ -2259,45 +2267,29 @@ class ClaudeRunner:
                 )
             parts.append("\n".join(access_parts))
 
-        # Recent session history — enables smart recall of past work
+        # Recent session history — enables smart recall of past work.
+        # Candidates are fetched newest-first, then narrowed to the entries most
+        # relevant to THIS prompt. Injecting all 20 spent roughly a thousand
+        # tokens per spawn on sessions that usually had nothing to do with the
+        # task in hand.
         if instance.repo_name:
-            recent = history_mod.load_recent(
-                repo=instance.repo_name, limit=20, dedupe_thread=True,
+            history_block = history_mod.render_recent_block(
+                repo=instance.repo_name,
+                prompt=instance.prompt or "",
+                # Only the branch this session is actually working on.
+                # NOT original_branch — despite the name that is the merge
+                # TARGET (master), shared by every build in the repo, so
+                # pinning it would pin work with nothing in common.
+                pin_branches={instance.branch} if instance.branch else set(),
+                # Lineage: the steps this session was stacked on are the
+                # closest thing the runner has to "same thread" — Instance
+                # carries no channel id, but parent/chained ids identify the
+                # earlier steps of this same piece of work.
+                pin_ids={
+                    i for i in (instance.parent_id, instance.chained_from) if i
+                },
             )
-            if recent:
-                lines = []
-                for e in recent:
-                    eid = e.get("id", "?")
-                    topic = e.get("topic", "")[:80]
-                    status = e.get("status", "?")
-                    finished = e.get("finished", "")
-                    branch = e.get("branch")
-                    summary = e.get("summary", "")[:120]
-
-                    age = ""
-                    if finished:
-                        try:
-                            dt = datetime.fromisoformat(finished)
-                            delta = datetime.now(timezone.utc) - dt
-                            if delta.days > 0:
-                                age = f"{delta.days}d ago"
-                            else:
-                                hours = delta.seconds // 3600
-                                age = f"{hours}h ago" if hours else f"{delta.seconds // 60}m ago"
-                        except Exception:
-                            pass
-
-                    line = f'- [{eid}] "{topic}" — {status} {age}'
-                    if branch:
-                        line += f" (branch: {branch})"
-                    if summary:
-                        line += f"\n  Summary: {summary}"
-                    lines.append(line)
-
-                history_block = "\n".join(lines)
-                # Cap to ~4K to keep total command line under Windows limits
-                if len(history_block) > 4000:
-                    history_block = history_block[:4000] + "\n... (truncated)"
+            if history_block:
                 parts.append(
                     "\n\n--- Recent Sessions (this project) ---\n"
                     + history_block
