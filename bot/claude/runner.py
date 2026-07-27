@@ -752,6 +752,22 @@ class ClaudeRunner:
                     log.debug("Failed to resolve account alert", exc_info=True)
         return found
 
+    def reconcile_account_health(self) -> dict[str, str]:
+        """Re-probe every account and sync the alert table.  Call once at boot.
+
+        Two things go stale while the bot is down, in opposite directions: an
+        account signed out at shutdown may have been signed back in since, and
+        one that was fine may be signed out now.  Left alone, the first sits
+        sidelined until some task happens to try it, and the second is
+        announced only once failover lands on it — which is precisely the
+        "nobody notices for weeks" case this whole feature exists to kill.
+
+        Deliberately a thin wrapper: the per-spawn path already knows how to
+        open, retire and resolve these records, and a second copy of those
+        rules in the startup path is exactly how the two drift apart.
+        """
+        return self._unusable_accounts()
+
     def _record_auth_alert(self, account_dir: str) -> None:
         """Persist that an account was sidelined for auth at runtime.
 

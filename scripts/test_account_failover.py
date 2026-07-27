@@ -1002,6 +1002,74 @@ async def _test_sideline_survives_a_reboot() -> list[str]:
     return failures
 
 
+async def _test_boot_reconciles_account_health() -> list[str]:
+    """Startup must re-check the accounts, not just trust the saved table.
+
+    While the bot is down, both directions go stale: an account can be signed
+    back in (its sideline is now a lie that benches it until some task happens
+    to try it) and one can be signed out (nothing announces it until failover
+    lands on it — the "nobody notices for weeks" case this feature exists to
+    kill). Boot used to only seed alerts for the second case, with its own copy
+    of the fingerprint logic; this covers both through the runner's own rules.
+    """
+    failures: list[str] = []
+    tmp = tempfile.mkdtemp(prefix="acct_boot_")
+    came_back = os.path.join(tmp, "came-back")
+    went_out = os.path.join(tmp, "went-out")
+    for d in (came_back, went_out):
+        os.makedirs(d, exist_ok=True)
+    _write_credentials(came_back, logged_in=True, token="rt-signed-in-while-down")
+    _write_credentials(went_out, logged_in=False)
+    clear_auth_cache()
+    saved = list(config.CLAUDE_ACCOUNTS)
+    config.CLAUDE_ACCOUNTS[:] = [came_back, went_out]
+    try:
+        # State as the previous process left it: came_back was sidelined and
+        # announced, judged against a credentials file that has since been
+        # rewritten by a /login.  went_out looked fine, so there's no record.
+        store = _FakeStore()
+        store.alerts[came_back] = {
+            "reason": REASON_RUNTIME_401, "since": "2026-07-27T09:00:00+00:00",
+            "cred_fp": "1:1", "notified": True, "resolved": False,
+            "snooze_until": None,
+        }
+        store.cooldowns[came_back] = (
+            datetime.now(timezone.utc) + timedelta(hours=24)
+        ).isoformat()
+
+        runner = ClaudeRunner(store=store)
+        runner.reconcile_account_health()
+
+        if came_back in runner._account_cooldowns:
+            failures.append(
+                "boot: an account signed back in while the bot was down was "
+                "still benched — nothing would free it until a task tried it"
+            )
+        if not (store.alerts.get(came_back) or {}).get("resolved"):
+            failures.append(
+                "boot: no all-clear queued for the recovered account, so The "
+                "Ark keeps showing a stale outage notice"
+            )
+        rec = store.alerts.get(went_out)
+        if not rec:
+            failures.append(
+                "boot: an account that went out while we were down was never "
+                "recorded, so nothing tells the user until failover fails"
+            )
+        elif rec.get("notified"):
+            failures.append("boot: seeded the alert as already announced")
+        elif not rec.get("cred_fp"):
+            failures.append(
+                "boot: seeded an alert with no credentials fingerprint, so a "
+                "later /login couldn't retire it without a restart"
+            )
+    finally:
+        config.CLAUDE_ACCOUNTS[:] = saved
+        clear_auth_cache()
+        shutil.rmtree(tmp, ignore_errors=True)
+    return failures
+
+
 def _test_login_clears_auth_cooldown() -> list[str]:
     """Signing in must put the account straight back into rotation.
 
@@ -1080,6 +1148,8 @@ async def _amain() -> int:
                          await _test_runtime_401_alert_not_auto_cleared()))
     all_failures.append(("sideline-survives-a-reboot",
                          await _test_sideline_survives_a_reboot()))
+    all_failures.append(("boot-reconciles-account-health",
+                         await _test_boot_reconciles_account_health()))
     all_failures.append(("relogin-clears-auth-cooldown",
                          _test_login_clears_auth_cooldown()))
 

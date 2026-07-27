@@ -20,7 +20,15 @@ from typing import TYPE_CHECKING
 import discord
 
 from bot import config
-from bot.claude.auth_health import account_label, relogin_command
+from bot.claude.auth_health import (
+    REASON_NO_DIR,
+    REASON_NO_FILE,
+    REASON_NO_TOKEN,
+    REASON_RUNTIME_401,
+    REASON_UNREADABLE,
+    account_label,
+    relogin_command,
+)
 
 if TYPE_CHECKING:
     from bot.discord.bot import ClaudeBot
@@ -58,34 +66,72 @@ def button_id(action: str, account_dir: str, idx: int) -> str:
     return f"auth:{action}:{idx}:{account_label(account_dir)[:LABEL_ID_MAX]}"
 
 
-def build_alert_embed(account_dir: str, reason: str) -> discord.Embed:
-    """Orange 'this account is sidelined' notice for The Ark."""
+# The reason strings are written for the log, where a filename or an HTTP
+# status is the useful detail. Dropped into a sentence in The Ark they read as
+# a stutter ("is signed out — logged out — ... (401)") and leak internals at
+# the user. Each one gets a plain-English cause here; anything unmapped falls
+# back to the raw string, which is still readable, just less polished.
+_REASON_COPY = {
+    REASON_RUNTIME_401: "the login expired and Claude turned it away",
+    REASON_NO_TOKEN: "there's no saved login for it",
+    REASON_NO_FILE: "it has never been signed in on this machine",
+    REASON_NO_DIR: "its config folder is missing",
+    REASON_UNREADABLE: "its saved login can't be read",
+}
+
+
+def describe_reason(reason: str) -> str:
+    """Plain-English cause for a sidelined account, for user-facing copy."""
+    return _REASON_COPY.get(reason, reason)
+
+
+def build_alert_embed(
+    account_dir: str, reason: str, also_down: set[str] | None = None,
+) -> discord.Embed:
+    """Orange 'this account is sidelined' notice for The Ark.
+
+    *also_down* is the rest of the currently sidelined set. Without it the
+    notice happily promises that "work keeps running on `<other>`" while that
+    other account is signed out too — during a both-accounts outage each of the
+    two notices would point at the other as the survivor.
+    """
     label = account_label(account_dir)
     embed = discord.Embed(
         title="Account sidelined — failover degraded",
         color=discord.Color.orange(),
     )
 
+    down = set(also_down or ())
     others = [a for a in config.CLAUDE_ACCOUNTS if a != account_dir]
-    if others:
-        still = ", ".join(f"`{account_label(a)}`" for a in others)
+    healthy = [a for a in others if a not in down]
+    # The closing reassurance only holds while something is left to run on;
+    # telling the user nothing needs their attention when no account can take
+    # a task is the one place this notice could actively mislead.
+    if healthy:
+        still = ", ".join(f"`{account_label(a)}`" for a in healthy)
         impact = (
             f"Work keeps running on {still}. What you lose is the safety net: "
             "when that account hits its usage limit there's nothing to fail "
             "over to, so tasks wait for the reset instead of continuing."
         )
+        closer = "Nothing has failed and nothing needs your attention right now. "
     else:
         impact = (
+            "Every configured account is signed out, so nothing can run until "
+            "one of them is signed in again."
+            if others else
             "This is the only account configured, so nothing can run until "
             "it's signed in again."
         )
+        closer = ("New tasks can't run — they'll auto-retry a few times in "
+                  "case you sign in, then give up. ")
 
     embed.description = (
-        f"**`{label}`** is signed out — {reason}.\n\n"
+        f"**`{label}`** is signed out — {describe_reason(reason)}.\n\n"
         f"{impact}\n\n"
-        "Nothing has failed and nothing needs your attention right now. "
-        "Fix it whenever you like; the account rejoins rotation on its own "
-        "the moment it's signed in — no restart needed."
+        f"{closer}"
+        "The account rejoins rotation on its own the moment it's signed in "
+        "— no restart needed."
     )
     embed.add_field(
         name=f"Sign in on {config.PC_NAME}",
@@ -155,9 +201,22 @@ async def _drain_once(bot: ClaudeBot) -> None:
 
     now = datetime.now(timezone.utc)
     can_console: bool | None = None
+    # Every account currently sidelined, so a notice can't promise that work
+    # continues on an account that is itself down.
+    down = {a for a, m in alerts.items() if not m.get("resolved")}
 
     for account_dir, meta in list(alerts.items()):
         try:
+            # An account dropped from CLAUDE_ACCOUNTS is nothing the runner
+            # touches again, so its record would sit here forever — and if it
+            # was never notified, we'd announce an outage on an account the
+            # user deliberately removed.  Guarded on a non-empty rotation so an
+            # unconfigured/misread env can't wipe live alerts.
+            if config.CLAUDE_ACCOUNTS and account_dir not in config.CLAUDE_ACCOUNTS:
+                log.info("Dropping account alert for unconfigured %s", account_dir)
+                store.drop_account_alert(account_dir)
+                continue
+
             if meta.get("resolved"):
                 if meta.get("notified"):
                     await channel.send(build_clear_message(account_dir))
@@ -185,7 +244,7 @@ async def _drain_once(bot: ClaudeBot) -> None:
 
             reason = meta.get("reason") or "not logged in"
             await channel.send(
-                embed=build_alert_embed(account_dir, reason),
+                embed=build_alert_embed(account_dir, reason, down),
                 view=build_alert_view(account_dir, can_console),
             )
             store.mark_account_alert_notified(account_dir)

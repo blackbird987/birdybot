@@ -81,9 +81,13 @@ class StateStore:
         # refuses spawns.
         self._model_cooldowns: dict[str, str] = {}
         # account_dir -> {"reason": str, "since": ISO, "notified": bool,
-        #                 "snooze_until": ISO|None}.  Tracks accounts sidelined
-        # for auth (logged out / OAuth dead) so the Ark notice fires exactly
-        # once per outage instead of once per failed task, and survives reboot.
+        #                 "snooze_until": ISO|None, "resolved": bool,
+        #                 "cred_fp": str|None}.  Tracks accounts sidelined for
+        # auth (logged out / OAuth dead) so the Ark notice fires exactly once
+        # per outage instead of once per failed task, and survives reboot.
+        # "resolved" marks an outage that's over but still owes an all-clear
+        # post; "cred_fp" fingerprints the credentials file the verdict was
+        # reached against, so a later login is recognisable across a restart.
         self._account_alerts: dict[str, dict] = {}
         self._dirty: bool = False  # Dirty flag — mark_dirty() defers save to auto-save loop
         self._last_mtime: float = 0.0  # Track file mtime for external change detection

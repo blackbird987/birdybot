@@ -11,6 +11,11 @@ Covers:
     posted then dropped, snoozed alerts stay quiet
   - the embed/view actually built: plain-language body, copy-pasteable
     re-auth command, and buttons that fit Discord's row limit
+  - the notice copy staying honest: no raw reason strings or HTTP statuses in
+    the prose, and no promising that work continues on an account that is
+    itself signed out
+  - an alert for an account removed from CLAUDE_ACCOUNTS being dropped rather
+    than nagging forever about something the user deleted on purpose
   - the /auth panel the notice links to reporting the same account as signed
     out, even though its credentials file still reads as valid
 
@@ -30,7 +35,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from bot import config
-from bot.claude.auth_health import REASON_NO_TOKEN
+from bot.claude.auth_health import REASON_NO_TOKEN, REASON_RUNTIME_401
 from bot.claude.auth_health import clear_cache as auth_clear_cache
 from bot.discord import account_alerts as alerts_mod
 from bot.services.auth_sync import collect_account_statuses
@@ -289,6 +294,120 @@ def _test_rendering() -> list[str]:
     return failures
 
 
+def _test_notice_copy_is_honest() -> list[str]:
+    """The notice must not read like a log line, or promise a survivor that isn't.
+
+    Two separate ways this copy went wrong. The reason strings are written for
+    the log, so dropping one straight into a sentence produced "is signed out —
+    logged out — the CLI rejected its OAuth token (401)": a stutter, and an
+    HTTP status aimed at a user on their phone. And the "work keeps running on
+    <other>" line listed every *other* configured account without checking
+    whether those were signed out too — so in a both-accounts outage each of
+    the two notices calmly pointed at the other one as the survivor, while
+    nothing could run at all.
+    """
+    failures: list[str] = []
+    saved = list(config.CLAUDE_ACCOUNTS)
+    config.CLAUDE_ACCOUNTS[:] = [OTHER, ACCT]
+    try:
+        body = alerts_mod.build_alert_embed(ACCT, REASON_RUNTIME_401).description or ""
+        if "401" in body or "OAuth" in body:
+            failures.append(
+                f"copy: leaked the raw reason string at the user: {body!r}"
+            )
+        if "signed out — logged out" in body:
+            failures.append("copy: 'is signed out — logged out — ...' stutter")
+        if alerts_mod.account_label(OTHER) not in body:
+            failures.append(
+                "copy: didn't name the account still carrying the work"
+            )
+        if "Nothing has failed" not in body:
+            failures.append(
+                "copy: dropped the reassurance while a healthy account remains"
+            )
+
+        # Both down: no survivor to point at, and the "nothing needs your
+        # attention" line would be flatly untrue.
+        both = alerts_mod.build_alert_embed(
+            ACCT, REASON_RUNTIME_401, {ACCT, OTHER},
+        ).description or ""
+        if "Work keeps running" in both:
+            failures.append(
+                "copy: promised work continues on an account that is itself "
+                "signed out"
+            )
+        if "Nothing has failed" in both:
+            failures.append(
+                "copy: told the user nothing needs attention while no account "
+                "could take a task"
+            )
+        if "Every configured account is signed out" not in both:
+            failures.append("copy: never says that everything is down")
+
+        # A sidelined account that isn't ours doesn't change our story...
+        one = alerts_mod.build_alert_embed(ACCT, REASON_RUNTIME_401, {ACCT}).description or ""
+        if "Work keeps running" not in one:
+            failures.append(
+                "copy: treated the reporting account's own sideline as a "
+                "second outage, hiding the healthy account"
+            )
+
+        # ...and a single-account setup has no survivor by definition.
+        config.CLAUDE_ACCOUNTS[:] = [ACCT]
+        solo = alerts_mod.build_alert_embed(ACCT, REASON_NO_TOKEN).description or ""
+        if "only account configured" not in solo:
+            failures.append("copy: single-account outage lost its wording")
+    finally:
+        config.CLAUDE_ACCOUNTS[:] = saved
+    return failures
+
+
+async def _test_unconfigured_account_is_dropped(store: StateStore) -> list[str]:
+    """Removing an account from .env must not leave it nagging from The Ark.
+
+    The runner only ever looks at configured accounts, so an alert for one the
+    user has since deleted from CLAUDE_ACCOUNTS can never be resolved — it
+    would sit in the table forever and, if the outage was never announced,
+    announce itself on the next tick about an account that no longer exists.
+    """
+    failures: list[str] = []
+    channel = _StubChannel()
+    bot = _StubBot(store, channel)
+    saved = list(config.CLAUDE_ACCOUNTS)
+    try:
+        config.CLAUDE_ACCOUNTS[:] = [OTHER]  # ACCT was removed from .env
+        # Start from no record at all: re-opening the one the drain test left
+        # behind would carry its "already announced" flag, and the silence
+        # asserted below would prove nothing.
+        store.drop_account_alert(ACCT)
+        store.set_account_alert(ACCT, REASON_NO_TOKEN, "2026-07-27T10:00:00+00:00")
+        await alerts_mod._drain_once(bot)
+        if channel.sent:
+            failures.append(
+                "prune: announced an outage on an account the user had "
+                "already removed from CLAUDE_ACCOUNTS"
+            )
+        if ACCT in store.get_account_alerts():
+            failures.append(
+                "prune: the record for an unconfigured account survived, so it "
+                "would count against the usable-accounts total forever"
+            )
+
+        # With no rotation configured at all, CLAUDE_ACCOUNTS is empty for
+        # reasons that have nothing to do with the alert — don't wipe the table.
+        config.CLAUDE_ACCOUNTS[:] = []
+        store.set_account_alert(ACCT, REASON_NO_TOKEN, "2026-07-27T11:00:00+00:00")
+        await alerts_mod._drain_once(bot)
+        if ACCT not in store.get_account_alerts():
+            failures.append(
+                "prune: an unset CLAUDE_ACCOUNTS wiped a live alert"
+            )
+        store.drop_account_alert(ACCT)
+    finally:
+        config.CLAUDE_ACCOUNTS[:] = saved
+    return failures
+
+
 async def _test_auth_panel_agrees_with_the_ark() -> list[str]:
     """The panel the outage notice links to must not contradict it.
 
@@ -345,6 +464,8 @@ async def _amain() -> int:
             ("state-machine", _test_state_machine(store)),
             ("drain", await _test_drain(store)),
             ("rendering", _test_rendering()),
+            ("notice-copy", _test_notice_copy_is_honest()),
+            ("unconfigured-dropped", await _test_unconfigured_account_is_dropped(store)),
             ("auth-panel-agrees", await _test_auth_panel_agrees_with_the_ark()),
         ]
     finally:

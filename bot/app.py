@@ -9,7 +9,6 @@ import signal
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -448,20 +447,6 @@ async def run() -> None:
         max_retained=config.INSTANCE_MAX_RETAINED,
     )
 
-    # Seed alerts for accounts that were already signed out at boot, so the
-    # notifier surfaces them even if no task ever tries to fail over.
-    if startup_degraded:
-        from bot.claude.auth_health import credentials_fingerprint
-        boot_iso = datetime.now(timezone.utc).isoformat()
-        for acct, reason in startup_degraded.items():
-            # Fingerprint the file this verdict was reached against, same as
-            # the runner does — it's what lets a later `/login` retire the
-            # sideline without a restart.
-            store.set_account_alert(
-                acct, reason, boot_iso,
-                cred_fp=credentials_fingerprint(acct),
-            )
-
     orphans = store.mark_orphans()
     if orphans:
         log.warning("Marked %d orphaned instances as failed", len(orphans))
@@ -493,6 +478,15 @@ async def run() -> None:
 
     # Initialize shared runner
     runner = ClaudeRunner(store=store)
+
+    # Bring the account alert table in line with what's actually on disk right
+    # now: announce accounts that went out while we were down, and retire
+    # sidelines on accounts that were signed back in.  Needs the runner (it
+    # owns those rules), so it can't move up next to the store.
+    try:
+        runner.reconcile_account_health()
+    except Exception:
+        log.warning("Account health reconcile failed at startup", exc_info=True)
 
     try:
         cli_version = await runner.check_cli()
