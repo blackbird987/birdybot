@@ -1718,6 +1718,14 @@ class ClaudeRunner:
         """
         provider = provider or self.provider
 
+        # Stamp the resume flag before anything can clear session_id.  The CLI
+        # always returns a session_id, so after the run there is no way to tell
+        # a resumed turn from a fresh spawn — but prompt-cache reuse can only
+        # be judged against a resume.  Mutating the instance here is race-free
+        # for the same reason documented at the _build_command call site: the
+        # instance is owned by the calling coroutine under the channel lock.
+        instance.resumed_session = bool(instance.session_id)
+
         # Build prompt — never mutated on the instance.
         # Resume fallback (t-3541): when a Layer 3 recovery clears session_id
         # and respawns, the LLM may not see Layer 1's system-prompt preamble
@@ -2259,20 +2267,52 @@ class ClaudeRunner:
                 )
             parts.append("\n".join(access_parts))
 
-        # Recent session history — enables smart recall of past work
+        # Recent session history — enables smart recall of past work.
+        # Candidates are fetched newest-first, then narrowed to the entries most
+        # relevant to THIS prompt. Injecting all 20 spent roughly a thousand
+        # tokens per spawn on sessions that usually had nothing to do with the
+        # task in hand.
         if instance.repo_name:
             recent = history_mod.load_recent(
                 repo=instance.repo_name, limit=20, dedupe_thread=True,
             )
+            if recent and config.SESSION_HISTORY_RANKING == "relevance":
+                recent = history_mod.rank_entries(
+                    recent,
+                    prompt=instance.prompt or "",
+                    limit=config.SESSION_HISTORY_MAX,
+                    # Work on the same branch is almost always relevant.
+                    pin_branches={
+                        b for b in (instance.branch, instance.original_branch) if b
+                    },
+                    # Lineage: the steps this session was stacked on are the
+                    # closest thing the runner has to "same thread" — Instance
+                    # carries no channel id, but parent/chained ids identify the
+                    # earlier steps of this same piece of work.
+                    pin_ids={
+                        i for i in (instance.parent_id, instance.chained_from) if i
+                    },
+                )
+            elif recent:
+                # "recency" mode — the previous behaviour, still capped so the
+                # block can't grow without bound.
+                recent = recent[: config.SESSION_HISTORY_MAX]
             if recent:
+                from bot.platform.formatting import clip
+
+                # Topics and summaries are free-form markdown with newlines in
+                # them; each renders as one line here, so flatten first.
+                def _flat(v) -> str:
+                    return " ".join(str(v or "").split())
+
                 lines = []
                 for e in recent:
                     eid = e.get("id", "?")
-                    topic = e.get("topic", "")[:80]
+                    topic = clip(_flat(e.get("topic")), 80)
                     status = e.get("status", "?")
                     finished = e.get("finished", "")
                     branch = e.get("branch")
-                    summary = e.get("summary", "")[:120]
+                    summary = clip(_flat(e.get("summary")), 120)
 
                     age = ""
                     if finished:
@@ -2294,10 +2334,21 @@ class ClaudeRunner:
                         line += f"\n  Summary: {summary}"
                     lines.append(line)
 
-                history_block = "\n".join(lines)
-                # Cap to ~4K to keep total command line under Windows limits
-                if len(history_block) > 4000:
-                    history_block = history_block[:4000] + "\n... (truncated)"
+                # Size backstop: drop whole entries from the end rather than
+                # slicing mid-word. The old cap cut the block at a fixed byte
+                # count, routinely severing an entry mid-sentence and leaving
+                # the model a dangling fragment to interpret.
+                kept: list[str] = []
+                used = 0
+                for line in lines:
+                    cost = len(line) + 1  # +1 for the joining newline
+                    if used + cost > config.SESSION_HISTORY_MAX_CHARS and kept:
+                        kept.append("... (older entries omitted)")
+                        break
+                    kept.append(line)
+                    used += cost
+
+                history_block = "\n".join(kept)
                 parts.append(
                     "\n\n--- Recent Sessions (this project) ---\n"
                     + history_block

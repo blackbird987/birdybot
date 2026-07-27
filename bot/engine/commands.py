@@ -24,6 +24,7 @@ from bot.platform.base import ButtonSpec, RequestContext, SpawnArgs
 from bot.platform.formatting import (
     VALID_MODES,
     action_button_specs,
+    clip,
     expanded_button_specs,
     format_expanded_result_md,
     format_instance_list_md,
@@ -1843,6 +1844,64 @@ async def on_branches(ctx: RequestContext) -> None:
 
 
 # --- /cost ---
+
+async def on_evals(ctx: RequestContext, days: int = 7) -> None:
+    """Report which quality flags keep recurring, and what owns each one."""
+    from bot.engine import eval as eval_mod
+
+    if not config.EVAL_ENABLED:
+        await ctx.messenger.send_text(
+            ctx.channel_id,
+            "Session evaluation is disabled (`EVAL_ENABLED=0`) — nothing to report.",
+        )
+        return
+
+    days = max(1, min(days, 90))
+    digest = await asyncio.to_thread(eval_mod.build_digest, days)
+
+    lines: list[str] = [f"**Eval digest — last {digest.days}d**"]
+    lines.append(f"{digest.sessions} session(s) evaluated")
+
+    if digest.median_cache_hit_rate is not None:
+        lines.append(
+            f"Prompt cache: {digest.median_cache_hit_rate * 100:.0f}% median reuse "
+            f"across {digest.resumed_sessions} resumed session(s)"
+        )
+    elif digest.sessions:
+        lines.append("Prompt cache: no resumed sessions in this window")
+
+    # Keep the message inside the 2000-char single-message limit rather than
+    # letting the platform truncate it mid-row.
+    MAX_ROWS = 10
+    if digest.rows:
+        lines.append("")
+        lines.append("**Recurring flags**")
+        for row in digest.rows[:MAX_ROWS]:
+            mark = {"issue": "✗", "warning": "!", "info": "·"}.get(row.severity, "·")
+            share = f"{row.count}/{digest.sessions} sessions"
+            # Occurrences only add information when a flag fires repeatedly
+            # inside the same session — otherwise it's the same number twice.
+            if row.occurrences > row.count:
+                share += f", {row.occurrences} hits"
+            lines.append(f"{mark} **{share}** — {clip(row.message, 110)}")
+            lines.append(f"   owner: `{row.owner}` · e.g. {', '.join(row.examples)}")
+        if len(digest.rows) > MAX_ROWS:
+            lines.append(f"_...and {len(digest.rows) - MAX_ROWS} more._")
+    elif digest.sessions:
+        lines.append("")
+        lines.append("No flag recurred often enough to report.")
+
+    if digest.suppressed_rows:
+        lines.append("")
+        lines.append(
+            f"_{digest.suppressed_rows} one-off flag(s) below the reporting "
+            f"threshold not shown._"
+        )
+
+    text = "\n".join(lines)
+    markup = ctx.messenger.markdown_to_markup(text)
+    await ctx.messenger.send_text(ctx.channel_id, markup)
+
 
 async def on_cost(ctx: RequestContext) -> None:
     from bot.engine.usage import _fetch_daily_range, _pct_label

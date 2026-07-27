@@ -635,12 +635,21 @@ def _build_usage_text(
             f"  Burn: ${block.burn_rate_cost_per_hour:.2f}/hr"
             f" \u00b7 {block.remaining_minutes}m remaining"
         )
+        # Cache-hit share of prompt tokens (output is never cacheable, so it is
+        # excluded from the denominator — including it would understate reuse).
+        prompt_tokens = (
+            block.input_tokens + block.cache_creation_tokens + block.cache_read_tokens
+        )
+        cached_suffix = ""
+        if prompt_tokens > 0:
+            cached_suffix = f" · {block.cache_read_tokens / prompt_tokens * 100:.0f}% cached"
         lines.append(
             f"  Tokens: {_format_tokens(block.total_tokens)}"
             f" ({_format_tokens(block.input_tokens)} in"
             f" + {_format_tokens(block.output_tokens)} out"
             f" + {_format_tokens(block.cache_creation_tokens)} cache-write"
             f" + {_format_tokens(block.cache_read_tokens)} cache-read)"
+            f"{cached_suffix}"
         )
         if block.models:
             lines.append(f"  Models: {', '.join(block.models)}")

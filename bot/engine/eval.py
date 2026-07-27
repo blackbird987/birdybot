@@ -144,6 +144,33 @@ class ChainEval:
         )
 
 
+# --- Prompt-cache accounting ---
+
+# Below this share of reused prefix, a resumed session is paying close to full
+# price for context it already sent — the signal that something upstream (a
+# volatile block near the front of the prompt, a rebuilt system prompt) is
+# invalidating the cached prefix.
+LOW_CACHE_HIT_RATE = 0.5
+
+
+def cache_hit_rate(inst: Instance) -> float | None:
+    """Share of this run's prompt tokens served from the prompt cache.
+
+    ``None`` when the run reported no prompt tokens at all (errored before
+    the first request, or a provider that doesn't report usage) — that is
+    genuinely "unknown", which must not be flattened into 0.0 and then read
+    back as a cache miss.
+    """
+    total = (
+        (inst.cache_read_tokens or 0)
+        + (inst.cache_creation_tokens or 0)
+        + (inst.input_tokens or 0)
+    )
+    if total <= 0:
+        return None
+    return round((inst.cache_read_tokens or 0) / total, 3)
+
+
 # --- Per-instance heuristic checks ---
 
 def evaluate_instance(inst: Instance) -> SessionEval:
@@ -166,6 +193,10 @@ def evaluate_instance(inst: Instance) -> SessionEval:
             "turns": inst.num_turns,
             "input_tokens": inst.input_tokens,
             "output_tokens": inst.output_tokens,
+            "cache_read_tokens": inst.cache_read_tokens,
+            "cache_creation_tokens": inst.cache_creation_tokens,
+            "cache_hit_rate": cache_hit_rate(inst),
+            "resumed_session": inst.resumed_session,
             "cost": inst.cost_usd,
             "duration_ms": inst.duration_ms,
         },
@@ -319,6 +350,24 @@ def _check_efficiency(inst: Instance) -> list[EvalFlag]:
             flags.append(EvalFlag(
                 category="efficiency", severity="info",
                 message=f"Token ratio {ratio:.0f}:1 input:output — context may be bloated",
+            ))
+
+    # Prompt-cache reuse — only meaningful on a resume.  A fresh spawn has no
+    # prefix to hit, so flagging it would be pure noise.
+    if inst.resumed_session:
+        rate = cache_hit_rate(inst)
+        if rate is not None and rate < LOW_CACHE_HIT_RATE:
+            flags.append(EvalFlag(
+                category="efficiency", severity="info",
+                message=(
+                    f"Low prompt-cache reuse on resume ({rate * 100:.0f}% of prompt "
+                    f"tokens cached) — the cached prefix may be breaking between turns"
+                ),
+                evidence=(
+                    f"{inst.cache_read_tokens} cache-read, "
+                    f"{inst.cache_creation_tokens} cache-write, "
+                    f"{inst.input_tokens} uncached input"
+                ),
             ))
 
     return flags
@@ -477,6 +526,142 @@ def load_evals(since_hours: int = 24) -> list[SessionEval]:
         except Exception:
             continue
     return evals
+
+
+# --- Digest / attribution ---
+#
+# Eval results have been written to disk and never read back. Counting them is
+# only half the value: a recurring flag is evidence that a specific piece of
+# the system prompt is not doing its job, so each flag is attributed to the
+# block that was supposed to prevent it. Anything without a clear owner is
+# reported as unattributed rather than guessed at.
+
+_ATTRIBUTION: tuple[tuple[str, str, str], ...] = (
+    # (category, substring matched against the flag message, owning block)
+    ("claim_grounding", "verification", "HONESTY_CONSTRAINT"),
+    ("claim_grounding", "url", "HONESTY_CONSTRAINT"),
+    ("narration", "doesn't describe", "CHAT_APP_CONSTRAINT"),
+    ("narration", "short response", "CHAT_APP_CONSTRAINT"),
+    ("constraint_violation", "mobile", "MOBILE_HINT"),
+    ("efficiency", "prompt-cache", "prompt assembly order (harness)"),
+    ("efficiency", "context may be bloated", "context injection (harness)"),
+    ("efficiency", "turns", "step prompt scope"),
+    ("efficiency", "revision rounds", "PLAN_REVIEW_PROMPT"),
+    ("efficiency", "code review looped", "CODE_REVIEW_PROMPT"),
+    ("efficiency", "chain cost", "chain budget (harness)"),
+    ("tool_hygiene", "", "tool gating (harness, not prompt-owned)"),
+    ("test_failure", "", "VERIFY_PROMPT"),
+)
+
+
+def attribute_flag(category: str, message: str) -> str:
+    """Name the prompt block or harness area responsible for a flag."""
+    msg = (message or "").lower()
+    for cat, needle, owner in _ATTRIBUTION:
+        if cat == category and (not needle or needle in msg):
+            return owner
+    return "unattributed"
+
+
+@dataclass
+class DigestRow:
+    """One recurring flag, with who owns it.
+
+    ``count`` is the number of SESSIONS the flag appeared in, not the number
+    of times it fired. Per-command checks (tool hygiene) can fire dozens of
+    times in a single session, which would otherwise bury every other finding
+    and make one talkative session look like a systemic problem.
+    """
+    category: str
+    message: str
+    count: int
+    severity: str
+    owner: str
+    occurrences: int = 0
+    examples: list[str] = field(default_factory=list)
+
+
+@dataclass
+class EvalDigest:
+    """Aggregated eval findings over a window."""
+    days: int
+    sessions: int
+    rows: list[DigestRow] = field(default_factory=list)
+    median_cache_hit_rate: float | None = None
+    resumed_sessions: int = 0
+    suppressed_rows: int = 0    # distinct flags below the reporting threshold
+
+
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2
+
+
+def build_digest(days: int = 7, min_count: int = 3) -> EvalDigest:
+    """Aggregate recent session evals into a reportable digest.
+
+    Only flags seen in `min_count` or more SESSIONS are reported — a quiet week
+    should produce a short message, not a wall of one-offs. The number of
+    flags held back is reported so the threshold never hides its own effect.
+    """
+    evals = load_evals(since_hours=days * 24)
+    digest = EvalDigest(days=days, sessions=len(evals))
+    if not evals:
+        return digest
+
+    # Group identical flags. Messages embed live numbers ("took 22 turns"), so
+    # group on a normalised form — otherwise every occurrence looks unique and
+    # nothing ever reaches the threshold.
+    grouped: dict[tuple[str, str], dict] = {}
+    for ev in evals:
+        # A flag counts once per session no matter how often it fired there.
+        # Per-command checks fire on every tool call, so raw occurrences would
+        # let a single long session outrank a habit spread across fifty.
+        seen_here: set[tuple[str, str]] = set()
+        for flag in ev.flags:
+            norm = re.sub(r"\d+(\.\d+)?", "N", flag.message).strip()
+            key = (flag.category, norm)
+            slot = grouped.setdefault(key, {
+                "count": 0, "occurrences": 0, "severity": flag.severity,
+                "examples": [],
+            })
+            slot["occurrences"] += 1
+            if key not in seen_here:
+                seen_here.add(key)
+                slot["count"] += 1
+                if len(slot["examples"]) < 2:
+                    slot["examples"].append(ev.instance_id)
+            # Keep the worst severity seen for this flag.
+            order = {"info": 0, "warning": 1, "issue": 2}
+            if order.get(flag.severity, 0) > order.get(slot["severity"], 0):
+                slot["severity"] = flag.severity
+
+    for (category, message), slot in grouped.items():
+        if slot["count"] < min_count:
+            digest.suppressed_rows += 1
+            continue
+        digest.rows.append(DigestRow(
+            category=category, message=message, count=slot["count"],
+            severity=slot["severity"], owner=attribute_flag(category, message),
+            occurrences=slot["occurrences"], examples=slot["examples"],
+        ))
+    digest.rows.sort(key=lambda r: (r.count, r.occurrences), reverse=True)
+
+    # Cache reuse is only meaningful for resumes; fresh spawns have no prefix
+    # to hit and would drag the median toward zero for no reason.
+    rates = [
+        ev.metrics["cache_hit_rate"] for ev in evals
+        if ev.metrics.get("resumed_session")
+        and isinstance(ev.metrics.get("cache_hit_rate"), (int, float))
+    ]
+    digest.median_cache_hit_rate = _median([float(r) for r in rates])
+    digest.resumed_sessions = len(rates)
+    return digest
 
 
 def load_chain_evals(since_hours: int = 24) -> list[ChainEval]:

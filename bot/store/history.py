@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 from bot import config
@@ -137,3 +139,139 @@ def load_recent(
         if len(entries) >= limit:
             break
     return entries
+
+
+# --- Relevance ranking -------------------------------------------------
+#
+# Injecting the N most recent sessions into every prompt spends context on
+# whatever happened to run last, which is usually unrelated to the task at
+# hand. Ranking by overlap with the current prompt keeps the slots for
+# history that might actually inform this session.
+
+# Deliberately small: these are the words that appear in nearly every prompt
+# and topic, so scoring on them would rank noise as highly as signal.
+_STOPWORDS = frozenset({
+    "the", "a", "an", "and", "or", "but", "if", "then", "than", "so", "to",
+    "of", "in", "on", "at", "for", "from", "by", "with", "without", "into",
+    "is", "are", "was", "were", "be", "been", "being", "do", "does", "did",
+    "have", "has", "had", "it", "its", "this", "that", "these", "those",
+    "i", "we", "you", "he", "she", "they", "me", "us", "them", "my", "our",
+    "your", "their", "can", "could", "should", "would", "will", "shall",
+    "may", "might", "must", "not", "no", "yes", "all", "any", "some", "as",
+    "just", "now", "also", "please", "lets", "let", "make", "made", "get",
+    "got", "up", "out", "off", "over", "again", "more", "most", "there",
+    "what", "when", "where", "which", "who", "why", "how",
+})
+
+_TOKEN_RE = re.compile(r"[a-z0-9_]+")
+
+# Age at which the recency bonus has fully decayed to zero. Roughly matches
+# how long a repo's context stays relevant between bursts of work on it.
+_RECENCY_HORIZON_DAYS = 14.0
+# Weight of a fully-fresh entry relative to keyword overlap. Overlap is a
+# ratio in [0, 1], so this keeps recency as a tiebreaker between entries of
+# similar topical relevance rather than something that can outvote it.
+_RECENCY_WEIGHT = 0.25
+# Overlap is normalised by the SMALLER of the two vocabularies — "of the words
+# these two could possibly have shared, how many did they". Dividing by the
+# prompt alone makes every score shrink as the prompt gets longer (a long brief
+# scored near zero on everything and let recency decide); dividing by the entry
+# alone makes short prompts unable to beat the recency bonus at all. The floor
+# stops a two-word entry from scoring 1.0 on a single common token.
+_MIN_ENTRY_TOKENS = 8
+
+
+def _tokenize(text: str) -> set[str]:
+    """Lowercase word set with stopwords and 1-2 char noise removed."""
+    if not text:
+        return set()
+    return {
+        t for t in _TOKEN_RE.findall(text.lower())
+        if len(t) > 2 and t not in _STOPWORDS
+    }
+
+
+def _recency_score(finished: str, now: datetime) -> float:
+    """1.0 for something that just finished, decaying linearly to 0.0."""
+    if not finished:
+        return 0.0
+    try:
+        dt = datetime.fromisoformat(finished)
+    except (ValueError, TypeError):
+        return 0.0
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    age_days = (now - dt).total_seconds() / 86400.0
+    if age_days < 0:
+        return 1.0
+    return max(0.0, 1.0 - (age_days / _RECENCY_HORIZON_DAYS))
+
+
+def rank_entries(
+    entries: list[dict],
+    prompt: str,
+    limit: int,
+    pin_branches: set[str] | None = None,
+    pin_ids: set[str] | None = None,
+    now: datetime | None = None,
+) -> list[dict]:
+    """Pick the `limit` most useful history entries for the current prompt.
+
+    Pinned entries claim slots first and keep their newest-first order:
+      * anything on a branch this session is working on, and
+      * anything whose id this session descends from (parent / stacked build),
+        which is how the earlier steps of the *same* piece of work stay visible,
+      * anything that failed in the last 24h — a fresh failure is worth knowing
+        about even when it looks topically unrelated.
+
+    Remaining slots go to the highest-scoring entries by keyword overlap with
+    the current prompt, with a decaying recency bonus as a tiebreaker.
+    Returned newest-first so the rendered block reads chronologically.
+    """
+    if limit <= 0 or not entries:
+        return []
+    now = now or datetime.now(timezone.utc)
+    pin_branches = {b for b in (pin_branches or set()) if b}
+    pin_ids = {i for i in (pin_ids or set()) if i}
+
+    def _is_pinned(e: dict) -> bool:
+        if e.get("branch") and e["branch"] in pin_branches:
+            return True
+        if e.get("id") and e["id"] in pin_ids:
+            return True
+        if e.get("status") == "failed":
+            # Recent failures only — a month-old failure is just history.
+            return _recency_score(e.get("finished", ""), now) > (
+                1.0 - (1.0 / _RECENCY_HORIZON_DAYS)
+            )
+        return False
+
+    pinned = [e for e in entries if _is_pinned(e)]
+    if len(pinned) >= limit:
+        return pinned[:limit]
+
+    prompt_tokens = _tokenize(prompt)
+    pinned_ids = {id(e) for e in pinned}
+    rest = [e for e in entries if id(e) not in pinned_ids]
+
+    scored: list[tuple[float, int, dict]] = []
+    for idx, e in enumerate(rest):
+        entry_tokens = _tokenize(f"{e.get('topic', '')} {e.get('summary', '')}")
+        if prompt_tokens and entry_tokens:
+            denom = max(
+                _MIN_ENTRY_TOKENS, min(len(prompt_tokens), len(entry_tokens))
+            )
+            overlap = len(prompt_tokens & entry_tokens) / denom
+        else:
+            overlap = 0.0
+        score = overlap + _RECENCY_WEIGHT * _recency_score(e.get("finished", ""), now)
+        # idx keeps the sort deterministic (and newest-first) among ties.
+        scored.append((score, -idx, e))
+
+    scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
+    chosen = pinned + [e for _, _, e in scored[: limit - len(pinned)]]
+
+    # Restore newest-first ordering from the source list.
+    order = {id(e): i for i, e in enumerate(entries)}
+    chosen.sort(key=lambda e: order.get(id(e), 0))
+    return chosen

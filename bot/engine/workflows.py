@@ -18,7 +18,7 @@ from bot.claude.types import (
     BUILD_ORIGINS, CODE_CHANGE_TOOLS, ChainPhaseState, Instance, InstanceOrigin,
     InstanceStatus, InstanceType, PHASE_GATES, Phase, merge_msg_is_failure,
 )
-from bot.engine import lifecycle, sessions as sessions_mod
+from bot.engine import ai_project, lifecycle, sessions as sessions_mod
 from bot.platform.base import ButtonSpec, RequestContext
 from bot.platform.formatting import (
     action_button_specs,
@@ -1272,10 +1272,19 @@ async def on_review_code(ctx: RequestContext, source_id: str, source_msg_id: str
     current_source = source_id
     current_msg = source_msg_id
     result: Instance | None = None
+
+    # LLM-shaped repos get an extra review lens (evals, output validation,
+    # derived-data honesty...). Repos that don't call a model see no change at
+    # all — no block, no token cost. Resolved once, not per round.
+    review_prompt = config.CODE_REVIEW_PROMPT
+    src = ctx.store.get_instance(source_id)
+    if src and ai_project.is_llm_project(src.repo_path):
+        review_prompt += config.AI_PROJECT_REVIEW_LENS
+
     for round_num in range(MAX_ROUNDS):
         status = "Reviewing code..." if round_num == 0 else f"Re-reviewing (round {round_num + 1})..."
         result = await spawn_from(ctx, current_source, SpawnConfig(
-            instance_type=InstanceType.TASK, prompt=config.CODE_REVIEW_PROMPT,
+            instance_type=InstanceType.TASK, prompt=review_prompt,
             mode="build", origin=InstanceOrigin.REVIEW_CODE,
             status_text=status, resume_session=True,
             copy_branch=True, silent=True,

@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+- **Prompt-cache hit rate is now measured.** Every session eval records how much of its prompt was served from cache (`cache_hit_rate`) alongside the raw cache-read/cache-write counts, and a resumed session that reuses less than half its prefix gets flagged. Fresh spawns are never flagged — they have no prefix to hit. `Instance.resumed_session` is stamped at command-build time because the CLI always returns a session id, making a resume indistinguishable from a fresh spawn after the fact. The `/cost` token line gains a `N% cached` suffix.
+- **AI-project review lens.** Repos whose root manifests declare a model-provider SDK (anthropic, openai, langchain, gemini, mistral, cohere, ollama, ai-sdk) get an extra block appended to the code-review prompt, covering eval coverage, output validation vs prose-scraping, derived-summary honesty, failure taxonomy, cache-shaped prompt assembly, tool-surface scoping and model-id pinning. Detection reads root manifests only and memoises per repo; non-LLM repos are completely unaffected. New module `bot/engine/ai_project.py`.
+- **`/evals` command.** Aggregates the session evals that were previously written to `data/evals/` and never read back: recurring flags over a window (default 7 days, minimum 3 sessions), each attributed to the system-prompt block or harness area responsible for it, plus median prompt-cache reuse across resumed sessions. Flags are counted once per session, not once per occurrence — per-command checks fire on every tool call, so raw occurrence counts let one long session outrank a habit spread across fifty; total hits are still shown alongside when they differ. Reports how many one-off flags the threshold held back.
+
+### Changed
+- **Session history injected into the system prompt is now relevance-ranked, not just recent.** Candidates are still loaded newest-first, then narrowed to `SESSION_HISTORY_MAX` (default 6) by keyword overlap with the current prompt plus a decaying recency bonus. Entries on the session's own branch, its parent/stacked-build lineage, and failures from the last 24h are pinned regardless of score. `SESSION_HISTORY_RANKING=recency` restores the previous newest-N behaviour as a no-deploy revert switch.
+- Session-history block no longer truncates mid-word at a fixed byte count. It now drops whole entries from the end under `SESSION_HISTORY_MAX_CHARS` (default 6000). The old 4000-char cap cited a Windows command-line limit that no longer applies — the system prompt is passed via `--append-system-prompt-file`, not argv. Per-entry topic and summary caps also cut on a word boundary now (shared `formatting.clip`) and flatten embedded newlines, instead of leaving the model a severed fragment like `**What I`.
+
 ## v0.99.9 — Plan-vs-build model routing (2026-07-23)
 
 ### Added
