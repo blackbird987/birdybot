@@ -2273,18 +2273,23 @@ class ClaudeRunner:
         # tokens per spawn on sessions that usually had nothing to do with the
         # task in hand.
         if instance.repo_name:
+            # Candidate pool: always at least 20 so ranking has something to
+            # choose between, and never smaller than what we intend to keep.
             recent = history_mod.load_recent(
-                repo=instance.repo_name, limit=20, dedupe_thread=True,
+                repo=instance.repo_name,
+                limit=max(20, config.SESSION_HISTORY_MAX),
+                dedupe_thread=True,
             )
             if recent and config.SESSION_HISTORY_RANKING == "relevance":
                 recent = history_mod.rank_entries(
                     recent,
                     prompt=instance.prompt or "",
                     limit=config.SESSION_HISTORY_MAX,
-                    # Work on the same branch is almost always relevant.
-                    pin_branches={
-                        b for b in (instance.branch, instance.original_branch) if b
-                    },
+                    # Only the branch this session is actually working on.
+                    # NOT original_branch — despite the name that is the merge
+                    # TARGET (master), shared by every build in the repo, so
+                    # pinning it would pin work with nothing in common.
+                    pin_branches={instance.branch} if instance.branch else set(),
                     # Lineage: the steps this session was stacked on are the
                     # closest thing the runner has to "same thread" — Instance
                     # carries no channel id, but parent/chained ids identify the
@@ -2294,8 +2299,10 @@ class ClaudeRunner:
                     },
                 )
             elif recent:
-                # "recency" mode — the previous behaviour, still capped so the
-                # block can't grow without bound.
+                # "recency" mode — newest-first selection, as before, but still
+                # capped at SESSION_HISTORY_MAX. This is not a full revert to
+                # the old block (which injected all 20); it turns off *ranking*,
+                # not the size cap. Raise SESSION_HISTORY_MAX to widen it.
                 recent = recent[: config.SESSION_HISTORY_MAX]
             if recent:
                 from bot.platform.formatting import clip

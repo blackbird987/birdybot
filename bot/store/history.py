@@ -255,6 +255,13 @@ def rank_entries(
             1.0 - (1.0 / _RECENCY_HORIZON_DAYS)
         )
 
+    # Source order is newest-first; every return path restores it so the
+    # rendered block reads chronologically no matter which path produced it.
+    order = {id(e): i for i, e in enumerate(entries)}
+
+    def _newest_first(chosen: list[dict]) -> list[dict]:
+        return sorted(chosen, key=lambda e: order.get(id(e), 0))
+
     # Lineage pins are precise, so they are uncapped; failure pins are a
     # heuristic and take at most a couple of slots. Order matters: if the pins
     # alone overflow `limit`, the failures are the ones dropped.
@@ -264,7 +271,7 @@ def rank_entries(
             e for e in entries if not _is_lineage(e) and _is_fresh_failure(e)
         ][:_MAX_FAILURE_PINS]
     if len(pinned) >= limit:
-        return pinned[:limit]
+        return _newest_first(pinned[:limit])
 
     prompt_tokens = _tokenize(prompt)
     pinned_ids = {id(e) for e in pinned}
@@ -285,9 +292,4 @@ def rank_entries(
         scored.append((score, -idx, e))
 
     scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
-    chosen = pinned + [e for _, _, e in scored[: limit - len(pinned)]]
-
-    # Restore newest-first ordering from the source list.
-    order = {id(e): i for i, e in enumerate(entries)}
-    chosen.sort(key=lambda e: order.get(id(e), 0))
-    return chosen
+    return _newest_first(pinned + [e for _, _, e in scored[: limit - len(pinned)]])

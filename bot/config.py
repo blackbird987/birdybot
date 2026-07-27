@@ -249,10 +249,19 @@ EVAL_ENABLED: bool = os.getenv("EVAL_ENABLED", "1").lower() in ("1", "true", "ye
 
 # Recent-session history injected into every system prompt.
 # SESSION_HISTORY_RANKING="relevance" keeps the entries most related to the
-# current prompt; "recency" restores the old newest-N behaviour and exists as a
+# current prompt; "recency" selects newest-first instead, and exists as a
 # no-deploy revert switch if relevance ranking ever hides something useful.
 SESSION_HISTORY_MAX: int = int(os.getenv("SESSION_HISTORY_MAX", "6"))
-SESSION_HISTORY_RANKING: str = os.getenv("SESSION_HISTORY_RANKING", "relevance").lower()
+SESSION_HISTORY_RANKING: str = os.getenv("SESSION_HISTORY_RANKING", "relevance").strip().lower()
+if SESSION_HISTORY_RANKING not in ("relevance", "recency"):
+    # A typo must not silently disable ranking — that is a behaviour change
+    # nobody asked for and nothing would report. Warn and use the default.
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "Unknown SESSION_HISTORY_RANKING=%r — using 'relevance'",
+        SESSION_HISTORY_RANKING,
+    )
+    SESSION_HISTORY_RANKING = "relevance"
 # Backstop on the rendered block. Trims whole entries, never mid-word — the
 # real constraint is context cost, not command-line length (the system prompt
 # goes to the CLI via --append-system-prompt-file, not as an argv string).

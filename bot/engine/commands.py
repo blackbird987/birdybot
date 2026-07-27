@@ -1870,26 +1870,45 @@ async def on_evals(ctx: RequestContext, days: int = 7) -> None:
     elif digest.sessions:
         lines.append("Prompt cache: no resumed sessions in this window")
 
-    # Keep the message inside the 2000-char single-message limit rather than
-    # letting the platform truncate it mid-row.
-    MAX_ROWS = 10
+    # send_text hard-truncates at Discord's 2000 chars — it does not split. So
+    # fill rows against a character budget, not a fixed row count: a fixed count
+    # of long rows overflows, and the thing cut off is the "...and N more"
+    # footer, which is exactly the line that says the list is incomplete.
+    ROW_BUDGET = 1700
     if digest.rows:
         lines.append("")
         lines.append("**Recurring flags**")
-        for row in digest.rows[:MAX_ROWS]:
+        used = sum(len(ln) + 1 for ln in lines)
+        shown = 0
+        for row in digest.rows:
             mark = {"issue": "✗", "warning": "!", "info": "·"}.get(row.severity, "·")
             share = f"{row.count}/{digest.sessions} sessions"
             # Occurrences only add information when a flag fires repeatedly
             # inside the same session — otherwise it's the same number twice.
             if row.occurrences > row.count:
                 share += f", {row.occurrences} hits"
-            lines.append(f"{mark} **{share}** — {clip(row.message, 110)}")
-            lines.append(f"   owner: `{row.owner}` · e.g. {', '.join(row.examples)}")
-        if len(digest.rows) > MAX_ROWS:
-            lines.append(f"_...and {len(digest.rows) - MAX_ROWS} more._")
+            pair = [
+                f"{mark} **{share}** — {clip(row.message, 110)}",
+                f"   owner: `{row.owner}` · e.g. {', '.join(row.examples)}",
+            ]
+            cost = sum(len(ln) + 1 for ln in pair)
+            # `shown` guard: always emit at least one row, even a huge one.
+            if shown and used + cost > ROW_BUDGET:
+                break
+            lines.extend(pair)
+            used += cost
+            shown += 1
+        if shown < len(digest.rows):
+            lines.append(f"_...and {len(digest.rows) - shown} more._")
     elif digest.sessions:
         lines.append("")
         lines.append("No flag recurred often enough to report.")
+    else:
+        lines.append("")
+        lines.append(
+            "No sessions were evaluated in this window — try a longer one, "
+            "e.g. `/evals days:30`."
+        )
 
     if digest.suppressed_rows:
         lines.append("")
