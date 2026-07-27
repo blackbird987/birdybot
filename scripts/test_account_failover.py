@@ -33,6 +33,8 @@ Two layers:
    - all accounts failing the probe -> safety valve still spawns.
    - nothing left -> actionable message naming the account, not a raw 401.
    - a runtime 401 sideline is not auto-cleared by re-reading the same file.
+   - that sideline still retires on a login after a bot restart, when the
+     in-memory record of why it was applied is gone.
 
 Run: ``python scripts/test_account_failover.py``  (exit 0 on pass).
 """
@@ -170,7 +172,13 @@ class _FakeStore:
         return {}
 
     def set_account_cooldown(self, account_dir, reset_iso):
-        self.cooldowns[account_dir] = reset_iso
+        # None means "clear" in the real store — mirroring that matters, or a
+        # test asserting on the persisted table would see a cleared cooldown
+        # still sitting there as a None value.
+        if reset_iso is None:
+            self.cooldowns.pop(account_dir, None)
+        else:
+            self.cooldowns[account_dir] = reset_iso
 
     def set_model_cooldown(self, account_dir, reset_iso):
         pass
@@ -182,7 +190,11 @@ class _FakeStore:
     def set_account_alert(self, account_dir, reason, since_iso, cred_fp=None):
         rec = self.alerts.get(account_dir)
         if rec is not None:
-            if rec.get("reason") != reason:
+            # Mirrors StateStore: the fingerprint belongs to the verdict, so a
+            # re-mark that supplies one refreshes it (a stale one would flap
+            # the account in and out of the sideline), and one that supplies
+            # nothing leaves the record alone.
+            if cred_fp is not None:
                 rec["cred_fp"] = cred_fp
             rec["reason"] = reason
             rec["resolved"] = False
@@ -900,6 +912,96 @@ async def _test_runtime_401_alert_not_auto_cleared() -> list[str]:
     return failures
 
 
+async def _test_sideline_survives_a_reboot() -> list[str]:
+    """A restart must not strand a signed-out account for the rest of the day.
+
+    The record of *why* an account was sidelined lives in memory and dies with
+    the process; only the cooldown itself and the alert record are persisted.
+    So after a restart every sideline reads as an ordinary usage limit — and
+    signing the account back in, which is supposed to return it to rotation
+    immediately, would quietly do nothing, benching it for up to 24h despite
+    being fine. The credentials fingerprint on the alert record is the only
+    evidence of a login that survives the restart, so this is the one recovery
+    path that has to keep working across one; the sibling test above covers the
+    same recovery within a single process.
+    """
+    failures: list[str] = []
+    tmp = tempfile.mkdtemp(prefix="acct_reboot_")
+    acct = os.path.join(tmp, "primary")
+    other = os.path.join(tmp, "other")
+    for d in (acct, other):
+        os.makedirs(d, exist_ok=True)
+    _write_credentials(acct, logged_in=True)
+    _write_credentials(other, logged_in=True)
+    clear_auth_cache()
+    saved = list(config.CLAUDE_ACCOUNTS)
+    config.CLAUDE_ACCOUNTS[:] = [acct, other]
+    try:
+        # --- The outage, before the reboot.
+        store = _FakeStore()
+        runner = ClaudeRunner(store=store)
+        runner._record_auth_alert(acct)
+        runner._set_account_cooldown(
+            acct, datetime.now(timezone.utc) + timedelta(hours=24),
+        )
+        runner._auth_cooldowns.add(acct)
+        store.alerts[acct]["notified"] = True
+
+        # --- Reboot: same store on disk, brand-new runner. _auth_cooldowns is
+        #     empty now, which is exactly what makes this case different.
+        rebooted = ClaudeRunner(store=store)
+        if acct not in rebooted._account_cooldowns:
+            failures.append(
+                "reboot: the sideline didn't survive the restart at all — "
+                "the account would be picked again immediately"
+            )
+        if rebooted._auth_cooldowns:
+            failures.append(
+                "reboot: auth/usage split unexpectedly survived; this test "
+                "no longer covers what it claims to"
+            )
+
+        # A `/login` rewrites the credentials file.
+        _write_credentials(acct, logged_in=True, token="rt-signed-back-in")
+        clear_auth_cache()
+        rebooted._unusable_accounts()
+        if acct in rebooted._account_cooldowns:
+            failures.append(
+                "reboot: signed back in after a restart but still benched — "
+                "the fingerprint is the only surviving proof of a login and "
+                "it was ignored"
+            )
+        if store.cooldowns.get(acct):
+            failures.append(
+                "reboot: cleared in memory but not in the store, so the next "
+                "restart would bench the account all over again"
+            )
+        if acct in ClaudeRunner(store=store)._account_cooldowns:
+            failures.append(
+                "reboot: a second restart resurrected the cleared sideline"
+            )
+
+        # The all-clear record sits around for up to a minute waiting on the
+        # notifier. A usage limit landing in that window must survive: nothing
+        # about a stale fingerprint on an already-settled record says anything
+        # about a rate limit, and clearing it would send the next task straight
+        # into the limit it was meant to be waiting out.
+        rebooted._set_account_cooldown(
+            acct, datetime.now(timezone.utc) + timedelta(hours=5),
+        )
+        rebooted._unusable_accounts()
+        if acct not in rebooted._account_cooldowns:
+            failures.append(
+                "reboot: a fresh usage limit was wiped by the already-resolved "
+                "auth alert still waiting for its all-clear"
+            )
+    finally:
+        config.CLAUDE_ACCOUNTS[:] = saved
+        clear_auth_cache()
+        shutil.rmtree(tmp, ignore_errors=True)
+    return failures
+
+
 def _test_login_clears_auth_cooldown() -> list[str]:
     """Signing in must put the account straight back into rotation.
 
@@ -976,6 +1078,8 @@ async def _amain() -> int:
                          await _test_sole_account_dead_gives_actionable_message()))
     all_failures.append(("runtime-401-not-auto-cleared",
                          await _test_runtime_401_alert_not_auto_cleared()))
+    all_failures.append(("sideline-survives-a-reboot",
+                         await _test_sideline_survives_a_reboot()))
     all_failures.append(("relogin-clears-auth-cooldown",
                          _test_login_clears_auth_cooldown()))
 

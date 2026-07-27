@@ -246,7 +246,15 @@ async def _handle_claude_login(
         str(Path.home() / config.PROVIDER_DIR_NAME)
     ]
     cooldowns = getattr(bot._runner, "_account_cooldowns", {}) or {}
-    statuses = await collect_account_statuses(account_dirs, cooldowns)
+    # Same sideline table The Ark reads, so tapping "Auth panel" on an outage
+    # notice can't land on a green tick for the account it just named.
+    try:
+        sidelined = bot._store.sidelined_accounts()
+    except Exception:
+        sidelined = set()
+    statuses = await collect_account_statuses(
+        account_dirs, cooldowns, sidelined,
+    )
 
     can_console = host_can_show_console()
     embed = _build_auth_panel_embed(statuses, can_console)

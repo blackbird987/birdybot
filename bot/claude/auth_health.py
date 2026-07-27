@@ -40,8 +40,10 @@ REASON_UNREADABLE = "credentials file unreadable"
 
 # Not produced by the probe — recorded by the runner when the CLI itself
 # rejects a token that *looks* fine on disk.  Kept here so both the writer and
-# the "is this account healthy again?" reader agree on the exact string: only a
-# successful run can clear it, since re-reading the same file proves nothing.
+# the "is this account healthy again?" reader agree on the exact string.  This
+# is the one verdict re-reading the file cannot retire, since the rejected file
+# parses fine too: it takes either a successful run or the file being rewritten
+# (see ``credentials_fingerprint``).
 REASON_RUNTIME_401 = "logged out — the CLI rejected its OAuth token (401)"
 
 

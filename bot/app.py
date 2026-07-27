@@ -451,9 +451,16 @@ async def run() -> None:
     # Seed alerts for accounts that were already signed out at boot, so the
     # notifier surfaces them even if no task ever tries to fail over.
     if startup_degraded:
+        from bot.claude.auth_health import credentials_fingerprint
         boot_iso = datetime.now(timezone.utc).isoformat()
         for acct, reason in startup_degraded.items():
-            store.set_account_alert(acct, reason, boot_iso)
+            # Fingerprint the file this verdict was reached against, same as
+            # the runner does — it's what lets a later `/login` retire the
+            # sideline without a restart.
+            store.set_account_alert(
+                acct, reason, boot_iso,
+                cred_fp=credentials_fingerprint(acct),
+            )
 
     orphans = store.mark_orphans()
     if orphans:

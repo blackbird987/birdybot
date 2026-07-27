@@ -11,6 +11,8 @@ Covers:
     posted then dropped, snoozed alerts stay quiet
   - the embed/view actually built: plain-language body, copy-pasteable
     re-auth command, and buttons that fit Discord's row limit
+  - the /auth panel the notice links to reporting the same account as signed
+    out, even though its credentials file still reads as valid
 
 No Discord connection — the channel is a stub that records what was sent.
 
@@ -29,7 +31,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from bot import config
 from bot.claude.auth_health import REASON_NO_TOKEN
+from bot.claude.auth_health import clear_cache as auth_clear_cache
 from bot.discord import account_alerts as alerts_mod
+from bot.services.auth_sync import collect_account_statuses
 from bot.store.state import StateStore
 
 ACCT = "/home/q/.claude-klerk"
@@ -106,6 +110,32 @@ def _test_state_machine(store: StateStore) -> list[str]:
     store.drop_account_alert(ACCT)
     if store.get_account_alerts():
         failures.append("state: drop_account_alert left a record behind")
+
+    # The credentials fingerprint belongs to the verdict, not the reason.
+    # If a re-open with the same reason kept the OLD fingerprint, the runner
+    # would compare it against the current file, see a mismatch, read that as
+    # "someone logged in", un-sideline the account, watch it fail again, and
+    # repeat forever — one wasted spawn and an Ark notice per cycle.
+    store.set_account_alert(ACCT, REASON_NO_TOKEN, "2026-07-27T15:00:00+00:00",
+                            cred_fp="111:20")
+    store.mark_account_alert_notified(ACCT)
+    store.resolve_account_alert(ACCT)
+    store.set_account_alert(ACCT, REASON_NO_TOKEN, "2026-07-27T16:00:00+00:00",
+                            cred_fp="222:30")
+    if store.get_account_alerts()[ACCT].get("cred_fp") != "222:30":
+        failures.append(
+            "state: re-opening an alert kept the stale credentials "
+            "fingerprint — the account would flap in and out of the sideline"
+        )
+    # ...but a caller with no opinion must not blank it.
+    store.set_account_alert(ACCT, REASON_NO_TOKEN, "2026-07-27T17:00:00+00:00")
+    if store.get_account_alerts()[ACCT].get("cred_fp") != "222:30":
+        failures.append(
+            "state: a set_account_alert call without a fingerprint erased the "
+            "recorded one — the sideline could never be retired by a /login"
+        )
+
+    store.drop_account_alert(ACCT)
     return failures
 
 
@@ -259,6 +289,54 @@ def _test_rendering() -> list[str]:
     return failures
 
 
+async def _test_auth_panel_agrees_with_the_ark() -> list[str]:
+    """The panel the outage notice links to must not contradict it.
+
+    A server-rejected account leaves a perfectly valid-looking credentials
+    file, so every on-disk check calls it signed in. The Ark says "signed out",
+    the user taps through to the auth panel, and — before this — saw a green
+    tick and a "Re-login" button next to the very account that just failed.
+    """
+    failures: list[str] = []
+    tmp = tempfile.mkdtemp(prefix="acct_panel_")
+    try:
+        good = Path(tmp, "good")
+        rejected = Path(tmp, "rejected")
+        for d in (good, rejected):
+            d.mkdir()
+            (d / ".credentials.json").write_text(
+                '{"claudeAiOauth": {"refreshToken": "rt"}}', encoding="utf-8",
+            )
+        auth_clear_cache()
+        dirs = [str(good), str(rejected)]
+
+        baseline = await collect_account_statuses(dirs)
+        if not all(s.logged_in for s in baseline):
+            failures.append(
+                "panel: the on-disk check alone should call both accounts "
+                "signed in — this test no longer proves anything"
+            )
+
+        statuses = await collect_account_statuses(
+            dirs, None, {str(rejected)},
+        )
+        by_label = {s.label: s for s in statuses}
+        if by_label["rejected"].logged_in:
+            failures.append(
+                "panel: showed a signed-out account as signed in, "
+                "contradicting the Ark notice that links here"
+            )
+        if not by_label["good"].logged_in:
+            failures.append(
+                "panel: marked a healthy account signed out — the sideline "
+                "leaked across accounts"
+            )
+    finally:
+        auth_clear_cache()
+        shutil.rmtree(tmp, ignore_errors=True)
+    return failures
+
+
 async def _amain() -> int:
     tmp = tempfile.mkdtemp(prefix="acct_alerts_")
     try:
@@ -267,6 +345,7 @@ async def _amain() -> int:
             ("state-machine", _test_state_machine(store)),
             ("drain", await _test_drain(store)),
             ("rendering", _test_rendering()),
+            ("auth-panel-agrees", await _test_auth_panel_agrees_with_the_ark()),
         ]
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

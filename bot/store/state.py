@@ -678,15 +678,22 @@ class StateStore:
 
         ``cred_fp`` fingerprints the credentials file the verdict was reached
         against, so a later reader can tell "still the same rejected file" from
-        "someone logged in since".  It rides with ``reason`` and is replaced
-        whenever the reason changes — a stale fingerprint from a different
-        diagnosis would answer the wrong question.
+        "someone logged in since".  It belongs to the verdict, not to the
+        reason: it is refreshed on every re-mark that supplies one, including a
+        re-open with the reason unchanged.  Keeping the old value there would
+        strand the account in a loop — the reader would see a fingerprint that
+        no longer matches the file, conclude a login had happened, un-sideline
+        it, watch it fail again, and repeat on every spawn.  A caller that
+        supplies nothing (boot seeding before the probe has an opinion) leaves
+        whatever is on record alone rather than blanking it.
         """
         existing = self._account_alerts.get(account_dir)
         if existing is not None:
             changed = False
             if existing.get("reason") != reason:
                 existing["reason"] = reason
+                changed = True
+            if cred_fp is not None and existing.get("cred_fp") != cred_fp:
                 existing["cred_fp"] = cred_fp
                 changed = True
             if existing.get("resolved"):

@@ -514,9 +514,11 @@ class ClaudeRunner:
         # Accounts whose *current* cooldown was applied for auth, not usage.
         # Kept apart because the two mean opposite things for recovery: a usage
         # cooldown ends on the clock, an auth one ends when someone logs in —
-        # so a fresh login should clear it immediately. Deliberately in-memory:
-        # after a restart we can't tell the two apart on disk, and waiting out
-        # a stale auth cooldown is the safe way to be wrong.
+        # so a fresh login should clear it immediately. In-memory only, so a
+        # restart loses the distinction; recovery after one rests entirely on
+        # the credential fingerprint stored with the alert, which is why
+        # ``_clear_auth_cooldown`` grew a ``force`` escape hatch for callers
+        # holding that durable proof.
         self._auth_cooldowns: set[str] = set()
         # Accounts the *server* rejected this run, even though their
         # credentials file looks fine. Distinct from _unusable_seen (which the
@@ -677,7 +679,14 @@ class ClaudeRunner:
             now_iso = datetime.now(timezone.utc).isoformat()
             for acct, reason in found.items():
                 try:
-                    self._store.set_account_alert(acct, reason, now_iso)
+                    self._store.set_account_alert(
+                        acct, reason, now_iso,
+                        # Every open alert remembers the file it was judged
+                        # against, whatever the reason — that is what lets the
+                        # recovery check below be one rule instead of one per
+                        # reason string.
+                        cred_fp=credentials_fingerprint(acct),
+                    )
                 except Exception:
                     log.debug("Failed to record account alert", exc_info=True)
             try:
@@ -687,32 +696,51 @@ class ClaudeRunner:
             for acct in config.CLAUDE_ACCOUNTS:
                 if acct in found:
                     continue
-                # A runtime 401 means the file on disk looked fine and the
-                # server still said no — re-reading the SAME file proves
-                # nothing, so that verdict stands until either a successful run
-                # (see _stream_output) or the file being rewritten, which is
-                # what a `/login` does.  The fingerprint is what tells those
-                # two apart, and it's persisted, so this still works after a
-                # reboot — the in-memory auth-cooldown bookkeeping does not.
-                existing = open_alerts.get(acct) or {}
-                if existing.get("reason") == REASON_RUNTIME_401:
+                # The credentials read fine now — but "fine" is exactly how a
+                # server-rejected token reads too, so the probe alone can't
+                # retire a sideline.  What can: the file having been rewritten
+                # since the verdict was reached, which is what a `/login` does.
+                # Comparing fingerprints is the only recovery signal that
+                # survives a reboot; the in-memory record of which cooldowns
+                # were auth-kind does not.
+                #
+                # Only an *open* record is considered.  A resolved one has
+                # already been acted on and is merely waiting for the notifier
+                # to post its all-clear and drop it — up to a minute later.
+                # Re-firing on it during that window would log the same
+                # retirement on every spawn, and worse: if the account picked
+                # up a genuine usage limit in the meantime, the force-clear
+                # below would wipe that cooldown and send the next task
+                # straight into the limit it was waiting out.
+                existing = open_alerts.get(acct)
+                if existing and not existing.get("resolved"):
                     fp = existing.get("cred_fp")
-                    if fp and fp == credentials_fingerprint(acct):
+                    same_file = bool(fp) and fp == credentials_fingerprint(acct)
+                    if same_file and existing.get("reason") == REASON_RUNTIME_401:
+                        # Same file the server rejected. Only a successful run
+                        # clears this one (see _stream_output).
                         continue
-                    log.info(
-                        "Clearing the 401 sideline on %s: %s",
-                        account_label(acct),
-                        "credentials were rewritten (re-authenticated)" if fp
-                        # No fingerprint means the record predates this check,
-                        # so there is nothing to compare against.  Give it the
-                        # benefit of the doubt rather than stranding it: if the
-                        # server still says no, the next run re-opens it.
-                        else "no fingerprint on record — cannot prove it is "
-                             "still the rejected credentials",
-                    )
-                    # Durable evidence of a fresh login, so this may override
-                    # the in-memory record of which cooldowns were auth-kind.
-                    self._clear_auth_cooldown(acct, force=True)
+                    if not same_file:
+                        log.info(
+                            "Retiring the sideline on %s (%s): %s",
+                            account_label(acct),
+                            existing.get("reason") or "unknown",
+                            "credentials were rewritten" if fp
+                            # No fingerprint means the record predates this
+                            # check, so there is nothing to compare against.
+                            # Give it the benefit of the doubt rather than
+                            # stranding it: if the account is still broken the
+                            # next run re-opens the sideline.
+                            else "nothing on record to compare against",
+                        )
+                        # Durable evidence of a fresh login, so this may
+                        # override the in-memory auth/usage split — which a
+                        # reboot loses entirely.  Worst case it drops a real
+                        # usage cooldown that had been hiding behind the
+                        # sideline; the next run re-arms it from the limit
+                        # response, which is far cheaper than stranding a
+                        # working account for the rest of the day.
+                        self._clear_auth_cooldown(acct, force=True)
                 if acct in self._account_cooldowns:
                     continue
                 # Credentials look fine and the account isn't sidelined —
@@ -1167,8 +1195,12 @@ class ClaudeRunner:
             # A run that actually completed proves the account authenticates,
             # which is the only reliable all-clear for a runtime 401 sideline
             # (the credentials file looked fine both before and after).
+            # Forced: this is the strongest evidence there is, and it has to
+            # outrank the in-memory auth/usage split because a reboot wipes
+            # that — a success would otherwise leave the persisted cooldown in
+            # place and bench an account that just did the work.
             if not result.is_error and account_dir:
-                self._clear_auth_cooldown(account_dir)
+                self._clear_auth_cooldown(account_dir, force=True)
                 if self._store:
                     try:
                         self._store.resolve_account_alert(account_dir)

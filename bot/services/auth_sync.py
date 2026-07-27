@@ -25,6 +25,7 @@ import logging
 import os
 import subprocess
 import sys
+from collections.abc import Container
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -315,8 +316,16 @@ def _check_credentials_file(account_dir: Path) -> bool:
 async def collect_account_statuses(
     account_dirs: list[str],
     cooldowns: dict[str, datetime] | None = None,
+    sidelined: Container[str] = (),
 ) -> list[AccountStatus]:
-    """Build AccountStatus list for the given dirs (off the event loop)."""
+    """Build AccountStatus list for the given dirs (off the event loop).
+
+    ``sidelined`` names accounts the *server* rejected at runtime. Their
+    credentials file still parses, so the on-disk check says "signed in" — and
+    this is the panel the outage notice links to, so without this it would
+    cheerfully show a green tick for the very account The Ark just reported as
+    signed out, offering "Re-login" where the user needs "Log in".
+    """
     cooldowns = cooldowns or {}
 
     def _build() -> list[AccountStatus]:
@@ -325,7 +334,9 @@ async def collect_account_statuses(
             p = Path(raw).expanduser()
             label = p.name or str(p)
             try:
-                logged_in = _check_credentials_file(p)
+                logged_in = _check_credentials_file(p) and not (
+                    raw in sidelined or str(p) in sidelined
+                )
                 email, org, uuid_ = _read_account_identity(p)
                 out.append(AccountStatus(
                     path=str(p),
