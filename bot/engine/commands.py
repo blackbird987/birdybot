@@ -1962,6 +1962,24 @@ async def on_usage(ctx: RequestContext, *, force: bool = False) -> str:
 
 # --- /status ---
 
+def _accounts_status_line() -> str | None:
+    """`**Accounts** — 1/2 usable | signed out: `klerk`` — or None if there's
+    no failover configured. Names the dead account so a silently degraded
+    rotation is visible at a glance instead of only at failover time.
+    """
+    accounts = list(config.CLAUDE_ACCOUNTS)
+    if len(accounts) < 2:
+        return None
+    from bot.claude.auth_health import account_label, credentials_usable
+
+    sidelined = [a for a in accounts if not credentials_usable(a)]
+    line = f"**Accounts** — {len(accounts) - len(sidelined)}/{len(accounts)} usable"
+    if sidelined:
+        names = ", ".join(f"`{account_label(a)}`" for a in sidelined)
+        line += f" | signed out: {names} — run /auth to fix"
+    return line
+
+
 async def on_status(ctx: RequestContext) -> None:
     uptime = _time.time() - _start_time
     active_repo, _ = ctx.store.get_active_repo()
@@ -1973,6 +1991,7 @@ async def on_status(ctx: RequestContext) -> None:
         platforms.append("Discord")
 
     text = format_status_md(
+        accounts_line=_accounts_status_line(),
         uptime_secs=uptime,
         running=ctx.store.running_count(),
         instances_today=ctx.store.instance_count_today(),
@@ -2721,6 +2740,7 @@ async def on_help(ctx: RequestContext) -> None:
         "`/cost` — spending breakdown\n"
         "`/evals` — recurring session-quality flags\n"
         "`/status` — health dashboard\n"
+        "`/auth` — Claude account status / re-login\n"
         "`/logs` — bot log\n"
         "`/mode` — explore|plan|build\n"
         "`/verbose` — progress detail (0|1|2)\n"

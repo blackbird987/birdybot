@@ -9,10 +9,16 @@ import signal
 import subprocess
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from bot import config
+from bot.claude.auth_health import (
+    REASON_NO_DIR,
+    relogin_command,
+    unusable_reason,
+)
 from bot.claude.runner import ClaudeRunner
 from bot.claude.types import InstanceStatus
 from bot.engine import commands as engine_commands
@@ -374,36 +380,52 @@ async def run() -> None:
     setup_logging()
     log.info("Starting Claude Bot...")
 
+    # Accounts that exist but can't authenticate right now -- seeded into the
+    # alert table once the store is up so The Ark surfaces them.
+    startup_degraded: dict[str, str] = {}
+
     if config.CLAUDE_ACCOUNTS:
+        configured_count = len(config.CLAUDE_ACCOUNTS)
         log.info(
             "Claude accounts configured: %d (%s)",
-            len(config.CLAUDE_ACCOUNTS),
+            configured_count,
             ", ".join(config.CLAUDE_ACCOUNTS),
         )
+        # Structurally-invalid entries (missing dir) are pruned for good --
+        # nothing can rehabilitate them without an .env edit + restart anyway.
+        # Logged-out entries are NOT pruned: the runner skips them per-run and
+        # rejoins them the moment credentials reappear, so a `/login` heals
+        # rotation without a reboot.
         valid: list[str] = []
         for acct in config.CLAUDE_ACCOUNTS:
-            acct_path = Path(acct)
-            if not acct_path.is_dir():
+            reason = unusable_reason(acct)
+            if reason == REASON_NO_DIR:
                 log.error(
-                    "CLAUDE_ACCOUNTS entry dropped: %s (dir does not exist). "
+                    "CLAUDE_ACCOUNTS entry dropped: %s (%s). "
                     "See CLAUDE.md -> Multi-Account Setup.",
                     acct,
+                    reason,
                 )
-            elif not (acct_path / ".credentials.json").is_file():
+                continue
+            valid.append(acct)
+            if reason:
+                startup_degraded[acct] = reason
                 log.error(
-                    "CLAUDE_ACCOUNTS entry dropped: %s (no .credentials.json -- "
-                    "not logged in). See CLAUDE.md -> Multi-Account Setup.",
+                    "CLAUDE_ACCOUNTS entry sidelined: %s (%s). It stays in "
+                    "rotation config and rejoins automatically after login -- "
+                    "run: %s",
                     acct,
+                    reason,
+                    relogin_command(acct),
                 )
-            else:
-                valid.append(acct)
-        if len(valid) != len(config.CLAUDE_ACCOUNTS):
+        config.CLAUDE_ACCOUNTS = valid
+        usable = len(valid) - len(startup_degraded)
+        if usable != configured_count:
             log.warning(
                 "Multi-account failover degraded: %d of %d accounts usable",
-                len(valid),
-                len(config.CLAUDE_ACCOUNTS),
+                usable,
+                configured_count,
             )
-            config.CLAUDE_ACCOUNTS = valid
 
     if not config.CLAUDE_ACCOUNTS:
         log.warning(
@@ -425,6 +447,13 @@ async def run() -> None:
         retention_days=config.INSTANCE_RETENTION_DAYS,
         max_retained=config.INSTANCE_MAX_RETAINED,
     )
+
+    # Seed alerts for accounts that were already signed out at boot, so the
+    # notifier surfaces them even if no task ever tries to fail over.
+    if startup_degraded:
+        boot_iso = datetime.now(timezone.utc).isoformat()
+        for acct, reason in startup_degraded.items():
+            store.set_account_alert(acct, reason, boot_iso)
 
     orphans = store.mark_orphans()
     if orphans:
@@ -804,6 +833,11 @@ async def run() -> None:
     if config.AUTO_UPDATE:
         _bg_tasks.append(asyncio.create_task(
             auto_update_loop(stop_event, runner, notifier),
+        ))
+    if discord_bot:
+        from bot.discord.account_alerts import run_account_alert_notifier
+        _bg_tasks.append(asyncio.create_task(
+            run_account_alert_notifier(discord_bot, stop_event),
         ))
     if config.LOG_TRIAGE_ENABLED and discord_bot:
         from bot.discord.log_triage import run_triage_service

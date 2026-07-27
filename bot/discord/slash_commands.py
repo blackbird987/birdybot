@@ -52,6 +52,20 @@ def setup(bot: ClaudeBot) -> None:
             return
         await bot._run_slash(interaction, commands.on_status)
 
+    @bot.tree.command(
+        name="auth",
+        description="Claude account status — who's signed in, who's sidelined",
+        guild=guild_obj,
+    )
+    async def cmd_auth(interaction: discord.Interaction):
+        if not bot._is_owner(interaction.user.id):
+            await interaction.response.send_message("Unauthorized", ephemeral=True)
+            return
+        # Same ephemeral panel the Ark's "Claude Login" button opens — this is
+        # just a way to reach it from anywhere without hunting for the button.
+        from bot.discord.wizard import _handle_claude_login
+        await _handle_claude_login(bot, interaction)
+
     @bot.tree.command(name="cost", description="Spending breakdown", guild=guild_obj)
     async def cmd_cost(interaction: discord.Interaction):
         if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:

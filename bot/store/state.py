@@ -80,7 +80,12 @@ class StateStore:
         # stays usable for other models, so this only downgrades — never
         # refuses spawns.
         self._model_cooldowns: dict[str, str] = {}
-        self._dirty: bool = False  # Dirty flag — mark_dirty() defers save to auto-save loop
+        # account_dir -> {"reason": str, "since": ISO, "notified": bool,
+        #                 "snooze_until": ISO|None}.  Tracks accounts sidelined
+        # for auth (logged out / OAuth dead) so the Ark notice fires exactly
+        # once per outage instead of once per failed task, and survives reboot.
+        self._account_alerts: dict[str, dict] = {}
+        self._dirty: bool = False # Dirty flag — mark_dirty() defers save to auto-save loop
         self._last_mtime: float = 0.0  # Track file mtime for external change detection
 
         self._load()
@@ -150,6 +155,7 @@ class StateStore:
             self._fallback_cost_date = data.get("fallback_cost_date", "")
             self._account_cooldowns = data.get("account_cooldowns", {})
             self._model_cooldowns = data.get("model_cooldowns", {})
+            self._account_alerts = data.get("account_alerts", {})
             for d in data.get("schedules", []):
                 sched = Schedule.from_dict(d)
                 self._schedules[sched.id] = sched
@@ -226,6 +232,7 @@ class StateStore:
             "fallback_cost_date": self._fallback_cost_date,
             "account_cooldowns": self._account_cooldowns,
             "model_cooldowns": self._model_cooldowns,
+            "account_alerts": self._account_alerts,
             "schedules": [s.to_dict() for s in self._schedules.values()],
         }
         return json.dumps(data, separators=(",", ":"))
@@ -626,6 +633,94 @@ class StateStore:
             self._model_cooldowns.pop(account_dir, None)
         else:
             self._model_cooldowns[account_dir] = reset_iso
+        self.save()
+
+    # --- Account Alerts (auth sideline notices) ---
+
+    def get_account_alerts(self) -> dict[str, dict]:
+        """Return a copy of {account_dir -> alert record}.
+
+        Record shape: ``{"reason": str, "since": ISO, "notified": bool,
+        "resolved": bool, "snooze_until": ISO|None}``.
+
+        The record is a small state machine drained by the notifier loop:
+        open+unnotified -> announce; resolved+notified -> all-clear then drop;
+        resolved+unannounced -> drop silently (nothing to un-say).  Writers
+        (the runner) only ever open or resolve records — they never post, so
+        the engine layer keeps sole ownership of Discord.
+        """
+        return {k: dict(v) for k, v in self._account_alerts.items()}
+
+    def set_account_alert(self, account_dir: str, reason: str, since_iso: str) -> bool:
+        """Open (or re-open) an auth sideline for an account. True if new.
+
+        Re-marking an already-open alert is a no-op that keeps the original
+        ``since`` and the ``notified``/``snooze_until`` flags — that is what
+        stops a burst of failed tasks from re-notifying.  An account that
+        breaks again before its all-clear went out simply re-opens.
+        """
+        existing = self._account_alerts.get(account_dir)
+        if existing is not None:
+            changed = False
+            if existing.get("reason") != reason:
+                existing["reason"] = reason
+                changed = True
+            if existing.get("resolved"):
+                existing["resolved"] = False
+                changed = True
+            if changed:
+                self.save()
+            return False
+        self._account_alerts[account_dir] = {
+            "reason": reason,
+            "since": since_iso,
+            "notified": False,
+            "resolved": False,
+            "snooze_until": None,
+        }
+        self.save()
+        return True
+
+    def resolve_account_alert(self, account_dir: str) -> None:
+        """Mark an account healthy again, leaving the all-clear for the notifier.
+
+        An alert that was never announced is dropped outright — there is no
+        point telling the user an account recovered from an outage they were
+        never told about.
+        """
+        record = self._account_alerts.get(account_dir)
+        if record is None or record.get("resolved"):
+            return
+        if not record.get("notified"):
+            self._account_alerts.pop(account_dir, None)
+        else:
+            record["resolved"] = True
+        self.save()
+
+    def drop_account_alert(self, account_dir: str) -> None:
+        """Remove an alert record entirely (notifier, after the all-clear)."""
+        if self._account_alerts.pop(account_dir, None) is not None:
+            self.save()
+
+    def mark_account_alert_notified(self, account_dir: str) -> None:
+        """Record that the sideline notice was delivered for this account."""
+        record = self._account_alerts.get(account_dir)
+        if record is None:
+            return
+        record["notified"] = True
+        self.save()
+
+    def snooze_account_alert(self, account_dir: str, until_iso: str) -> None:
+        """Suppress further notices for this account until *until_iso*.
+
+        Marks it notified too, so the snooze holds even if the account flaps
+        between cooldown windows while the user is ignoring it on purpose.
+        """
+        record = self._account_alerts.get(account_dir)
+        if record is None:
+            return
+        record["snooze_until"] = until_iso
+        record["notified"] = True
         self.save()
 
     # --- Platform State ---

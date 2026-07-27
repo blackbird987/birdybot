@@ -183,7 +183,8 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
         await handle_wizard_button(bot, interaction, custom_id)
         return
 
-    # --- Multi-account auth panel (auth:login:<i>, auth:sync, auth:refresh) ---
+    # --- Multi-account auth panel
+    # (auth:login:<i>, auth:snooze:<i>, auth:sync, auth:refresh) ---
     if custom_id.startswith("auth:"):
         from bot.discord.wizard import handle_auth_button
         await handle_auth_button(bot, interaction, custom_id)

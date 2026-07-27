@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 from bot import config
 from bot.claude.models import context_tokens_from_usage
+from bot.claude.parser import is_account_unusable_error
 from bot.claude.provider import get_provider
 from bot.claude.runner import RebootResult
 from bot.claude.types import (
@@ -42,6 +43,27 @@ log = logging.getLogger(__name__)
 _NOWND: dict = config.NOWND
 
 MAX_COOLDOWN_RETRIES = 3
+
+
+def humanize_failure(text: str | None) -> str | None:
+    """Replace a raw CLI auth error with something the user can act on.
+
+    ``Failed to authenticate. API Error: 401 OAuth access token has expired.``
+    as the headline of a build failure reads like the task broke, when in fact
+    an account is simply signed out.  Messages the bot composed itself already
+    name the account and the fix (they carry the re-auth command), so those
+    pass through untouched.
+    """
+    if not text or not is_account_unusable_error(text):
+        return text
+    if "CLAUDE_CONFIG_DIR" in text:
+        return text
+    return (
+        "A Claude account is signed out — the CLI rejected its saved login "
+        "(OAuth expired). The task itself is fine.\n"
+        "Run /auth to see which account and re-login, or ignore it: the bot "
+        "keeps working on any account that's still signed in."
+    )
 
 
 def _with_fallback_footer(text: str, result: RunResult) -> str:
@@ -120,8 +142,18 @@ async def schedule_cooldown_retry(
     # Display the original reset time (not the clamped time) so the
     # user sees "retrying at 4:00 AM" matching the limit message.
     reset_str = _format_reset_time(result.usage_limit_reset)
+    # The cause matters to the user: "usage limit" is a lie when what actually
+    # happened is that the backup account is logged out and we're waiting for
+    # the main one to reset.
+    if result.retry_reason == "backup_logged_out":
+        headline = (
+            "⏳ Backup account logged out — waiting for your main account "
+            f"to reset, auto-retrying at {reset_str}"
+        )
+    else:
+        headline = f"⏳ Usage limit hit — auto-retrying at {reset_str}"
     msg = (
-        f"⏳ Usage limit hit — auto-retrying at {reset_str}"
+        f"{headline}"
         f" (attempt {inst.cooldown_retries}/{MAX_COOLDOWN_RETRIES})"
     )
     buttons = []
@@ -136,6 +168,10 @@ async def schedule_cooldown_retry(
                 f"Continue with {config.API_FALLBACK_MODEL} (≤${cap:.2f})",
                 f"continue_ppu:{inst.id}",
             )])
+    if result.retry_reason == "backup_logged_out":
+        # Fix-it right where the problem is announced, instead of making the
+        # user go hunting for the auth panel in The Ark.
+        buttons.append([ButtonSpec("Auth panel", "ark:claude_login")])
     buttons.append([ButtonSpec("Cancel Auto-Retry", f"cancel_cooldown:{inst.id}")])
     try:
         await ctx.messenger.send_text(
@@ -495,10 +531,12 @@ def finalize_run(ctx: RequestContext, inst: Instance, result: RunResult) -> None
             # kill window (Windows in particular cannot distinguish on
             # returncode — see runner._stream_output for the rationale).
             inst.status = InstanceStatus.KILLED
-            inst.error = result.error_message or None
+            inst.error = humanize_failure(result.error_message or None)
         else:
             inst.status = InstanceStatus.FAILED
-            inst.error = result.error_message or result.result_text
+            inst.error = humanize_failure(
+                result.error_message or result.result_text
+            )
     else:
         inst.status = InstanceStatus.COMPLETED
 

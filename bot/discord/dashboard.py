@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 import discord
 
 from bot import config
+from bot.claude.auth_health import credentials_usable
 from bot.claude.types import InstanceStatus
 from bot.discord.access import load_access_config
 from bot.platform.formatting import format_relative_time
@@ -228,8 +229,17 @@ def build_dashboard_embed(
 
     # --- Usage ---
     usage_label = f"Usage · {config.PLAN_NAME}"
-    if len(config.CLAUDE_ACCOUNTS) > 1:
-        usage_label += f" · {len(config.CLAUDE_ACCOUNTS)} accts"
+    total_accts = len(config.CLAUDE_ACCOUNTS)
+    if total_accts > 1:
+        # Show usable/total when one is signed out, so a dead backup can't
+        # masquerade as working failover the way klerk did for five weeks.
+        usable_accts = sum(
+            1 for a in config.CLAUDE_ACCOUNTS if credentials_usable(a)
+        )
+        if usable_accts < total_accts:
+            usage_label += f" · {usable_accts}/{total_accts} accts"
+        else:
+            usage_label += f" · {total_accts} accts"
     if usage_text:
         embed.add_field(name=usage_label, value=usage_text, inline=False)
     else:

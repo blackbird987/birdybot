@@ -23,6 +23,13 @@ if TYPE_CHECKING:
     from bot.store.state import StateStore
 
 from bot import config
+from bot.claude.auth_health import (
+    REASON_RUNTIME_401,
+    account_label,
+    credentials_usable,
+    relogin_command,
+    unusable_reason,
+)
 from bot.claude.branch_utils import canonical_branch
 from bot.claude.gitpaths import git_common_dir, git_dir, git_toplevel
 from bot.claude.parser import (
@@ -69,6 +76,29 @@ def _is_primary_model(model: str | None) -> bool:
     if not effective:
         return True
     return config.PRIMARY_MODEL.lower() in effective.lower()
+
+
+def _no_productive_work(res: RunResult) -> bool:
+    """True when a run died before producing any real work product.
+
+    Used by the failover paths to decide whether a backup account "took" the
+    turn or fell over instantly.  The obvious test — "did it emit any output
+    text?" — is wrong: the CLI writes fatal auth errors into ``result_text``,
+    not ``error_message`` (t-6614; ``data/results/t-6570.md`` was exactly the
+    99-byte 401 string).  That misread a dead account as a genuine mid-work
+    failure, dropped the original usage-limit reset, and surfaced a raw 401 as
+    a build failure instead of scheduling the normal auto-retry.
+
+    A run that completed more than one turn is treated as real work no matter
+    what it says, so a genuine mid-work failure on the backup is never masked.
+    """
+    if res.num_turns and res.num_turns > 1:
+        return False
+    text = (res.result_text or "").strip()
+    if not text:
+        return True
+    return (is_account_unusable_error(text)
+            or is_account_unusable_error(res.error_message or ""))
 
 # Tunable knobs for the cross-account session-recovery path (step 3 of the
 # dementia fix).  60s cache window dedupes rebuild_project_index calls when a
@@ -468,6 +498,11 @@ class ClaudeRunner:
         # "simplify cache key" refactor MUST keep size.
         self._freshness_cache: dict[tuple[str, int, int], datetime | None] = {}
 
+        # account_dir -> reason, for accounts the credential preflight is
+        # currently skipping. Held only to log transitions instead of
+        # repeating the same line on every spawn.
+        self._unusable_seen: dict[str, str] = {}
+
     @property
     def provider(self) -> ProviderConfig:
         """Current provider — re-reads config for runtime switching."""
@@ -525,12 +560,20 @@ class ClaudeRunner:
         }
         exclude = exclude or set()
 
-        def _first(skip_model_cooled: bool) -> str | None:
+        # Credential preflight: an account with no usable refresh token can
+        # only ever return a 401, so spawning it wastes a task and (before
+        # t-6614) could surface a raw auth error as a build failure.  Skipping
+        # it here is free and self-healing — a `/login` rewrites the
+        # credentials file, which busts the cached probe on the next pick.
+        unusable = self._unusable_accounts()
+
+        def _first(skip_model_cooled: bool, skip_unusable: bool) -> str | None:
             if (
                 prefer
                 and prefer in config.CLAUDE_ACCOUNTS
                 and prefer not in exclude
                 and prefer not in self._account_cooldowns
+                and not (skip_unusable and prefer in unusable)
                 and not (skip_model_cooled and prefer in self._model_cooldowns)
             ):
                 return prefer
@@ -539,6 +582,8 @@ class ClaudeRunner:
                     continue
                 if acct in self._account_cooldowns:
                     continue
+                if skip_unusable and acct in unusable:
+                    continue
                 if skip_model_cooled and acct in self._model_cooldowns:
                     continue
                 return acct
@@ -546,10 +591,149 @@ class ClaudeRunner:
 
         if avoid_model_cooldown:
             self._purge_model_cooldowns()
-            candidate = _first(skip_model_cooled=True)
+            candidate = _first(skip_model_cooled=True, skip_unusable=True)
             if candidate:
                 return candidate
-        return _first(skip_model_cooled=False)
+        candidate = _first(skip_model_cooled=False, skip_unusable=True)
+        if candidate or len(unusable) < len(config.CLAUDE_ACCOUNTS):
+            return candidate
+
+        # Safety valve: EVERY configured account failed the credentials probe.
+        # The probe is a heuristic (a host that keeps credentials outside the
+        # config dir, e.g. macOS Keychain, reads as "logged out" for every
+        # account), and a clean sweep is exactly what a wrong heuristic looks
+        # like — so it must never be able to take the fleet dark.  Better to
+        # spawn and get a real error than to refuse everything.
+        #
+        # Deliberately NOT fired when only some accounts fail the probe: there
+        # the probe is discriminating (one real dead account), and spawning it
+        # anyway is the doomed-401 spawn this whole change exists to prevent.
+        log.warning(
+            "Credential preflight would exclude every account (%s) — "
+            "ignoring it and picking normally",
+            ", ".join(sorted(account_label(a) for a in unusable)),
+        )
+        if avoid_model_cooldown:
+            candidate = _first(skip_model_cooled=True, skip_unusable=False)
+            if candidate:
+                return candidate
+        return _first(skip_model_cooled=False, skip_unusable=False)
+
+    def _unusable_accounts(self) -> dict[str, str]:
+        """{account_dir -> reason} for configured accounts that can't authenticate.
+
+        Logs only when the set changes, so a busy fleet doesn't repeat the
+        same line on every spawn.  Also records/clears the persisted alert
+        marker that drives the one-time Discord notice.
+        """
+        found: dict[str, str] = {}
+        for acct in config.CLAUDE_ACCOUNTS:
+            reason = unusable_reason(acct)
+            if reason:
+                found[acct] = reason
+        if found != self._unusable_seen:
+            for acct, reason in found.items():
+                if acct not in self._unusable_seen:
+                    log.warning(
+                        "Account %s skipped: %s", account_label(acct), reason,
+                    )
+            for acct in self._unusable_seen:
+                if acct not in found:
+                    log.info("Account %s is usable again", account_label(acct))
+            self._unusable_seen = dict(found)
+        # Persist alert state so the notifier can announce (and un-announce)
+        # this exactly once.  Never notifies from inside the runner — the
+        # engine layer owns Discord.
+        if self._store:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            for acct, reason in found.items():
+                try:
+                    self._store.set_account_alert(acct, reason, now_iso)
+                except Exception:
+                    log.debug("Failed to record account alert", exc_info=True)
+            try:
+                open_alerts = self._store.get_account_alerts()
+            except Exception:
+                open_alerts = {}
+            for acct in config.CLAUDE_ACCOUNTS:
+                if acct in found or acct in self._account_cooldowns:
+                    continue
+                # A runtime 401 means the file on disk looked fine and the
+                # server still said no — re-reading it proves nothing, so only
+                # a successful run (see _stream_output) may clear that one.
+                existing = open_alerts.get(acct) or {}
+                if existing.get("reason") == REASON_RUNTIME_401:
+                    continue
+                # Credentials look fine and the account isn't sidelined —
+                # resolve rather than delete so the notifier can post the
+                # matching all-clear for an outage it announced.
+                try:
+                    self._store.resolve_account_alert(acct)
+                except Exception:
+                    log.debug("Failed to resolve account alert", exc_info=True)
+        return found
+
+    def _record_auth_alert(self, account_dir: str, error_text: str | None = None) -> None:
+        """Persist that an account was sidelined for auth at runtime.
+
+        Only writes state — the engine layer drains it and posts to Discord,
+        so the runner keeps no platform dependency.
+        """
+        if not self._store:
+            return
+        reason = REASON_RUNTIME_401
+        try:
+            self._store.set_account_alert(
+                account_dir, reason, datetime.now(timezone.utc).isoformat(),
+            )
+        except Exception:
+            log.debug("Failed to record auth alert", exc_info=True)
+
+    def _soften_auth_dead_end(
+        self, result: RunResult, instance: Instance, dead_account: str,
+    ) -> None:
+        """Turn a nowhere-to-go auth failure into a retry or a useful message.
+
+        A raw ``401 OAuth access token has expired`` as the headline of a
+        build failure tells the user nothing they can act on, and throws away
+        a turn that would have succeeded twenty minutes later.  So:
+
+        * another account merely cooling down -> schedule the turn to come
+          back when the earliest one frees up (a real wall-clock moment), and
+        * genuinely nothing left -> say which account is logged out and how to
+          fix it, instead of echoing the CLI.
+        """
+        now = datetime.now(timezone.utc)
+        others = {
+            acct: reset
+            for acct, reset in self._account_cooldowns.items()
+            if acct != dead_account
+            and acct in config.CLAUDE_ACCOUNTS
+            and reset > now
+        }
+        label = account_label(dead_account)
+        if others:
+            earliest = min(others.values())
+            result.usage_limit_reset = earliest
+            result.session_id = result.session_id or instance.session_id
+            result.retry_reason = "backup_logged_out"
+            log.warning(
+                "Account %s is logged out and no failover target is free for "
+                "%s — scheduling retry at %s instead of failing",
+                label, instance.id, earliest.isoformat(),
+            )
+            return
+        result.error_message = (
+            f"Account '{label}' is logged out (OAuth expired) and there is no "
+            f"other account to fall back to.\n"
+            f"Re-auth with: {relogin_command(dead_account)}  then /login "
+            f"inside the CLI — or drop it from CLAUDE_ACCOUNTS."
+        )
+        result.result_text = ""
+        log.error(
+            "Account %s is logged out and nothing is left to fall back to "
+            "(%s)", label, instance.id,
+        )
 
     def _set_account_cooldown(self, account_dir: str, reset_at: datetime) -> None:
         """Record cooldown both in memory and on disk via the StateStore.
@@ -687,19 +871,42 @@ class ClaudeRunner:
                 earliest_reset = None
                 if self._account_cooldowns:
                     earliest_reset = min(self._account_cooldowns.values())
+                logged_out = self._unusable_seen
+                if earliest_reset is None:
+                    # No cooldown to wait on — every account was excluded for
+                    # some other reason (logged out, or already tried on this
+                    # turn).  Without a retry time this dead-ends the turn, so
+                    # come back shortly instead; MAX_COOLDOWN_RETRIES bounds it.
+                    earliest_reset = datetime.now(timezone.utc) + timedelta(
+                        minutes=15
+                    )
                 log.warning(
-                    "Refusing spawn for %s: all %d account(s) on cooldown or excluded",
+                    "Refusing spawn for %s: all %d account(s) on cooldown or "
+                    "excluded (logged out: %s)",
                     instance.id, len(config.CLAUDE_ACCOUNTS),
+                    ", ".join(sorted(account_label(a) for a in logged_out))
+                    or "none",
                 )
-                return RunResult(
-                    is_error=True,
-                    error_message=(
+                if logged_out:
+                    labels = ", ".join(sorted(account_label(a) for a in logged_out))
+                    message = (
+                        f"No account is available right now — {labels} "
+                        f"logged out, the rest are on cooldown."
+                    )
+                else:
+                    message = (
                         "All configured Claude accounts are on cooldown "
                         "(usage limit or unavailable)."
-                    ),
+                    )
+                return RunResult(
+                    is_error=True,
+                    error_message=message,
                     result_text="",
                     session_id=instance.session_id,
                     usage_limit_reset=earliest_reset,
+                    retry_reason=(
+                        "backup_logged_out" if logged_out else None
+                    ),
                 )
 
         # Pre-emptive model downgrade: when the chosen account's primary
@@ -830,6 +1037,15 @@ class ClaudeRunner:
                 and (result.session_id or instance.session_id)
             ):
                 instance.session_account = account_dir
+
+            # A run that actually completed proves the account authenticates,
+            # which is the only reliable all-clear for a runtime 401 sideline
+            # (the credentials file looked fine both before and after).
+            if not result.is_error and account_dir and self._store:
+                try:
+                    self._store.resolve_account_alert(account_dir)
+                except Exception:
+                    log.debug("Failed to resolve account alert", exc_info=True)
 
             # Dead session: layered recovery before silent --resume drop.
             # Layer 1: rebuild the owning account's session-index in-process
@@ -1057,12 +1273,11 @@ class ClaudeRunner:
                         # its own account-wide cap): this account can still
                         # run the fallback model — keep working instead of
                         # surfacing a raw error or stalling until a reset.
-                        # Guarded on empty output so a real mid-work failure
-                        # on the backup is never masked.
-                        if (
-                            inner.is_error
-                            and not (inner.result_text or "").strip()
-                        ):
+                        # _no_productive_work (not an empty-text test) is what
+                        # keeps a real mid-work failure on the backup visible
+                        # while still catching a CLI fatal error that landed
+                        # in result_text.
+                        if inner.is_error and _no_productive_work(inner):
                             if "model_downgrade" not in recovery_state:
                                 return await _downgrade_retry(
                                     f"{m_label} limit + backup unavailable"
@@ -1127,17 +1342,22 @@ class ClaudeRunner:
                         # is still fundamentally usage-limited. Carry the
                         # original reset time so the caller schedules the
                         # normal auto-retry countdown instead of surfacing the
-                        # backup's raw auth error. Guarded on empty output so a
-                        # real mid-work failure on the backup is never masked.
+                        # backup's raw auth error.  This is the t-6570 path:
+                        # the old empty-output guard missed it because the CLI
+                        # put its 401 in result_text (see _no_productive_work).
                         if (
                             inner.is_error
                             and not inner.usage_limit_reset
-                            and not (inner.result_text or "").strip()
+                            and _no_productive_work(inner)
                         ):
                             inner.usage_limit_reset = reset_at
                             inner.session_id = (
                                 inner.session_id or instance.session_id
                             )
+                            if is_account_unusable_error(
+                                inner.result_text or inner.error_message or ""
+                            ):
+                                inner.retry_reason = "backup_logged_out"
                         return inner
                     # All accounts exhausted — fall through to cooldown/PPU
                     result.usage_limit_reset = reset_at
@@ -1169,13 +1389,15 @@ class ClaudeRunner:
             #    NOT account-agnostic (model unavailable / bad flag), so a blip
             #    can't cascade-cool both accounts. (usage-limit and "No
             #    conversation found" are handled above.)
-            # NOTE: this path deliberately returns the raw error rather than
-            # setting usage_limit_reset, so it does NOT trigger app.py's
-            # paid-API billing fallback — we don't silently spend API credits
-            # to paper over an auth fault. (Exception: when the run arrived
-            # here VIA the usage-limit failover above, that caller stamps its
-            # original reset time onto this raw error — the turn really is
-            # usage-limited, the backup just couldn't take it.)
+            # NOTE on stamping usage_limit_reset here: it schedules an
+            # auto-retry, it does NOT spend money.  The paid-API fallback is an
+            # opt-in button offered by schedule_cooldown_retry (and suppressed
+            # entirely for autopilot chains), never automatic — the older
+            # comment claiming otherwise was wrong.  The real rule is that the
+            # retry time must be a REAL wall-clock moment when an account frees
+            # up (another account's cooldown expiry), never a fabricated one:
+            # retrying against a dead account on a made-up schedule just burns
+            # the three attempts and fails anyway.
             if result.is_error and provider.supports_account_failover and account_dir:
                 confident = is_account_unusable_error(error_text)
                 no_turns = (not (result.result_text or "").strip()
@@ -1195,6 +1417,7 @@ class ClaudeRunner:
                             seconds=config.ACCOUNT_AUTH_COOLDOWN_SECS
                         )
                         self._set_account_cooldown(account_dir, cooldown)
+                        self._record_auth_alert(account_dir, error_text)
                     elif not confident:
                         # Unmatched wording — log the text (whether or not a
                         # failover target exists) so we can graduate it to a
@@ -1234,6 +1457,13 @@ class ClaudeRunner:
                             _provider=provider, _binary=binary,
                             _recovery_state=recovery_state,
                             on_recovery=on_recovery,
+                        )
+                    if confident:
+                        # Nowhere to fail over. Don't dead-end the turn on a
+                        # raw 401 (the t-6570 symptom): if any other account is
+                        # merely cooling down, come back when it frees up.
+                        self._soften_auth_dead_end(
+                            result, instance, account_dir,
                         )
 
             return result

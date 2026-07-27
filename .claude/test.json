@@ -49,7 +49,9 @@
     "wake_promise": "python scripts/test_wake_promise.py",
     "multi_spawn": "python scripts/test_multi_spawn.py",
     "chain_botcmd": "python scripts/test_chain_botcmd.py",
-    "unattended_nudge": "python scripts/test_unattended_nudge.py"
+    "unattended_nudge": "python scripts/test_unattended_nudge.py",
+    "account_failover": "python scripts/test_account_failover.py",
+    "account_alerts": "python scripts/test_account_alerts.py"
   },
 
   "auth": {

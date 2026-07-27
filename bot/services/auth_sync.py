@@ -31,6 +31,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from bot import config
+from bot.claude.auth_health import clear_cache as clear_auth_cache
+from bot.claude.auth_health import credentials_usable
 
 if TYPE_CHECKING:
     import discord
@@ -104,6 +106,9 @@ def write_credentials(data: dict) -> bool:
         CREDENTIALS_PATH.write_text(
             json.dumps(data, indent=2), encoding="utf-8"
         )
+        # A pulled credential set makes a previously-dead account usable again;
+        # drop the memoized probe so the picker sees it on the very next spawn.
+        clear_auth_cache()
         log.info("Wrote credentials to %s", CREDENTIALS_PATH)
         return True
     except Exception:
@@ -298,16 +303,13 @@ def _read_account_identity(account_dir: Path) -> tuple[str | None, str | None, s
 
 
 def _check_credentials_file(account_dir: Path) -> bool:
-    """True if <dir>/.credentials.json has a refreshToken."""
-    cred_path = account_dir / ".credentials.json"
-    if not cred_path.exists():
-        return False
-    try:
-        data = json.loads(cred_path.read_text(encoding="utf-8"))
-    except Exception:
-        return False
-    oauth = data.get("claudeAiOauth") or {}
-    return bool(oauth.get("refreshToken"))
+    """True if <dir>/.credentials.json has a refreshToken.
+
+    Delegates to the shared cached probe so the auth panel, the startup
+    validation and the runner's account picker all answer this question the
+    same way (t-6614).
+    """
+    return credentials_usable(account_dir)
 
 
 async def collect_account_statuses(

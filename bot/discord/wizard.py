@@ -410,6 +410,33 @@ async def handle_auth_button(
             )
         return
 
+    if action == "snooze" and len(parts) >= 3:
+        await interaction.response.defer(ephemeral=True)
+        try:
+            idx = int(parts[2])
+        except ValueError:
+            await interaction.followup.send("Invalid account index.", ephemeral=True)
+            return
+        account_dirs = list(config.CLAUDE_ACCOUNTS)
+        if idx >= len(account_dirs):
+            await interaction.followup.send(
+                "Account no longer in config.", ephemeral=True,
+            )
+            return
+
+        from bot.claude.auth_health import account_label
+        from bot.discord.account_alerts import SNOOZE_DAYS, snooze_deadline
+
+        target = account_dirs[idx]
+        bot._store.snooze_account_alert(target, snooze_deadline())
+        await interaction.followup.send(
+            f"Muted for {SNOOZE_DAYS} days. `{account_label(target)}` stays out "
+            f"of rotation until it's signed in — the bot keeps working on the "
+            f"accounts that are.",
+            ephemeral=True,
+        )
+        return
+
     if action == "sync":
         await _handle_cross_pc_sync(bot, interaction)
         return
