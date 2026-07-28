@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 from bot import config
 from bot.claude.models import context_tokens_from_usage
+from bot.claude.parser import looks_like_fatal_auth_error
 from bot.claude.provider import get_provider
 from bot.claude.runner import RebootResult
 from bot.claude.types import (
@@ -42,6 +43,48 @@ log = logging.getLogger(__name__)
 _NOWND: dict = config.NOWND
 
 MAX_COOLDOWN_RETRIES = 3
+
+# Why a turn was rescheduled -> what the countdown says.  Keyed by
+# RunResult.retry_reason; anything unlisted (including None) is a plain usage
+# limit.  These exist because "usage limit hit" is a lie in every one of these
+# cases, and two of them aren't waiting for a reset at all — they're a short
+# grace window in case the user signs an account back in.
+_RETRY_HEADLINES = {
+    "backup_logged_out": (
+        "⏳ Backup account logged out — waiting for your main account to "
+        "reset, auto-retrying at {t}"
+    ),
+    "accounts_logged_out": (
+        "⏳ Every Claude account is signed out — retrying at {t} in case one "
+        "gets signed back in"
+    ),
+    "no_account_free": "⏳ No account was free to take this — retrying at {t}",
+}
+# ...and which of those the user can fix from the auth panel.
+_AUTH_RETRY_REASONS = frozenset({"backup_logged_out", "accounts_logged_out"})
+
+
+def humanize_failure(text: str | None) -> str | None:
+    """Replace a raw CLI auth error with something the user can act on.
+
+    ``Failed to authenticate. API Error: 401 OAuth access token has expired.``
+    as the headline of a build failure reads like the task broke, when in fact
+    an account is simply signed out.  Messages the bot composed itself already
+    name the account and the fix (they carry the re-auth command), so those
+    pass through untouched — as does any longer output, which is a work product
+    that merely mentions auth rather than an account failure (this repo's own
+    sessions write about 401s all the time).
+    """
+    if not text or not looks_like_fatal_auth_error(text):
+        return text
+    if "CLAUDE_CONFIG_DIR" in text:
+        return text
+    return (
+        "A Claude account is signed out — the CLI rejected its saved login "
+        "(OAuth expired). The task itself is fine.\n"
+        "Run /auth to see which account and re-login, or ignore it: the bot "
+        "keeps working on any account that's still signed in."
+    )
 
 
 def _with_fallback_footer(text: str, result: RunResult) -> str:
@@ -120,10 +163,10 @@ async def schedule_cooldown_retry(
     # Display the original reset time (not the clamped time) so the
     # user sees "retrying at 4:00 AM" matching the limit message.
     reset_str = _format_reset_time(result.usage_limit_reset)
-    msg = (
-        f"⏳ Usage limit hit — auto-retrying at {reset_str}"
-        f" (attempt {inst.cooldown_retries}/{MAX_COOLDOWN_RETRIES})"
-    )
+    headline = _RETRY_HEADLINES.get(
+        result.retry_reason or "", "⏳ Usage limit hit — auto-retrying at {t}",
+    ).format(t=reset_str)
+    msg = f"{headline} (attempt {inst.cooldown_retries}/{MAX_COOLDOWN_RETRIES})"
     buttons = []
     # Offer pay-per-use opt-in if API key configured, budget not exhausted,
     # and this isn't an unattended autopilot chain.
@@ -136,6 +179,10 @@ async def schedule_cooldown_retry(
                 f"Continue with {config.API_FALLBACK_MODEL} (≤${cap:.2f})",
                 f"continue_ppu:{inst.id}",
             )])
+    if result.retry_reason in _AUTH_RETRY_REASONS:
+        # Fix-it right where the problem is announced, instead of making the
+        # user go hunting for the auth panel in The Ark.
+        buttons.append([ButtonSpec("Auth panel", "ark:claude_login")])
     buttons.append([ButtonSpec("Cancel Auto-Retry", f"cancel_cooldown:{inst.id}")])
     try:
         await ctx.messenger.send_text(
@@ -495,10 +542,12 @@ def finalize_run(ctx: RequestContext, inst: Instance, result: RunResult) -> None
             # kill window (Windows in particular cannot distinguish on
             # returncode — see runner._stream_output for the rationale).
             inst.status = InstanceStatus.KILLED
-            inst.error = result.error_message or None
+            inst.error = humanize_failure(result.error_message or None)
         else:
             inst.status = InstanceStatus.FAILED
-            inst.error = result.error_message or result.result_text
+            inst.error = humanize_failure(
+                result.error_message or result.result_text
+            )
     else:
         inst.status = InstanceStatus.COMPLETED
 

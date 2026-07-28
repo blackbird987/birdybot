@@ -423,6 +423,11 @@ class RunResult:
     model: str | None = None         # Model name reported in usage
     needs_input: bool = False  # AskUserQuestion detected — waiting for user reply
     usage_limit_reset: object = None  # datetime | None — when usage limit resets (set by parser)
+    # Why an auto-retry was scheduled, when it wasn't the plain "you hit your
+    # own usage limit" case. Display-only — picks the wording in
+    # schedule_cooldown_retry so a dead backup account doesn't get reported to
+    # the user as a usage limit they never hit.
+    retry_reason: str | None = None
     api_fallback_used: bool = False   # True if result came from API billing fallback
     last_assistant_uuid: str | None = None  # JSONL uuid of final assistant message (for "Branch from here")
     # Recovery exhausted: layer-3 path fired (rebuild + cross-account both failed,

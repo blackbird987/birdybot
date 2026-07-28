@@ -633,6 +633,29 @@ def is_account_unusable_error(error_text: str) -> bool:
     return not (is_transient_error(lower) or parse_usage_limit(lower))
 
 
+# A CLI fatal error is one line — the t-6570 401 was 99 bytes. Anything longer
+# is a work product that merely mentions auth, which matters here because this
+# bot's own sessions discuss OAuth and 401s constantly.
+FATAL_ERROR_MAX_CHARS = 400
+
+
+def looks_like_fatal_auth_error(text: str | None) -> bool:
+    """True when *text* is not just about auth, but IS an auth failure.
+
+    ``is_account_unusable_error`` answers "does this mention an auth fault?",
+    which is the right question for a captured stderr line and the wrong one
+    for a whole run output.  Callers that classify a run — did the account die,
+    or did it produce work? — want this stricter form instead, or they will
+    misread a session that happened to write about 401s as a dead account.
+    """
+    if not text:
+        return False
+    stripped = text.strip()
+    if len(stripped) > FATAL_ERROR_MAX_CHARS:
+        return False
+    return is_account_unusable_error(stripped)
+
+
 def is_account_agnostic_error(error_text: str) -> bool:
     """Errors switching accounts can't fix — both accounts share model access
     and CLI version (e.g. model unavailable, bad CLI flag).

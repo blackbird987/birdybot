@@ -25,12 +25,16 @@ import logging
 import os
 import subprocess
 import sys
+from collections.abc import Container
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from bot import config
+from bot.claude.auth_health import account_label
+from bot.claude.auth_health import clear_cache as clear_auth_cache
+from bot.claude.auth_health import credentials_usable
 
 if TYPE_CHECKING:
     import discord
@@ -104,6 +108,9 @@ def write_credentials(data: dict) -> bool:
         CREDENTIALS_PATH.write_text(
             json.dumps(data, indent=2), encoding="utf-8"
         )
+        # A pulled credential set makes a previously-dead account usable again;
+        # drop the memoized probe so the picker sees it on the very next spawn.
+        clear_auth_cache()
         log.info("Wrote credentials to %s", CREDENTIALS_PATH)
         return True
     except Exception:
@@ -298,32 +305,44 @@ def _read_account_identity(account_dir: Path) -> tuple[str | None, str | None, s
 
 
 def _check_credentials_file(account_dir: Path) -> bool:
-    """True if <dir>/.credentials.json has a refreshToken."""
-    cred_path = account_dir / ".credentials.json"
-    if not cred_path.exists():
-        return False
-    try:
-        data = json.loads(cred_path.read_text(encoding="utf-8"))
-    except Exception:
-        return False
-    oauth = data.get("claudeAiOauth") or {}
-    return bool(oauth.get("refreshToken"))
+    """True if <dir>/.credentials.json has a refreshToken.
+
+    Delegates to the shared cached probe so the auth panel, the startup
+    validation and the runner's account picker all answer this question the
+    same way (t-6614).
+    """
+    return credentials_usable(account_dir)
 
 
 async def collect_account_statuses(
     account_dirs: list[str],
     cooldowns: dict[str, datetime] | None = None,
+    sidelined: Container[str] = (),
 ) -> list[AccountStatus]:
-    """Build AccountStatus list for the given dirs (off the event loop)."""
+    """Build AccountStatus list for the given dirs (off the event loop).
+
+    ``sidelined`` names accounts the *server* rejected at runtime. Their
+    credentials file still parses, so the on-disk check says "signed in" — and
+    this is the panel the outage notice links to, so without this it would
+    cheerfully show a green tick for the very account The Ark just reported as
+    signed out, offering "Re-login" where the user needs "Log in".
+    """
     cooldowns = cooldowns or {}
 
     def _build() -> list[AccountStatus]:
         out: list[AccountStatus] = []
         for raw in account_dirs:
             p = Path(raw).expanduser()
-            label = p.name or str(p)
+            # Same short name The Ark notice, /status, the dashboard and the
+            # login terminal all use.  The raw directory name would show
+            # `.claude-klerk` on the one panel the outage notice ("`klerk` is
+            # signed out") links to — the user has to work out that those are
+            # the same account, on the screen where they're least sure.
+            label = account_label(p)
             try:
-                logged_in = _check_credentials_file(p)
+                logged_in = _check_credentials_file(p) and not (
+                    raw in sidelined or str(p) in sidelined
+                )
                 email, org, uuid_ = _read_account_identity(p)
                 out.append(AccountStatus(
                     path=str(p),

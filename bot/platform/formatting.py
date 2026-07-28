@@ -865,6 +865,7 @@ def format_status_md(
     pc_name: str,
     platforms: list[str],
     recent: list[Instance] | None = None,
+    accounts_line: str | None = None,
 ) -> str:
     """Format /status health dashboard (markdown)."""
     # Uptime
@@ -881,6 +882,10 @@ def format_status_md(
     # Activity
     fail_str = f" ({failures_today} failed)" if failures_today else ""
     parts.append(f"**Activity** — {instances_today} today{fail_str} | {total_instances} total | {running} running")
+
+    # Accounts — only shown when failover is configured
+    if accounts_line:
+        parts.append(accounts_line)
 
     # Repos
     if repos:

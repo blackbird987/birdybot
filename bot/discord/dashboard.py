@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 import discord
 
 from bot import config
+from bot.claude.auth_health import split_accounts
 from bot.claude.types import InstanceStatus
 from bot.discord.access import load_access_config
 from bot.platform.formatting import format_relative_time
@@ -99,7 +100,11 @@ def build_dashboard_embed(
     Shows actionable items (attention, idle, failed) with clickable thread
     links, global stats, project navigation, cost, and system health.
 
-    Pure function — no side effects, no Discord API calls.
+    No Discord API calls and no state mutation. Not quite pure: the account
+    label stats each account's credentials file (cached on mtime+size in
+    ``auth_health``) and reads the store's sideline table, which together are
+    what let a signed-out backup show as ``1/2 accts`` here instead of only
+    surfacing at failover time.
     """
     active_repo, _ = store.get_active_repo()
 
@@ -228,8 +233,18 @@ def build_dashboard_embed(
 
     # --- Usage ---
     usage_label = f"Usage · {config.PLAN_NAME}"
-    if len(config.CLAUDE_ACCOUNTS) > 1:
-        usage_label += f" · {len(config.CLAUDE_ACCOUNTS)} accts"
+    total_accts = len(config.CLAUDE_ACCOUNTS)
+    if total_accts > 1:
+        # Show usable/total when one is signed out, so a dead backup can't
+        # masquerade as working failover the way klerk did for five weeks.
+        healthy, _ = split_accounts(
+            config.CLAUDE_ACCOUNTS, store.sidelined_accounts(),
+        )
+        usable_accts = len(healthy)
+        if usable_accts < total_accts:
+            usage_label += f" · {usable_accts}/{total_accts} accts"
+        else:
+            usage_label += f" · {total_accts} accts"
     if usage_text:
         embed.add_field(name=usage_label, value=usage_text, inline=False)
     else:

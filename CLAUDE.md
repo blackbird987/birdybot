@@ -101,13 +101,22 @@ credentials per `CLAUDE_CONFIG_DIR`, so two accounts cannot share `~/.claude`.
    ```
 4. Restart the bot. Boot log should show:
    `Claude accounts configured: 2 (...)`
-   If a path is wrong or not logged in, the bot drops it from rotation and
-   logs an ERROR per dropped entry.
+   A path that doesn't exist is dropped from rotation (ERROR per entry). A
+   path that exists but isn't logged in is *sidelined*, not dropped: the
+   runner skips it per-run and it rejoins automatically once signed in — no
+   restart, no `.env` edit.
 
 ### Verify
 
 - Check `data/logs/bot.log` for the startup line above
-- Dashboard footer shows `· N accts` when N > 1 (`bot/discord/dashboard.py:221`)
+- `/auth` — per-account panel (identity, cooldown, re-login)
+- `/status` — `**Accounts** — N/M usable`, naming any signed-out account
+- Dashboard usage label shows `· N accts`, or `· N/M accts` when one is down
+- The Ark gets one notice per outage, plus one all-clear on recovery
+  (`bot/discord/account_alerts.py`); "Ignore for 7d" mutes it and lets it
+  return once when the week is up
+- Harnesses: `python scripts/test_account_failover.py`,
+  `python scripts/test_account_alerts.py`
 
 ### Notes
 
