@@ -35,7 +35,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from bot import config
-from bot.claude.auth_health import REASON_NO_TOKEN, REASON_RUNTIME_401
+from bot.claude.auth_health import REASON_NO_TOKEN, REASON_RUNTIME_401, account_label
 from bot.claude.auth_health import clear_cache as auth_clear_cache
 from bot.discord import account_alerts as alerts_mod
 from bot.services.auth_sync import collect_account_statuses
@@ -415,12 +415,17 @@ async def _test_auth_panel_agrees_with_the_ark() -> list[str]:
     file, so every on-disk check calls it signed in. The Ark says "signed out",
     the user taps through to the auth panel, and — before this — saw a green
     tick and a "Re-login" button next to the very account that just failed.
+
+    The names it must agree on matter too, hence the realistic `.claude-x`
+    directories: with plain names the panel's raw-directory label and the
+    shared short label happen to coincide, and the disagreement this asserts
+    on would be invisible.
     """
     failures: list[str] = []
     tmp = tempfile.mkdtemp(prefix="acct_panel_")
     try:
-        good = Path(tmp, "good")
-        rejected = Path(tmp, "rejected")
+        good = Path(tmp, ".claude-good")
+        rejected = Path(tmp, ".claude-rejected")
         for d in (good, rejected):
             d.mkdir()
             (d / ".credentials.json").write_text(
@@ -440,6 +445,15 @@ async def _test_auth_panel_agrees_with_the_ark() -> list[str]:
             dirs, None, {str(rejected)},
         )
         by_label = {s.label: s for s in statuses}
+        expected = {account_label(d) for d in dirs}
+        if set(by_label) != expected:
+            failures.append(
+                f"panel: names accounts {sorted(by_label)} where every other "
+                f"surface (Ark notice, /status, dashboard, login terminal) "
+                f"says {sorted(expected)} — the user has to work out that "
+                f"they're the same account"
+            )
+            return failures
         if by_label["rejected"].logged_in:
             failures.append(
                 "panel: showed a signed-out account as signed in, "

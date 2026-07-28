@@ -687,9 +687,10 @@ class StateStore:
         re-open with the reason unchanged.  Keeping the old value there would
         strand the account in a loop — the reader would see a fingerprint that
         no longer matches the file, conclude a login had happened, un-sideline
-        it, watch it fail again, and repeat on every spawn.  A caller that
-        supplies nothing (boot seeding before the probe has an opinion) leaves
-        whatever is on record alone rather than blanking it.
+        it, watch it fail again, and repeat on every spawn.  None means "no
+        opinion" — which is what both writers pass for an account with no
+        credentials file at all — and leaves whatever is on record alone
+        rather than blanking it.
         """
         existing = self._account_alerts.get(account_dir)
         if existing is not None:

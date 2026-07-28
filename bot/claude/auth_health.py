@@ -113,6 +113,13 @@ def credentials_fingerprint(account_dir: str | Path) -> str | None:
     file being rewritten — which is exactly what ``/login`` does.  Same
     (mtime, size) pair the probe cache keys on, as a string so it can live in
     ``data/state.json`` and survive a reboot.
+
+    Strictly it means "rewritten", not "re-logged-in": a routine token refresh
+    rewrites the file too.  That only happens while the CLI is running under
+    this config dir, and a sidelined account is one we deliberately don't spawn
+    — so in practice the only writer is a login.  If something else does write
+    it, treating that as recovery is the right call anyway: a refresh that
+    succeeded means the account authenticates.
     """
     cred = Path(str(account_dir)).expanduser() / ".credentials.json"
     try:

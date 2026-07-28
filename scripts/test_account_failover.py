@@ -1120,6 +1120,86 @@ def _test_login_clears_auth_cooldown() -> list[str]:
     return failures
 
 
+async def _test_success_keeps_a_siblings_usage_cooldown() -> list[str]:
+    """A successful run must not wipe a usage limit a parallel task just hit.
+
+    This bot runs many tasks at once on the same account.  Task Y hits the 5h
+    limit and cools the account down while task X is still streaming; X then
+    finishes fine and clears the auth sideline.  If that clear ignores the
+    cooldown *kind*, it deletes Y's genuine limit and the next spawn walks
+    straight back into it.  A success only ever proves the account can log in.
+    """
+    failures: list[str] = []
+    reset = datetime.now(timezone.utc) + timedelta(hours=5)
+
+    def setup(runner, instance, accts):
+        inner = runner._stream_output
+
+        async def wrapped(proc, inst, on_progress, on_stall, **kw):
+            # The parallel sibling, landing mid-flight.
+            runner._set_account_cooldown(accts[0], reset)
+            return await inner(proc, inst, on_progress, on_stall, **kw)
+
+        runner._stream_output = wrapped
+
+    result, instance, runner, accts, _ = await _run_with_streams(
+        [RunResult(is_error=False, result_text="ok")],
+        accounts=["primary", "backup"], setup=setup,
+    )
+    if accts[0] not in runner._account_cooldowns:
+        failures.append(
+            "sibling-cooldown: a successful run wiped the usage-limit "
+            "cooldown a parallel task had just set on the same account"
+        )
+    if accts[0] not in runner._store.cooldowns:
+        failures.append(
+            "sibling-cooldown: the cooldown was cleared from the persisted "
+            "table, so a reboot wouldn't restore it either"
+        )
+    if result.is_error:
+        failures.append(f"sibling-cooldown: run errored: {result.error_message!r}")
+    return failures
+
+
+def _test_success_still_retires_an_auth_sideline() -> list[str]:
+    """...but the narrower clear must still end an auth sideline on success.
+
+    The other half of the same rule: a run that completed is the only evidence
+    that clears a runtime-401 sideline (the credentials file looks identical
+    before and after), so narrowing it must not strand a recovered account.
+    """
+    failures: list[str] = []
+    tmp = tempfile.mkdtemp(prefix="acct_success_")
+    acct = os.path.join(tmp, "primary")
+    os.makedirs(acct, exist_ok=True)
+    _write_credentials(acct, logged_in=True)
+    clear_auth_cache()
+    saved = list(config.CLAUDE_ACCOUNTS)
+    config.CLAUDE_ACCOUNTS[:] = [acct]
+    try:
+        runner = ClaudeRunner(store=_FakeStore())
+        runner._set_account_cooldown(
+            acct, datetime.now(timezone.utc) + timedelta(hours=24),
+        )
+        runner._auth_cooldowns.add(acct)
+        runner._auth_dead.add(acct)
+
+        runner._clear_auth_cooldown(acct)  # what the success path now calls
+
+        if acct in runner._account_cooldowns:
+            failures.append(
+                "success-clears-auth: the 401 sideline outlived a run that "
+                "proved the account authenticates"
+            )
+        if acct in runner._auth_dead:
+            failures.append("success-clears-auth: still marked server-rejected")
+    finally:
+        config.CLAUDE_ACCOUNTS[:] = saved
+        clear_auth_cache()
+        shutil.rmtree(tmp, ignore_errors=True)
+    return failures
+
+
 async def _amain() -> int:
     all_failures: list[tuple[str, list[str]]] = []
 
@@ -1152,6 +1232,10 @@ async def _amain() -> int:
                          await _test_boot_reconciles_account_health()))
     all_failures.append(("relogin-clears-auth-cooldown",
                          _test_login_clears_auth_cooldown()))
+    all_failures.append(("success-keeps-sibling-usage-cooldown",
+                         await _test_success_keeps_a_siblings_usage_cooldown()))
+    all_failures.append(("success-retires-auth-sideline",
+                         _test_success_still_retires_an_auth_sideline()))
 
     total = sum(len(f) for _, f in all_failures)
     if total:

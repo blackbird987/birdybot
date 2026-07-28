@@ -379,9 +379,11 @@ async def run() -> None:
     setup_logging()
     log.info("Starting Claude Bot...")
 
-    # Accounts that exist but can't authenticate right now -- seeded into the
-    # alert table once the store is up so The Ark surfaces them.
-    startup_degraded: dict[str, str] = {}
+    # How many accounts exist but can't authenticate right now.  A count, not a
+    # table: surfacing these in The Ark is reconcile_account_health()'s job
+    # below, which reads disk after the runner is up and so also catches
+    # accounts that went out (or came back) while the bot was down.
+    degraded = 0
 
     if config.CLAUDE_ACCOUNTS:
         configured_count = len(config.CLAUDE_ACCOUNTS)
@@ -408,7 +410,7 @@ async def run() -> None:
                 continue
             valid.append(acct)
             if reason:
-                startup_degraded[acct] = reason
+                degraded += 1
                 log.error(
                     "CLAUDE_ACCOUNTS entry sidelined: %s (%s). It stays in "
                     "rotation config and rejoins automatically after login -- "
@@ -418,7 +420,7 @@ async def run() -> None:
                     relogin_command(acct),
                 )
         config.CLAUDE_ACCOUNTS = valid
-        usable = len(valid) - len(startup_degraded)
+        usable = len(valid) - degraded
         if usable != configured_count:
             log.warning(
                 "Multi-account failover degraded: %d of %d accounts usable",

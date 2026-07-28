@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from bot import config
+from bot.claude.auth_health import account_label
 from bot.claude.auth_health import clear_cache as clear_auth_cache
 from bot.claude.auth_health import credentials_usable
 
@@ -332,7 +333,12 @@ async def collect_account_statuses(
         out: list[AccountStatus] = []
         for raw in account_dirs:
             p = Path(raw).expanduser()
-            label = p.name or str(p)
+            # Same short name The Ark notice, /status, the dashboard and the
+            # login terminal all use.  The raw directory name would show
+            # `.claude-klerk` on the one panel the outage notice ("`klerk` is
+            # signed out") links to — the user has to work out that those are
+            # the same account, on the screen where they're least sure.
+            label = account_label(p)
             try:
                 logged_in = _check_credentials_file(p) and not (
                     raw in sidelined or str(p) in sidelined

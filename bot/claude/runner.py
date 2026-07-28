@@ -511,6 +511,11 @@ class ClaudeRunner:
         # currently skipping. Held only to log transitions instead of
         # repeating the same line on every spawn.
         self._unusable_seen: dict[str, str] = {}
+        # Whether the "preflight excluded everything" safety valve is currently
+        # engaged. Same reason as above: on a host that keeps credentials
+        # outside the config dir the valve holds forever, and logging it per
+        # spawn would bury the log in a line that never changes.
+        self._preflight_valve_open = False
         # Accounts whose *current* cooldown was applied for auth, not usage.
         # Kept apart because the two mean opposite things for recovery: a usage
         # cooldown ends on the clock, an auth one ends when someone logs in —
@@ -589,6 +594,15 @@ class ClaudeRunner:
         # it here is free and self-healing — a `/login` rewrites the
         # credentials file, which busts the cached probe on the next pick.
         unusable = self._unusable_accounts()
+        # A clean sweep is what engages the safety valve below.  Tracked here,
+        # next to the condition itself, rather than at one of the several
+        # return paths — otherwise an early return leaves the flag stuck and
+        # the next real outage goes unlogged.
+        sweep = len(unusable) >= len(config.CLAUDE_ACCOUNTS)
+        valve_was_open = self._preflight_valve_open
+        if valve_was_open and not sweep:
+            log.info("Credential preflight is discriminating again")
+        self._preflight_valve_open = sweep
 
         def _first(skip_model_cooled: bool, skip_unusable: bool) -> str | None:
             if (
@@ -618,7 +632,7 @@ class ClaudeRunner:
             if candidate:
                 return candidate
         candidate = _first(skip_model_cooled=False, skip_unusable=True)
-        if candidate or len(unusable) < len(config.CLAUDE_ACCOUNTS):
+        if candidate or not sweep:
             return candidate
 
         # Safety valve: EVERY configured account failed the credentials probe.
@@ -631,11 +645,16 @@ class ClaudeRunner:
         # Deliberately NOT fired when only some accounts fail the probe: there
         # the probe is discriminating (one real dead account), and spawning it
         # anyway is the doomed-401 spawn this whole change exists to prevent.
-        log.warning(
-            "Credential preflight would exclude every account (%s) — "
-            "ignoring it and picking normally",
-            ", ".join(sorted(account_label(a) for a in unusable)),
-        )
+        #
+        # Logged on the transition only. The host-keeps-credentials-elsewhere
+        # case above never resolves, so a per-spawn warning would be a
+        # permanent line in the log that says nothing new.
+        if not valve_was_open:
+            log.warning(
+                "Credential preflight would exclude every account (%s) — "
+                "ignoring it and picking normally",
+                ", ".join(sorted(account_label(a) for a in unusable)),
+            )
         if avoid_model_cooldown:
             candidate = _first(skip_model_cooled=True, skip_unusable=False)
             if candidate:
@@ -1211,12 +1230,18 @@ class ClaudeRunner:
             # A run that actually completed proves the account authenticates,
             # which is the only reliable all-clear for a runtime 401 sideline
             # (the credentials file looked fine both before and after).
-            # Forced: this is the strongest evidence there is, and it has to
-            # outrank the in-memory auth/usage split because a reboot wipes
-            # that — a success would otherwise leave the persisted cooldown in
-            # place and bench an account that just did the work.
+            #
+            # Deliberately NOT forced.  A success says "this account can log
+            # in"; it says nothing about whether it has usage left, and the
+            # forcing path pops the cooldown whatever kind it is.  This bot
+            # runs tasks in parallel, so by the time a run finishes a sibling
+            # may have just cooled this same account on a 5h limit — force
+            # would wipe that and send the next spawn straight into the limit.
+            # Nothing is lost by asking: the picker never hands out a cooled
+            # account, so a run reaching here can only be carrying a cooldown
+            # that arrived mid-flight, i.e. exactly the one to keep.
             if not result.is_error and account_dir:
-                self._clear_auth_cooldown(account_dir, force=True)
+                self._clear_auth_cooldown(account_dir)
                 if self._store:
                     try:
                         self._store.resolve_account_alert(account_dir)
