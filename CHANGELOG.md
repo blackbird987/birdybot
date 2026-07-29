@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.99.13 — Outbound image sharing (2026-07-29)
+
 ### Added
 - **Claude can now put a picture in front of you.** Images already flowed one way — a photo attached in Discord is saved and handed to the session — but there was no reverse: a diagram checked into a repo could only ever be described, or its path recited for you to go open yourself. A turn can now emit `[BOT_CMD: /image path="docs/arch.png" caption="…"]` and the bot uploads the file into the thread, using the same directive channel as `/spawn`, `/chain` and `/wake`. Pictures are posted *before* the result embed so the workflow buttons stay the last thing in the thread. Up to 4 per response, batched into a single Discord message (new `Messenger.send_files`, with a loop-over-`send_file` default so non-Discord adapters get it free). Path safety is the whole risk surface — unchecked, "share a picture" is "read any file on the host and publish it to Discord" — so a candidate must resolve, after `..` collapsing and symlink resolution, to a real file under the run's own repo, its build worktree, or the bot's data dir. The system temp dir was in that list in the first cut and is deliberately not now: the test harness showed it both exposes every other process's scratch files and, on a machine where the repo itself sits under temp, silently defeats the `..`-escape check. Non-image extensions, empty files, anything over 8 MB, and SVG (Discord won't render it inline) are refused, and every refusal posts a visible one-line reason — a message promising a diagram with no diagram attached is worse than no feature at all. New module `bot/engine/images.py`; harness `python scripts/test_image_directive.py`.
 
