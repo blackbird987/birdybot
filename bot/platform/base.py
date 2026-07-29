@@ -135,6 +135,25 @@ class Messenger(Protocol):
         """Send a file. Returns message_id as string."""
         ...
 
+    async def send_files(
+        self, channel_id: str, file_paths: list[str],
+        caption: str | None = None,
+    ) -> list[str]:
+        """Send several files, batched into one message where supported.
+
+        Used by the [BOT_CMD: /image] path so a handful of pictures arrive as
+        one message instead of a burst. Default: fall back to one send_file per
+        file, which every adapter already implements.
+        """
+        from pathlib import Path as _Path
+        out: list[str] = []
+        for p in file_paths:
+            out.append(await self.send_file(
+                channel_id, p, _Path(p).name, caption,
+            ))
+            caption = None  # caption belongs to the first message only
+        return out
+
     def markdown_to_markup(self, md: str) -> str:
         """Convert markdown to platform markup."""
         ...

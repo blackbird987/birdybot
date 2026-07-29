@@ -24,6 +24,7 @@ from bot.platform.base import ButtonSpec, RequestContext, SpawnArgs
 from bot.platform.formatting import (
     VALID_MODES,
     action_button_specs,
+    collapse_bot_directives,
     expanded_button_specs,
     format_expanded_result_md,
     format_instance_list_md,
@@ -38,6 +39,7 @@ from bot.platform.formatting import (
     resolver_running_button_specs,
     running_button_specs,
     strip_markdown,
+    strip_verify_blocks,
 )
 from bot.textutil import clip
 
@@ -1246,7 +1248,20 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
             except Exception:
                 log.debug("invalidate_prime callback raised", exc_info=True)
 
-        await lifecycle.send_result(ctx, inst, result.result_text, result=result)
+        # [BOT_CMD: /image] — pictures go up first so the result embed (and its
+        # buttons) stays the last thing in the thread.
+        if result.result_text and not result.is_error:
+            from bot.engine.images import deliver_images
+            await deliver_images(ctx, result.result_text, inst)
+
+        # Displayed copy only — directives collapse to one subtext line each
+        # (parity with the background path in lifecycle.run_instance, which has
+        # always done this). The dispatchers below keep reading RAW text.
+        await lifecycle.send_result(
+            ctx, inst,
+            collapse_bot_directives(strip_verify_blocks(result.result_text)),
+            result=result,
+        )
 
         # Tier 2: scan Claude's response for [BOT_CMD: /repo ...] directives
         if result.result_text and not result.is_error:

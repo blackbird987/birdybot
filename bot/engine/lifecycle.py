@@ -360,6 +360,12 @@ async def run_instance(
         display_text = collapse_bot_directives(
             strip_verify_blocks(result.result_text)
         )
+        # [BOT_CMD: /image] — post pictures BEFORE the result embed so the
+        # workflow buttons stay the last thing in the thread. Raw text: the
+        # collapsed copy above has already had the directives stripped out.
+        if result.result_text and not result.is_error:
+            from bot.engine.images import deliver_images
+            await deliver_images(ctx, result.result_text, inst)
         await send_result(
             ctx, inst, _with_fallback_footer(display_text, result),
             silent=silent, result=result,

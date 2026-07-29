@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 
 import discord
 
@@ -399,6 +400,20 @@ class DiscordMessenger:
         file = discord.File(file_path, filename=filename)
         msg = await channel.send(content=caption, file=file)
         return str(msg.id)
+
+    async def send_files(
+        self, channel_id: str, file_paths: list[str],
+        caption: str | None = None,
+    ) -> list[str]:
+        """Batch upload — Discord takes up to 10 attachments per message."""
+        channel = await self._resolve_channel(channel_id)
+        if not channel or not file_paths:
+            return []
+        files = [
+            discord.File(p, filename=Path(p).name) for p in file_paths[:10]
+        ]
+        msg = await channel.send(content=caption, files=files)
+        return [str(msg.id)]
 
     def markdown_to_markup(self, md: str) -> str:
         """Discord uses markdown natively — pass through."""

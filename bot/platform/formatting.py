@@ -100,14 +100,21 @@ def _chip_value(raw: str) -> str:
     return re.sub(r"\s+", " ", (raw or "").replace("`", "")).strip()
 
 
-def _render_directive_chip(verb: str, args: str) -> str:
-    """One-line summary of a directive: which command, its params, and why."""
+def _render_directive_chip(verb: str, args: str) -> str | None:
+    """One-line summary of a directive: which command, its params, and why.
+
+    Returns None when the directive should vanish from the displayed copy
+    entirely (``/image`` — the uploaded picture IS the visible outcome, so a
+    chip describing it is pure duplicate noise).
+    """
     kv = {
         k: (d or s or b or "")
         for k, d, s, b in _BOT_CMD_KV_RE.findall(args or "")
     }
     parts: list[str] = []
 
+    if verb == "image":
+        return None
     if verb == "wake":
         try:
             parts.append(f"in {format_delay_secs(int(kv.get('delay', '')))}")
@@ -155,9 +162,16 @@ def collapse_bot_directives(text: str) -> str:
         if m.start() < pos:
             continue  # already swallowed as a previous directive's body
         out.append(text[pos:m.start()])
-        out.append(_render_directive_chip(m.group(1), m.group(2)))
+        chip = _render_directive_chip(m.group(1), m.group(2))
+        if chip is not None:
+            out.append(chip)
         body = _BOT_CMD_BODY_RE.match(text, m.end())
         pos = body.end() if body else m.end()
+        if chip is None:
+            # Nothing rendered in its place — swallow the now-orphaned newline
+            # so the directive leaves no gap where its line used to be.
+            if text[pos:pos + 1] == "\n":
+                pos += 1
     if not out:
         return text
     out.append(text[pos:])

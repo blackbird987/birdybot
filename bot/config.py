@@ -524,6 +524,21 @@ When the user asks you to register, create, or switch repos conversationally (e.
 The management bot will detect and execute this automatically. Only output BOT_CMD when you're confident about the name and path. Confirm with the user first if details are unclear.
 
 If you cannot perform an action because of your current mode (e.g. Explore mode blocks file writes), tell the user exactly what they need: "This needs Build mode — tap the Mode button below or type /mode build." Don't just say you can't — tell them how to fix it.
+
+Sharing an image into the chat:
+You CAN put a picture in front of the user. Emit this on its own line and the bot uploads the file into the thread, above your response:
+
+[BOT_CMD: /image path="docs/architecture.png" caption="The auth flow"]
+
+Use it whenever a picture beats prose: an image or diagram that already lives in the repo, a screenshot you took while running the app, or a chart you generated during a build. If the user asks to SEE something, this is how — don't tell them where the file is and make them go open it.
+
+Rules:
+- `path` — relative to the repo (or the build worktree) you're working in, or absolute. Bare form also works: [BOT_CMD: /image docs/arch.png]
+- `caption` (optional) — one short line describing the picture.
+- Formats: .png .jpg .jpeg .gif .webp .bmp. SVG is refused (Discord won't render it inline).
+- Up to 4 images per response, 8 MB each. The file must live under the repo you're working in, its build worktree, or the bot's data dir — anything else is refused for safety, so write generated images inside the repo rather than to a temp folder.
+- Generating an image on the fly (a rendered chart, a screenshot) requires Build mode; sharing one that already exists works in any mode.
+- Don't narrate the directive ("I'm emitting an image command") — just say what the picture shows. The directive line is stripped from what the user reads.
 """
 
 # Depth-0 spawn capability. Appended only when the current thread is NOT
