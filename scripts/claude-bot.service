@@ -1,0 +1,40 @@
+# systemd *user* service for the Claude Code Discord bot.
+#
+# A user service (not a system one) on purpose: the bot spawns the Claude CLI,
+# which reads credentials from $HOME/.claude — running it as root or as a
+# system unit would look at the wrong home and every session would be signed
+# out.
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp scripts/claude-bot.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now claude-bot
+#
+# IMPORTANT — without this the service stops when you log out of the desktop
+# and does not come back on boot until you log in again:
+#   sudo loginctl enable-linger $USER
+#
+# Logs:   journalctl --user -u claude-bot -f
+# Status: systemctl --user status claude-bot
+
+[Unit]
+Description=Claude Code Discord bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Desktop/Programming/claude-telegram-bot
+ExecStart=%h/Desktop/Programming/claude-telegram-bot/.venv/bin/python -m bot
+Environment=PYTHONUNBUFFERED=1
+# The bot has a self-reboot path (data/reboot_request.json) that exits cleanly
+# and expects to be brought back up — so restart on success as well as failure.
+Restart=always
+RestartSec=10
+# Give in-flight Claude turns a chance to finish before SIGKILL.
+TimeoutStopSec=60
+KillMode=mixed
+
+[Install]
+WantedBy=default.target

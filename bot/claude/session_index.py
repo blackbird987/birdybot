@@ -166,14 +166,25 @@ def extract_session_metadata(jsonl_path: Path) -> dict | None:
 
 
 def _project_dir_to_original_path(dir_name: str) -> str:
-    """Best-effort reverse of `C--Users-Quincy-...` → `C:\\Users\\Quincy\\...`.
+    """Best-effort reverse of :func:`cwd_to_project_dir_name`.
+
+    Windows drive form: `C--Users-Quincy-...` → `C:\\Users\\Quincy\\...`
+    POSIX form:         `-home-quincy-...`    → `/home/quincy/...`
+
+    The drive form is decoded on any host so a project directory copied over
+    from a Windows install still reads back sensibly; everything else follows
+    the *running* platform's separator. Reconstructing with backslashes on
+    Linux produced paths that could never match a real cwd.
 
     Cannot recover dots inside path components (e.g. `.worktrees`) — Claude
     CLI seems to tolerate this as long as `fullPath` on each entry is right.
     """
     if len(dir_name) >= 3 and dir_name[1:3] == "--" and dir_name[0].isalpha():
         return f"{dir_name[0]}:\\" + dir_name[3:].replace("-", "\\")
-    return dir_name.replace("-", "\\")
+    if os.name == "nt":
+        return dir_name.replace("-", "\\")
+    # POSIX: the leading "/" encoded as a leading "-", so this round-trips.
+    return dir_name.replace("-", "/")
 
 
 def _existing_original_path(project_dir: Path) -> str | None:
