@@ -8,6 +8,8 @@ Usage:
   python scripts/smoke_test.py --respond    # also send a test message and wait for reply
 """
 
+import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
+
 import os
 import re
 import sys

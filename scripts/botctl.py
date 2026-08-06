@@ -25,6 +25,8 @@ Exit codes: 0 = success / running, 1 = failure, 2 = not running (status).
 
 from __future__ import annotations
 
+import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
+
 import os
 import signal
 import subprocess
