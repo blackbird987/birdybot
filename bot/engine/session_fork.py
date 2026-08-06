@@ -48,6 +48,31 @@ def encode_project_path(path: str) -> str:
     return p.replace("/", "-").replace(":", "-").replace(".", "-")
 
 
+def encoded_spellings(path: str) -> list[str]:
+    """Every project-dir name one directory's history could be filed under.
+
+    Companion to :func:`encode_project_path`, and it lives here for the same
+    reason: the encoding rule has exactly one owner. The CLI names a project
+    dir after the path it was launched from, so a repo on a drive that two
+    machines both mount is filed under a different name on each. This checkout
+    has history under three of them right now — the Windows spelling, the
+    Linux mount, and a live-USB session — so encoding only the local spelling
+    makes the rest invisible to anything that goes looking.
+
+    ``READS`` only. A dir being *written* must use the local spelling, which
+    is always the first entry here. With no path map this returns exactly one
+    name, so every caller degrades to its previous single-spelling behaviour.
+    """
+    from bot import paths
+
+    out: list[str] = []
+    for spelling in paths.aliases(path) or [path]:
+        enc = encode_project_path(spelling)
+        if enc and enc not in out:
+            out.append(enc)
+    return out
+
+
 def get_last_assistant_uuid(jsonl_path: Path) -> str | None:
     """Return the uuid of the most recent assistant record in the JSONL, or None."""
     if not jsonl_path.exists():

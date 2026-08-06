@@ -2813,23 +2813,32 @@ class ClaudeRunner:
         """The CLI projects dir holding this repo's session history, if any.
 
         Only used to tell the model where its own past sessions and plans
-        live. Two things this had wrong: it carried its own copy of the
+        live. Three things this had wrong: it carried its own copy of the
         encoder that never replaced ``.``, so a repo path containing a dot
-        pointed at a directory the CLI had never written; and it looked only
+        pointed at a directory the CLI had never written; it looked only
         under the primary account, so a session started on the backup account
-        named a path that does not exist. Both failures are silent — the
-        caller just drops the line.
+        named a path that does not exist; and it knew only the local spelling
+        of the repo, so on a shared drive it pointed past the history the
+        other machine wrote. All three failures are silent — the caller just
+        drops the line.
+
+        Still one directory, because the caller writes one path into a
+        prompt. Preference order is local spelling first, then the other
+        machines', so an existing local dir always wins.
         """
         try:
-            from bot.engine.session_fork import encode_project_path
-            encoded = encode_project_path(repo_path)
+            from bot.engine.session_fork import encoded_spellings
+            spellings = encoded_spellings(repo_path)
         except Exception:
             return None
-        for root in config.claude_projects_dirs():
-            candidate = root / encoded
-            if candidate.is_dir():
-                return candidate
-        return config.CLAUDE_PROJECTS_DIR / encoded
+        if not spellings:
+            return None
+        for encoded in spellings:
+            for root in config.claude_projects_dirs():
+                candidate = root / encoded
+                if candidate.is_dir():
+                    return candidate
+        return config.CLAUDE_PROJECTS_DIR / spellings[0]
 
     # --- Task-level tracking ---
 
@@ -3995,6 +4004,8 @@ class ClaudeRunner:
         # instead of dead ends; without it, resuming on the other machine is a
         # guaranteed "No conversation found" no matter how healthy everything
         # else is.
+        from bot.engine.session_fork import encoded_spellings
+
         encodings: list[str] = []
 
         def _add_encoding(enc: str | None) -> None:
@@ -4010,8 +4021,8 @@ class ClaudeRunner:
         for base in (cwd, instance.repo_path):
             if not base:
                 continue
-            for spelling in paths.aliases(base):
-                _add_encoding(self._encode_project_path(spelling))
+            for enc in encoded_spellings(base):
+                _add_encoding(enc)
 
         # Seeded with the target rather than trusting it to fall out of the
         # loops below.  "Target is freshest -> keep it" is only reachable if the

@@ -246,32 +246,52 @@ def _encode_path(path: str) -> str:
     return encode_project_path(path)
 
 
+def _encoded_spellings(path: str) -> list[str]:
+    """Every project-dir name this repo's history could be filed under.
+
+    Delegates to the shared implementation, for the same reason ``_encode_path``
+    does: one owner for the encoding rule.
+    """
+    from bot.engine.session_fork import encoded_spellings
+    return encoded_spellings(path)
+
+
 def find_latest_session_for_repo(repo_path: str) -> dict | None:
     """Find the most recent CLI session matching a repo path.
 
     Returns {"id": session_id, "mtime": float} or None.
     Lightweight: only checks file mtime, no JSONL parsing.
-    Matches by encoding the repo_path and comparing to project dir names.
+    Matches by encoding the repo_path and comparing to project dir names —
+    every known spelling of it, so history written from the other machine
+    counts as this repo's too.
     """
-    encoded = _encode_path(repo_path)
-
     best: tuple[float, str] | None = None  # (mtime, session_id)
+    spellings = _encoded_spellings(repo_path)
 
     for projects_dir in config.claude_projects_dirs():
-        proj_dir = projects_dir / encoded
-        if not proj_dir.is_dir():
-            continue
-        for f in proj_dir.glob("*.jsonl"):
-            try:
-                mtime = f.stat().st_mtime
-            except OSError:
+        for encoded in spellings:
+            proj_dir = projects_dir / encoded
+            if not proj_dir.is_dir():
                 continue
-            if best is None or mtime > best[0]:
-                best = (mtime, f.stem)
+            best = _newest_jsonl(proj_dir, best)
 
     if best is None:
         return None
     return {"id": best[1], "mtime": best[0]}
+
+
+def _newest_jsonl(
+    proj_dir: Path, best: tuple[float, str] | None,
+) -> tuple[float, str] | None:
+    """Fold the newest .jsonl in ``proj_dir`` into the running best (mtime, id)."""
+    for f in proj_dir.glob("*.jsonl"):
+        try:
+            mtime = f.stat().st_mtime
+        except OSError:
+            continue
+        if best is None or mtime > best[0]:
+            best = (mtime, f.stem)
+    return best
 
 
 def scan_sessions(
@@ -284,12 +304,20 @@ def scan_sessions(
         limit: Max sessions to return.
         repos: Optional {name: path} dict for accurate project name display.
     """
-    # Build reverse lookup: encoded_path -> repo_name for display
+    # Build reverse lookup: encoded_path -> repo_name for display. Every known
+    # spelling of the repo is registered, not just the local one — otherwise a
+    # conversation written from the other machine falls through to the lossy
+    # decoded-directory fallback below and shows a mangled name instead of the
+    # repo it plainly belongs to.
+    # Local spellings are claimed first across all repos, so an alias of one
+    # repo can never shadow another repo's actual directory.
     _encoded_to_name: dict[str, str] = {}
     if repos:
         for name, path in repos.items():
-            encoded = _encode_path(path)
-            _encoded_to_name[encoded] = name
+            _encoded_to_name[_encode_path(path)] = name
+        for name, path in repos.items():
+            for encoded in _encoded_spellings(path):
+                _encoded_to_name.setdefault(encoded, name)
 
     candidates = []
     for projects_dir in config.claude_projects_dirs():

@@ -620,6 +620,64 @@ def test_filesystem_root_is_refused() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# --------------------------------------------------------------------------
+# 12. The session picker sees the other machine's conversations too
+# --------------------------------------------------------------------------
+def test_session_scan_spellings() -> None:
+    print("\n[12] /session and the picker look under every spelling")
+    from bot import config
+    from bot.engine import sessions as sessions_mod
+    from bot.engine.session_fork import encoded_spellings
+
+    win = "C:/Users/Quincy"
+    lin = "/run/media/quincy/SYSTEM/Users/Quincy"
+    repo = lin + "/Desktop/Programming/bot"
+
+    paths.reset_for_test({"g1": [win, lin]}, {"g1": lin})
+    got = encoded_spellings(repo)
+    check(
+        "the local spelling is first (it is the one we WRITE under)",
+        got[0],
+        "-run-media-quincy-SYSTEM-Users-Quincy-Desktop-Programming-bot",
+    )
+    check_true(
+        "the windows-written project dir is searched too",
+        "C--Users-Quincy-Desktop-Programming-bot" in got,
+    )
+    check("no duplicates", len(got), len(set(got)))
+
+    # With no map this must collapse to exactly the old single-spelling
+    # behaviour — that is what makes it safe on a single-machine install.
+    paths.reset_for_test({}, {})
+    check(
+        "no map means one spelling, unchanged from before",
+        encoded_spellings(repo),
+        ["-run-media-quincy-SYSTEM-Users-Quincy-Desktop-Programming-bot"],
+    )
+
+    # The picker's directory -> repo-name lookup must cover the aliases as
+    # well, or a conversation written elsewhere shows a mangled name.
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        paths.reset_for_test({"g1": [win, lin]}, {"g1": lin})
+        saved_dirs = config.claude_projects_dirs
+        (tmp / "projects").mkdir()
+        config.claude_projects_dirs = lambda: [tmp / "projects"]  # type: ignore
+        try:
+            other = tmp / "projects" / "C--Users-Quincy-Desktop-Programming-bot"
+            other.mkdir()
+            sid = "11111111-2222-3333-4444-555555555555"
+            (other / f"{sid}.jsonl").write_text("{}\n")
+            found = sessions_mod.find_latest_session_for_repo(repo)
+            check(
+                "history written by the other machine is found",
+                (found or {}).get("id"),
+                sid,
+            )
+        finally:
+            config.claude_projects_dirs = saved_dirs  # type: ignore
+
+
 def show_live_map() -> None:
     """Print the real map without modifying anything."""
     os.environ.pop("BOT_PATHS_DISABLED", None)
@@ -656,6 +714,7 @@ def main() -> int:
     test_translation_cannot_lose_state()
     test_fold_is_length_preserving()
     test_filesystem_root_is_refused()
+    test_session_scan_spellings()
 
     print(f"\n{_checks - len(_failures)}/{_checks} checks passed")
     if _failures:
