@@ -312,8 +312,10 @@ def test_history_lookup() -> None:
 
         runner = ClaudeRunner()
         inst = _mk("q-test", session_id)
+        # In-place, not a rebind: a rebind would be invisible to any module
+        # that from-imports the name, and the sibling harness already does this.
         saved_accounts = list(config.CLAUDE_ACCOUNTS)
-        config.CLAUDE_ACCOUNTS = [str(acct)]
+        config.CLAUDE_ACCOUNTS[:] = [str(acct)]
         try:
             ok = asyncio.run(
                 runner._hydrate_session_for_account(
@@ -371,7 +373,7 @@ def test_history_lookup() -> None:
             )
             check("a wildcard id matches nothing", ok4, False)
         finally:
-            config.CLAUDE_ACCOUNTS = saved_accounts
+            config.CLAUDE_ACCOUNTS[:] = saved_accounts
 
 
 # --------------------------------------------------------------------------
@@ -384,7 +386,7 @@ def test_refusal_honesty() -> None:
 
     runner = ClaudeRunner()
     saved = list(config.CLAUDE_ACCOUNTS)
-    config.CLAUDE_ACCOUNTS = ["/acct/main", "/acct/backup"]
+    config.CLAUDE_ACCOUNTS[:] = ["/acct/main", "/acct/backup"]
     try:
         runner._account_cooldowns = {}
         _, reason = runner._refusal_retry_plan({"/acct/backup"})
@@ -425,11 +427,14 @@ def test_refusal_honesty() -> None:
         _, reason = runner._refusal_retry_plan({"/acct/backup"})
         check("a live cooldown still wins", reason, "backup_logged_out")
     finally:
-        config.CLAUDE_ACCOUNTS = saved
+        config.CLAUDE_ACCOUNTS[:] = saved
 
 
 # --------------------------------------------------------------------------
-# 8. Abandoning a conversation must free the accounts up again
+# 8. Stored paths are rewritten on the way in
+#    (abandoning a conversation and freeing the accounts back up is the other
+#    half of this branch, and lives in scripts/test_dead_session_recovery.py —
+#    it needs the whole cascade, not just the map)
 # --------------------------------------------------------------------------
 def test_state_localisation() -> None:
     print("\n[8] Stored state is localised on load")
