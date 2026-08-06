@@ -179,6 +179,24 @@ def _parse_version_tag(name: str) -> tuple[int, int, int, int] | None:
     return tuple(int(g) if g else 0 for g in m.groups())  # type: ignore[return-value]
 
 
+# Git's transfer statistics, which the server echoes back prefixed "remote:".
+# Matched as a category rather than by symptom: filtering on "contains a
+# percentage" / "ends with done." looks equivalent but misses the one such
+# line that has neither, `remote: Total 3 (delta 0), reused 0 (delta 0)`,
+# which is then reported to the user as the cause of the failure.
+_GIT_PROGRESS = (
+    "enumerating objects", "counting objects", "compressing objects",
+    "writing objects", "receiving objects", "resolving deltas",
+    "unpacking objects", "total ",
+)
+
+
+def _is_git_progress(line: str) -> bool:
+    """Is this a transfer-statistics line rather than a diagnosis?"""
+    body = line[len("remote:"):] if line.startswith("remote:") else line
+    return body.strip().lower().startswith(_GIT_PROGRESS)
+
+
 def _git_fail_reason(detail: str, limit: int = 160) -> str:
     """The one line of a failed git command worth showing a human.
 
@@ -210,10 +228,9 @@ def _git_fail_reason(detail: str, limit: int = 160) -> str:
     marked. ``hint:`` is deliberately not a marker: it is the paragraph of
     advice that follows the reason, not the reason.
 
-    Progress chatter is excluded for the same reason. A push refused by a
-    server-side hook arrives as ``remote: Resolving deltas: 100% (1/1),
-    done.`` *before* ``remote: error: hook declined``, and ``remote:`` alone
-    would have handed back the percentage.
+    Transfer statistics are excluded for the same reason. The server sends
+    those prefixed ``remote:`` too, and they arrive *before* its refusal, so
+    ``remote:`` alone would report a byte count as the cause of the failure.
 
     Redacted because it is user-facing and a remote URL can carry an embedded
     token, and imported lazily to keep the claude layer free of a platform
@@ -230,7 +247,7 @@ def _git_fail_reason(detail: str, limit: int = 160) -> str:
     line = next(
         (ln for ln in lines
          if ln.startswith(("fatal:", "error:", "remote:", "!"))
-         and "%" not in ln and not ln.endswith("done.")),
+         and not _is_git_progress(ln)),
         lines[0],
     )
     line = redact_secrets(line)
@@ -4895,6 +4912,12 @@ class ClaudeRunner:
                     sync_note = (
                         "\nCould not sync with origin — merged against local state"
                     )
+                    # Same reasoning as the push note below: without git's own
+                    # sentence this says only that something went wrong, and
+                    # this is the branch the credential hang actually landed
+                    # in ("Fetch origin failed ... timed out (30s)").
+                    if reason := _git_fail_reason(fetch_err):
+                        sync_note += f"\n`{reason}`"
                 else:
                     ahead = self._rev_count(repo, f"origin/{target}..{target}")
                     behind = self._rev_count(repo, f"{target}..origin/{target}")
@@ -4935,6 +4958,8 @@ class ClaudeRunner:
                                 "\nCould not fast-forward to origin — "
                                 "merged against local state"
                             )
+                            if reason := _git_fail_reason(ff_detail):
+                                sync_note += f"\n`{reason}`"
                         else:
                             log.info(
                                 "Fast-forwarded %s to origin/%s (+%d) in %s",

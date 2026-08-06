@@ -178,6 +178,29 @@ _check("progress chatter is not a diagnosis",
        _git_fail_reason(_HOOK) == "remote: error: hook declined to update refs/heads/master",
        repr(_git_fail_reason(_HOOK)))
 
+# The progress line with no percentage and no trailing "done." — verbatim
+# from a real `git fetch --progress`. An earlier filter matched chatter by
+# those two symptoms and let this one through, so a failed push reported a
+# byte count as its cause. Chatter is now matched as a category.
+_STATS = (
+    "remote: Enumerating objects: 5, done.\n"
+    "remote: Counting objects: 100% (5/5), done.\n"
+    "remote: Total 3 (delta 0), reused 0 (delta 0), pack-reused 0 (from 0)\n"
+    "remote: error: hook declined to update refs/heads/master\n"
+)
+_check("transfer statistics are not a diagnosis",
+       _git_fail_reason(_STATS)
+       == "remote: error: hook declined to update refs/heads/master",
+       repr(_git_fail_reason(_STATS)))
+# ...and the exclusion must not swallow a real diagnosis that happens to
+# quote a percentage or end in "done.".
+_check("a fatal line quoting a percentage still wins",
+       _git_fail_reason("remote: Counting objects: 100% (5/5), done.\n"
+                        "fatal: pack exceeds 100% of quota, done.")
+       == "fatal: pack exceeds 100% of quota, done.",
+       repr(_git_fail_reason("remote: Counting objects: 100% (5/5), done.\n"
+                             "fatal: pack exceeds 100% of quota, done.")))
+
 # hint: is the advice *after* the reason, never the reason itself.
 _check("hint is not a diagnosis",
        _git_fail_reason("hint: try harder\nerror: real problem") == "error: real problem",
