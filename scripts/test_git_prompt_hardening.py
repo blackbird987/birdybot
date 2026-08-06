@@ -1,4 +1,4 @@
-"""Regression test for ``bot.procutil.harden_git_env`` and the merge-note reason.
+"""Regression test for ``bot.procutil.harden_git_env`` and ``git_fail_reason``.
 
 Guards the fix for a week of silent sync failures. Git run as a subprocess
 with no terminal does not give up when it needs a credential — it looks for a
@@ -31,7 +31,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
 sys.path.insert(0, _ROOT)
 
-from bot.claude.runner import _git_fail_reason  # noqa: E402
+from bot.claude.runner import git_fail_reason  # noqa: E402
 from bot.procutil import harden_git_env  # noqa: E402
 
 _failures: list[str] = []
@@ -119,8 +119,8 @@ try:
                f"stderr was {_err[:200]!r}")
         # And the sentence must survive the trip to Discord.
         _check("reason reaches the merge note",
-               "terminal prompts disabled" in _git_fail_reason(_err),
-               repr(_git_fail_reason(_err)))
+               "terminal prompts disabled" in git_fail_reason(_err),
+               repr(git_fail_reason(_err)))
 except subprocess.TimeoutExpired:
     _failures.append(
         "git HUNG for 25s with hardening applied — the askpass block regressed"
@@ -133,8 +133,8 @@ except FileNotFoundError:
 # 3. The merge note carries a reason, redacted and bounded
 # --------------------------------------------------------------------------
 _check("marked line wins",
-       _git_fail_reason("\n\nfatal: boom\nhint: ignore me") == "fatal: boom",
-       repr(_git_fail_reason("\n\nfatal: boom\nhint: ignore me")))
+       git_fail_reason("\n\nfatal: boom\nhint: ignore me") == "fatal: boom",
+       repr(git_fail_reason("\n\nfatal: boom\nhint: ignore me")))
 
 # Verbatim from a real rejected push (two local clones, one behind the other).
 # The regression this pins: taking the *first* line hands Discord
@@ -147,7 +147,7 @@ _REJECTED = (
     "hint: Updates were rejected because the remote contains work that you do not\n"
     "hint: have locally. This is usually caused by another repository pushing to\n"
 )
-_r_reason = _git_fail_reason(_REJECTED)
+_r_reason = git_fail_reason(_REJECTED)
 _check("rejected push skips the 'To <url>' line",
        not _r_reason.startswith("To "), repr(_r_reason))
 _check("rejected push names the cause",
@@ -162,8 +162,8 @@ _DENIED = (
     "The requested URL returned error: 403\n"
 )
 _check("permission denial prefers the remote's reason",
-       _git_fail_reason(_DENIED).startswith("remote: Permission"),
-       repr(_git_fail_reason(_DENIED)))
+       git_fail_reason(_DENIED).startswith("remote: Permission"),
+       repr(git_fail_reason(_DENIED)))
 
 # Server-side hook refusal: the server's progress chatter is prefixed
 # "remote:" too, and arrives before the reason. Picking on the prefix alone
@@ -175,8 +175,8 @@ _HOOK = (
     " ! [remote rejected] master -> master (hook declined)\n"
 )
 _check("progress chatter is not a diagnosis",
-       _git_fail_reason(_HOOK) == "remote: error: hook declined to update refs/heads/master",
-       repr(_git_fail_reason(_HOOK)))
+       git_fail_reason(_HOOK) == "remote: error: hook declined to update refs/heads/master",
+       repr(git_fail_reason(_HOOK)))
 
 # The progress line with no percentage and no trailing "done." — verbatim
 # from a real `git fetch --progress`. An earlier filter matched chatter by
@@ -189,38 +189,65 @@ _STATS = (
     "remote: error: hook declined to update refs/heads/master\n"
 )
 _check("transfer statistics are not a diagnosis",
-       _git_fail_reason(_STATS)
+       git_fail_reason(_STATS)
        == "remote: error: hook declined to update refs/heads/master",
-       repr(_git_fail_reason(_STATS)))
+       repr(git_fail_reason(_STATS)))
 # ...and the exclusion must not swallow a real diagnosis that happens to
 # quote a percentage or end in "done.".
 _check("a fatal line quoting a percentage still wins",
-       _git_fail_reason("remote: Counting objects: 100% (5/5), done.\n"
+       git_fail_reason("remote: Counting objects: 100% (5/5), done.\n"
                         "fatal: pack exceeds 100% of quota, done.")
        == "fatal: pack exceeds 100% of quota, done.",
-       repr(_git_fail_reason("remote: Counting objects: 100% (5/5), done.\n"
+       repr(git_fail_reason("remote: Counting objects: 100% (5/5), done.\n"
                              "fatal: pack exceeds 100% of quota, done.")))
+
+# Chatter has to be dropped before the fallback too, not just skipped while
+# hunting for a marker. Git's real message here carries no marker at all, so
+# a scan-only exclusion hands back the object count it just rejected.
+_UNMARKED = (
+    "remote: Counting objects: 100% (5/5), done.\n"
+    "remote: Total 3 (delta 0), reused 0 (delta 0), pack-reused 0\n"
+    "The remote end hung up unexpectedly\n"
+)
+_check("chatter is not the fallback either",
+       git_fail_reason(_UNMARKED) == "The remote end hung up unexpectedly",
+       repr(git_fail_reason(_UNMARKED)))
+# ...but chatter is still better than nothing when it is all git said.
+_check("all-chatter output still returns something",
+       git_fail_reason("remote: Counting objects: 100% (5/5), done.\n") != "",
+       repr(git_fail_reason("remote: Counting objects: 100% (5/5), done.\n")))
 
 # hint: is the advice *after* the reason, never the reason itself.
 _check("hint is not a diagnosis",
-       _git_fail_reason("hint: try harder\nerror: real problem") == "error: real problem",
-       repr(_git_fail_reason("hint: try harder\nerror: real problem")))
+       git_fail_reason("hint: try harder\nerror: real problem") == "error: real problem",
+       repr(git_fail_reason("hint: try harder\nerror: real problem")))
 
 # Nothing marked at all — fall back rather than return empty.
 _check("unmarked output falls back to first line",
-       _git_fail_reason("something odd happened\nsecond line") == "something odd happened",
-       repr(_git_fail_reason("something odd happened\nsecond line")))
-_check("empty in, empty out", _git_fail_reason("") == "")
-_check("whitespace in, empty out", _git_fail_reason("\n  \n") == "")
-_check("bounded", len(_git_fail_reason("x" * 500)) <= 160,
-       str(len(_git_fail_reason("x" * 500))))
+       git_fail_reason("something odd happened\nsecond line") == "something odd happened",
+       repr(git_fail_reason("something odd happened\nsecond line")))
+_check("empty in, empty out", git_fail_reason("") == "")
+_check("whitespace in, empty out", git_fail_reason("\n  \n") == "")
+_check("bounded", len(git_fail_reason("x" * 500)) <= 160,
+       str(len(git_fail_reason("x" * 500))))
 # User-facing, and a remote URL can carry an embedded token.
-_redacted = _git_fail_reason(
+_redacted = git_fail_reason(
     "fatal: Authentication failed for "
     "'https://user:ghp_AbC123AbC123AbC123AbC123AbC123AbC1@github.com/o/r.git'"
 )
 _check("token redacted", "ghp_AbC123AbC123AbC123AbC123AbC123AbC1" not in _redacted,
        repr(_redacted))
+# The deploy push in discord/interactions.py used to post this stderr raw,
+# and nothing redacts at the Discord send boundary. Verbatim shape of what
+# git prints when an HTTPS remote has a token baked into the URL.
+_LEAK = (
+    "remote: Support for password authentication was removed.\n"
+    "fatal: Authentication failed for "
+    "'https://someone:ghp_R3alT0k3nAbC123AbC123AbC123AbC1@github.com/o/r.git/'\n"
+)
+_check("embedded token never reaches Discord",
+       "ghp_R3alT0k3nAbC123AbC123AbC123AbC1" not in git_fail_reason(_LEAK),
+       repr(git_fail_reason(_LEAK)))
 
 
 if _failures:

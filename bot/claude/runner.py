@@ -197,7 +197,7 @@ def _is_git_progress(line: str) -> bool:
     return body.strip().lower().startswith(_GIT_PROGRESS)
 
 
-def _git_fail_reason(detail: str, limit: int = 160) -> str:
+def git_fail_reason(detail: str, limit: int = 160) -> str:
     """The one line of a failed git command worth showing a human.
 
     Merge notes carried the exit code alone. That stayed hidden while git was
@@ -228,27 +228,43 @@ def _git_fail_reason(detail: str, limit: int = 160) -> str:
     marked. ``hint:`` is deliberately not a marker: it is the paragraph of
     advice that follows the reason, not the reason.
 
-    Transfer statistics are excluded for the same reason. The server sends
-    those prefixed ``remote:`` too, and they arrive *before* its refusal, so
-    ``remote:`` alone would report a byte count as the cause of the failure.
+    Transfer statistics are dropped before either step, not merely skipped
+    while looking for a marker. The server sends those prefixed ``remote:``
+    too and they arrive *before* its refusal, so scanning on the marker alone
+    would report a byte count as the cause — but excluding them only from the
+    scan leaves the fallback free to hand the same byte count back, which is
+    exactly what happens when the real message carries no marker at all::
 
-    Redacted because it is user-facing and a remote URL can carry an embedded
-    token, and imported lazily to keep the claude layer free of a platform
-    import.
+        remote: Counting objects: 100% (5/5), done.
+        The remote end hung up unexpectedly
+
+    Redaction is not optional politeness. Nothing scrubs secrets at the
+    Discord send boundary — ``redact_secrets`` is applied per call site — and
+    an HTTPS remote can carry an embedded token, which git then quotes back
+    inside ``fatal: Authentication failed for '<url>'``. The deploy push in
+    ``discord/interactions.py`` posted that stderr raw, so the token went to
+    Discord verbatim; both it and the merge notes go through here now. Public
+    for that reason: a leading underscore on a name imported from another
+    package would misdescribe the interface.
+
+    ``redact_secrets`` is imported lazily to keep the claude layer free of a
+    module-level platform import.
     """
     from bot.platform.formatting import redact_secrets
 
-    # Ordered scan, first match wins, so the earliest *marked* line is used:
-    # on a permission failure that is the server's "remote: Permission ...
-    # denied", which is more use than the `fatal:` 403 that follows it.
     lines = [" ".join(ln.split()) for ln in detail.splitlines() if ln.strip()]
     if not lines:
         return ""
+    # Chatter first, so it can be neither the pick nor the fallback. Keeping
+    # everything if that empties the list: better a byte count than nothing.
+    useful = [ln for ln in lines if not _is_git_progress(ln)] or lines
+    # Then an ordered scan, first match wins, so the earliest *marked* line is
+    # used: on a permission failure that is the server's "remote: Permission
+    # ... denied", which is more use than the `fatal:` 403 that follows it.
     line = next(
-        (ln for ln in lines
-         if ln.startswith(("fatal:", "error:", "remote:", "!"))
-         and not _is_git_progress(ln)),
-        lines[0],
+        (ln for ln in useful
+         if ln.startswith(("fatal:", "error:", "remote:", "!"))),
+        useful[0],
     )
     line = redact_secrets(line)
     return (line[: limit - 1] + "…") if len(line) > limit else line
@@ -4916,7 +4932,7 @@ class ClaudeRunner:
                     # sentence this says only that something went wrong, and
                     # this is the branch the credential hang actually landed
                     # in ("Fetch origin failed ... timed out (30s)").
-                    if reason := _git_fail_reason(fetch_err):
+                    if reason := git_fail_reason(fetch_err):
                         sync_note += f"\n`{reason}`"
                 else:
                     ahead = self._rev_count(repo, f"origin/{target}..{target}")
@@ -4958,7 +4974,7 @@ class ClaudeRunner:
                                 "\nCould not fast-forward to origin — "
                                 "merged against local state"
                             )
-                            if reason := _git_fail_reason(ff_detail):
+                            if reason := git_fail_reason(ff_detail):
                                 sync_note += f"\n`{reason}`"
                         else:
                             log.info(
@@ -5075,7 +5091,7 @@ class ClaudeRunner:
                     log.error("Push to origin after merge in %s: %s",
                               repo, push_detail)
                     push_note = f"\nCould not push to origin (exit {push_r.returncode})"
-                    if reason := _git_fail_reason(push_detail):
+                    if reason := git_fail_reason(push_detail):
                         push_note += f"\n`{reason}`"
                 else:
                     log.info("Pushed %s to origin after merge in %s", target, repo)
@@ -5112,7 +5128,7 @@ class ClaudeRunner:
                                 tag_detail = (tag_push_r.stderr or tag_push_r.stdout or "").strip()
                                 log.error("Tag push to origin in %s: %s", repo, tag_detail)
                                 push_note += f"\nTags not pushed (exit {tag_push_r.returncode})"
-                                if reason := _git_fail_reason(tag_detail):
+                                if reason := git_fail_reason(tag_detail):
                                     push_note += f"\n`{reason}`"
                             else:
                                 tag_list = ", ".join(tag_names)
