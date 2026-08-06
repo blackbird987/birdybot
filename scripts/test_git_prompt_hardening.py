@@ -48,7 +48,20 @@ def _check(label: str, cond: bool, detail: str = "") -> None:
 # --------------------------------------------------------------------------
 # 1. The environment, applied over the exact desktop condition that broke us
 # --------------------------------------------------------------------------
-os.environ["SSH_ASKPASS"] = "/usr/bin/ksshaskpass"
+# The askpass helper must be a binary that *exists and answers*, not the real
+# ksshaskpass path — on a machine without KDE installed that path is missing,
+# git fails fast because it cannot exec it, and the whole suite would pass
+# while proving nothing. Pointed at `echo`, a broken shadow means git happily
+# takes the prompt text back as the username and fails with an authentication
+# error instead of "terminal prompts disabled" — so case 2 below can tell the
+# difference between the block working and the block being absent.
+_ASKPASS = next((p for p in ("/bin/echo", "/usr/bin/echo") if os.path.exists(p)),
+                "/usr/bin/ksshaskpass")
+os.environ["SSH_ASKPASS"] = _ASKPASS
+# No DISPLAY needed: unlike ssh, git runs an askpass helper whether or not a
+# display exists — verified by running it with DISPLAY and WAYLAND_DISPLAY
+# both unset. Which is also why the original hang did not need a visible
+# desktop to happen.
 for _var in ("GIT_TERMINAL_PROMPT", "GIT_ASKPASS", "SSH_ASKPASS_REQUIRE"):
     os.environ.pop(_var, None)
 
@@ -86,12 +99,19 @@ try:
     _elapsed = time.time() - _t
     _err = (_r.stderr or _r.stdout or "").strip()
 
-    if "could not resolve host" in _err.lower() or "unable to access" in _err.lower():
+    # Network-only markers. "unable to access" deliberately is NOT one: it is
+    # also what a genuine 403 says, so skipping on it would turn the exact
+    # regression this guards (shadow broken -> auth attempted -> 403) into a
+    # silent skip rather than a failure.
+    _offline = any(m in _err.lower() for m in (
+        "could not resolve host", "failed to connect",
+        "connection timed out", "network is unreachable",
+    ))
+    if _offline:
         print("SKIP — network unreachable, live-git cases not run")
     else:
         _check("git failed rather than hung", _r.returncode != 0)
-        # The point of the fix. Anything above a second or two means git found
-        # a way to ask a human again.
+        # The point of the fix: seconds, not a block until the 30s timeout.
         _check("failed fast", _elapsed < 10,
                f"took {_elapsed:.1f}s — git may have found an askpass again")
         _check("names the cause",
@@ -112,9 +132,61 @@ except FileNotFoundError:
 # --------------------------------------------------------------------------
 # 3. The merge note carries a reason, redacted and bounded
 # --------------------------------------------------------------------------
-_check("first non-blank line wins",
+_check("marked line wins",
        _git_fail_reason("\n\nfatal: boom\nhint: ignore me") == "fatal: boom",
        repr(_git_fail_reason("\n\nfatal: boom\nhint: ignore me")))
+
+# Verbatim from a real rejected push (two local clones, one behind the other).
+# The regression this pins: taking the *first* line hands Discord
+# "To github.com:owner/repo.git", which explains nothing while looking like
+# it should. The rejection line names the cause — "(fetch first)".
+_REJECTED = (
+    "To github.com:owner/repo.git\n"
+    " ! [rejected]        master -> master (fetch first)\n"
+    "error: failed to push some refs to 'github.com:owner/repo.git'\n"
+    "hint: Updates were rejected because the remote contains work that you do not\n"
+    "hint: have locally. This is usually caused by another repository pushing to\n"
+)
+_r_reason = _git_fail_reason(_REJECTED)
+_check("rejected push skips the 'To <url>' line",
+       not _r_reason.startswith("To "), repr(_r_reason))
+_check("rejected push names the cause",
+       "rejected" in _r_reason and "fetch first" in _r_reason, repr(_r_reason))
+_check("runs of whitespace collapsed",
+       "  " not in _r_reason, repr(_r_reason))
+
+# Server-side refusal: the remote's sentence beats the 403 that follows it.
+_DENIED = (
+    "remote: Permission to owner/repo.git denied to someone.\n"
+    "fatal: unable to access 'https://github.com/owner/repo.git/': "
+    "The requested URL returned error: 403\n"
+)
+_check("permission denial prefers the remote's reason",
+       _git_fail_reason(_DENIED).startswith("remote: Permission"),
+       repr(_git_fail_reason(_DENIED)))
+
+# Server-side hook refusal: the server's progress chatter is prefixed
+# "remote:" too, and arrives before the reason. Picking on the prefix alone
+# would report a percentage as the cause of the failure.
+_HOOK = (
+    "remote: Resolving deltas: 100% (1/1), done.\n"
+    "remote: error: hook declined to update refs/heads/master\n"
+    "To github.com:owner/repo.git\n"
+    " ! [remote rejected] master -> master (hook declined)\n"
+)
+_check("progress chatter is not a diagnosis",
+       _git_fail_reason(_HOOK) == "remote: error: hook declined to update refs/heads/master",
+       repr(_git_fail_reason(_HOOK)))
+
+# hint: is the advice *after* the reason, never the reason itself.
+_check("hint is not a diagnosis",
+       _git_fail_reason("hint: try harder\nerror: real problem") == "error: real problem",
+       repr(_git_fail_reason("hint: try harder\nerror: real problem")))
+
+# Nothing marked at all — fall back rather than return empty.
+_check("unmarked output falls back to first line",
+       _git_fail_reason("something odd happened\nsecond line") == "something odd happened",
+       repr(_git_fail_reason("something odd happened\nsecond line")))
 _check("empty in, empty out", _git_fail_reason("") == "")
 _check("whitespace in, empty out", _git_fail_reason("\n  \n") == "")
 _check("bounded", len(_git_fail_reason("x" * 500)) <= 160,

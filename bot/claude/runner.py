@@ -190,17 +190,49 @@ def _git_fail_reason(detail: str, limit: int = 160) -> str:
     sentence naming the cause still stranded in ``bot.log``. Fixing the hang
     without this would have swapped one uninformative message for another.
 
-    Git puts the actionable part first (``fatal: could not read Username
-    for 'https://github.com': terminal prompts disabled``) and pads the rest
-    with advice, so the first non-blank line is the whole diagnosis. Redacted
-    because it is user-facing and a remote URL can carry an embedded token,
-    and imported lazily to keep the claude layer free of a platform import.
+    Which line that is takes some care, and "the first one" is wrong. A
+    credential failure does lead with its diagnosis::
+
+        fatal: could not read Username for 'https://github.com': terminal
+        prompts disabled
+
+    but the far more common failure — a branch that is behind its remote —
+    does not::
+
+        To github.com:owner/repo.git
+         ! [rejected]        master -> master (fetch first)
+        error: failed to push some refs to 'github.com:owner/repo.git'
+        hint: Updates were rejected because the remote contains work ...
+
+    There the first line is the remote's address, which explains nothing
+    while looking like it should. So prefer the first line git marks as a
+    diagnosis and fall back to the first non-blank line only if none is
+    marked. ``hint:`` is deliberately not a marker: it is the paragraph of
+    advice that follows the reason, not the reason.
+
+    Progress chatter is excluded for the same reason. A push refused by a
+    server-side hook arrives as ``remote: Resolving deltas: 100% (1/1),
+    done.`` *before* ``remote: error: hook declined``, and ``remote:`` alone
+    would have handed back the percentage.
+
+    Redacted because it is user-facing and a remote URL can carry an embedded
+    token, and imported lazily to keep the claude layer free of a platform
+    import.
     """
     from bot.platform.formatting import redact_secrets
 
-    line = next((ln.strip() for ln in detail.splitlines() if ln.strip()), "")
-    if not line:
+    # Ordered scan, first match wins, so the earliest *marked* line is used:
+    # on a permission failure that is the server's "remote: Permission ...
+    # denied", which is more use than the `fatal:` 403 that follows it.
+    lines = [" ".join(ln.split()) for ln in detail.splitlines() if ln.strip()]
+    if not lines:
         return ""
+    line = next(
+        (ln for ln in lines
+         if ln.startswith(("fatal:", "error:", "remote:", "!"))
+         and "%" not in ln and not ln.endswith("done.")),
+        lines[0],
+    )
     line = redact_secrets(line)
     return (line[: limit - 1] + "…") if len(line) > limit else line
 
