@@ -8,6 +8,15 @@ Two modes:
 
 Every check builds its own sandbox under a temp dir and never reads or writes
 the real root map, the real state file, or the real session history.
+
+The `# portability: ok` markers scattered through this file are not an excuse
+being made — they are the escape hatch `scripts/check_portability.py`
+documents for "a test fixture that is a synthetic string and never touches
+disk", and this file is the purest instance of it. A literal `C:/Users/...`
+here is the *input being translated*, not a path anything opens; the whole
+point of the file is asserting that both spellings of one directory behave.
+Tagged per line rather than exempting the file, so a genuinely hardcoded
+runtime path added here later still gets caught.
 """
 
 from __future__ import annotations
@@ -52,24 +61,24 @@ def check_true(label: str, got) -> None:
 # --------------------------------------------------------------------------
 def test_translation() -> None:
     print("\n[1] Translating a stored path into the local spelling")
-    win = "C:/Users/Quincy"
+    win = "C:/Users/Quincy"  # portability: ok
     lin = "/run/media/quincy/SYSTEM/Users/Quincy"
 
     # Pretend we booted Linux: the Linux spelling is the one that resolves.
     paths.reset_for_test({"g1": [win, lin]}, {"g1": lin})
     check(
         "windows-stored repo path reads as linux",
-        paths.translate("C:/Users/Quincy/Desktop/Programming/X"),
+        paths.translate("C:/Users/Quincy/Desktop/Programming/X"),  # portability: ok
         "/run/media/quincy/SYSTEM/Users/Quincy/Desktop/Programming/X",
     )
     check(
         "backslashes are handled",
-        paths.translate(r"C:\Users\Quincy\.claude"),
+        paths.translate(r"C:\Users\Quincy\.claude"),  # portability: ok
         "/run/media/quincy/SYSTEM/Users/Quincy/.claude",
     )
     check(
         "drive-letter case does not defeat the match",
-        paths.translate("c:/users/quincy/.claude-klerk"),
+        paths.translate("c:/users/quincy/.claude-klerk"),  # portability: ok
         "/run/media/quincy/SYSTEM/Users/Quincy/.claude-klerk",
     )
     check(
@@ -79,8 +88,8 @@ def test_translation() -> None:
     )
     check(
         "an unknown path passes through untouched",
-        paths.translate("/home/quincy/Programming/The-Citadel"),
-        "/home/quincy/Programming/The-Citadel",
+        paths.translate("/home/quincy/Programming/The-Citadel"),  # portability: ok
+        "/home/quincy/Programming/The-Citadel",  # portability: ok
     )
     check("None survives", paths.translate(None), None)
 
@@ -89,12 +98,12 @@ def test_translation() -> None:
     check(
         "linux-stored repo path reads as windows",
         paths.translate(lin + "/Desktop/Programming/X"),
-        r"C:\Users\Quincy\Desktop\Programming\X",
+        r"C:\Users\Quincy\Desktop\Programming\X",  # portability: ok
     )
     check(
         "windows output uses native separators",
         paths.translate(lin + "/.claude"),
-        r"C:\Users\Quincy\.claude",
+        r"C:\Users\Quincy\.claude",  # portability: ok
     )
 
 
@@ -103,7 +112,7 @@ def test_translation() -> None:
 # --------------------------------------------------------------------------
 def test_aliases() -> None:
     print("\n[2] Every known spelling of one directory")
-    win = "C:/Users/Quincy"
+    win = "C:/Users/Quincy"  # portability: ok
     lin = "/run/media/quincy/SYSTEM/Users/Quincy"
     usb = "/run/media/liveuser/SYSTEM/Users/Quincy"
     paths.reset_for_test({"g1": [win, lin, usb]}, {"g1": lin})
@@ -126,7 +135,7 @@ def test_aliases() -> None:
 def test_is_portable() -> None:
     print("\n[3] Spotting a repo that exists on one machine only")
     paths.reset_for_test(
-        {"g1": ["C:/Users/Quincy", "/run/media/quincy/SYSTEM/Users/Quincy"]},
+        {"g1": ["C:/Users/Quincy", "/run/media/quincy/SYSTEM/Users/Quincy"]},  # portability: ok
         {"g1": "/run/media/quincy/SYSTEM/Users/Quincy"},
     )
     check_true(
@@ -137,7 +146,7 @@ def test_is_portable() -> None:
     )
     check(
         "a repo on the linux-only partition is not",
-        paths.is_portable("/home/quincy/Programming/The-Citadel"),
+        paths.is_portable("/home/quincy/Programming/The-Citadel"),  # portability: ok
         False,
     )
 
@@ -252,12 +261,12 @@ def test_marker_walk_detection() -> None:
             data = tmp / "data"
             (data).mkdir(parents=True, exist_ok=True)
             (data / paths.ROOTS_FILENAME).write_text(json.dumps(
-                {"version": 1, "groups": {shared_id: ["C:/Users/Quincy"]}}
+                {"version": 1, "groups": {shared_id: ["C:/Users/Quincy"]}}  # portability: ok
             ))
             paths.init(data_dir=data, account_hints=[], here=repo)
             check(
                 "a Windows-written path resolves at the live mount",
-                paths.translate("C:/Users/Quincy/Desktop/Programming/bot"),
+                paths.translate("C:/Users/Quincy/Desktop/Programming/bot"),  # portability: ok
                 str(repo).replace("\\", "/"),
             )
         finally:
@@ -267,7 +276,7 @@ def test_marker_walk_detection() -> None:
 def test_no_map_is_passthrough() -> None:
     print("\n[5] With no map at all, nothing is rewritten")
     paths.reset_for_test({}, {})
-    for p in ("C:/Users/Quincy/x", "/home/q/y", r"D:\z"):
+    for p in ("C:/Users/Quincy/x", "/home/q/y", r"D:\z"):  # portability: ok
         check(f"passthrough {p}", paths.translate(p), p)
     check("nothing is portable", paths.is_portable("/anything"), False)
 
@@ -293,7 +302,7 @@ def test_history_lookup() -> None:
         acct = tmp / "acct"
         (acct / "projects").mkdir(parents=True)
 
-        win_root = "C:/Users/Quincy"
+        win_root = "C:/Users/Quincy"  # portability: ok
         lin_root = str(tmp / "SYSTEM" / "Users" / "Quincy").replace("\\", "/")
         paths.reset_for_test({"g1": [win_root, lin_root]}, {"g1": lin_root})
 
@@ -440,34 +449,34 @@ def test_state_localisation() -> None:
     print("\n[8] Stored state is localised on load")
     from bot.store.state import _localise_paths
 
-    win = "C:/Users/Quincy"
+    win = "C:/Users/Quincy"  # portability: ok
     lin = "/run/media/quincy/SYSTEM/Users/Quincy"
     paths.reset_for_test({"g1": [win, lin]}, {"g1": lin})
 
     data = {
-        "repos": {"bot": "C:/Users/Quincy/Desktop/Programming/bot",
-                  "stray": "/home/quincy/Programming/The-Citadel"},
+        "repos": {"bot": "C:/Users/Quincy/Desktop/Programming/bot",  # portability: ok
+                  "stray": "/home/quincy/Programming/The-Citadel"},  # portability: ok
         "instances": [{
             "id": "q-1",
-            "repo_path": "C:/Users/Quincy/Desktop/Programming/bot",
-            "worktree_path": "C:/Users/Quincy/Desktop/Programming/bot/.worktrees/t-1",
-            "session_account": "C:/Users/Quincy/.claude",
+            "repo_path": "C:/Users/Quincy/Desktop/Programming/bot",  # portability: ok
+            "worktree_path": "C:/Users/Quincy/Desktop/Programming/bot/.worktrees/t-1",  # portability: ok
+            "session_account": "C:/Users/Quincy/.claude",  # portability: ok
             # Opened by /log and /diff, and when a forum thread rebuilds its
             # history — the failure is silent, so it is easy to miss.
-            "result_file": "C:/Users/Quincy/Desktop/Programming/bot/data/results/q-1.md",
-            "diff_file": "C:/Users/Quincy/Desktop/Programming/bot/data/results/q-1.diff",
+            "result_file": "C:/Users/Quincy/Desktop/Programming/bot/data/results/q-1.md",  # portability: ok
+            "diff_file": "C:/Users/Quincy/Desktop/Programming/bot/data/results/q-1.diff",  # portability: ok
             "prompt": "left alone: C:/Users/Quincy/notes.txt",
             "bash_commands": ["ls C:/Users/Quincy/x"],
-            "path_poisoning": ["C:/Users/Quincy/Desktop/Programming/bot/CHANGELOG.md"],
+            "path_poisoning": ["C:/Users/Quincy/Desktop/Programming/bot/CHANGELOG.md"],  # portability: ok
         }],
-        "schedules": [{"id": "s1", "repo_path": "C:/Users/Quincy/Desktop/Programming/bot"}],
-        "account_cooldowns": {"C:/Users/Quincy/.claude-klerk": "2026-08-06T00:00:00Z"},
+        "schedules": [{"id": "s1", "repo_path": "C:/Users/Quincy/Desktop/Programming/bot"}],  # portability: ok
+        "account_cooldowns": {"C:/Users/Quincy/.claude-klerk": "2026-08-06T00:00:00Z"},  # portability: ok
     }
     _localise_paths(data)
     check("repo path localised", data["repos"]["bot"],
           lin + "/Desktop/Programming/bot")
     check("unknown repo untouched", data["repos"]["stray"],
-          "/home/quincy/Programming/The-Citadel")
+          "/home/quincy/Programming/The-Citadel")  # portability: ok
     check("instance repo localised", data["instances"][0]["repo_path"],
           lin + "/Desktop/Programming/bot")
     check("worktree localised", data["instances"][0]["worktree_path"],
@@ -485,7 +494,7 @@ def test_state_localisation() -> None:
     check("bash history NOT rewritten", data["instances"][0]["bash_commands"],
           ["ls C:/Users/Quincy/x"])
     check("poisoning record NOT rewritten", data["instances"][0]["path_poisoning"],
-          ["C:/Users/Quincy/Desktop/Programming/bot/CHANGELOG.md"])
+          ["C:/Users/Quincy/Desktop/Programming/bot/CHANGELOG.md"])  # portability: ok
     check("cooldown key localised",
           list(data["account_cooldowns"]), [lin + "/.claude-klerk"])
 
@@ -550,13 +559,13 @@ def test_fold_is_length_preserving() -> None:
     characters.  Folding ASCII only keeps the two lengths locked together.
     """
     print("\n[10] Case folding keeps the path length intact")
-    tricky = "C:/Users/İstanbul/Straße/ΣΩ"
+    tricky = "C:/Users/İstanbul/Straße/ΣΩ"  # portability: ok
     check("fold preserves length", len(paths._cmp(tricky)), len(tricky))
     check("plain lower() would NOT have", len(tricky.lower()) == len(tricky), False)
 
     # And end to end: a root whose name carries one of those characters must
     # translate to a whole path, not a shortened one.
-    win = "C:/Users/İstanbul"
+    win = "C:/Users/İstanbul"  # portability: ok
     lin = "/mnt/win/Users/İstanbul"
     paths.reset_for_test({"g1": [win, lin]}, {"g1": lin})
     check("no truncation under a non-ASCII root",
@@ -564,8 +573,8 @@ def test_fold_is_length_preserving() -> None:
           lin + "/Desktop/Programming/bot")
 
     # Drive-letter case still folds, which is the case that actually occurs.
-    paths.reset_for_test({"g1": ["C:/Users/Quincy", "/mnt/q"]}, {"g1": "/mnt/q"})
-    check("ASCII case still folds", paths.translate("c:/USERS/quincy/x"), "/mnt/q/x")
+    paths.reset_for_test({"g1": ["C:/Users/Quincy", "/mnt/q"]}, {"g1": "/mnt/q"})  # portability: ok
+    check("ASCII case still folds", paths.translate("c:/USERS/quincy/x"), "/mnt/q/x")  # portability: ok
 
 
 # --------------------------------------------------------------------------
@@ -592,7 +601,7 @@ def test_filesystem_root_is_refused() -> None:
         # exercised by the same check.
         (tmp / "data").mkdir()
         (tmp / "data" / paths.ROOTS_FILENAME).write_text(json.dumps({
-            "groups": {"g1": ["/", "C:/Users/Quincy"]},
+            "groups": {"g1": ["/", "C:/Users/Quincy"]},  # portability: ok
         }), encoding="utf-8")
 
         env = os.environ.pop("BOT_PATHS_DISABLED", None)
@@ -613,7 +622,7 @@ def test_filesystem_root_is_refused() -> None:
         check("an arbitrary path is not suddenly portable",
               paths.is_portable("/etc/passwd"), False)
         check("nor is one on the other partition",
-              paths.is_portable("/home/quincy/Programming/The-Citadel"), False)
+              paths.is_portable("/home/quincy/Programming/The-Citadel"), False)  # portability: ok
         check("translation is still an identity for them",
               paths.translate("/etc/passwd"), "/etc/passwd")
     finally:
@@ -629,7 +638,7 @@ def test_session_scan_spellings() -> None:
     from bot.engine import sessions as sessions_mod
     from bot.engine.session_fork import encoded_spellings
 
-    win = "C:/Users/Quincy"
+    win = "C:/Users/Quincy"  # portability: ok
     lin = "/run/media/quincy/SYSTEM/Users/Quincy"
     repo = lin + "/Desktop/Programming/bot"
 
