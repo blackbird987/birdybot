@@ -108,6 +108,11 @@ def _acquire_pid_lock() -> bool:
     # here was left by a caller that died mid-stop, and letting it survive
     # would turn the next emergency kill into a permanent one.
     clear_stop_request(config.DATA_DIR)
+    # The one line that marks where a boot begins. The health check has always
+    # looked for it and it had never been written, so the check could not tell
+    # this run's startup from the previous run's and judged a clean boot by
+    # ten hours of unrelated runtime.
+    log.info("Acquired PID lock (PID %d)", os.getpid())
     return True
 
 
@@ -415,7 +420,12 @@ async def run() -> None:
             valid.append(acct)
             if reason:
                 degraded += 1
-                log.error(
+                # WARNING, not ERROR: a sidelined account is a *handled*
+                # condition -- rotation carries on without it and it rejoins on
+                # its own after a login. Logging it at ERROR meant a signed-out
+                # backup account made every startup read as a failed startup,
+                # which is also how the aggregate line below already treats it.
+                log.warning(
                     "CLAUDE_ACCOUNTS entry sidelined: %s (%s). It stays in "
                     "rotation config and rejoins automatically after login -- "
                     "run: %s",

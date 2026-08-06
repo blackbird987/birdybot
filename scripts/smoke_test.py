@@ -56,23 +56,66 @@ LOBBY_ID = _env.get("DISCORD_LOBBY_CHANNEL_ID")
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _read_log_lines(max_lines: int = 200) -> list[str]:
-    """Read last N lines from bot.log."""
+def _read_log_lines(max_bytes: int = 12 * 1024 * 1024) -> list[str]:
+    """Read the log, from the whole file if it fits.
+
+    This used to take the last 200 lines, which made the check *less* reliable
+    the better the bot was doing: after eleven hours of healthy uptime the
+    "Bot ready" line had scrolled 2,500 lines out of reach, so a bot that was
+    talking to Discord that same second was reported as never having started.
+    Since `.claude/test.json` tells the verify step to run `start` when the
+    log says the bot is down, a false negative here points at booting a second
+    instance of a singleton.
+
+    The cap is a backstop, not a window: the log rotates at 10 MB, so this
+    reads the whole of a normal one.
+    """
     try:
+        size = os.path.getsize(_LOG_FILE)
         with open(_LOG_FILE, encoding="utf-8", errors="replace") as f:
-            return f.readlines()[-max_lines:]
+            if size > max_bytes:
+                f.seek(size - max_bytes)
+                f.readline()  # discard the partial line landed in
+            return f.readlines()
     except OSError:
         # FileNotFoundError (no log yet) or PermissionError (locked during rotation)
         return []
 
 
-def _find_last_startup(lines: list[str]) -> list[str]:
-    """Return log lines from the most recent startup onward.
+_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) ")
 
-    Scans backward for 'Bot ready' and then further back to find the
-    process start (PID lock or first log line of that run).
+# How far back of "Bot ready" a boot can plausibly reach when the log holds no
+# explicit start marker. Real boots here take about thirty seconds; five
+# minutes is slack, not a window anyone should be relying on.
+_BOOT_WINDOW_S = 300.0
+
+
+def _line_time(line: str) -> float | None:
+    """Epoch seconds for a log line, or None for continuation lines."""
+    m = _TS_RE.match(line)
+    if not m:
+        return None
+    try:
+        return time.mktime(time.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"))
+    except ValueError:
+        return None
+
+
+def _split_log(lines: list[str]) -> tuple[list[str], list[str]]:
+    """Split the log into (this boot's startup, everything logged after it).
+
+    Bounded at *both* ends on purpose. Everything after the bot finished
+    coming up is ordinary runtime, and folding that in meant any later error —
+    a git push timing out in some unrelated repo nine hours in — was reported
+    as a startup failure.
+
+    The backward walk is also bounded by *time*. It used to rely solely on
+    finding a start marker, and neither marker it looked for had ever been
+    written to a log, so it ran back to the previous boot's "Bot ready" and
+    called ten hours of runtime a startup sequence. The marker is now really
+    emitted (`bot/app.py`, on taking the PID lock) but historic logs and any
+    bot that predates it still need the clock as a backstop.
     """
-    # Find the last "Bot ready" line
     ready_idx = None
     for i in range(len(lines) - 1, -1, -1):
         if "Bot ready" in lines[i]:
@@ -80,22 +123,40 @@ def _find_last_startup(lines: list[str]) -> list[str]:
             break
 
     if ready_idx is None:
-        # No "Bot ready" found — return all lines (startup may be in progress)
-        return lines
+        # Never came up, or is still coming up. Recent lines are the evidence.
+        return lines[-200:], []
 
-    # Walk backward from ready to find start of this boot (PID lock or start of log)
-    start_idx = ready_idx
+    ready_at = _line_time(lines[ready_idx])
+    marker_idx = None   # an explicit start marker, if this log has one
+    clock_idx = None    # first line too old to belong to this boot
+    floor_idx = ready_idx
+
     for i in range(ready_idx - 1, -1, -1):
         if "Acquired PID lock" in lines[i] or "Starting bot" in lines[i]:
-            start_idx = i
+            marker_idx = i
+            floor_idx = i
             break
-        # Also stop if we hit a PREVIOUS "Bot ready" — that's a different boot
+        # A PREVIOUS "Bot ready" is a different boot entirely.
         if "Bot ready" in lines[i]:
-            start_idx = i + 1
+            floor_idx = i + 1
             break
-        start_idx = i
+        ts = _line_time(lines[i])
+        if clock_idx is None and ready_at is not None and ts is not None \
+                and ready_at - ts > _BOOT_WINDOW_S:
+            clock_idx = i + 1
+        floor_idx = i
 
-    return lines[start_idx:]
+    # The marker is authoritative wherever it appears: a boot that took a
+    # quarter of an hour is unusual, not evidence that the log is lying. The
+    # clock only stands in for a marker that was never written.
+    if marker_idx is not None:
+        start_idx = marker_idx
+    elif clock_idx is not None:
+        start_idx = clock_idx
+    else:
+        start_idx = floor_idx
+
+    return lines[start_idx:ready_idx + 1], lines[ready_idx + 1:]
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +181,60 @@ class CheckResult:
         if self.detail:
             s += f"\n       {self.detail}"
         return s
+
+
+def check_process_alive() -> CheckResult:
+    """Is there actually a bot process? The most direct evidence there is.
+
+    The log tells you what happened; this tells you what is true now. Nothing
+    here checked it before, so every verdict rested on reading old text —
+    which is how a bot that was live on Discord that same second could be
+    reported as down.
+    """
+    pid_file = os.path.join(_PROJECT_ROOT, "data", "bot.pid")
+    try:
+        with open(pid_file, encoding="utf-8") as f:
+            pid = int(f.read().strip())
+    except (OSError, ValueError) as exc:
+        return CheckResult("Bot process", False, f"No usable PID file ({exc})")
+
+    try:
+        from bot.procutil import is_bot_process, is_process_alive
+    except Exception as exc:  # pragma: no cover — helper must never break the check
+        return CheckResult("Bot process", True,
+                           f"Skipped — cannot import procutil: {exc}", partial=True)
+
+    if not is_process_alive(pid):
+        return CheckResult("Bot process", False, f"PID {pid} is not running")
+    if not is_bot_process(pid, _PROJECT_ROOT):
+        return CheckResult("Bot process", False,
+                           f"PID {pid} was recycled onto another process")
+    return CheckResult("Bot process", True, f"Running as PID {pid}")
+
+
+def check_runtime_errors(runtime_lines: list[str]) -> CheckResult:
+    """Errors logged *after* the bot came up.
+
+    Reported, but never fatal: these are the bot doing its job and hitting
+    something — a repo whose push timed out, an API hiccup — not evidence that
+    this build broke it. Rolling them into the startup verdict is what made a
+    healthy bot read UNHEALTHY.
+
+    Only the last 200 runtime lines are scanned. A long-lived bot accumulates
+    thousands, and listing every one it ever hit tells you nothing about the
+    build you just shipped.
+    """
+    tail = runtime_lines[-200:]
+
+    log_level_re = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} (ERROR|CRITICAL)\s")
+    errors = [ln.strip()[:150] for ln in tail if log_level_re.match(ln)]
+    if not errors:
+        return CheckResult("No recent runtime errors", True,
+                           f"Scanned {len(tail)} of {len(runtime_lines)} lines since startup")
+    detail = f"{len(errors)} since startup (not a startup failure):\n" + "\n".join(
+        f"       - {e}" for e in errors[:5]
+    )
+    return CheckResult("No recent runtime errors", True, detail, partial=True)
 
 
 def check_bot_ready(startup_lines: list[str]) -> CheckResult:
@@ -240,15 +355,16 @@ def run(respond: bool = False) -> int:
     print("Bot Smoke Test")
     print("=" * 50)
 
-    all_lines = _read_log_lines(200)
-    startup_lines = _find_last_startup(all_lines)
+    startup_lines, runtime_lines = _split_log(_read_log_lines())
 
     results: list[CheckResult] = []
 
     # Core checks (always run)
+    results.append(check_process_alive())
     results.append(check_bot_ready(startup_lines))
     results.append(check_startup_errors(startup_lines))
     results.append(check_platforms(startup_lines))
+    results.append(check_runtime_errors(runtime_lines))
 
     # Response check (opt-in or when webhooks are available)
     if respond:

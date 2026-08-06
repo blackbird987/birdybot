@@ -38,14 +38,20 @@
     "list_threads": "python scripts/discord_test.py list-threads <forum_id>",
     "send": "python scripts/discord_test.py send <channel_or_thread_id> <message>",
     "read": "python scripts/discord_test.py read <channel_or_thread_id> [limit]",
-    "wait_response": "python scripts/discord_test.py wait-response <channel_id> [timeout]",
+    "wait_response": "python scripts/discord_test.py wait-response <channel_id> [timeout] [after_msg_id]",
     "suite": "python scripts/discord_test.py run-suite",
     "_note": [
       "send/read go through TEST_WEBHOOK_URL / TEST_LOBBY_WEBHOOK_URL and are",
       "treated as user messages (TEST_WEBHOOK_IDS bypasses the bot-author guard),",
       "so this is a genuine end-to-end action -> observe loop against the live bot.",
       "'read' returns message content, embeds and buttons — which is how you check",
-      "what a result message actually RENDERED, not just that it was sent."
+      "what a result message actually RENDERED, not just that it was sent.",
+      "",
+      "Feed the message id 'send' prints into wait-response as after_msg_id. The",
+      "bot answers in about two seconds, so without it the baseline is taken",
+      "after the reply already arrived and a healthy bot reads as unresponsive.",
+      "Ark replies also self-delete after 15s, and the probe message is deleted",
+      "once handled — so a probe that has VANISHED is proof it was handled."
     ]
   },
 
@@ -53,6 +59,7 @@
     "_note": "Standalone runners for logic with no live surface. Exit 0 = pass.",
     "portability": "python scripts/check_portability.py",
     "stop_sentinel": "python scripts/test_stop_sentinel.py",
+    "smoke_window": "python scripts/test_smoke_window.py",
     "projects_dirs": "python scripts/test_projects_dirs.py",
     "botcmd_collapse": "python scripts/test_botcmd_collapse.py",
     "wake_directive": "python scripts/test_wake_directive.py",
