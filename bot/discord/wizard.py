@@ -441,7 +441,7 @@ async def handle_auth_button(
                 "Failed to open a login terminal — no usable terminal "
                 "emulator on this host. Run this on **"
                 f"{config.PC_NAME}** instead:\n"
-                f"```\nCLAUDE_CONFIG_DIR={target} {config.CLAUDE_BINARY}\n```\n"
+                f'```\nCLAUDE_CONFIG_DIR="{target}" "{config.CLAUDE_BINARY}"\n```\n'
                 "then `/login` inside it. See bot logs for what was tried.",
                 ephemeral=True,
             )

@@ -207,7 +207,8 @@ python scripts/check_portability.py
 which fails loudly on CRLF creeping back into the index, a `.sh` that lost its
 executable bit, a filename Windows cannot check out, a hardcoded drive letter
 outside a platform branch, or a `.claude/test.json` command that only runs on
-one OS.
+one OS — including one that merely *starts* with a single-platform shell
+utility like `tail` or `taskkill`.
 
 ### Config is per-machine and must stay that way
 
@@ -226,6 +227,7 @@ Session history is likewise per-machine; see the first caveat below.
 
 ```bash
 python scripts/botctl.py start | stop | restart | status
+python scripts/botctl.py logs 50        # `tail` has no Windows equivalent
 ```
 
 The `.bat` files are kept for double-clicking from Explorer, and `start.sh` /

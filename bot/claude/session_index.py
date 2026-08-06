@@ -65,10 +65,13 @@ def claude_projects_dirs() -> list[Path]:
     """
     try:
         from bot import config
-        return config.claude_projects_dirs()
-    except Exception:
+    except ImportError:
+        # Only a genuinely absent config module falls back. A bug *inside*
+        # claude_projects_dirs() must surface, not degrade into rebuilding
+        # the wrong directory.
         fallback = Path.home() / ".claude" / "projects"
         return [fallback] if fallback.is_dir() else []
+    return config.claude_projects_dirs()
 
 
 def cwd_to_project_dir_name(cwd: str) -> str:
@@ -76,12 +79,13 @@ def cwd_to_project_dir_name(cwd: str) -> str:
 
     `C:\\Users\\foo\\bar`           → `C--Users-foo-bar`
     `C:\\foo\\.worktrees\\t-1`      → `C--foo--worktrees-t-1`
+
+    Delegates to the one shared encoder so the runner, the JSONL forker, the
+    session scanner and this index rebuilder can never disagree about where a
+    project's sessions live.
     """
-    return (cwd
-            .replace(":", "-")
-            .replace("\\", "-")
-            .replace("/", "-")
-            .replace(".", "-"))
+    from bot.engine.session_fork import encode_project_path
+    return encode_project_path(cwd)
 
 
 def extract_session_metadata(jsonl_path: Path) -> dict | None:
@@ -390,7 +394,13 @@ async def rebuild_all(
 
     counts = {"projects": 0, "sessions": 0, "failed": 0, "skipped_active": 0, "no_jsonls": 0}
     for base in bases:
-        for pdir in sorted(base.iterdir()):
+        try:
+            entries = sorted(base.iterdir())
+        except OSError as e:
+            log.warning("Cannot list projects root %s: %s", base, e)
+            counts["failed"] += 1
+            continue
+        for pdir in entries:
             if not pdir.is_dir():
                 continue
             try:

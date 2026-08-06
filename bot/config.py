@@ -781,6 +781,27 @@ WORKFLOW_GUIDANCE: dict[str, str] = {
 # Provider's base directory name (e.g. ".claude", ".cursor")
 PROVIDER_DIR_NAME: str = _PROVIDER_CFG.projects_dir_name
 
+
+def primary_account_dir() -> Path | None:
+    """The account config dir to pin ``CLAUDE_CONFIG_DIR`` to, or None.
+
+    ``CLAUDE_ACCOUNTS`` is ordered and the first entry is the default account.
+    Anything spawning the CLI outside the normal rotation (title generation,
+    one-shot helpers) has to pin to it explicitly: left alone the CLI reads
+    ``$HOME/.claude``, which on Linux is frequently not one of the configured
+    accounts and may not be signed in at all.
+
+    None means "nothing to pin" — a non-``claude`` provider, no accounts
+    configured, or a malformed first entry.
+    """
+    if PROVIDER != "claude" or not CLAUDE_ACCOUNTS:
+        return None
+    try:
+        return Path(CLAUDE_ACCOUNTS[0]).expanduser()
+    except (OSError, RuntimeError):  # malformed entry — behave as unset
+        return None
+
+
 def claude_projects_dirs() -> list[Path]:
     """Every projects root the CLI may have written session JSONLs to.
 
@@ -834,11 +855,9 @@ def _default_projects_dir() -> Path:
     Unlike :func:`claude_projects_dirs` this never filters on existence — it
     has to be a usable target even before the directory has been created.
     """
-    if PROVIDER == "claude" and CLAUDE_ACCOUNTS:
-        try:
-            return Path(CLAUDE_ACCOUNTS[0]).expanduser() / "projects"
-        except (OSError, RuntimeError):
-            pass
+    acct = primary_account_dir()
+    if acct is not None:
+        return acct / "projects"
     return Path.home() / PROVIDER_DIR_NAME / "projects"
 
 

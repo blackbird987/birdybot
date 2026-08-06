@@ -59,24 +59,37 @@ def tracked_files() -> list[tuple[str, str]]:
     return out
 
 
-def check_line_endings(files: list[tuple[str, str]]) -> None:
+def check_line_endings() -> None:
     """Every text blob in HEAD must be LF; CRLF belongs only in the working
-    tree, applied by .gitattributes on checkout."""
-    for _mode, path in files:
-        if Path(path).suffix.lower() in CRLF_OK:
+    tree, applied by .gitattributes on checkout.
+
+    Answered by a single `git ls-files --eol`, which reports the index
+    encoding for every tracked file at once. The first version shelled out to
+    `git show :<path>` per file — ~150 subprocesses for the same answer.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "ls-files", "--eol"], cwd=REPO,
+            capture_output=True, text=True, check=True,
+        ).stdout
+    except (subprocess.CalledProcessError, OSError) as e:
+        problems.append(f"Could not read index line endings ({e})")
+        return
+
+    # Each row: "i/lf    w/crlf  attr/text=auto eol=lf   \t<path>"
+    for line in out.splitlines():
+        attrs, _, path = line.partition("\t")
+        path = path.strip()
+        if not path or Path(path).suffix.lower() in CRLF_OK:
             continue
-        try:
-            blob = subprocess.run(
-                ["git", "show", f":{path}"], cwd=REPO,
-                capture_output=True, check=True,
-            ).stdout
-        except subprocess.CalledProcessError:
-            continue
-        if b"\x00" in blob[:8192]:
-            continue  # binary
-        if b"\r\n" in blob:
+        index_eol = next(
+            (f[2:] for f in attrs.split() if f.startswith("i/")), ""
+        )
+        # "-text" is binary and "none" is an empty file — neither can be wrong.
+        if index_eol in ("crlf", "mixed"):
             problems.append(
-                f"CRLF in git index: {path} — run `git add --renormalize .`"
+                f"{index_eol.upper()} in git index: {path} "
+                f"— run `git add --renormalize .`"
             )
 
 
@@ -169,6 +182,37 @@ def check_hardcoded_paths(files: list[tuple[str, str]]) -> None:
                 )
 
 
+# Shell utilities that exist on only one of the two platforms. A command
+# leading with one of these cannot be run by the verify step on the other
+# machine. `tail -n 50 data/logs/bot.log` sat in logs.tail for exactly this
+# reason — the earlier version of this check only looked at start/stop/health
+# and only at file extensions, so it never saw it.
+POSIX_ONLY_CMDS = {
+    "tail", "head", "cat", "grep", "sed", "awk", "ls", "rm", "cp", "mv",
+    "touch", "which", "chmod", "chown", "kill", "pkill", "ps", "sh", "bash",
+    "sudo", "systemctl", "journalctl",
+}
+WINDOWS_ONLY_CMDS = {
+    "taskkill", "tasklist", "dir", "del", "copy", "move", "where", "cmd",
+    "powershell", "pwsh", "reg", "sc",
+}
+
+
+def _iter_json_commands(node, path: str = ""):
+    """Yield (json_path, command_string) for every command-ish string.
+
+    Keys starting with `_` are prose notes, and lists in this file are only
+    ever notes or marker words — neither is a command.
+    """
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key.startswith("_"):
+                continue
+            yield from _iter_json_commands(value, f"{path}.{key}" if path else key)
+    elif isinstance(node, str):
+        yield path, node
+
+
 def check_test_json() -> None:
     """.claude/test.json is static JSON with no way to branch per platform, so
     every command it names has to run on both."""
@@ -181,16 +225,29 @@ def check_test_json() -> None:
         problems.append(f".claude/test.json is not valid JSON: {exc}")
         return
 
-    for key in ("start", "stop", "health"):
-        cmd = cfg.get(key)
-        if not isinstance(cmd, str) or not cmd:
+    for key, cmd in _iter_json_commands(cfg):
+        if key in ("project_type", "logs.file"):
+            continue  # values, not commands
+        tokens = cmd.split()
+        if not tokens:
             continue
+        program = Path(tokens[0]).name.lower()
+        if program in POSIX_ONLY_CMDS:
+            problems.append(
+                f".claude/test.json '{key}' starts with POSIX-only `{program}` "
+                f"({cmd}) — route it through a python script that runs on both"
+            )
+        elif program in WINDOWS_ONLY_CMDS:
+            problems.append(
+                f".claude/test.json '{key}' starts with Windows-only `{program}` "
+                f"({cmd}) — route it through a python script that runs on both"
+            )
         if cmd.endswith((".bat", ".cmd", ".ps1", ".vbs")):
             problems.append(
                 f".claude/test.json '{key}' is Windows-only ({cmd}) — "
                 f"point it at a python script that runs on both"
             )
-        if cmd.endswith(".sh"):
+        elif cmd.endswith(".sh"):
             problems.append(
                 f".claude/test.json '{key}' is POSIX-only ({cmd}) — "
                 f"point it at a python script that runs on both"
@@ -199,7 +256,7 @@ def check_test_json() -> None:
 
 def main() -> int:
     files = tracked_files()
-    check_line_endings(files)
+    check_line_endings()
     check_exec_bits(files)
     check_windows_safe_names(files)
     check_hardcoded_paths(files)

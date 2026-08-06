@@ -215,7 +215,11 @@ def find_session_file(session_id: str) -> Path | None:
     a session started on the backup account lives under that account's dir.
     """
     for projects_dir in config.claude_projects_dirs():
-        for proj_dir in projects_dir.iterdir():
+        try:
+            entries = list(projects_dir.iterdir())
+        except OSError:
+            continue  # unreadable / unmounted since the existence check
+        for proj_dir in entries:
             if not proj_dir.is_dir():
                 continue
             exact = proj_dir / f"{session_id}.jsonl"
@@ -228,12 +232,18 @@ def find_session_file(session_id: str) -> Path | None:
 
 
 def _encode_path(path: str) -> str:
-    """Encode a filesystem path the same way Claude Code encodes project dir names.
+    """Encode a filesystem path the way the CLI names its project dirs.
 
-    Normalizes slashes and strips trailing separator before encoding.
+    Delegates to the shared implementation — this used to be a third private
+    copy that had drifted: it never replaced ``.`` with ``-``, so any path
+    containing a dot encoded wrong. A build worktree
+    (``…/claude-telegram-bot/.worktrees/t-6839``) came out as
+    ``…-bot-.worktrees-t-6839`` while the CLI had written
+    ``…-bot--worktrees-t-6839``, so the lookup could never match.
+    ``runner._encode_project_path`` already delegates here for the same reason.
     """
-    path = path.replace("\\", "/").rstrip("/")
-    return path.replace("/", "-").replace(":", "-")
+    from bot.engine.session_fork import encode_project_path
+    return encode_project_path(path)
 
 
 def find_latest_session_for_repo(repo_path: str) -> dict | None:
@@ -283,7 +293,11 @@ def scan_sessions(
 
     candidates = []
     for projects_dir in config.claude_projects_dirs():
-        for proj_dir in projects_dir.iterdir():
+        try:
+            entries = list(projects_dir.iterdir())
+        except OSError:
+            continue  # unreadable / unmounted since the existence check
+        for proj_dir in entries:
             if not proj_dir.is_dir():
                 continue
             for f in proj_dir.glob("*.jsonl"):

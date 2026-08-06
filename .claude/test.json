@@ -20,15 +20,16 @@
   "start": "python scripts/botctl.py start",
   "stop": "python scripts/botctl.py stop",
   "_platform_note": [
-    "start/stop go through scripts/botctl.py, which works on both Linux and",
-    "Windows. They used to name start_bot.bat / stop_bot.bat -- files that",
-    "do not exist on Linux, so verify could never recover a bot it found down.",
+    "start/stop/logs go through scripts/botctl.py, which works on both Linux",
+    "and Windows. start/stop used to name start_bot.bat / stop_bot.bat -- files",
+    "that do not exist on Linux, so verify could never recover a bot it found",
+    "down. logs.tail used to be 'tail -n 50', which does not exist on Windows.",
     "The .bat wrappers are kept for double-clicking from Explorer."
   ],
 
   "logs": {
     "file": "data/logs/bot.log",
-    "tail": "tail -n 50 data/logs/bot.log",
+    "tail": "python scripts/botctl.py logs 50",
     "failure_markers": ["ERROR", "CRITICAL", "Traceback"]
   },
 

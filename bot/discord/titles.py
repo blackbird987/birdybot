@@ -77,7 +77,13 @@ def cleanup_stale_temp_jsonls() -> int:
         # Sweep every account root, not just the primary — older builds ran
         # title-gen against $HOME/.claude, so leftovers can sit in either.
         for projects_dir in config.claude_projects_dirs():
-            for proj_dir in projects_dir.iterdir():
+            try:
+                entries = list(projects_dir.iterdir())
+            except OSError:
+                # One unreadable root must not abandon the others.
+                log.debug("Cannot list %s", projects_dir, exc_info=True)
+                continue
+            for proj_dir in entries:
                 if not proj_dir.is_dir() or not _is_temp_like_project_dir(proj_dir):
                     continue
                 for jsonl in proj_dir.glob("*.jsonl"):
@@ -178,8 +184,9 @@ async def generate_title_text(prompt: str, summary: str = "") -> str | None:
     # back to $HOME/.claude, which on Windows happens to be the same directory
     # but on Linux can be a different — possibly unauthenticated — config dir,
     # silently failing every title generation.
-    if config.PROVIDER == "claude" and config.CLAUDE_ACCOUNTS:
-        env["CLAUDE_CONFIG_DIR"] = str(Path(config.CLAUDE_ACCOUNTS[0]).expanduser())
+    primary_acct = config.primary_account_dir()
+    if primary_acct is not None:
+        env["CLAUDE_CONFIG_DIR"] = str(primary_acct)
 
     # Snapshot pre-existing jsonls in the Temp project dir so we can delete
     # whatever this subprocess writes — the CLI persists every -p call as a

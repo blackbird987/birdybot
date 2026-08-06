@@ -13,6 +13,7 @@ detached process and later signal it.
 
 Usage:
     python scripts/botctl.py start | stop | restart | status
+    python scripts/botctl.py logs [n]      # last n log lines, default 50
 
 Exit codes: 0 = success / running, 1 = failure, 2 = not running (status).
 """
@@ -20,9 +21,11 @@ Exit codes: 0 = success / running, 1 = failure, 2 = not running (status).
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import sys
 import time
+from collections import deque
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -188,8 +191,6 @@ def stop() -> int:
             capture_output=True, check=False,
         )
     else:
-        import signal
-
         # Graceful first — app.py has a SIGTERM handler that saves context.
         _signal_posix(pid, signal.SIGTERM)
 
@@ -201,8 +202,6 @@ def stop() -> int:
             return 0
 
     if not IS_WINDOWS:
-        import signal
-
         print("Graceful stop timed out — sending SIGKILL.")
         _signal_posix(pid, signal.SIGKILL)
         time.sleep(1)
@@ -213,6 +212,29 @@ def stop() -> int:
     PID_FILE.unlink(missing_ok=True)
     print("Bot stopped.")
     return 0
+
+
+def logs(count: int = 50) -> int:
+    """Print the tail of the bot log.
+
+    Exists because `tail` is not a command on Windows, and `.claude/test.json`
+    is static JSON that cannot branch per platform — the verify step needs one
+    log-reading command that works on both machines.
+    """
+    log_file = REPO / "data" / "logs" / "bot.log"
+    try:
+        with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+            tail = deque(f, maxlen=max(1, count))
+    except OSError as e:
+        print(f"Cannot read {log_file}: {e}", file=sys.stderr)
+        return 1
+    sys.stdout.write("".join(tail))
+    if tail and not tail[-1].endswith("\n"):
+        sys.stdout.write("\n")
+    return 0
+
+
+USAGE = "Usage: botctl.py start|stop|restart|status|logs [n]"
 
 
 def main() -> int:
@@ -229,8 +251,14 @@ def main() -> int:
         return start()
     if cmd == "status":
         return status()
-    print(f"Unknown command: {cmd}\nUsage: botctl.py start|stop|restart|status",
-          file=sys.stderr)
+    if cmd == "logs":
+        try:
+            count = int(sys.argv[2]) if len(sys.argv) > 2 else 50
+        except ValueError:
+            print(f"logs: line count must be a number\n{USAGE}", file=sys.stderr)
+            return 1
+        return logs(count)
+    print(f"Unknown command: {cmd}\n{USAGE}", file=sys.stderr)
     return 1
 
 

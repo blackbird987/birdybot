@@ -444,14 +444,18 @@ def launch_login_terminal(account_dir: str) -> bool:
             except OSError:
                 log.debug("Terminal %s failed to spawn", term, exc_info=True)
                 continue
-            # A terminal that launches and dies immediately (wrong flag,
-            # no display, missing font config) used to be reported as a
-            # success, so the user was told login was open when nothing
-            # had happened. Give it a moment and check it is still alive.
+            # A terminal that launches and dies (wrong flag, no display,
+            # missing font config) used to be reported as a success, so the
+            # user was told login was open when nothing had happened. Give it
+            # a moment, then judge by exit CODE — not by whether it exited.
+            # gnome-terminal, kgx and ptyxis are D-Bus clients: they hand the
+            # window to a separate server process and return 0 straight away,
+            # so "already exited" alone would reject the terminals most likely
+            # to be installed on this desktop.
             time.sleep(0.6)
-            if proc.poll() is not None:
+            if proc.poll() is not None and proc.returncode != 0:
                 log.debug(
-                    "Terminal %s exited immediately (rc=%s) — trying next",
+                    "Terminal %s exited with rc=%s — trying next",
                     term, proc.returncode,
                 )
                 continue
