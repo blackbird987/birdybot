@@ -151,6 +151,7 @@ def test_verify_prompt_wording() -> None:
 
 def test_commits_ahead_garbage_is_zero() -> None:
     print("test_commits_ahead_garbage_is_zero")
+    # portability: ok - deliberately non-existent on either platform
     _check(_commits_ahead("Z:/definitely/not/a/repo", "master", "nope") == 0,
            "bad repo path -> 0 (target never ships)")
     _check(_commits_ahead(_ROOT, "master", "no-such-branch-xyz") == 0,

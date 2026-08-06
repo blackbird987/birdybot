@@ -419,7 +419,10 @@ async def run() -> None:
                     reason,
                     relogin_command(acct),
                 )
-        config.CLAUDE_ACCOUNTS = valid
+        # Through the setter, not a bare assignment: dropping an entry can move
+        # the primary account, and the projects root and CLAUDE_CONFIG_DIR pin
+        # are both derived from it.
+        config.set_accounts(valid)
         usable = len(valid) - degraded
         if usable != configured_count:
             log.warning(

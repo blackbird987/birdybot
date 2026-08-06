@@ -12,7 +12,7 @@ Checks:
   2. Shell scripts are marked executable in git's index.
   3. Files Windows can't create (reserved names, ':' etc.) aren't tracked.
   4. Nothing hardcodes a drive letter or a backslash-joined path.
-  5. The commands in .claude/test.json exist on this platform.
+  5. No command in .claude/test.json is single-platform.
 
 Exit 0 = clean, 1 = problems found. Run from anywhere in the repo.
 """
@@ -123,24 +123,48 @@ def check_windows_safe_names(files: list[tuple[str, str]]) -> None:
 
 GUARD_RE = re.compile(r"win32|os\.name\s*==\s*['\"]nt['\"]|IS_WINDOWS|_is_windows")
 
+# Escape hatch for the cases a platform guard can't express: a migration tool
+# whose whole job is old Windows paths, a test fixture that is a synthetic
+# string and never touches disk. Without one, the check fails forever on
+# known-good code and stops being read — which is the same as not having it.
+ALLOW_RE = re.compile(r"#\s*portability:\s*ok")
+
 
 def _doc_and_comment_lines(text: str) -> set[int]:
     """Line numbers that are purely docstring or comment.
 
-    Tokenizing beats matching on raw lines: docstrings routinely *document*
-    Windows paths (`C:\\Users\\foo` → `C--Users-foo`), and flagging those is
-    noise that trains you to ignore the check.
+    Docstrings routinely *document* Windows paths (`C:\\Users\\foo` →
+    `C--Users-foo`), and flagging those is noise that trains you to ignore the
+    check. But they have to be excluded precisely: an earlier version skipped
+    every line holding a STRING token, and since a hardcoded path is *always*
+    a string literal, that silently disabled the whole check — it could not
+    fire on anything. Comments come from the tokenizer; docstrings are found
+    as bare string-expression statements, which is what a docstring is and
+    what a real assignment is not.
     """
+    import ast
     import io
     import tokenize
 
     skip: set[int] = set()
     try:
         for tok in tokenize.generate_tokens(io.StringIO(text).readline):
-            if tok.type in (tokenize.STRING, tokenize.COMMENT):
+            if tok.type == tokenize.COMMENT:
                 skip.update(range(tok.start[0], tok.end[0] + 1))
     except (tokenize.TokenError, IndentationError, SyntaxError):
         pass  # unparsable — fall through and check every line
+
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return skip
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            skip.update(range(node.lineno, (node.end_lineno or node.lineno) + 1))
     return skip
 
 
@@ -150,9 +174,15 @@ def check_hardcoded_paths(files: list[tuple[str, str]]) -> None:
     Only real code counts, and only when no platform guard appears in the
     preceding few lines — `os.environ.get("ProgramData", r"C:\\ProgramData")`
     inside an `if sys.platform == "win32":` block is correct, not a defect.
+
+    Only this file is exempt, and only because its own search needles look
+    exactly like the thing it hunts for. It used to skip all of `scripts/`,
+    which quietly excused every harness and helper — including the ones the
+    verify step runs on both machines — to hide that single self-match.
     """
+    self_rel = Path(__file__).resolve().relative_to(REPO).as_posix()
     for _mode, path in files:
-        if not path.endswith(".py") or path.startswith("scripts/"):
+        if not path.endswith(".py") or path == self_rel:
             continue
         try:
             text = (REPO / path).read_text(encoding="utf-8", errors="replace")
@@ -164,6 +194,9 @@ def check_hardcoded_paths(files: list[tuple[str, str]]) -> None:
 
         for i, line in enumerate(lines, 1):
             if i in skip:
+                continue
+            # `# portability: ok` on the line itself or the one above it.
+            if ALLOW_RE.search(line) or (i > 1 and ALLOW_RE.search(lines[i - 2])):
                 continue
             # Look back a short window for the enclosing platform branch.
             context = "\n".join(lines[max(0, i - 7):i])

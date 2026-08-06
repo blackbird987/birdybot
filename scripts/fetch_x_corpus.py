@@ -19,6 +19,7 @@ read cap that the DegenAI bot also draws from. Default of 800 = 8% of a month.
 import argparse
 import html
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -27,9 +28,31 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-DEGENAI_SETTINGS = Path(
-    r"C:\Users\Quincy\Desktop\Programming\DegenAI\AIAgent\AIAgent\settings.json"
-)
+_SETTINGS_REL = Path("DegenAI") / "AIAgent" / "AIAgent" / "settings.json"
+
+
+def _find_degenai_settings() -> Path:
+    """Locate the sibling DegenAI repo's settings.json.
+
+    This was an absolute Windows path, so on the Linux desktop the script could
+    not find the credentials at all and exited on the first read. Prefer
+    ``REPOS_BASE_DIR`` when it's exported, then walk up from this file — which
+    also covers running out of a build worktree, where the repo root is two
+    levels deeper than usual. ``--settings`` overrides everything.
+    """
+    base = os.getenv("REPOS_BASE_DIR")
+    if base and (Path(base) / _SETTINGS_REL).exists():
+        return Path(base) / _SETTINGS_REL
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / _SETTINGS_REL).exists():
+            return parent / _SETTINGS_REL
+    # Nothing found — return the most likely location so the "not found"
+    # message names somewhere useful.
+    return Path(base or here.parent.parent.parent) / _SETTINGS_REL
+
+
+DEGENAI_SETTINGS = _find_degenai_settings()
 API = "https://api.twitter.com/2"
 TWEET_FIELDS = "created_at,public_metrics,referenced_tweets,conversation_id,lang"
 PAGE_SIZE = 100

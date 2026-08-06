@@ -823,8 +823,17 @@ def claude_projects_dirs() -> list[Path]:
     session data — that override wins and confines the scan to it alone.
     Some callers here *delete* files, so widening a deliberately narrowed
     scope would be actively destructive.
+
+    That test compares against ``_DERIVED_PROJECTS_DIR``, the value *as last
+    derived*, and not against a fresh call to :func:`_default_projects_dir`.
+    Recomputing reads it as an override whenever the inputs have moved since —
+    and they do move: ``bot/app.py`` prunes ``CLAUDE_ACCOUNTS`` at boot, so a
+    stale first entry in ``.env`` (nothing rarer than a machine whose account
+    paths just changed) made every root vanish and every session reader go
+    blind. Comparing to the snapshot asks the question actually meant here —
+    "has someone assigned to this global?" — which no input change can fake.
     """
-    if CLAUDE_PROJECTS_DIR != _default_projects_dir():
+    if CLAUDE_PROJECTS_DIR != _DERIVED_PROJECTS_DIR:
         return [CLAUDE_PROJECTS_DIR] if CLAUDE_PROJECTS_DIR.is_dir() else []
 
     roots: list[Path] = []
@@ -866,6 +875,33 @@ def _default_projects_dir() -> Path:
 # a second account's history isn't invisible.
 CLAUDE_PROJECTS_DIR: Path = _default_projects_dir()
 
+# The same value, kept as a snapshot of what the config *derives*. Whenever the
+# two differ, something has deliberately overridden the projects root and every
+# scan confines itself to it (see claude_projects_dirs). Anything that changes
+# an input to the derivation must refresh this alongside CLAUDE_PROJECTS_DIR,
+# or an ordinary config change reads as an override — use set_accounts() /
+# set_provider() rather than assigning CLAUDE_ACCOUNTS or PROVIDER by hand.
+_DERIVED_PROJECTS_DIR: Path = CLAUDE_PROJECTS_DIR
+
+
+def set_accounts(accounts: list[str]) -> None:
+    """Replace the account list and re-derive the paths that follow from it.
+
+    ``bot/app.py`` prunes entries whose directory is missing, which moves the
+    primary account. Without re-deriving, the primary projects root and the
+    ``CLAUDE_CONFIG_DIR`` pin both stay aimed at the dropped entry.
+
+    An override of ``CLAUDE_PROJECTS_DIR`` that is already in effect survives —
+    a test sandbox must not be silently un-sandboxed by a config update.
+    """
+    global CLAUDE_ACCOUNTS, CLAUDE_PROJECTS_DIR, _DERIVED_PROJECTS_DIR
+
+    overridden = CLAUDE_PROJECTS_DIR != _DERIVED_PROJECTS_DIR
+    CLAUDE_ACCOUNTS = list(accounts)
+    _DERIVED_PROJECTS_DIR = _default_projects_dir()
+    if not overridden:
+        CLAUDE_PROJECTS_DIR = _DERIVED_PROJECTS_DIR
+
 
 def set_provider(name: str) -> None:
     """Switch the active provider at runtime.
@@ -878,6 +914,7 @@ def set_provider(name: str) -> None:
 
     global PROVIDER, _PROVIDER_CFG, CLAUDE_BINARY, BRANCH_PREFIX
     global PROVIDER_DIR_NAME, CLAUDE_PROJECTS_DIR, CURSOR_MODEL
+    global _DERIVED_PROJECTS_DIR
 
     new_cfg = _get_provider(name)
 
@@ -900,12 +937,16 @@ def set_provider(name: str) -> None:
             f"Install the {name} CLI or set CLAUDE_BINARY to the full path."
         )
 
+    overridden = CLAUDE_PROJECTS_DIR != _DERIVED_PROJECTS_DIR
+
     PROVIDER = name
     _PROVIDER_CFG = new_cfg
     CLAUDE_BINARY = resolved
     BRANCH_PREFIX = os.getenv("BRANCH_PREFIX") or new_cfg.branch_prefix
     PROVIDER_DIR_NAME = new_cfg.projects_dir_name
-    CLAUDE_PROJECTS_DIR = _default_projects_dir()
+    _DERIVED_PROJECTS_DIR = _default_projects_dir()
+    if not overridden:  # don't un-sandbox a test that set the root explicitly
+        CLAUDE_PROJECTS_DIR = _DERIVED_PROJECTS_DIR
     CURSOR_MODEL = os.getenv("CURSOR_MODEL", "auto")
     _logging.getLogger(__name__).info(
         "Provider switched to %s (binary=%s)", name, CLAUDE_BINARY,
