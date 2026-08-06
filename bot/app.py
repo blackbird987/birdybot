@@ -12,7 +12,7 @@ import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from bot import config
+from bot import config, paths
 from bot.claude.auth_health import (
     REASON_NO_DIR,
     relogin_command,
@@ -325,6 +325,42 @@ async def auto_update_loop(
                 failure_notified = True
 
 
+def _audit_repo_portability(store: StateStore) -> None:
+    """Warn about registered repos that only exist on this machine.
+
+    The state file is shared between machines, so a repo registered outside
+    every known root simply will not be there after the next reboot into the
+    other OS.  Worse, it can be a *second checkout* of a repo whose history
+    all sits under the shared copy — identical contents, different folder, so
+    nothing looks wrong except that no conversation in it can ever resume.
+    That cost a night of 16-minute retry loops before anyone noticed, and the
+    whole diagnosis is one line the bot was in a position to print at boot.
+
+    Log-only, deliberately: which copy is the right one is a judgement call,
+    and silently re-pointing a repo is a far worse failure than saying so.
+    """
+    repos = store.list_repos()
+    if not repos:
+        return
+    log.info("%s", paths.describe())
+    stray = {n: p for n, p in repos.items() if not paths.is_portable(p)}
+    if not stray:
+        return
+    for name, path in sorted(stray.items()):
+        log.warning(
+            "Repo %r is outside every known root (%s) — it will not resolve "
+            "on another machine sharing this state file, and CLI history "
+            "written elsewhere for the same project will not be found from "
+            "here. Re-register it under a shared root, or add its root to "
+            "data/%s.",
+            name, path, paths.ROOTS_FILENAME,
+        )
+    log.warning(
+        "Repo portability: %d of %d registered repos are machine-local",
+        len(stray), len(repos),
+    )
+
+
 def _migrate_deferred_to_todo(store: StateStore) -> None:
     """One-time migration: data/deferred/*.md → repo TODO.md files.
 
@@ -465,6 +501,8 @@ async def run() -> None:
         retention_days=config.INSTANCE_RETENTION_DAYS,
         max_retained=config.INSTANCE_MAX_RETAINED,
     )
+
+    _audit_repo_portability(store)
 
     orphans = store.mark_orphans()
     if orphans:

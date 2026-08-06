@@ -19,6 +19,37 @@ NOWND: dict = (
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(_PROJECT_ROOT / ".env", override=True)
 
+# Per-machine overlay, layered on top of the shared .env. Only for settings
+# that genuinely DIFFER between machines rather than being two names for one
+# thing — CLAUDE_BINARY above all, which is an OS-native install location with
+# no counterpart on the other side to translate to. Anything that IS merely
+# another spelling of the same directory belongs in the path map below, not
+# here. No file = no overlay, which is the normal single-machine case.
+_PLATFORM_ENV = {"win32": "windows", "darwin": "darwin"}.get(sys.platform, "linux")
+_OVERLAY = _PROJECT_ROOT / f".env.{_PLATFORM_ENV}"
+if _OVERLAY.is_file():
+    load_dotenv(_OVERLAY, override=True)
+
+# Path portability. `.env` and `data/state.json` are shared verbatim between
+# machines (they live on the drive both boot from), so the absolute paths in
+# them can only ever be correct for one of those machines. `paths.translate()`
+# rewrites a stored path into the local spelling on the way in; this is the
+# first of the two doors it is applied at, the other being the state load in
+# bot.store.state. Seeded before any path constant below is derived.
+#
+# roots.json is keyed off the code location rather than DATA_DIR on purpose:
+# DATA_DIR is itself a translatable path, and bootstrapping the translator
+# from a value it has not translated yet is how you get a map that only works
+# when it wasn't needed.
+from bot import paths as _paths  # noqa: E402
+
+_paths.init(
+    data_dir=_PROJECT_ROOT / "data",
+    account_hints=[
+        p.strip() for p in os.getenv("CLAUDE_ACCOUNTS", "").split(",") if p.strip()
+    ],
+)
+
 
 # --- Telegram (stripped — shell only, not started) ---
 TELEGRAM_BOT_TOKEN: str | None = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -69,7 +100,7 @@ from bot.claude.provider import get_provider as _get_provider  # noqa: E402
 _PROVIDER_CFG = _get_provider(PROVIDER)
 
 # Binary and branch prefix — derived from provider, overridable via env.
-CLAUDE_BINARY: str = os.getenv("CLAUDE_BINARY") or _PROVIDER_CFG.binary
+CLAUDE_BINARY: str = _paths.translate(os.getenv("CLAUDE_BINARY")) or _PROVIDER_CFG.binary
 BRANCH_PREFIX: str = os.getenv("BRANCH_PREFIX") or _PROVIDER_CFG.branch_prefix
 
 # Cursor-specific: default model (free tier = "auto", paid = specific model)
@@ -218,7 +249,9 @@ MODEL_FALLBACK: str = os.getenv("MODEL_FALLBACK", "opus")
 # retries on the next available account.
 # e.g. "C:/Users/Quincy/.claude,C:/Users/Quincy/.claude-account2"
 CLAUDE_ACCOUNTS: list[str] = [
-    p.strip() for p in os.getenv("CLAUDE_ACCOUNTS", "").split(",") if p.strip()
+    _paths.translate(p.strip())
+    for p in os.getenv("CLAUDE_ACCOUNTS", "").split(",")
+    if p.strip()
 ]
 
 # Cooldown for an account that fails auth / can't start (e.g. a cancelled or
@@ -283,18 +316,26 @@ LOG_TRIAGE_TIMEOUT_SECS: int = int(os.getenv("LOG_TRIAGE_TIMEOUT_SECS", "60"))
 LOG_TRIAGE_MODEL: str = os.getenv("LOG_TRIAGE_MODEL", "claude-haiku-4-5-20251001")
 
 # Data directory
-DATA_DIR: Path = Path(os.getenv("DATA_DIR", str(_PROJECT_ROOT / "data"))).resolve()
+DATA_DIR: Path = Path(
+    _paths.translate(os.getenv("DATA_DIR")) or str(_PROJECT_ROOT / "data")
+).resolve()
 RESULTS_DIR: Path = DATA_DIR / "results"
 LOGS_DIR: Path = DATA_DIR / "logs"
 STATE_FILE: Path = DATA_DIR / "state.json"
 LOG_FILE: Path = LOGS_DIR / "bot.log"
 
 # Base directory for new repos (optional — falls back to sibling of active repo)
-REPOS_BASE_DIR: Path | None = Path(v).resolve() if (v := os.getenv("REPOS_BASE_DIR")) else None
+REPOS_BASE_DIR: Path | None = (
+    Path(_paths.translate(v)).resolve() if (v := os.getenv("REPOS_BASE_DIR")) else None
+)
 
 # Workspace roots for repo wizard directory browser (comma-separated paths)
 # Falls back to parent directories of registered repos when empty
-WORKSPACE_ROOTS: str = os.getenv("WORKSPACE_ROOTS", "")
+WORKSPACE_ROOTS: str = ",".join(
+    _paths.translate(p.strip())
+    for p in os.getenv("WORKSPACE_ROOTS", "").split(",")
+    if p.strip()
+)
 
 if REPOS_BASE_DIR and not REPOS_BASE_DIR.is_dir():
     import warnings

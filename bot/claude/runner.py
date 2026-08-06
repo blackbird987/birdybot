@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Awaitable, Callable, NamedTuple
 if TYPE_CHECKING:
     from bot.store.state import StateStore
 
-from bot import config
+from bot import config, paths
 from bot.claude.auth_health import (
     REASON_RUNTIME_401,
     account_label,
@@ -868,7 +868,16 @@ class ClaudeRunner:
         grace = datetime.now(timezone.utc) + timedelta(
             minutes=REFUSAL_GRACE_MINUTES
         )
-        return grace, ("accounts_logged_out" if logged_out else "no_account_free")
+        # "Every account is signed out" has to mean every account.  Any logged
+        # -out account at all used to be enough to print it, so a single dead
+        # backup made a healthy primary — the one answering at that very
+        # moment — read as signed out, and pointed the user at re-authenticating
+        # something that was never broken.  Anything short of a clean sweep is
+        # simply nothing free right now.
+        all_signed_out = bool(config.CLAUDE_ACCOUNTS) and logged_out >= set(
+            config.CLAUDE_ACCOUNTS
+        )
+        return grace, ("accounts_logged_out" if all_signed_out else "no_account_free")
 
     def _soften_auth_dead_end(
         self, result: RunResult, instance: Instance, dead_account: str,
@@ -1348,6 +1357,17 @@ class ClaudeRunner:
                             "on_recovery callback failed for %s", instance.id,
                         )
                 instance.session_id = None
+                # Layer 2 marked the account it just used as "tried" — but
+                # that mark means "this conversation isn't filed on that
+                # account", which stops being true of anything the moment the
+                # conversation is abandoned.  Carrying it into a blank run
+                # leaves the picker with no candidates and makes it refuse to
+                # spawn, so a recoverable missing-session turned into a
+                # fabricated "no account available" that then re-queued every
+                # 16 minutes forever.  Real reasons to skip an account (usage
+                # limit, failed auth) are recorded separately as cooldowns and
+                # still apply after this reset.
+                instance._accounts_tried = set()
                 recovery_state.add("exhausted")
                 fresh = await self._run_impl(
                     instance, on_progress, on_stall,
@@ -1360,25 +1380,45 @@ class ClaudeRunner:
                 fresh.session_recovery_exhausted = True
                 fresh.recovery_warning_posted = warning_posted
                 # Don't poison the retry path: if the fallback produced no
-                # usable output (refuse-to-spawn synthetic result, or the
-                # CLI exited before generating any text), restore the
+                # usable output because it never got to run, restore the
                 # ORIGINAL session_id so the cooldown retry in app.py
                 # can still resume it.  Predicate uses result_text rather
                 # than num_turns because a usage-limit hit *after* turn 1
                 # also has no recoverable conversation but does have turns.
+                #
+                # Restoring is only right when the attempt was blocked on
+                # account availability — a cooldown or a refusal to spawn —
+                # because then the conversation is untested and may well still
+                # be there.  When the blank run simply produced nothing, the
+                # search above has already proven the conversation exists on no
+                # account under any spelling, and handing that id back to the
+                # retry queue rebuilds the exact loop this is meant to avoid:
+                # resume, fail, restore, re-queue, forever, every 16 minutes.
                 fresh_text = (fresh.result_text or "").strip()
+                blocked_on_account = bool(
+                    fresh.retry_reason or fresh.usage_limit_reset
+                )
                 if (
                     fresh.session_id != original_session_id
                     and not fresh_text
                     and original_session_id
                 ):
-                    log.info(
-                        "Layer-3 fresh run produced no output; "
-                        "restoring original session_id %s for %s",
-                        original_session_id[:12], instance.id,
-                    )
-                    fresh.session_id = original_session_id
-                    instance.session_id = original_session_id
+                    if blocked_on_account:
+                        log.info(
+                            "Layer-3 fresh run never started (%s); "
+                            "restoring original session_id %s for %s",
+                            fresh.retry_reason or "cooldown",
+                            original_session_id[:12], instance.id,
+                        )
+                        fresh.session_id = original_session_id
+                        instance.session_id = original_session_id
+                    else:
+                        log.warning(
+                            "Layer-3 fresh run produced no output for %s and "
+                            "session %s is on no account — dropping it rather "
+                            "than re-queueing an unresumable id",
+                            instance.id, original_session_id[:12],
+                        )
                 return fresh
 
             # Model-specific limit (e.g. "You've reached your Fable 5
@@ -3930,20 +3970,72 @@ class ClaudeRunner:
         )
 
         # --- Freshness-aware path ---
-        # Gather candidates across every configured account × {cwd, repo}
-        # encoding, INCLUDING the target itself.  Pick the freshest.
+        # Gather candidates across every configured account × every encoding
+        # this conversation could be filed under, INCLUDING the target itself.
+        # Pick the freshest.
+        #
+        # The encodings are not just {cwd, repo}.  The CLI names a project dir
+        # after the path it was launched from, so the SAME repo produces a
+        # different dir per machine — `C--Users-...` written from Windows,
+        # `-run-media-...` written from Linux, off one shared drive.  Asking
+        # the path map for every known spelling turns those into candidates
+        # instead of dead ends; without it, resuming on the other machine is a
+        # guaranteed "No conversation found" no matter how healthy everything
+        # else is.
+        encodings: list[str] = []
+        for base in (cwd, instance.repo_path):
+            if not base:
+                continue
+            for spelling in (paths.aliases(base) or [base]):
+                enc = self._encode_project_path(spelling)
+                if enc and enc not in encodings:
+                    encodings.append(enc)
+
         candidates: list[Path] = []
         seen: set[str] = set()
-        for acct in (config.CLAUDE_ACCOUNTS or [account_dir]):
-            for enc in (encoded_cwd, encoded_repo):
-                if not enc:
-                    continue
+        accounts = list(config.CLAUDE_ACCOUNTS or [account_dir])
+        for acct in accounts:
+            for enc in encodings:
                 p = Path(acct) / "projects" / enc / f"{session_id}.jsonl"
                 key = str(p)
                 if key in seen:
                     continue
                 seen.add(key)
                 candidates.append(p)
+
+        # Catch-all: a session id is a UUID, so a filename match is an exact
+        # identification rather than a guess.  This finds history filed under a
+        # spelling nothing here can derive — a live-USB mount point, a repo
+        # that moved, a second checkout of the same project — which is the
+        # difference between "recovers on its own" and "needs a human to
+        # notice".  One directory listing per account, only ever on the path
+        # where the derived candidates already came up empty.
+        if not any(p.exists() for p in candidates):
+            def _scan() -> list[Path]:
+                found: list[Path] = []
+                for acct in accounts:
+                    root = Path(acct) / "projects"
+                    try:
+                        found.extend(root.glob(f"*/{session_id}.jsonl"))
+                    except OSError:
+                        continue
+                return found
+
+            try:
+                for extra in await asyncio.to_thread(_scan):
+                    key = str(extra)
+                    if key not in seen:
+                        seen.add(key)
+                        candidates.append(extra)
+                        log.info(
+                            "Hydrate: found session %s under unmapped project "
+                            "dir %s for %s",
+                            session_id[:12], extra.parent.name, instance.id,
+                        )
+            except Exception:
+                log.exception(
+                    "Hydrate catch-all scan raised for %s", session_id[:12],
+                )
 
         def _gather_freshness() -> list[tuple[Path, datetime | None, int]]:
             """Stat + parse last-timestamp for each existing candidate.

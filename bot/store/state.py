@@ -10,11 +10,59 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from bot import paths
 from bot.claude.types import ChainPhaseState, Instance, InstanceStatus, InstanceType, Schedule
 from bot.engine.auto_fix import AutoFixState
 from bot.engine.deploy import DeployState
 
 log = logging.getLogger(__name__)
+
+# Absolute paths recorded per instance. `prompt` also mentions paths in a few
+# historical records, but that is conversation text — rewriting it would
+# falsify the record rather than repair it.
+_INSTANCE_PATH_FIELDS = ("repo_path", "worktree_path", "session_account")
+# Maps whose KEYS are account directories.
+_ACCOUNT_KEYED = ("account_cooldowns", "model_cooldowns", "account_alerts")
+
+
+def _localise_paths(data: dict) -> None:
+    """Rewrite stored absolute paths into this machine's spelling, in place.
+
+    The state file is shared verbatim between machines that reach the same
+    directories under different names (a mounted Windows drive read from
+    Linux, and the same drive read from Windows). Every path in it is correct
+    for whichever machine wrote it last, so it is translated on the way in
+    rather than migrated on disk — that keeps both machines writing freely and
+    means neither has to run a conversion before it can start.
+
+    Unknown paths pass through untouched, so a machine with no path map behaves
+    exactly as it did before this existed.
+    """
+    repos = data.get("repos")
+    if isinstance(repos, dict):
+        for name, path in list(repos.items()):
+            if isinstance(path, str):
+                repos[name] = paths.translate(path)
+
+    for inst in data.get("instances") or []:
+        if not isinstance(inst, dict):
+            continue
+        for field in _INSTANCE_PATH_FIELDS:
+            value = inst.get(field)
+            if isinstance(value, str) and value:
+                inst[field] = paths.translate(value)
+
+    # Cooldowns and outage records are keyed by account directory. Left
+    # untranslated, a cooldown set under the other machine's spelling is
+    # invisible here — the account reads as free, gets spawned, and fails
+    # again on the same limit.
+    for key in _ACCOUNT_KEYED:
+        table = data.get(key)
+        if isinstance(table, dict):
+            data[key] = {
+                (paths.translate(k) if isinstance(k, str) else k): v
+                for k, v in table.items()
+            }
 
 
 class StateStore:
@@ -103,6 +151,7 @@ class StateStore:
             return
         try:
             data = json.loads(self._file.read_text(encoding="utf-8"))
+            _localise_paths(data)
             for d in data.get("instances", []):
                 inst = Instance.from_dict(d)
                 self._instances[inst.id] = inst
