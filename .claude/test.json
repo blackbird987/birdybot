@@ -70,7 +70,8 @@
     "account_failover": "python scripts/test_account_failover.py",
     "account_alerts": "python scripts/test_account_alerts.py",
     "paths": "python scripts/verify_paths.py",
-    "dead_session_recovery": "python scripts/test_dead_session_recovery.py"
+    "dead_session_recovery": "python scripts/test_dead_session_recovery.py",
+    "git_prompt_hardening": "python scripts/test_git_prompt_hardening.py"
   },
 
   "auth": {
