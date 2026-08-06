@@ -17,7 +17,22 @@ import time
 # Config — read .env the same way discord_test.py does (no heavy deps)
 # ---------------------------------------------------------------------------
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_PROJECT_ROOT = os.path.dirname(_SCRIPT_DIR)
+_SCRIPT_ROOT = os.path.dirname(_SCRIPT_DIR)
+
+# Health is a property of the *installed* bot. Run from a build worktree this
+# used to read the worktree's own data/logs/bot.log — which is empty, and has
+# no .env beside it either — and report UNHEALTHY for a bot that is running
+# perfectly well. Fall back to the old behaviour if the helper is unavailable
+# for any reason; a health check must never fail to run.
+try:
+    sys.path.insert(0, _SCRIPT_ROOT)
+    from bot.procutil import install_root
+    from pathlib import Path
+
+    _PROJECT_ROOT = str(install_root(Path(_SCRIPT_ROOT)))
+except Exception:
+    _PROJECT_ROOT = _SCRIPT_ROOT
+
 _LOG_FILE = os.path.join(_PROJECT_ROOT, "data", "logs", "bot.log")
 
 ENV_PATH = os.path.join(_PROJECT_ROOT, ".env")

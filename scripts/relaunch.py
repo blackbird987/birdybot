@@ -10,30 +10,8 @@ import sys
 import time
 from pathlib import Path
 
-
-def _is_process_alive(pid: int) -> bool:
-    """Check if a process is still running (cross-platform)."""
-    if sys.platform == "win32":
-        import ctypes
-        kernel32 = ctypes.windll.kernel32
-        handle = kernel32.OpenProcess(0x1000, False, pid)
-        if not handle:
-            return False
-        STILL_ACTIVE = 259
-        exit_code = ctypes.c_ulong()
-        alive = bool(
-            kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
-            and exit_code.value == STILL_ACTIVE
-        )
-        kernel32.CloseHandle(handle)
-        return alive
-    else:
-        import os
-        try:
-            os.kill(pid, 0)
-            return True
-        except OSError:
-            return False
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from bot.procutil import is_process_alive  # noqa: E402  (needs the path above)
 
 
 def main():
@@ -51,7 +29,7 @@ def main():
             break
         try:
             old_pid = int(pid_file.read_text().strip())
-            if not _is_process_alive(old_pid):
+            if not is_process_alive(old_pid):
                 break
         except (ValueError, OSError):
             break

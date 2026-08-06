@@ -23,6 +23,7 @@ from bot.claude.types import InstanceStatus
 from bot.engine import commands as engine_commands
 from bot.platform.base import NotificationService
 from bot.platform.formatting import redact_secrets
+from bot.procutil import is_bot_process, is_process_alive
 from bot.scheduler import Scheduler
 from bot.store.state import StateStore
 
@@ -63,41 +64,34 @@ def setup_logging() -> None:
     logging.getLogger("discord").setLevel(logging.WARNING)
 
 
-def _is_process_alive(pid: int) -> bool:
-    """Check if a process with the given PID is still running (cross-platform)."""
-    if sys.platform == "win32":
-        import ctypes
-        kernel32 = ctypes.windll.kernel32
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-        if not handle:
-            return False
-        # Check if process has actually exited
-        STILL_ACTIVE = 259
-        exit_code = ctypes.c_ulong()
-        alive = bool(
-            kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
-            and exit_code.value == STILL_ACTIVE
-        )
-        kernel32.CloseHandle(handle)
-        return alive
-    else:
-        try:
-            os.kill(pid, 0)
-            return True
-        except OSError:
-            return False
-
-
 def _acquire_pid_lock() -> bool:
-    """Write PID file, refusing to start if another instance is alive."""
+    """Write PID file, refusing to start if another instance is alive.
+
+    Liveness alone is not enough: after an unclean exit the PID file outlives
+    the process, and the kernel eventually recycles that number onto something
+    unrelated — at which point the bot would refuse to start forever with no
+    second instance anywhere. So the PID must also still *look* like the bot.
+    ``is_bot_process`` only says no on positive evidence, so an unreadable or
+    ambiguous process is still treated as a live instance and we stand down.
+    """
     pid_file = config.DATA_DIR / "bot.pid"
     if pid_file.exists():
         try:
             old_pid = int(pid_file.read_text().strip())
-            if old_pid != os.getpid() and _is_process_alive(old_pid):
-                log.error("Another bot instance is running (PID %d). Exiting.", old_pid)
-                return False
+            if old_pid != os.getpid() and is_process_alive(old_pid):
+                # No `root` here on purpose: a false "not ours" would start a
+                # second instance, so only the argv evidence is used. botctl
+                # can afford the stricter check because its failure mode is
+                # refusing to signal.
+                if is_bot_process(old_pid):
+                    log.error(
+                        "Another bot instance is running (PID %d). Exiting.", old_pid
+                    )
+                    return False
+                log.info(
+                    "PID file holds %d, but that process is not this bot "
+                    "(recycled PID) — taking over", old_pid
+                )
             else:
                 log.info("Stale PID file (PID %d no longer running), taking over", old_pid)
         except (ValueError, OSError):

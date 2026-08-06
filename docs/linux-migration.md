@@ -18,9 +18,10 @@ is gated behind a `sys_platform == "win32"` marker so Linux skips it.
   `os.killpg(..., SIGKILL)` on POSIX. Both implemented
   (`bot/engine/usage.py`, `bot/engine/sensors.py`).
 - **Opening a login terminal for `claude /login`** — spawns `cmd.exe` on
-  Windows, and on POSIX tries `x-terminal-emulator`, `gnome-terminal`,
-  `konsole`, `xterm` in turn. **Konsole is the Fedora KDE default**, so this
-  path is covered (`bot/services/auth_sync.py`).
+  Windows, and on POSIX tries `gnome-terminal`, `kgx`, `ptyxis`, `konsole`,
+  `xfce4-terminal`, `alacritty`, `kitty`, `x-terminal-emulator` and `xterm` in
+  that order, each with the argument form it actually accepts. **Konsole is the
+  Fedora KDE default**, so this path is covered (`bot/services/auth_sync.py`).
 - **"Can this host show a window?"** — checks the Windows station on Windows,
   `$DISPLAY` / `$WAYLAND_DISPLAY` on POSIX.
 - **Hiding subprocess console windows** — `CREATE_NO_WINDOW` is applied only

@@ -8,7 +8,7 @@ a config path derived from $HOME resolves correctly on Windows and to an
 empty directory on Linux. This script makes that class of problem fail loudly.
 
 Checks:
-  1. Line endings match the .gitattributes policy (LF, except *.bat & friends).
+  1. Every text blob in the git index is LF.
   2. Shell scripts are marked executable in git's index.
   3. Files Windows can't create (reserved names, ':' etc.) aren't tracked.
   4. Nothing hardcodes a drive letter or a backslash-joined path.
@@ -26,9 +26,6 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-
-# Extensions that legitimately keep CRLF — must mirror .gitattributes.
-CRLF_OK = {".bat", ".cmd", ".ps1", ".vbs"}
 
 # Names Windows refuses regardless of extension.
 WIN_RESERVED = {
@@ -60,8 +57,14 @@ def tracked_files() -> list[tuple[str, str]]:
 
 
 def check_line_endings() -> None:
-    """Every text blob in HEAD must be LF; CRLF belongs only in the working
-    tree, applied by .gitattributes on checkout.
+    """Every text blob in the index must be LF — including the .bat files.
+
+    No extension is exempt, and an earlier version's exemption list for
+    `.bat`/`.cmd`/`.ps1`/`.vbs` was a misreading of how git works. `eol=crlf`
+    is a *working tree* directive: git stores those files as LF like everything
+    else and converts on checkout. All 140 tracked text blobs here read `i/lf`,
+    so the list never once fired — it was pure hole, skipping the only files
+    whose CRLF would have been deliberate enough to look plausible.
 
     Answered by a single `git ls-files --eol`, which reports the index
     encoding for every tracked file at once. The first version shelled out to
@@ -80,7 +83,7 @@ def check_line_endings() -> None:
     for line in out.splitlines():
         attrs, _, path = line.partition("\t")
         path = path.strip()
-        if not path or Path(path).suffix.lower() in CRLF_OK:
+        if not path:
             continue
         index_eol = next(
             (f[2:] for f in attrs.split() if f.startswith("i/")), ""
