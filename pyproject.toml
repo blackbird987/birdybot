@@ -16,6 +16,16 @@ dependencies = [
     "psutil>=5.9",
 ]
 
+[project.optional-dependencies]
+# Local meeting capture (bot/services/meeting.py). Machine-specific — needs a
+# working audio backend and, for GPU inference, CUDA. Imported gracefully, like
+# pywin32 for Outlook, so the bot runs fine without them.
+meeting = [
+    "soundcard>=0.4.2",
+    "faster-whisper>=1.0",
+    "numpy>=1.24",
+]
+
 [project.scripts]
 claude-bot = "bot.__main__:main"
 
