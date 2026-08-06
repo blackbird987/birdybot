@@ -485,6 +485,84 @@ def test_state_localisation() -> None:
           list(data["account_cooldowns"]), [lin + "/.claude-klerk"])
 
 
+# --------------------------------------------------------------------------
+# 9. Nothing about translation can cost us the state file
+# --------------------------------------------------------------------------
+def test_translation_cannot_lose_state() -> None:
+    """A path rewrite that blows up must degrade, not wipe.
+
+    The state loader's own handler recovers by "starting fresh", and for
+    data/state.json that means every repo, instance and forum-thread mapping
+    is gone and the next auto-save writes the empty version over the real one.
+    Translation is new code running on every boot, so it gets its own net.
+    """
+    print("\n[9] A failing path rewrite degrades instead of wiping the state")
+    from bot.claude.types import Instance, InstanceStatus, InstanceType
+    from bot.store import state as state_mod
+
+    tmp = Path(tempfile.mkdtemp(prefix="bot-loseless-"))
+    try:
+        # Round-tripped through the real dataclass rather than hand-written, so
+        # this fixture cannot rot into an unloadable record when the schema
+        # gains a field and quietly turn the check into a tautology.
+        inst = Instance(
+            id="q-1", name="q-1", instance_type=InstanceType.QUERY,
+            prompt="x", repo_name="bot", repo_path="/somewhere/bot",
+            status=InstanceStatus.COMPLETED,
+        )
+        state_file = tmp / "state.json"
+        state_file.write_text(json.dumps({
+            "repos": {"bot": "/somewhere/bot"},
+            "instances": [inst.to_dict()],
+        }), encoding="utf-8")
+
+        original = state_mod._localise_paths
+
+        def _explode(_data):
+            raise RuntimeError("simulated translation failure")
+
+        state_mod._localise_paths = _explode
+        try:
+            store = state_mod.StateStore(state_file, tmp / "results")
+        finally:
+            state_mod._localise_paths = original
+
+        check("repos survived a translation crash", store.list_repos(),
+              {"bot": "/somewhere/bot"})
+        check("instances survived a translation crash",
+              len(store.list_instances(all_=True)), 1)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
+# 10. Case folding may never change a path's length
+# --------------------------------------------------------------------------
+def test_fold_is_length_preserving() -> None:
+    """The remainder is sliced off the raw path at an offset measured on the
+    folded one, so a fold that changes length silently truncates.  Turkish
+    dotted capital I is the classic offender: str.lower() turns it into two
+    characters.  Folding ASCII only keeps the two lengths locked together.
+    """
+    print("\n[10] Case folding keeps the path length intact")
+    tricky = "C:/Users/İstanbul/Straße/ΣΩ"
+    check("fold preserves length", len(paths._cmp(tricky)), len(tricky))
+    check("plain lower() would NOT have", len(tricky.lower()) == len(tricky), False)
+
+    # And end to end: a root whose name carries one of those characters must
+    # translate to a whole path, not a shortened one.
+    win = "C:/Users/İstanbul"
+    lin = "/mnt/win/Users/İstanbul"
+    paths.reset_for_test({"g1": [win, lin]}, {"g1": lin})
+    check("no truncation under a non-ASCII root",
+          paths.translate(win + "/Desktop/Programming/bot"),
+          lin + "/Desktop/Programming/bot")
+
+    # Drive-letter case still folds, which is the case that actually occurs.
+    paths.reset_for_test({"g1": ["C:/Users/Quincy", "/mnt/q"]}, {"g1": "/mnt/q"})
+    check("ASCII case still folds", paths.translate("c:/USERS/quincy/x"), "/mnt/q/x")
+
+
 def show_live_map() -> None:
     """Print the real map without modifying anything."""
     os.environ.pop("BOT_PATHS_DISABLED", None)
@@ -518,6 +596,8 @@ def main() -> int:
     test_history_lookup()
     test_refusal_honesty()
     test_state_localisation()
+    test_translation_cannot_lose_state()
+    test_fold_is_length_preserving()
 
     print(f"\n{_checks - len(_failures)}/{_checks} checks passed")
     if _failures:

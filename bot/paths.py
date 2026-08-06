@@ -64,14 +64,26 @@ def _norm(p: str | os.PathLike) -> str:
     return str(p).replace("\\", "/").rstrip("/")
 
 
+# ASCII-only, and that is the point: str.lower() is not length-preserving for
+# every character ('İ' becomes two), and _match slices the *un-folded* path at
+# an offset measured on the folded one. A translate() table maps one character
+# to one character, so the two lengths can never drift apart. The cost is that
+# a root differing only by non-ASCII case fails to match — which means
+# pass-through, the documented safe outcome, rather than a truncated path.
+_FOLD = str.maketrans(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+    "abcdefghijklmnopqrstuvwxyz",
+)
+
+
 def _cmp(p: str) -> str:
-    """Case-folded comparison key.
+    """Case-folded comparison key, guaranteed same length as the input.
 
     Roots are user-profile directories on volumes that are case-insensitive in
     practice (NTFS, and NTFS-via-fuse from Linux). Folding avoids a spelling
     mismatch on drive letter or profile-name case defeating the whole map.
     """
-    return _norm(p).lower()
+    return _norm(p).translate(_FOLD)
 
 
 def _is_windows_style(p: str) -> bool:
@@ -254,9 +266,9 @@ def init(
             # Adopt the id of a group this root is already listed in, so a
             # deleted marker rejoins its group instead of splitting off a
             # duplicate that translates nothing.
-            here = _cmp(local_root)
+            key = _cmp(local_root)
             gid = next(
-                (g for g, ms in _groups.items() if any(_cmp(m) == here for m in ms)),
+                (g for g, ms in _groups.items() if any(_cmp(m) == key for m in ms)),
                 None,
             ) or uuid.uuid4().hex
             _write_marker(local_root, gid)

@@ -73,11 +73,24 @@ def _localise_paths(data: dict) -> None:
     # again on the same limit.
     for key in _ACCOUNT_KEYED:
         table = data.get(key)
-        if isinstance(table, dict):
-            data[key] = {
-                (paths.translate(k) if isinstance(k, str) else k): v
-                for k, v in table.items()
-            }
+        if not isinstance(table, dict):
+            continue
+        merged: dict = {}
+        for k, v in table.items():
+            local = paths.translate(k) if isinstance(k, str) else k
+            if local in merged and merged[local] != v:
+                # Two spellings of one account carrying different records.
+                # Normal saves can't produce this (the whole table is rewritten
+                # in the local spelling every time), so it means a hand-edited
+                # file — worth a line in the log rather than a value that
+                # vanishes without explanation.
+                log.warning(
+                    "%s: %r and %r are the same account with different records "
+                    "— keeping the first", key, k, local,
+                )
+                continue
+            merged[local] = v
+        data[key] = merged
 
 
 class StateStore:
@@ -166,7 +179,16 @@ class StateStore:
             return
         try:
             data = json.loads(self._file.read_text(encoding="utf-8"))
-            _localise_paths(data)
+            # Deliberately isolated from the load below.  Everything after this
+            # point is inside a handler whose recovery is "start fresh" — which
+            # for this file means every repo, instance and thread mapping is
+            # dropped and the next auto-save overwrites the real one.  A path
+            # rewrite failing is a degradation (paths stay in the other
+            # machine's spelling); it must never escalate to losing the state.
+            try:
+                _localise_paths(data)
+            except Exception:
+                log.exception("Path localisation failed — loading paths as stored")
             for d in data.get("instances", []):
                 inst = Instance.from_dict(d)
                 self._instances[inst.id] = inst

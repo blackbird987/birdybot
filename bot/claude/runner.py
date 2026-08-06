@@ -4004,8 +4004,14 @@ class ClaudeRunner:
                 if enc and enc not in encodings:
                     encodings.append(enc)
 
-        candidates: list[Path] = []
-        seen: set[str] = set()
+        # Seeded with the target rather than trusting it to fall out of the
+        # loops below.  "Target is freshest -> keep it" is only reachable if the
+        # target is in this list; if it silently dropped out (an account_dir
+        # spelled differently from its CLAUDE_ACCOUNTS entry, a cwd with a
+        # trailing separator), the winner could never be the target and a stale
+        # cross-account copy would overwrite a perfectly good local history.
+        candidates: list[Path] = [target_file]
+        seen: set[str] = {str(target_file)}
         accounts = list(config.CLAUDE_ACCOUNTS or [account_dir])
         for acct in accounts:
             for enc in encodings:
