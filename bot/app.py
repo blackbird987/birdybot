@@ -339,10 +339,10 @@ def _audit_repo_portability(store: StateStore) -> None:
     Log-only, deliberately: which copy is the right one is a judgement call,
     and silently re-pointing a repo is a far worse failure than saying so.
     """
+    log.info("%s", paths.describe())
     repos = store.list_repos()
     if not repos:
         return
-    log.info("%s", paths.describe())
     stray = {n: p for n, p in repos.items() if not paths.is_portable(p)}
     if not stray:
         return

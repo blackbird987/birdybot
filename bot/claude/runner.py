@@ -119,6 +119,13 @@ REBUILD_TIMEOUT_SECS = 30
 # correlated resume attempts shouldn't re-scan every account on disk.
 HYDRATE_CACHE_TTL_SECS = 60
 
+# Session ids are UUIDs. Asserted before one is interpolated into a glob, since
+# a stray wildcard there would match a DIFFERENT conversation's file.
+_UUID_RE = re.compile(
+    r"\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z"
+)
+
 
 @dataclass
 class PrecheckResult:
@@ -872,12 +879,18 @@ class ClaudeRunner:
         # -out account at all used to be enough to print it, so a single dead
         # backup made a healthy primary — the one answering at that very
         # moment — read as signed out, and pointed the user at re-authenticating
-        # something that was never broken.  Anything short of a clean sweep is
-        # simply nothing free right now.
-        all_signed_out = bool(config.CLAUDE_ACCOUNTS) and logged_out >= set(
-            config.CLAUDE_ACCOUNTS
-        )
-        return grace, ("accounts_logged_out" if all_signed_out else "no_account_free")
+        # something that was never broken.
+        #
+        # Three states, not two, because the middle one is the common one and
+        # collapsing it either way loses something: called a clean sweep it
+        # lies, called "nothing free" it drops the auth panel that would in
+        # fact unblock this.  Signing the dead account back in is still the
+        # fastest way out, so say so and offer the button.
+        if bool(config.CLAUDE_ACCOUNTS) and logged_out >= set(config.CLAUDE_ACCOUNTS):
+            return grace, "accounts_logged_out"
+        if logged_out:
+            return grace, "some_accounts_logged_out"
+        return grace, "no_account_free"
 
     def _soften_auth_dead_end(
         self, result: RunResult, instance: Instance, dead_account: str,
@@ -4010,7 +4023,14 @@ class ClaudeRunner:
         # difference between "recovers on its own" and "needs a human to
         # notice".  One directory listing per account, only ever on the path
         # where the derived candidates already came up empty.
-        if not any(p.exists() for p in candidates):
+        #
+        # The UUID shape is CHECKED, not assumed: the id is interpolated into a
+        # glob pattern, so anything carrying `*` or `?` would silently widen
+        # this from "the conversation we want" to "some other conversation",
+        # and hydrating the wrong history is worse than finding none.
+        if _UUID_RE.match(session_id or "") and not any(
+            p.exists() for p in candidates
+        ):
             def _scan() -> list[Path]:
                 found: list[Path] = []
                 for acct in accounts:
@@ -4178,20 +4198,19 @@ class ClaudeRunner:
             return target_file.exists()
         self._hydrate_cache[cache_key] = now
 
-        # Build candidate source paths: every OTHER account × {cwd, repo_path}.
+        # Build candidate source paths: every OTHER account × every encoding
+        # this conversation could be filed under (the same set the freshness
+        # path used — reusing it rather than re-deriving {cwd, repo} keeps this
+        # fallback from being quietly blinder than the path it backs up).
         # The current account's own paths are already covered by the
         # target_file check and same-account fast path above.
-        accounts = list(config.CLAUDE_ACCOUNTS) or [account_dir]
         candidates: list[Path] = []
         for acct in accounts:
             if acct == account_dir:
                 continue
-            candidates.append(
-                Path(acct) / "projects" / encoded_cwd / f"{session_id}.jsonl"
-            )
-            if encoded_repo and encoded_repo != encoded_cwd:
+            for enc in encodings:
                 candidates.append(
-                    Path(acct) / "projects" / encoded_repo / f"{session_id}.jsonl"
+                    Path(acct) / "projects" / enc / f"{session_id}.jsonl"
                 )
 
         def _copy_first_match() -> Path | None:

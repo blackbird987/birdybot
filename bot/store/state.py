@@ -17,10 +17,19 @@ from bot.engine.deploy import DeployState
 
 log = logging.getLogger(__name__)
 
-# Absolute paths recorded per instance. `prompt` also mentions paths in a few
-# historical records, but that is conversation text — rewriting it would
-# falsify the record rather than repair it.
-_INSTANCE_PATH_FIELDS = ("repo_path", "worktree_path", "session_account")
+# Absolute paths recorded per instance that are later OPENED — the working
+# tree, the build worktree, the account dir that owns the session, and the two
+# artefact files behind /log and /diff (also read back when a forum thread
+# rebuilds its history). Untranslated, those two are the quiet failure: the
+# instance list renders fine and the button just returns nothing.
+#
+# `prompt`, `bash_commands` and `path_poisoning` also contain absolute paths
+# and are deliberately left alone — they are a record of what was said and
+# done, not a handle to open, and rewriting them would falsify history rather
+# than repair it.
+_INSTANCE_PATH_FIELDS = (
+    "repo_path", "worktree_path", "session_account", "result_file", "diff_file",
+)
 # Maps whose KEYS are account directories.
 _ACCOUNT_KEYED = ("account_cooldowns", "model_cooldowns", "account_alerts")
 
@@ -51,6 +60,12 @@ def _localise_paths(data: dict) -> None:
             value = inst.get(field)
             if isinstance(value, str) and value:
                 inst[field] = paths.translate(value)
+
+    # A schedule fires unattended, so a repo path spelled for the other machine
+    # fails with nobody watching.
+    for sched in data.get("schedules") or []:
+        if isinstance(sched, dict) and isinstance(sched.get("repo_path"), str):
+            sched["repo_path"] = paths.translate(sched["repo_path"])
 
     # Cooldowns and outage records are keyed by account directory. Left
     # untranslated, a cooldown set under the other machine's spelling is

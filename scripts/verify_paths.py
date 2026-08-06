@@ -211,6 +211,59 @@ def test_self_assembly() -> None:
             os.environ["BOT_PATHS_DISABLED"] = "1"
 
 
+def test_marker_walk_detection() -> None:
+    print("\n[4b] A mount point no configuration predicted still finds itself")
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        os.environ.pop("BOT_PATHS_DISABLED", None)
+        try:
+            # The volume came up somewhere nobody could have written down: a
+            # live session, a relabelled drive. The configured account paths
+            # resolve to nothing here and $HOME is a throwaway profile — but
+            # the marker is sitting on the volume, above the code.
+            root = tmp / "media" / "liveuser" / "8A31-2F0C" / "Users" / "Quincy"
+            repo = root / "Desktop" / "Programming" / "bot"
+            repo.mkdir(parents=True)
+            shared_id = uuid.uuid4().hex
+            (root / paths.MARKER_NAME).write_text(shared_id + "\n")
+
+            throwaway = tmp / "home" / "liveuser"
+            throwaway.mkdir(parents=True)
+
+            found = paths.detect_local_root(
+                ["C:/Users/Quincy/.claude"],  # does not exist here
+                home=throwaway,
+                here=repo,
+            )
+            check("marker above the code identifies the root", found, root)
+
+            # And with no marker anywhere, it still falls back rather than
+            # inventing something.
+            (root / paths.MARKER_NAME).unlink()
+            check(
+                "no marker falls back to home",
+                paths.detect_local_root([], home=throwaway, here=repo),
+                throwaway,
+            )
+
+            # Restore it and check init() wires the whole thing up, so a path
+            # written under the Windows name resolves at this mount point.
+            (root / paths.MARKER_NAME).write_text(shared_id + "\n")
+            data = tmp / "data"
+            (data).mkdir(parents=True, exist_ok=True)
+            (data / paths.ROOTS_FILENAME).write_text(json.dumps(
+                {"version": 1, "groups": {shared_id: ["C:/Users/Quincy"]}}
+            ))
+            paths.init(data_dir=data, account_hints=[], here=repo)
+            check(
+                "a Windows-written path resolves at the live mount",
+                paths.translate("C:/Users/Quincy/Desktop/Programming/bot"),
+                str(repo).replace("\\", "/"),
+            )
+        finally:
+            os.environ["BOT_PATHS_DISABLED"] = "1"
+
+
 def test_no_map_is_passthrough() -> None:
     print("\n[5] With no map at all, nothing is rewritten")
     paths.reset_for_test({}, {})
@@ -306,6 +359,17 @@ def test_history_lookup() -> None:
                 )
             )
             check("a genuinely absent conversation stays absent", ok3, False)
+
+            # The id goes into a glob pattern, so a wildcard in it would match
+            # somebody ELSE's conversation and hydrate that instead. A real
+            # jsonl is sitting in `stray` for it to grab if the guard is gone.
+            inst4 = _mk("q-test4", "*")
+            ok4 = asyncio.run(
+                runner._hydrate_session_for_account(
+                    str(acct), repo_linux, "*", inst4,
+                )
+            )
+            check("a wildcard id matches nothing", ok4, False)
         finally:
             config.CLAUDE_ACCOUNTS = saved_accounts
 
@@ -324,13 +388,33 @@ def test_refusal_honesty() -> None:
     try:
         runner._account_cooldowns = {}
         _, reason = runner._refusal_retry_plan({"/acct/backup"})
-        check("one of two signed out is NOT a sweep", reason, "no_account_free")
+        check(
+            "one of two signed out is NOT a sweep",
+            reason, "some_accounts_logged_out",
+        )
 
         _, reason = runner._refusal_retry_plan({"/acct/main", "/acct/backup"})
         check("both signed out IS a sweep", reason, "accounts_logged_out")
 
         _, reason = runner._refusal_retry_plan(set())
         check("none signed out", reason, "no_account_free")
+
+        # Every reason the refusal can produce must have copy written for it,
+        # and the ones a login would fix must offer the auth panel — otherwise
+        # narrowing the wording quietly removes the button that fixes it.
+        from bot.engine.lifecycle import _AUTH_RETRY_REASONS, _RETRY_HEADLINES
+
+        for r in ("accounts_logged_out", "some_accounts_logged_out",
+                  "no_account_free", "backup_logged_out"):
+            check_true(f"copy exists for {r}", r in _RETRY_HEADLINES)
+        check_true(
+            "partial logout still offers the auth panel",
+            "some_accounts_logged_out" in _AUTH_RETRY_REASONS,
+        )
+        check(
+            "'nothing free' does not claim a login problem",
+            "no_account_free" in _AUTH_RETRY_REASONS, False,
+        )
 
         # A live cooldown is a real wall-clock moment and keeps priority.
         from datetime import datetime, timedelta, timezone
@@ -363,8 +447,15 @@ def test_state_localisation() -> None:
             "repo_path": "C:/Users/Quincy/Desktop/Programming/bot",
             "worktree_path": "C:/Users/Quincy/Desktop/Programming/bot/.worktrees/t-1",
             "session_account": "C:/Users/Quincy/.claude",
+            # Opened by /log and /diff, and when a forum thread rebuilds its
+            # history — the failure is silent, so it is easy to miss.
+            "result_file": "C:/Users/Quincy/Desktop/Programming/bot/data/results/q-1.md",
+            "diff_file": "C:/Users/Quincy/Desktop/Programming/bot/data/results/q-1.diff",
             "prompt": "left alone: C:/Users/Quincy/notes.txt",
+            "bash_commands": ["ls C:/Users/Quincy/x"],
+            "path_poisoning": ["C:/Users/Quincy/Desktop/Programming/bot/CHANGELOG.md"],
         }],
+        "schedules": [{"id": "s1", "repo_path": "C:/Users/Quincy/Desktop/Programming/bot"}],
         "account_cooldowns": {"C:/Users/Quincy/.claude-klerk": "2026-08-06T00:00:00Z"},
     }
     _localise_paths(data)
@@ -378,8 +469,18 @@ def test_state_localisation() -> None:
           lin + "/Desktop/Programming/bot/.worktrees/t-1")
     check("account pin localised", data["instances"][0]["session_account"],
           lin + "/.claude")
+    check("result file localised", data["instances"][0]["result_file"],
+          lin + "/Desktop/Programming/bot/data/results/q-1.md")
+    check("diff file localised", data["instances"][0]["diff_file"],
+          lin + "/Desktop/Programming/bot/data/results/q-1.diff")
+    check("schedule repo localised", data["schedules"][0]["repo_path"],
+          lin + "/Desktop/Programming/bot")
     check("prompt text NOT rewritten", data["instances"][0]["prompt"],
           "left alone: C:/Users/Quincy/notes.txt")
+    check("bash history NOT rewritten", data["instances"][0]["bash_commands"],
+          ["ls C:/Users/Quincy/x"])
+    check("poisoning record NOT rewritten", data["instances"][0]["path_poisoning"],
+          ["C:/Users/Quincy/Desktop/Programming/bot/CHANGELOG.md"])
     check("cooldown key localised",
           list(data["account_cooldowns"]), [lin + "/.claude-klerk"])
 
@@ -412,6 +513,7 @@ def main() -> int:
     test_aliases()
     test_is_portable()
     test_self_assembly()
+    test_marker_walk_detection()
     test_no_map_is_passthrough()
     test_history_lookup()
     test_refusal_honesty()

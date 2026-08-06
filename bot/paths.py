@@ -118,14 +118,52 @@ def _write_marker(root: Path, gid: str) -> bool:
         return False
 
 
-def detect_local_root(account_hints: list[str], home: Path | None = None) -> Path | None:
+def _marker_ancestor(here: Path | None) -> Path | None:
+    """Nearest ancestor of ``here`` already carrying a root marker.
+
+    The strongest signal available, because it is evidence rather than
+    inference: some machine previously claimed that directory as a root and
+    left proof on the disk.  Everything else here guesses from configuration.
+
+    It is also the only thing that copes with a mount point nobody could have
+    predicted — a live USB session, a drive that came up under a different
+    label — where the configured account paths resolve to nothing and
+    ``Path.home()`` is a throwaway ramdisk profile.  Walking up from the code's
+    own location finds the marker anyway, because the code is sitting on the
+    volume in question.
+    """
+    if here is None:
+        return None
+    try:
+        start = Path(here).resolve()
+    except (OSError, RuntimeError):
+        return None
+    for d in (start, *start.parents):
+        try:
+            if (d / MARKER_NAME).is_file():
+                return d
+        except OSError:
+            continue
+    return None
+
+
+def detect_local_root(
+    account_hints: list[str],
+    home: Path | None = None,
+    here: Path | None = None,
+) -> Path | None:
     """The user root as reachable from *this* machine.
 
-    Derived from the first configured account directory that actually exists —
-    on Linux that is the mounted Windows profile, which is the root that
-    matters.  ``Path.home()`` is the fallback and the normal answer on Windows,
-    where the shared ``.env`` names Linux paths that resolve to nothing.
+    Marker first (see ``_marker_ancestor``), then the first configured account
+    directory that actually exists — on Linux that is the mounted Windows
+    profile, which is the root that matters.  ``Path.home()`` is the last
+    resort and the right answer on a first-ever boot, and on Windows before
+    Linux has run, where the shared ``.env`` names paths that resolve to
+    nothing.
     """
+    marked = _marker_ancestor(here)
+    if marked is not None:
+        return marked
     for hint in account_hints:
         if not hint:
             continue
@@ -185,6 +223,7 @@ def init(
     data_dir: Path,
     account_hints: list[str] | None = None,
     home: Path | None = None,
+    here: Path | None = None,
 ) -> None:
     """Load the root map and record this machine's spelling in it.
 
@@ -208,7 +247,7 @@ def init(
     _groups = _load_file(_roots_file)
     _local = {}
 
-    local_root = detect_local_root(account_hints or [], home)
+    local_root = detect_local_root(account_hints or [], home, here)
     if local_root is not None:
         gid = _read_marker(local_root)
         if gid is None:

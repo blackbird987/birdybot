@@ -48,6 +48,10 @@ _paths.init(
     account_hints=[
         p.strip() for p in os.getenv("CLAUDE_ACCOUNTS", "").split(",") if p.strip()
     ],
+    # Where the code itself is sitting. Lets the root be identified by walking
+    # up to an existing marker, which is the only detection that survives a
+    # mount point no configuration predicted (a live USB, a relabelled drive).
+    here=_PROJECT_ROOT,
 )
 
 
