@@ -250,6 +250,70 @@ _check("embedded token never reaches Discord",
        repr(git_fail_reason(_LEAK)))
 
 
+# --------------------------------------------------------------------------
+# 4. The scrubber this leans on, which had no test of its own
+# --------------------------------------------------------------------------
+# Every credential form git can quote back inside an error must vanish...
+for _label, _line, _secret in (
+    ("classic PAT",
+     "fatal: Authentication failed for "
+     "'https://me:ghp_AbC123AbC123AbC123AbC123@github.com/o/r.git/'",
+     "ghp_AbC123AbC123AbC123AbC123"),
+    ("fine-grained PAT",
+     "fatal: Authentication failed for "
+     "'https://me:github_pat_11ABCDEFG0aBcDeFgHiJkL@github.com/o/r.git/'",
+     "github_pat_11ABCDEFG0aBcDeFgHiJkL"),
+    ("plain password",
+     "fatal: Authentication failed for "
+     "'https://me:CorrectHorseBattery@github.com/o/r.git/'",
+     "CorrectHorseBattery"),
+    # Regression: the userinfo rule used to require 8+ characters, so a short
+    # password was printed verbatim. Nothing in that field is ever safe.
+    ("short password",
+     "fatal: Authentication failed for 'https://me:hunter2@github.com/o/r.git/'",
+     "hunter2"),
+    # Regression: a token can *be* the userinfo, with no password half, and an
+    # unrecognised vendor format matches none of the token patterns.
+    ("vendor token as userinfo",
+     "fatal: Authentication failed for "
+     "'https://glpat-xY9zAbC123dEfGhI@gitlab.com/o/r.git/'",
+     "glpat-xY9zAbC123dEfGhI"),
+):
+    _check(f"redacted: {_label}", _secret not in git_fail_reason(_line),
+           repr(git_fail_reason(_line)))
+
+# ...while a real username in a remote URL is not a secret, and blanking it
+# would make the bot's own SSH remotes unreadable.
+for _label, _line, _keep in (
+    ("ssh git user", "fatal: Could not read from remote repository "
+                     "'ssh://git@github.com/o/r.git'", "git@github.com"),
+    ("oauth2 user", "error: cannot spawn ssh://oauth2@gitlab.com/o/r.git",
+     "oauth2@gitlab.com"),
+    ("x-access-token", "fatal: unable to access "
+                       "'https://x-access-token@github.com/o/r.git/'",
+     "x-access-token@github.com"),
+):
+    _check(f"preserved: {_label}", _keep in git_fail_reason(_line),
+           repr(git_fail_reason(_line)))
+
+# And the scrubber must not mangle an ordinary git error into nonsense — the
+# aggressive key=value rule fires on words like "password" and "token", which
+# git and GitHub both use in perfectly ordinary sentences.
+for _line in (
+    "fatal: could not read Username for 'https://github.com': "
+    "terminal prompts disabled",
+    "remote: Invalid username or token. Password authentication is not "
+    "supported for Git operations.",
+    "remote: HTTP Basic: Access denied. The provided password or token is "
+    "incorrect.",
+    "fatal: unable to access 'https://github.com/o/r.git/': "
+    "The requested URL returned error: 403",
+    "error: failed to push some refs to 'github.com:owner/repo.git'",
+):
+    _check("ordinary error survives intact", "[REDACTED]" not in git_fail_reason(_line),
+           repr(git_fail_reason(_line)))
+
+
 if _failures:
     print(f"FAIL ({len(_failures)} case(s)):")
     for f in _failures:

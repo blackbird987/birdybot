@@ -1579,7 +1579,8 @@ async def _handle_sync_git(
             cwd=repo_path, capture_output=True, text=True, timeout=30, **NOWND,
         )
         if fetch.returncode != 0:
-            err = (fetch.stderr or fetch.stdout or "unknown error")[:200]
+            detail = (fetch.stderr or fetch.stdout or "").strip()
+            err = git_fail_reason(detail) or "unknown error"
             await interaction.followup.send(
                 f"`{repo_name}`: Fetch failed \u2014 `{err}`", ephemeral=True,
             )
@@ -1638,7 +1639,8 @@ async def _handle_sync_git(
                 cwd=repo_path, capture_output=True, text=True, timeout=30, **NOWND,
             )
             if pull.returncode != 0:
-                err = (pull.stderr or pull.stdout or "unknown error")[:200]
+                detail = (pull.stderr or pull.stdout or "").strip()
+                err = git_fail_reason(detail) or "unknown error"
                 await interaction.followup.send(
                     f"`{repo_name}`: Pull failed (histories diverged?) \u2014 `{err}`",
                     ephemeral=True,
