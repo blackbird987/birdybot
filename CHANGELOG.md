@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.99.17 — Git credential hardening and harness portability (2026-08-07)
+
 ### Changed
 - **Remotes on this machine moved from HTTPS to SSH.** Configuration, not code, and recorded here only because it is the other half of the story below: the HTTPS credential lived in Windows' credential manager, which does not migrate, and Fedora ships no equivalent helper — so git had nothing to authenticate with and no way to ask. `birdybot` and `AWAS666/AIAgent` now use `git@github.com:`, where the existing `id_ed25519` key already authenticates as `blackbird987` with no passphrase and nothing to expire; a token would have been a second secret to store and rotate for no gain. Worktrees share the parent repo's config, so build branches inherit it. A fresh clone elsewhere will need the same choice made again.
 
