@@ -10,11 +10,87 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from bot import paths
 from bot.claude.types import ChainPhaseState, Instance, InstanceStatus, InstanceType, Schedule
 from bot.engine.auto_fix import AutoFixState
 from bot.engine.deploy import DeployState
 
 log = logging.getLogger(__name__)
+
+# Absolute paths recorded per instance that are later OPENED — the working
+# tree, the build worktree, the account dir that owns the session, and the two
+# artefact files behind /log and /diff (also read back when a forum thread
+# rebuilds its history). Untranslated, those two are the quiet failure: the
+# instance list renders fine and the button just returns nothing.
+#
+# `prompt`, `bash_commands` and `path_poisoning` also contain absolute paths
+# and are deliberately left alone — they are a record of what was said and
+# done, not a handle to open, and rewriting them would falsify history rather
+# than repair it.
+_INSTANCE_PATH_FIELDS = (
+    "repo_path", "worktree_path", "session_account", "result_file", "diff_file",
+)
+# Maps whose KEYS are account directories.
+_ACCOUNT_KEYED = ("account_cooldowns", "model_cooldowns", "account_alerts")
+
+
+def _localise_paths(data: dict) -> None:
+    """Rewrite stored absolute paths into this machine's spelling, in place.
+
+    The state file is shared verbatim between machines that reach the same
+    directories under different names (a mounted Windows drive read from
+    Linux, and the same drive read from Windows). Every path in it is correct
+    for whichever machine wrote it last, so it is translated on the way in
+    rather than migrated on disk — that keeps both machines writing freely and
+    means neither has to run a conversion before it can start.
+
+    Unknown paths pass through untouched, so a machine with no path map behaves
+    exactly as it did before this existed.
+    """
+    repos = data.get("repos")
+    if isinstance(repos, dict):
+        for name, path in list(repos.items()):
+            if isinstance(path, str):
+                repos[name] = paths.translate(path)
+
+    for inst in data.get("instances") or []:
+        if not isinstance(inst, dict):
+            continue
+        for field in _INSTANCE_PATH_FIELDS:
+            value = inst.get(field)
+            if isinstance(value, str) and value:
+                inst[field] = paths.translate(value)
+
+    # A schedule fires unattended, so a repo path spelled for the other machine
+    # fails with nobody watching.
+    for sched in data.get("schedules") or []:
+        if isinstance(sched, dict) and isinstance(sched.get("repo_path"), str):
+            sched["repo_path"] = paths.translate(sched["repo_path"])
+
+    # Cooldowns and outage records are keyed by account directory. Left
+    # untranslated, a cooldown set under the other machine's spelling is
+    # invisible here — the account reads as free, gets spawned, and fails
+    # again on the same limit.
+    for key in _ACCOUNT_KEYED:
+        table = data.get(key)
+        if not isinstance(table, dict):
+            continue
+        merged: dict = {}
+        for k, v in table.items():
+            local = paths.translate(k) if isinstance(k, str) else k
+            if local in merged and merged[local] != v:
+                # Two spellings of one account carrying different records.
+                # Normal saves can't produce this (the whole table is rewritten
+                # in the local spelling every time), so it means a hand-edited
+                # file — worth a line in the log rather than a value that
+                # vanishes without explanation.
+                log.warning(
+                    "%s: %r and %r are the same account with different records "
+                    "— keeping the first", key, k, local,
+                )
+                continue
+            merged[local] = v
+        data[key] = merged
 
 
 class StateStore:
@@ -103,6 +179,16 @@ class StateStore:
             return
         try:
             data = json.loads(self._file.read_text(encoding="utf-8"))
+            # Deliberately isolated from the load below.  Everything after this
+            # point is inside a handler whose recovery is "start fresh" — which
+            # for this file means every repo, instance and thread mapping is
+            # dropped and the next auto-save overwrites the real one.  A path
+            # rewrite failing is a degradation (paths stay in the other
+            # machine's spelling); it must never escalate to losing the state.
+            try:
+                _localise_paths(data)
+            except Exception:
+                log.exception("Path localisation failed — loading paths as stored")
             for d in data.get("instances", []):
                 inst = Instance.from_dict(d)
                 self._instances[inst.id] = inst

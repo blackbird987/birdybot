@@ -58,10 +58,16 @@ _RETRY_HEADLINES = {
         "⏳ Every Claude account is signed out — retrying at {t} in case one "
         "gets signed back in"
     ),
+    "some_accounts_logged_out": (
+        "⏳ No account was free — and at least one is signed out. Retrying at "
+        "{t}; signing it back in unblocks this sooner"
+    ),
     "no_account_free": "⏳ No account was free to take this — retrying at {t}",
 }
 # ...and which of those the user can fix from the auth panel.
-_AUTH_RETRY_REASONS = frozenset({"backup_logged_out", "accounts_logged_out"})
+_AUTH_RETRY_REASONS = frozenset({
+    "backup_logged_out", "accounts_logged_out", "some_accounts_logged_out",
+})
 
 
 def humanize_failure(text: str | None) -> str | None:
