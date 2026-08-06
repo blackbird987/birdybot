@@ -209,29 +209,41 @@ def session_resume_state(session_id: str) -> tuple[bool, bool]:
 
 
 def find_session_file(session_id: str) -> Path | None:
-    """Find a session JSONL file by full or partial ID."""
-    projects_dir = config.CLAUDE_PROJECTS_DIR
-    if not projects_dir.is_dir():
-        return None
-    for proj_dir in projects_dir.iterdir():
-        if not proj_dir.is_dir():
-            continue
-        exact = proj_dir / f"{session_id}.jsonl"
-        if exact.exists():
-            return exact
-        if len(session_id) < 36:
-            for f in proj_dir.glob(f"{session_id}*.jsonl"):
-                return f
+    """Find a session JSONL file by full or partial ID.
+
+    Scans every configured account's projects root, not just the primary —
+    a session started on the backup account lives under that account's dir.
+    """
+    for projects_dir in config.claude_projects_dirs():
+        try:
+            entries = list(projects_dir.iterdir())
+        except OSError:
+            continue  # unreadable / unmounted since the existence check
+        for proj_dir in entries:
+            if not proj_dir.is_dir():
+                continue
+            exact = proj_dir / f"{session_id}.jsonl"
+            if exact.exists():
+                return exact
+            if len(session_id) < 36:
+                for f in proj_dir.glob(f"{session_id}*.jsonl"):
+                    return f
     return None
 
 
 def _encode_path(path: str) -> str:
-    """Encode a filesystem path the same way Claude Code encodes project dir names.
+    """Encode a filesystem path the way the CLI names its project dirs.
 
-    Normalizes slashes and strips trailing separator before encoding.
+    Delegates to the shared implementation — this used to be a third private
+    copy that had drifted: it never replaced ``.`` with ``-``, so any path
+    containing a dot encoded wrong. A build worktree
+    (``…/claude-telegram-bot/.worktrees/t-6839``) came out as
+    ``…-bot-.worktrees-t-6839`` while the CLI had written
+    ``…-bot--worktrees-t-6839``, so the lookup could never match. See that
+    function for the full list of call sites that share the rule.
     """
-    path = path.replace("\\", "/").rstrip("/")
-    return path.replace("/", "-").replace(":", "-")
+    from bot.engine.session_fork import encode_project_path
+    return encode_project_path(path)
 
 
 def find_latest_session_for_repo(repo_path: str) -> dict | None:
@@ -241,18 +253,13 @@ def find_latest_session_for_repo(repo_path: str) -> dict | None:
     Lightweight: only checks file mtime, no JSONL parsing.
     Matches by encoding the repo_path and comparing to project dir names.
     """
-    projects_dir = config.CLAUDE_PROJECTS_DIR
-    if not projects_dir.is_dir():
-        return None
-
     encoded = _encode_path(repo_path)
 
     best: tuple[float, str] | None = None  # (mtime, session_id)
 
-    for proj_dir in projects_dir.iterdir():
+    for projects_dir in config.claude_projects_dirs():
+        proj_dir = projects_dir / encoded
         if not proj_dir.is_dir():
-            continue
-        if proj_dir.name != encoded:
             continue
         for f in proj_dir.glob("*.jsonl"):
             try:
@@ -271,16 +278,12 @@ def scan_sessions(
     limit: int = 10,
     repos: dict[str, str] | None = None,
 ) -> list[dict]:
-    """Scan ~/.claude/projects/ for recent sessions.
+    """Scan every account's projects dir for recent sessions.
 
     Args:
         limit: Max sessions to return.
         repos: Optional {name: path} dict for accurate project name display.
     """
-    projects_dir = config.CLAUDE_PROJECTS_DIR
-    if not projects_dir.is_dir():
-        return []
-
     # Build reverse lookup: encoded_path -> repo_name for display
     _encoded_to_name: dict[str, str] = {}
     if repos:
@@ -289,26 +292,47 @@ def scan_sessions(
             _encoded_to_name[encoded] = name
 
     candidates = []
-    for proj_dir in projects_dir.iterdir():
-        if not proj_dir.is_dir():
-            continue
-        for f in proj_dir.glob("*.jsonl"):
-            candidates.append((f.stat().st_mtime, f, proj_dir.name))
+    for projects_dir in config.claude_projects_dirs():
+        try:
+            entries = list(projects_dir.iterdir())
+        except OSError:
+            continue  # unreadable / unmounted since the existence check
+        for proj_dir in entries:
+            if not proj_dir.is_dir():
+                continue
+            for f in proj_dir.glob("*.jsonl"):
+                try:
+                    candidates.append((f.stat().st_mtime, f, proj_dir.name))
+                except OSError:
+                    continue  # vanished mid-scan (CLI rotating files)
 
     candidates.sort(key=lambda x: x[0], reverse=True)
 
+    # Collapse copies of one session BEFORE taking the working window. The
+    # runner mirrors session JSONLs between accounts and back-copies them out
+    # of a worktree's project dir into the main repo's, so a single session
+    # routinely exists three or four times over — on this machine 1290 files
+    # hold 368 distinct sessions. De-duplicating inside the loop instead meant
+    # the `limit * 3` window of 30 rows carried only ~13 real sessions, and
+    # every one that then failed to parse ate into the same budget, so a
+    # request for 10 came back with fewer. Newest-first ordering means the
+    # first copy seen is the one kept, exactly as before.
+    deduped: list[tuple[float, Path, str]] = []
+    seen_ids: set[str] = set()
+    for cand in candidates:
+        if cand[1].stem in seen_ids:
+            continue
+        seen_ids.add(cand[1].stem)
+        deduped.append(cand)
+
     sessions = []
-    seen_ids = set()
     now = datetime.now(timezone.utc)
 
-    for mtime, fpath, proj_encoded in candidates[:limit * 3]:
+    for mtime, fpath, proj_encoded in deduped[:limit * 3]:
         if len(sessions) >= limit:
             break
 
         session_id = fpath.stem
-        if session_id in seen_ids:
-            continue
-        seen_ids.add(session_id)
 
         # Use repo name from store if available, otherwise fall back to last dir segment
         project_name = _encoded_to_name.get(proj_encoded)

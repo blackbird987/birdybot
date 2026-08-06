@@ -1,0 +1,32 @@
+# Line-ending policy — this repo is worked on from both Linux and Windows.
+#
+# Without this file each platform guesses (via core.autocrlf), and the guesses
+# disagree: a Windows checkout writes CRLF to disk while the history holds LF,
+# so the same clone reads "clean" on Windows and "121 files modified" on Linux.
+# Commit from the wrong side and every file flips, turning diffs, reviews and
+# worktree merges into whole-file noise.
+#
+# So: normalize everything to LF, in history AND on disk, on every platform.
+# Python, git, VS Code and the Discord bot all handle LF fine on Windows.
+* text=auto eol=lf
+
+# Exceptions — these are interpreted by Windows itself and want CRLF on disk.
+# cmd.exe mis-parses multi-line constructs (labels, goto, for) in LF batch
+# files, and cscript is likewise happier with CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+*.vbs text eol=crlf
+
+# Binary — belt and braces over text=auto's own detection, so an image can
+# never be mangled by an eol rewrite.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.webp binary
+*.bmp  binary
+*.ico  binary
+*.pdf  binary
+*.zip  binary
+*.jsonl -text

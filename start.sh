@@ -17,6 +17,11 @@ if [[ -z "$PYTHON" ]]; then
 fi
 
 echo "Stopping existing bot instances..."
+# The bot relaunches itself when signalled (see _emergency_reboot_handler in
+# bot/app.py). Without this marker it would come straight back and race the
+# fresh instance started below for the PID lock.
+mkdir -p data
+: > data/stop_requested
 if [[ -f data/bot.pid ]]; then
     pid="$(cat data/bot.pid 2>/dev/null || true)"
     if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
@@ -32,6 +37,9 @@ fi
 # Belt and braces: anything still running the module, but never this script.
 pkill -f 'python[0-9.]*  *-m  *bot' 2>/dev/null || true
 sleep 1
+# Consumed by whichever instance caught the signal, or left behind if none
+# did; either way it must not be sitting there for the new one.
+rm -f data/stop_requested
 
 mkdir -p data/logs
 echo "Starting bot in background..."

@@ -200,6 +200,7 @@ def check_worktrees() -> list[str]:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    # portability: ok - this tool exists to rewrite the old Windows paths
     ap.add_argument("--windows-home", default="C:/Users/Quincy",
                     help="Old Windows home directory (default: %(default)s)")
     ap.add_argument("--linux-home", default=None,

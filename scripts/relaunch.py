@@ -1,8 +1,12 @@
-"""Delayed bot relaunch — spawned by /reboot to ensure clean restart.
+"""Delayed bot relaunch — brings the bot back after it exits.
+
+Spawned by both restart paths in ``bot/app.py``: the coalesced `/reboot`
+executor, and the signal handler that catches a bot being killed.
 
 Usage: python scripts/relaunch.py <project_root>
 
-Waits for the old process to exit (via PID file), then starts a fresh bot.
+Waits for the old process to exit (via PID file), then starts a fresh bot —
+unless systemd is already going to do that for us.
 """
 
 import subprocess
@@ -10,36 +14,47 @@ import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from bot.procutil import (  # noqa: E402  (needs the path above)
+    detached_kwargs,
+    is_process_alive,
+)
 
-def _is_process_alive(pid: int) -> bool:
-    """Check if a process is still running (cross-platform)."""
-    if sys.platform == "win32":
-        import ctypes
-        kernel32 = ctypes.windll.kernel32
-        handle = kernel32.OpenProcess(0x1000, False, pid)
-        if not handle:
-            return False
-        STILL_ACTIVE = 259
-        exit_code = ctypes.c_ulong()
-        alive = bool(
-            kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
-            and exit_code.value == STILL_ACTIVE
-        )
-        kernel32.CloseHandle(handle)
-        return alive
-    else:
-        import os
-        try:
-            os.kill(pid, 0)
-            return True
-        except OSError:
-            return False
+
+# The unit shipped in scripts/. Renaming it on install costs only the check
+# below, which then falls back to relaunching ourselves.
+SERVICE_UNIT = "claude-bot.service"
+
+
+def _under_service_unit() -> bool:
+    """Is a systemd service already responsible for restarting the bot?
+
+    If one is, starting a replacement here puts two candidates in a race for
+    the PID lock. The loser exits immediately — and when the loser is the
+    supervised one, `Restart=always` turns that into a restart loop until
+    systemd gives up on the unit, leaving a bot that runs but is no longer
+    watched by anything.
+
+    Read from the cgroup, not from INVOCATION_ID: a desktop terminal is itself
+    a systemd *scope* and exports that variable, so a bot started by hand from
+    Konsole would inherit it and look supervised when nothing is watching.
+    The cgroup path names the unit that actually owns this process.
+    """
+    try:
+        cgroup = Path("/proc/self/cgroup").read_text(encoding="utf-8")
+    except OSError:
+        return False  # not Linux, or no /proc — nobody else is restarting us
+    return SERVICE_UNIT in cgroup
 
 
 def main():
     if len(sys.argv) < 2:
         print("Usage: relaunch.py <project_root>")
         sys.exit(1)
+
+    if _under_service_unit():
+        print("Running under systemd — leaving the restart to the unit.")
+        return
 
     cwd = sys.argv[1]
     pid_file = Path(cwd) / "data" / "bot.pid"
@@ -51,18 +66,12 @@ def main():
             break
         try:
             old_pid = int(pid_file.read_text().strip())
-            if not _is_process_alive(old_pid):
+            if not is_process_alive(old_pid):
                 break
         except (ValueError, OSError):
             break
 
-    kwargs = {}
-    if sys.platform == "win32":
-        kwargs["creationflags"] = (
-            subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-        )
-        kwargs["close_fds"] = True
-    subprocess.Popen([sys.executable, "-m", "bot"], cwd=cwd, **kwargs)
+    subprocess.Popen([sys.executable, "-m", "bot"], cwd=cwd, **detached_kwargs())
 
 
 if __name__ == "__main__":

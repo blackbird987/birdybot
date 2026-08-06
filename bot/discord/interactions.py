@@ -1034,7 +1034,8 @@ async def _handle_branch(
     dest_dir = config.CLAUDE_PROJECTS_DIR / encode_project_path(repo_path)
     src_path = dest_dir / f"{inst.session_id}.jsonl"
     if not src_path.exists():
-        # Fall back to a global search (handles encoding mismatches).
+        # Fall back to a global search (handles encoding mismatches, and a
+        # session that lives under a non-primary account's projects root).
         found = await asyncio.to_thread(sessions_mod.find_session_file, inst.session_id)
         if not found:
             await interaction.followup.send(
@@ -1042,6 +1043,10 @@ async def _handle_branch(
             )
             return
         src_path = found
+        # Write the fork beside its source. Sending it to the primary account
+        # instead would strand it: sessions are pinned to the account that
+        # started them, so --resume would look in the source's dir and miss.
+        dest_dir = src_path.parent
 
     source_msg_id = str(interaction.message.id) if interaction.message else None
     target_uuid = inst.jsonl_uuid_by_msg_id.get(source_msg_id) if source_msg_id else None

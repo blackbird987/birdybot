@@ -821,7 +821,12 @@ async def _test_sole_account_dead_gives_actionable_message() -> list[str]:
         failures.append(
             f"dead-end: message lacks the re-auth command: {msg!r}"
         )
-    if "401" in msg:
+    # Match the CLI's raw phrasing, not the bare digits. `msg` embeds the
+    # account's config dir, which here is a mkdtemp path with a random
+    # suffix — one that can contain "401" by chance, failing this test at
+    # random. It did: "/tmp/acct_failover_26401es7/solo". This harness blocks
+    # the chain, so a one-in-a-few-hundred false failure is a real cost.
+    if "API Error" in msg or "access token has expired" in msg:
         failures.append(f"dead-end: raw CLI 401 leaked into the message: {msg!r}")
     if humanize_failure(msg) != msg:
         failures.append(

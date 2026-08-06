@@ -27,6 +27,11 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=%h/Desktop/Programming/claude-telegram-bot
 ExecStart=%h/Desktop/Programming/claude-telegram-bot/.venv/bin/python -m bot
+# The bot answers a signal by relaunching itself, so that an agent killing it
+# does not leave it down. systemd's own SIGTERM would trip that, and `stop`
+# would be met by a bot that comes straight back. This marker tells it the
+# shutdown is deliberate; leading `-` so a failure here never blocks the stop.
+ExecStop=-/usr/bin/touch %h/Desktop/Programming/claude-telegram-bot/data/stop_requested
 Environment=PYTHONUNBUFFERED=1
 # The bot has a self-reboot path (data/reboot_request.json) that exits cleanly
 # and expects to be brought back up — so restart on success as well as failure.

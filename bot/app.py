@@ -23,6 +23,13 @@ from bot.claude.types import InstanceStatus
 from bot.engine import commands as engine_commands
 from bot.platform.base import NotificationService
 from bot.platform.formatting import redact_secrets
+from bot.procutil import (
+    clear_stop_request,
+    detached_kwargs,
+    is_bot_process,
+    is_process_alive,
+    stop_was_requested,
+)
 from bot.scheduler import Scheduler
 from bot.store.state import StateStore
 
@@ -63,47 +70,49 @@ def setup_logging() -> None:
     logging.getLogger("discord").setLevel(logging.WARNING)
 
 
-def _is_process_alive(pid: int) -> bool:
-    """Check if a process with the given PID is still running (cross-platform)."""
-    if sys.platform == "win32":
-        import ctypes
-        kernel32 = ctypes.windll.kernel32
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-        if not handle:
-            return False
-        # Check if process has actually exited
-        STILL_ACTIVE = 259
-        exit_code = ctypes.c_ulong()
-        alive = bool(
-            kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
-            and exit_code.value == STILL_ACTIVE
-        )
-        kernel32.CloseHandle(handle)
-        return alive
-    else:
-        try:
-            os.kill(pid, 0)
-            return True
-        except OSError:
-            return False
-
-
 def _acquire_pid_lock() -> bool:
-    """Write PID file, refusing to start if another instance is alive."""
+    """Write PID file, refusing to start if another instance is alive.
+
+    Liveness alone is not enough: after an unclean exit the PID file outlives
+    the process, and the kernel eventually recycles that number onto something
+    unrelated — at which point the bot would refuse to start forever with no
+    second instance anywhere. So the PID must also still *look* like the bot.
+    ``is_bot_process`` only says no on positive evidence, so an unreadable or
+    ambiguous process is still treated as a live instance and we stand down.
+    """
     pid_file = config.DATA_DIR / "bot.pid"
     if pid_file.exists():
         try:
             old_pid = int(pid_file.read_text().strip())
-            if old_pid != os.getpid() and _is_process_alive(old_pid):
-                log.error("Another bot instance is running (PID %d). Exiting.", old_pid)
-                return False
+            if old_pid != os.getpid() and is_process_alive(old_pid):
+                # No `root` here on purpose: a false "not ours" would start a
+                # second instance, so only the argv evidence is used. botctl
+                # can afford the stricter check because its failure mode is
+                # refusing to signal.
+                if is_bot_process(old_pid):
+                    log.error(
+                        "Another bot instance is running (PID %d). Exiting.", old_pid
+                    )
+                    return False
+                log.info(
+                    "PID file holds %d, but that process is not this bot "
+                    "(recycled PID) — taking over", old_pid
+                )
             else:
                 log.info("Stale PID file (PID %d no longer running), taking over", old_pid)
         except (ValueError, OSError):
             pass  # Corrupt PID file, overwrite it
 
     pid_file.write_text(str(os.getpid()), encoding="utf-8")
+    # A stop request belongs to the process it was aimed at. Anything still
+    # here was left by a caller that died mid-stop, and letting it survive
+    # would turn the next emergency kill into a permanent one.
+    clear_stop_request(config.DATA_DIR)
+    # The one line that marks where a boot begins. The health check has always
+    # looked for it and it had never been written, so the check could not tell
+    # this run's startup from the previous run's and judged a clean boot by
+    # ten hours of unrelated runtime.
+    log.info("Acquired PID lock (PID %d)", os.getpid())
     return True
 
 
@@ -411,7 +420,12 @@ async def run() -> None:
             valid.append(acct)
             if reason:
                 degraded += 1
-                log.error(
+                # WARNING, not ERROR: a sidelined account is a *handled*
+                # condition -- rotation carries on without it and it rejoins on
+                # its own after a login. Logging it at ERROR meant a signed-out
+                # backup account made every startup read as a failed startup,
+                # which is also how the aggregate line below already treats it.
+                log.warning(
                     "CLAUDE_ACCOUNTS entry sidelined: %s (%s). It stays in "
                     "rotation config and rejoins automatically after login -- "
                     "run: %s",
@@ -419,7 +433,10 @@ async def run() -> None:
                     reason,
                     relogin_command(acct),
                 )
-        config.CLAUDE_ACCOUNTS = valid
+        # Through the setter, not a bare assignment: dropping an entry can move
+        # the primary account, and the projects root and CLAUDE_CONFIG_DIR pin
+        # are both derived from it.
+        config.set_accounts(valid)
         usable = len(valid) - degraded
         if usable != configured_count:
             log.warning(
@@ -536,8 +553,22 @@ async def run() -> None:
     # Emergency signal handler: if the bot is killed (e.g. by a Claude Code instance
     # running taskkill), save context and auto-relaunch so we come back online.
     def _emergency_reboot_handler(signum, frame):
+        # On Windows this only ever fired for an unusual signal, so relaunching
+        # unconditionally was fine. On Linux SIGTERM is how everything stops a
+        # process — botctl, start.sh, systemctl, shutdown — and a bot that
+        # relaunches itself out of each one cannot be stopped at all. Callers
+        # that mean it leave a sentinel; everything else is still an emergency.
+        # Checked before the imports below: this is a signal handler, and the
+        # deliberate path should not be reaching for the import lock at all.
+        if stop_was_requested(config.DATA_DIR):
+            log.warning("Caught signal %s — deliberate stop, not relaunching", signum)
+            store.save()
+            _release_pid_lock()
+            os._exit(0)
+
         import json as _json
         import subprocess as _sp
+
         log.warning("Caught signal %s — emergency reboot", signum)
         # Find any running instance's channel to send confirmation after restart
         reboot_data: dict = {}
@@ -566,11 +597,10 @@ async def run() -> None:
         try:
             _sp.Popen(
                 [sys.executable, str(launcher), str(config._PROJECT_ROOT)],
-                creationflags=_sp.DETACHED_PROCESS | _sp.CREATE_NEW_PROCESS_GROUP,
-                close_fds=True,
+                **detached_kwargs(),
             )
         except Exception:
-            pass
+            log.exception("Emergency relaunch could not be spawned")
         store.save()
         _release_pid_lock()
         os._exit(1)
@@ -629,8 +659,7 @@ async def run() -> None:
             launcher = config._PROJECT_ROOT / "scripts" / "relaunch.py"
             _sp.Popen(
                 [sys.executable, str(launcher), str(config._PROJECT_ROOT)],
-                creationflags=_sp.DETACHED_PROCESS | _sp.CREATE_NEW_PROCESS_GROUP,
-                close_fds=True,
+                **detached_kwargs(),
             )
             runner.clear_reboots()
             stop_event.set()

@@ -781,8 +781,126 @@ WORKFLOW_GUIDANCE: dict[str, str] = {
 # Provider's base directory name (e.g. ".claude", ".cursor")
 PROVIDER_DIR_NAME: str = _PROVIDER_CFG.projects_dir_name
 
-# Session/plan data directory — derived from provider (e.g. ~/.claude/projects/)
-CLAUDE_PROJECTS_DIR: Path = Path.home() / PROVIDER_DIR_NAME / "projects"
+
+def primary_account_dir() -> Path | None:
+    """The account config dir to pin ``CLAUDE_CONFIG_DIR`` to, or None.
+
+    ``CLAUDE_ACCOUNTS`` is ordered and the first entry is the default account.
+    Anything spawning the CLI outside the normal rotation (title generation,
+    one-shot helpers) has to pin to it explicitly: left alone the CLI reads
+    ``$HOME/.claude``, which on Linux is frequently not one of the configured
+    accounts and may not be signed in at all.
+
+    None means "nothing to pin" — a non-``claude`` provider, no accounts
+    configured, or a malformed first entry.
+    """
+    if PROVIDER != "claude" or not CLAUDE_ACCOUNTS:
+        return None
+    try:
+        return Path(CLAUDE_ACCOUNTS[0]).expanduser()
+    except (OSError, RuntimeError):  # malformed entry — behave as unset
+        return None
+
+
+def claude_projects_dirs() -> list[Path]:
+    """Every projects root the CLI may have written session JSONLs to.
+
+    The bot launches the CLI with ``CLAUDE_CONFIG_DIR`` pointed at whichever
+    account is active, so sessions land under *that* directory — not under
+    ``$HOME``.  On Windows the two coincide (``C:/Users/x`` and
+    ``C:/Users/x/.claude``), which is why deriving this from ``Path.home()``
+    alone worked there.  On Linux they routinely diverge: the account dirs may
+    sit on another filesystem entirely, leaving the home-derived path holding a
+    handful of stray sessions while every real one lives elsewhere.
+
+    Ordered most-authoritative first (the accounts, in rotation order), with
+    the home-derived path last as a fallback for a single-account or
+    non-``claude`` setup.  Deduplicated and filtered to dirs that exist, so
+    callers can iterate without guarding.
+
+    If ``CLAUDE_PROJECTS_DIR`` has been reassigned away from its derived value
+    — which a sandboxed test harness does to keep its fixtures off real
+    session data — that override wins and confines the scan to it alone.
+    Some callers here *delete* files, so widening a deliberately narrowed
+    scope would be actively destructive.
+
+    That test compares against ``_DERIVED_PROJECTS_DIR``, the value *as last
+    derived*, and not against a fresh call to :func:`_default_projects_dir`.
+    Recomputing reads it as an override whenever the inputs have moved since —
+    and they do move: ``bot/app.py`` prunes ``CLAUDE_ACCOUNTS`` at boot, so a
+    stale first entry in ``.env`` (nothing rarer than a machine whose account
+    paths just changed) made every root vanish and every session reader go
+    blind. Comparing to the snapshot asks the question actually meant here —
+    "has someone assigned to this global?" — which no input change can fake.
+    """
+    if CLAUDE_PROJECTS_DIR != _DERIVED_PROJECTS_DIR:
+        return [CLAUDE_PROJECTS_DIR] if CLAUDE_PROJECTS_DIR.is_dir() else []
+
+    roots: list[Path] = []
+    if PROVIDER == "claude":
+        for acct in CLAUDE_ACCOUNTS:
+            try:
+                roots.append(Path(acct).expanduser() / "projects")
+            except (OSError, RuntimeError):  # malformed entry — skip, don't crash
+                continue
+    roots.append(Path.home() / PROVIDER_DIR_NAME / "projects")
+
+    seen: set[str] = set()
+    out: list[Path] = []
+    for r in roots:
+        key = str(r).lower() if os.name == "nt" else str(r)
+        if key in seen:
+            continue
+        seen.add(key)
+        if r.is_dir():
+            out.append(r)
+    return out
+
+
+def _default_projects_dir() -> Path:
+    """The single projects root to WRITE to / treat as primary.
+
+    First configured account when there is one, else the home-derived path.
+    Unlike :func:`claude_projects_dirs` this never filters on existence — it
+    has to be a usable target even before the directory has been created.
+    """
+    acct = primary_account_dir()
+    if acct is not None:
+        return acct / "projects"
+    return Path.home() / PROVIDER_DIR_NAME / "projects"
+
+
+# Session/plan data directory — the primary account's projects root. Readers
+# that scan for existing sessions should use claude_projects_dirs() instead so
+# a second account's history isn't invisible.
+CLAUDE_PROJECTS_DIR: Path = _default_projects_dir()
+
+# The same value, kept as a snapshot of what the config *derives*. Whenever the
+# two differ, something has deliberately overridden the projects root and every
+# scan confines itself to it (see claude_projects_dirs). Anything that changes
+# an input to the derivation must refresh this alongside CLAUDE_PROJECTS_DIR,
+# or an ordinary config change reads as an override — use set_accounts() /
+# set_provider() rather than assigning CLAUDE_ACCOUNTS or PROVIDER by hand.
+_DERIVED_PROJECTS_DIR: Path = CLAUDE_PROJECTS_DIR
+
+
+def set_accounts(accounts: list[str]) -> None:
+    """Replace the account list and re-derive the paths that follow from it.
+
+    ``bot/app.py`` prunes entries whose directory is missing, which moves the
+    primary account. Without re-deriving, the primary projects root and the
+    ``CLAUDE_CONFIG_DIR`` pin both stay aimed at the dropped entry.
+
+    An override of ``CLAUDE_PROJECTS_DIR`` that is already in effect survives —
+    a test sandbox must not be silently un-sandboxed by a config update.
+    """
+    global CLAUDE_ACCOUNTS, CLAUDE_PROJECTS_DIR, _DERIVED_PROJECTS_DIR
+
+    overridden = CLAUDE_PROJECTS_DIR != _DERIVED_PROJECTS_DIR
+    CLAUDE_ACCOUNTS = list(accounts)
+    _DERIVED_PROJECTS_DIR = _default_projects_dir()
+    if not overridden:
+        CLAUDE_PROJECTS_DIR = _DERIVED_PROJECTS_DIR
 
 
 def set_provider(name: str) -> None:
@@ -796,6 +914,7 @@ def set_provider(name: str) -> None:
 
     global PROVIDER, _PROVIDER_CFG, CLAUDE_BINARY, BRANCH_PREFIX
     global PROVIDER_DIR_NAME, CLAUDE_PROJECTS_DIR, CURSOR_MODEL
+    global _DERIVED_PROJECTS_DIR
 
     new_cfg = _get_provider(name)
 
@@ -818,12 +937,16 @@ def set_provider(name: str) -> None:
             f"Install the {name} CLI or set CLAUDE_BINARY to the full path."
         )
 
+    overridden = CLAUDE_PROJECTS_DIR != _DERIVED_PROJECTS_DIR
+
     PROVIDER = name
     _PROVIDER_CFG = new_cfg
     CLAUDE_BINARY = resolved
     BRANCH_PREFIX = os.getenv("BRANCH_PREFIX") or new_cfg.branch_prefix
     PROVIDER_DIR_NAME = new_cfg.projects_dir_name
-    CLAUDE_PROJECTS_DIR = Path.home() / PROVIDER_DIR_NAME / "projects"
+    _DERIVED_PROJECTS_DIR = _default_projects_dir()
+    if not overridden:  # don't un-sandbox a test that set the root explicitly
+        CLAUDE_PROJECTS_DIR = _DERIVED_PROJECTS_DIR
     CURSOR_MODEL = os.getenv("CURSOR_MODEL", "auto")
     _logging.getLogger(__name__).info(
         "Provider switched to %s (binary=%s)", name, CLAUDE_BINARY,

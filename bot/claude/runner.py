@@ -2757,17 +2757,26 @@ class ClaudeRunner:
 
     @staticmethod
     def _get_projects_dir(repo_path: str) -> Path | None:
-        """Get the CLI projects directory for a repo path.
+        """The CLI projects dir holding this repo's session history, if any.
 
-        Session data is stored in ~/<provider_dir>/projects/<sanitized-path>/
-        where the path has : and separators replaced with dashes.
+        Only used to tell the model where its own past sessions and plans
+        live. Two things this had wrong: it carried its own copy of the
+        encoder that never replaced ``.``, so a repo path containing a dot
+        pointed at a directory the CLI had never written; and it looked only
+        under the primary account, so a session started on the backup account
+        named a path that does not exist. Both failures are silent — the
+        caller just drops the line.
         """
         try:
-            # Sanitize: replace : \ / with -
-            sanitized = repo_path.replace(":", "-").replace("\\", "-").replace("/", "-")
-            return config.CLAUDE_PROJECTS_DIR / sanitized
+            from bot.engine.session_fork import encode_project_path
+            encoded = encode_project_path(repo_path)
         except Exception:
             return None
+        for root in config.claude_projects_dirs():
+            candidate = root / encoded
+            if candidate.is_dir():
+                return candidate
+        return config.CLAUDE_PROJECTS_DIR / encoded
 
     # --- Task-level tracking ---
 
@@ -5661,10 +5670,13 @@ class ClaudeRunner:
         if not instance.worktree_path:
             return
         wt_encoded = self._encode_project_path(instance.worktree_path)
-        sweep_roots: set[Path] = {config.CLAUDE_PROJECTS_DIR}
-        for acct in config.CLAUDE_ACCOUNTS:
-            sweep_roots.add(Path(acct) / "projects")
-        for root in sweep_roots:
+        # One source of truth for "every root the CLI may have written to" —
+        # already deduplicated, already existence-filtered, and it honours a
+        # deliberately narrowed root. That last part matters here more than
+        # anywhere: this is an rmtree, so a harness that sandboxed the
+        # projects root must not have the sweep widened back onto real
+        # session data.
+        for root in config.claude_projects_dirs():
             wt_proj_dir = root / wt_encoded
             if wt_proj_dir.is_dir():
                 shutil.rmtree(str(wt_proj_dir), ignore_errors=True)

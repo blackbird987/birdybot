@@ -41,7 +41,9 @@ from bot.discord import account_alerts as alerts_mod
 from bot.services.auth_sync import collect_account_statuses
 from bot.store.state import StateStore
 
+# portability: ok - synthetic identifiers, never resolved against disk
 ACCT = "/home/q/.claude-klerk"
+# portability: ok - synthetic identifiers, never resolved against disk
 OTHER = "/home/q/.claude"
 
 

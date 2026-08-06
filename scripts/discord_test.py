@@ -7,7 +7,10 @@ Commands:
   list-channels                  List all channels in bot category
   list-threads <forum_id>        List active + archived threads
   channel-info <id>              Get channel type, parent, topic, tags
-  wait-response <channel_id> [timeout]    Poll for new bot messages
+  wait-response <channel_id> [timeout] [after_msg_id]
+                                 Poll for new bot messages. Pass the id that
+                                 `send` printed as after_msg_id, or a fast
+                                 reply lands before the baseline is taken.
   run-suite                      Automated test sequence
 
 Webhook setup:
@@ -30,8 +33,25 @@ import urllib.request
 
 sys.stdout.reconfigure(encoding="utf-8")
 
-# Load config from .env
-ENV_PATH = os.path.join(os.path.dirname(__file__), "..", ".env")
+# Load config from .env.
+#
+# Resolved against the *installed* bot, not against this file. `.env` is
+# gitignored, so a build worktree never has one -- and this script is the
+# interact surface `.claude/test.json` points the verify step at, which meant
+# verification from a worktree died on "Error: .env not found" before it could
+# touch Discord at all. The credentials belong to the one live bot regardless
+# of which checkout is driving it.
+_SCRIPT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+try:
+    sys.path.insert(0, _SCRIPT_ROOT)
+    from pathlib import Path as _Path
+
+    from bot.procutil import install_root
+
+    _ROOT = str(install_root(_Path(_SCRIPT_ROOT)))
+except Exception:
+    _ROOT = _SCRIPT_ROOT
+ENV_PATH = os.path.join(_ROOT, ".env")
 _env = {}
 try:
     with open(ENV_PATH) as f:
@@ -279,12 +299,27 @@ def cmd_channel_info(channel_id):
         print(f"Locked: {meta.get('locked', False)}")
 
 
-def cmd_wait_response(channel_id, timeout=30):
-    """Poll for a new bot message after sending."""
-    msgs = api_call("GET", f"/channels/{channel_id}/messages?limit=1")
-    last_id = msgs[0]["id"] if msgs and isinstance(msgs, list) else "0"
+def cmd_wait_response(channel_id, timeout=30, after_id=None):
+    """Poll for a new bot message after sending.
 
-    print(f"Waiting for response (timeout: {timeout}s)...")
+    Pass *after_id* — the message id `send` printed — whenever the two are run
+    as separate commands, which is how `.claude/test.json` documents them.
+    Without it the baseline is whatever is newest *now*, and the bot answers
+    fast enough (under two seconds in The Ark) that its reply is already the
+    newest message before this even starts. It then waits out the full timeout
+    for a reply it is standing on, and reports a live bot as unresponsive.
+
+    Webhook authors are skipped. Discord marks webhook messages `bot: true`,
+    so without that the very probe this harness just sent counts as the bot
+    answering it — a false pass, which is worse than the false fail above.
+    """
+    if after_id:
+        last_id = str(after_id)
+    else:
+        msgs = api_call("GET", f"/channels/{channel_id}/messages?limit=1")
+        last_id = msgs[0]["id"] if msgs and isinstance(msgs, list) else "0"
+
+    print(f"Waiting for response (timeout: {timeout}s, after {last_id})...")
     start = time.time()
     while time.time() - start < timeout:
         time.sleep(2)
@@ -292,6 +327,8 @@ def cmd_wait_response(channel_id, timeout=30):
         if not isinstance(msgs, list):
             continue
         for m in msgs:
+            if m.get("webhook_id"):
+                continue
             if int(m["id"]) > int(last_id) and m["author"].get("bot"):
                 content = m.get("content", "")[:200]
                 print(f"Bot responded! (msg {m['id']})")
@@ -595,7 +632,8 @@ def main():
     elif cmd == "wait-response":
         channel_id = sys.argv[2] if len(sys.argv) > 2 else LOBBY_ID
         timeout = int(sys.argv[3]) if len(sys.argv) > 3 else 30
-        cmd_wait_response(channel_id, timeout)
+        after_id = sys.argv[4] if len(sys.argv) > 4 else None
+        cmd_wait_response(channel_id, timeout, after_id)
     elif cmd == "run-suite":
         cmd_run_suite()
     else:

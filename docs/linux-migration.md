@@ -18,9 +18,10 @@ is gated behind a `sys_platform == "win32"` marker so Linux skips it.
   `os.killpg(..., SIGKILL)` on POSIX. Both implemented
   (`bot/engine/usage.py`, `bot/engine/sensors.py`).
 - **Opening a login terminal for `claude /login`** — spawns `cmd.exe` on
-  Windows, and on POSIX tries `x-terminal-emulator`, `gnome-terminal`,
-  `konsole`, `xterm` in turn. **Konsole is the Fedora KDE default**, so this
-  path is covered (`bot/services/auth_sync.py`).
+  Windows, and on POSIX tries `gnome-terminal`, `kgx`, `ptyxis`, `konsole`,
+  `xfce4-terminal`, `alacritty`, `kitty`, `x-terminal-emulator` and `xterm` in
+  that order, each with the argument form it actually accepts. **Konsole is the
+  Fedora KDE default**, so this path is covered (`bot/services/auth_sync.py`).
 - **"Can this host show a window?"** — checks the Windows station on Windows,
   `$DISPLAY` / `$WAYLAND_DISPLAY` on POSIX.
 - **Hiding subprocess console windows** — `CREATE_NO_WINDOW` is applied only
@@ -29,7 +30,8 @@ is gated behind a `sys_platform == "win32"` marker so Linux skips it.
   which is the correct behaviour (`bot/claude/parser.py`).
 - **Managed settings lookup** — has a real Linux branch
   (`/etc/claude-code/managed-settings.json`, `bot/claude/models.py`).
-- **Shutdown signals** — `SIGTERM` is registered on both platforms.
+- **Shutdown signals** — `SIGTERM` is registered on both platforms, and now
+  means the same thing on both (see *Stopping means stopping* below).
 
 ## What you lose
 
@@ -167,15 +169,122 @@ throwaway query in a small repo to confirm the CLI actually spawns.
 
 ---
 
+## Working from both machines at once
+
+The Linux desktop is not a replacement for the Windows laptop — both drive the
+same repo. Two things have to be true for that to be painless, and neither is
+automatic.
+
+### Line endings are pinned, and the laptop needs one reset
+
+`.gitattributes` forces LF everywhere, in history and on disk, on both
+platforms. Batch files (`.bat`, `.cmd`, `.ps1`, `.vbs`) keep CRLF because
+`cmd.exe` mis-parses multi-line LF batch.
+
+Before this existed each platform guessed via `core.autocrlf`, and the guesses
+disagreed: the Windows checkout held CRLF against an LF history, so the same
+clone read *clean* on Windows and *121 files modified* on Linux. A single
+commit from the Linux side would have flipped every file, turning every
+subsequent diff, code review and worktree merge into whole-file noise.
+
+**On the Windows laptop, once, after pulling the commit that added
+`.gitattributes`:**
+
+```powershell
+git rm --cached -r .
+git reset --hard
+```
+
+That re-checks-out every file under the new policy. Do it with no builds in
+flight, and merge or discard any open worktrees first — they were created
+under the old policy. Skip it and the laptop shows a one-time wave of phantom
+modifications.
+
+Both machines can then be verified with:
+
+```bash
+python scripts/check_portability.py
+```
+
+which fails loudly on CRLF creeping back into the index, a `.sh` that lost its
+executable bit, a filename Windows cannot check out, a hardcoded drive letter
+outside a platform branch, a Windows-only API reached without a platform
+branch, or a `.claude/test.json` command that only runs on one OS — including
+one that merely *starts* with a single-platform shell utility like `tail` or
+`taskkill`.
+
+That fourth check is not hypothetical: `subprocess.DETACHED_PROCESS` and its
+siblings do not exist in POSIX Python, and two unguarded uses in `bot/app.py`
+had left the emergency relaunch and the entire `/reboot` path dead on Linux —
+each inside an `except` broad enough to hide it.
+
+### Config is per-machine and must stay that way
+
+`.env` and `data/` are both gitignored, so each machine keeps its own paths,
+its own `state.json` and its own PID file. **Do not copy `.env` between the
+two** — `CLAUDE_BINARY`, `REPOS_BASE_DIR` and `CLAUDE_ACCOUNTS` are all
+absolute and machine-specific. `scripts/migrate_to_linux.py` copies every file
+it touches to `<name>.windows.bak` before writing, so the original Windows
+values stay readable next to the rewritten ones.
+
+Session history is likewise per-machine; see the first caveat below.
+
+### Starting and stopping the bot
+
+`scripts/botctl.py` works on both:
+
+```bash
+python scripts/botctl.py start | stop | restart | status
+python scripts/botctl.py logs 50        # `tail` has no Windows equivalent
+```
+
+The `.bat` files are kept for double-clicking from Explorer, and `start.sh` /
+the systemd user unit remain the Linux conveniences — but anything scripted
+should use `botctl.py`, because it is the only entry point that exists on both
+platforms. `.claude/test.json` points at it for exactly that reason.
+
+### Stopping means stopping
+
+The bot relaunches itself when it is signalled, so that an agent killing it
+does not leave it offline. On Windows that only ever fired for an unusual
+signal. On Linux `SIGTERM` is how *everything* stops a process, so the same
+rule would make the bot unkillable — every stop answered by a fresh bot a few
+seconds later.
+
+So a caller that means it writes `data/stop_requested` first, and the handler
+consumes that and stays down. All three supported ways of stopping do this for
+you: `botctl.py stop`, `start.sh`, and `systemctl --user stop claude-bot` (via
+`ExecStop=` in the unit). A bare `kill <pid>` is *not* one of them — that is
+still read as an emergency and the bot comes back, which is the point.
+
+The marker expires after two minutes and is cleared at startup, so a stop that
+dies half-way through cannot leave the relaunch disabled.
+
+Under systemd the unit's own `Restart=always` does the restarting and the bot
+skips its self-relaunch — otherwise the two race for the PID lock, and if
+systemd's copy loses it restarts into an immediate exit until the unit is
+marked failed. Detected from the cgroup, so renaming the unit on install
+costs only that optimisation.
+
+Verified end to end by:
+
+```bash
+python scripts/test_stop_sentinel.py
+```
+
+---
+
 ## Caveats
 
 - **Claude CLI session history does not follow you.** The CLI stores past
-  sessions under `~/.claude/projects/<encoded-cwd>/`, and the encoding embeds
-  the absolute path — `C--Users-Quincy-...` on Windows,
-  `-home-quincy-...` on Linux. Old conversations are not lost, but they will
-  not be found by `/session list` or resumed under the new paths. New sessions
-  are unaffected. Rewriting them would mean rewriting the `cwd` inside every
-  JSONL record; not worth the risk for history.
+  sessions under `<account dir>/projects/<encoded-cwd>/` — that is each entry
+  in `CLAUDE_ACCOUNTS`, *not* `~/.claude`, unless the two happen to coincide
+  (they do on Windows; on Linux they routinely don't). The encoding embeds the
+  absolute path — `C--Users-Quincy-...` on Windows, `-run-media-...` on Linux.
+  Old conversations are not lost, but they will not be found by
+  `/session list` or resumed under the new paths. New sessions are unaffected.
+  Rewriting them would mean rewriting the `cwd` inside every JSONL record; not
+  worth the risk for history.
 
 - **Path decoding is lossy in both directions, by design.** The encoding
   flattens `:`, `\`, `/` and `.` all to `-`, so a directory containing a

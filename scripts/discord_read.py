@@ -6,8 +6,19 @@ from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
 
+# The token belongs to the installed bot; `.env` is gitignored and so is never
+# present in a build worktree. Resolve there, not beside this file.
+_ROOT = Path(__file__).resolve().parent.parent
+try:
+    sys.path.insert(0, str(_ROOT))
+    from bot.procutil import install_root
+
+    _ROOT = install_root(_ROOT)
+except Exception:
+    pass
+
 TOKEN = None
-with open(Path(__file__).resolve().parent.parent / ".env") as f:
+with open(_ROOT / ".env") as f:
     for line in f:
         if line.startswith("DISCORD_BOT_TOKEN="):
             TOKEN = line.split("=", 1)[1].strip()
