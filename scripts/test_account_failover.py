@@ -41,6 +41,8 @@ Run: ``python scripts/test_account_failover.py``  (exit 0 on pass).
 
 from __future__ import annotations
 
+import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
+
 import asyncio
 import json
 import os

@@ -17,6 +17,8 @@ A false "down" is a second bot on one Discord token.
 Usage: python scripts/test_smoke_window.py
 """
 
+import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
+
 import sys
 from pathlib import Path
 

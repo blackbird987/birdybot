@@ -23,6 +23,9 @@ Webhook setup:
      -> Set TEST_WEBHOOK_URL in .env
   3. Add BOTH webhook IDs to TEST_WEBHOOK_IDS (comma-separated)
 """
+
+import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
+
 import json
 import os
 import ssl

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-bot"
-version = "0.100.0"
+version = "0.99.17"
 description = "Discord bot for managing Claude Code CLI instances"
 requires-python = ">=3.11"
 dependencies = [
@@ -14,16 +14,6 @@ dependencies = [
     "tzdata>=2023.3; sys_platform == 'win32'",
     "cryptography>=42.0",
     "psutil>=5.9",
-]
-
-[project.optional-dependencies]
-# Local meeting capture (bot/services/meeting.py). Machine-specific — needs a
-# working audio backend and, for GPU inference, CUDA. Imported gracefully, like
-# pywin32 for Outlook, so the bot runs fine without them.
-meeting = [
-    "soundcard>=0.4.2",
-    "faster-whisper>=1.0",
-    "numpy>=1.24",
 ]
 
 [project.scripts]

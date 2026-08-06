@@ -7,6 +7,11 @@ at: a Windows checkout looks clean while Linux sees the whole repo rewritten;
 a config path derived from $HOME resolves correctly on Windows and to an
 empty directory on Linux. This script makes that class of problem fail loudly.
 
+Check 7 belongs here for the same reason without being an OS difference: it
+fires where the harnesses are actually run — in the bot's child processes,
+which inherit no virtualenv — and not from a developer's activated shell, so
+it too is invisible from where you are standing.
+
 Checks:
   1. Every text blob in the git index is LF.
   2. Shell scripts are marked executable in git's index.
@@ -14,12 +19,15 @@ Checks:
   4. Nothing hardcodes a drive letter or a backslash-joined path.
   5. No Windows-only API is reached outside a platform branch.
   6. No command in .claude/test.json is single-platform.
+  7. Every script .claude/test.json runs finds its own interpreter.
 
 Exit 0 = clean, 1 = problems found. Run from anywhere in the repo.
 """
 
 from __future__ import annotations
 
+import ast
+import functools
 import json
 import re
 import subprocess
@@ -27,6 +35,11 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+
+# The shim that relaunches a script under the project virtualenv. This file does
+# not import it and must not: it reads the repo with the standard library only,
+# so it stays runnable on a checkout that has no virtualenv yet.
+BOOTSTRAP = "_bootstrap"
 
 # Names Windows refuses regardless of extension.
 WIN_RESERVED = {
@@ -370,16 +383,29 @@ def _iter_json_commands(node, path: str = ""):
         yield path, node
 
 
+@functools.lru_cache(maxsize=1)
+def _test_json() -> dict | None:
+    """Parsed .claude/test.json, or None if it is absent or unreadable.
+
+    Cached so the two checks that read it neither parse it twice nor report a
+    broken file twice — and, more to the point, so neither has to assume the
+    other ran first to do the reporting.
+    """
+    cfg_path = REPO / ".claude" / "test.json"
+    if not cfg_path.exists():
+        return None
+    try:
+        return json.loads(cfg_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        problems.append(f".claude/test.json is not readable: {exc}")
+        return None
+
+
 def check_test_json() -> None:
     """.claude/test.json is static JSON with no way to branch per platform, so
     every command it names has to run on both."""
-    cfg_path = REPO / ".claude" / "test.json"
-    if not cfg_path.exists():
-        return
-    try:
-        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        problems.append(f".claude/test.json is not valid JSON: {exc}")
+    cfg = _test_json()
+    if cfg is None:
         return
 
     for key, cmd in _iter_json_commands(cfg):
@@ -411,6 +437,79 @@ def check_test_json() -> None:
             )
 
 
+def _imported_names(tree: ast.Module) -> set[str]:
+    """Every top-level package name imported anywhere in ``tree``.
+
+    Walks the whole tree rather than the module body, because the imports that
+    matter most here are the deferred ones — ``smoke_test.py`` reaches for the
+    bot from inside a function, which is exactly the case a body-only scan
+    would call dependency-free and wave through.
+    """
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names.add(node.module.split(".")[0])
+    return names
+
+
+def check_harness_bootstrap() -> None:
+    """Scripts .claude/test.json runs must not depend on which `python` wins.
+
+    The verify step inherits the bot's environment, and the bot is launched by
+    a direct path into its virtualenv rather than by activating it — so
+    `VIRTUAL_ENV` is unset, `.venv/bin` is off `PATH`, and a bare `python` in
+    a child process is the *system* interpreter. A script that reaches for the
+    bot then dies at import with a `ModuleNotFoundError` shaped exactly like a
+    real failure, before any of its own logic runs.
+
+    `scripts/_bootstrap.py` fixes that, but only for the scripts that import
+    it, and that is a convention spread across seventeen files with nothing
+    holding it up. A harness added to test.json without the line would fail on
+    Linux for a reason having nothing to do with the code under test — the
+    hazard this whole script exists to catch, so it is checked rather than
+    remembered.
+
+    A script importing nothing outside the standard library is exempt: it
+    genuinely runs anywhere, and this checker is itself one of them.
+    """
+    cfg = _test_json()
+    if cfg is None:
+        return
+
+    seen: set[str] = set()
+    for key, cmd in _iter_json_commands(cfg):
+        if key in NON_COMMAND_KEYS:
+            continue
+        for token in cmd.split():
+            if not token.endswith(".py") or token in seen:
+                continue
+            script = REPO / token
+            if not script.is_file():
+                continue
+            seen.add(token)
+            try:
+                tree = ast.parse(script.read_text(encoding="utf-8"))
+            except (OSError, SyntaxError) as exc:
+                problems.append(f"Could not parse {token} ({exc})")
+                continue
+            imported = _imported_names(tree)
+            if BOOTSTRAP in imported:
+                continue
+            foreign = sorted(
+                name for name in imported
+                if name != BOOTSTRAP and name not in sys.stdlib_module_names
+            )
+            if foreign:
+                problems.append(
+                    f"{token} is run by .claude/test.json '{key}' and imports "
+                    f"{', '.join(foreign)}, but does not `import {BOOTSTRAP}` — "
+                    f"under the bot's environment a bare `python` is the system "
+                    f"interpreter and it will die at import"
+                )
+
+
 def main() -> int:
     files = tracked_files()
     check_line_endings()
@@ -419,6 +518,7 @@ def main() -> int:
     check_hardcoded_paths(files)
     check_windows_only_apis(files)
     check_test_json()
+    check_harness_bootstrap()
 
     if problems:
         print(f"Portability check FAILED — {len(problems)} problem(s):\n")

@@ -20,6 +20,8 @@ running one for the PID lock and the Discord token.
 
 from __future__ import annotations
 
+import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
+
 import os
 import signal
 import subprocess
