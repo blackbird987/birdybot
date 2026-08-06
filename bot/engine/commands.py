@@ -3723,3 +3723,15 @@ async def handle_callback(
         if actual != target and ctx.mode_ceiling:
             msg += f" (capped — your ceiling is {mode_label(ctx.mode_ceiling)})"
         await ctx.messenger.send_text(ctx.channel_id, msg, silent=True)
+
+    else:
+        # The platform layer acknowledged the tap before dispatching here, so
+        # falling off the end of this chain produces a button that visibly
+        # does nothing.  Name the action instead — it is almost always a
+        # button left over from an older build of the bot.
+        log.warning("Unhandled button action %r (instance=%s)", action, instance_id)
+        await ctx.messenger.send_text(
+            ctx.channel_id,
+            f"That button (`{action}`) isn't wired up in this version of the bot.",
+            silent=True,
+        )

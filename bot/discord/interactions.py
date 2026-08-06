@@ -59,6 +59,30 @@ def action_label(action: str) -> str:
     """Human-readable label for a button action (used by usage-limit gate)."""
     return _ACTION_LABELS.get(action, action.replace("_", " ").title())
 
+
+async def settle(interaction: discord.Interaction, message: str) -> None:
+    """Acknowledge an interaction with visible feedback, whatever its state.
+
+    Discord gives us 3 seconds to acknowledge a component interaction; miss
+    it and the tap resolves to "This interaction failed" with no explanation.
+    A silent ``return`` from a dispatch branch is therefore never harmless —
+    it is a dead end the user has to guess at.  This is the single escape
+    hatch for those paths: safe before the initial response, after a defer,
+    and after the ack window has already closed.
+    """
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
+    except discord.NotFound:
+        # 10062 Unknown interaction — the window shut before we got here.
+        # Discord has already shown the user a failure; nothing to add.
+        log.debug("interaction expired before settle", exc_info=True)
+    except discord.HTTPException:
+        log.debug("could not settle interaction", exc_info=True)
+
+
 # --- Deploy status message management (keeps control rooms clean) ---
 
 _deploy_status_msgs: dict[str, int] = {}  # repo_name → message_id
@@ -192,6 +216,12 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
 
     parts = custom_id.split(":", 1)
     if len(parts) != 2:
+        # Every custom_id we emit is "<action>:<id>".  Anything else is a
+        # button from a build that no longer matches this one — say so
+        # rather than dropping the tap on the floor.
+        log.warning("Unroutable custom_id %r in #%s", custom_id,
+                    getattr(interaction.channel, "name", "?"))
+        await settle(interaction, "This button is from an older version of the bot and no longer works.")
         return
 
     action, instance_id = parts

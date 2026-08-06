@@ -35,6 +35,11 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 _NOWND: dict = config.NOWND
 
+# Thread names a control room may still be carrying from an older version.
+# Includes the current name so a thread that already matches is recognised
+# (and then skipped) rather than renamed to itself on every refresh.
+_LEGACY_CONTROL_ROOM_NAMES = ("Control Center", "Control Room")
+
 
 # --- Data structures ---
 
@@ -1358,11 +1363,15 @@ class ForumManager:
                 proj.control_message_id = None
                 self.save_forum_map()
                 return
-            # Migrate old names to current Control Room name
-            if thread.name in ("Control Center", "Control Room"):
+            # Migrate old names to current Control Room name.  The guard on
+            # the current name matters: renaming a thread to the name it
+            # already has still spends one of Discord's 2-per-10-min rename
+            # slots for that thread, and this runs on every refresh.
+            if thread.name != channels.CONTROL_ROOM_NAME and thread.name in _LEGACY_CONTROL_ROOM_NAMES:
+                old_name = thread.name
                 try:
                     await thread.edit(name=channels.CONTROL_ROOM_NAME)
-                    log.info("Renamed %s -> %s (thread=%s)", thread.name, channels.CONTROL_ROOM_NAME, thread.id)
+                    log.info("Renamed %s -> %s (thread=%s)", old_name, channels.CONTROL_ROOM_NAME, thread.id)
                 except Exception:
                     pass
             msg = await thread.fetch_message(int(proj.control_message_id))
@@ -1463,11 +1472,13 @@ class ForumManager:
                 ua.control_message_id = None
                 access_mod.save_access_config(cfg)
                 return
-            # Migrate old names to current Control Room name
-            if thread.name in ("Control Center", "Control Room"):
+            # Migrate old names to current Control Room name (see the note in
+            # refresh_control_room -- a self-rename is not free).
+            if thread.name != channels.CONTROL_ROOM_NAME and thread.name in _LEGACY_CONTROL_ROOM_NAMES:
+                old_name = thread.name
                 try:
                     await thread.edit(name=channels.CONTROL_ROOM_NAME)
-                    log.info("Renamed %s -> %s (thread=%s)", thread.name, channels.CONTROL_ROOM_NAME, thread.id)
+                    log.info("Renamed %s -> %s (thread=%s)", old_name, channels.CONTROL_ROOM_NAME, thread.id)
                 except Exception:
                     pass
             msg = await thread.fetch_message(int(ua.control_message_id))

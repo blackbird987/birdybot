@@ -2047,9 +2047,27 @@ class ClaudeBot(discord.Client):
         log.exception("Unhandled exception in %s", event_method)
 
     async def on_interaction(self, interaction: discord.Interaction) -> None:
-        """Handle button interactions (persistent views)."""
+        """Handle button interactions (persistent views).
+
+        Every component interaction leaves here settled: handled, or answered
+        with a reason.  Letting one fall through unacknowledged costs the user
+        a 3-second spinner ending in "This interaction failed", which looks
+        identical to the bot being down and is just as hard to diagnose.
+        """
         if interaction.type != discord.InteractionType.component:
             return
         if not self._in_scope(interaction.guild, interaction.channel):
+            await interactions_mod.settle(
+                interaction,
+                "That control is outside this bot's workspace, so it can't act on it.",
+            )
             return
-        await interactions_mod.handle(self, interaction)
+        try:
+            await interactions_mod.handle(self, interaction)
+        except Exception:
+            custom_id = (interaction.data or {}).get("custom_id", "?")
+            log.exception("Button interaction failed: %s", custom_id)
+            await interactions_mod.settle(
+                interaction,
+                "Something went wrong handling that button — the error is in the bot log.",
+            )

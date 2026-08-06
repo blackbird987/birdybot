@@ -91,6 +91,25 @@ def _parse_origin(value) -> InstanceOrigin:
         return InstanceOrigin.DIRECT
 
 
+# Marker embedded in a merge-result string when the merge itself landed but
+# cleanup left the *main repo* in a state where its code will not import.
+# Distinct from a merge failure on purpose: the branch is fine, the checkout
+# is not, and the two need opposite responses from the caller.
+REPO_UNUSABLE_MARKER = "REPO LEFT BROKEN"
+
+
+def merge_msg_repo_unusable(msg: str) -> bool:
+    """Did the merge land but leave the working tree unusable?
+
+    A failed stash-pop rollback is the known cause: tracked files keep their
+    conflict markers, so every Python file that carries one stops parsing and
+    the bot cannot restart. This is strictly worse than a merge failure — a
+    failed merge changes nothing — so it must not be routed through
+    ``merge_msg_is_failure``, which gates branch-cleanup and retry flows.
+    """
+    return REPO_UNUSABLE_MARKER in msg
+
+
 def merge_msg_is_failure(msg: str) -> bool:
     """Did ``ClaudeRunner.merge_branch`` report an actual merge failure?
 

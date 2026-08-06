@@ -17,6 +17,7 @@ from bot.claude.gitpaths import git_dir_stat
 from bot.claude.types import (
     BUILD_ORIGINS, CODE_CHANGE_TOOLS, ChainPhaseState, Instance, InstanceOrigin,
     InstanceStatus, InstanceType, PHASE_GATES, Phase, merge_msg_is_failure,
+    merge_msg_repo_unusable,
 )
 from bot.engine import ai_project, lifecycle, sessions as sessions_mod
 from bot.platform.base import ButtonSpec, RequestContext
@@ -2071,6 +2072,25 @@ async def _finalize_merge(
     if merge_msg_is_failure(merge_msg):
         return False
     clear_stale_branches(ctx.store, branch_name)
+
+    if merge_msg_repo_unusable(merge_msg):
+        # The branch landed, but cleanup left conflict markers in tracked
+        # files — the repo no longer imports and the bot will not survive a
+        # restart. Two things must NOT happen here. Deploying would restart
+        # into the broken tree; closing the thread would bury the only
+        # notice the user gets, which is exactly how the last occurrence
+        # went unseen (the warning posted and the thread archived four
+        # seconds later). So: no deploy, no close, and a loud ping.
+        log.error("Auto-merge left the repo unusable: %s", merge_msg)
+        if ctx.on_merged:
+            await ctx.on_merged()
+        await ctx.messenger.send_text(
+            ctx.channel_id,
+            f"⛔ **The merge landed, but the repo is now broken — "
+            f"do not restart the bot until it is repaired.**\n{merge_msg}",
+        )
+        return True
+
     from bot.engine.deploy import apply_post_merge_deploy
     await apply_post_merge_deploy(ctx.messenger, ctx.store, merge_target)
     # Apply "merged" tag before close (tag must land before archive)

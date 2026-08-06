@@ -50,7 +50,7 @@ from bot.claude.parser import (
 from bot.claude.provider import ProviderConfig, get_provider
 from bot.claude.types import (
     Instance, InstanceOrigin, InstanceStatus, InstanceType, KillOutcome,
-    merge_msg_is_failure,
+    REPO_UNUSABLE_MARKER, merge_msg_is_failure,
 )
 from bot.store import history as history_mod
 
@@ -5112,6 +5112,26 @@ class ClaudeRunner:
                 except Exception:
                     log.exception("git merge --abort raised during finally cleanup")
 
+    def _unmerged_paths(self, repo: str) -> list[str]:
+        """Tracked paths git still considers unmerged (conflict markers on disk).
+
+        Used to verify a rollback rather than trust its exit code. Returns
+        an empty list when the check itself cannot run — callers treat that
+        as "nothing proven wrong", and the exit code they already have is
+        the fallback signal.
+        """
+        try:
+            r = subprocess.run(
+                ["git", "diff", "--name-only", "--diff-filter=U"],
+                cwd=repo, capture_output=True, text=True, **_NOWND,
+            )
+            if r.returncode != 0:
+                return []
+            return [ln for ln in r.stdout.splitlines() if ln.strip()]
+        except (subprocess.SubprocessError, OSError):
+            log.debug("unmerged-path check failed in %s", repo, exc_info=True)
+            return []
+
     def _restore_stash(self, repo: str) -> str:
         """Pop the auto-stash if safe; return user-facing status string.
 
@@ -5169,22 +5189,47 @@ class ClaudeRunner:
                 cwd=repo, capture_output=True, text=True, **_NOWND,
             )
             if pop_r.returncode != 0:
+                # A conflicted pop leaves UNMERGED index entries, and
+                # `git checkout -- .` refuses to touch those ("path ... is
+                # unmerged") — so the old rollback failed on every single
+                # occasion it was actually needed, leaving conflict markers
+                # in every conflicted file. `reset --hard` is the operation
+                # that clears an unmerged index, and it is safe *here*
+                # specifically because the tracked-dirty check above already
+                # established the tree carried no other tracked work: the
+                # only changes it can discard are the ones the failed pop
+                # just wrote. A conflicting pop never drops the stash, so
+                # the user's work still survives in stash@{0} either way.
                 rollback_ok = False
                 try:
                     rb_r = subprocess.run(
-                        ["git", "checkout", "--", "."],
+                        ["git", "reset", "--hard", "HEAD"],
                         cwd=repo, capture_output=True, text=True, **_NOWND,
                     )
                     rollback_ok = rb_r.returncode == 0
                     if not rollback_ok:
                         log.warning(
-                            "Rollback `git checkout -- .` returned rc=%d in %s: %s",
+                            "Rollback `git reset --hard HEAD` returned rc=%d in %s: %s",
                             rb_r.returncode, repo,
                             (rb_r.stderr or rb_r.stdout or "").strip(),
                         )
+                    else:
+                        # Don't trust the exit code alone. The entire point
+                        # of this branch is that a rollback can report
+                        # success while leaving the repo unusable, and the
+                        # cost of believing it is a repo that no longer
+                        # imports. Confirm against the index itself.
+                        leftover = self._unmerged_paths(repo)
+                        if leftover:
+                            rollback_ok = False
+                            log.error(
+                                "Rollback ran but %d path(s) are still unmerged in "
+                                "%s: %s",
+                                len(leftover), repo, ", ".join(leftover[:10]),
+                            )
                 except (subprocess.SubprocessError, OSError):
                     log.warning(
-                        "Rollback `git checkout -- .` raised in %s",
+                        "Rollback `git reset --hard HEAD` raised in %s",
                         repo, exc_info=True,
                     )
                     rollback_ok = False
@@ -5201,13 +5246,17 @@ class ClaudeRunner:
                 else:
                     log.error(
                         "Stash pop conflicted AND rollback failed in %s — "
-                        "tree may contain conflict markers",
+                        "tree contains conflict markers and the repo will not "
+                        "run until it is repaired",
                         repo,
                     )
                     return (
-                        "\nStash pop conflicted AND rollback failed — your tree may "
-                        "contain conflict markers. Run `git status` and inspect "
-                        "`stash@{0}` manually before continuing."
+                        f"\n{REPO_UNUSABLE_MARKER} — the stash pop conflicted and "
+                        "could not be undone, so tracked files still contain "
+                        "conflict markers. Code in this repo will not import "
+                        "until it is repaired. Your pre-merge work is safe in "
+                        "`stash@{0}`. Repair with `git reset --hard HEAD`, then "
+                        "re-apply the stash."
                     )
             # Clean pop — confirm restoration so the user never has to guess
             # where their pre-merge work lives.
