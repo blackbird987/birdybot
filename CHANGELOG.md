@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.99.15 — Merge safety and dead-end recovery (2026-08-06)
+
 ### Added
 - **`start.sh` bootstraps itself, and there is now a double-clickable launcher.** Starting the bot on a fresh (or live-USB) boot meant hand-running the venv creation, the dependency install, and a `.env` fixup before `start.sh` would do anything but crash — and the crash was invisible, because the old script backgrounded the process and reported "Bot started (pid …)" whether or not it survived the next second. The script now creates `.venv` and installs dependencies when they are missing or stale, repoints a dead `CLAUDE_BINARY` at whatever `claude` is actually on PATH (it has to rewrite the file, not export a variable — `config.py` loads `.env` with `override=True`, so the file always wins), warns when `git` is absent since every build/worktree/merge shells out to it, and waits 5s before declaring success, dumping the tail of `stdout.log` if the process is already gone. `scripts/install_desktop_launcher.sh` generates "Start Claude Bot.desktop" into the repo root, `~/Desktop` and the application menu, with the repo's absolute path baked in at generation time — re-run it after moving the repo or when a live session mounts it somewhere new.
 
