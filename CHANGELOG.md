@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Pushes to GitHub stopped hanging on an invisible password dialog.** Every push since the move to Linux failed as `Push to origin timed out (30s)` — three times overnight in one repo — with nothing in the log naming a cause. The credential was the cause: it had lived in Windows' credential manager, which does not migrate, and Fedora ships no equivalent helper, so git had to ask. Git asks a subprocess with no terminal by running a *graphical* helper, and on KDE that is `SSH_ASKPASS=/usr/bin/ksshaskpass` — hence a dialog captioned for SSH credentials, prompting for a GitHub HTTPS password on a screen no agent watches, for an account password GitHub stopped accepting in 2021. Git blocked on it until the push timeout fired. Both HTTPS remotes (`birdybot`, `AWAS666/AIAgent`) now use SSH, where the existing `id_ed25519` key already authenticates as `blackbird987` with no passphrase and nothing to expire — a token would have been a second secret to store and rotate for no gain. Worktrees share the parent's config, so build branches inherit it.
+- **A credential failure now names itself in under a second.** The remotes were only half the bug; the other half is that git waiting on a dialog is indistinguishable from a slow network until a timeout lies about it. New `procutil.harden_git_env()`, called at the top of `app.run()`, sets `GIT_TERMINAL_PROMPT=0`, `GIT_ASKPASS=""` (empty-*but-set* on purpose: git only falls through to `SSH_ASKPASS` when `GIT_ASKPASS` is unset, so this shadows the desktop's) and `SSH_ASKPASS_REQUIRE=never` for ssh's own passphrase path. One call at startup covers all 84 git call sites plus git run by the Claude CLI children, rather than threading an environment through ten modules. A missing credential now fails in 0.27s as `could not read Username ... terminal prompts disabled`.
+
 ## v0.99.15 — Merge safety and dead-end recovery (2026-08-06)
 
 ### Added

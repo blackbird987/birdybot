@@ -54,6 +54,44 @@ def detached_kwargs() -> dict:
 
 
 # --------------------------------------------------------------------------
+# Git must never stop and ask a human
+# --------------------------------------------------------------------------
+
+
+def harden_git_env() -> None:
+    """Make git fail loudly on missing credentials instead of hanging.
+
+    Every git call the bot makes is a subprocess with no terminal attached.
+    When such a git needs a username or password it does *not* give up -- it
+    looks for a graphical helper, and on a KDE desktop it finds
+    ``SSH_ASKPASS=/usr/bin/ksshaskpass`` and pops a dialog on a screen no
+    agent is watching. Git then blocks on that dialog forever, the bot's 30s
+    push timeout fires, and the log records a meaningless
+    ``Push to origin timed out (30s)``.
+
+    That is how a plain missing-credential turned into a silent, repeating,
+    hour-after-hour sync failure on this machine. The credential itself lived
+    in Windows' credential manager and did not survive the move to Linux; the
+    fix for *that* is SSH remotes. This function fixes the second, worse half
+    -- that the failure was invisible.
+
+    Set once at startup so all ~84 git call sites, plus git run by the Claude
+    CLI children, inherit it. Afterwards a credential problem surfaces in
+    under a second as ``could not read Username ... terminal prompts
+    disabled``, naming the actual cause.
+    """
+    # No terminal prompt...
+    os.environ["GIT_TERMINAL_PROMPT"] = "0"
+    # ...and no GUI one either. Empty-but-set is deliberate: git reads
+    # GIT_ASKPASS first and only consults SSH_ASKPASS when GIT_ASKPASS is
+    # *unset*, so this both disables the helper and shadows the desktop's.
+    os.environ["GIT_ASKPASS"] = ""
+    # Same for ssh itself, which has its own askpass path for key passphrases
+    # (OpenSSH >= 8.4). Harmless on older ssh, which ignores it.
+    os.environ["SSH_ASKPASS_REQUIRE"] = "never"
+
+
+# --------------------------------------------------------------------------
 # "Stay down" handshake
 # --------------------------------------------------------------------------
 # The bot relaunches itself when signalled, so that an agent killing it does

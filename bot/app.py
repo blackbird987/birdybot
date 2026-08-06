@@ -26,6 +26,7 @@ from bot.platform.formatting import redact_secrets
 from bot.procutil import (
     clear_stop_request,
     detached_kwargs,
+    harden_git_env,
     is_bot_process,
     is_process_alive,
     stop_was_requested,
@@ -387,6 +388,10 @@ async def run() -> None:
     """Main async entry point."""
     setup_logging()
     log.info("Starting Claude Bot...")
+
+    # Before anything can shell out to git. See harden_git_env() -- without
+    # this a missing credential is a 30s timeout with no cause in the log.
+    harden_git_env()
 
     # How many accounts exist but can't authenticate right now.  A count, not a
     # table: surfacing these in The Ark is reconcile_account_health()'s job
