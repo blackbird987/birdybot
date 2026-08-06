@@ -30,13 +30,19 @@ def encode_project_path(path: str) -> str:
     """Encode a filesystem path the same way the Claude CLI does for project dirs.
 
     The canonical implementation: a trailing separator is stripped, then
-    ``\\``, ``/``, ``:`` and ``.`` all become ``-``.
-    ``ClaudeRunner._encode_project_path``, ``engine.sessions._encode_path`` and
-    ``claude.session_index.cwd_to_project_dir_name`` all delegate here. They
-    were four independent copies, two of which never replaced ``.`` — so any
-    project path containing a dot (every build worktree, which lives under
-    ``.worktrees/``) was looked up under a name the CLI had never written.
-    Change the rule here and nowhere else.
+    ``\\``, ``/``, ``:`` and ``.`` all become ``-``. Change the rule here and
+    nowhere else — everything below delegates to it:
+
+    * ``ClaudeRunner._encode_project_path``
+    * ``ClaudeRunner._get_projects_dir``
+    * ``engine.sessions._encode_path``
+    * ``claude.session_index.cwd_to_project_dir_name``
+    * ``discord.titles._encoded_temp_dir`` (both temp-dir call sites)
+
+    All but the first were independent copies, and four of the five omitted
+    the ``.`` rule — so any project path containing a dot (every build
+    worktree, which lives under ``.worktrees/``) was looked up under a name
+    the CLI had never written.
     """
     p = path.replace("\\", "/").rstrip("/")
     return p.replace("/", "-").replace(":", "-").replace(".", "-")

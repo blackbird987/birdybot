@@ -239,8 +239,8 @@ def _encode_path(path: str) -> str:
     containing a dot encoded wrong. A build worktree
     (``…/claude-telegram-bot/.worktrees/t-6839``) came out as
     ``…-bot-.worktrees-t-6839`` while the CLI had written
-    ``…-bot--worktrees-t-6839``, so the lookup could never match.
-    ``runner._encode_project_path`` already delegates here for the same reason.
+    ``…-bot--worktrees-t-6839``, so the lookup could never match. See that
+    function for the full list of call sites that share the rule.
     """
     from bot.engine.session_fork import encode_project_path
     return encode_project_path(path)
@@ -308,18 +308,31 @@ def scan_sessions(
 
     candidates.sort(key=lambda x: x[0], reverse=True)
 
+    # Collapse copies of one session BEFORE taking the working window. The
+    # runner mirrors session JSONLs between accounts and back-copies them out
+    # of a worktree's project dir into the main repo's, so a single session
+    # routinely exists three or four times over — on this machine 1290 files
+    # hold 368 distinct sessions. De-duplicating inside the loop instead meant
+    # the `limit * 3` window of 30 rows carried only ~13 real sessions, and
+    # every one that then failed to parse ate into the same budget, so a
+    # request for 10 came back with fewer. Newest-first ordering means the
+    # first copy seen is the one kept, exactly as before.
+    deduped: list[tuple[float, Path, str]] = []
+    seen_ids: set[str] = set()
+    for cand in candidates:
+        if cand[1].stem in seen_ids:
+            continue
+        seen_ids.add(cand[1].stem)
+        deduped.append(cand)
+
     sessions = []
-    seen_ids = set()
     now = datetime.now(timezone.utc)
 
-    for mtime, fpath, proj_encoded in candidates[:limit * 3]:
+    for mtime, fpath, proj_encoded in deduped[:limit * 3]:
         if len(sessions) >= limit:
             break
 
         session_id = fpath.stem
-        if session_id in seen_ids:
-            continue
-        seen_ids.add(session_id)
 
         # Use repo name from store if available, otherwise fall back to last dir segment
         project_name = _encoded_to_name.get(proj_encoded)

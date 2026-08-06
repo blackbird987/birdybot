@@ -215,9 +215,9 @@ utility like `tail` or `taskkill`.
 `.env` and `data/` are both gitignored, so each machine keeps its own paths,
 its own `state.json` and its own PID file. **Do not copy `.env` between the
 two** — `CLAUDE_BINARY`, `REPOS_BASE_DIR` and `CLAUDE_ACCOUNTS` are all
-absolute and machine-specific. `scripts/migrate_to_linux.py` leaves
-`# windows-original:` comments above each rewritten line, so the Windows value
-is recoverable if you ever need to read it back.
+absolute and machine-specific. `scripts/migrate_to_linux.py` copies every file
+it touches to `<name>.windows.bak` before writing, so the original Windows
+values stay readable next to the rewritten ones.
 
 Session history is likewise per-machine; see the first caveat below.
 

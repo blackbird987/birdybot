@@ -22,16 +22,28 @@ log = logging.getLogger(__name__)
 _NOWND: dict = config.NOWND
 
 
+def _encoded_temp_dir() -> str:
+    """``tempfile.gettempdir()`` under the CLI's project-dir encoding.
+
+    Delegates to the one shared encoder. Both call sites used to carry their
+    own copy that replaced ':', '\\' and '/' but not '.', which is harmless
+    while the temp root has no dot in it (``/tmp``, ``…\\AppData\\Local\\Temp``)
+    and silently wrong the moment ``TMPDIR`` points somewhere that does — the
+    title-gen JSONLs would then never be found, and every one of them would
+    accumulate in the session picker.
+    """
+    from bot.engine.session_fork import encode_project_path
+    return encode_project_path(tempfile.gettempdir())
+
+
 def _temp_project_dir() -> Path | None:
     """Path to the CLI projects subdir corresponding to tempfile.gettempdir().
 
-    The CLI encodes cwd by replacing ':', '\\', '/' with '-'. We mirror that
-    so we can locate any .jsonl files the title-gen subprocess wrote.
+    That is where the title-gen subprocess writes its session jsonl, since it
+    runs with cwd set to the temp dir.
     """
     try:
-        tmp = tempfile.gettempdir()
-        encoded = tmp.replace(":", "-").replace("\\", "-").replace("/", "-")
-        return config.CLAUDE_PROJECTS_DIR / encoded
+        return config.CLAUDE_PROJECTS_DIR / _encoded_temp_dir()
     except Exception:
         return None
 
@@ -46,8 +58,7 @@ def _is_temp_like_project_dir(proj_dir: Path) -> bool:
     try:
         name = proj_dir.name
         # Full match against tempfile.gettempdir()'s encoding
-        tmp_encoded = tempfile.gettempdir().replace(":", "-").replace("\\", "-").replace("/", "-")
-        if name == tmp_encoded:
+        if name == _encoded_temp_dir():
             return True
         # Last segment heuristic for stale dirs left by other temp roots
         decoded = name.replace("-", "/")

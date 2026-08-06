@@ -185,7 +185,10 @@ def check_hardcoded_paths(files: list[tuple[str, str]]) -> None:
         if not path.endswith(".py") or path == self_rel:
             continue
         try:
-            text = (REPO / path).read_text(encoding="utf-8", errors="replace")
+            # utf-8-sig, not utf-8: a leading BOM makes ast.parse raise, which
+            # would drop this file back to comments-only skipping and flag
+            # every path its docstrings merely document.
+            text = (REPO / path).read_text(encoding="utf-8-sig", errors="replace")
         except OSError:
             continue
 
@@ -231,17 +234,28 @@ WINDOWS_ONLY_CMDS = {
 }
 
 
+# Keys whose value is data, not something anyone runs.
+NON_COMMAND_KEYS = {"project_type", "logs.file", "logs.failure_markers"}
+
+
 def _iter_json_commands(node, path: str = ""):
     """Yield (json_path, command_string) for every command-ish string.
 
-    Keys starting with `_` are prose notes, and lists in this file are only
-    ever notes or marker words — neither is a command.
+    Prose lives under `_`-prefixed keys by convention and is skipped there.
+    Lists are walked rather than ignored: today the only one holding
+    non-prose is `logs.failure_markers` (named in NON_COMMAND_KEYS), but a
+    future `"steps": [...]` of real commands must not be invisible — a check
+    that quietly stops looking is the failure mode this whole script exists
+    to prevent.
     """
     if isinstance(node, dict):
         for key, value in node.items():
             if key.startswith("_"):
                 continue
             yield from _iter_json_commands(value, f"{path}.{key}" if path else key)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _iter_json_commands(item, path)
     elif isinstance(node, str):
         yield path, node
 
@@ -259,8 +273,8 @@ def check_test_json() -> None:
         return
 
     for key, cmd in _iter_json_commands(cfg):
-        if key in ("project_type", "logs.file"):
-            continue  # values, not commands
+        if key in NON_COMMAND_KEYS:
+            continue
         tokens = cmd.split()
         if not tokens:
             continue
