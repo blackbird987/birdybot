@@ -12,7 +12,8 @@ Checks:
   2. Shell scripts are marked executable in git's index.
   3. Files Windows can't create (reserved names, ':' etc.) aren't tracked.
   4. Nothing hardcodes a drive letter or a backslash-joined path.
-  5. No command in .claude/test.json is single-platform.
+  5. No Windows-only API is reached outside a platform branch.
+  6. No command in .claude/test.json is single-platform.
 
 Exit 0 = clean, 1 = problems found. Run from anywhere in the repo.
 """
@@ -62,7 +63,7 @@ def check_line_endings() -> None:
     No extension is exempt, and an earlier version's exemption list for
     `.bat`/`.cmd`/`.ps1`/`.vbs` was a misreading of how git works. `eol=crlf`
     is a *working tree* directive: git stores those files as LF like everything
-    else and converts on checkout. All 140 tracked text blobs here read `i/lf`,
+    else and converts on checkout. Every tracked text blob here reads `i/lf`,
     so the list never once fired — it was pure hole, skipping the only files
     whose CRLF would have been deliberate enough to look plausible.
 
@@ -221,6 +222,112 @@ def check_hardcoded_paths(files: list[tuple[str, str]]) -> None:
                 )
 
 
+# Names that simply are not there on POSIX Python. Touching one outside a
+# platform branch raises AttributeError (or ImportError) at the moment it
+# runs, which — in the restart paths, where every one of these lived inside a
+# broad `except` — is indistinguishable from the feature quietly not working.
+#
+# The constants are matched bare rather than as `subprocess.X`, because the
+# two real defects were spelled `_sp.DETACHED_PROCESS` through an aliased
+# import and a prefix-anchored pattern walked straight past them. The names
+# are distinctive enough that the only things this catches otherwise are
+# deliberate local definitions of the same value — which belong inside a
+# platform branch anyway, and are therefore already excused by the guard.
+WIN_ONLY_API_RE = re.compile(
+    r"""\b(?:DETACHED_PROCESS
+            |CREATE_NEW_PROCESS_GROUP
+            |CREATE_NO_WINDOW
+            |CREATE_NEW_CONSOLE
+            |CREATE_BREAKAWAY_FROM_JOB
+            |STARTF_USESHOWWINDOW
+            |STARTUPINFO
+            |SW_HIDE)\b
+        |\bctypes\.(?:windll|WinDLL|OleDLL)\b
+        |\bos\.startfile\b
+        |\b(?:import|from)\s+(?:winreg|msvcrt|win32api|win32con|win32com|
+                               win32gui|win32process|pywintypes|pythoncom)\b""",
+    re.VERBOSE,
+)
+
+
+def _import_error_guarded_lines(text: str) -> set[int]:
+    """Lines of imports wrapped in `try: ... except ImportError:`.
+
+    A platform branch is not the only correct guard. `bot/services/outlook.py`
+    reaches pywin32 this way and degrades to a feature flag when the import
+    fails, which is exactly what should happen on Linux — demanding a
+    `sys.platform` check there would be a false alarm, and a check that cries
+    wolf gets silenced.
+    """
+    import ast
+
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return set()
+
+    def catches_import_error(handler: "ast.ExceptHandler") -> bool:
+        if handler.type is None:
+            return True  # bare except
+        parts = (
+            handler.type.elts
+            if isinstance(handler.type, ast.Tuple) else [handler.type]
+        )
+        return any(
+            getattr(p, "id", "") in ("ImportError", "ModuleNotFoundError", "Exception")
+            for p in parts
+        )
+
+    guarded: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try):
+            continue
+        if not any(catches_import_error(h) for h in node.handlers):
+            continue
+        for stmt in node.body:
+            for sub in ast.walk(stmt):
+                if isinstance(sub, (ast.Import, ast.ImportFrom)):
+                    end = sub.end_lineno or sub.lineno
+                    guarded.update(range(sub.lineno, end + 1))
+    return guarded
+
+
+def check_windows_only_apis(files: list[tuple[str, str]]) -> None:
+    """A Windows-only name reached on Linux is an AttributeError, not a no-op.
+
+    Same window-and-guard rule as the hardcoded-path check, and for the same
+    reason: `subprocess.CREATE_NO_WINDOW` inside `if sys.platform == "win32":`
+    is correct. Outside one it is a landmine that only goes off on the other
+    machine — `bot/app.py` carried two, so the emergency relaunch and the
+    whole `/reboot` path were dead on Linux while reading as if they worked.
+    """
+    self_rel = Path(__file__).resolve().relative_to(REPO).as_posix()
+    for _mode, path in files:
+        if not path.endswith(".py") or path == self_rel:
+            continue
+        try:
+            text = (REPO / path).read_text(encoding="utf-8-sig", errors="replace")
+        except OSError:
+            continue
+
+        skip = _doc_and_comment_lines(text) | _import_error_guarded_lines(text)
+        lines = text.splitlines()
+        for i, line in enumerate(lines, 1):
+            if i in skip:
+                continue
+            if ALLOW_RE.search(line) or (i > 1 and ALLOW_RE.search(lines[i - 2])):
+                continue
+            m = WIN_ONLY_API_RE.search(line)
+            if not m:
+                continue
+            if GUARD_RE.search("\n".join(lines[max(0, i - 7):i])):
+                continue
+            problems.append(
+                f"{path}:{i} Windows-only {m.group(0).strip()} outside a "
+                f"platform branch — it does not exist on Linux"
+            )
+
+
 # Shell utilities that exist on only one of the two platforms. A command
 # leading with one of these cannot be run by the verify step on the other
 # machine. `tail -n 50 data/logs/bot.log` sat in logs.tail for exactly this
@@ -310,6 +417,7 @@ def main() -> int:
     check_exec_bits(files)
     check_windows_safe_names(files)
     check_hardcoded_paths(files)
+    check_windows_only_apis(files)
     check_test_json()
 
     if problems:

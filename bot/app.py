@@ -23,7 +23,13 @@ from bot.claude.types import InstanceStatus
 from bot.engine import commands as engine_commands
 from bot.platform.base import NotificationService
 from bot.platform.formatting import redact_secrets
-from bot.procutil import is_bot_process, is_process_alive
+from bot.procutil import (
+    clear_stop_request,
+    detached_kwargs,
+    is_bot_process,
+    is_process_alive,
+    stop_was_requested,
+)
 from bot.scheduler import Scheduler
 from bot.store.state import StateStore
 
@@ -98,6 +104,10 @@ def _acquire_pid_lock() -> bool:
             pass  # Corrupt PID file, overwrite it
 
     pid_file.write_text(str(os.getpid()), encoding="utf-8")
+    # A stop request belongs to the process it was aimed at. Anything still
+    # here was left by a caller that died mid-stop, and letting it survive
+    # would turn the next emergency kill into a permanent one.
+    clear_stop_request(config.DATA_DIR)
     return True
 
 
@@ -533,8 +543,22 @@ async def run() -> None:
     # Emergency signal handler: if the bot is killed (e.g. by a Claude Code instance
     # running taskkill), save context and auto-relaunch so we come back online.
     def _emergency_reboot_handler(signum, frame):
+        # On Windows this only ever fired for an unusual signal, so relaunching
+        # unconditionally was fine. On Linux SIGTERM is how everything stops a
+        # process — botctl, start.sh, systemctl, shutdown — and a bot that
+        # relaunches itself out of each one cannot be stopped at all. Callers
+        # that mean it leave a sentinel; everything else is still an emergency.
+        # Checked before the imports below: this is a signal handler, and the
+        # deliberate path should not be reaching for the import lock at all.
+        if stop_was_requested(config.DATA_DIR):
+            log.warning("Caught signal %s — deliberate stop, not relaunching", signum)
+            store.save()
+            _release_pid_lock()
+            os._exit(0)
+
         import json as _json
         import subprocess as _sp
+
         log.warning("Caught signal %s — emergency reboot", signum)
         # Find any running instance's channel to send confirmation after restart
         reboot_data: dict = {}
@@ -563,11 +587,10 @@ async def run() -> None:
         try:
             _sp.Popen(
                 [sys.executable, str(launcher), str(config._PROJECT_ROOT)],
-                creationflags=_sp.DETACHED_PROCESS | _sp.CREATE_NEW_PROCESS_GROUP,
-                close_fds=True,
+                **detached_kwargs(),
             )
         except Exception:
-            pass
+            log.exception("Emergency relaunch could not be spawned")
         store.save()
         _release_pid_lock()
         os._exit(1)
@@ -626,8 +649,7 @@ async def run() -> None:
             launcher = config._PROJECT_ROOT / "scripts" / "relaunch.py"
             _sp.Popen(
                 [sys.executable, str(launcher), str(config._PROJECT_ROOT)],
-                creationflags=_sp.DETACHED_PROCESS | _sp.CREATE_NEW_PROCESS_GROUP,
-                close_fds=True,
+                **detached_kwargs(),
             )
             runner.clear_reboots()
             stop_event.set()

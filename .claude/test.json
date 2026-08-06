@@ -52,6 +52,7 @@
   "harnesses": {
     "_note": "Standalone runners for logic with no live surface. Exit 0 = pass.",
     "portability": "python scripts/check_portability.py",
+    "stop_sentinel": "python scripts/test_stop_sentinel.py",
     "projects_dirs": "python scripts/test_projects_dirs.py",
     "botcmd_collapse": "python scripts/test_botcmd_collapse.py",
     "wake_directive": "python scripts/test_wake_directive.py",

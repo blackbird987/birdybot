@@ -38,15 +38,19 @@ from pathlib import Path
 SCRIPT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SCRIPT_ROOT))
 from bot.procutil import (  # noqa: E402  (needs the path above)
+    clear_stop_request,
+    detached_kwargs,
     install_root,
     is_bot_process,
     is_process_alive,
+    request_stop,
 )
 
 # Everything we act on — pid file, log, launch cwd, venv — belongs to the
 # installed bot, not to whatever worktree this script was invoked from.
 REPO = install_root(SCRIPT_ROOT)
-PID_FILE = REPO / "data" / "bot.pid"
+DATA_DIR = REPO / "data"
+PID_FILE = DATA_DIR / "bot.pid"
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -150,17 +154,15 @@ def start() -> int:
         print(f"Bot already running (pid {pid}) — nothing to do.")
         return 0
 
-    (REPO / "data" / "logs").mkdir(parents=True, exist_ok=True)
-    stdout_log = REPO / "data" / "logs" / "stdout.log"
+    (DATA_DIR / "logs").mkdir(parents=True, exist_ok=True)
+    stdout_log = DATA_DIR / "logs" / "stdout.log"
+
+    # A sentinel from an earlier stop must not outlive it — the bot clears it
+    # on startup too, but not before it has read its own signal handlers in.
+    clear_stop_request(DATA_DIR)
 
     # Detach so the bot outlives this script and its parent shell.
-    kwargs: dict = {}
-    if IS_WINDOWS:
-        # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP — no console, and Ctrl-C
-        # in the launching shell doesn't propagate into the bot.
-        kwargs["creationflags"] = 0x00000008 | 0x00000200
-    else:
-        kwargs["start_new_session"] = True
+    kwargs = detached_kwargs()
 
     with open(stdout_log, "ab") as out:
         proc = subprocess.Popen(
@@ -186,7 +188,7 @@ def start() -> int:
             return 1
         live = _live_bot_pid()
         if live is not None:
-            print(f"Bot started (pid {live}). Logs: {REPO / 'data' / 'logs' / 'bot.log'}")
+            print(f"Bot started (pid {live}). Logs: {DATA_DIR / 'logs' / 'bot.log'}")
             return 0
 
     print(
@@ -214,6 +216,10 @@ def stop() -> int:
         return 0
 
     print(f"Stopping bot (pid {pid})...")
+    # Tell the bot this is a real shutdown. Its SIGTERM handler otherwise
+    # relaunches itself, so without this every stop on Linux would be answered
+    # by a fresh bot a few seconds later.
+    request_stop(DATA_DIR)
     err: str | None = None
     if IS_WINDOWS:
         # /T so the whole tree goes: the bot spawns CLI subprocesses that
@@ -231,9 +237,7 @@ def stop() -> int:
     for _ in range(20):  # up to 10s
         time.sleep(0.5)
         if not _alive(pid):
-            PID_FILE.unlink(missing_ok=True)
-            print("Bot stopped.")
-            return 0
+            return _stopped()
 
     if not IS_WINDOWS:
         print("Graceful stop timed out — sending SIGKILL.")
@@ -241,10 +245,19 @@ def stop() -> int:
         time.sleep(1)
 
     if _alive(pid):
+        # Leave the sentinel: it expires on its own, and clearing it here
+        # would re-arm the relaunch under a bot we have not managed to stop.
         detail = f": {err}" if err else ""
         print(f"Failed to stop bot (pid {pid}){detail}.", file=sys.stderr)
         return 1
+    return _stopped()
+
+
+def _stopped() -> int:
+    """Tidy up after the bot is confirmed gone."""
     PID_FILE.unlink(missing_ok=True)
+    # A SIGKILLed bot never ran its handler, so the sentinel can outlive it.
+    clear_stop_request(DATA_DIR)
     print("Bot stopped.")
     return 0
 
@@ -256,7 +269,7 @@ def logs(count: int = 50) -> int:
     is static JSON that cannot branch per platform — the verify step needs one
     log-reading command that works on both machines.
     """
-    log_file = REPO / "data" / "logs" / "bot.log"
+    log_file = DATA_DIR / "logs" / "bot.log"
     try:
         with open(log_file, "r", encoding="utf-8", errors="replace") as f:
             tail = deque(f, maxlen=max(1, count))

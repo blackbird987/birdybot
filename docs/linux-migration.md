@@ -30,7 +30,8 @@ is gated behind a `sys_platform == "win32"` marker so Linux skips it.
   which is the correct behaviour (`bot/claude/parser.py`).
 - **Managed settings lookup** — has a real Linux branch
   (`/etc/claude-code/managed-settings.json`, `bot/claude/models.py`).
-- **Shutdown signals** — `SIGTERM` is registered on both platforms.
+- **Shutdown signals** — `SIGTERM` is registered on both platforms, and now
+  means the same thing on both (see *Stopping means stopping* below).
 
 ## What you lose
 
@@ -207,9 +208,15 @@ python scripts/check_portability.py
 
 which fails loudly on CRLF creeping back into the index, a `.sh` that lost its
 executable bit, a filename Windows cannot check out, a hardcoded drive letter
-outside a platform branch, or a `.claude/test.json` command that only runs on
-one OS — including one that merely *starts* with a single-platform shell
-utility like `tail` or `taskkill`.
+outside a platform branch, a Windows-only API reached without a platform
+branch, or a `.claude/test.json` command that only runs on one OS — including
+one that merely *starts* with a single-platform shell utility like `tail` or
+`taskkill`.
+
+That fourth check is not hypothetical: `subprocess.DETACHED_PROCESS` and its
+siblings do not exist in POSIX Python, and two unguarded uses in `bot/app.py`
+had left the emergency relaunch and the entire `/reboot` path dead on Linux —
+each inside an `except` broad enough to hide it.
 
 ### Config is per-machine and must stay that way
 
@@ -235,6 +242,35 @@ The `.bat` files are kept for double-clicking from Explorer, and `start.sh` /
 the systemd user unit remain the Linux conveniences — but anything scripted
 should use `botctl.py`, because it is the only entry point that exists on both
 platforms. `.claude/test.json` points at it for exactly that reason.
+
+### Stopping means stopping
+
+The bot relaunches itself when it is signalled, so that an agent killing it
+does not leave it offline. On Windows that only ever fired for an unusual
+signal. On Linux `SIGTERM` is how *everything* stops a process, so the same
+rule would make the bot unkillable — every stop answered by a fresh bot a few
+seconds later.
+
+So a caller that means it writes `data/stop_requested` first, and the handler
+consumes that and stays down. All three supported ways of stopping do this for
+you: `botctl.py stop`, `start.sh`, and `systemctl --user stop claude-bot` (via
+`ExecStop=` in the unit). A bare `kill <pid>` is *not* one of them — that is
+still read as an emergency and the bot comes back, which is the point.
+
+The marker expires after two minutes and is cleared at startup, so a stop that
+dies half-way through cannot leave the relaunch disabled.
+
+Under systemd the unit's own `Restart=always` does the restarting and the bot
+skips its self-relaunch — otherwise the two race for the PID lock, and if
+systemd's copy loses it restarts into an immediate exit until the unit is
+marked failed. Detected from the cgroup, so renaming the unit on install
+costs only that optimisation.
+
+Verified end to end by:
+
+```bash
+python scripts/test_stop_sentinel.py
+```
 
 ---
 

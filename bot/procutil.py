@@ -23,9 +23,87 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 IS_WINDOWS = sys.platform == "win32"
+
+
+def detached_kwargs() -> dict:
+    """``Popen`` kwargs for a child that must outlive us.
+
+    The two Windows flags are spelled as literals on purpose.
+    ``subprocess.DETACHED_PROCESS`` and friends **do not exist** on POSIX
+    Python — reading the attribute raises ``AttributeError``. Both of the
+    bot's restart paths did exactly that, inside an ``except`` that swallowed
+    it, so on Linux the emergency relaunch and ``/reboot`` were silent no-ops
+    while the code read as if they worked.
+
+    On POSIX ``start_new_session`` is the equivalent that matters: it puts the
+    child in its own session, so a process-*group* kill aimed at the dying bot
+    does not also take out the relauncher that is meant to bring it back.
+    """
+    if IS_WINDOWS:
+        DETACHED_PROCESS = 0x00000008
+        CREATE_NEW_PROCESS_GROUP = 0x00000200
+        return {
+            "creationflags": DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+            "close_fds": True,
+        }
+    return {"start_new_session": True, "close_fds": True}
+
+
+# --------------------------------------------------------------------------
+# "Stay down" handshake
+# --------------------------------------------------------------------------
+# The bot relaunches itself when signalled, so that an agent killing it does
+# not leave it dead. On Windows that only ever fired for an unusual signal;
+# on Linux SIGTERM is *the* ordinary way to stop a process, so `botctl stop`,
+# `start.sh` and `systemctl stop` would all be met by a bot that immediately
+# comes back. A caller that means it writes this file first.
+STOP_SENTINEL = "stop_requested"
+
+# Long enough for the slowest stop (SIGTERM, 10s grace, SIGKILL), short enough
+# that a sentinel left behind by a crashed caller cannot disable the emergency
+# relaunch for any length of time. Startup clears it too.
+_STOP_MAX_AGE_S = 120.0
+
+
+def request_stop(data_dir: Path | str) -> None:
+    """Declare the next shutdown deliberate — the bot must not relaunch."""
+    try:
+        target = Path(data_dir)
+        target.mkdir(parents=True, exist_ok=True)
+        (target / STOP_SENTINEL).write_text(str(os.getpid()), encoding="utf-8")
+    except OSError:
+        pass  # worst case the bot relaunches; the caller can try again
+
+
+def clear_stop_request(data_dir: Path | str) -> None:
+    """Drop any sentinel — called on startup and after a stop completes."""
+    try:
+        (Path(data_dir) / STOP_SENTINEL).unlink()
+    except OSError:
+        pass
+
+
+def stop_was_requested(data_dir: Path | str) -> bool:
+    """Consume the sentinel. True only for a fresh, deliberate stop.
+
+    Consuming rather than merely reading it means one request answers one
+    signal; a second kill of a bot that came back is treated as an emergency
+    again, which is the safer default.
+    """
+    path = Path(data_dir) / STOP_SENTINEL
+    try:
+        age = time.time() - path.stat().st_mtime
+    except OSError:
+        return False
+    try:
+        path.unlink()
+    except OSError:
+        pass
+    return age <= _STOP_MAX_AGE_S
 
 
 def install_root(script_root: Path) -> Path:
@@ -103,9 +181,16 @@ def _looks_like_bot_argv(args: list[str]) -> bool:
     ``start.sh``, ``scripts/claude-bot.service``, ``start.bat`` and
     ``botctl.py start`` all use the first; the second is what you get running
     it by hand from an editor.
+
+    Matching the argument that actually follows ``-m`` is both wider and
+    narrower than looking for the two tokens anywhere: it accepts the
+    ``bot.__main__`` spelling, and it stops ``python -m pytest bot`` from
+    passing for the bot itself.
     """
-    if "bot" in args and "-m" in args:
-        return True
+    if "-m" in args:
+        idx = args.index("-m")
+        if idx + 1 < len(args) and args[idx + 1] in ("bot", "bot.__main__"):
+            return True
     joined = " ".join(args).replace("\\", "/")
     return "bot/__main__.py" in joined
 
@@ -134,11 +219,16 @@ def is_bot_process(pid: int, root: Path | str | None = None) -> bool:
 
     if root is not None:
         try:
-            cwd = Path(os.readlink(str(proc / "cwd"))).resolve()
+            cwd = os.readlink(str(proc / "cwd"))
         except OSError:
             return True  # different user or hardened /proc — argv was enough
         try:
-            return cwd == Path(root).resolve()
+            # samefile, not string equality: this repo lives under a mount
+            # point that is reachable by more than one path, and a bot whose
+            # directory has been replaced reads back as "<path> (deleted)",
+            # which no amount of normalising turns into a match. Both cases
+            # raise here and fall through to the conservative answer.
+            return os.path.samefile(cwd, str(root))
         except OSError:
             return True
     return True
