@@ -178,6 +178,33 @@ def _parse_version_tag(name: str) -> tuple[int, int, int, int] | None:
         return None
     return tuple(int(g) if g else 0 for g in m.groups())  # type: ignore[return-value]
 
+
+def _git_fail_reason(detail: str, limit: int = 160) -> str:
+    """The one line of a failed git command worth showing a human.
+
+    Merge notes carried the exit code alone. That stayed hidden while git was
+    hanging, because the note read ``Push to origin timed out (30s)`` instead
+    — but disabling the interactive prompt (``procutil.harden_git_env``)
+    turns those hangs into fast non-zero exits, which would then have reached
+    the phone as a bare ``Could not push to origin (exit 128)`` with the
+    sentence naming the cause still stranded in ``bot.log``. Fixing the hang
+    without this would have swapped one uninformative message for another.
+
+    Git puts the actionable part first (``fatal: could not read Username
+    for 'https://github.com': terminal prompts disabled``) and pads the rest
+    with advice, so the first non-blank line is the whole diagnosis. Redacted
+    because it is user-facing and a remote URL can carry an embedded token,
+    and imported lazily to keep the claude layer free of a platform import.
+    """
+    from bot.platform.formatting import redact_secrets
+
+    line = next((ln.strip() for ln in detail.splitlines() if ln.strip()), "")
+    if not line:
+        return ""
+    line = redact_secrets(line)
+    return (line[: limit - 1] + "…") if len(line) > limit else line
+
+
 ProgressCallback = Callable  # async callback(message: str, detail: str)
 # Stall callback: legacy single-arg form is still accepted via TypeError
 # fallback at the call site, so platform layers that haven't been updated
@@ -4991,6 +5018,8 @@ class ClaudeRunner:
                     log.error("Push to origin after merge in %s: %s",
                               repo, push_detail)
                     push_note = f"\nCould not push to origin (exit {push_r.returncode})"
+                    if reason := _git_fail_reason(push_detail):
+                        push_note += f"\n`{reason}`"
                 else:
                     log.info("Pushed %s to origin after merge in %s", target, repo)
                     # Push tags pointing at any commit in the branch-unique
@@ -5026,6 +5055,8 @@ class ClaudeRunner:
                                 tag_detail = (tag_push_r.stderr or tag_push_r.stdout or "").strip()
                                 log.error("Tag push to origin in %s: %s", repo, tag_detail)
                                 push_note += f"\nTags not pushed (exit {tag_push_r.returncode})"
+                                if reason := _git_fail_reason(tag_detail):
+                                    push_note += f"\n`{reason}`"
                             else:
                                 tag_list = ", ".join(tag_names)
                                 log.info("Pushed tags [%s] to origin in %s", tag_list, repo)

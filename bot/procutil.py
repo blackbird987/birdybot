@@ -1,4 +1,9 @@
-"""Locating the running bot: where it is installed, and whether it is alive.
+"""The bot as an operating-system process: where it lives, whether it is
+alive, and what its children inherit.
+
+Everything here is about the bot's own process rather than about anything it
+manages — which is why locating a running bot and fixing the environment its
+subprocesses are born into (``harden_git_env``) sit in the same file.
 
 Stdlib only, and deliberately free of any bot import — the control scripts
 that need it (``botctl.py``, ``smoke_test.py``, ``relaunch.py``) load it
@@ -75,10 +80,21 @@ def harden_git_env() -> None:
     fix for *that* is SSH remotes. This function fixes the second, worse half
     -- that the failure was invisible.
 
-    Set once at startup so all ~84 git call sites, plus git run by the Claude
-    CLI children, inherit it. Afterwards a credential problem surfaces in
-    under a second as ``could not read Username ... terminal prompts
-    disabled``, naming the actual cause.
+    Set once at startup, so every git call site in ``bot/`` inherits it, as do
+    the Claude CLI children (``runner.py`` builds their environment with
+    ``{**os.environ}``). One assignment beats threading an environment through
+    eleven modules, and cannot be forgotten at a call site added later.
+    Afterwards a credential problem surfaces in well under a second as ``could
+    not read Username ... terminal prompts disabled``, naming its own cause.
+
+    Note this deliberately removes the only way a passphrase-protected SSH key
+    could be unlocked interactively. That is the right trade for a headless
+    bot — a hang is worse than an error — but it means such a key must be
+    pre-loaded with ``ssh-add`` into the agent the bot inherits. Keys with no
+    passphrase (the current setup) are unaffected.
+
+    Credential *helpers* are untouched: git consults those before it ever
+    prompts, so Git Credential Manager on Windows keeps working as before.
     """
     # No terminal prompt...
     os.environ["GIT_TERMINAL_PROMPT"] = "0"
