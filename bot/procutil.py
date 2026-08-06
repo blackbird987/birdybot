@@ -1,4 +1,9 @@
-"""Locating the running bot: where it is installed, and whether it is alive.
+"""The bot as an operating-system process: where it lives, whether it is
+alive, and what its children inherit.
+
+Everything here is about the bot's own process rather than about anything it
+manages — which is why locating a running bot and fixing the environment its
+subprocesses are born into (``harden_git_env``) sit in the same file.
 
 Stdlib only, and deliberately free of any bot import — the control scripts
 that need it (``botctl.py``, ``smoke_test.py``, ``relaunch.py``) load it
@@ -51,6 +56,55 @@ def detached_kwargs() -> dict:
             "close_fds": True,
         }
     return {"start_new_session": True, "close_fds": True}
+
+
+# --------------------------------------------------------------------------
+# Git must never stop and ask a human
+# --------------------------------------------------------------------------
+
+
+def harden_git_env() -> None:
+    """Make git fail loudly on missing credentials instead of hanging.
+
+    Every git call the bot makes is a subprocess with no terminal attached.
+    When such a git needs a username or password it does *not* give up -- it
+    looks for a graphical helper, and on a KDE desktop it finds
+    ``SSH_ASKPASS=/usr/bin/ksshaskpass`` and pops a dialog on a screen no
+    agent is watching. Git then blocks on that dialog forever, the bot's 30s
+    push timeout fires, and the log records a meaningless
+    ``Push to origin timed out (30s)``.
+
+    That is how a plain missing-credential turned into a silent, repeating,
+    hour-after-hour sync failure on this machine. The credential itself lived
+    in Windows' credential manager and did not survive the move to Linux; the
+    fix for *that* is SSH remotes. This function fixes the second, worse half
+    -- that the failure was invisible.
+
+    Set once at startup, so every git call site in ``bot/`` inherits it, as do
+    the Claude CLI children (``runner.py`` builds their environment with
+    ``{**os.environ}``). One assignment beats threading an environment through
+    eleven modules, and cannot be forgotten at a call site added later.
+    Afterwards a credential problem surfaces in well under a second as ``could
+    not read Username ... terminal prompts disabled``, naming its own cause.
+
+    Note this deliberately removes the only way a passphrase-protected SSH key
+    could be unlocked interactively. That is the right trade for a headless
+    bot — a hang is worse than an error — but it means such a key must be
+    pre-loaded with ``ssh-add`` into the agent the bot inherits. Keys with no
+    passphrase (the current setup) are unaffected.
+
+    Credential *helpers* are untouched: git consults those before it ever
+    prompts, so Git Credential Manager on Windows keeps working as before.
+    """
+    # No terminal prompt...
+    os.environ["GIT_TERMINAL_PROMPT"] = "0"
+    # ...and no GUI one either. Empty-but-set is deliberate: git reads
+    # GIT_ASKPASS first and only consults SSH_ASKPASS when GIT_ASKPASS is
+    # *unset*, so this both disables the helper and shadows the desktop's.
+    os.environ["GIT_ASKPASS"] = ""
+    # Same for ssh itself, which has its own askpass path for key passphrases
+    # (OpenSSH >= 8.4). Harmless on older ssh, which ignores it.
+    os.environ["SSH_ASKPASS_REQUIRE"] = "never"
 
 
 # --------------------------------------------------------------------------

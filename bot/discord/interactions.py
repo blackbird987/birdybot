@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 import discord
 
-from bot.claude.runner import RebootResult
+from bot.claude.runner import RebootResult, git_fail_reason
 from bot.discord import access as access_mod
 from bot.discord import channels
 from bot.discord.access import AccessResult, load_access_config, effective_mode as access_effective_mode
@@ -1579,7 +1579,8 @@ async def _handle_sync_git(
             cwd=repo_path, capture_output=True, text=True, timeout=30, **NOWND,
         )
         if fetch.returncode != 0:
-            err = (fetch.stderr or fetch.stdout or "unknown error")[:200]
+            detail = (fetch.stderr or fetch.stdout or "").strip()
+            err = git_fail_reason(detail) or "unknown error"
             await interaction.followup.send(
                 f"`{repo_name}`: Fetch failed \u2014 `{err}`", ephemeral=True,
             )
@@ -1638,7 +1639,8 @@ async def _handle_sync_git(
                 cwd=repo_path, capture_output=True, text=True, timeout=30, **NOWND,
             )
             if pull.returncode != 0:
-                err = (pull.stderr or pull.stdout or "unknown error")[:200]
+                detail = (pull.stderr or pull.stdout or "").strip()
+                err = git_fail_reason(detail) or "unknown error"
                 await interaction.followup.send(
                     f"`{repo_name}`: Pull failed (histories diverged?) \u2014 `{err}`",
                     ephemeral=True,
@@ -1686,7 +1688,8 @@ async def _handle_sync_git(
             if result.returncode == 0:
                 parts.append(f"pushed {ahead} commit{'s' if ahead != 1 else ''}")
             else:
-                err = (result.stderr or result.stdout or "unknown error")[:200]
+                detail = (result.stderr or result.stdout or "").strip()
+                err = git_fail_reason(detail) or "unknown error"
                 await interaction.followup.send(
                     f"`{repo_name}`: Push failed \u2014 `{err}`", ephemeral=True,
                 )
@@ -1706,7 +1709,7 @@ async def _handle_sync_git(
             if tag_lines:
                 parts.append(f"{len(tag_lines)} tag{'s' if len(tag_lines) != 1 else ''}")
         else:
-            err = (tag_result.stderr or tag_result.stdout or "")[:200]
+            err = git_fail_reason((tag_result.stderr or tag_result.stdout or "").strip())
             if err:
                 parts.append(f"tags failed: `{err}`")
 

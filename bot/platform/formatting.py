@@ -290,7 +290,20 @@ _TOKEN_PATTERNS = [
     re.compile(r'(?i)Bearer\s+[a-zA-Z0-9_./-]{20,}'),
 ]
 
-_CONN_STRING_PATTERN = re.compile(r'(://[^:\s]+:)([^@\s]{8,})(@)')
+# Anything sitting between the colon and the @ of a URL is, by definition of
+# the userinfo field, a credential — so there is no length below which it is
+# safe to print. This used to require 8+ characters, which let a short
+# password through verbatim.
+_CONN_STRING_PATTERN = re.compile(r'(://[^:\s]+:)([^@\s]+)(@)')
+
+# A credential can also *be* the userinfo, with no password half at all:
+# `https://<token>@github.com/o/r.git` is a form GitHub accepts, and a token
+# in an unrecognised vendor format matches none of the patterns above. Length
+# is what separates it from a real username, and the floor is set well clear
+# of the longest ones actually in use — `git` (3), `oauth2` (6),
+# `x-access-token` (14), `gitlab-ci-token` (15) — so every SSH remote in the
+# bot's own output stays readable.
+_URL_USERINFO_PATTERN = re.compile(r'(://)([^:/\s@]{20,})(@)')
 
 _SECRET_KEY_WORDS = (
     r'password|passwd|secret|mnemonic|private[_-]?key|seed[_-]?phrase|'
@@ -328,6 +341,7 @@ def redact_secrets(text: str) -> str:
     for pattern in _TOKEN_PATTERNS:
         text = pattern.sub('[REDACTED]', text)
     text = _CONN_STRING_PATTERN.sub(r'\1[REDACTED]\3', text)
+    text = _URL_USERINFO_PATTERN.sub(r'\1[REDACTED]\3', text)
     text = _MNEMONIC_PATTERN.sub(lambda m: m.group(1) + '=[REDACTED]', text)
     text = _KV_PATTERN.sub(lambda m: f'{m.group(1)}=[REDACTED] ', text)
     text = _HEX_KEY_PATTERN.sub('[REDACTED]', text)

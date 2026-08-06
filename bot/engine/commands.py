@@ -43,7 +43,7 @@ from bot.platform.formatting import (
 )
 from bot.textutil import clip
 
-from bot.claude.runner import ClaudeRunner, MERGE_FAIL_DIVERGED, _NOWND
+from bot.claude.runner import ClaudeRunner, MERGE_FAIL_DIVERGED, _NOWND, git_fail_reason
 
 log = logging.getLogger(__name__)
 
@@ -2464,7 +2464,11 @@ async def _create_repo(ctx: RequestContext, text: str) -> None:
             if result.returncode == 0:
                 msg += f" Pushed to GitHub ({visibility[2:]})."
             else:
-                msg += f"\nGitHub create failed: {result.stderr.strip()}"
+                # `gh repo create --push` shells out to git, so this is git's
+                # stderr — remote-contacting, and it went out unbounded and
+                # unredacted. Same picker as everywhere else.
+                reason = git_fail_reason(result.stderr.strip()) or "unknown error"
+                msg += f"\nGitHub create failed: {reason}"
         except FileNotFoundError:
             msg += "\nGitHub push skipped: `gh` CLI not installed."
 

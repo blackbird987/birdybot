@@ -185,6 +185,98 @@ def _parse_version_tag(name: str) -> tuple[int, int, int, int] | None:
         return None
     return tuple(int(g) if g else 0 for g in m.groups())  # type: ignore[return-value]
 
+
+# Git's transfer statistics, which the server echoes back prefixed "remote:".
+# Matched as a category rather than by symptom: filtering on "contains a
+# percentage" / "ends with done." looks equivalent but misses the one such
+# line that has neither, `remote: Total 3 (delta 0), reused 0 (delta 0)`,
+# which is then reported to the user as the cause of the failure.
+_GIT_PROGRESS = (
+    "enumerating objects", "counting objects", "compressing objects",
+    "writing objects", "receiving objects", "resolving deltas",
+    "unpacking objects", "total ",
+)
+
+
+def _is_git_progress(line: str) -> bool:
+    """Is this a transfer-statistics line rather than a diagnosis?"""
+    body = line[len("remote:"):] if line.startswith("remote:") else line
+    return body.strip().lower().startswith(_GIT_PROGRESS)
+
+
+def git_fail_reason(detail: str, limit: int = 160) -> str:
+    """The one line of a failed git command worth showing a human.
+
+    Merge notes carried the exit code alone. That stayed hidden while git was
+    hanging, because the note read ``Push to origin timed out (30s)`` instead
+    — but disabling the interactive prompt (``procutil.harden_git_env``)
+    turns those hangs into fast non-zero exits, which would then have reached
+    the phone as a bare ``Could not push to origin (exit 128)`` with the
+    sentence naming the cause still stranded in ``bot.log``. Fixing the hang
+    without this would have swapped one uninformative message for another.
+
+    Which line that is takes some care, and "the first one" is wrong. A
+    credential failure does lead with its diagnosis::
+
+        fatal: could not read Username for 'https://github.com': terminal
+        prompts disabled
+
+    but the far more common failure — a branch that is behind its remote —
+    does not::
+
+        To github.com:owner/repo.git
+         ! [rejected]        master -> master (fetch first)
+        error: failed to push some refs to 'github.com:owner/repo.git'
+        hint: Updates were rejected because the remote contains work ...
+
+    There the first line is the remote's address, which explains nothing
+    while looking like it should. So prefer the first line git marks as a
+    diagnosis and fall back to the first non-blank line only if none is
+    marked. ``hint:`` is deliberately not a marker: it is the paragraph of
+    advice that follows the reason, not the reason.
+
+    Transfer statistics are dropped before either step, not merely skipped
+    while looking for a marker. The server sends those prefixed ``remote:``
+    too and they arrive *before* its refusal, so scanning on the marker alone
+    would report a byte count as the cause — but excluding them only from the
+    scan leaves the fallback free to hand the same byte count back, which is
+    exactly what happens when the real message carries no marker at all::
+
+        remote: Counting objects: 100% (5/5), done.
+        The remote end hung up unexpectedly
+
+    Redaction is not optional politeness. Nothing scrubs secrets at the
+    Discord send boundary — ``redact_secrets`` is applied per call site — and
+    an HTTPS remote can carry an embedded token, which git then quotes back
+    inside ``fatal: Authentication failed for '<url>'``. The deploy push in
+    ``discord/interactions.py`` posted that stderr raw, so the token went to
+    Discord verbatim; both it and the merge notes go through here now. Public
+    for that reason: a leading underscore on a name imported from another
+    package would misdescribe the interface.
+
+    ``redact_secrets`` is imported lazily to keep the claude layer free of a
+    module-level platform import.
+    """
+    from bot.platform.formatting import redact_secrets
+
+    lines = [" ".join(ln.split()) for ln in detail.splitlines() if ln.strip()]
+    if not lines:
+        return ""
+    # Chatter first, so it can be neither the pick nor the fallback. Keeping
+    # everything if that empties the list: better a byte count than nothing.
+    useful = [ln for ln in lines if not _is_git_progress(ln)] or lines
+    # Then an ordered scan, first match wins, so the earliest *marked* line is
+    # used: on a permission failure that is the server's "remote: Permission
+    # ... denied", which is more use than the `fatal:` 403 that follows it.
+    line = next(
+        (ln for ln in useful
+         if ln.startswith(("fatal:", "error:", "remote:", "!"))),
+        useful[0],
+    )
+    line = redact_secrets(line)
+    return (line[: limit - 1] + "…") if len(line) > limit else line
+
+
 ProgressCallback = Callable  # async callback(message: str, detail: str)
 # Stall callback: legacy single-arg form is still accepted via TypeError
 # fallback at the call site, so platform layers that haven't been updated
@@ -4977,6 +5069,12 @@ class ClaudeRunner:
                     sync_note = (
                         "\nCould not sync with origin — merged against local state"
                     )
+                    # Same reasoning as the push note below: without git's own
+                    # sentence this says only that something went wrong, and
+                    # this is the branch the credential hang actually landed
+                    # in ("Fetch origin failed ... timed out (30s)").
+                    if reason := git_fail_reason(fetch_err):
+                        sync_note += f"\n`{reason}`"
                 else:
                     ahead = self._rev_count(repo, f"origin/{target}..{target}")
                     behind = self._rev_count(repo, f"{target}..origin/{target}")
@@ -5017,6 +5115,8 @@ class ClaudeRunner:
                                 "\nCould not fast-forward to origin — "
                                 "merged against local state"
                             )
+                            if reason := git_fail_reason(ff_detail):
+                                sync_note += f"\n`{reason}`"
                         else:
                             log.info(
                                 "Fast-forwarded %s to origin/%s (+%d) in %s",
@@ -5132,6 +5232,8 @@ class ClaudeRunner:
                     log.error("Push to origin after merge in %s: %s",
                               repo, push_detail)
                     push_note = f"\nCould not push to origin (exit {push_r.returncode})"
+                    if reason := git_fail_reason(push_detail):
+                        push_note += f"\n`{reason}`"
                 else:
                     log.info("Pushed %s to origin after merge in %s", target, repo)
                     # Push tags pointing at any commit in the branch-unique
@@ -5167,6 +5269,8 @@ class ClaudeRunner:
                                 tag_detail = (tag_push_r.stderr or tag_push_r.stdout or "").strip()
                                 log.error("Tag push to origin in %s: %s", repo, tag_detail)
                                 push_note += f"\nTags not pushed (exit {tag_push_r.returncode})"
+                                if reason := git_fail_reason(tag_detail):
+                                    push_note += f"\n`{reason}`"
                             else:
                                 tag_list = ", ".join(tag_names)
                                 log.info("Pushed tags [%s] to origin in %s", tag_list, repo)
