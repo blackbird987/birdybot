@@ -86,6 +86,25 @@ def _cmp(p: str) -> str:
     return _norm(p).translate(_FOLD)
 
 
+def _usable_root(p: str) -> bool:
+    """Reject a root that would swallow the whole filesystem.
+
+    ``_norm`` strips the trailing separator, so the POSIX root ``/`` normalises
+    to the empty string, which prefix-matches every absolute path there is.
+    Translation itself would survive that (the rewrite comes out as the input),
+    but ``is_portable`` would answer True for every path on the machine, and
+    that function's only job is to spot a repo living outside the shared roots
+    — the condition that stranded a repo on a Linux-only partition and cost a
+    night of retry loops.  A root of ``/`` would silence that warning for every
+    repo at once.  Reachable when an account directory sits at the top of the
+    filesystem, or on a container running with ``HOME=/``.
+
+    Single definition on purpose: both the on-disk map and the live detection
+    ask this, so there is one answer to "is this a root we will accept".
+    """
+    return bool(p)
+
+
 def _is_windows_style(p: str) -> bool:
     n = _norm(p)
     return len(n) >= 2 and n[1] == ":" and n[0].isalpha()
@@ -206,7 +225,10 @@ def _load_file(path: Path) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
     for gid, members in groups.items():
         if isinstance(members, list):
-            out[str(gid)] = [_norm(m) for m in members if isinstance(m, str) and m]
+            out[str(gid)] = [
+                n for m in members
+                if isinstance(m, str) and _usable_root(n := _norm(m))
+            ]
     return out
 
 
@@ -260,6 +282,12 @@ def init(
     _local = {}
 
     local_root = detect_local_root(account_hints or [], home, here)
+    if local_root is not None and not _usable_root(_norm(local_root)):
+        log.warning(
+            "Path map: refusing %s as a root — it would prefix-match every "
+            "absolute path", local_root,
+        )
+        local_root = None
     if local_root is not None:
         gid = _read_marker(local_root)
         if gid is None:

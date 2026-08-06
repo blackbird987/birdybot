@@ -563,6 +563,58 @@ def test_fold_is_length_preserving() -> None:
     check("ASCII case still folds", paths.translate("c:/USERS/quincy/x"), "/mnt/q/x")
 
 
+# --------------------------------------------------------------------------
+# 11. A root of "/" must never enter the map
+# --------------------------------------------------------------------------
+def test_filesystem_root_is_refused() -> None:
+    """A root of "/" would mark every path on the machine as portable.
+
+    "/" normalises to the empty string, which prefix-matches every absolute
+    path.  Translation survives that (the rewrite equals the input), but
+    is_portable then answers True for everything — and its only job is to spot
+    a repo living outside the shared roots, which is precisely the condition
+    that stranded a repo on a Linux-only partition.  One bad root would
+    silence that warning for every repo at once.
+
+    Driven through the reachable route: an account directory sitting at the
+    top of the filesystem, whose parent is "/".  With the guard in place no
+    marker is ever written, so this never touches the real root.
+    """
+    print("\n[11] The filesystem root is refused as a map root")
+    tmp = Path(tempfile.mkdtemp(prefix="bot-rootguard-"))
+    try:
+        # Also seeded on disk, so both the stored map and live detection are
+        # exercised by the same check.
+        (tmp / "data").mkdir()
+        (tmp / "data" / paths.ROOTS_FILENAME).write_text(json.dumps({
+            "groups": {"g1": ["/", "C:/Users/Quincy"]},
+        }), encoding="utf-8")
+
+        env = os.environ.pop("BOT_PATHS_DISABLED", None)
+        try:
+            # /tmp exists on every machine this runs on, so its parent — "/" —
+            # is what detection would otherwise settle on.
+            paths.init(data_dir=tmp / "data", account_hints=["/tmp"],
+                       home=tmp / "nonexistent-home")
+        finally:
+            if env is not None:
+                os.environ["BOT_PATHS_DISABLED"] = env
+
+        snap = paths.snapshot()
+        check("no group records the filesystem root",
+              [m for ms in snap["groups"].values() for m in ms if m == ""], [])
+        check("'/' did not become the local root",
+              [v for v in snap["local"].values() if v == ""], [])
+        check("an arbitrary path is not suddenly portable",
+              paths.is_portable("/etc/passwd"), False)
+        check("nor is one on the other partition",
+              paths.is_portable("/home/quincy/Programming/The-Citadel"), False)
+        check("translation is still an identity for them",
+              paths.translate("/etc/passwd"), "/etc/passwd")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def show_live_map() -> None:
     """Print the real map without modifying anything."""
     os.environ.pop("BOT_PATHS_DISABLED", None)
@@ -598,6 +650,7 @@ def main() -> int:
     test_state_localisation()
     test_translation_cannot_lose_state()
     test_fold_is_length_preserving()
+    test_filesystem_root_is_refused()
 
     print(f"\n{_checks - len(_failures)}/{_checks} checks passed")
     if _failures:

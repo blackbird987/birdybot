@@ -37,6 +37,13 @@ import sys
 import tempfile
 from pathlib import Path
 
+# Importing bot.config runs a real path-map init, which would drop a root
+# marker in whoever's home this runs under and write a roots.json next to the
+# checkout. The cascade under test does not depend on the map, so switch it
+# off: an empty map means every path passes through unchanged, and the test
+# stops varying with the machine it runs on.
+os.environ.setdefault("BOT_PATHS_DISABLED", "1")
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from bot import config

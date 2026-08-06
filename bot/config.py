@@ -104,7 +104,12 @@ from bot.claude.provider import get_provider as _get_provider  # noqa: E402
 _PROVIDER_CFG = _get_provider(PROVIDER)
 
 # Binary and branch prefix — derived from provider, overridable via env.
-CLAUDE_BINARY: str = _paths.translate(os.getenv("CLAUDE_BINARY")) or _PROVIDER_CFG.binary
+# NOT translated, unlike every other path here — the overlay above owns this
+# one. Translating it would turn `C:/…/npm/claude.cmd` into a path that really
+# does exist on the mounted drive and really is a Windows batch file, so Linux
+# would run it and fail with an exec error instead of the honest "that binary
+# is not here". A wrong path that resolves is worse than one that doesn't.
+CLAUDE_BINARY: str = os.getenv("CLAUDE_BINARY") or _PROVIDER_CFG.binary
 BRANCH_PREFIX: str = os.getenv("BRANCH_PREFIX") or _PROVIDER_CFG.branch_prefix
 
 # Cursor-specific: default model (free tier = "auto", paid = specific model)

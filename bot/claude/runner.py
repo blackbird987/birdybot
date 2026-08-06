@@ -3996,13 +3996,22 @@ class ClaudeRunner:
         # guaranteed "No conversation found" no matter how healthy everything
         # else is.
         encodings: list[str] = []
+
+        def _add_encoding(enc: str | None) -> None:
+            if enc and enc not in encodings:
+                encodings.append(enc)
+
+        # The two directly-derived encodings go in first and by name, so that
+        # "the encoding this call is actually targeting is in the list" is
+        # structurally true rather than an accident of the alias round-trip
+        # producing a byte-identical string.
+        _add_encoding(encoded_cwd)
+        _add_encoding(encoded_repo)
         for base in (cwd, instance.repo_path):
             if not base:
                 continue
-            for spelling in (paths.aliases(base) or [base]):
-                enc = self._encode_project_path(spelling)
-                if enc and enc not in encodings:
-                    encodings.append(enc)
+            for spelling in paths.aliases(base):
+                _add_encoding(self._encode_project_path(spelling))
 
         # Seeded with the target rather than trusting it to fall out of the
         # loops below.  "Target is freshest -> keep it" is only reachable if the
@@ -4034,10 +4043,14 @@ class ClaudeRunner:
         # glob pattern, so anything carrying `*` or `?` would silently widen
         # this from "the conversation we want" to "some other conversation",
         # and hydrating the wrong history is worse than finding none.
-        if _UUID_RE.match(session_id or "") and not any(
-            p.exists() for p in candidates
-        ):
+        if _UUID_RE.match(session_id or ""):
             def _scan() -> list[Path]:
+                # The "did the derived candidates miss?" probe lives in here
+                # too, not on the event loop. These are stat calls against a
+                # FUSE-mounted NTFS volume in the hot path of every resume, and
+                # the rest of this method is careful to keep that off the loop.
+                if any(p.exists() for p in candidates):
+                    return []
                 found: list[Path] = []
                 for acct in accounts:
                     root = Path(acct) / "projects"
