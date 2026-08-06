@@ -23,8 +23,10 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
+import time
 from collections.abc import Container
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -414,17 +416,52 @@ def launch_login_terminal(account_dir: str) -> bool:
             )
             log.info("Spawned login terminal for %s", p)
             return True
-        # POSIX — try a few common terminal emulators
+        # POSIX — try common terminal emulators, newest conventions first.
+        #
+        # Each entry is (program, args-before-command). The flag is NOT
+        # uniform: GNOME dropped `-e` in favour of `-- cmd…`, kgx/ptyxis
+        # followed it, while konsole/xterm/xfce4-terminal still take `-e`.
+        # Passing `-e` to a modern gnome-terminal makes it exit non-zero
+        # without ever showing a window.
         env = os.environ.copy()
         env["CLAUDE_CONFIG_DIR"] = str(p)
-        for term in ("x-terminal-emulator", "gnome-terminal", "konsole", "xterm"):
-            try:
-                subprocess.Popen([term, "-e", binary], env=env)
-                log.info("Spawned %s for login on %s", term, p)
-                return True
-            except FileNotFoundError:
+        candidates = (
+            ("gnome-terminal", ["--"]),
+            ("kgx", ["--"]),
+            ("ptyxis", ["--"]),
+            ("konsole", ["-e"]),
+            ("xfce4-terminal", ["-e"]),
+            ("alacritty", ["-e"]),
+            ("kitty", ["-e"]),
+            ("x-terminal-emulator", ["-e"]),
+            ("xterm", ["-e"]),
+        )
+        for term, flag in candidates:
+            if not shutil.which(term):
                 continue
-        log.warning("No terminal emulator found to launch login for %s", p)
+            try:
+                proc = subprocess.Popen([term, *flag, binary], env=env)
+            except OSError:
+                log.debug("Terminal %s failed to spawn", term, exc_info=True)
+                continue
+            # A terminal that launches and dies immediately (wrong flag,
+            # no display, missing font config) used to be reported as a
+            # success, so the user was told login was open when nothing
+            # had happened. Give it a moment and check it is still alive.
+            time.sleep(0.6)
+            if proc.poll() is not None:
+                log.debug(
+                    "Terminal %s exited immediately (rc=%s) — trying next",
+                    term, proc.returncode,
+                )
+                continue
+            log.info("Spawned %s for login on %s", term, p)
+            return True
+        log.warning(
+            "No usable terminal emulator for login on %s. Run manually: "
+            "CLAUDE_CONFIG_DIR=%s %s",
+            p, p, binary,
+        )
         return False
     except Exception:
         log.exception("Failed to spawn login terminal for %s", p)

@@ -424,7 +424,10 @@ async def handle_auth_button(
             )
             return
 
-        ok = launch_login_terminal(target)
+        # Off the event loop: the POSIX path probes candidate terminals and
+        # waits briefly on each to confirm it didn't die on launch, which
+        # would otherwise block the Discord heartbeat for seconds.
+        ok = await asyncio.to_thread(launch_login_terminal, target)
         if ok:
             await interaction.followup.send(
                 f"Opened a terminal for `{account_label(target)}` on "
@@ -435,7 +438,11 @@ async def handle_auth_button(
             )
         else:
             await interaction.followup.send(
-                "Failed to open a login terminal — check bot logs.",
+                "Failed to open a login terminal — no usable terminal "
+                "emulator on this host. Run this on **"
+                f"{config.PC_NAME}** instead:\n"
+                f"```\nCLAUDE_CONFIG_DIR={target} {config.CLAUDE_BINARY}\n```\n"
+                "then `/login` inside it. See bot logs for what was tried.",
                 ephemeral=True,
             )
         return

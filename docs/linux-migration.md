@@ -167,15 +167,85 @@ throwaway query in a small repo to confirm the CLI actually spawns.
 
 ---
 
+## Working from both machines at once
+
+The Linux desktop is not a replacement for the Windows laptop — both drive the
+same repo. Two things have to be true for that to be painless, and neither is
+automatic.
+
+### Line endings are pinned, and the laptop needs one reset
+
+`.gitattributes` forces LF everywhere, in history and on disk, on both
+platforms. Batch files (`.bat`, `.cmd`, `.ps1`, `.vbs`) keep CRLF because
+`cmd.exe` mis-parses multi-line LF batch.
+
+Before this existed each platform guessed via `core.autocrlf`, and the guesses
+disagreed: the Windows checkout held CRLF against an LF history, so the same
+clone read *clean* on Windows and *121 files modified* on Linux. A single
+commit from the Linux side would have flipped every file, turning every
+subsequent diff, code review and worktree merge into whole-file noise.
+
+**On the Windows laptop, once, after pulling the commit that added
+`.gitattributes`:**
+
+```powershell
+git rm --cached -r .
+git reset --hard
+```
+
+That re-checks-out every file under the new policy. Do it with no builds in
+flight, and merge or discard any open worktrees first — they were created
+under the old policy. Skip it and the laptop shows a one-time wave of phantom
+modifications.
+
+Both machines can then be verified with:
+
+```bash
+python scripts/check_portability.py
+```
+
+which fails loudly on CRLF creeping back into the index, a `.sh` that lost its
+executable bit, a filename Windows cannot check out, a hardcoded drive letter
+outside a platform branch, or a `.claude/test.json` command that only runs on
+one OS.
+
+### Config is per-machine and must stay that way
+
+`.env` and `data/` are both gitignored, so each machine keeps its own paths,
+its own `state.json` and its own PID file. **Do not copy `.env` between the
+two** — `CLAUDE_BINARY`, `REPOS_BASE_DIR` and `CLAUDE_ACCOUNTS` are all
+absolute and machine-specific. `scripts/migrate_to_linux.py` leaves
+`# windows-original:` comments above each rewritten line, so the Windows value
+is recoverable if you ever need to read it back.
+
+Session history is likewise per-machine; see the first caveat below.
+
+### Starting and stopping the bot
+
+`scripts/botctl.py` works on both:
+
+```bash
+python scripts/botctl.py start | stop | restart | status
+```
+
+The `.bat` files are kept for double-clicking from Explorer, and `start.sh` /
+the systemd user unit remain the Linux conveniences — but anything scripted
+should use `botctl.py`, because it is the only entry point that exists on both
+platforms. `.claude/test.json` points at it for exactly that reason.
+
+---
+
 ## Caveats
 
 - **Claude CLI session history does not follow you.** The CLI stores past
-  sessions under `~/.claude/projects/<encoded-cwd>/`, and the encoding embeds
-  the absolute path — `C--Users-Quincy-...` on Windows,
-  `-home-quincy-...` on Linux. Old conversations are not lost, but they will
-  not be found by `/session list` or resumed under the new paths. New sessions
-  are unaffected. Rewriting them would mean rewriting the `cwd` inside every
-  JSONL record; not worth the risk for history.
+  sessions under `<account dir>/projects/<encoded-cwd>/` — that is each entry
+  in `CLAUDE_ACCOUNTS`, *not* `~/.claude`, unless the two happen to coincide
+  (they do on Windows; on Linux they routinely don't). The encoding embeds the
+  absolute path — `C--Users-Quincy-...` on Windows, `-run-media-...` on Linux.
+  Old conversations are not lost, but they will not be found by
+  `/session list` or resumed under the new paths. New sessions are unaffected.
+  Rewriting them would mean rewriting the `cwd` inside every JSONL record; not
+  worth the risk for history.
 
 - **Path decoding is lossy in both directions, by design.** The encoding
   flattens `:`, `\`, `/` and `.` all to `-`, so a directory containing a

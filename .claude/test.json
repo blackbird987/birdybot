@@ -17,8 +17,14 @@
   "singleton": true,
 
   "health": "python scripts/smoke_test.py",
-  "start": "scripts/start_bot.bat",
-  "stop": "scripts/stop_bot.bat",
+  "start": "python scripts/botctl.py start",
+  "stop": "python scripts/botctl.py stop",
+  "_platform_note": [
+    "start/stop go through scripts/botctl.py, which works on both Linux and",
+    "Windows. They used to name start_bot.bat / stop_bot.bat -- files that",
+    "do not exist on Linux, so verify could never recover a bot it found down.",
+    "The .bat wrappers are kept for double-clicking from Explorer."
+  ],
 
   "logs": {
     "file": "data/logs/bot.log",
@@ -44,6 +50,8 @@
 
   "harnesses": {
     "_note": "Standalone runners for logic with no live surface. Exit 0 = pass.",
+    "portability": "python scripts/check_portability.py",
+    "projects_dirs": "python scripts/test_projects_dirs.py",
     "botcmd_collapse": "python scripts/test_botcmd_collapse.py",
     "wake_directive": "python scripts/test_wake_directive.py",
     "wake_promise": "python scripts/test_wake_promise.py",

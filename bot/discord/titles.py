@@ -67,10 +67,6 @@ def cleanup_stale_temp_jsonls() -> int:
 
     Returns the count of files removed. Best-effort — never raises.
     """
-    projects_dir = config.CLAUDE_PROJECTS_DIR
-    if not projects_dir.is_dir():
-        return 0
-
     # Lazy import: titles.py is in the discord layer; engine.sessions doesn't
     # import titles.py, so this directional dep is fine. Lazy keeps module
     # load cheap.
@@ -78,21 +74,27 @@ def cleanup_stale_temp_jsonls() -> int:
 
     removed = 0
     try:
-        for proj_dir in projects_dir.iterdir():
-            if not proj_dir.is_dir() or not _is_temp_like_project_dir(proj_dir):
-                continue
-            for jsonl in proj_dir.glob("*.jsonl"):
-                summary = _read_session_summary(jsonl)
-                if not summary or not summary.get("first_user"):
+        # Sweep every account root, not just the primary — older builds ran
+        # title-gen against $HOME/.claude, so leftovers can sit in either.
+        for projects_dir in config.claude_projects_dirs():
+            for proj_dir in projects_dir.iterdir():
+                if not proj_dir.is_dir() or not _is_temp_like_project_dir(proj_dir):
                     continue
-                first = summary["first_user"].get("text", "")
-                if not first.startswith(config.TITLE_PROMPT_MARKER):
-                    continue
-                try:
-                    jsonl.unlink()
-                    removed += 1
-                except OSError:
-                    log.debug("Failed to delete stale title-gen jsonl: %s", jsonl, exc_info=True)
+                for jsonl in proj_dir.glob("*.jsonl"):
+                    summary = _read_session_summary(jsonl)
+                    if not summary or not summary.get("first_user"):
+                        continue
+                    first = summary["first_user"].get("text", "")
+                    if not first.startswith(config.TITLE_PROMPT_MARKER):
+                        continue
+                    try:
+                        jsonl.unlink()
+                        removed += 1
+                    except OSError:
+                        log.debug(
+                            "Failed to delete stale title-gen jsonl: %s",
+                            jsonl, exc_info=True,
+                        )
     except OSError:
         log.debug("Stale title-gen jsonl scan failed", exc_info=True)
     return removed
@@ -172,6 +174,12 @@ async def generate_title_text(prompt: str, summary: str = "") -> str | None:
     env = os.environ.copy()
     env.pop("CLAUDE_CODE", None)
     env.pop("CLAUDECODE", None)
+    # Pin to the primary configured account. Without this the subprocess falls
+    # back to $HOME/.claude, which on Windows happens to be the same directory
+    # but on Linux can be a different — possibly unauthenticated — config dir,
+    # silently failing every title generation.
+    if config.PROVIDER == "claude" and config.CLAUDE_ACCOUNTS:
+        env["CLAUDE_CONFIG_DIR"] = str(Path(config.CLAUDE_ACCOUNTS[0]).expanduser())
 
     # Snapshot pre-existing jsonls in the Temp project dir so we can delete
     # whatever this subprocess writes — the CLI persists every -p call as a

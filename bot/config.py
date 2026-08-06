@@ -781,8 +781,71 @@ WORKFLOW_GUIDANCE: dict[str, str] = {
 # Provider's base directory name (e.g. ".claude", ".cursor")
 PROVIDER_DIR_NAME: str = _PROVIDER_CFG.projects_dir_name
 
-# Session/plan data directory — derived from provider (e.g. ~/.claude/projects/)
-CLAUDE_PROJECTS_DIR: Path = Path.home() / PROVIDER_DIR_NAME / "projects"
+def claude_projects_dirs() -> list[Path]:
+    """Every projects root the CLI may have written session JSONLs to.
+
+    The bot launches the CLI with ``CLAUDE_CONFIG_DIR`` pointed at whichever
+    account is active, so sessions land under *that* directory — not under
+    ``$HOME``.  On Windows the two coincide (``C:/Users/x`` and
+    ``C:/Users/x/.claude``), which is why deriving this from ``Path.home()``
+    alone worked there.  On Linux they routinely diverge: the account dirs may
+    sit on another filesystem entirely, leaving the home-derived path holding a
+    handful of stray sessions while every real one lives elsewhere.
+
+    Ordered most-authoritative first (the accounts, in rotation order), with
+    the home-derived path last as a fallback for a single-account or
+    non-``claude`` setup.  Deduplicated and filtered to dirs that exist, so
+    callers can iterate without guarding.
+
+    If ``CLAUDE_PROJECTS_DIR`` has been reassigned away from its derived value
+    — which a sandboxed test harness does to keep its fixtures off real
+    session data — that override wins and confines the scan to it alone.
+    Some callers here *delete* files, so widening a deliberately narrowed
+    scope would be actively destructive.
+    """
+    if CLAUDE_PROJECTS_DIR != _default_projects_dir():
+        return [CLAUDE_PROJECTS_DIR] if CLAUDE_PROJECTS_DIR.is_dir() else []
+
+    roots: list[Path] = []
+    if PROVIDER == "claude":
+        for acct in CLAUDE_ACCOUNTS:
+            try:
+                roots.append(Path(acct).expanduser() / "projects")
+            except (OSError, RuntimeError):  # malformed entry — skip, don't crash
+                continue
+    roots.append(Path.home() / PROVIDER_DIR_NAME / "projects")
+
+    seen: set[str] = set()
+    out: list[Path] = []
+    for r in roots:
+        key = str(r).lower() if os.name == "nt" else str(r)
+        if key in seen:
+            continue
+        seen.add(key)
+        if r.is_dir():
+            out.append(r)
+    return out
+
+
+def _default_projects_dir() -> Path:
+    """The single projects root to WRITE to / treat as primary.
+
+    First configured account when there is one, else the home-derived path.
+    Unlike :func:`claude_projects_dirs` this never filters on existence — it
+    has to be a usable target even before the directory has been created.
+    """
+    if PROVIDER == "claude" and CLAUDE_ACCOUNTS:
+        try:
+            return Path(CLAUDE_ACCOUNTS[0]).expanduser() / "projects"
+        except (OSError, RuntimeError):
+            pass
+    return Path.home() / PROVIDER_DIR_NAME / "projects"
+
+
+# Session/plan data directory — the primary account's projects root. Readers
+# that scan for existing sessions should use claude_projects_dirs() instead so
+# a second account's history isn't invisible.
+CLAUDE_PROJECTS_DIR: Path = _default_projects_dir()
 
 
 def set_provider(name: str) -> None:
@@ -823,7 +886,7 @@ def set_provider(name: str) -> None:
     CLAUDE_BINARY = resolved
     BRANCH_PREFIX = os.getenv("BRANCH_PREFIX") or new_cfg.branch_prefix
     PROVIDER_DIR_NAME = new_cfg.projects_dir_name
-    CLAUDE_PROJECTS_DIR = Path.home() / PROVIDER_DIR_NAME / "projects"
+    CLAUDE_PROJECTS_DIR = _default_projects_dir()
     CURSOR_MODEL = os.getenv("CURSOR_MODEL", "auto")
     _logging.getLogger(__name__).info(
         "Provider switched to %s (binary=%s)", name, CLAUDE_BINARY,

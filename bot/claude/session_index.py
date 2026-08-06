@@ -51,8 +51,24 @@ class RebuildResult:
     detail: str = ""
 
 
-def claude_projects_dir() -> Path:
-    return Path.home() / ".claude" / "projects"
+def claude_projects_dirs() -> list[Path]:
+    """Every projects root to rebuild indexes under.
+
+    Delegates to :func:`bot.config.claude_projects_dirs` so this follows the
+    configured accounts.  ``$HOME/.claude`` is only correct when the account
+    dirs happen to live under home — true on Windows, routinely false on
+    Linux, where it would rebuild an almost-empty directory and silently leave
+    every real session unindexed.
+
+    Lazy import: this module is otherwise standalone, and the fallback keeps
+    it usable from a bare script with no config loaded.
+    """
+    try:
+        from bot import config
+        return config.claude_projects_dirs()
+    except Exception:
+        fallback = Path.home() / ".claude" / "projects"
+        return [fallback] if fallback.is_dir() else []
 
 
 def cwd_to_project_dir_name(cwd: str) -> str:
@@ -363,40 +379,41 @@ async def rebuild_all(
     exempt_instance_id: str | None = None,
     backup: bool = False,
 ) -> dict:
-    """Rebuild every project's sessions-index.json under ~/.claude/projects.
+    """Rebuild every project's sessions-index.json across all account roots.
 
     Per-project failures are isolated and logged; other projects continue.
     """
-    base = claude_projects_dir()
-    if not base.is_dir():
-        log.info("No %s — nothing to rebuild", base)
+    bases = claude_projects_dirs()
+    if not bases:
+        log.info("No projects dir found — nothing to rebuild")
         return {"projects": 0, "sessions": 0, "failed": 0, "skipped_active": 0, "no_jsonls": 0}
 
     counts = {"projects": 0, "sessions": 0, "failed": 0, "skipped_active": 0, "no_jsonls": 0}
-    for pdir in sorted(base.iterdir()):
-        if not pdir.is_dir():
-            continue
-        try:
-            result = await rebuild_project_index(
-                pdir, state=state,
-                exempt_instance_id=exempt_instance_id,
-                backup=backup,
-            )
-        except Exception:
-            log.exception("rebuild_project_index crashed for %s", pdir)
-            counts["failed"] += 1
-            continue
+    for base in bases:
+        for pdir in sorted(base.iterdir()):
+            if not pdir.is_dir():
+                continue
+            try:
+                result = await rebuild_project_index(
+                    pdir, state=state,
+                    exempt_instance_id=exempt_instance_id,
+                    backup=backup,
+                )
+            except Exception:
+                log.exception("rebuild_project_index crashed for %s", pdir)
+                counts["failed"] += 1
+                continue
 
-        if result.status == "rebuilt":
-            counts["projects"] += 1
-            counts["sessions"] += result.sessions_indexed
-        elif result.status == "skipped_active":
-            counts["skipped_active"] += 1
-        elif result.status == "skipped_no_jsonls":
-            counts["no_jsonls"] += 1
-        else:  # verification_failed | error
-            counts["failed"] += 1
-            log.warning("Rebuild %s for %s: %s", result.status, pdir, result.detail)
+            if result.status == "rebuilt":
+                counts["projects"] += 1
+                counts["sessions"] += result.sessions_indexed
+            elif result.status == "skipped_active":
+                counts["skipped_active"] += 1
+            elif result.status == "skipped_no_jsonls":
+                counts["no_jsonls"] += 1
+            else:  # verification_failed | error
+                counts["failed"] += 1
+                log.warning("Rebuild %s for %s: %s", result.status, pdir, result.detail)
 
     log.info(
         "Sessions-index rebuild: %d projects, %d sessions, %d failed, %d skipped (active), %d empty",
