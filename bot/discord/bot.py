@@ -15,12 +15,15 @@ Extracted modules:
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
 import os
 import re
 import time as _time
 import uuid
+import xml.etree.ElementTree as ET
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -115,6 +118,120 @@ def _strip_missing_image_refs(prompt: str, image_paths: list[str]) -> str:
         len(missing), missing,
     )
     return cleaned
+
+
+# --- Attachment handling ---------------------------------------------------
+# What the message handler accepts and the size ceiling for each family.
+# Module-level so the user-facing rejection notice can quote the same limits
+# the loop enforces instead of duplicating them.
+ATTACH_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+ATTACH_AUDIO_EXTS = {".ogg", ".mp3", ".wav", ".m4a", ".webm"}
+# Inlined straight into the prompt — anything that is plain text underneath
+# and small enough to paste.
+ATTACH_TEXT_EXTS = {".txt", ".md", ".csv", ".json", ".log", ".yaml", ".yml"}
+# Saved to disk and referenced by path: the session's own Read tool handles
+# PDFs natively (extracted text *and* a rendered page image, plus page
+# ranges), which beats anything we could extract here — and costs no new
+# dependency.  Verified against a real PDF before choosing this route.
+ATTACH_DOC_EXTS = {".pdf"}
+# Read refuses .docx as a binary file (also verified), so Word has to be
+# extracted locally — see _extract_docx_text.
+ATTACH_WORD_EXTS = {".docx"}
+
+ATTACH_AUDIO_MAX = 25_000_000
+ATTACH_IMAGE_MAX = 10_000_000
+ATTACH_TEXT_MAX = 500_000
+ATTACH_DOC_MAX = 20_000_000
+
+ATTACH_ACCEPTED_SENTENCE = (
+    "I can read PDFs, Word documents, images, plain-text files "
+    "(including Markdown, CSV, JSON and logs) and voice notes."
+)
+
+
+def _human_size(n: int) -> str:
+    """Rough, readable size for a user-facing sentence — not for arithmetic."""
+    if n >= 10_000_000:
+        return f"{n / 1_000_000:.0f} MB"
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f} MB"
+    return f"{max(1, round(n / 1000))} KB"
+
+
+def _attachment_reject_note(
+    filename: str, ext: str, size: int, *, voice_enabled: bool = True,
+) -> str:
+    """Plain-language reason an attachment couldn't be taken.
+
+    Written for a non-technical reader: name the file, say what went wrong,
+    and say what would work instead.  Never leaks a traceback or a bare list
+    of extensions.
+    """
+    if ext in ATTACH_AUDIO_EXTS and not voice_enabled:
+        return (
+            f"I couldn't listen to **{filename}** — voice transcription isn't "
+            "switched on for this bot right now."
+        )
+    families = (
+        ("voice note", ATTACH_AUDIO_EXTS, ATTACH_AUDIO_MAX),
+        ("image", ATTACH_IMAGE_EXTS, ATTACH_IMAGE_MAX),
+        ("text file", ATTACH_TEXT_EXTS, ATTACH_TEXT_MAX),
+        ("document", ATTACH_DOC_EXTS | ATTACH_WORD_EXTS, ATTACH_DOC_MAX),
+    )
+    for label, exts, cap in families:
+        if ext in exts:
+            return (
+                f"**{filename}** is too big for me to open — it's "
+                f"{_human_size(size)}, and the most I can take for a "
+                f"{label} is {_human_size(cap)}."
+            )
+    return f"I can't read **{filename}**. {ATTACH_ACCEPTED_SENTENCE}"
+
+
+# A .docx is a zip; guard against one that unpacks to something enormous.
+_DOCX_XML_MAX = 10_000_000
+_DOCX_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+
+
+def _extract_docx_text(data: bytes) -> str:
+    """Pull the visible text out of a .docx.
+
+    A .docx is a zip whose ``word/document.xml`` holds the body; every run of
+    visible text is a ``<w:t>`` node and paragraphs (``<w:p>``) are the line
+    breaks.  Table cells are built from the same nodes, so a form laid out as
+    a table comes through as well.
+
+    Done with the standard library on purpose rather than python-docx: the
+    point of this feature is that a non-technical user can drop a Word file
+    in and have it work, and a lazy-imported dependency that isn't installed
+    would degrade straight back to "I can't read that".  zipfile keeps the
+    bot dependency-free so it works on a fresh checkout.  If layout fidelity
+    ever matters more than that, python-docx is a drop-in swap here.
+    """
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        info = z.getinfo("word/document.xml")
+        if info.file_size > _DOCX_XML_MAX:
+            raise ValueError(f"document.xml too large ({info.file_size} bytes)")
+        xml = z.read("word/document.xml")
+    # ElementTree will happily expand entity declarations; a hostile file can
+    # use that to blow up memory.  We only ever want plain markup here.
+    if b"<!ENTITY" in xml or b"<!DOCTYPE" in xml:
+        raise ValueError("document.xml declares entities")
+    root = ET.fromstring(xml)
+    lines: list[str] = []
+    for para in root.iter(f"{_DOCX_NS}p"):
+        parts: list[str] = []
+        for node in para.iter():
+            if node.tag == f"{_DOCX_NS}t":
+                parts.append(node.text or "")
+            elif node.tag == f"{_DOCX_NS}tab":
+                parts.append("\t")
+            elif node.tag == f"{_DOCX_NS}br":
+                parts.append("\n")
+        line = "".join(parts).strip()
+        if line:
+            lines.append(line)
+    return "\n".join(lines)
 
 
 class _AutoDeleteMessenger:
@@ -1560,11 +1677,14 @@ class ClaudeBot(discord.Client):
 
         text = message.content.strip()
         _image_paths: list[str] = []
+        # Anything we couldn't take, phrased for the user.  Sent even when the
+        # message carried no text of its own, so an upload can never vanish.
+        _attach_problems: list[str] = []
         ctx = None  # set later in forum-thread / unmapped-channel branches
 
         # Handle file attachments
-        IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
-        AUDIO_EXTS = {".ogg", ".mp3", ".wav", ".m4a", ".webm"}
+        IMAGE_EXTS = ATTACH_IMAGE_EXTS
+        AUDIO_EXTS = ATTACH_AUDIO_EXTS
         if message.attachments:
             log.info(
                 "Message has %d attachment(s): %s",
@@ -1619,14 +1739,20 @@ class ClaudeBot(discord.Client):
                     return
                 break  # voice consumed, skip remaining attachments
 
-            if ext == ".txt" and att.size <= 500_000:
+            if ext in ATTACH_TEXT_EXTS and att.size <= ATTACH_TEXT_MAX:
                 try:
                     file_bytes = await att.read()
+                    # errors="replace" — a mis-encoded file degrades to
+                    # readable text with substitutions rather than raising.
                     file_text = file_bytes.decode("utf-8", errors="replace")
                     text = f"{text}\n\n{file_text}" if text else file_text
-                    log.info("Read .txt attachment %s (%d bytes)", att.filename, att.size)
+                    log.info("Read text attachment %s (%d bytes)", att.filename, att.size)
                 except Exception:
                     log.warning("Failed to read attachment %s", att.filename, exc_info=True)
+                    _attach_problems.append(
+                        f"I couldn't open **{att.filename}** — downloading it failed. "
+                        "Try sending it again."
+                    )
 
             elif ext in IMAGE_EXTS and att.size <= 10_000_000:
                 try:
@@ -1642,6 +1768,86 @@ class ClaudeBot(discord.Client):
                     log.info("Saved image attachment %s (%d bytes) to %s", att.filename, att.size, img_path)
                 except Exception:
                     log.warning("Failed to save image %s", att.filename, exc_info=True)
+                    _attach_problems.append(
+                        f"I couldn't open **{att.filename}** — saving it failed. "
+                        "Try sending it again."
+                    )
+
+            elif ext in ATTACH_DOC_EXTS and att.size <= ATTACH_DOC_MAX:
+                # Same shape as the image branch: park the file and hand the
+                # session a path, so its Read tool does the parsing.  Reusing
+                # _image_paths is deliberate — that list is what the usage-limit
+                # queue claims and what the on_message / 48h-sweep cleanup
+                # walks, so documents inherit the identical lifecycle.
+                try:
+                    doc_path = config.PENDING_IMAGES_DIR / f"{uuid.uuid4().hex}{ext}"
+                    file_bytes = await att.read()
+                    doc_path.write_bytes(file_bytes)
+                    _image_paths.append(str(doc_path))
+                    doc_prompt = f"[File: {att.filename} saved at `{doc_path}`]"
+                    if text:
+                        text = f"{text}\n\n{doc_prompt}"
+                    else:
+                        text = (
+                            f"Read the document saved at `{doc_path}` "
+                            f"(the user uploaded it as {att.filename}) and tell "
+                            "them what it says."
+                        )
+                    log.info("Saved document attachment %s (%d bytes) to %s", att.filename, att.size, doc_path)
+                except Exception:
+                    log.warning("Failed to save document %s", att.filename, exc_info=True)
+                    _attach_problems.append(
+                        f"I couldn't open **{att.filename}** — saving it failed. "
+                        "Try sending it again."
+                    )
+
+            elif ext in ATTACH_WORD_EXTS and att.size <= ATTACH_DOC_MAX:
+                try:
+                    file_bytes = await att.read()
+                    doc_text = _extract_docx_text(file_bytes)
+                    if len(doc_text) > ATTACH_TEXT_MAX:
+                        doc_text = doc_text[:ATTACH_TEXT_MAX] + "\n\n[document truncated]"
+                    if doc_text.strip():
+                        block = f"[Word document: {att.filename}]\n{doc_text}"
+                        text = f"{text}\n\n{block}" if text else block
+                        log.info(
+                            "Extracted Word attachment %s (%d bytes, %d chars of text)",
+                            att.filename, att.size, len(doc_text),
+                        )
+                    else:
+                        log.info("Word attachment %s had no readable text", att.filename)
+                        _attach_problems.append(
+                            f"I opened **{att.filename}** but there was no text in it. "
+                            "If the content is a scan or a picture, sending it as a "
+                            "PDF or an image works better."
+                        )
+                except Exception:
+                    log.warning("Failed to read Word attachment %s", att.filename, exc_info=True)
+                    _attach_problems.append(
+                        f"I couldn't open **{att.filename}** — it may be damaged, "
+                        "password-protected, or an older Word format. Saving it as "
+                        "a PDF and sending that usually works."
+                    )
+
+            else:
+                # Nothing above could take it — too big, or a type we don't
+                # handle.  Say so; never let an upload disappear in silence.
+                log.info(
+                    "Unhandled attachment %s (ext=%s, %d bytes)",
+                    att.filename, ext, att.size,
+                )
+                _attach_problems.append(_attachment_reject_note(
+                    att.filename, ext, att.size, voice_enabled=self._voice_enabled,
+                ))
+
+        # Tell the user about anything we turned away.  This runs before the
+        # empty-text bail-out, which is what used to swallow a lone PDF upload.
+        # Archive channels stay read-only, so stay quiet there.
+        if _attach_problems and message.channel.id not in self._forums.archive_channel_ids:
+            try:
+                await message.channel.send("\n".join(_attach_problems))
+            except Exception:
+                log.warning("Failed to send attachment notice", exc_info=True)
 
         if not text:
             return

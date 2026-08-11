@@ -72,7 +72,8 @@
     "paths": "python scripts/verify_paths.py",
     "dead_session_recovery": "python scripts/test_dead_session_recovery.py",
     "git_prompt_hardening": "python scripts/test_git_prompt_hardening.py",
-    "meeting_watch": "python scripts/test_meeting_watch.py"
+    "meeting_watch": "python scripts/test_meeting_watch.py",
+    "attachments": "python scripts/test_attachments.py"
   },
 
   "auth": {
