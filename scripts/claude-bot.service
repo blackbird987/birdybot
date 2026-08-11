@@ -1,40 +1,68 @@
-# systemd *user* service for the Claude Code Discord bot.
+# Claude Code Discord bot — systemd *user* service.
 #
-# A user service (not a system one) on purpose: the bot spawns the Claude CLI,
-# which reads credentials from $HOME/.claude — running it as root or as a
-# system unit would look at the wrong home and every session would be signed
-# out.
+# Install (adjust the four absolute paths below if the bot lives elsewhere):
+#     mkdir -p ~/.config/systemd/user
+#     cp scripts/claude-bot.service ~/.config/systemd/user/
+#     sudo loginctl enable-linger "$USER"   # REQUIRED: start at boot, before login
+#     systemctl --user daemon-reload
+#     systemctl --user enable --now claude-bot.service
 #
-# Install:
-#   mkdir -p ~/.config/systemd/user
-#   cp scripts/claude-bot.service ~/.config/systemd/user/
-#   systemctl --user daemon-reload
-#   systemctl --user enable --now claude-bot
+# Why a *user* service and not a system one: the bot spawns the Claude CLI, which
+# reads its credentials from $HOME/.claude. A system service runs as root with a
+# different HOME and cannot authenticate.
 #
-# IMPORTANT — without this the service stops when you log out of the desktop
-# and does not come back on boot until you log in again:
-#   sudo loginctl enable-linger $USER
+# Why enable-linger is mandatory: without it a user manager only exists while you
+# are logged in, so the service would not start until you reach the desktop and
+# would stop again when you log out.
 #
-# Logs:   journalctl --user -u claude-bot -f
-# Status: systemctl --user status claude-bot
-
+# Paths are absolute rather than %h because on the Citadel machine the bot lives
+# on a separate NTFS volume, not under $HOME. scripts/migrate-off-windows-disk.sh
+# in the The-Citadel repo rewrites them when the bot moves.
+#
+#     journalctl --user -u claude-bot -f      # follow the log
+#     systemctl --user restart claude-bot     # restart
 [Unit]
 Description=Claude Code Discord bot
-After=network-online.target
-Wants=network-online.target
+Documentation=https://github.com/quincy/claude-telegram-bot
+# NOTE: this is a *user* unit, so it cannot order itself against system units
+# (network-online.target, the NTFS .mount unit) — those names are invisible to
+# the user manager and would be silently ignored. The waiting is done by
+# ExecStartPre + an unlimited restart loop instead.
+# Never give up: a boot where the disk is slow to mount must not exhaust a burst
+# limit and leave the bot permanently down.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-WorkingDirectory=%h/Desktop/Programming/claude-telegram-bot
-ExecStart=%h/Desktop/Programming/claude-telegram-bot/.venv/bin/python -m bot
-# The bot answers a signal by relaunching itself, so that an agent killing it
-# does not leave it down. systemd's own SIGTERM would trip that, and `stop`
-# would be met by a bot that comes straight back. This marker tells it the
-# shutdown is deliberate; leading `-` so a failure here never blocks the stop.
-ExecStop=-/usr/bin/touch %h/Desktop/Programming/claude-telegram-bot/data/stop_requested
+
+# The bot does NOT live under $HOME. It is on the NTFS Windows disk, mounted by
+# fstab at /run/media/quincy/SYSTEM. When scripts/migrate-off-windows-disk.sh
+# runs, all four paths below get rewritten to /home/quincy/Programming/claude-telegram-bot.
+WorkingDirectory=/run/media/quincy/SYSTEM/Users/Quincy/Desktop/Programming/claude-telegram-bot
+ExecStart=/run/media/quincy/SYSTEM/Users/Quincy/Desktop/Programming/claude-telegram-bot/.venv/bin/python3 -m bot
+
+# At boot the user manager can start before the NTFS volume is mounted. Wait for
+# the interpreter to actually exist (up to 2 min) rather than failing instantly.
+ExecStartPre=/usr/bin/bash -c 'for i in $(seq 1 60); do [ -x "/run/media/quincy/SYSTEM/Users/Quincy/Desktop/Programming/claude-telegram-bot/.venv/bin/python3" ] && exit 0; sleep 2; done; echo "bot volume never appeared" >&2; exit 1'
+
+# The bot relaunches itself on signal; this marker tells it the shutdown is
+# deliberate. Leading `-` so a failure here never blocks the stop.
+ExecStop=-/usr/bin/touch /run/media/quincy/SYSTEM/Users/Quincy/Desktop/Programming/claude-telegram-bot/data/stop_requested
+
 Environment=PYTHONUNBUFFERED=1
-# The bot has a self-reboot path (data/reboot_request.json) that exits cleanly
-# and expects to be brought back up — so restart on success as well as failure.
+Environment=PATH=/home/quincy/.cargo/bin:/home/quincy/.local/bin:/home/quincy/bin:/usr/local/bin:/usr/bin:/bin
+# Linger starts this before anyone logs in, so there is no desktop to inherit.
+# These are the values Plasma settles on once you do log in, hardcoded so that
+# GUI-driving agent work (screenshots, Wine apps) starts working at that point
+# without needing a service restart. Before login they simply point at nothing.
+Environment=DISPLAY=:0
+Environment=WAYLAND_DISPLAY=wayland-0
+Environment=XDG_SESSION_TYPE=wayland
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+
+# The bot's self-reboot path (data/reboot_request.json) exits cleanly and expects
+# to be brought back — so restart on success as well as failure.
 Restart=always
 RestartSec=10
 # Give in-flight Claude turns a chance to finish before SIGKILL.

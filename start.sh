@@ -22,6 +22,19 @@ fail() {
     exit 1
 }
 
+# --- 0. don't fight the systemd service -------------------------------------
+# When claude-bot.service is active it owns the bot process. This script's first
+# act is to kill any running bot, which systemd would immediately restart — and
+# then we'd start a second, unmanaged copy on top. Hand over instead.
+# INVOCATION_ID is set by systemd, so the service's own ExecStart skips this.
+if [[ -z "${INVOCATION_ID:-}" ]] && systemctl --user is-active --quiet claude-bot.service 2>/dev/null; then
+    echo "claude-bot.service is running — restarting through systemd instead of starting a second copy."
+    systemctl --user restart claude-bot.service || fail "systemctl restart failed"
+    systemctl --user --no-pager --lines=0 status claude-bot.service || true
+    [[ "$GUI" == "1" ]] && read -r -p "Press Enter to close..."
+    exit 0
+fi
+
 # --- 1. python / venv -------------------------------------------------------
 PYTHON="${PYTHON:-}"
 if [[ -z "$PYTHON" ]]; then
