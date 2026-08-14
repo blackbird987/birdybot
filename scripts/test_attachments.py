@@ -19,6 +19,7 @@ import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
 import asyncio
 import io
 import sys
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -162,7 +163,6 @@ class FakeForums:
 class FakeCtx:
     def __init__(self):
         self.pending_image_paths: list[str] = []
-        self.images_claimed = False
         self.user_id = ""
         self.user_name = ""
 
@@ -177,6 +177,13 @@ class Harness:
         self._forums = FakeForums()
         self._lobby_channel_id = 1  # never matches FakeChannel.id
         self.prompts: list[str] = []
+        self.sweeps = 0
+
+    def _schedule_pending_image_sweep(self) -> None:
+        # Real bot hands the saved file to the retention reaper here. Counting
+        # the nudge is enough — the reaper itself is covered by
+        # scripts/test_pending_image_lifecycle.py.
+        self.sweeps += 1
 
     def _in_scope(self, guild, channel):
         return True
@@ -189,11 +196,16 @@ class Harness:
         return FakeCtx()
 
 
-async def run_upload(filename: str, data: bytes, text: str = "",
-                     size: int | None = None, voice: bool = False):
-    """Push one attachment through the real on_message; return (replies, prompt)."""
+async def run_uploads(attachments: list[FakeAttachment], text: str = "",
+                      voice: bool = False, heard: str | None = None):
+    """Push a whole message through the real on_message; return (replies, prompt).
+
+    ``heard`` stubs out speech-to-text.  It has to be stubbed rather than left
+    to fail: the real one posts the audio to a paid API, and a machine with a
+    key in its .env would make a live call every time this file runs.
+    """
     harness = Harness(voice_enabled=voice)
-    msg = FakeMessage(text, [FakeAttachment(filename, data, size=size)])
+    msg = FakeMessage(text, attachments)
 
     captured: list[str] = []
 
@@ -203,16 +215,33 @@ async def run_upload(filename: str, data: bytes, text: str = "",
     async def fake_enrich(t):
         return t
 
+    async def fake_transcribe(audio_bytes, filename="voice.ogg"):
+        if heard is None:
+            raise RuntimeError("transcription unavailable")
+        return heard
+
+    from bot.services import audio as audio_mod
     orig_on_text, orig_enrich = commands.on_text, botmod.enrich_with_tweets
+    orig_transcribe = audio_mod.transcribe
     commands.on_text = fake_on_text
     botmod.enrich_with_tweets = fake_enrich
+    audio_mod.transcribe = fake_transcribe
     try:
         await ClaudeBot.on_message(harness, msg)
     finally:
         commands.on_text = orig_on_text
         botmod.enrich_with_tweets = orig_enrich
+        audio_mod.transcribe = orig_transcribe
 
     return msg.channel.sent, (captured[0] if captured else None)
+
+
+async def run_upload(filename: str, data: bytes, text: str = "",
+                     size: int | None = None, voice: bool = False):
+    """Push one attachment through the real on_message; return (replies, prompt)."""
+    return await run_uploads(
+        [FakeAttachment(filename, data, size=size)], text=text, voice=voice,
+    )
 
 
 # --- Cases -----------------------------------------------------------------
@@ -231,6 +260,34 @@ async def main() -> int:
               saved.parent == config.PENDING_IMAGES_DIR, str(saved))
         check("saved bytes are a real PDF", make_pdf()[:5] == b"%PDF-", "")
     check("no confusing error shown to the user", not replies, str(replies))
+
+    print("\n== Image upload (the branch the size limits guard) ==")
+    replies, prompt = await run_upload("shot.png", b"\x89PNG\r\n\x1a\nfake")
+    # An image sent alone gets "Analyze this screenshot at `<path>`." — a
+    # different sentence from the document branch's "saved at `<path>`", and
+    # the one _strip_missing_image_refs has to recognise when the file is gone.
+    check("the screenshot reaches the session as a path",
+          bool(prompt) and "Analyze this screenshot at `" in prompt, str(prompt))
+    shot = Path(prompt.split("at `")[-1].split("`")[0]) if prompt else None
+    check("and lands in the pending dir",
+          shot is not None and shot.exists()
+          and shot.parent == config.PENDING_IMAGES_DIR, str(shot))
+    # Pin the strip against the real sentence rather than a hand-written
+    # imitation: if the wording drifts, the replay would ship a dead path.
+    if shot is not None and shot.exists():
+        shot.unlink()
+        stripped = botmod._strip_missing_image_refs(prompt, [str(shot)])
+        check("a dead path is stripped back out of that exact sentence",
+              str(shot) not in stripped, stripped)
+    # Same file one byte over the ceiling: the loop must turn it away, and the
+    # notice must quote the ceiling the loop actually enforced.
+    replies, prompt = await run_upload(
+        "huge.png", b"\x89PNG", size=botmod.ATTACH_IMAGE_MAX + 1)
+    check("an oversized image is refused, not silently dropped",
+          bool(replies) and "huge.png" in replies[0], str(replies))
+    check("the refusal quotes the limit the loop enforces",
+          bool(replies) and botmod._human_size(botmod.ATTACH_IMAGE_MAX) in replies[0],
+          str(replies))
 
     print("\n== PDF alongside message text ==")
     replies, prompt = await run_upload("q3.pdf", make_pdf(), text="what's my rating?")
@@ -339,6 +396,42 @@ async def main() -> int:
     check("the skipped one is reported",
           any("nope.pages" in s for s in msg.channel.sent), str(msg.channel.sent))
 
+    print("\n== A voice note doesn't quietly swallow what came with it ==")
+    # Transcription replaces the message text, so the loop has to stop at the
+    # first voice note. Everything queued behind it went unread in silence —
+    # the user got an answer about the audio and no hint their screenshot was
+    # never opened.
+    replies, prompt = await run_uploads(
+        [FakeAttachment("note.ogg", b"fake audio"),
+         FakeAttachment("shot.png", b"\x89PNG\r\n\x1a\nfake")],
+        voice=True, heard="have a look at this",
+    )
+    check("the transcription is what reaches the session",
+          prompt == "[Voice message] have a look at this", str(prompt))
+    check("and the picture behind it is named as unread",
+          any("shot.png" in r for r in replies), str(replies))
+
+    replies, prompt = await run_uploads(
+        [FakeAttachment("note.ogg", b"fake audio")],
+        text="what did I just say?", voice=True, heard="the thing about Tuesday",
+    )
+    check("a caption typed with the voice note survives it",
+          bool(prompt) and "what did I just say?" in prompt
+          and "the thing about Tuesday" in prompt, str(prompt))
+
+    print("\n== A failed voice note doesn't eat the other notices ==")
+    # The transcription failure used to return straight past the send, so a
+    # rejection already written for an earlier attachment was discarded.
+    replies, prompt = await run_uploads(
+        [FakeAttachment("archive.zip", b"PK\x03\x04"),
+         FakeAttachment("note.ogg", b"fake audio")],
+        voice=True, heard=None,   # stub raises → transcription fails
+    )
+    joined = " ".join(replies)
+    check("the unsupported file is still reported", "archive.zip" in joined, joined)
+    check("alongside the transcription failure", "note.ogg" in joined, joined)
+    check("and nothing was dispatched to a session", prompt is None, str(prompt))
+
     print("\n== Archive channels stay silent ==")
     harness = Harness()
     msg = FakeMessage("", [FakeAttachment("form.pages", b"x")])
@@ -357,11 +450,31 @@ async def main() -> int:
     check("unknown type gets the accepted-kinds sentence",
           "voice notes" in note, note)
 
-    print("\n== Cleanup ==")
-    leftovers = [f for f in config.PENDING_IMAGES_DIR.iterdir()
-                 if f.is_file() and f.suffix == ".pdf"]
-    check("saved PDFs are removed once the turn ends", not leftovers,
-          str(leftovers))
+    print("\n== Uploads outlive the turn that received them ==")
+    # This used to assert the opposite. Deleting on turn-exit is what wiped a
+    # screenshot one second before the steered run that referenced it started:
+    # the path is in the session transcript, so a later turn can still need it.
+    # Reaping is the retention sweep's job now.
+    sweep_harness = Harness()
+    sweep_msg = FakeMessage("", [FakeAttachment("keeper.pdf", make_pdf())])
+    orig, orig_e = commands.on_text, botmod.enrich_with_tweets
+    commands.on_text = _swallow
+    botmod.enrich_with_tweets = _identity
+    # Count only what THIS upload produced. Every earlier case in this run
+    # dropped files in the same directory, so "there are PDFs on disk" would
+    # pass with the delete-on-exit bug still in place.
+    before = {f for f in config.PENDING_IMAGES_DIR.iterdir() if f.is_file()}
+    try:
+        await ClaudeBot.on_message(sweep_harness, sweep_msg)
+    finally:
+        commands.on_text, botmod.enrich_with_tweets = orig, orig_e
+
+    saved = [f for f in config.PENDING_IMAGES_DIR.iterdir()
+             if f.is_file() and f not in before]
+    check("the upload this turn saved is still on disk after it returned",
+          len(saved) == 1 and saved[0].suffix == ".pdf", str(saved))
+    check("the reaper was nudged instead of an immediate delete",
+          sweep_harness.sweeps == 1, str(sweep_harness.sweeps))
 
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
@@ -369,6 +482,11 @@ async def main() -> int:
 
 async def _identity(t):
     return t
+
+
+async def _swallow(ctx, prompt):
+    """Stand-in for the real dispatcher — takes the prompt, does nothing."""
+    return None
 
 
 def _entity_docx() -> bytes:
@@ -388,4 +506,15 @@ def _raises(fn) -> bool:
 
 
 if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+    # This harness writes real uploads through the real save path, and the bot
+    # it shares a machine with is probably running.  Point the save directory at
+    # scratch space so a test file can never land in — or be cleaned out of —
+    # the live folder somebody's screenshot is sitting in.
+    _real_dir = config.PENDING_IMAGES_DIR
+    _tmp = tempfile.TemporaryDirectory(prefix="attachments_test_")
+    config.PENDING_IMAGES_DIR = Path(_tmp.name)
+    try:
+        sys.exit(asyncio.run(main()))
+    finally:
+        config.PENDING_IMAGES_DIR = _real_dir
+        _tmp.cleanup()

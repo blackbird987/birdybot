@@ -70,11 +70,16 @@ def _parse_iso(s: str | None) -> datetime | None:
     return dt
 
 
-def _unlink_image_paths(paths: list[str], *, site: str) -> int:
+def unlink_image_paths(paths: list[str], *, site: str) -> int:
     """Best-effort delete each path; log a single line with the count.
 
     Only counts files that actually existed and got removed — already-missing
     paths return cleanly without inflating the count.
+
+    One caller left: a cancelled queue entry.  That prompt never ran, so no
+    session transcript can be holding the path and deleting now is safe.
+    Every other site that used to call this deleted files a live run still
+    needed — see ``reap_pending_images``.
     """
     deleted = 0
     for p in paths or []:
@@ -90,14 +95,110 @@ def _unlink_image_paths(paths: list[str], *, site: str) -> int:
     return deleted
 
 
+def reap_pending_images(
+    referenced: set[str],
+    now: float,
+    *,
+    ttl_hours: float | None = None,
+    max_bytes: int | None = None,
+    min_age_secs: int | None = None,
+) -> tuple[int, int]:
+    """Delete stale uploads from PENDING_IMAGES_DIR. Returns (aged, evicted).
+
+    Two exemptions, then two rules:
+
+    - A file a live usage-queue entry still points at is never touched — that
+      prompt hasn't run yet and the path is the only copy it has.
+    - Nothing younger than ``min_age_secs`` is ever deleted, by any rule.
+      That floor is the in-flight guarantee: a run reading a picture it was
+      just handed cannot lose it to a burst of uploads in another thread, and
+      making it outrank both rules means a mistyped TTL can't quietly revoke
+      it either.
+
+    1. Past the retention window it goes.  The window is generous on purpose:
+       the path we handed the session is in its transcript forever, so a steer,
+       a retry, or a later "look at that screenshot again" turn can still read
+       it.  Deleting on the receiving turn's exit is exactly what made uploads
+       vanish out from under a steered run one second before it started.
+    2. If the folder is still over the size cap, evict oldest-first until it
+       fits.  The cap governs reapable files only: a queued prompt's uploads
+       are exempt above and don't count toward it, since evicting other
+       people's files wouldn't reclaim them anyway.
+
+    Blocking (stat/unlink); the caller runs it off the event loop.
+    """
+    ttl = config.PENDING_IMAGES_TTL_HOURS if ttl_hours is None else ttl_hours
+    cap = config.PENDING_IMAGES_MAX_BYTES if max_bytes is None else max_bytes
+    floor = (
+        config.PENDING_IMAGES_MIN_AGE_SECS if min_age_secs is None else min_age_secs
+    )
+
+    survivors: list[tuple[float, int, Path]] = []  # (mtime, size, path)
+    aged = 0
+    try:
+        entries = list(config.PENDING_IMAGES_DIR.iterdir())
+    except OSError:
+        return 0, 0
+
+    for f in entries:
+        try:
+            if not f.is_file():
+                continue
+            if str(f.resolve()) in referenced:
+                continue
+            st = f.stat()
+            age = now - st.st_mtime
+            # Too young to touch, but its bytes are still on the disk, so it
+            # counts toward the cap below (which skips it for the same reason).
+            if age >= floor and age > ttl * 3600:
+                f.unlink(missing_ok=True)
+                aged += 1
+            else:
+                survivors.append((st.st_mtime, st.st_size, f))
+        except OSError:
+            continue
+
+    evicted = 0
+    total = sum(size for _, size, _ in survivors)
+    if total > cap:
+        survivors.sort(key=lambda t: t[0])  # oldest first
+        for mtime, size, f in survivors:
+            if total <= cap:
+                break
+            if now - mtime < floor:
+                continue  # too young to reap, cap or no cap
+            try:
+                f.unlink(missing_ok=True)
+            except OSError:
+                continue
+            total -= size
+            evicted += 1
+        if total > cap:
+            log.warning(
+                "Image cleanup [sweep]: still %d bytes over cap after evicting "
+                "%d — the rest is inside the %ds floor or wouldn't delete",
+                total - cap, evicted, floor,
+            )
+
+    if aged or evicted:
+        log.info(
+            "Image cleanup [sweep]: deleted %d past retention, evicted %d for size",
+            aged, evicted,
+        )
+    return aged, evicted
+
+
 def _strip_missing_image_refs(prompt: str, image_paths: list[str]) -> str:
     """Drop "saved at `<path>`" / "screenshot at `<path>`" clauses for paths
     that no longer exist on disk.  Falls back to noop if every file is intact.
 
-    A queue entry can outlive its image files (sweep, manual cleanup, disk
-    rotation).  Without this scrub the replay sends Claude a path that fails
-    its Read tool call silently — better to drop the path and let Claude
-    respond to whatever text remains.
+    A queue entry shouldn't be able to outlive its image files any more — the
+    reaper exempts anything the queue still references, and the retention
+    clock restarts at the pop — so this is the belt to that pair of braces,
+    covering what the bot doesn't control: a file deleted by hand, a wiped
+    data dir, a restore from a backup taken before the upload.  Without the
+    scrub the replay hands Claude a path whose Read fails silently; better to
+    drop the path and let it answer whatever text remains.
     """
     if not image_paths:
         return prompt
@@ -118,6 +219,42 @@ def _strip_missing_image_refs(prompt: str, image_paths: list[str]) -> str:
         len(missing), missing,
     )
     return cleaned
+
+
+def refresh_image_retention(paths: list[str]) -> None:
+    """Restart the retention clock on uploads that are about to be needed.
+
+    The reaper dates a file by its mtime, which for an upload means "when it
+    arrived".  That is the wrong clock for anything that sat in the usage
+    queue: a weekly limit can hold a prompt for days, and the queue exemption
+    ends the instant the entry is popped — so its images can be past the
+    retention window before the run they were queued for has read a byte, and
+    the next sweep takes them out from under it.  Touching them makes mtime
+    mean "last needed by a run" instead of "uploaded at", which is the
+    lifetime that matters, and re-arms the young-file floor for the read.
+
+    Called both where the exemption ends (the pop) and at the handoff itself,
+    because a batch of due entries replays one at a time and the last one's
+    files would otherwise be unprotected for the length of every run ahead
+    of it.
+    """
+    for p in paths or []:
+        try:
+            os.utime(p, None)
+        except OSError:
+            pass  # gone already, or not ours to touch — reads degrade to the
+            # path-strip, which is the same outcome as before this existed
+
+
+def prepare_replayed_prompt(prompt: str, image_paths: list[str]) -> str:
+    """Ready a queued prompt and its uploads for the run about to get them.
+
+    Public because interactions.py calls it too: the timer path and the Run
+    Now button need an identical handoff, and the cost of a third call site
+    getting it wrong is an upload deleted while a run is reading it.
+    """
+    refresh_image_retention(image_paths)
+    return _strip_missing_image_refs(prompt, image_paths)
 
 
 # --- Attachment handling ---------------------------------------------------
@@ -321,6 +458,8 @@ class ClaudeBot(discord.Client):
         # channel_id -> window_end_utc; bypass the usage-limit gate while now < end.
         # In-memory by design — a reboot mid-window means one more prompt then quiet.
         self._usage_gate_bypass: dict[str, datetime] = {}
+        # Debounce for the upload reaper — see _schedule_pending_image_sweep.
+        self._last_image_sweep: float = 0.0
         self._setup_commands()
 
     @property
@@ -1033,12 +1172,6 @@ class ClaudeBot(discord.Client):
             "usage gate: intercepted %s in %s (qid=%s)",
             entry_extras.get("action") or "text", ctx.channel_id, qid,
         )
-        # Hand off image-file lifecycle to the queue entry (text path only) —
-        # only after both the persist AND the Discord send succeeded.  If we
-        # fell through to the except path above, this stays False and
-        # on_message's finally cleans up the files.
-        if entry_extras.get("type") == "text":
-            ctx.images_claimed = True
         return True
 
     async def _offer_usage_limit_choice(
@@ -1181,6 +1314,13 @@ class ClaudeBot(discord.Client):
         if not due:
             return
         log.info("Usage queue: firing %d due entries", len(due))
+        # The pop above ended these entries' exemption from the reaper, so
+        # re-arm the whole batch's retention now rather than per entry at its
+        # own handoff: the replays below run one after another, each awaiting a
+        # full query, so entry two's uploads would otherwise sit unreferenced
+        # and reapable for however long entry one takes.
+        for entry in due:
+            refresh_image_retention(entry.get("image_paths", []))
         for entry in due:
             # Clear the stale gate message (best-effort) so its buttons don't
             # linger as "already resolved" traps once the prompt is running.
@@ -1189,7 +1329,7 @@ class ClaudeBot(discord.Client):
                 if entry.get("type", "text") == "callback":
                     await self._replay_callback(entry)
                 else:
-                    prompt = _strip_missing_image_refs(
+                    prompt = prepare_replayed_prompt(
                         entry.get("prompt", ""), entry.get("image_paths", []),
                     )
                     await self._replay_to_thread(
@@ -1200,9 +1340,10 @@ class ClaudeBot(discord.Client):
                 log.exception(
                     "usage_queue replay failed for %s", entry.get("qid"),
                 )
-            # Image cleanup applies only to text entries (callbacks have none).
-            if entry.get("type", "text") != "callback":
-                _unlink_image_paths(entry.get("image_paths", []), site="replay")
+            # No image cleanup here — same reason as the Run Now path in
+            # interactions: _replay_to_thread also returns when the run is
+            # killed mid-read, and the replacement run still needs the file.
+            # The retention reaper collects them once the entry is gone.
 
     async def _retire_gate_message(self, entry: dict) -> None:
         """Edit the gate-prompt message to reflect that it's been fired."""
@@ -1273,35 +1414,62 @@ class ClaudeBot(discord.Client):
         await self._sweep_pending_images()
 
     async def _sweep_pending_images(self) -> None:
-        """Belt-and-suspenders: remove orphaned files in PENDING_IMAGES_DIR.
+        """Reap old uploads from PENDING_IMAGES_DIR.
 
-        A file is orphaned if no live queue entry references it.  We only
-        delete files older than 48h to give in-flight requests breathing room
-        between save-time and queue-append.
+        This is now the ONLY thing that deletes an upload (bar an explicitly
+        cancelled queue entry, which never ran).  See ``reap_pending_images``
+        for the policy and ``PENDING_IMAGES_TTL_HOURS`` for why nothing is
+        deleted at the end of the turn that received it.
         """
         try:
             referenced: set[str] = set()
             async with self._usage_queue_lock:
                 for e in self._read_usage_queue():
                     for p in e.get("image_paths", []) or []:
-                        referenced.add(str(Path(p).resolve()))
-            cutoff = _time.time() - 48 * 3600
-            deleted = 0
-            for f in config.PENDING_IMAGES_DIR.iterdir():
-                if not f.is_file():
-                    continue
-                if str(f.resolve()) in referenced:
-                    continue
-                try:
-                    if f.stat().st_mtime < cutoff:
-                        f.unlink(missing_ok=True)
-                        deleted += 1
-                except Exception:
-                    pass
-            if deleted:
-                log.info("Image cleanup [sweep]: deleted %d orphaned files", deleted)
+                        try:
+                            referenced.add(str(Path(p).resolve()))
+                        except OSError:
+                            pass
+            await asyncio.to_thread(
+                reap_pending_images, referenced, _time.time(),
+            )
         except Exception:
             log.exception("Pending-images sweep failed")
+
+    def _schedule_pending_image_sweep(self) -> None:
+        """Debounced nudge for the reaper, fired after an upload lands.
+
+        The hourly loop is the real schedule; this only shortens the window in
+        which a burst of large uploads can sit over the size cap.  Rate-limited
+        to one sweep a minute so a rapid-fire batch of screenshots doesn't
+        spawn one each — a batch that arrives inside that minute waits for the
+        next nudge or the next tick, which the cap's headroom can absorb.
+
+        Never raises: on_message calls this from a ``finally``, where an
+        exception would mask whatever sent us there.
+        """
+        now = _time.time()
+        if now - self._last_image_sweep < 60:
+            return
+        self._last_image_sweep = now
+        try:
+            asyncio.create_task(self._sweep_pending_images())
+        except RuntimeError:  # loop already closing (shutdown)
+            log.debug("Skipped image sweep — no running loop")
+
+    async def _pending_image_sweep_loop(self) -> None:
+        """Periodic reaper tick.
+
+        Independent of the usage-queue startup drain, which sweeps once and
+        then never again.  Sleeping first means it can't race that boot sweep.
+        """
+        while True:
+            await asyncio.sleep(config.PENDING_IMAGES_SWEEP_SECS)
+            try:
+                self._last_image_sweep = _time.time()
+                await self._sweep_pending_images()
+            except Exception:
+                log.exception("pending_image_sweep_loop iteration failed")
 
     async def _usage_queue_replay_loop(self) -> None:
         """Periodic tick (60s). Runs AFTER startup drain completes."""
@@ -1489,6 +1657,16 @@ class ClaudeBot(discord.Client):
                     log.exception("usage_queue_startup_drain failed")
                 await self._usage_queue_replay_loop()
             self._usage_queue_task = asyncio.create_task(_usage_queue_main())
+
+        # Upload reaper.  Separate from the drain above because the drain
+        # sweeps once and then never again — and the reaper is the only thing
+        # deleting uploads now, so "once at boot" would let a long-lived
+        # process accumulate them indefinitely.
+        existing_reaper = getattr(self, '_image_sweep_task', None)
+        if not existing_reaper or existing_reaper.done():
+            self._image_sweep_task = asyncio.create_task(
+                self._pending_image_sweep_loop()
+            )
 
         # Clean up stale worktrees/branches from interrupted autopilot chains
         asyncio.create_task(self._startup_worktree_cleanup())
@@ -1682,9 +1860,46 @@ class ClaudeBot(discord.Client):
         _attach_problems: list[str] = []
         ctx = None  # set later in forum-thread / unmapped-channel branches
 
+        async def _flush_attach_problems() -> None:
+            """Send everything we turned away — the user's only window into it.
+
+            The voice branch's early exits call this too.  They used to return
+            straight past the send at the end of the loop, so a notice about an
+            earlier attachment in the same message was written and then thrown
+            away — the silence this whole notice mechanism exists to prevent.
+            Archive channels stay read-only, so stay quiet there.
+            """
+            if not _attach_problems:
+                return
+            if message.channel.id in self._forums.archive_channel_ids:
+                return
+            try:
+                await message.channel.send("\n".join(_attach_problems))
+            except Exception:
+                log.warning("Failed to send attachment notice", exc_info=True)
+            _attach_problems.clear()
+
+        def _note_unread_after(idx: int) -> None:
+            """A voice note ends the loop — name whatever it left unopened.
+
+            Transcription overwrites the message text, so a second voice note
+            would erase the first and the loop has to stop.  Everything queued
+            behind it goes unread, which the user has to be told rather than
+            left to infer from an answer that ignores their screenshot.
+            """
+            rest = [
+                a.filename for a in message.attachments[idx + 1:] if a.filename
+            ]
+            if not rest:
+                return
+            names = ", ".join(f"**{n}**" for n in rest)
+            it = "it" if len(rest) == 1 else "them"
+            _attach_problems.append(
+                f"I stopped at the voice note in that message, so {names} went "
+                f"unread — send {it} without a voice note and I'll open {it}."
+            )
+
         # Handle file attachments
-        IMAGE_EXTS = ATTACH_IMAGE_EXTS
-        AUDIO_EXTS = ATTACH_AUDIO_EXTS
         if message.attachments:
             log.info(
                 "Message has %d attachment(s): %s",
@@ -1699,19 +1914,25 @@ class ClaudeBot(discord.Client):
                 bool(getattr(message, "message_snapshots", None)),
                 len(message.embeds),
             )
-        for att in message.attachments:
+        for idx, att in enumerate(message.attachments):
             if not att.filename:
                 continue
             ext = Path(att.filename).suffix.lower()
 
-            if ext in AUDIO_EXTS and self._voice_enabled and att.size <= 25_000_000:
+            if (ext in ATTACH_AUDIO_EXTS and self._voice_enabled
+                    and att.size <= ATTACH_AUDIO_MAX):
                 try:
                     file_bytes = await att.read()
                     from bot.services.audio import transcribe
                     transcription = await transcribe(file_bytes, filename=att.filename)
                     cleaned = transcription.strip() if transcription else ""
                     if cleaned:
-                        text = f"[Voice message] {cleaned}"
+                        # Appended, not assigned: a caption typed alongside the
+                        # voice note used to be overwritten by the
+                        # transcription and never reached the session.  Same
+                        # composition every other branch in this loop uses.
+                        voice_block = f"[Voice message] {cleaned}"
+                        text = f"{text}\n\n{voice_block}" if text else voice_block
                         log.info("Transcribed voice %s: %s", att.filename, cleaned[:80])
                         # Echo is non-critical — don't lose the transcription if send fails
                         try:
@@ -1725,18 +1946,22 @@ class ClaudeBot(discord.Client):
                         except Exception:
                             log.warning("Failed to send voice echo", exc_info=True)
                     else:
-                        try:
-                            await message.channel.send("Couldn't detect any speech in that voice message.")
-                        except Exception:
-                            pass
+                        _attach_problems.append(
+                            f"I couldn't hear any speech in **{att.filename}**."
+                        )
+                        _note_unread_after(idx)
+                        await _flush_attach_problems()
                         return
                 except Exception:
                     log.warning("Voice transcription failed for %s", att.filename, exc_info=True)
-                    try:
-                        await message.channel.send("Couldn't transcribe that voice message.")
-                    except Exception:
-                        pass
+                    _attach_problems.append(
+                        f"I couldn't transcribe **{att.filename}** — try sending "
+                        "it again."
+                    )
+                    _note_unread_after(idx)
+                    await _flush_attach_problems()
                     return
+                _note_unread_after(idx)
                 break  # voice consumed, skip remaining attachments
 
             if ext in ATTACH_TEXT_EXTS and att.size <= ATTACH_TEXT_MAX:
@@ -1754,7 +1979,7 @@ class ClaudeBot(discord.Client):
                         "Try sending it again."
                     )
 
-            elif ext in IMAGE_EXTS and att.size <= 10_000_000:
+            elif ext in ATTACH_IMAGE_EXTS and att.size <= ATTACH_IMAGE_MAX:
                 try:
                     img_path = config.PENDING_IMAGES_DIR / f"{uuid.uuid4().hex}{ext}"
                     file_bytes = await att.read()
@@ -1776,9 +2001,9 @@ class ClaudeBot(discord.Client):
             elif ext in ATTACH_DOC_EXTS and att.size <= ATTACH_DOC_MAX:
                 # Same shape as the image branch: park the file and hand the
                 # session a path, so its Read tool does the parsing.  Reusing
-                # _image_paths is deliberate — that list is what the usage-limit
-                # queue claims and what the on_message / 48h-sweep cleanup
-                # walks, so documents inherit the identical lifecycle.
+                # _image_paths is deliberate — that list is what a queued prompt
+                # holds a reference to and what the retention reaper walks, so
+                # documents inherit the identical lifecycle.
                 try:
                     doc_path = config.PENDING_IMAGES_DIR / f"{uuid.uuid4().hex}{ext}"
                     file_bytes = await att.read()
@@ -1842,12 +2067,7 @@ class ClaudeBot(discord.Client):
 
         # Tell the user about anything we turned away.  This runs before the
         # empty-text bail-out, which is what used to swallow a lone PDF upload.
-        # Archive channels stay read-only, so stay quiet there.
-        if _attach_problems and message.channel.id not in self._forums.archive_channel_ids:
-            try:
-                await message.channel.send("\n".join(_attach_problems))
-            except Exception:
-                log.warning("Failed to send attachment notice", exc_info=True)
+        await _flush_attach_problems()
 
         if not text:
             return
@@ -2013,18 +2233,15 @@ class ClaudeBot(discord.Client):
                 log.warning("Tweet enrichment failed, continuing with original text", exc_info=True)
             await commands.on_text(ctx, text)
         finally:
-            # Images claimed by the usage-limit gate are owned by the queue
-            # entry from here on (cleanup happens at replay or Cancel).
-            if ctx is None or not ctx.images_claimed:
-                deleted = 0
-                for p in _image_paths:
-                    try:
-                        Path(p).unlink(missing_ok=True)
-                        deleted += 1
-                    except Exception:
-                        pass
-                if deleted:
-                    log.info("Image cleanup [on_message]: deleted %d files", deleted)
+            # Uploads are deliberately NOT deleted here.  This frame returning
+            # does not mean the run that reads the file is done with it — the
+            # Steer path dispatches its run from a different task, a killed run
+            # gets replaced by one resuming the same transcript, and any later
+            # turn can be asked to look at the picture again.  Deleting on exit
+            # wiped both of those cases (see reap_pending_images).  The reaper
+            # owns the lifecycle now; nudge it so a burst can't sit over cap.
+            if _image_paths:
+                self._schedule_pending_image_sweep()
 
     async def _route_lobby_message(
         self, message: discord.Message, text: str, repo_name: str | None,
