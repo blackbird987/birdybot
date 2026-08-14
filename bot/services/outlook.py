@@ -97,16 +97,21 @@ def _with_retry(fn):
 
 # How long to keep Outlook alive after saving so its background sync engine
 # can upload the item. There is no completion signal to wait on (see
-# _sync_to_server), so this is a measured guess: 30s is the span that was
-# observed to get a stranded draft onto the server on this mailbox.
+# _sync_to_server), so this is empirical rather than derived: 30s is the wait
+# that was used the one time a stranded draft was confirmed to reach the
+# server. Not established as the minimum, only as a span that sufficed.
 _SYNC_SETTLE_S = 30
 
 
 def _pump_for(seconds: float) -> None:
-    """Keep this process alive and servicing COM callbacks for *seconds*.
+    """Idle for *seconds* without letting this thread go dark to COM.
 
-    A plain sleep would block the message queue that Outlook's own
-    background work is driven from, so pump it rather than sleeping through.
+    Staying alive is the point — Outlook is an out-of-process COM server and
+    keeps running while we hold references into it, which is the window its
+    background sync needs. Pumping rather than sleeping flat is because
+    pywin32 puts us in a single-threaded apartment, where a thread that
+    blocks without draining its message queue stalls any cross-apartment
+    call Outlook tries to make into us.
     """
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
@@ -149,7 +154,12 @@ def _sync_to_server(settle_s: float = _SYNC_SETTLE_S) -> bool:
         if sync_objects.Count == 0:
             log.warning("No Outlook send/receive group — cannot nudge a sync")
             return False
-        sync_objects.Item(1).Start()
+        # Held across the wait rather than released straight after Start():
+        # the hand-run sequence this fix is modelled on kept it alive, and
+        # dropping the only reference to an in-flight sync is not something
+        # worth deviating on for one line.
+        sync_obj = sync_objects.Item(1)
+        sync_obj.Start()
     except Exception as e:
         log.warning("Could not start an Outlook send/receive: %s", e)
         return False
@@ -158,6 +168,7 @@ def _sync_to_server(settle_s: float = _SYNC_SETTLE_S) -> bool:
         _pump_for(settle_s)
     except Exception as e:  # pumping must not sink an already-saved draft
         log.warning("Interrupted while waiting for Outlook to sync: %s", e)
+    del sync_obj
     return True
 
 
