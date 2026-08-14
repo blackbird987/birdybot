@@ -25,15 +25,23 @@ import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from bot import config  # noqa: E402
-from bot.discord.bot import reap_pending_images  # noqa: E402
+from bot.discord.bot import (  # noqa: E402
+    prepare_replayed_prompt,
+    reap_pending_images,
+)
 
 PASS, FAIL = 0, 0
-NOW = 1_800_000_000.0  # fixed clock — nothing here depends on wall time
+# Real clock, not a made-up one: the handoff case touches files through
+# os.utime, so the reaper has to be reading the same timeline it writes to.
+# Every age below is an offset from this single reading, so the cases are
+# still deterministic — nothing depends on what time of day it is.
+NOW = time.time()
 HOUR = 3600.0
 
 
@@ -139,6 +147,27 @@ def run_cases() -> int:
     check("a file inside the floor survives ttl=0", inflight.exists())
     check("one outside the floor still goes", not settled.exists())
     check("counted once", aged == 1, str(aged))
+
+    print("\n== A prompt that waited out a weekly limit keeps its picture ==")
+    clear_dir()
+    # The queue exemption ends the instant the entry is popped, and a weekly
+    # limit can hold one for days.  Without the retention clock restarting on
+    # handoff, the picture is already past the window when its run finally
+    # starts — reaped by the next sweep, mid-read.
+    waited = put("waited.png", age_hours=100)
+    out = prepare_replayed_prompt(
+        f"Analyze this screenshot at `{waited}`.", [str(waited)])
+    check("the path still reaches the run", str(waited) in out)
+    aged, _ = reap_pending_images(set(), NOW, ttl_hours=48)
+    check("and the picture survives the sweep that follows",
+          waited.exists(), f"aged={aged}")
+
+    print("\n== Handoff doesn't resurrect what's already gone ==")
+    clear_dir()
+    lost = config.PENDING_IMAGES_DIR / "lost.png"   # never written
+    out = prepare_replayed_prompt(
+        f"Analyze this screenshot at `{lost}`.", [str(lost)])
+    check("the dead path is stripped from the prompt", str(lost) not in out)
 
     print("\n== Odd inputs don't take the reaper down ==")
     clear_dir()

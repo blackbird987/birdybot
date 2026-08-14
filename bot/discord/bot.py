@@ -70,7 +70,7 @@ def _parse_iso(s: str | None) -> datetime | None:
     return dt
 
 
-def _unlink_image_paths(paths: list[str], *, site: str) -> int:
+def unlink_image_paths(paths: list[str], *, site: str) -> int:
     """Best-effort delete each path; log a single line with the count.
 
     Only counts files that actually existed and got removed — already-missing
@@ -175,9 +175,9 @@ def reap_pending_images(
             evicted += 1
         if total > cap:
             log.warning(
-                "Image cleanup [sweep]: still %d bytes over cap — every "
-                "remaining file is younger than the %ds floor",
-                total - cap, floor,
+                "Image cleanup [sweep]: still %d bytes over cap after evicting "
+                "%d — the rest is inside the %ds floor or wouldn't delete",
+                total - cap, evicted, floor,
             )
 
     if aged or evicted:
@@ -216,6 +216,42 @@ def _strip_missing_image_refs(prompt: str, image_paths: list[str]) -> str:
         len(missing), missing,
     )
     return cleaned
+
+
+def refresh_image_retention(paths: list[str]) -> None:
+    """Restart the retention clock on uploads that are about to be needed.
+
+    The reaper dates a file by its mtime, which for an upload means "when it
+    arrived".  That is the wrong clock for anything that sat in the usage
+    queue: a weekly limit can hold a prompt for days, and the queue exemption
+    ends the instant the entry is popped — so its images can be past the
+    retention window before the run they were queued for has read a byte, and
+    the next sweep takes them out from under it.  Touching them makes mtime
+    mean "last needed by a run" instead of "uploaded at", which is the
+    lifetime that matters, and re-arms the young-file floor for the read.
+
+    Called both where the exemption ends (the pop) and at the handoff itself,
+    because a batch of due entries replays one at a time and the last one's
+    files would otherwise be unprotected for the length of every run ahead
+    of it.
+    """
+    for p in paths or []:
+        try:
+            os.utime(p, None)
+        except OSError:
+            pass  # gone already, or not ours to touch — reads degrade to the
+            # path-strip, which is the same outcome as before this existed
+
+
+def prepare_replayed_prompt(prompt: str, image_paths: list[str]) -> str:
+    """Ready a queued prompt and its uploads for the run about to get them.
+
+    Public because interactions.py calls it too: the timer path and the Run
+    Now button need an identical handoff, and the cost of a third call site
+    getting it wrong is an upload deleted while a run is reading it.
+    """
+    refresh_image_retention(image_paths)
+    return _strip_missing_image_refs(prompt, image_paths)
 
 
 # --- Attachment handling ---------------------------------------------------
@@ -1275,6 +1311,13 @@ class ClaudeBot(discord.Client):
         if not due:
             return
         log.info("Usage queue: firing %d due entries", len(due))
+        # The pop above ended these entries' exemption from the reaper, so
+        # re-arm the whole batch's retention now rather than per entry at its
+        # own handoff: the replays below run one after another, each awaiting a
+        # full query, so entry two's uploads would otherwise sit unreferenced
+        # and reapable for however long entry one takes.
+        for entry in due:
+            refresh_image_retention(entry.get("image_paths", []))
         for entry in due:
             # Clear the stale gate message (best-effort) so its buttons don't
             # linger as "already resolved" traps once the prompt is running.
@@ -1283,7 +1326,7 @@ class ClaudeBot(discord.Client):
                 if entry.get("type", "text") == "callback":
                     await self._replay_callback(entry)
                 else:
-                    prompt = _strip_missing_image_refs(
+                    prompt = prepare_replayed_prompt(
                         entry.get("prompt", ""), entry.get("image_paths", []),
                     )
                     await self._replay_to_thread(

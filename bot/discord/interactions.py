@@ -691,8 +691,8 @@ async def _handle_usage_action(
     if action == "usage_cancel":
         removed = await bot._usage_queue_remove(qid)
         if removed:
-            from bot.discord.bot import _unlink_image_paths
-            _unlink_image_paths(removed.get("image_paths", []), site="cancel")
+            from bot.discord.bot import unlink_image_paths
+            unlink_image_paths(removed.get("image_paths", []), site="cancel")
             if msg:
                 try:
                     await msg.edit(content="Cancelled.", view=None)
@@ -737,6 +737,14 @@ async def _handle_usage_action(
         )
         return
 
+    # That removal ended the reaper's queue exemption for this entry's
+    # uploads, and there are Discord round-trips between here and the replay.
+    # Restart their retention clock before awaiting anything, or a sweep
+    # landing in that gap can delete a picture this click just promised to
+    # look at.
+    from bot.discord.bot import prepare_replayed_prompt, refresh_image_retention
+    refresh_image_retention(removed.get("image_paths", []))
+
     if msg:
         try:
             await msg.edit(content="Running now…", view=None)
@@ -751,7 +759,8 @@ async def _handle_usage_action(
 
     # Dispatch by entry type.  Callback entries replay the original button
     # action via _replay_callback (no images involved).  Text entries replay
-    # the prompt and own the image-file lifecycle.
+    # the prompt, re-arming the retention clock on whatever uploads it still
+    # references — see prepare_replayed_prompt.
     if removed.get("type", "text") == "callback":
         asyncio.create_task(bot._replay_callback(removed))
     else:
@@ -760,8 +769,7 @@ async def _handle_usage_action(
         image_paths = removed.get("image_paths", [])
 
         async def _run_replay() -> None:
-            from bot.discord.bot import _strip_missing_image_refs
-            cleaned = _strip_missing_image_refs(prompt, image_paths)
+            cleaned = prepare_replayed_prompt(prompt, image_paths)
             try:
                 await bot._replay_to_thread(channel_id, cleaned, repo_name=repo_name)
             except Exception:
