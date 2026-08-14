@@ -95,60 +95,70 @@ def _with_retry(fn):
         raise
 
 
-def _sync_to_server(timeout_s: int = 45) -> bool:
-    """Run a send/receive so locally-saved items reach the Exchange server.
+# How long to keep Outlook alive after saving so its background sync engine
+# can upload the item. There is no completion signal to wait on (see
+# _sync_to_server), so this is a measured guess: 30s is the span that was
+# observed to get a stranded draft onto the server on this mailbox.
+_SYNC_SETTLE_S = 30
 
-    Outlook runs in cached mode: items we create over COM land in the local
-    .ost first. When the bot drives a *headless* Outlook instance, that
-    instance exits before the next scheduled sync, so the item is stranded
-    locally and never shows up in new Outlook / OWA. Forcing the sync here
-    and waiting for it to finish keeps the process alive long enough.
 
-    Never raises — a failed sync still leaves the item safely saved locally.
+def _pump_for(seconds: float) -> None:
+    """Keep this process alive and servicing COM callbacks for *seconds*.
+
+    A plain sleep would block the message queue that Outlook's own
+    background work is driven from, so pump it rather than sleeping through.
+    """
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        pythoncom.PumpWaitingMessages()
+        time.sleep(0.2)
+
+
+def _sync_to_server(settle_s: float = _SYNC_SETTLE_S) -> bool:
+    """Nudge a send/receive and stay alive long enough for the upload to land.
+
+    Outlook runs in cached mode: items created over COM land in the local
+    .ost first and are uploaded afterwards. The bot drives a *headless*
+    Outlook instance, which exits seconds after the script finishes — long
+    before that upload happens — so the item is stranded locally and never
+    appears in new Outlook / OWA. Holding the process open is what actually
+    fixes it; `SyncObject.Start()` is only a nudge.
+
+    There is deliberately no completion check, because on this mailbox no
+    usable one exists. Measured on a real Exchange account: the send/receive
+    group fires SyncStart, Progress(0/1000) and SyncEnd within 60ms, before
+    `Start()` even returns, so `OnSyncEnd` reports the *group* finishing and
+    says nothing about a cached-mode upload; and an item's `EntryID` is
+    unchanged 45s after creation, so re-keying is not a signal either. The
+    upload is done by a background sync engine that reports through neither.
+    Waiting a fixed span is therefore the honest mechanism, not a fallback.
+
+    Never raises. That is load-bearing twice over: a failed nudge still
+    leaves the item safely saved locally, and callers run inside
+    `_with_retry`, which would re-run the whole operation — creating a
+    second draft — if a COM error escaped from here.
 
     Returns:
-        True if the sync completed (or the timed fallback ran), False if no
-        sync group exists or the sync did not finish within *timeout_s*.
+        True if a send/receive was requested and waited out, False if it
+        could not be requested at all. True means "given time to upload",
+        NOT "confirmed on the server" — no such confirmation is available.
     """
     try:
         ns = _get_namespace()
         sync_objects = ns.SyncObjects
         if sync_objects.Count == 0:
-            log.warning("No Outlook send/receive group — skipping server sync")
+            log.warning("No Outlook send/receive group — cannot nudge a sync")
             return False
-        sync_obj = sync_objects.Item(1)
-
-        try:
-
-            class _SyncHandler:
-                done = False
-
-                def OnSyncEnd(self):
-                    _SyncHandler.done = True
-
-            win32com.client.WithEvents(sync_obj, _SyncHandler)
-        except Exception as e:
-            # Some environments refuse event binding; fall back to a fixed wait.
-            log.warning("Sync event binding failed (%s), using timed wait", e)
-            sync_obj.Start()
-            deadline = time.monotonic() + 20
-            while time.monotonic() < deadline:
-                pythoncom.PumpWaitingMessages()
-                time.sleep(0.2)
-            return True
-
-        sync_obj.Start()
-        deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
-            pythoncom.PumpWaitingMessages()
-            if _SyncHandler.done:
-                return True
-            time.sleep(0.2)
-        log.warning("Outlook sync did not finish within %ss", timeout_s)
-        return False
+        sync_objects.Item(1).Start()
     except Exception as e:
-        log.warning("Outlook server sync failed: %s", e)
+        log.warning("Could not start an Outlook send/receive: %s", e)
         return False
+
+    try:
+        _pump_for(settle_s)
+    except Exception as e:  # pumping must not sink an already-saved draft
+        log.warning("Interrupted while waiting for Outlook to sync: %s", e)
+    return True
 
 
 # --- Helpers ---
@@ -393,13 +403,15 @@ def create_draft(
                 if not os.path.isfile(abs_path):
                     raise FileNotFoundError(f"Attachment not found: {abs_path}")
                 mail.Attachments.Add(abs_path)
-        mail.Save()  # saves to Drafts (local .ost only)
-        synced = _sync_to_server()  # push it up so new Outlook / OWA can see it
+        mail.Save()  # saves to Drafts, local .ost only
+        # Blocks ~30s: without it the draft never reaches the server and so
+        # never shows up in the mail client the user actually reads.
+        sync_requested = _sync_to_server()
         return {
             "subject": subject,
             "to": to,
             "attachments": len(attachments) if attachments else 0,
-            "synced": synced,
+            "sync_requested": sync_requested,
         }
 
     return _with_retry(_do)
@@ -483,19 +495,21 @@ def main(args: list[str] | None = None) -> int:
             body_text = args[3]
             att = args[4:] if len(args) > 4 else None
             result = create_draft(to_addr, subj, body_text, att)
-            if result["synced"]:
-                print(f"Draft created and synced to server: {result['subject']}")
-            else:
-                print(f"Draft created: {result['subject']}")
+            print(f"Draft created: {result['subject']}")
             print(f"To: {result['to']}")
             if result["attachments"]:
                 print(f"Attachments: {result['attachments']}")
-            if not result["synced"]:
+            if result["sync_requested"]:
                 print(
-                    "WARNING: saved locally but server sync not confirmed - it may "
-                    "not appear in new Outlook until the next Outlook send/receive."
+                    f"Send/receive requested, waited {_SYNC_SETTLE_S}s for Outlook "
+                    "to upload it. Delivery to the server is not independently "
+                    "confirmable - check your Drafts folder."
                 )
-            print("Check your Outlook Drafts folder.")
+            else:
+                print(
+                    "WARNING: saved locally, but no send/receive could be started - "
+                    "it may not appear until Outlook next syncs on its own."
+                )
         else:
             print(f"Unknown command: {cmd}")
             return 1
