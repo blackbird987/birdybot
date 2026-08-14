@@ -107,6 +107,21 @@ def run_cases() -> int:
     check("ancient but still referenced by a queue entry → kept",
           queued.exists())
 
+    print("\n== The queue exemption beats the size cap too ==")
+    clear_dir()
+    # The docstring claims the cap governs reapable files only. Pin it: a
+    # queued prompt's upload is both the oldest thing here and, on its own,
+    # over the cap — and still must not be the one that gets evicted.
+    held = put("held.png", age_hours=200, size=5000)
+    spare = put("spare.png", age_hours=100, size=5000)
+    aged, evicted = reap_pending_images(
+        {str(held.resolve())}, NOW, ttl_hours=500, max_bytes=1000,
+        min_age_secs=60)
+    check("the queued prompt's picture is never the eviction victim",
+          held.exists())
+    check("the reapable one beside it goes instead",
+          not spare.exists(), f"aged={aged} evicted={evicted}")
+
     print("\n== Size cap evicts oldest-first ==")
     clear_dir()
     a = put("a.png", age_hours=10, size=1000)

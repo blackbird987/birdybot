@@ -239,6 +239,34 @@ async def main() -> int:
         check("saved bytes are a real PDF", make_pdf()[:5] == b"%PDF-", "")
     check("no confusing error shown to the user", not replies, str(replies))
 
+    print("\n== Image upload (the branch the size limits guard) ==")
+    replies, prompt = await run_upload("shot.png", b"\x89PNG\r\n\x1a\nfake")
+    # An image sent alone gets "Analyze this screenshot at `<path>`." — a
+    # different sentence from the document branch's "saved at `<path>`", and
+    # the one _strip_missing_image_refs has to recognise when the file is gone.
+    check("the screenshot reaches the session as a path",
+          bool(prompt) and "Analyze this screenshot at `" in prompt, str(prompt))
+    shot = Path(prompt.split("at `")[-1].split("`")[0]) if prompt else None
+    check("and lands in the pending dir",
+          shot is not None and shot.exists()
+          and shot.parent == config.PENDING_IMAGES_DIR, str(shot))
+    # Pin the strip against the real sentence rather than a hand-written
+    # imitation: if the wording drifts, the replay would ship a dead path.
+    if shot is not None and shot.exists():
+        shot.unlink()
+        stripped = botmod._strip_missing_image_refs(prompt, [str(shot)])
+        check("a dead path is stripped back out of that exact sentence",
+              str(shot) not in stripped, stripped)
+    # Same file one byte over the ceiling: the loop must turn it away, and the
+    # notice must quote the ceiling the loop actually enforced.
+    replies, prompt = await run_upload(
+        "huge.png", b"\x89PNG", size=botmod.ATTACH_IMAGE_MAX + 1)
+    check("an oversized image is refused, not silently dropped",
+          bool(replies) and "huge.png" in replies[0], str(replies))
+    check("the refusal quotes the limit the loop enforces",
+          bool(replies) and botmod._human_size(botmod.ATTACH_IMAGE_MAX) in replies[0],
+          str(replies))
+
     print("\n== PDF alongside message text ==")
     replies, prompt = await run_upload("q3.pdf", make_pdf(), text="what's my rating?")
     check("user text preserved", bool(prompt) and "what's my rating?" in prompt, str(prompt))
@@ -374,14 +402,19 @@ async def main() -> int:
     orig, orig_e = commands.on_text, botmod.enrich_with_tweets
     commands.on_text = _swallow
     botmod.enrich_with_tweets = _identity
+    # Count only what THIS upload produced. Every earlier case in this run
+    # dropped files in the same directory, so "there are PDFs on disk" would
+    # pass with the delete-on-exit bug still in place.
+    before = {f for f in config.PENDING_IMAGES_DIR.iterdir() if f.is_file()}
     try:
         await ClaudeBot.on_message(sweep_harness, sweep_msg)
     finally:
         commands.on_text, botmod.enrich_with_tweets = orig, orig_e
 
-    saved = [f for f in config.PENDING_IMAGES_DIR.iterdir() if f.is_file()]
-    check("saved uploads still on disk after on_message returned",
-          sum(1 for f in saved if f.suffix == ".pdf") >= 2, str(saved))
+    saved = [f for f in config.PENDING_IMAGES_DIR.iterdir()
+             if f.is_file() and f not in before]
+    check("the upload this turn saved is still on disk after it returned",
+          len(saved) == 1 and saved[0].suffix == ".pdf", str(saved))
     check("the reaper was nudged instead of an immediate delete",
           sweep_harness.sweeps == 1, str(sweep_harness.sweeps))
 

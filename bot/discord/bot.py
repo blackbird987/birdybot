@@ -192,10 +192,13 @@ def _strip_missing_image_refs(prompt: str, image_paths: list[str]) -> str:
     """Drop "saved at `<path>`" / "screenshot at `<path>`" clauses for paths
     that no longer exist on disk.  Falls back to noop if every file is intact.
 
-    A queue entry can outlive its image files (sweep, manual cleanup, disk
-    rotation).  Without this scrub the replay sends Claude a path that fails
-    its Read tool call silently — better to drop the path and let Claude
-    respond to whatever text remains.
+    A queue entry shouldn't be able to outlive its image files any more — the
+    reaper exempts anything the queue still references, and the retention
+    clock restarts at the pop — so this is the belt to that pair of braces,
+    covering what the bot doesn't control: a file deleted by hand, a wiped
+    data dir, a restore from a backup taken before the upload.  Without the
+    scrub the replay hands Claude a path whose Read fails silently; better to
+    drop the path and let it answer whatever text remains.
     """
     if not image_paths:
         return prompt
@@ -1858,8 +1861,6 @@ class ClaudeBot(discord.Client):
         ctx = None  # set later in forum-thread / unmapped-channel branches
 
         # Handle file attachments
-        IMAGE_EXTS = ATTACH_IMAGE_EXTS
-        AUDIO_EXTS = ATTACH_AUDIO_EXTS
         if message.attachments:
             log.info(
                 "Message has %d attachment(s): %s",
@@ -1879,7 +1880,8 @@ class ClaudeBot(discord.Client):
                 continue
             ext = Path(att.filename).suffix.lower()
 
-            if ext in AUDIO_EXTS and self._voice_enabled and att.size <= 25_000_000:
+            if (ext in ATTACH_AUDIO_EXTS and self._voice_enabled
+                    and att.size <= ATTACH_AUDIO_MAX):
                 try:
                     file_bytes = await att.read()
                     from bot.services.audio import transcribe
@@ -1929,7 +1931,7 @@ class ClaudeBot(discord.Client):
                         "Try sending it again."
                     )
 
-            elif ext in IMAGE_EXTS and att.size <= 10_000_000:
+            elif ext in ATTACH_IMAGE_EXTS and att.size <= ATTACH_IMAGE_MAX:
                 try:
                     img_path = config.PENDING_IMAGES_DIR / f"{uuid.uuid4().hex}{ext}"
                     file_bytes = await att.read()

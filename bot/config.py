@@ -369,6 +369,8 @@ PENDING_IMAGES_DIR: Path = DATA_DIR / "pending_images"
 # turn can read the file long after the receiving message frame is gone.
 # Frame-scoped deletion could never be right for a resumable session: it wiped
 # an upload one second before the steered run that referenced it started.
+# The window is measured from the last time a run was *given* the path, not
+# from when the file arrived — see refresh_image_retention.
 PENDING_IMAGES_TTL_HOURS: float = float(os.getenv("PENDING_IMAGES_TTL_HOURS", "48"))
 # Disk guard.  Retention alone is unbounded if someone dumps a burst of large
 # uploads, so the sweep also evicts oldest-first back under this cap...
