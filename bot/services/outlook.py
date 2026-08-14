@@ -10,6 +10,9 @@ CLI usage:
     python outlook.py unread
     python outlook.py read "subject"
     python outlook.py draft "to" "subject" "body" [attachment1 attachment2 ...]
+
+`draft` blocks for ~30s on purpose — see _sync_to_server. The draft is saved
+in the first moment; the rest of the wait is what gets it onto the server.
 """
 
 from __future__ import annotations
@@ -19,12 +22,14 @@ import logging
 import os
 import re
 import sys
+import time
 
 log = logging.getLogger(__name__)
 
 # --- Graceful import of COM dependencies ---
 
 try:
+    import pythoncom
     import pywintypes
     import win32com.client
 
@@ -91,6 +96,109 @@ def _with_retry(fn):
                     f"Outlook reconnect failed: {retry_err}"
                 ) from retry_err
         raise
+
+
+# How long to keep Outlook alive after saving so its background sync engine
+# can upload the item. There is no completion signal to wait on (see
+# _sync_to_server), so this is empirical rather than derived: 30s is the wait
+# that was used the one time a stranded draft was confirmed to reach the
+# server. Not established as the minimum, only as a span that sufficed.
+_SYNC_SETTLE_S = 30
+
+
+def _pump_for(seconds: float) -> None:
+    """Idle for *seconds* without letting this thread go dark to COM.
+
+    Staying alive is the point — Outlook is an out-of-process COM server and
+    keeps running while we hold references into it, which is the window its
+    background sync needs. Pumping rather than sleeping flat is because
+    pywin32 puts us in a single-threaded apartment, where a thread that
+    blocks without draining its message queue stalls any cross-apartment
+    call Outlook tries to make into us.
+    """
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        pythoncom.PumpWaitingMessages()
+        time.sleep(0.2)
+
+
+def _sync_to_server(settle_s: float = _SYNC_SETTLE_S) -> bool:
+    """Nudge a send/receive and stay alive long enough for the upload to land.
+
+    Outlook runs in cached mode: items created over COM land in the local
+    .ost first and are uploaded afterwards. The bot drives a *headless*
+    Outlook instance, and that instance is gone the moment the script
+    releases its COM references (measured: no OUTLOOK.EXE remains by the
+    first sample after exit) — long before the upload happens, so the item
+    is stranded locally and never appears in new Outlook / OWA. Holding the
+    process open is what actually fixes it; `Start()` is only a nudge.
+
+    There is deliberately no completion check, because on this mailbox no
+    usable one exists. Three candidates were tried against a real Exchange
+    account and all three are dead ends:
+
+    - `OnSyncEnd` on the send/receive group. Instrumented, it fires alongside
+      SyncStart and Progress(0/1000) within 60ms, *before `Start()` even
+      returns* — it reports the group finishing and says nothing about a
+      cached-mode upload. Waiting on it returns in 0.2s, which is the
+      original bug wearing a success message.
+    - Re-keying to a server `EntryID`. The EntryID is byte-identical 45s
+      after creation, so there is nothing to watch.
+    - `PR_CHANGE_KEY` via `PropertyAccessor`. Do not reintroduce this: it
+      does not merely fail, it *wedges* a headless Outlook. Polling it hung
+      past 120s and left an unresponsive OUTLOOK.EXE that had to be killed,
+      in a session where a plain folder read takes 1.3s.
+
+    The upload is done by a background sync engine that reports through none
+    of them, so waiting a fixed span is the honest mechanism, not a fallback.
+
+    Never raises. That is load-bearing twice over: a failed nudge still
+    leaves the item safely saved locally, and callers run inside
+    `_with_retry`, which would re-run the whole operation — creating a
+    second draft — if a COM error escaped from here.
+
+    Returns:
+        True only if the nudge went out *and* the full wait was taken. False
+        if the send/receive could not be started, or if the wait was cut
+        short or failed. Even True means only "given time to upload", never
+        "confirmed on the server" — no such confirmation is available.
+    """
+    try:
+        ns = _get_namespace()
+        sync_objects = ns.SyncObjects
+        if sync_objects.Count == 0:
+            log.warning("No Outlook send/receive group — cannot nudge a sync")
+            return False
+        # Do not inline this into sync_objects.Item(1).Start(). The binding
+        # keeps the sync object referenced for the wait below; the hand-run
+        # sequence this fix is modelled on held it, and dropping the only
+        # reference to an in-flight sync is not worth deviating on.
+        sync_obj = sync_objects.Item(1)
+        sync_obj.Start()
+    except Exception as e:
+        log.warning("Could not start an Outlook send/receive: %s", e)
+        return False
+
+    try:
+        _pump_for(settle_s)
+    except KeyboardInterrupt:
+        # This wait is a 30s window the user can now realistically Ctrl-C
+        # through, which they could not before the command started blocking.
+        # Letting it escape would print a traceback over an operation that
+        # actually succeeded — the draft is saved, only the upload window was
+        # cut short. Swallow it and report the wait as not taken, which is
+        # true and lands the caller on its "may not have reached the server"
+        # message rather than a stack trace.
+        log.warning("Sync wait interrupted — draft is saved, upload unconfirmed")
+        return False
+    except Exception as e:
+        # Same situation as the interrupt, so the same answer: the nudge went
+        # out but the window was not held open, and there is no distinguishing
+        # a blow-up at 1s from one at 29s. Never re-raised — the draft is
+        # already saved and must not be undone by a failure in the tail.
+        log.warning("Error while waiting for Outlook to sync: %s", e)
+        return False
+    return True
 
 
 # --- Helpers ---
@@ -312,6 +420,10 @@ def create_draft(
 ) -> dict:
     """Create a draft email in Outlook Drafts folder.
 
+    Blocks for roughly `_SYNC_SETTLE_S` seconds. The draft is saved almost
+    immediately; the wait is what gets it off the local cache and onto the
+    server, without which it never appears in new Outlook / OWA.
+
     Args:
         to: Recipient email address(es), semicolon-separated for multiple.
         subject: Email subject line.
@@ -319,7 +431,9 @@ def create_draft(
         attachments: Optional list of absolute file paths to attach.
 
     Returns:
-        Dict with subject and attachment count for confirmation.
+        Dict with `subject`, `to`, `attachments` (a count), and
+        `sync_requested` — see _sync_to_server for what that last one does
+        and does not promise.
     """
 
     def _do():
@@ -335,11 +449,15 @@ def create_draft(
                 if not os.path.isfile(abs_path):
                     raise FileNotFoundError(f"Attachment not found: {abs_path}")
                 mail.Attachments.Add(abs_path)
-        mail.Save()  # saves to Drafts
+        mail.Save()  # saves to Drafts, local .ost only
+        # Blocks ~30s: without it the draft never reaches the server and so
+        # never shows up in the mail client the user actually reads.
+        sync_requested = _sync_to_server()
         return {
             "subject": subject,
             "to": to,
             "attachments": len(attachments) if attachments else 0,
+            "sync_requested": sync_requested,
         }
 
     return _with_retry(_do)
@@ -427,7 +545,17 @@ def main(args: list[str] | None = None) -> int:
             print(f"To: {result['to']}")
             if result["attachments"]:
                 print(f"Attachments: {result['attachments']}")
-            print("Check your Outlook Drafts folder.")
+            if result["sync_requested"]:
+                print(
+                    f"Send/receive requested, waited {_SYNC_SETTLE_S}s for Outlook "
+                    "to upload it. Delivery to the server is not independently "
+                    "confirmable - check your Drafts folder."
+                )
+            else:
+                print(
+                    "WARNING: saved locally, but no send/receive could be started - "
+                    "it may not appear until Outlook next syncs on its own."
+                )
         else:
             print(f"Unknown command: {cmd}")
             return 1
