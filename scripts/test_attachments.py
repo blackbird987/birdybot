@@ -19,6 +19,7 @@ import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
 import asyncio
 import io
 import sys
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -224,8 +225,6 @@ async def run_upload(filename: str, data: bytes, text: str = "",
 # --- Cases -----------------------------------------------------------------
 
 async def main() -> int:
-    pre_existing = {f for f in config.PENDING_IMAGES_DIR.iterdir() if f.is_file()}
-
     print("\n== PDF upload, no message text (the original bug) ==")
     replies, prompt = await run_upload("feedback_form.pdf", make_pdf())
     check("something reached the session", prompt is not None,
@@ -373,21 +372,18 @@ async def main() -> int:
     sweep_harness = Harness()
     sweep_msg = FakeMessage("", [FakeAttachment("keeper.pdf", make_pdf())])
     orig, orig_e = commands.on_text, botmod.enrich_with_tweets
-    commands.on_text = lambda ctx, prompt: _noop()
+    commands.on_text = _swallow
     botmod.enrich_with_tweets = _identity
     try:
         await ClaudeBot.on_message(sweep_harness, sweep_msg)
     finally:
         commands.on_text, botmod.enrich_with_tweets = orig, orig_e
 
-    new_files = {f for f in config.PENDING_IMAGES_DIR.iterdir()
-                 if f.is_file()} - pre_existing
+    saved = [f for f in config.PENDING_IMAGES_DIR.iterdir() if f.is_file()]
     check("saved uploads still on disk after on_message returned",
-          sum(1 for f in new_files if f.suffix == ".pdf") >= 2, str(new_files))
+          sum(1 for f in saved if f.suffix == ".pdf") >= 2, str(saved))
     check("the reaper was nudged instead of an immediate delete",
           sweep_harness.sweeps == 1, str(sweep_harness.sweeps))
-    for f in new_files:
-        f.unlink(missing_ok=True)  # harness cleans up its own droppings
 
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
@@ -397,7 +393,8 @@ async def _identity(t):
     return t
 
 
-async def _noop():
+async def _swallow(ctx, prompt):
+    """Stand-in for the real dispatcher — takes the prompt, does nothing."""
     return None
 
 
@@ -418,4 +415,15 @@ def _raises(fn) -> bool:
 
 
 if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+    # This harness writes real uploads through the real save path, and the bot
+    # it shares a machine with is probably running.  Point the save directory at
+    # scratch space so a test file can never land in — or be cleaned out of —
+    # the live folder somebody's screenshot is sitting in.
+    _real_dir = config.PENDING_IMAGES_DIR
+    _tmp = tempfile.TemporaryDirectory(prefix="attachments_test_")
+    config.PENDING_IMAGES_DIR = Path(_tmp.name)
+    try:
+        sys.exit(asyncio.run(main()))
+    finally:
+        config.PENDING_IMAGES_DIR = _real_dir
+        _tmp.cleanup()

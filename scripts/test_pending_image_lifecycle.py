@@ -73,6 +73,7 @@ def main() -> int:
         config.PENDING_IMAGES_DIR = real_dir
         tmp.cleanup()
 
+
 def run_cases() -> int:
     print("\n== A fresh upload survives (the whole point) ==")
     clear_dir()
@@ -128,16 +129,28 @@ def run_cases() -> int:
     check("old one evicted", not stale.exists())
     check("young one survives", recent.exists())
 
+    print("\n== The floor outranks a mistyped retention window ==")
+    clear_dir()
+    # ttl_hours=0 says "delete everything". The floor says otherwise: a config
+    # typo must not be able to revoke the in-flight guarantee.
+    inflight = put("inflight.png", age_hours=0.02)   # ~1 min old
+    settled = put("settled.png", age_hours=2)
+    aged, _ = reap_pending_images(set(), NOW, ttl_hours=0, min_age_secs=900)
+    check("a file inside the floor survives ttl=0", inflight.exists())
+    check("one outside the floor still goes", not settled.exists())
+    check("counted once", aged == 1, str(aged))
+
     print("\n== Odd inputs don't take the reaper down ==")
     clear_dir()
-    (config.PENDING_IMAGES_DIR / "subdir").mkdir(exist_ok=True)
+    subdir = config.PENDING_IMAGES_DIR / "subdir"
+    subdir.mkdir(exist_ok=True)
     keep = put("keep.png", age_hours=1)
     aged, evicted = reap_pending_images(set(), NOW)
-    check("a directory in there is ignored, not crashed on", keep.exists())
-    missing = config.PENDING_IMAGES_DIR / "gone.png"
-    check("no counts from an empty pass", (aged, evicted) == (0, 0),
-          f"{aged},{evicted}")
-    check("nothing invented", not missing.exists())
+    check("a directory in there is ignored, not crashed on", subdir.is_dir())
+    check("the file beside it is untouched", keep.exists())
+    check("nothing counted on a pass with nothing to do",
+          (aged, evicted) == (0, 0), f"{aged},{evicted}")
+    subdir.rmdir()
 
     print("\n== 17:57 replay: steer kills the run mid-read ==")
     clear_dir()

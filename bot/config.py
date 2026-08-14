@@ -375,10 +375,13 @@ PENDING_IMAGES_TTL_HOURS: float = float(os.getenv("PENDING_IMAGES_TTL_HOURS", "4
 PENDING_IMAGES_MAX_BYTES: int = int(
     os.getenv("PENDING_IMAGES_MAX_BYTES", str(500 * 1024 * 1024))
 )
-# ...but never touches a file this young, whatever the cap says — that floor is
-# what keeps an in-flight run's image out of the reaper's hands.
-PENDING_IMAGES_MIN_AGE_SECS: int = 900
-PENDING_IMAGES_SWEEP_SECS: int = 3600
+# ...but never touches a file this young, whatever the cap OR the TTL says —
+# that floor is what keeps an in-flight run's image out of the reaper's hands,
+# and it outranks both rules so a mistyped TTL can't revoke it.
+PENDING_IMAGES_MIN_AGE_SECS: int = int(
+    os.getenv("PENDING_IMAGES_MIN_AGE_SECS", "900")
+)
+PENDING_IMAGES_SWEEP_SECS: int = int(os.getenv("PENDING_IMAGES_SWEEP_SECS", "3600"))
 # Self-wake: an inner session writes data/wakes/<instance_id>.json to have the
 # bot re-invoke it in the same thread after a delay (see WAKE_GUIDANCE). Per
 # instance-id so concurrent sessions never clobber a shared file, and absolute

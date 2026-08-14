@@ -247,8 +247,8 @@ class RequestContext:
     # Image attachments saved for this request. Nothing here owns their
     # deletion: an upload outlives the request that carried it (its path is in
     # the session transcript, so a steer/retry/follow-up turn can still read
-    # it) and is reaped on a retention timer instead — bot.discord.bot.
-    # reap_pending_images. A cancelled queue entry is the one early delete.
+    # it), and a retention sweep reaps it later instead — see
+    # ``reap_pending_images``. A cancelled queue entry is the one early delete.
     pending_image_paths: list[str] = field(default_factory=list)
     # [BOT_CMD: /spawn] — platform-supplied callback that creates a fresh
     # session thread and dispatches `args.prompt` into it. Engine never

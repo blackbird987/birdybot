@@ -762,7 +762,12 @@ async def _handle_usage_action(
         async def _run_replay() -> None:
             from bot.discord.bot import _strip_missing_image_refs
             cleaned = _strip_missing_image_refs(prompt, image_paths)
-            await bot._replay_to_thread(channel_id, cleaned, repo_name=repo_name)
+            try:
+                await bot._replay_to_thread(channel_id, cleaned, repo_name=repo_name)
+            except Exception:
+                # Fire-and-forget: without this the traceback is swallowed as
+                # an unretrieved task exception and Run Now just does nothing.
+                log.exception("Run Now replay failed for %s", channel_id)
 
         # No cleanup here on purpose.  This used to unlink the upload when
         # _replay_to_thread returned — which also happens when the run is

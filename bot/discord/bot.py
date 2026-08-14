@@ -105,19 +105,25 @@ def reap_pending_images(
 ) -> tuple[int, int]:
     """Delete stale uploads from PENDING_IMAGES_DIR. Returns (aged, evicted).
 
-    Three rules, in order:
+    Two exemptions, then two rules:
 
-    1. A file a live usage-queue entry still points at is never touched — that
-       prompt hasn't run yet and the path is the only copy it has.
-    2. Past the retention window it goes.  The window is generous on purpose:
+    - A file a live usage-queue entry still points at is never touched — that
+      prompt hasn't run yet and the path is the only copy it has.
+    - Nothing younger than ``min_age_secs`` is ever deleted, by any rule.
+      That floor is the in-flight guarantee: a run reading a picture it was
+      just handed cannot lose it to a burst of uploads in another thread, and
+      making it outrank both rules means a mistyped TTL can't quietly revoke
+      it either.
+
+    1. Past the retention window it goes.  The window is generous on purpose:
        the path we handed the session is in its transcript forever, so a steer,
        a retry, or a later "look at that screenshot again" turn can still read
        it.  Deleting on the receiving turn's exit is exactly what made uploads
        vanish out from under a steered run one second before it started.
-    3. If the folder is still over the size cap, evict oldest-first until it
-       fits — but never a file younger than the floor, whatever the cap says.
-       That floor is the in-flight guarantee: a run reading a picture it was
-       just handed cannot lose it to a burst of uploads in another thread.
+    2. If the folder is still over the size cap, evict oldest-first until it
+       fits.  The cap governs reapable files only: a queued prompt's uploads
+       are exempt above and don't count toward it, since evicting other
+       people's files wouldn't reclaim them anyway.
 
     Blocking (stat/unlink); the caller runs it off the event loop.
     """
@@ -141,7 +147,10 @@ def reap_pending_images(
             if str(f.resolve()) in referenced:
                 continue
             st = f.stat()
-            if now - st.st_mtime > ttl * 3600:
+            age = now - st.st_mtime
+            # Too young to touch, but its bytes are still on the disk, so it
+            # counts toward the cap below (which skips it for the same reason).
+            if age >= floor and age > ttl * 3600:
                 f.unlink(missing_ok=True)
                 aged += 1
             else:
@@ -1384,18 +1393,30 @@ class ClaudeBot(discord.Client):
     def _schedule_pending_image_sweep(self) -> None:
         """Debounced nudge for the reaper, fired after an upload lands.
 
-        The hourly loop is the real schedule; this just keeps a burst of large
-        uploads from sitting over the size cap until the next tick.  Debounced
-        so a rapid-fire batch of screenshots doesn't spawn a sweep each.
+        The hourly loop is the real schedule; this only shortens the window in
+        which a burst of large uploads can sit over the size cap.  Rate-limited
+        to one sweep a minute so a rapid-fire batch of screenshots doesn't
+        spawn one each — a batch that arrives inside that minute waits for the
+        next nudge or the next tick, which the cap's headroom can absorb.
+
+        Never raises: on_message calls this from a ``finally``, where an
+        exception would mask whatever sent us there.
         """
         now = _time.time()
         if now - self._last_image_sweep < 60:
             return
         self._last_image_sweep = now
-        asyncio.create_task(self._sweep_pending_images())
+        try:
+            asyncio.create_task(self._sweep_pending_images())
+        except RuntimeError:  # loop already closing (shutdown)
+            log.debug("Skipped image sweep — no running loop")
 
     async def _pending_image_sweep_loop(self) -> None:
-        """Periodic reaper tick. Runs AFTER the startup drain completes."""
+        """Periodic reaper tick.
+
+        Independent of the usage-queue startup drain, which sweeps once and
+        then never again.  Sleeping first means it can't race that boot sweep.
+        """
         while True:
             await asyncio.sleep(config.PENDING_IMAGES_SWEEP_SECS)
             try:
@@ -1887,9 +1908,9 @@ class ClaudeBot(discord.Client):
             elif ext in ATTACH_DOC_EXTS and att.size <= ATTACH_DOC_MAX:
                 # Same shape as the image branch: park the file and hand the
                 # session a path, so its Read tool does the parsing.  Reusing
-                # _image_paths is deliberate — that list is what the usage-limit
-                # queue claims and what the on_message / 48h-sweep cleanup
-                # walks, so documents inherit the identical lifecycle.
+                # _image_paths is deliberate — that list is what a queued prompt
+                # holds a reference to and what the retention reaper walks, so
+                # documents inherit the identical lifecycle.
                 try:
                     doc_path = config.PENDING_IMAGES_DIR / f"{uuid.uuid4().hex}{ext}"
                     file_bytes = await att.read()
