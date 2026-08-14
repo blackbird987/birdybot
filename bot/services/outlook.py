@@ -124,19 +124,30 @@ def _sync_to_server(settle_s: float = _SYNC_SETTLE_S) -> bool:
 
     Outlook runs in cached mode: items created over COM land in the local
     .ost first and are uploaded afterwards. The bot drives a *headless*
-    Outlook instance, which exits seconds after the script finishes — long
-    before that upload happens — so the item is stranded locally and never
-    appears in new Outlook / OWA. Holding the process open is what actually
-    fixes it; `SyncObject.Start()` is only a nudge.
+    Outlook instance, and that instance is gone the moment the script
+    releases its COM references (measured: no OUTLOOK.EXE remains by the
+    first sample after exit) — long before the upload happens, so the item
+    is stranded locally and never appears in new Outlook / OWA. Holding the
+    process open is what actually fixes it; `Start()` is only a nudge.
 
     There is deliberately no completion check, because on this mailbox no
-    usable one exists. Measured on a real Exchange account: the send/receive
-    group fires SyncStart, Progress(0/1000) and SyncEnd within 60ms, before
-    `Start()` even returns, so `OnSyncEnd` reports the *group* finishing and
-    says nothing about a cached-mode upload; and an item's `EntryID` is
-    unchanged 45s after creation, so re-keying is not a signal either. The
-    upload is done by a background sync engine that reports through neither.
-    Waiting a fixed span is therefore the honest mechanism, not a fallback.
+    usable one exists. Three candidates were tried against a real Exchange
+    account and all three are dead ends:
+
+    - `OnSyncEnd` on the send/receive group. Instrumented, it fires alongside
+      SyncStart and Progress(0/1000) within 60ms, *before `Start()` even
+      returns* — it reports the group finishing and says nothing about a
+      cached-mode upload. Waiting on it returns in 0.2s, which is the
+      original bug wearing a success message.
+    - Re-keying to a server `EntryID`. The EntryID is byte-identical 45s
+      after creation, so there is nothing to watch.
+    - `PR_CHANGE_KEY` via `PropertyAccessor`. Do not reintroduce this: it
+      does not merely fail, it *wedges* a headless Outlook. Polling it hung
+      past 120s and left an unresponsive OUTLOOK.EXE that had to be killed,
+      in a session where a plain folder read takes 1.3s.
+
+    The upload is done by a background sync engine that reports through none
+    of them, so waiting a fixed span is the honest mechanism, not a fallback.
 
     Never raises. That is load-bearing twice over: a failed nudge still
     leaves the item safely saved locally, and callers run inside
@@ -154,10 +165,10 @@ def _sync_to_server(settle_s: float = _SYNC_SETTLE_S) -> bool:
         if sync_objects.Count == 0:
             log.warning("No Outlook send/receive group — cannot nudge a sync")
             return False
-        # Held across the wait rather than released straight after Start():
-        # the hand-run sequence this fix is modelled on kept it alive, and
-        # dropping the only reference to an in-flight sync is not something
-        # worth deviating on for one line.
+        # Do not inline this into sync_objects.Item(1).Start(). The binding
+        # keeps the sync object referenced for the wait below; the hand-run
+        # sequence this fix is modelled on held it, and dropping the only
+        # reference to an in-flight sync is not worth deviating on.
         sync_obj = sync_objects.Item(1)
         sync_obj.Start()
     except Exception as e:
@@ -168,7 +179,6 @@ def _sync_to_server(settle_s: float = _SYNC_SETTLE_S) -> bool:
         _pump_for(settle_s)
     except Exception as e:  # pumping must not sink an already-saved draft
         log.warning("Interrupted while waiting for Outlook to sync: %s", e)
-    del sync_obj
     return True
 
 
