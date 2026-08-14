@@ -1860,6 +1860,45 @@ class ClaudeBot(discord.Client):
         _attach_problems: list[str] = []
         ctx = None  # set later in forum-thread / unmapped-channel branches
 
+        async def _flush_attach_problems() -> None:
+            """Send everything we turned away — the user's only window into it.
+
+            The voice branch's early exits call this too.  They used to return
+            straight past the send at the end of the loop, so a notice about an
+            earlier attachment in the same message was written and then thrown
+            away — the silence this whole notice mechanism exists to prevent.
+            Archive channels stay read-only, so stay quiet there.
+            """
+            if not _attach_problems:
+                return
+            if message.channel.id in self._forums.archive_channel_ids:
+                return
+            try:
+                await message.channel.send("\n".join(_attach_problems))
+            except Exception:
+                log.warning("Failed to send attachment notice", exc_info=True)
+            _attach_problems.clear()
+
+        def _note_unread_after(idx: int) -> None:
+            """A voice note ends the loop — name whatever it left unopened.
+
+            Transcription overwrites the message text, so a second voice note
+            would erase the first and the loop has to stop.  Everything queued
+            behind it goes unread, which the user has to be told rather than
+            left to infer from an answer that ignores their screenshot.
+            """
+            rest = [
+                a.filename for a in message.attachments[idx + 1:] if a.filename
+            ]
+            if not rest:
+                return
+            names = ", ".join(f"**{n}**" for n in rest)
+            it = "it" if len(rest) == 1 else "them"
+            _attach_problems.append(
+                f"I stopped at the voice note in that message, so {names} went "
+                f"unread — send {it} without a voice note and I'll open {it}."
+            )
+
         # Handle file attachments
         if message.attachments:
             log.info(
@@ -1875,7 +1914,7 @@ class ClaudeBot(discord.Client):
                 bool(getattr(message, "message_snapshots", None)),
                 len(message.embeds),
             )
-        for att in message.attachments:
+        for idx, att in enumerate(message.attachments):
             if not att.filename:
                 continue
             ext = Path(att.filename).suffix.lower()
@@ -1888,7 +1927,12 @@ class ClaudeBot(discord.Client):
                     transcription = await transcribe(file_bytes, filename=att.filename)
                     cleaned = transcription.strip() if transcription else ""
                     if cleaned:
-                        text = f"[Voice message] {cleaned}"
+                        # Appended, not assigned: a caption typed alongside the
+                        # voice note used to be overwritten by the
+                        # transcription and never reached the session.  Same
+                        # composition every other branch in this loop uses.
+                        voice_block = f"[Voice message] {cleaned}"
+                        text = f"{text}\n\n{voice_block}" if text else voice_block
                         log.info("Transcribed voice %s: %s", att.filename, cleaned[:80])
                         # Echo is non-critical — don't lose the transcription if send fails
                         try:
@@ -1902,18 +1946,22 @@ class ClaudeBot(discord.Client):
                         except Exception:
                             log.warning("Failed to send voice echo", exc_info=True)
                     else:
-                        try:
-                            await message.channel.send("Couldn't detect any speech in that voice message.")
-                        except Exception:
-                            pass
+                        _attach_problems.append(
+                            f"I couldn't hear any speech in **{att.filename}**."
+                        )
+                        _note_unread_after(idx)
+                        await _flush_attach_problems()
                         return
                 except Exception:
                     log.warning("Voice transcription failed for %s", att.filename, exc_info=True)
-                    try:
-                        await message.channel.send("Couldn't transcribe that voice message.")
-                    except Exception:
-                        pass
+                    _attach_problems.append(
+                        f"I couldn't transcribe **{att.filename}** — try sending "
+                        "it again."
+                    )
+                    _note_unread_after(idx)
+                    await _flush_attach_problems()
                     return
+                _note_unread_after(idx)
                 break  # voice consumed, skip remaining attachments
 
             if ext in ATTACH_TEXT_EXTS and att.size <= ATTACH_TEXT_MAX:
@@ -2019,12 +2067,7 @@ class ClaudeBot(discord.Client):
 
         # Tell the user about anything we turned away.  This runs before the
         # empty-text bail-out, which is what used to swallow a lone PDF upload.
-        # Archive channels stay read-only, so stay quiet there.
-        if _attach_problems and message.channel.id not in self._forums.archive_channel_ids:
-            try:
-                await message.channel.send("\n".join(_attach_problems))
-            except Exception:
-                log.warning("Failed to send attachment notice", exc_info=True)
+        await _flush_attach_problems()
 
         if not text:
             return

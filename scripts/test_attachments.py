@@ -196,11 +196,16 @@ class Harness:
         return FakeCtx()
 
 
-async def run_upload(filename: str, data: bytes, text: str = "",
-                     size: int | None = None, voice: bool = False):
-    """Push one attachment through the real on_message; return (replies, prompt)."""
+async def run_uploads(attachments: list[FakeAttachment], text: str = "",
+                      voice: bool = False, heard: str | None = None):
+    """Push a whole message through the real on_message; return (replies, prompt).
+
+    ``heard`` stubs out speech-to-text.  It has to be stubbed rather than left
+    to fail: the real one posts the audio to a paid API, and a machine with a
+    key in its .env would make a live call every time this file runs.
+    """
     harness = Harness(voice_enabled=voice)
-    msg = FakeMessage(text, [FakeAttachment(filename, data, size=size)])
+    msg = FakeMessage(text, attachments)
 
     captured: list[str] = []
 
@@ -210,16 +215,33 @@ async def run_upload(filename: str, data: bytes, text: str = "",
     async def fake_enrich(t):
         return t
 
+    async def fake_transcribe(audio_bytes, filename="voice.ogg"):
+        if heard is None:
+            raise RuntimeError("transcription unavailable")
+        return heard
+
+    from bot.services import audio as audio_mod
     orig_on_text, orig_enrich = commands.on_text, botmod.enrich_with_tweets
+    orig_transcribe = audio_mod.transcribe
     commands.on_text = fake_on_text
     botmod.enrich_with_tweets = fake_enrich
+    audio_mod.transcribe = fake_transcribe
     try:
         await ClaudeBot.on_message(harness, msg)
     finally:
         commands.on_text = orig_on_text
         botmod.enrich_with_tweets = orig_enrich
+        audio_mod.transcribe = orig_transcribe
 
     return msg.channel.sent, (captured[0] if captured else None)
+
+
+async def run_upload(filename: str, data: bytes, text: str = "",
+                     size: int | None = None, voice: bool = False):
+    """Push one attachment through the real on_message; return (replies, prompt)."""
+    return await run_uploads(
+        [FakeAttachment(filename, data, size=size)], text=text, voice=voice,
+    )
 
 
 # --- Cases -----------------------------------------------------------------
@@ -373,6 +395,42 @@ async def main() -> int:
     check("PDF made it through", "report.pdf saved at `" in got, got)
     check("the skipped one is reported",
           any("nope.pages" in s for s in msg.channel.sent), str(msg.channel.sent))
+
+    print("\n== A voice note doesn't quietly swallow what came with it ==")
+    # Transcription replaces the message text, so the loop has to stop at the
+    # first voice note. Everything queued behind it went unread in silence —
+    # the user got an answer about the audio and no hint their screenshot was
+    # never opened.
+    replies, prompt = await run_uploads(
+        [FakeAttachment("note.ogg", b"fake audio"),
+         FakeAttachment("shot.png", b"\x89PNG\r\n\x1a\nfake")],
+        voice=True, heard="have a look at this",
+    )
+    check("the transcription is what reaches the session",
+          prompt == "[Voice message] have a look at this", str(prompt))
+    check("and the picture behind it is named as unread",
+          any("shot.png" in r for r in replies), str(replies))
+
+    replies, prompt = await run_uploads(
+        [FakeAttachment("note.ogg", b"fake audio")],
+        text="what did I just say?", voice=True, heard="the thing about Tuesday",
+    )
+    check("a caption typed with the voice note survives it",
+          bool(prompt) and "what did I just say?" in prompt
+          and "the thing about Tuesday" in prompt, str(prompt))
+
+    print("\n== A failed voice note doesn't eat the other notices ==")
+    # The transcription failure used to return straight past the send, so a
+    # rejection already written for an earlier attachment was discarded.
+    replies, prompt = await run_uploads(
+        [FakeAttachment("archive.zip", b"PK\x03\x04"),
+         FakeAttachment("note.ogg", b"fake audio")],
+        voice=True, heard=None,   # stub raises → transcription fails
+    )
+    joined = " ".join(replies)
+    check("the unsupported file is still reported", "archive.zip" in joined, joined)
+    check("alongside the transcription failure", "note.ogg" in joined, joined)
+    check("and nothing was dispatched to a session", prompt is None, str(prompt))
 
     print("\n== Archive channels stay silent ==")
     harness = Harness()
