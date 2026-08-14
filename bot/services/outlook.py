@@ -10,6 +10,9 @@ CLI usage:
     python outlook.py unread
     python outlook.py read "subject"
     python outlook.py draft "to" "subject" "body" [attachment1 attachment2 ...]
+
+`draft` blocks for ~30s on purpose — see _sync_to_server. The draft is saved
+in the first moment; the rest of the wait is what gets it onto the server.
 """
 
 from __future__ import annotations
@@ -155,9 +158,10 @@ def _sync_to_server(settle_s: float = _SYNC_SETTLE_S) -> bool:
     second draft — if a COM error escaped from here.
 
     Returns:
-        True if a send/receive was requested and waited out, False if it
-        could not be requested at all. True means "given time to upload",
-        NOT "confirmed on the server" — no such confirmation is available.
+        True only if the nudge went out *and* the full wait was taken. False
+        if the send/receive could not be started, or if the wait was cut
+        short or failed. Even True means only "given time to upload", never
+        "confirmed on the server" — no such confirmation is available.
     """
     try:
         ns = _get_namespace()
@@ -177,8 +181,23 @@ def _sync_to_server(settle_s: float = _SYNC_SETTLE_S) -> bool:
 
     try:
         _pump_for(settle_s)
-    except Exception as e:  # pumping must not sink an already-saved draft
-        log.warning("Interrupted while waiting for Outlook to sync: %s", e)
+    except KeyboardInterrupt:
+        # This wait is a 30s window the user can now realistically Ctrl-C
+        # through, which they could not before the command started blocking.
+        # Letting it escape would print a traceback over an operation that
+        # actually succeeded — the draft is saved, only the upload window was
+        # cut short. Swallow it and report the wait as not taken, which is
+        # true and lands the caller on its "may not have reached the server"
+        # message rather than a stack trace.
+        log.warning("Sync wait interrupted — draft is saved, upload unconfirmed")
+        return False
+    except Exception as e:
+        # Same situation as the interrupt, so the same answer: the nudge went
+        # out but the window was not held open, and there is no distinguishing
+        # a blow-up at 1s from one at 29s. Never re-raised — the draft is
+        # already saved and must not be undone by a failure in the tail.
+        log.warning("Error while waiting for Outlook to sync: %s", e)
+        return False
     return True
 
 
@@ -401,6 +420,10 @@ def create_draft(
 ) -> dict:
     """Create a draft email in Outlook Drafts folder.
 
+    Blocks for roughly `_SYNC_SETTLE_S` seconds. The draft is saved almost
+    immediately; the wait is what gets it off the local cache and onto the
+    server, without which it never appears in new Outlook / OWA.
+
     Args:
         to: Recipient email address(es), semicolon-separated for multiple.
         subject: Email subject line.
@@ -408,7 +431,9 @@ def create_draft(
         attachments: Optional list of absolute file paths to attach.
 
     Returns:
-        Dict with subject and attachment count for confirmation.
+        Dict with `subject`, `to`, `attachments` (a count), and
+        `sync_requested` — see _sync_to_server for what that last one does
+        and does not promise.
     """
 
     def _do():
