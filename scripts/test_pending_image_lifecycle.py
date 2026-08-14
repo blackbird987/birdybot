@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
 
+import asyncio
 import os
 import sys
 import tempfile
@@ -32,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from bot import config  # noqa: E402
 from bot.discord.bot import (  # noqa: E402
+    ClaudeBot,
     prepare_replayed_prompt,
     reap_pending_images,
 )
@@ -209,8 +211,68 @@ def run_cases() -> int:
     check("the picture that came with the steer is intact", second.exists())
 
     clear_dir()
+    asyncio.run(scheduling_cases())
+
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
+
+
+class _Counter:
+    """Stand-in bot: counts sweeps instead of touching the disk.
+
+    The real scheduling methods are called unbound against this, so the
+    debounce arithmetic and the loop's sleep-first ordering are the genuine
+    article — only the sweep itself is swapped out.
+    """
+
+    def __init__(self) -> None:
+        self._last_image_sweep = 0.0
+        self.sweeps = 0
+
+    async def _sweep_pending_images(self) -> None:
+        self.sweeps += 1
+
+
+async def scheduling_cases() -> None:
+    print("\n== The post-upload nudge is rate-limited ==")
+    stub = _Counter()
+    nudge = ClaudeBot._schedule_pending_image_sweep
+    for _ in range(3):          # three screenshots dropped in one breath
+        nudge(stub)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    check("a burst of uploads causes one sweep, not one each",
+          stub.sweeps == 1, str(stub.sweeps))
+
+    stub._last_image_sweep = time.time() - 61   # a minute has passed
+    nudge(stub)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    check("the next upload after the window sweeps again",
+          stub.sweeps == 2, str(stub.sweeps))
+
+    print("\n== The periodic tick sleeps before its first sweep ==")
+    # It has to: the startup drain already sweeps once, and a loop that swept
+    # on entry would run a second one against the same directory at boot.
+    stub = _Counter()
+    task = asyncio.create_task(ClaudeBot._pending_image_sweep_loop(stub))
+    for _ in range(5):
+        await asyncio.sleep(0)
+    check("nothing swept on entry, even after the loop is well started",
+          stub.sweeps == 0, str(stub.sweeps))
+
+    real_secs = config.PENDING_IMAGES_SWEEP_SECS
+    config.PENDING_IMAGES_SWEEP_SECS = 0.02
+    try:
+        task.cancel()
+        stub = _Counter()
+        task = asyncio.create_task(ClaudeBot._pending_image_sweep_loop(stub))
+        await asyncio.sleep(0.25)       # ~12 ticks' worth of headroom
+        check("and then it keeps ticking on its own", stub.sweeps >= 1,
+              str(stub.sweeps))
+        task.cancel()
+    finally:
+        config.PENDING_IMAGES_SWEEP_SECS = real_secs
 
 
 if __name__ == "__main__":
