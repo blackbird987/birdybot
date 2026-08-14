@@ -162,7 +162,6 @@ class FakeForums:
 class FakeCtx:
     def __init__(self):
         self.pending_image_paths: list[str] = []
-        self.images_claimed = False
         self.user_id = ""
         self.user_name = ""
 
@@ -177,6 +176,13 @@ class Harness:
         self._forums = FakeForums()
         self._lobby_channel_id = 1  # never matches FakeChannel.id
         self.prompts: list[str] = []
+        self.sweeps = 0
+
+    def _schedule_pending_image_sweep(self) -> None:
+        # Real bot hands the saved file to the retention reaper here. Counting
+        # the nudge is enough — the reaper itself is covered by
+        # scripts/test_pending_image_lifecycle.py.
+        self.sweeps += 1
 
     def _in_scope(self, guild, channel):
         return True
@@ -218,6 +224,8 @@ async def run_upload(filename: str, data: bytes, text: str = "",
 # --- Cases -----------------------------------------------------------------
 
 async def main() -> int:
+    pre_existing = {f for f in config.PENDING_IMAGES_DIR.iterdir() if f.is_file()}
+
     print("\n== PDF upload, no message text (the original bug) ==")
     replies, prompt = await run_upload("feedback_form.pdf", make_pdf())
     check("something reached the session", prompt is not None,
@@ -357,11 +365,29 @@ async def main() -> int:
     check("unknown type gets the accepted-kinds sentence",
           "voice notes" in note, note)
 
-    print("\n== Cleanup ==")
-    leftovers = [f for f in config.PENDING_IMAGES_DIR.iterdir()
-                 if f.is_file() and f.suffix == ".pdf"]
-    check("saved PDFs are removed once the turn ends", not leftovers,
-          str(leftovers))
+    print("\n== Uploads outlive the turn that received them ==")
+    # This used to assert the opposite. Deleting on turn-exit is what wiped a
+    # screenshot one second before the steered run that referenced it started:
+    # the path is in the session transcript, so a later turn can still need it.
+    # Reaping is the retention sweep's job now.
+    sweep_harness = Harness()
+    sweep_msg = FakeMessage("", [FakeAttachment("keeper.pdf", make_pdf())])
+    orig, orig_e = commands.on_text, botmod.enrich_with_tweets
+    commands.on_text = lambda ctx, prompt: _noop()
+    botmod.enrich_with_tweets = _identity
+    try:
+        await ClaudeBot.on_message(sweep_harness, sweep_msg)
+    finally:
+        commands.on_text, botmod.enrich_with_tweets = orig, orig_e
+
+    new_files = {f for f in config.PENDING_IMAGES_DIR.iterdir()
+                 if f.is_file()} - pre_existing
+    check("saved uploads still on disk after on_message returned",
+          sum(1 for f in new_files if f.suffix == ".pdf") >= 2, str(new_files))
+    check("the reaper was nudged instead of an immediate delete",
+          sweep_harness.sweeps == 1, str(sweep_harness.sweeps))
+    for f in new_files:
+        f.unlink(missing_ok=True)  # harness cleans up its own droppings
 
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
@@ -369,6 +395,10 @@ async def main() -> int:
 
 async def _identity(t):
     return t
+
+
+async def _noop():
+    return None
 
 
 def _entity_docx() -> bytes:

@@ -363,6 +363,22 @@ DRAIN_QUEUE_FILE: Path = DATA_DIR / "drain_queue.json"
 PENDING_PROMPTS_FILE: Path = DATA_DIR / "pending_prompts.json"
 USAGE_QUEUE_FILE: Path = DATA_DIR / "usage_queue.json"
 PENDING_IMAGES_DIR: Path = DATA_DIR / "pending_images"
+# Uploads are kept for a retention window, NOT deleted when the turn that
+# received them returns.  The path we hand the session lives on in its
+# transcript, so a steer, a retry, or a plain "look at that screenshot again"
+# turn can read the file long after the receiving message frame is gone.
+# Frame-scoped deletion could never be right for a resumable session: it wiped
+# an upload one second before the steered run that referenced it started.
+PENDING_IMAGES_TTL_HOURS: float = float(os.getenv("PENDING_IMAGES_TTL_HOURS", "48"))
+# Disk guard.  Retention alone is unbounded if someone dumps a burst of large
+# uploads, so the sweep also evicts oldest-first back under this cap...
+PENDING_IMAGES_MAX_BYTES: int = int(
+    os.getenv("PENDING_IMAGES_MAX_BYTES", str(500 * 1024 * 1024))
+)
+# ...but never touches a file this young, whatever the cap says — that floor is
+# what keeps an in-flight run's image out of the reaper's hands.
+PENDING_IMAGES_MIN_AGE_SECS: int = 900
+PENDING_IMAGES_SWEEP_SECS: int = 3600
 # Self-wake: an inner session writes data/wakes/<instance_id>.json to have the
 # bot re-invoke it in the same thread after a delay (see WAKE_GUIDANCE). Per
 # instance-id so concurrent sessions never clobber a shared file, and absolute

@@ -75,6 +75,11 @@ def _unlink_image_paths(paths: list[str], *, site: str) -> int:
 
     Only counts files that actually existed and got removed — already-missing
     paths return cleanly without inflating the count.
+
+    One caller left: a cancelled queue entry.  That prompt never ran, so no
+    session transcript can be holding the path and deleting now is safe.
+    Every other site that used to call this deleted files a live run still
+    needed — see ``reap_pending_images``.
     """
     deleted = 0
     for p in paths or []:
@@ -88,6 +93,90 @@ def _unlink_image_paths(paths: list[str], *, site: str) -> int:
     if deleted:
         log.info("Image cleanup [%s]: deleted %d files", site, deleted)
     return deleted
+
+
+def reap_pending_images(
+    referenced: set[str],
+    now: float,
+    *,
+    ttl_hours: float | None = None,
+    max_bytes: int | None = None,
+    min_age_secs: int | None = None,
+) -> tuple[int, int]:
+    """Delete stale uploads from PENDING_IMAGES_DIR. Returns (aged, evicted).
+
+    Three rules, in order:
+
+    1. A file a live usage-queue entry still points at is never touched — that
+       prompt hasn't run yet and the path is the only copy it has.
+    2. Past the retention window it goes.  The window is generous on purpose:
+       the path we handed the session is in its transcript forever, so a steer,
+       a retry, or a later "look at that screenshot again" turn can still read
+       it.  Deleting on the receiving turn's exit is exactly what made uploads
+       vanish out from under a steered run one second before it started.
+    3. If the folder is still over the size cap, evict oldest-first until it
+       fits — but never a file younger than the floor, whatever the cap says.
+       That floor is the in-flight guarantee: a run reading a picture it was
+       just handed cannot lose it to a burst of uploads in another thread.
+
+    Blocking (stat/unlink); the caller runs it off the event loop.
+    """
+    ttl = config.PENDING_IMAGES_TTL_HOURS if ttl_hours is None else ttl_hours
+    cap = config.PENDING_IMAGES_MAX_BYTES if max_bytes is None else max_bytes
+    floor = (
+        config.PENDING_IMAGES_MIN_AGE_SECS if min_age_secs is None else min_age_secs
+    )
+
+    survivors: list[tuple[float, int, Path]] = []  # (mtime, size, path)
+    aged = 0
+    try:
+        entries = list(config.PENDING_IMAGES_DIR.iterdir())
+    except OSError:
+        return 0, 0
+
+    for f in entries:
+        try:
+            if not f.is_file():
+                continue
+            if str(f.resolve()) in referenced:
+                continue
+            st = f.stat()
+            if now - st.st_mtime > ttl * 3600:
+                f.unlink(missing_ok=True)
+                aged += 1
+            else:
+                survivors.append((st.st_mtime, st.st_size, f))
+        except OSError:
+            continue
+
+    evicted = 0
+    total = sum(size for _, size, _ in survivors)
+    if total > cap:
+        survivors.sort(key=lambda t: t[0])  # oldest first
+        for mtime, size, f in survivors:
+            if total <= cap:
+                break
+            if now - mtime < floor:
+                continue  # too young to reap, cap or no cap
+            try:
+                f.unlink(missing_ok=True)
+            except OSError:
+                continue
+            total -= size
+            evicted += 1
+        if total > cap:
+            log.warning(
+                "Image cleanup [sweep]: still %d bytes over cap — every "
+                "remaining file is younger than the %ds floor",
+                total - cap, floor,
+            )
+
+    if aged or evicted:
+        log.info(
+            "Image cleanup [sweep]: deleted %d past retention, evicted %d for size",
+            aged, evicted,
+        )
+    return aged, evicted
 
 
 def _strip_missing_image_refs(prompt: str, image_paths: list[str]) -> str:
@@ -321,6 +410,8 @@ class ClaudeBot(discord.Client):
         # channel_id -> window_end_utc; bypass the usage-limit gate while now < end.
         # In-memory by design — a reboot mid-window means one more prompt then quiet.
         self._usage_gate_bypass: dict[str, datetime] = {}
+        # Debounce for the upload reaper — see _schedule_pending_image_sweep.
+        self._last_image_sweep: float = 0.0
         self._setup_commands()
 
     @property
@@ -1033,12 +1124,6 @@ class ClaudeBot(discord.Client):
             "usage gate: intercepted %s in %s (qid=%s)",
             entry_extras.get("action") or "text", ctx.channel_id, qid,
         )
-        # Hand off image-file lifecycle to the queue entry (text path only) —
-        # only after both the persist AND the Discord send succeeded.  If we
-        # fell through to the except path above, this stays False and
-        # on_message's finally cleans up the files.
-        if entry_extras.get("type") == "text":
-            ctx.images_claimed = True
         return True
 
     async def _offer_usage_limit_choice(
@@ -1200,9 +1285,10 @@ class ClaudeBot(discord.Client):
                 log.exception(
                     "usage_queue replay failed for %s", entry.get("qid"),
                 )
-            # Image cleanup applies only to text entries (callbacks have none).
-            if entry.get("type", "text") != "callback":
-                _unlink_image_paths(entry.get("image_paths", []), site="replay")
+            # No image cleanup here — same reason as the Run Now path in
+            # interactions: _replay_to_thread also returns when the run is
+            # killed mid-read, and the replacement run still needs the file.
+            # The retention reaper collects them once the entry is gone.
 
     async def _retire_gate_message(self, entry: dict) -> None:
         """Edit the gate-prompt message to reflect that it's been fired."""
@@ -1273,35 +1359,50 @@ class ClaudeBot(discord.Client):
         await self._sweep_pending_images()
 
     async def _sweep_pending_images(self) -> None:
-        """Belt-and-suspenders: remove orphaned files in PENDING_IMAGES_DIR.
+        """Reap old uploads from PENDING_IMAGES_DIR.
 
-        A file is orphaned if no live queue entry references it.  We only
-        delete files older than 48h to give in-flight requests breathing room
-        between save-time and queue-append.
+        This is now the ONLY thing that deletes an upload (bar an explicitly
+        cancelled queue entry, which never ran).  See ``reap_pending_images``
+        for the policy and ``PENDING_IMAGES_TTL_HOURS`` for why nothing is
+        deleted at the end of the turn that received it.
         """
         try:
             referenced: set[str] = set()
             async with self._usage_queue_lock:
                 for e in self._read_usage_queue():
                     for p in e.get("image_paths", []) or []:
-                        referenced.add(str(Path(p).resolve()))
-            cutoff = _time.time() - 48 * 3600
-            deleted = 0
-            for f in config.PENDING_IMAGES_DIR.iterdir():
-                if not f.is_file():
-                    continue
-                if str(f.resolve()) in referenced:
-                    continue
-                try:
-                    if f.stat().st_mtime < cutoff:
-                        f.unlink(missing_ok=True)
-                        deleted += 1
-                except Exception:
-                    pass
-            if deleted:
-                log.info("Image cleanup [sweep]: deleted %d orphaned files", deleted)
+                        try:
+                            referenced.add(str(Path(p).resolve()))
+                        except OSError:
+                            pass
+            await asyncio.to_thread(
+                reap_pending_images, referenced, _time.time(),
+            )
         except Exception:
             log.exception("Pending-images sweep failed")
+
+    def _schedule_pending_image_sweep(self) -> None:
+        """Debounced nudge for the reaper, fired after an upload lands.
+
+        The hourly loop is the real schedule; this just keeps a burst of large
+        uploads from sitting over the size cap until the next tick.  Debounced
+        so a rapid-fire batch of screenshots doesn't spawn a sweep each.
+        """
+        now = _time.time()
+        if now - self._last_image_sweep < 60:
+            return
+        self._last_image_sweep = now
+        asyncio.create_task(self._sweep_pending_images())
+
+    async def _pending_image_sweep_loop(self) -> None:
+        """Periodic reaper tick. Runs AFTER the startup drain completes."""
+        while True:
+            await asyncio.sleep(config.PENDING_IMAGES_SWEEP_SECS)
+            try:
+                self._last_image_sweep = _time.time()
+                await self._sweep_pending_images()
+            except Exception:
+                log.exception("pending_image_sweep_loop iteration failed")
 
     async def _usage_queue_replay_loop(self) -> None:
         """Periodic tick (60s). Runs AFTER startup drain completes."""
@@ -1489,6 +1590,16 @@ class ClaudeBot(discord.Client):
                     log.exception("usage_queue_startup_drain failed")
                 await self._usage_queue_replay_loop()
             self._usage_queue_task = asyncio.create_task(_usage_queue_main())
+
+        # Upload reaper.  Separate from the drain above because the drain
+        # sweeps once and then never again — and the reaper is the only thing
+        # deleting uploads now, so "once at boot" would let a long-lived
+        # process accumulate them indefinitely.
+        existing_reaper = getattr(self, '_image_sweep_task', None)
+        if not existing_reaper or existing_reaper.done():
+            self._image_sweep_task = asyncio.create_task(
+                self._pending_image_sweep_loop()
+            )
 
         # Clean up stale worktrees/branches from interrupted autopilot chains
         asyncio.create_task(self._startup_worktree_cleanup())
@@ -2013,18 +2124,15 @@ class ClaudeBot(discord.Client):
                 log.warning("Tweet enrichment failed, continuing with original text", exc_info=True)
             await commands.on_text(ctx, text)
         finally:
-            # Images claimed by the usage-limit gate are owned by the queue
-            # entry from here on (cleanup happens at replay or Cancel).
-            if ctx is None or not ctx.images_claimed:
-                deleted = 0
-                for p in _image_paths:
-                    try:
-                        Path(p).unlink(missing_ok=True)
-                        deleted += 1
-                    except Exception:
-                        pass
-                if deleted:
-                    log.info("Image cleanup [on_message]: deleted %d files", deleted)
+            # Uploads are deliberately NOT deleted here.  This frame returning
+            # does not mean the run that reads the file is done with it — the
+            # Steer path dispatches its run from a different task, a killed run
+            # gets replaced by one resuming the same transcript, and any later
+            # turn can be asked to look at the picture again.  Deleting on exit
+            # wiped both of those cases (see reap_pending_images).  The reaper
+            # owns the lifecycle now; nudge it so a burst can't sit over cap.
+            if _image_paths:
+                self._schedule_pending_image_sweep()
 
     async def _route_lobby_message(
         self, message: discord.Message, text: str, repo_name: str | None,

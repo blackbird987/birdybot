@@ -759,17 +759,19 @@ async def _handle_usage_action(
         repo_name = removed.get("repo_name")
         image_paths = removed.get("image_paths", [])
 
-        async def _run_and_cleanup() -> None:
-            from bot.discord.bot import _strip_missing_image_refs, _unlink_image_paths
+        async def _run_replay() -> None:
+            from bot.discord.bot import _strip_missing_image_refs
             cleaned = _strip_missing_image_refs(prompt, image_paths)
-            try:
-                await bot._replay_to_thread(channel_id, cleaned, repo_name=repo_name)
-            finally:
-                _unlink_image_paths(image_paths, site="run_now")
+            await bot._replay_to_thread(channel_id, cleaned, repo_name=repo_name)
 
+        # No cleanup here on purpose.  This used to unlink the upload when
+        # _replay_to_thread returned — which also happens when the run is
+        # KILLED mid-read by a Steer, so the replacement run inherited a
+        # transcript pointing at a file deleted a second earlier.  The
+        # retention reaper owns these files now.
         # Fire-and-forget so the interaction handler returns promptly; the
         # lock inside _replay_to_thread serializes any concurrent spawn.
-        asyncio.create_task(_run_and_cleanup())
+        asyncio.create_task(_run_replay())
 
 
 async def _handle_repo_switch(
