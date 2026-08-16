@@ -143,15 +143,21 @@ def _carry_forward_work_record(aborted: RunResult, resumed: RunResult) -> RunRes
         setattr(resumed, numeric,
                 getattr(aborted, numeric) + getattr(resumed, numeric))
 
-    for listed in ("tools_used", "bash_commands", "path_poisoning"):
+    # tools_used and path_poisoning are sets wearing a list's clothes and must
+    # not gain duplicates; bash_commands is a chronological log where the same
+    # command run twice is two real events.
+    for listed, dedupe in (
+        ("tools_used", True),
+        ("bash_commands", False),
+        ("path_poisoning", True),
+    ):
         merged = list(getattr(aborted, listed) or [])
         seen = set(merged)
         for item in getattr(resumed, listed) or []:
-            # bash_commands is a genuine log — keep repeats; the other two are
-            # sets-in-list-clothing and must not gain duplicates.
-            if listed == "bash_commands" or item not in seen:
-                seen.add(item)
-                merged.append(item)
+            if dedupe and item in seen:
+                continue
+            seen.add(item)
+            merged.append(item)
         setattr(resumed, listed, merged)
 
     return resumed
@@ -1609,7 +1615,7 @@ class ClaudeRunner:
                     # Consumed by _build_command on the very next attempt.
                     instance._context_thrash_retry = True
                     log.warning(
-                        "Autocompact thrash for %s (attempt %d/%d) — resuming "
+                        "Autocompact thrash for %s (resume %d/%d) — resuming "
                         "session %s automatically",
                         instance.id, thrash_attempts + 1,
                         config.CONTEXT_THRASH_MAX_RETRIES,
@@ -1636,6 +1642,15 @@ class ClaudeRunner:
                         _recovery_state=recovery_state,
                         on_recovery=on_recovery,
                     )
+                    # _build_command normally consumes the flag, but the resume
+                    # can end before it ever gets there — the refuse-to-spawn
+                    # short-circuit above returns as soon as every account is
+                    # on cooldown, and that path re-queues this same Instance
+                    # object for a later cooldown retry.  Left set, that retry
+                    # would open with "your previous attempt was aborted" hours
+                    # after the fact.  Clearing here covers every exit the
+                    # recursion can take.
+                    instance._context_thrash_retry = False
                     # The aborted attempt did real work — its edits are on disk
                     # and the resumed attempt may never touch a file again.
                     return _carry_forward_work_record(result, resumed)
@@ -1643,7 +1658,7 @@ class ClaudeRunner:
                 # to the normal failure so the Retry button is still offered.
                 log.warning(
                     "Autocompact thrash for %s not auto-resumed "
-                    "(attempts=%d/%d, session=%s)",
+                    "(resumes=%d/%d, session=%s)",
                     instance.id, thrash_attempts,
                     config.CONTEXT_THRASH_MAX_RETRIES,
                     (resume_id or "none")[:12],

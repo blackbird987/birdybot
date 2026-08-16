@@ -26,9 +26,16 @@ Asserted here:
   * the resumed attempt's prompt is prefixed with the recovery note (and the
     first attempt's is not), so the agent knows its edits are still on disk
   * the user is told, once per resume
+  * the aborted attempt's record of work — which tools it used, what it ran,
+    any main-repo paths it reached for — survives into the final result, so a
+    build that made all its edits before dying isn't reported as one that
+    changed nothing
   * thrashing forever gives up after CONTEXT_THRASH_MAX_RETRIES and surfaces
     the real error rather than looping
   * a non-thrash error never enters this path
+  * a resume that is refused before it can spawn (fleet on cooldown) still
+    clears the "you were just aborted" flag, so the cooldown retry that
+    re-queues the same instance later doesn't inherit a stale recovery note
 
 Strategy follows scripts/test_dead_session_recovery.py: stub the subprocess
 boundary only, so the real recovery cascade in _run_impl executes.
@@ -46,6 +53,7 @@ import os
 import shutil
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Same reasoning as test_dead_session_recovery: importing bot.config runs a
@@ -117,12 +125,15 @@ class _FakeProc:
 class _Harness:
     """One scripted run of the real cascade against a stubbed subprocess."""
 
-    def __init__(self, tmp: str, outcomes: list[RunResult]):
+    def __init__(self, tmp: str, outcomes: list[RunResult], *, after_attempt=None):
         self.account = os.path.join(tmp, "acct_primary")
         self.repo = os.path.join(tmp, "repo")
         for p in (self.account, self.repo):
             os.makedirs(p, exist_ok=True)
         self.outcomes = outcomes
+        # Called (runner, attempt_index) as each attempt finishes. Case 4 uses
+        # it to move the fleet onto cooldown between attempts.
+        self.after_attempt = after_attempt
         self.spawn_argvs: list[list[str]] = []
         self.spawn_accounts: list[str | None] = []
         self.prompts: list[str] = []
@@ -155,7 +166,10 @@ class _Harness:
             # builds a fresh RunResult per attempt: handing the same object
             # back twice would let a merge across attempts fold a result into
             # itself, which cannot happen in production.
-            return copy.deepcopy(self.outcomes[min(i, len(self.outcomes) - 1)])
+            outcome = copy.deepcopy(self.outcomes[min(i, len(self.outcomes) - 1)])
+            if self.after_attempt:
+                self.after_attempt(runner, i)
+            return outcome
 
         runner._stream_output = fake_stream_output  # type: ignore[assignment]
 
@@ -485,6 +499,47 @@ async def _amain() -> int:
         if h3.progress:
             failures.append(
                 f"a plain build failure posted a recovery notice: {h3.progress}"
+            )
+
+        # --- Case 4: the resume never gets to spawn --------------------------
+        # The account goes on cooldown between attempts, so the resume hits the
+        # refuse-to-spawn short-circuit and returns before _build_command — the
+        # one place that clears the "you were just aborted" flag. That path
+        # re-queues this same Instance for a later cooldown retry, which would
+        # then open with a recovery note about an abort that happened hours ago.
+        def _cooldown_after_first(runner, attempt_index):
+            # A cooldown, not a signed-out account: when EVERY account fails
+            # the credential probe the picker deliberately spawns anyway (the
+            # probe is a heuristic and a clean sweep is what a wrong heuristic
+            # looks like), so only a cooldown actually reaches the refusal.
+            if attempt_index == 0:
+                runner._account_cooldowns[h4.account] = (
+                    datetime.now(timezone.utc) + timedelta(hours=1)
+                )
+
+        h4 = _Harness(tmp, [_thrash_result()], after_attempt=_cooldown_after_first)
+        result4, instance4 = await h4.run(session_id=BORN_SESSION)
+
+        if len(h4.spawn_argvs) != 1:
+            failures.append(
+                f"expected the resume to be refused before spawning, got "
+                f"{len(h4.spawn_argvs)} spawns"
+            )
+        if instance4._context_thrash_retry:
+            failures.append(
+                "the recovery flag survived a resume that never reached the "
+                "prompt builder — the next cooldown retry would be told it had "
+                "just been aborted"
+            )
+        if "Edit" not in (result4.tools_used or []):
+            failures.append(
+                "a refused resume dropped the aborted attempt's tool record: "
+                f"{result4.tools_used!r}"
+            )
+        if result4.session_id != BORN_SESSION:
+            failures.append(
+                "the refused resume lost the conversation id, so the cooldown "
+                f"retry has nothing to resume ({result4.session_id!r})"
             )
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
