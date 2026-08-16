@@ -110,6 +110,52 @@ def _no_productive_work(res: RunResult) -> bool:
     return (looks_like_fatal_auth_error(text)
             or looks_like_fatal_auth_error(res.error_message))
 
+
+def _carry_forward_work_record(aborted: RunResult, resumed: RunResult) -> RunResult:
+    """Fold a discarded attempt's record of work into the attempt that replaced it.
+
+    ``finalize_run`` *assigns* the winning RunResult's fields onto the Instance,
+    so anything the aborted attempt recorded is simply dropped.  Which tools ran
+    is the field with teeth: a build that made every one of its edits before
+    being killed, then resumed only to confirm the work was already on disk,
+    would report an empty tool list — and the chain reads that list to decide
+    whether a build changed code at all (``CODE_CHANGE_TOOLS``), so a real build
+    would render as "no changes made".  The bash log feeds the eval surface and
+    the main-repo-path hits feed the poisoning warning; both are equally gone.
+
+    Deliberately NOT merged:
+      * ``num_turns`` — the failover heuristic above treats >1 turn as proof the
+        account took the turn, so inflating it could hide a dead backup account.
+      * ``context_tokens`` / ``model`` — a snapshot of the final call (it drives
+        the "context nearly full" warning), not a running total.
+      * ``session_id`` / ``result_text`` / status flags — the resumed attempt is
+        the authoritative one.
+
+    A killed CLI usually emits no ``result`` event, so the cost/duration/token
+    counters below are typically zero on the aborted side; they are summed
+    anyway because they are cumulative totals whenever they are present.
+    """
+    for numeric in (
+        "cost_usd", "duration_ms", "duration_api_ms",
+        "input_tokens", "output_tokens",
+        "cache_read_tokens", "cache_creation_tokens",
+    ):
+        setattr(resumed, numeric,
+                getattr(aborted, numeric) + getattr(resumed, numeric))
+
+    for listed in ("tools_used", "bash_commands", "path_poisoning"):
+        merged = list(getattr(aborted, listed) or [])
+        seen = set(merged)
+        for item in getattr(resumed, listed) or []:
+            # bash_commands is a genuine log — keep repeats; the other two are
+            # sets-in-list-clothing and must not gain duplicates.
+            if listed == "bash_commands" or item not in seen:
+                seen.add(item)
+                merged.append(item)
+        setattr(resumed, listed, merged)
+
+    return resumed
+
 # Tunable knobs for the cross-account session-recovery path (step 3 of the
 # dementia fix).  60s cache window dedupes rebuild_project_index calls when a
 # burst of resumes hits the same missing-session state.  30s timeout caps
@@ -1582,7 +1628,7 @@ class ClaudeRunner:
                             log.exception(
                                 "Progress callback error during thrash resume",
                             )
-                    return await self._run_impl(
+                    resumed = await self._run_impl(
                         instance, on_progress, on_stall,
                         context, sibling_context,
                         api_fallback=api_fallback,
@@ -1590,6 +1636,9 @@ class ClaudeRunner:
                         _recovery_state=recovery_state,
                         on_recovery=on_recovery,
                     )
+                    # The aborted attempt did real work — its edits are on disk
+                    # and the resumed attempt may never touch a file again.
+                    return _carry_forward_work_record(result, resumed)
                 # Out of retries (or no conversation to resume): fall through
                 # to the normal failure so the Retry button is still offered.
                 log.warning(

@@ -41,6 +41,7 @@ from __future__ import annotations
 import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
 
 import asyncio
+import copy
 import os
 import shutil
 import sys
@@ -150,8 +151,11 @@ class _Harness:
             calls["n"] += 1
             # Beyond the script, keep returning the last outcome — a thrash
             # loop must be stopped by the retry cap, not by running out of
-            # scripted answers.
-            return self.outcomes[min(i, len(self.outcomes) - 1)]
+            # scripted answers.  Deep-copied because the real _stream_output
+            # builds a fresh RunResult per attempt: handing the same object
+            # back twice would let a merge across attempts fold a result into
+            # itself, which cannot happen in production.
+            return copy.deepcopy(self.outcomes[min(i, len(self.outcomes) - 1)])
 
         runner._stream_output = fake_stream_output  # type: ignore[assignment]
 
@@ -181,9 +185,9 @@ class _Harness:
         """Session id each spawn passed to --resume, None when it didn't."""
         out: list[str | None] = []
         for argv in self.spawn_argvs:
-            flat = argv[0] if len(argv) == 1 and isinstance(argv[0], list) else argv
-            if "--resume" in flat:
-                out.append(flat[flat.index("--resume") + 1])
+            # create_subprocess_exec is called as (*cmd), so argv is flat.
+            if "--resume" in argv:
+                out.append(argv[argv.index("--resume") + 1])
             else:
                 out.append(None)
         return out
@@ -202,6 +206,13 @@ def _thrash_result() -> RunResult:
         error_message=THRASH,
         session_id=BORN_SESSION,
         num_turns=53,
+        # 53 turns of real work: files were edited and commands were run, and
+        # all of it is on disk even though the process died. tools_used is the
+        # only record the chain has that a build changed code.
+        tools_used=["Read", "Edit", "Bash"],
+        bash_commands=["dotnet build"],
+        cache_read_tokens=400_000,
+        cache_creation_tokens=90_000,
     )
 
 
@@ -301,7 +312,17 @@ async def _check_session_id_survives_a_kill(failures: list[str]) -> None:
         mode="build",
     )
     proc = _KilledProc(lines, THRASH.encode())
-    result = await runner._stream_output(proc, instance, None, None)
+    # The real stream loop writes recovered assistant text to RESULTS_DIR.
+    # Point that at scratch space: the live bot is running out of this same
+    # checkout and a test must never drop files into its data directory.
+    scratch = tempfile.mkdtemp(prefix="thrash_results_")
+    saved_results_dir = config.RESULTS_DIR
+    config.RESULTS_DIR = Path(scratch)
+    try:
+        result = await runner._stream_output(proc, instance, None, None)
+    finally:
+        config.RESULTS_DIR = saved_results_dir
+        shutil.rmtree(scratch, ignore_errors=True)
 
     if result.session_id != BORN_SESSION:
         failures.append(
@@ -333,6 +354,13 @@ async def _amain() -> int:
                 session_id=BORN_SESSION,
                 result_text="reconciliation policy implemented",
                 num_turns=12,
+                # The resumed agent finds its edits already on disk (that is
+                # what the recovery note tells it to check), so it reads and
+                # reports without touching a file. No code-change tool here.
+                tools_used=["Bash", "Read"],
+                bash_commands=["git diff --stat"],
+                cache_read_tokens=50_000,
+                cache_creation_tokens=10_000,
             ),
         ])
         result, instance = await h.run(session_id=None)
@@ -387,6 +415,34 @@ async def _amain() -> int:
         if len(notices) != 1:
             failures.append(
                 f"expected exactly 1 user-visible resume notice, got {len(notices)}"
+            )
+
+        # The aborted attempt's record of work must survive into the result the
+        # lifecycle layer sees — it ASSIGNS these fields onto the instance.
+        if "Edit" not in (result.tools_used or []):
+            failures.append(
+                "the aborted attempt's file edits vanished from the tool record "
+                f"({result.tools_used!r}); the chain would read this build as "
+                "'no code changes made' and skip the review"
+            )
+        if result.tools_used != ["Read", "Edit", "Bash"]:
+            failures.append(
+                "tool record is not the ordered union of both attempts: "
+                f"{result.tools_used!r}"
+            )
+        if result.bash_commands != ["dotnet build", "git diff --stat"]:
+            failures.append(
+                f"the bash log lost a run: {result.bash_commands!r}"
+            )
+        if result.cache_read_tokens != 450_000:
+            failures.append(
+                "cached-token usage was not carried across the resume "
+                f"({result.cache_read_tokens})"
+            )
+        if result.num_turns != 12:
+            failures.append(
+                "turn count was summed across attempts; the failover heuristic "
+                f"reads it as proof an account did real work ({result.num_turns})"
             )
 
         # --- Case 2: thrashes forever — must give up, not loop ---------------
