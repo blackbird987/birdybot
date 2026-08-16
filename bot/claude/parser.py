@@ -606,6 +606,30 @@ def is_transient_error(error_text: str) -> bool:
     return any(p in lower for p in transient_patterns)
 
 
+def is_context_thrash_error(error_text: str) -> bool:
+    """The CLI aborted because autocompact couldn't hold the context down.
+
+    Verbatim wording from claude.exe (exit 1): "Autocompact is thrashing: the
+    context refilled to the limit within 3 turns of the previous compact, 3
+    times in a row. A file being read or a tool output is likely too large for
+    the context window."
+
+    That counter lives in the CLI *process*, not in the session — a resumed
+    session starts from the compact summary with the counter back at zero,
+    which is why clicking Retry has always worked.  Deliberately NOT folded
+    into is_transient_error: that path sleeps 30s and re-runs blind, whereas
+    this one has to resume one specific conversation or it throws away every
+    turn of work that led up to the abort.
+    """
+    if not error_text:
+        return False
+    lower = error_text.lower()
+    return (
+        "autocompact is thrashing" in lower
+        or "context refilled to the limit" in lower
+    )
+
+
 def is_account_unusable_error(error_text: str) -> bool:
     """Account-level auth/subscription failure (cancelled sub, logged out).
 

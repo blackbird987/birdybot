@@ -274,6 +274,39 @@ ACCOUNT_AUTH_COOLDOWN_SECS: int = max(
     60, int(os.getenv("ACCOUNT_AUTH_COOLDOWN_SECS", "86400"))
 )
 
+# How many times a run may be auto-resumed after the CLI aborts it for
+# autocompact thrashing (see parser.is_context_thrash_error). The thrash
+# counter is per-process, so a resume clears it — this is the click the user
+# used to have to make. Bounded because a session whose context is
+# structurally too heavy will keep tripping it, and each attempt is a real
+# 20-minute run: 2 retries = 3 attempts total, then the failure surfaces
+# normally with the Retry button. Clamped to 0..5; 0 disables auto-resume.
+CONTEXT_THRASH_MAX_RETRIES: int = max(
+    0, min(5, int(os.getenv("CONTEXT_THRASH_MAX_RETRIES", "2")))
+)
+
+# Prepended to the prompt of an auto-resumed attempt only. The CLI's own
+# "read in smaller chunks" advice goes to the operator, not to the agent —
+# the agent just sees its process vanish, so without this it walks straight
+# back into the same wall. The git-status line matters as much as the
+# discipline list: the worktree still holds every edit the killed attempt
+# made, and an agent that assumes otherwise redoes work it already did.
+CONTEXT_THRASH_NUDGE = (
+    "--- Automatic recovery: your previous attempt was aborted ---\n"
+    "The Claude Code CLI killed your last run: the context window refilled to "
+    "the limit within 3 turns of each auto-compaction, 3 times in a row. This "
+    "session has been resumed for you, so you may be missing detail that was "
+    "compacted away.\n"
+    "Your work is NOT lost — every edit the aborted attempt made is still on "
+    "disk. Run `git status` and `git diff` in your working directory FIRST and "
+    "carry on from there; do not start over.\n"
+    "To avoid tripping the same guard again: read large files in ranges "
+    "(offset/limit) instead of whole, pipe command output through `head`/"
+    "`grep`/`wc` instead of dumping it, prefer targeted searches over broad "
+    "ones, and delegate large-file sweeps to a subagent so the bulk never "
+    "enters this context."
+)
+
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
 
 # ccusage cache TTL in seconds (adaptive: shortened near rate limits)

@@ -41,6 +41,7 @@ from bot.claude.parser import (
     extract_usage,
     format_ask_question,
     is_account_agnostic_error,
+    is_context_thrash_error,
     is_transient_error,
     iter_tool_blocks,
     last_assistant_text,
@@ -1526,6 +1527,79 @@ class ClaudeRunner:
                         )
                 return fresh
 
+            # Autocompact thrash: the CLI aborts its own process when the
+            # context refills to the limit within 3 turns of a compact, 3 times
+            # running.  Nothing is broken — that counter is per-process, so a
+            # resume starts from the compact summary with it back at zero,
+            # which is why the manual Retry has always worked on the first
+            # click.  Do it ourselves instead of blocking a chain and paging
+            # the user to press a button whose only job is "run it again".
+            #
+            # Placed here on purpose: after the dead-session cascade (a thrash
+            # is not a missing conversation) and before the model-limit and
+            # account-failure branches, neither of which can match this text
+            # anyway — the no-turns heuristic needs an empty result and zero
+            # turns, and a thrash has ~50 of them.
+            if result.is_error and is_context_thrash_error(error_text):
+                thrash_attempts = sum(
+                    1 for k in recovery_state if k.startswith("context_thrash:")
+                )
+                # Prefer the id the run just reported: on a FRESH spawn the
+                # instance has none, and the conversation we need to resume is
+                # the one the dead process created.
+                resume_id = result.session_id or instance.session_id
+                if (
+                    thrash_attempts < config.CONTEXT_THRASH_MAX_RETRIES
+                    and resume_id
+                ):
+                    recovery_state.add(f"context_thrash:{thrash_attempts + 1}")
+                    instance.session_id = resume_id
+                    if account_dir:
+                        # Session ownership is normally stamped only on
+                        # success; do it here too, or _pick_account has no
+                        # `prefer` hint and --resume can land on the account
+                        # the JSONL isn't on.
+                        instance.session_account = account_dir
+                    # Consumed by _build_command on the very next attempt.
+                    instance._context_thrash_retry = True
+                    log.warning(
+                        "Autocompact thrash for %s (attempt %d/%d) — resuming "
+                        "session %s automatically",
+                        instance.id, thrash_attempts + 1,
+                        config.CONTEXT_THRASH_MAX_RETRIES,
+                        resume_id[:12],
+                    )
+                    if on_progress:
+                        try:
+                            await on_progress(
+                                "Context filled up — resuming automatically",
+                                f"The CLI stopped itself to avoid a compaction "
+                                f"loop; picking the session back up "
+                                f"(attempt {thrash_attempts + 2} of "
+                                f"{config.CONTEXT_THRASH_MAX_RETRIES + 1})",
+                            )
+                        except Exception:
+                            log.exception(
+                                "Progress callback error during thrash resume",
+                            )
+                    return await self._run_impl(
+                        instance, on_progress, on_stall,
+                        context, sibling_context,
+                        api_fallback=api_fallback,
+                        _provider=provider, _binary=binary,
+                        _recovery_state=recovery_state,
+                        on_recovery=on_recovery,
+                    )
+                # Out of retries (or no conversation to resume): fall through
+                # to the normal failure so the Retry button is still offered.
+                log.warning(
+                    "Autocompact thrash for %s not auto-resumed "
+                    "(attempts=%d/%d, session=%s)",
+                    instance.id, thrash_attempts,
+                    config.CONTEXT_THRASH_MAX_RETRIES,
+                    (resume_id or "none")[:12],
+                )
+
             # Model-specific limit (e.g. "You've reached your Fable 5
             # limit"): the account is still healthy for every other model,
             # so never cool the WHOLE account down for this.  Route: another
@@ -2181,6 +2255,19 @@ class ClaudeRunner:
             if not result.error_message:
                 result.error_message = stderr_text or f"Exit code {proc.returncode}"
 
+        # Keep the conversation resumable after a failure.  extract_result only
+        # sees a session_id if the CLI got as far as emitting a `result` event
+        # — a process killed mid-run (autocompact thrash, crash, watchdog) often
+        # doesn't, so without this a FRESH spawn that died after 50 turns of
+        # real work reports no session at all, and both the auto-resume below
+        # and the user's Retry button start from scratch instead of resuming.
+        # The init event carries the id from turn 1, so captured_session_id is
+        # the answer; the AskUserQuestion and end-of-turn paths above already
+        # do exactly this.  finalize_run only overwrites instance.session_id
+        # when the result carries one, so this can only ever add information.
+        if not result.session_id:
+            result.session_id = captured_session_id
+
         # Classify intentional kills (Steer / resolve-cancel) so the
         # lifecycle layer can render a quiet KILLED tombstone instead of
         # a red FAILED embed.  Wrapped in try/finally
@@ -2352,6 +2439,17 @@ class ClaudeRunner:
             master_block = self._build_master_context_block(instance)
             if master_block:
                 prompt = master_block + "\n\n" + prompt
+
+        # Autocompact-thrash recovery note, on the resumed attempt only.  Goes
+        # in the user-message slot rather than the system prompt for the same
+        # reason as the block above: --resume can replay the original JSONL
+        # system prompt verbatim, so a system-prompt addition may never reach
+        # the resumed agent.  The flag is cleared as it's read — one attempt
+        # gets the note, and a later turn in the same instance doesn't inherit
+        # a stale "you were just aborted".
+        if getattr(instance, "_context_thrash_retry", False):
+            instance._context_thrash_retry = False
+            prompt = config.CONTEXT_THRASH_NUDGE + "\n\n" + prompt
 
         # API key file (only for providers that support API fallback)
         api_key_file: str | None = None
