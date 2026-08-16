@@ -251,6 +251,11 @@ class Instance:
     # chain doesn't re-enter verify_release on resume; the user clicks Amend /
     # Continue instead.
     _verifier_parse_failed: bool = False
+    # Ephemeral: set by the runner's autocompact-thrash recovery just before it
+    # re-spawns, consumed (and cleared) by _build_command so the resumed agent
+    # is told why its predecessor was killed and that its edits are still on
+    # disk. Not persisted — it describes one attempt, not the instance.
+    _context_thrash_retry: bool = False
 
     def display_id(self) -> str:
         if self.name:

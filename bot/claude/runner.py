@@ -41,6 +41,7 @@ from bot.claude.parser import (
     extract_usage,
     format_ask_question,
     is_account_agnostic_error,
+    is_context_thrash_error,
     is_transient_error,
     iter_tool_blocks,
     last_assistant_text,
@@ -85,7 +86,7 @@ REFUSAL_GRACE_MINUTES = 15
 
 
 def _no_productive_work(res: RunResult) -> bool:
-    """True when a run died before producing any real work product.
+    """True when a run died on its own before producing any real work product.
 
     Used by the failover paths to decide whether a backup account "took" the
     turn or fell over instantly.  The obvious test — "did it emit any output
@@ -100,7 +101,15 @@ def _no_productive_work(res: RunResult) -> bool:
     the auth check is the strict ``looks_like_fatal_auth_error`` (short output
     only), so a one-turn session that merely *writes about* 401s isn't
     swallowed as "the backup never ran".
+
+    An intentional kill is excluded outright: a Steer or a Kill button press
+    also lands here with one turn and no text, but the account did nothing
+    wrong.  Treating it as "the backup fell over" made the failover paths
+    stamp a usage-limit reset onto it, so the caller would schedule an
+    auto-retry countdown for a run the user had just asked to stop.
     """
+    if res.killed_intentionally:
+        return False
     if res.num_turns and res.num_turns > 1:
         return False
     text = (res.result_text or "").strip()
@@ -108,6 +117,58 @@ def _no_productive_work(res: RunResult) -> bool:
         return True
     return (looks_like_fatal_auth_error(text)
             or looks_like_fatal_auth_error(res.error_message))
+
+
+def _carry_forward_work_record(aborted: RunResult, resumed: RunResult) -> RunResult:
+    """Fold a discarded attempt's record of work into the attempt that replaced it.
+
+    ``finalize_run`` *assigns* the winning RunResult's fields onto the Instance,
+    so anything the aborted attempt recorded is simply dropped.  Which tools ran
+    is the field with teeth: a build that made every one of its edits before
+    being killed, then resumed only to confirm the work was already on disk,
+    would report an empty tool list — and the chain reads that list to decide
+    whether a build changed code at all (``CODE_CHANGE_TOOLS``), so a real build
+    would render as "no changes made".  The bash log feeds the eval surface and
+    the main-repo-path hits feed the poisoning warning; both are equally gone.
+
+    Deliberately NOT merged:
+      * ``num_turns`` — the failover heuristic above treats >1 turn as proof the
+        account took the turn, so inflating it could hide a dead backup account.
+      * ``context_tokens`` / ``model`` — a snapshot of the final call (it drives
+        the "context nearly full" warning), not a running total.
+      * ``session_id`` / ``result_text`` / status flags — the resumed attempt is
+        the authoritative one.
+
+    A killed CLI usually emits no ``result`` event, so the cost/duration/token
+    counters below are typically zero on the aborted side; they are summed
+    anyway because they are cumulative totals whenever they are present.
+    """
+    for numeric in (
+        "cost_usd", "duration_ms", "duration_api_ms",
+        "input_tokens", "output_tokens",
+        "cache_read_tokens", "cache_creation_tokens",
+    ):
+        setattr(resumed, numeric,
+                getattr(aborted, numeric) + getattr(resumed, numeric))
+
+    # tools_used and path_poisoning are sets wearing a list's clothes and must
+    # not gain duplicates; bash_commands is a chronological log where the same
+    # command run twice is two real events.
+    for listed, dedupe in (
+        ("tools_used", True),
+        ("bash_commands", False),
+        ("path_poisoning", True),
+    ):
+        merged = list(getattr(aborted, listed) or [])
+        seen = set(merged)
+        for item in getattr(resumed, listed) or []:
+            if dedupe and item in seen:
+                continue
+            seen.add(item)
+            merged.append(item)
+        setattr(resumed, listed, merged)
+
+    return resumed
 
 # Tunable knobs for the cross-account session-recovery path (step 3 of the
 # dementia fix).  60s cache window dedupes rebuild_project_index calls when a
@@ -1109,12 +1170,58 @@ class ClaudeRunner:
         # downgrade, which clears it deliberately so the fallback-model
         # retry may revisit accounts that are only model-limited).
         instance._accounts_tried = set()
+        # A kill mark belongs to the run it was fired at, and a top-level run
+        # is by definition a new one.  The lifecycle layer registers the id in
+        # _active_tasks just before calling this, which is what lets kill()
+        # record intent while there is no live subprocess — so this reset is
+        # what makes the check at the top of _run_impl safe to apply to the
+        # FIRST attempt as well as to retries.  Without it, a mark stranded by
+        # an earlier run (the 4h-lifetime early return skips the usual
+        # discard) would stop a re-queued instance before it ever spawned.
+        self._intentional_kills.discard(instance.id)
+        self._kill_reasons.pop(instance.id, None)
         async with self._semaphore:
             return await self._run_impl(
                 instance, on_progress, on_stall, context, sibling_context,
                 api_fallback=instance.api_fallback,
                 on_recovery=on_recovery,
             )
+
+    def _stopped_before_spawning(self, instance: Instance) -> RunResult | None:
+        """The run was killed at a moment when there was no process to kill.
+
+        A run is registered as active for its whole lifetime but only *holds a
+        process* for part of it: not while it waits on the concurrency
+        semaphore, not while its worktree is being built or an account picked,
+        and not in the gap between one attempt ending and the next starting —
+        a gap every recovery layer opens, for milliseconds on the recursive
+        ones and a full 30 seconds on the transient-error sleep.  A Kill or
+        Steer landing in any of those found nothing to terminate and simply
+        evaporated, so the run carried on for another twenty minutes while the
+        thread already said it had stopped.  ``kill()`` records the intent
+        instead (see its docstring) and the callers of this honour it at every
+        point a spawn is about to happen.
+
+        Returns the tombstone to hand back, or None to carry on.  The mark is
+        deliberately left set: several recovery layers inspect the result they
+        get back and recurse *again* (account failover, model downgrade), so
+        it has to keep refusing for the rest of this run.  ``run()`` clears it
+        on the way into the next one, which is what makes it safe to check
+        this before the first spawn as well as before a retry.
+        """
+        if instance.id not in self._intentional_kills:
+            return None
+        log.info(
+            "Not spawning for %s — kill requested with no process to signal",
+            instance.id,
+        )
+        return RunResult(
+            is_error=True,
+            error_message="Stopped before the next attempt started",
+            session_id=instance.session_id,
+            killed_intentionally=True,
+            kill_reason=self._kill_reasons.get(instance.id),
+        )
 
     async def _run_impl(
         self,
@@ -1140,6 +1247,12 @@ class ClaudeRunner:
         # No-conversation-found recovery added by the dementia fix).
         recovery_state: set[str] = _recovery_state if _recovery_state is not None else set()
 
+        # Waiting on the semaphore, and the gap between one attempt ending and
+        # the next starting, are both windows with no process to signal.
+        stopped = self._stopped_before_spawning(instance)
+        if stopped:
+            return stopped
+
         # Git worktree isolation for build tasks
         if instance.branch:
             await self._ensure_worktree(instance, provider=provider)
@@ -1164,6 +1277,15 @@ class ClaudeRunner:
                 avoid_model_cooldown=_is_primary_model(instance.model),
             )
             if not account_dir and config.CLAUDE_ACCOUNTS:
+                # A kill that landed while the worktree was being built (the
+                # longest of the no-process windows — it takes a per-repo git
+                # lock, so it can queue behind a sibling build's merge) would
+                # otherwise come back as the re-queueable result below and run
+                # hours later.  Every other pre-spawn window is caught after
+                # the process exists, but this branch never gets that far.
+                stopped = self._stopped_before_spawning(instance)
+                if stopped:
+                    return stopped
                 # Refuse to spawn when every configured account is on cooldown
                 # or already excluded.  Spawning anyway would invoke the CLI
                 # without CLAUDE_CONFIG_DIR set, which (a) routes the call to
@@ -1306,6 +1428,16 @@ class ClaudeRunner:
             instance.pid = proc.pid
             self._processes[instance.id] = proc
 
+            # Closes the last of the no-process windows: spawning is itself an
+            # await, so a kill can land after the checks above and still find
+            # nothing to signal.  Checked here rather than before the spawn
+            # because this is the first moment the answer can't change — and
+            # before _stream_output, which clears stale marks on the way in.
+            # The finally below SIGKILLs the process we just started.
+            stopped = self._stopped_before_spawning(instance)
+            if stopped:
+                return stopped
+
             # Pipe user prompt via stdin — avoids Windows command-line length
             # limit (WinError 206) for long prompts / system context.
             try:
@@ -1363,6 +1495,18 @@ class ClaudeRunner:
                         log.debug(
                             "Failed to resolve account alert", exc_info=True,
                         )
+
+            # Nothing below this line should fire for a run the user stopped
+            # on purpose.  Every branch that follows exists to rescue a run
+            # that fell over by itself, and each one ends in another spawn —
+            # so a Kill or a Steer would be answered by silently starting the
+            # work again.  The account-failover branch is the sharpest edge:
+            # a terminated process leaves no output and no completed turns,
+            # which is exactly its "this account fell over instantly"
+            # signature, so on a two-account setup killing a build handed it
+            # straight to the backup account.
+            if result.killed_intentionally:
+                return result
 
             # Dead session: layered recovery before silent --resume drop.
             # Layer 1: rebuild the owning account's session-index in-process
@@ -1525,6 +1669,91 @@ class ClaudeRunner:
                             instance.id, original_session_id[:12],
                         )
                 return fresh
+
+            # Autocompact thrash: the CLI aborts its own process when the
+            # context refills to the limit within 3 turns of a compact, 3 times
+            # running.  Nothing is broken — that counter is per-process, so a
+            # resume starts from the compact summary with it back at zero,
+            # which is why the manual Retry has always worked on the first
+            # click.  Do it ourselves instead of blocking a chain and paging
+            # the user to press a button whose only job is "run it again".
+            #
+            # Placed here on purpose: after the dead-session cascade (a thrash
+            # is not a missing conversation) and before the model-limit and
+            # account-failure branches, neither of which can match this text
+            # anyway — the no-turns heuristic needs an empty result and zero
+            # turns, and a thrash has ~50 of them.
+            if result.is_error and is_context_thrash_error(error_text):
+                thrash_attempts = sum(
+                    1 for k in recovery_state if k.startswith("context_thrash:")
+                )
+                # Prefer the id the run just reported: on a FRESH spawn the
+                # instance has none, and the conversation we need to resume is
+                # the one the dead process created.
+                resume_id = result.session_id or instance.session_id
+                if (
+                    thrash_attempts < config.CONTEXT_THRASH_MAX_RETRIES
+                    and resume_id
+                ):
+                    recovery_state.add(f"context_thrash:{thrash_attempts + 1}")
+                    instance.session_id = resume_id
+                    if account_dir:
+                        # Session ownership is normally stamped only on
+                        # success; do it here too, or _pick_account has no
+                        # `prefer` hint and --resume can land on the account
+                        # the JSONL isn't on.
+                        instance.session_account = account_dir
+                    # Consumed by _build_command on the very next attempt.
+                    instance._context_thrash_retry = True
+                    log.warning(
+                        "Autocompact thrash for %s (resume %d/%d) — resuming "
+                        "session %s automatically",
+                        instance.id, thrash_attempts + 1,
+                        config.CONTEXT_THRASH_MAX_RETRIES,
+                        resume_id[:12],
+                    )
+                    if on_progress:
+                        try:
+                            await on_progress(
+                                "Context filled up — resuming automatically",
+                                f"The CLI stopped itself to avoid a compaction "
+                                f"loop; picking the session back up "
+                                f"(attempt {thrash_attempts + 2} of "
+                                f"{config.CONTEXT_THRASH_MAX_RETRIES + 1})",
+                            )
+                        except Exception:
+                            log.exception(
+                                "Progress callback error during thrash resume",
+                            )
+                    resumed = await self._run_impl(
+                        instance, on_progress, on_stall,
+                        context, sibling_context,
+                        api_fallback=api_fallback,
+                        _provider=provider, _binary=binary,
+                        _recovery_state=recovery_state,
+                        on_recovery=on_recovery,
+                    )
+                    # _build_command normally consumes the flag, but the resume
+                    # can end before it ever gets there — the refuse-to-spawn
+                    # short-circuit above returns as soon as every account is
+                    # on cooldown, and that path re-queues this same Instance
+                    # object for a later cooldown retry.  Left set, that retry
+                    # would open with "your previous attempt was aborted" hours
+                    # after the fact.  Clearing here covers every exit the
+                    # recursion can take.
+                    instance._context_thrash_retry = False
+                    # The aborted attempt did real work — its edits are on disk
+                    # and the resumed attempt may never touch a file again.
+                    return _carry_forward_work_record(result, resumed)
+                # Out of retries (or no conversation to resume): fall through
+                # to the normal failure so the Retry button is still offered.
+                log.warning(
+                    "Autocompact thrash for %s not auto-resumed "
+                    "(resumes=%d/%d, session=%s)",
+                    instance.id, thrash_attempts,
+                    config.CONTEXT_THRASH_MAX_RETRIES,
+                    (resume_id or "none")[:12],
+                )
 
             # Model-specific limit (e.g. "You've reached your Fable 5
             # limit"): the account is still healthy for every other model,
@@ -2181,6 +2410,19 @@ class ClaudeRunner:
             if not result.error_message:
                 result.error_message = stderr_text or f"Exit code {proc.returncode}"
 
+        # Keep the conversation resumable after a failure.  extract_result only
+        # sees a session_id if the CLI got as far as emitting a `result` event
+        # — a process killed mid-run (autocompact thrash, crash, watchdog) often
+        # doesn't, so without this a FRESH spawn that died after 50 turns of
+        # real work reports no session at all, and both the auto-resume below
+        # and the user's Retry button start from scratch instead of resuming.
+        # The init event carries the id from turn 1, so captured_session_id is
+        # the answer; the AskUserQuestion and end-of-turn paths above already
+        # do exactly this.  finalize_run only overwrites instance.session_id
+        # when the result carries one, so this can only ever add information.
+        if not result.session_id:
+            result.session_id = captured_session_id
+
         # Classify intentional kills (Steer / resolve-cancel) so the
         # lifecycle layer can render a quiet KILLED tombstone instead of
         # a red FAILED embed.  Wrapped in try/finally
@@ -2352,6 +2594,17 @@ class ClaudeRunner:
             master_block = self._build_master_context_block(instance)
             if master_block:
                 prompt = master_block + "\n\n" + prompt
+
+        # Autocompact-thrash recovery note, on the resumed attempt only.  Goes
+        # in the user-message slot rather than the system prompt for the same
+        # reason as the block above: --resume can replay the original JSONL
+        # system prompt verbatim, so a system-prompt addition may never reach
+        # the resumed agent.  The flag is cleared as it's read — one attempt
+        # gets the note, and a later turn in the same instance doesn't inherit
+        # a stale "you were just aborted".
+        if getattr(instance, "_context_thrash_retry", False):
+            instance._context_thrash_retry = False
+            prompt = config.CONTEXT_THRASH_NUDGE + "\n\n" + prompt
 
         # API key file (only for providers that support API fallback)
         api_key_file: str | None = None
@@ -3240,9 +3493,28 @@ class ClaudeRunner:
 
         ``reason`` (when set) is stamped onto ``RunResult.kill_reason`` so
         the lifecycle layer can distinguish user-Kill from Steer.
+
+        The one case where the mark IS recorded without a signal: the run is
+        still live (its lifecycle task is registered) but sits *between*
+        subprocesses — every recovery layer in ``_run_impl`` re-spawns, and
+        during that window there is nothing to terminate.  Without the mark
+        the kill would evaporate and the retry would spawn a brand new
+        attempt seconds after the user asked it to stop.  ``_run_impl``
+        checks the mark on re-entry and bails instead.
         """
         proc = self._processes.get(instance_id)
         if not proc:
+            if instance_id in self._active_tasks and (
+                intentional or reason is not None
+            ):
+                self._intentional_kills.add(instance_id)
+                if reason is not None:
+                    self._kill_reasons[instance_id] = reason
+                log.info(
+                    "Kill for %s arrived between attempts — retries stopped",
+                    instance_id,
+                )
+                return True
             return False
         try:
             proc.terminate()

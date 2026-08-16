@@ -358,6 +358,84 @@ async def _test_agnostic_no_failover() -> list[str]:
     return failures
 
 
+async def _test_kill_does_not_fail_over() -> list[str]:
+    """A run the user stopped must not be handed to the backup account.
+
+    A terminated process leaves no output and no completed turns, which is
+    exactly the shape the no-turns heuristic reads as "this account fell over
+    instantly" — so before the guard, pressing Kill on a two-account setup
+    started the whole task again on the other account.
+    """
+    failures: list[str] = []
+    results = [
+        RunResult(is_error=True, error_message="Exit code -15",
+                  result_text="", killed_intentionally=True,
+                  kill_reason="kill"),
+        RunResult(is_error=False, result_text="ok"),
+    ]
+    result, instance, runner, accts, spawns = await _run_with_streams(
+        results, accounts=["primary", "backup"]
+    )
+    if spawns != 1:
+        failures.append(
+            f"killed: the stopped run was restarted on another account "
+            f"({spawns} spawns)"
+        )
+    if runner._account_cooldowns:
+        failures.append(
+            "killed: a user Kill sidelined an account that did nothing wrong: "
+            f"{list(runner._account_cooldowns)}"
+        )
+    if instance._accounts_tried:
+        failures.append(
+            f"killed: account excluded on a user Kill: {instance._accounts_tried}"
+        )
+    if not result.killed_intentionally:
+        failures.append("killed: the kill classification was lost on the way out")
+    if result.usage_limit_reset:
+        failures.append(
+            "killed: a usage-limit reset was stamped on a stopped run, so the "
+            "caller would schedule an auto-retry countdown for it"
+        )
+    return failures
+
+
+async def _test_lifetime_limit_does_not_fail_over() -> list[str]:
+    """Hitting our own 4h process ceiling is not an account problem.
+
+    It arrives with no output and no turns, so the no-turns heuristic used to
+    hand it to the backup account for another 4h.
+    """
+    failures: list[str] = []
+    results = [
+        # Built the way the runner builds it, so raising the ceiling in config
+        # can't leave this test asserting against a sentence nothing produces.
+        RunResult(is_error=True,
+                  error_message=(
+                      f"Process exceeded "
+                      f"{config.MAX_PROCESS_LIFETIME_SECS // 3600}h "
+                      f"lifetime limit"
+                  ),
+                  result_text=""),
+    ]
+    result, instance, runner, accts, spawns = await _run_with_streams(
+        results, accounts=["primary", "backup"]
+    )
+    if spawns != 1:
+        failures.append(
+            f"lifetime: a run that hit the 4h ceiling was restarted on the "
+            f"backup account ({spawns} spawns)"
+        )
+    if runner._account_cooldowns:
+        failures.append(
+            "lifetime: an account was sidelined for our own timeout: "
+            f"{list(runner._account_cooldowns)}"
+        )
+    if not result.is_error:
+        failures.append("lifetime: the timeout was swallowed")
+    return failures
+
+
 async def _test_both_dead_terminates() -> list[str]:
     """Both accounts auth-dead -> each tried once, error returned, no hang."""
     failures: list[str] = []
@@ -452,6 +530,41 @@ async def _test_limit_then_dead_backup_keeps_reset() -> list[str]:
                 f"limit+dead: backup cooldown {secs:.0f}s, expected "
                 f"~ACCOUNT_AUTH_COOLDOWN_SECS ({config.ACCOUNT_AUTH_COOLDOWN_SECS}s)"
             )
+    return failures
+
+
+async def _test_kill_on_the_backup_is_not_a_usage_limit() -> list[str]:
+    """Primary usage-limited, then the user kills the backup's attempt.
+
+    The failover parent above inspects what came back and, seeing no output
+    and no turns, used to conclude the backup had fallen over — carrying the
+    primary's reset time onto it. That schedules an auto-retry countdown for a
+    run the user deliberately stopped, so it would quietly start again later.
+    """
+    failures: list[str] = []
+    results = [
+        RunResult(is_error=True,
+                  error_message="You've hit your usage limit · resets 5pm",
+                  result_text=""),
+        RunResult(is_error=True, error_message="Exit code -15",
+                  result_text="", killed_intentionally=True,
+                  kill_reason="kill"),
+    ]
+    result, instance, runner, accts, spawns = await _run_with_streams(
+        results, accounts=["primary", "backup"]
+    )
+    if spawns != 2:
+        failures.append(f"limit+kill: expected exactly 2 spawns, got {spawns}")
+    if result.usage_limit_reset:
+        failures.append(
+            "limit+kill: the stopped run was stamped with a usage-limit reset, "
+            "so it gets re-queued for an auto-retry the user never asked for"
+        )
+    if not result.killed_intentionally:
+        failures.append(
+            "limit+kill: the kill classification was lost, so the thread shows "
+            "a red failure instead of a quiet stopped tombstone"
+        )
     return failures
 
 
@@ -1215,6 +1328,14 @@ async def _amain() -> int:
     all_failures.append(("credential-probe", _test_credential_probe()))
     all_failures.append(("confident-failover", await _test_confident_failover()))
     all_failures.append(("agnostic-no-failover", await _test_agnostic_no_failover()))
+    all_failures.append(("kill-no-failover", await _test_kill_does_not_fail_over()))
+    all_failures.append(
+        ("lifetime-no-failover", await _test_lifetime_limit_does_not_fail_over())
+    )
+    all_failures.append((
+        "limit-then-killed-backup",
+        await _test_kill_on_the_backup_is_not_a_usage_limit(),
+    ))
     all_failures.append(("both-dead-terminates", await _test_both_dead_terminates()))
     all_failures.append(("limit-then-dead-backup",
                          await _test_limit_then_dead_backup_keeps_reset()))
