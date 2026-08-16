@@ -36,6 +36,9 @@ Asserted here:
   * a resume that is refused before it can spawn (fleet on cooldown) still
     clears the "you were just aborted" flag, so the cooldown retry that
     re-queues the same instance later doesn't inherit a stale recovery note
+  * a Kill landing in the gap between the abort and the resume — where there
+    is no process to signal — stops the run instead of evaporating, and the
+    stopped run keeps its session id, its kill reason and its work record
 
 Strategy follows scripts/test_dead_session_recovery.py: stub the subprocess
 boundary only, so the real recovery cascade in _run_impl executes.
@@ -49,6 +52,7 @@ import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
 
 import asyncio
 import copy
+import inspect
 import json
 import os
 import shutil
@@ -169,7 +173,9 @@ class _Harness:
             # itself, which cannot happen in production.
             outcome = copy.deepcopy(self.outcomes[min(i, len(self.outcomes) - 1)])
             if self.after_attempt:
-                self.after_attempt(runner, i)
+                hook = self.after_attempt(runner, i)
+                if inspect.isawaitable(hook):
+                    await hook
             return outcome
 
         runner._stream_output = fake_stream_output  # type: ignore[assignment]
@@ -188,9 +194,13 @@ class _Harness:
             session_id=session_id,
             mode="build",
         )
+        # run_instance registers the id before spawning; kill() keys its
+        # "the run is live but between subprocesses" branch off this set.
+        runner._active_tasks.add(instance.id)
         try:
             result = await runner.run(instance, on_progress=on_progress)
         finally:
+            runner._active_tasks.discard(instance.id)
             asyncio.create_subprocess_exec = saved_spawn  # type: ignore[assignment]
             runner_mod.unusable_reason = saved_unusable  # type: ignore[assignment]
             config.CLAUDE_ACCOUNTS[:] = saved_accounts
@@ -544,6 +554,59 @@ async def _amain() -> int:
             failures.append(
                 "the refused resume lost the conversation id, so the cooldown "
                 f"retry has nothing to resume ({result4.session_id!r})"
+            )
+
+        # --- Case 5: the user hits Kill in the gap between attempts ----------
+        # There is no live process to terminate between an abort and its
+        # resume, so the kill has nothing to signal. If it evaporates, the
+        # auto-resume starts a fresh 20-minute attempt seconds after the user
+        # asked it to stop, while the UI already says "Killed".
+        async def _kill_in_the_gap(runner, attempt_index):
+            if attempt_index != 0:
+                return
+            # Reproduce the gap: the spawn's finally drops the process handle
+            # as soon as the stream returns, so kill() finds nothing.
+            runner._processes.pop("t-thrash", None)
+            if await runner.kill("t-thrash", reason="kill") is not True:
+                failures.append(
+                    "a Kill arriving between attempts reported 'nothing to "
+                    "stop' — the user is told the run is already over while "
+                    "it quietly carries on"
+                )
+
+        h5 = _Harness(tmp, [_thrash_result()], after_attempt=_kill_in_the_gap)
+        result5, instance5 = await h5.run(session_id=BORN_SESSION)
+
+        if len(h5.spawn_argvs) != 1:
+            failures.append(
+                "a killed run was resumed anyway "
+                f"({len(h5.spawn_argvs)} spawns) — the user stopped it and it "
+                "started over"
+            )
+        if not result5.killed_intentionally:
+            failures.append(
+                "the stopped run is reported as a plain failure, so the thread "
+                "gets a red build-failed embed instead of a quiet tombstone"
+            )
+        if result5.kill_reason != "kill":
+            failures.append(
+                f"the kill reason was lost ({result5.kill_reason!r}); the "
+                "lifecycle layer can no longer tell a Kill from a Steer"
+            )
+        if result5.session_id != BORN_SESSION:
+            failures.append(
+                "the stopped run lost its conversation id, so Retry cannot "
+                f"pick up where it left off ({result5.session_id!r})"
+            )
+        if "Edit" not in (result5.tools_used or []):
+            failures.append(
+                "the aborted attempt's work record was dropped when the run "
+                f"was stopped: {result5.tools_used!r}"
+            )
+        if instance5._context_thrash_retry:
+            failures.append(
+                "the recovery flag survived a kill — a later run on this "
+                "instance would open with a stale 'you were aborted' note"
             )
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

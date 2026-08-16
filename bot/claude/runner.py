@@ -101,7 +101,15 @@ def _no_productive_work(res: RunResult) -> bool:
     the auth check is the strict ``looks_like_fatal_auth_error`` (short output
     only), so a one-turn session that merely *writes about* 401s isn't
     swallowed as "the backup never ran".
+
+    An intentional kill is excluded outright: a Steer or a Kill button press
+    also lands here with one turn and no text, but the account did nothing
+    wrong.  Treating it as "the backup fell over" made the failover paths
+    stamp a usage-limit reset onto it, so the caller would schedule an
+    auto-retry countdown for a run the user had just asked to stop.
     """
+    if res.killed_intentionally:
+        return False
     if res.num_turns and res.num_turns > 1:
         return False
     text = (res.result_text or "").strip()
@@ -1193,6 +1201,37 @@ class ClaudeRunner:
         # No-conversation-found recovery added by the dementia fix).
         recovery_state: set[str] = _recovery_state if _recovery_state is not None else set()
 
+        # Every recovery layer below re-enters here to spawn another attempt,
+        # and each of those hops leaves a window with no live subprocess —
+        # milliseconds for the recursive layers, a full 30s for the transient
+        # sleep.  A Kill/Steer landing in that window finds nothing to
+        # terminate, so kill() records the intent instead (see its docstring)
+        # and we honour it here rather than starting a fresh 20-minute run
+        # seconds after the user asked to stop.
+        #
+        # Guarded on `_recovery_state is not None` so this only ever refuses a
+        # *retry*, never a first spawn: a stale mark left over from an earlier
+        # run of a reused instance id would otherwise stop the run before it
+        # began.  _stream_output clears the mark in its finally, so anything
+        # seen on a recursive re-entry was set during the gap we just crossed.
+        if _recovery_state is not None and instance.id in self._intentional_kills:
+            log.info(
+                "Not retrying %s — kill requested between attempts", instance.id
+            )
+            instance._context_thrash_retry = False
+            # The mark is deliberately left set: several recovery layers
+            # inspect the result they get back and recurse *again* (account
+            # failover, model downgrade), so it has to keep refusing for the
+            # rest of this run.  _stream_output discards stale marks at the
+            # top of every stream, so it cannot bleed into a later run.
+            return RunResult(
+                is_error=True,
+                error_message="Stopped: killed while retrying",
+                session_id=instance.session_id,
+                killed_intentionally=True,
+                kill_reason=self._kill_reasons.get(instance.id),
+            )
+
         # Git worktree isolation for build tasks
         if instance.branch:
             await self._ensure_worktree(instance, provider=provider)
@@ -1416,6 +1455,18 @@ class ClaudeRunner:
                         log.debug(
                             "Failed to resolve account alert", exc_info=True,
                         )
+
+            # Nothing below this line should fire for a run the user stopped
+            # on purpose.  Every branch that follows exists to rescue a run
+            # that fell over by itself, and each one ends in another spawn —
+            # so a Kill or a Steer would be answered by silently starting the
+            # work again.  The account-failover branch is the sharpest edge:
+            # a terminated process leaves no output and no completed turns,
+            # which is exactly its "this account fell over instantly"
+            # signature, so on a two-account setup killing a build handed it
+            # straight to the backup account.
+            if result.killed_intentionally:
+                return result
 
             # Dead session: layered recovery before silent --resume drop.
             # Layer 1: rebuild the owning account's session-index in-process
@@ -3402,9 +3453,28 @@ class ClaudeRunner:
 
         ``reason`` (when set) is stamped onto ``RunResult.kill_reason`` so
         the lifecycle layer can distinguish user-Kill from Steer.
+
+        The one case where the mark IS recorded without a signal: the run is
+        still live (its lifecycle task is registered) but sits *between*
+        subprocesses — every recovery layer in ``_run_impl`` re-spawns, and
+        during that window there is nothing to terminate.  Without the mark
+        the kill would evaporate and the retry would spawn a brand new
+        attempt seconds after the user asked it to stop.  ``_run_impl``
+        checks the mark on re-entry and bails instead.
         """
         proc = self._processes.get(instance_id)
         if not proc:
+            if instance_id in self._active_tasks and (
+                intentional or reason is not None
+            ):
+                self._intentional_kills.add(instance_id)
+                if reason is not None:
+                    self._kill_reasons[instance_id] = reason
+                log.info(
+                    "Kill for %s arrived between attempts — retries stopped",
+                    instance_id,
+                )
+                return True
             return False
         try:
             proc.terminate()

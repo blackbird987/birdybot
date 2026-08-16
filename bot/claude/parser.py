@@ -694,6 +694,11 @@ def is_account_agnostic_error(error_text: str) -> bool:
         "currently unavailable", "is unavailable", "model not found",
         "unknown model", "unrecognized arguments", "unknown option",
         "invalid argument", "no such option", "usage:",
+        # Our own process-lifetime ceiling.  It arrives with no output and no
+        # completed turns — the exact shape of "this account fell over
+        # instantly" — so without it here, a run that hit the 4h safety net
+        # would be handed to the backup account to burn another 4h.
+        "lifetime limit",
     ]
     return any(p in lower for p in patterns)
 
