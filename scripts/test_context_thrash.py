@@ -39,6 +39,12 @@ Asserted here:
   * a Kill landing in the gap between the abort and the resume — where there
     is no process to signal — stops the run instead of evaporating, and the
     stopped run keeps its session id, its kill reason and its work record
+  * a Kill landing while the process is being created, the one window a
+    pre-flight check cannot cover, stops it before a single turn is streamed
+  * a Kill landing during worktree setup, with the whole fleet on cooldown,
+    is reported as a kill rather than as a re-queueable usage-limit wait
+  * a kill mark stranded by an earlier run of the same id does not stop the
+    next one from spawning
 
 Strategy follows scripts/test_dead_session_recovery.py: stub the subprocess
 boundary only, so the real recovery cascade in _run_impl executes.
@@ -81,6 +87,10 @@ THRASH = (
     "tool output is likely too large for the context window. Try reading in "
     "smaller chunks, or use /clear to start fresh."
 )
+
+# The instance under test. Named here because the kill cases address it the
+# way the Kill button does — by id, from outside the run.
+INSTANCE_ID = "t-thrash"
 
 # The conversation the killed process had created — the one the resume must
 # find. Not on the instance at spawn time: attempt 1 is a fresh spawn.
@@ -130,7 +140,10 @@ class _FakeProc:
 class _Harness:
     """One scripted run of the real cascade against a stubbed subprocess."""
 
-    def __init__(self, tmp: str, outcomes: list[RunResult], *, after_attempt=None):
+    def __init__(
+        self, tmp: str, outcomes: list[RunResult], *,
+        after_attempt=None, during_spawn=None, during_setup=None,
+    ):
         self.account = os.path.join(tmp, "acct_primary")
         self.repo = os.path.join(tmp, "repo")
         for p in (self.account, self.repo):
@@ -139,12 +152,23 @@ class _Harness:
         # Called (runner, attempt_index) as each attempt finishes. Case 4 uses
         # it to move the fleet onto cooldown between attempts.
         self.after_attempt = after_attempt
+        # Called (runner, spawn_index) while the process is being created —
+        # the one window a check placed before the spawn cannot cover, since
+        # creating it is itself an await. Case 6 kills the run from here.
+        self.during_spawn = during_spawn
+        # Called (runner, instance) in place of the worktree build, which is
+        # the longest stretch of a run with no process to kill. Setting it
+        # gives the instance a branch, so the real code path is taken.
+        self.during_setup = during_setup
+        self.streams = 0
         self.spawn_argvs: list[list[str]] = []
         self.spawn_accounts: list[str | None] = []
         self.prompts: list[str] = []
         self.progress: list[tuple[str, str]] = []
 
-    async def run(self, *, session_id: str | None = None) -> tuple[RunResult, Instance]:
+    async def run(
+        self, *, session_id: str | None = None, stranded_mark: bool = False,
+    ) -> tuple[RunResult, Instance]:
         saved_accounts = list(config.CLAUDE_ACCOUNTS)
         saved_spawn = asyncio.create_subprocess_exec
         saved_unusable = runner_mod.unusable_reason
@@ -152,9 +176,14 @@ class _Harness:
         runner_mod.unusable_reason = lambda acct: None  # type: ignore[assignment]
 
         async def fake_spawn(*args, **kwargs):
+            index = len(self.spawn_argvs)
             self.spawn_argvs.append(list(args))
             env = kwargs.get("env") or {}
             self.spawn_accounts.append(env.get("CLAUDE_CONFIG_DIR"))
+            if self.during_spawn:
+                hook = self.during_spawn(runner, index)
+                if inspect.isawaitable(hook):
+                    await hook
             return _FakeProc(self.prompts)
 
         asyncio.create_subprocess_exec = fake_spawn  # type: ignore[assignment]
@@ -165,6 +194,7 @@ class _Harness:
         async def fake_stream_output(proc, instance, on_progress, on_stall, **kw):
             i = calls["n"]
             calls["n"] += 1
+            self.streams = calls["n"]
             # Beyond the script, keep returning the last outcome — a thrash
             # loop must be stopped by the retry cap, not by running out of
             # scripted answers.  Deep-copied because the real _stream_output
@@ -184,7 +214,7 @@ class _Harness:
             self.progress.append((headline, detail))
 
         instance = Instance(
-            id="t-thrash",
+            id=INSTANCE_ID,
             name=None,
             instance_type=InstanceType.TASK,
             prompt="Implement the ledger reconciliation policy.",
@@ -193,10 +223,21 @@ class _Harness:
             status=InstanceStatus.RUNNING,
             session_id=session_id,
             mode="build",
+            branch="claude-bot/t-thrash" if self.during_setup else None,
         )
+        if self.during_setup:
+            async def fake_ensure_worktree(inst, **kw):
+                await self.during_setup(runner, inst)
+
+            runner._ensure_worktree = fake_ensure_worktree  # type: ignore[assignment]
         # run_instance registers the id before spawning; kill() keys its
         # "the run is live but between subprocesses" branch off this set.
         runner._active_tasks.add(instance.id)
+        if stranded_mark:
+            # A kill mark left behind by an *earlier* run of the same id.  The
+            # runner outlives individual runs, and one path (the 4h-lifetime
+            # early return) skips the usual cleanup, so this really can happen.
+            runner._intentional_kills.add(instance.id)
         try:
             result = await runner.run(instance, on_progress=on_progress)
         finally:
@@ -566,8 +607,8 @@ async def _amain() -> int:
                 return
             # Reproduce the gap: the spawn's finally drops the process handle
             # as soon as the stream returns, so kill() finds nothing.
-            runner._processes.pop("t-thrash", None)
-            if await runner.kill("t-thrash", reason="kill") is not True:
+            runner._processes.pop(INSTANCE_ID, None)
+            if await runner.kill(INSTANCE_ID, reason="kill") is not True:
                 failures.append(
                     "a Kill arriving between attempts reported 'nothing to "
                     "stop' — the user is told the run is already over while "
@@ -607,6 +648,98 @@ async def _amain() -> int:
             failures.append(
                 "the recovery flag survived a kill — a later run on this "
                 "instance would open with a stale 'you were aborted' note"
+            )
+
+        # --- Case 6: the kill lands while the process is being created -------
+        # The narrowest window and the only one a check placed *before* the
+        # spawn cannot close, because spawning is itself an await: the kill
+        # arrives after every pre-flight check has passed and still finds
+        # nothing in the process table. The run must not go on to stream 20
+        # minutes of work.
+        async def _kill_mid_spawn(runner, spawn_index):
+            await runner.kill(INSTANCE_ID, reason="kill")
+
+        h6 = _Harness(tmp, [_thrash_result()], during_spawn=_kill_mid_spawn)
+        result6, _ = await h6.run(session_id=BORN_SESSION)
+
+        if h6.streams:
+            failures.append(
+                f"the run streamed {h6.streams} attempt(s) after being killed "
+                "mid-spawn — the process it just started is left working"
+            )
+        if len(h6.spawn_argvs) != 1:
+            failures.append(
+                f"expected the run to stop after one spawn, got "
+                f"{len(h6.spawn_argvs)}"
+            )
+        if not result6.killed_intentionally:
+            failures.append(
+                "a kill during spawn came back as a plain failure, so the "
+                "thread shows a red embed for a run the user stopped"
+            )
+        if result6.kill_reason != "kill":
+            failures.append(
+                f"the kill reason was lost mid-spawn ({result6.kill_reason!r})"
+            )
+
+        # --- Case 7: killed during worktree setup, with the fleet cooled -----
+        # Building a worktree takes a per-repo git lock, so it can queue behind
+        # a sibling build's merge — the longest stretch of a run with nothing
+        # to kill. Every other pre-spawn window is caught once the process
+        # exists, but a fleet on cooldown never gets that far: it returns a
+        # usage-limit result the caller re-queues, so the run the user stopped
+        # would quietly start hours later.
+        async def _kill_during_worktree(runner, inst):
+            runner._account_cooldowns[h7.account] = (
+                datetime.now(timezone.utc) + timedelta(hours=1)
+            )
+            await runner.kill(INSTANCE_ID, reason="kill")
+
+        h7 = _Harness(tmp, [_thrash_result()], during_setup=_kill_during_worktree)
+        result7, _ = await h7.run(session_id=BORN_SESSION)
+
+        if h7.spawn_argvs:
+            failures.append(
+                f"a run killed during worktree setup still spawned "
+                f"({len(h7.spawn_argvs)})"
+            )
+        if result7.usage_limit_reset:
+            failures.append(
+                "the stopped run came back as a usage-limit wait, so it gets "
+                "re-queued and runs itself hours after the user killed it"
+            )
+        if not result7.killed_intentionally:
+            failures.append(
+                "a kill during worktree setup was not recorded as a kill: "
+                f"{result7.error_message!r}"
+            )
+
+        # --- Case 8: a kill mark left over from a previous run ---------------
+        # The runner is long-lived and the mark is keyed only by instance id, so
+        # a mark stranded by an earlier run of the same id must not stop the
+        # next one before it spawns. run() clears it on the way in; without that
+        # clear, a re-queued instance would answer every attempt with a
+        # tombstone and never start.
+        h8 = _Harness(tmp, [
+            RunResult(
+                is_error=True,
+                error_message="Build failed: 3 compile errors",
+                session_id=BORN_SESSION,
+                num_turns=8,
+                result_text="dotnet build failed",
+            ),
+        ])
+        result8, _ = await h8.run(session_id=BORN_SESSION, stranded_mark=True)
+
+        if not h8.spawn_argvs:
+            failures.append(
+                "a stale kill mark from an earlier run blocked the next one "
+                f"from ever spawning: {result8.error_message!r}"
+            )
+        if result8.killed_intentionally:
+            failures.append(
+                "a fresh run inherited a previous run's kill and reported "
+                "itself as stopped by the user"
             )
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

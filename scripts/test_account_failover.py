@@ -408,8 +408,14 @@ async def _test_lifetime_limit_does_not_fail_over() -> list[str]:
     """
     failures: list[str] = []
     results = [
+        # Built the way the runner builds it, so raising the ceiling in config
+        # can't leave this test asserting against a sentence nothing produces.
         RunResult(is_error=True,
-                  error_message="Process exceeded 4h lifetime limit",
+                  error_message=(
+                      f"Process exceeded "
+                      f"{config.MAX_PROCESS_LIFETIME_SECS // 3600}h "
+                      f"lifetime limit"
+                  ),
                   result_text=""),
     ]
     result, instance, runner, accts, spawns = await _run_with_streams(

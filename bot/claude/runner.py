@@ -86,7 +86,7 @@ REFUSAL_GRACE_MINUTES = 15
 
 
 def _no_productive_work(res: RunResult) -> bool:
-    """True when a run died before producing any real work product.
+    """True when a run died on its own before producing any real work product.
 
     Used by the failover paths to decide whether a backup account "took" the
     turn or fell over instantly.  The obvious test — "did it emit any output
@@ -1170,12 +1170,58 @@ class ClaudeRunner:
         # downgrade, which clears it deliberately so the fallback-model
         # retry may revisit accounts that are only model-limited).
         instance._accounts_tried = set()
+        # A kill mark belongs to the run it was fired at, and a top-level run
+        # is by definition a new one.  The lifecycle layer registers the id in
+        # _active_tasks just before calling this, which is what lets kill()
+        # record intent while there is no live subprocess — so this reset is
+        # what makes the check at the top of _run_impl safe to apply to the
+        # FIRST attempt as well as to retries.  Without it, a mark stranded by
+        # an earlier run (the 4h-lifetime early return skips the usual
+        # discard) would stop a re-queued instance before it ever spawned.
+        self._intentional_kills.discard(instance.id)
+        self._kill_reasons.pop(instance.id, None)
         async with self._semaphore:
             return await self._run_impl(
                 instance, on_progress, on_stall, context, sibling_context,
                 api_fallback=instance.api_fallback,
                 on_recovery=on_recovery,
             )
+
+    def _stopped_before_spawning(self, instance: Instance) -> RunResult | None:
+        """The run was killed at a moment when there was no process to kill.
+
+        A run is registered as active for its whole lifetime but only *holds a
+        process* for part of it: not while it waits on the concurrency
+        semaphore, not while its worktree is being built or an account picked,
+        and not in the gap between one attempt ending and the next starting —
+        a gap every recovery layer opens, for milliseconds on the recursive
+        ones and a full 30 seconds on the transient-error sleep.  A Kill or
+        Steer landing in any of those found nothing to terminate and simply
+        evaporated, so the run carried on for another twenty minutes while the
+        thread already said it had stopped.  ``kill()`` records the intent
+        instead (see its docstring) and the callers of this honour it at every
+        point a spawn is about to happen.
+
+        Returns the tombstone to hand back, or None to carry on.  The mark is
+        deliberately left set: several recovery layers inspect the result they
+        get back and recurse *again* (account failover, model downgrade), so
+        it has to keep refusing for the rest of this run.  ``run()`` clears it
+        on the way into the next one, which is what makes it safe to check
+        this before the first spawn as well as before a retry.
+        """
+        if instance.id not in self._intentional_kills:
+            return None
+        log.info(
+            "Not spawning for %s — kill requested with no process to signal",
+            instance.id,
+        )
+        return RunResult(
+            is_error=True,
+            error_message="Stopped before the next attempt started",
+            session_id=instance.session_id,
+            killed_intentionally=True,
+            kill_reason=self._kill_reasons.get(instance.id),
+        )
 
     async def _run_impl(
         self,
@@ -1201,36 +1247,11 @@ class ClaudeRunner:
         # No-conversation-found recovery added by the dementia fix).
         recovery_state: set[str] = _recovery_state if _recovery_state is not None else set()
 
-        # Every recovery layer below re-enters here to spawn another attempt,
-        # and each of those hops leaves a window with no live subprocess —
-        # milliseconds for the recursive layers, a full 30s for the transient
-        # sleep.  A Kill/Steer landing in that window finds nothing to
-        # terminate, so kill() records the intent instead (see its docstring)
-        # and we honour it here rather than starting a fresh 20-minute run
-        # seconds after the user asked to stop.
-        #
-        # Guarded on `_recovery_state is not None` so this only ever refuses a
-        # *retry*, never a first spawn: a stale mark left over from an earlier
-        # run of a reused instance id would otherwise stop the run before it
-        # began.  _stream_output clears the mark in its finally, so anything
-        # seen on a recursive re-entry was set during the gap we just crossed.
-        if _recovery_state is not None and instance.id in self._intentional_kills:
-            log.info(
-                "Not retrying %s — kill requested between attempts", instance.id
-            )
-            instance._context_thrash_retry = False
-            # The mark is deliberately left set: several recovery layers
-            # inspect the result they get back and recurse *again* (account
-            # failover, model downgrade), so it has to keep refusing for the
-            # rest of this run.  _stream_output discards stale marks at the
-            # top of every stream, so it cannot bleed into a later run.
-            return RunResult(
-                is_error=True,
-                error_message="Stopped: killed while retrying",
-                session_id=instance.session_id,
-                killed_intentionally=True,
-                kill_reason=self._kill_reasons.get(instance.id),
-            )
+        # Waiting on the semaphore, and the gap between one attempt ending and
+        # the next starting, are both windows with no process to signal.
+        stopped = self._stopped_before_spawning(instance)
+        if stopped:
+            return stopped
 
         # Git worktree isolation for build tasks
         if instance.branch:
@@ -1256,6 +1277,15 @@ class ClaudeRunner:
                 avoid_model_cooldown=_is_primary_model(instance.model),
             )
             if not account_dir and config.CLAUDE_ACCOUNTS:
+                # A kill that landed while the worktree was being built (the
+                # longest of the no-process windows — it takes a per-repo git
+                # lock, so it can queue behind a sibling build's merge) would
+                # otherwise come back as the re-queueable result below and run
+                # hours later.  Every other pre-spawn window is caught after
+                # the process exists, but this branch never gets that far.
+                stopped = self._stopped_before_spawning(instance)
+                if stopped:
+                    return stopped
                 # Refuse to spawn when every configured account is on cooldown
                 # or already excluded.  Spawning anyway would invoke the CLI
                 # without CLAUDE_CONFIG_DIR set, which (a) routes the call to
@@ -1397,6 +1427,16 @@ class ClaudeRunner:
             # Register immediately so kill/cleanup works even if stdin write fails
             instance.pid = proc.pid
             self._processes[instance.id] = proc
+
+            # Closes the last of the no-process windows: spawning is itself an
+            # await, so a kill can land after the checks above and still find
+            # nothing to signal.  Checked here rather than before the spawn
+            # because this is the first moment the answer can't change — and
+            # before _stream_output, which clears stale marks on the way in.
+            # The finally below SIGKILLs the process we just started.
+            stopped = self._stopped_before_spawning(instance)
+            if stopped:
+                return stopped
 
             # Pipe user prompt via stdin — avoids Windows command-line length
             # limit (WinError 206) for long prompts / system context.
