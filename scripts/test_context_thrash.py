@@ -49,6 +49,7 @@ import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
 
 import asyncio
 import copy
+import json
 import os
 import shutil
 import sys
@@ -210,10 +211,11 @@ class _Harness:
 def _thrash_result() -> RunResult:
     """What the runner sees when the CLI kills itself for thrashing.
 
-    session_id is deliberately absent: the process died before emitting the
-    ``result`` event, which is exactly why the runner has to fall back to the
-    id captured from the init event. _stream_output is stubbed here, so this
-    stands in for that already-applied fallback.
+    The session id is present even though a killed process never emits the
+    ``result`` event that normally carries one: _stream_output is stubbed in
+    these cases, so this stands in for the already-applied init-event fallback.
+    That the fallback itself works is checked separately, against the real
+    stream loop, in _check_session_id_survives_a_kill.
     """
     return RunResult(
         is_error=True,
@@ -296,8 +298,6 @@ async def _check_session_id_survives_a_kill(failures: list[str]) -> None:
     died after 50 turns reports no conversation at all — and then neither the
     auto-resume nor the user's Retry button has anything to resume.
     """
-    import json
-
     lines = [
         json.dumps({
             "type": "system", "subtype": "init", "session_id": BORN_SESSION,
@@ -371,7 +371,10 @@ async def _amain() -> int:
                 # The resumed agent finds its edits already on disk (that is
                 # what the recovery note tells it to check), so it reads and
                 # reports without touching a file. No code-change tool here.
-                tools_used=["Bash", "Read"],
+                # TodoWrite is unique to this attempt, so the assertion below
+                # proves the merge appends as well as de-duplicates — with
+                # only repeats, dropping the resumed list entirely would pass.
+                tools_used=["Bash", "Read", "TodoWrite"],
                 bash_commands=["git diff --stat"],
                 cache_read_tokens=50_000,
                 cache_creation_tokens=10_000,
@@ -439,9 +442,10 @@ async def _amain() -> int:
                 f"({result.tools_used!r}); the chain would read this build as "
                 "'no code changes made' and skip the review"
             )
-        if result.tools_used != ["Read", "Edit", "Bash"]:
+        if result.tools_used != ["Read", "Edit", "Bash", "TodoWrite"]:
             failures.append(
-                "tool record is not the ordered union of both attempts: "
+                "tool record is not the ordered union of both attempts "
+                "(aborted first, then whatever the resume added): "
                 f"{result.tools_used!r}"
             )
         if result.bash_commands != ["dotnet build", "git diff --stat"]:
