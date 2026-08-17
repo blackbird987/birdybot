@@ -371,7 +371,10 @@ class StallSnapshot:
     # you whether a session is in trouble.
     tree_rss_mb: float | None = None
     tree_proc_count: int | None = None
-    tree_biggest: str | None = None      # "name(pid N, X MB)" of the fattest process
+    # The fattest process in the tree, as "name (pid N) X MB". The pid is part
+    # of it on purpose: this field exists to be read after the fact, and a name
+    # and a size alone cannot be looked up in `ps` an hour later.
+    tree_biggest: str | None = None
     conn_count: int | None = None
     https_conn_count: int | None = None
     children_count: int | None = None
@@ -463,6 +466,25 @@ async def _capture_process_snapshot(
         snapshot.error = "psutil not installed"
         return snapshot
 
+    # Tree memory first, and in a call of its own, so that nothing below can
+    # cost us it. Everything in the CPU/connection block shares a single try and
+    # a single early return: one unexpected psutil error down there and the
+    # snapshot comes back with no fields at all — and the tree figure is the one
+    # that mattered during the 2026-08-17 incident, when the CLI's own RSS read
+    # a reassuring 336MB. It is also the cheap half (a readdir plus a small read
+    # per process, against a deliberate 2-second CPU sample), so measuring it
+    # first costs the rest of the snapshot nothing.
+    try:
+        tree = await asyncio.to_thread(memory.sample_tree, pid)
+    except Exception as exc:
+        tree = None
+        log.debug("Tree memory sample failed: %s", type(exc).__name__)
+    if tree is not None and tree.proc_count:
+        snapshot.tree_rss_mb = tree.total_mb
+        snapshot.tree_proc_count = tree.proc_count
+        if tree.biggest_name:
+            snapshot.tree_biggest = f"{tree.offender()} {tree.biggest_mb:.0f}MB"
+
     def _sample() -> tuple[float | None, float | None, int | None, int | None, int | None, str | None]:
         try:
             proc = psutil.Process(pid)
@@ -507,22 +529,69 @@ async def _capture_process_snapshot(
     snapshot.children_count = children_n
     if err:
         snapshot.error = err
-    # Tree memory, sampled separately: the CPU measurement above blocks for 2s
-    # inside its own thread, and the tree walk must not be serialised behind it
-    # when the reason we're here is a memory question.
-    try:
-        tree = await asyncio.to_thread(memory.sample_tree, pid)
-    except Exception as exc:
-        tree = None
-        log.debug("Tree memory sample failed: %s", type(exc).__name__)
-    if tree is not None and tree.proc_count:
-        snapshot.tree_rss_mb = tree.total_mb
-        snapshot.tree_proc_count = tree.proc_count
-        if tree.biggest_name:
-            snapshot.tree_biggest = (
-                f"{tree.biggest_name}({tree.biggest_mb:.0f}MB)"
-            )
     return snapshot
+
+
+# --- Memory guard: what the user is told, and when a reap is moot -------------
+#
+# Pulled out of the watchdog loop rather than written inline. Both messages are
+# pure functions of a tree measurement and the configured ceiling, they are the
+# only part of the guard the user ever reads, and inline they sat six levels of
+# indentation deep inside a 400-line method where nothing could reach them.
+
+
+def _turn_completed_successfully(events: list[dict]) -> bool:
+    """True if the stream carries a ``result`` event reporting success.
+
+    Used to decide that a memory reap is moot. The two must agree on what
+    counts as success, so this reads ``is_error`` exactly the way
+    ``extract_result`` does — including the default: a ``result`` event that
+    omits the field is a completed turn, not a failed one.
+    """
+    return any(
+        ev.get("type") == "result" and not ev.get("is_error", False)
+        for ev in events
+    )
+
+
+def _memory_kill_detail(tree: memory.TreeMemory, kill_mb: int) -> str:
+    """The in-thread notice for a session the guard has decided to reap.
+
+    Says "largest single process", never "most of it": the headline figure is a
+    sum across the tree, so on a session running many processes at once the
+    biggest one can be a small share of the total. Saying otherwise would
+    misdirect the reader in exactly the case that is hardest to diagnose.
+    """
+    return (
+        f"Its {tree.proc_count} processes reached "
+        f"{tree.total_mb / 1024:.1f} GB between them "
+        f"(ceiling {kill_mb / 1024:.1f} GB); the largest single one was "
+        f"{tree.offender()} at {tree.biggest_mb / 1024:.1f} GB. "
+        f"Killing it here keeps the other sessions alive."
+    )
+
+
+def _memory_warning_detail(tree: memory.TreeMemory, kill_mb: int) -> str:
+    """The in-thread warning for a session that is heading for the ceiling.
+
+    Sent whether or not the kill is armed. ``SESSION_MEM_KILL_MB=0`` is
+    documented as "warnings only", and a warning nobody outside bot.log can see
+    is not that — so what varies with the setting is the sentence about being
+    stopped, not whether the session hears about it at all.
+    """
+    ceiling = (
+        f" It will be stopped at {kill_mb / 1024:.1f} GB."
+        if kill_mb > 0 else
+        " Nothing will stop it automatically — the per-session kill is "
+        "switched off here."
+    )
+    return (
+        f"Its {tree.proc_count} processes are at "
+        f"{tree.total_mb / 1024:.1f} GB between them; the largest single one "
+        f"is {tree.offender()} at {tree.biggest_mb / 1024:.1f} GB."
+        + ceiling
+        + " If that's a job you started, make it smaller now."
+    )
 
 
 class WorktreeRecoveryEvent(NamedTuple):
@@ -2310,6 +2379,23 @@ class ClaudeRunner:
                                 f"{cg.max_mb / 1024:.1f}GB"
                                 if cg.max_mb is not None else "no limit",
                             )
+                            # Told BEFORE the reap, not after, and that ordering
+                            # is load-bearing. Reaping closes the CLI's stdout,
+                            # which ends the reader loop, whose `finally`
+                            # cancels this watchdog — and it will usually do so
+                            # while we are still parked inside kill_tree's grace
+                            # wait for a multi-gigabyte process to actually die.
+                            # Anything after that call is on a coin flip, so the
+                            # one message explaining the kill goes out first.
+                            # The decision is already irrevocable here.
+                            if on_progress:
+                                try:
+                                    await on_progress(
+                                        "Stopped — this session ran out of memory",
+                                        _memory_kill_detail(tree, kill_mb),
+                                    )
+                                except Exception:
+                                    log.exception("Progress callback error on memory kill")
                             signalled: list[str] = []
                             try:
                                 signalled = await asyncio.to_thread(
@@ -2334,33 +2420,17 @@ class ClaudeRunner:
                                 # completion and then be reported as a memory
                                 # failure it recovered from, which is a lie in
                                 # whichever direction the run happened to end.
+                                # Reached only when the tree is still standing,
+                                # so stdout has not closed, so this watchdog has
+                                # not been cancelled — the one case where code
+                                # after the reap is guaranteed to run is also the
+                                # one case that needs it.
                                 log.warning(
                                     "Memory reap signalled nothing for %s — "
                                     "terminating the CLI directly",
                                     instance.id,
                                 )
                                 proc.terminate()
-                            if on_progress:
-                                try:
-                                    await on_progress(
-                                        "Stopped — this session ran out of memory",
-                                        # "largest single process", not "most of
-                                        # it": the figure is a sum across the
-                                        # tree, so on a session running many
-                                        # processes at once the biggest one can
-                                        # be a small share of the total. Saying
-                                        # otherwise would misdirect the reader
-                                        # in exactly the case that is hardest to
-                                        # diagnose.
-                                        f"Its {tree.proc_count} processes reached "
-                                        f"{tree.total_mb / 1024:.1f} GB between them "
-                                        f"(ceiling {kill_mb / 1024:.1f} GB); the "
-                                        f"largest single one was {tree.offender()} "
-                                        f"at {tree.biggest_mb / 1024:.1f} GB. Killing "
-                                        f"it here keeps the other sessions alive.",
-                                    )
-                                except Exception:
-                                    log.exception("Progress callback error on memory kill")
                             return
 
                         if warn_mb > 0 and tree.total_mb >= warn_mb and not mem_warned:
@@ -2374,30 +2444,11 @@ class ClaudeRunner:
                             # Told to the session, not just the log: while it is
                             # still running it can still choose a smaller batch.
                             # After the kill that choice is gone.
-                            #
-                            # Said even when the kill is switched off, because
-                            # SESSION_MEM_KILL_MB=0 is documented as "warnings
-                            # only" and a warning nobody outside bot.log can see
-                            # is not that. What varies is the sentence about
-                            # being stopped, not whether the session hears.
                             if on_progress:
-                                ceiling = (
-                                    f" It will be stopped at "
-                                    f"{kill_mb / 1024:.1f} GB."
-                                    if kill_mb > 0 else
-                                    " Nothing will stop it automatically — the "
-                                    "per-session kill is switched off here."
-                                )
                                 try:
                                     await on_progress(
                                         "Heads up — this session is using a lot of memory",
-                                        f"Its {tree.proc_count} processes are at "
-                                        f"{tree.total_mb / 1024:.1f} GB between them; "
-                                        f"the largest single one is {tree.offender()} "
-                                        f"at {tree.biggest_mb / 1024:.1f} GB."
-                                        + ceiling
-                                        + " If that's a job you started, make it "
-                                        "smaller now.",
+                                        _memory_warning_detail(tree, kill_mb),
                                     )
                                 except Exception:
                                     log.exception("Progress callback error on memory warning")
@@ -2640,10 +2691,7 @@ class ClaudeRunner:
         # redoing work whose output is already captured and whose edits are
         # already on disk. The kill is not lost information either way — the
         # guard logged it at ERROR the moment it fired.
-        if memory_kill is not None and any(
-            ev.get("type") == "result" and not ev.get("is_error", False)
-            for ev in events
-        ):
+        if memory_kill is not None and _turn_completed_successfully(events):
             log.warning(
                 "Memory reap for %s raced a completed turn — reporting the "
                 "completion instead (%s)", instance.id, memory_kill.summary(),

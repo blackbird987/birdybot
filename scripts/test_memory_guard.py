@@ -38,7 +38,15 @@ Asserted here:
   * a clean previous exit is not reported as an OOM just because an older run
     in the same window died of one
   * the thresholds are ordered warn < kill < the unit's own ``MemoryMax``, so
-    the bot always acts before systemd does
+    the bot always acts before systemd does — and, when the unit is installed on
+    this machine, that the *installed* copy really carries those settings, since
+    an edit to the file in git that was never copied into
+    ~/.config/systemd/user reads exactly like a fix and is not one
+  * the session is warned even when the kill is switched off
+    (``SESSION_MEM_KILL_MB=0`` is documented as "warnings only", and a warning
+    only bot.log can see is not that), without threatening to stop it at 0.0 GB
+  * a reap that lands in the same instant as a finishing turn stands down, so a
+    build whose edits are already on disk is not failed and re-run
   * the note handed to the resumed session states the numbers, says a
     re-run unchanged will die again, and warns that ``&``/``nohup`` jobs count
     against the same ceiling — the failure mode that started this
@@ -699,17 +707,180 @@ def _check_runtime_readings(failures: list[str]) -> None:
         val = getattr(cg, field)
         if val is not None and val < 0:
             failures.append(f"cgroup {field} read as negative: {val}")
-    # Headroom is measured against anon only: page cache crossing the limit
-    # triggers reclaim, not a kill, so counting it would cry wolf constantly.
     if cg.max_mb:
-        headroom = cg.headroom_mb()
-        if headroom is None:
+        if cg.headroom_mb() is None:
             failures.append("a cgroup with a limit reported no headroom figure")
-        elif headroom > cg.max_mb:
+
+    # Headroom against synthetic values, because the two answers that matter are
+    # both edges the live machine will not be sitting on. "No limit" has to come
+    # back as None rather than as a number, since every caller reads None as
+    # "unbounded" and a 0 would read as "out of room right now"; and a cgroup
+    # already over its cap has to clamp at zero rather than going negative,
+    # which would format as a negative gigabyte figure in a message.
+    if memory.CgroupMemory(anon_mb=8000.0, max_mb=None).headroom_mb() is not None:
+        failures.append(
+            "headroom_mb() answered a number for a cgroup with no limit; "
+            "callers read that as 'this much left' rather than 'unbounded'"
+        )
+    if memory.CgroupMemory(anon_mb=None, max_mb=16384.0).headroom_mb() is not None:
+        failures.append(
+            "headroom_mb() answered without an anonymous-memory reading, so it "
+            "invented a figure it has no basis for"
+        )
+    over = memory.CgroupMemory(anon_mb=17000.0, max_mb=16384.0).headroom_mb()
+    if over != 0.0:
+        failures.append(
+            f"a cgroup over its own cap reported {over} MB of headroom instead "
+            "of zero"
+        )
+
+
+def _installed_unit_settings() -> dict[str, str] | None:
+    """What systemd is *actually* enforcing, or None if it can't be asked.
+
+    The repo file is a template; the copy under ~/.config/systemd/user is what
+    protects the running bot, and nothing keeps them in step. An edit to the
+    template that is never installed reads as a fix and is not one.
+    """
+    if sys.platform != "linux" or not shutil.which("systemctl"):
+        return None
+    props = ("LoadState", "OOMPolicy", "MemoryMax", "MemoryHigh")
+    try:
+        proc = subprocess.run(
+            ["systemctl", "--user", "show", "claude-bot.service",
+             *[f"-p{p}" for p in props]],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    out: dict[str, str] = {}
+    for line in proc.stdout.splitlines():
+        key, _, val = line.partition("=")
+        out[key.strip()] = val.strip()
+    # not-found / masked / no user manager reachable — nothing to compare against
+    if out.get("LoadState") != "loaded":
+        return None
+    return out
+
+
+def _check_installed_unit(failures: list[str]) -> None:
+    """The live unit must carry the settings, not just the file in git."""
+    live = _installed_unit_settings()
+    if live is None:
+        return  # not installed here (CI, another host) — nothing to check
+
+    if live.get("OOMPolicy") != "continue":
+        failures.append(
+            f"the INSTALLED unit has OOMPolicy={live.get('OOMPolicy')!r} even "
+            "though scripts/claude-bot.service says continue — the running bot "
+            "still dies whenever a session's subprocess is OOM-killed. Copy the "
+            "file to ~/.config/systemd/user/ and run "
+            "`systemctl --user daemon-reload`"
+        )
+    # systemd reports these in bytes, or the literal "infinity" when unset.
+    for prop in ("MemoryMax", "MemoryHigh"):
+        raw = live.get(prop, "")
+        if raw in ("", "infinity"):
             failures.append(
-                f"headroom ({headroom:.0f}MB) exceeds the limit itself "
-                f"({cg.max_mb:.0f}MB) — file cache is being counted as anon"
+                f"the INSTALLED unit has no {prop}, so the running bot has no "
+                "ceiling regardless of what the repo file says"
             )
+            continue
+        try:
+            live_mb = int(raw) / (1024 * 1024)
+        except ValueError:
+            failures.append(f"could not read the installed {prop}: {raw!r}")
+            continue
+        want_mb = _as_mb(_unit_settings().get(prop, ""))
+        if want_mb is not None and abs(live_mb - want_mb) > 1.0:
+            failures.append(
+                f"the installed unit's {prop} is {live_mb:.0f}MB but the repo "
+                f"file says {want_mb:.0f}MB — they have drifted apart, so the "
+                "harness above is checking a number nothing enforces"
+            )
+
+
+def _check_guard_messages(failures: list[str]) -> None:
+    """The two things the user reads, and the one decision that cancels a reap."""
+    tree = memory.TreeMemory(
+        total_mb=13721.0, proc_count=7,
+        biggest_pid=282313, biggest_name="python", biggest_mb=13001.0,
+    )
+
+    killed = runner_mod._memory_kill_detail(tree, config.SESSION_MEM_KILL_MB)
+    if "13.4 GB" not in killed:
+        failures.append(f"the kill notice omits what the tree reached: {killed!r}")
+    if "7 processes" not in killed:
+        failures.append(
+            f"the kill notice does not say the figure is a sum over the "
+            f"session's processes: {killed!r}"
+        )
+    if "282313" not in killed:
+        failures.append(f"the kill notice does not name the offender: {killed!r}")
+    # The figure is a SUM. Calling the biggest process "most of it" would
+    # misdirect the reader on exactly the sessions that are hardest to diagnose.
+    if "most of it" in killed.lower():
+        failures.append(
+            "the kill notice calls the largest process 'most of it', but the "
+            "headline number is a sum across the whole tree"
+        )
+
+    armed = runner_mod._memory_warning_detail(tree, 12288)
+    if "12.0 GB" not in armed:
+        failures.append(
+            f"the warning does not say where the session will be stopped: {armed!r}"
+        )
+    # SESSION_MEM_KILL_MB=0 is documented as "warnings only". The session still
+    # has to hear the warning -- it was once gated on the kill being armed, so
+    # the only place it landed in that mode was bot.log, where nobody is looking.
+    unarmed = runner_mod._memory_warning_detail(tree, 0)
+    if "13.4 GB" not in unarmed or "282313" not in unarmed:
+        failures.append(
+            f"with the kill switched off the warning lost its numbers: {unarmed!r}"
+        )
+    if "0.0 GB" in unarmed:
+        failures.append(
+            "with the kill switched off the warning still threatens to stop the "
+            f"session, at 0.0 GB: {unarmed!r}"
+        )
+    if "switched off" not in unarmed.lower():
+        failures.append(
+            f"warnings-only mode does not say that nothing will stop it: {unarmed!r}"
+        )
+
+    # A reap decided on a 30s cadence can land while the CLI is flushing the
+    # result that says the turn finished. Failing that run would auto-resume a
+    # build whose edits are already on disk and whose answer is already captured.
+    done = [{"type": "assistant"}, {"type": "result", "is_error": False}]
+    if not runner_mod._turn_completed_successfully(done):
+        failures.append(
+            "a completed turn was not recognised, so a reap landing in the same "
+            "instant would report the finished run as a memory failure and "
+            "re-run work that is already on disk"
+        )
+    # A result event with no is_error field is a completed turn -- extract_result
+    # reads the same default, and the two must not disagree about it.
+    if not runner_mod._turn_completed_successfully([{"type": "result"}]):
+        failures.append(
+            "a result event without an is_error field was read as a failure, "
+            "which is the opposite of what extract_result does with it"
+        )
+    if runner_mod._turn_completed_successfully(
+        [{"type": "result", "is_error": True}]
+    ):
+        failures.append(
+            "a FAILED result event cancelled the reap, so a session killed for "
+            "memory would be reported as an ordinary error with no note and no "
+            "resume"
+        )
+    if runner_mod._turn_completed_successfully([{"type": "assistant"}]):
+        failures.append(
+            "a reap was cancelled by a stream with no result event at all — "
+            "that is the normal shape of a killed run, so no memory kill would "
+            "ever be reported"
+        )
 
 
 def _check_nudge_text(failures: list[str]) -> None:
@@ -978,7 +1149,9 @@ async def _amain() -> int:
     _check_journal_verdict(failures)
     _check_marker_roundtrip(failures)
     _check_unit_file(failures)
+    _check_installed_unit(failures)
     _check_runtime_readings(failures)
+    _check_guard_messages(failures)
     _check_nudge_text(failures)
     await _check_auto_resume(failures)
 
