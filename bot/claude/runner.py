@@ -541,17 +541,20 @@ async def _capture_process_snapshot(
 
 
 def _turn_completed_successfully(events: list[dict]) -> bool:
-    """True if the stream carries a ``result`` event reporting success.
+    """True if the stream's ``result`` event reports success.
 
-    Used to decide that a memory reap is moot. The two must agree on what
-    counts as success, so this reads ``is_error`` exactly the way
-    ``extract_result`` does — including the default: a ``result`` event that
-    omits the field is a completed turn, not a failed one.
+    Used to decide that a memory reap is moot, which means it has to agree with
+    ``extract_result`` about what success is — otherwise a run reported as
+    failed loses the memory explanation that would have gone with it. So this
+    reads the LAST ``result`` event, exactly as ``extract_result`` does, rather
+    than asking whether *any* of them looks successful. And it reads the same
+    default: a ``result`` event that omits ``is_error`` is a completed turn.
     """
-    return any(
-        ev.get("type") == "result" and not ev.get("is_error", False)
-        for ev in events
-    )
+    verdict: dict | None = None
+    for ev in events:
+        if ev.get("type") == "result":
+            verdict = ev
+    return verdict is not None and not verdict.get("is_error", False)
 
 
 def _memory_kill_detail(tree: memory.TreeMemory, kill_mb: int) -> str:
@@ -592,6 +595,61 @@ def _memory_warning_detail(tree: memory.TreeMemory, kill_mb: int) -> str:
         + ceiling
         + " If that's a job you started, make it smaller now."
     )
+
+
+def _memory_kill_result(
+    events: list[dict],
+    tree: memory.TreeMemory,
+    avail_mb: float | None,
+    session_id: str | None,
+    poisoning: list[str] | None = None,
+) -> RunResult:
+    """The failure a reaped run reports, built from what that run actually did.
+
+    Built on top of ``extract_result`` rather than from scratch, and that is the
+    whole reason it is a function. A reaped attempt has usually done real work,
+    and ``_carry_forward_work_record`` can only forward what this result
+    carries: hand it a bare ``RunResult`` and the attempt that resumes inherits
+    an empty ``tools_used`` — which the chain reads to decide whether a build
+    changed code at all, so a build that made every one of its edits before
+    being reaped comes back as "no changes made" and its diff is treated as
+    nothing. The cost, duration and token counters are the same story: this is
+    the only place the reaped attempt will ever report them from.
+
+    ``result_text`` is kept for the same reason the ordinary non-zero-exit path
+    keeps it — whatever the session managed to say before it died is still the
+    best account of what it was doing — while ``error_message`` below is what
+    the user is actually shown, because ``finalize_run`` prefers it.
+    """
+    result = extract_result(events)
+    result.is_error = True
+    # A reap lands mid-turn, long before the CLI emits a `result` event, so the
+    # id stamped from the init event on turn one is usually the only one there
+    # is — and the note below is worthless unless it reaches a RESUMED attempt.
+    if not result.session_id:
+        result.session_id = session_id
+    if poisoning:
+        result.path_poisoning = list(poisoning)
+    result.error_message = (
+        f"Stopped: this session's processes reached "
+        f"{tree.total_mb / 1024:.1f} GB of memory, over the "
+        f"{config.SESSION_MEM_KILL_MB / 1024:.1f} GB ceiling for a single "
+        f"session. Largest was {tree.offender()}"
+        + (
+            f"; {avail_mb / 1024:.1f} GB was free machine-wide."
+            if avail_mb is not None else "."
+        )
+    )
+    result.memory_kill_note = config.MEMORY_KILL_NUDGE_TEMPLATE.format(
+        peak_gb=f"{tree.total_mb / 1024:.1f}",
+        limit_gb=f"{config.SESSION_MEM_KILL_MB / 1024:.1f}",
+        offender=tree.offender(),
+        # "?" rather than a phrase: the template reads "About {avail_gb} GB was
+        # free", so anything but a number-shaped value produces a broken
+        # sentence in the one message whose entire job is to be read carefully.
+        avail_gb=f"{avail_mb / 1024:.1f}" if avail_mb is not None else "?",
+    )
+    return result
 
 
 class WorktreeRecoveryEvent(NamedTuple):
@@ -2677,6 +2735,42 @@ class ClaudeRunner:
 
         await proc.wait()
 
+        # Post-exit worktree housekeeping, placed here rather than in the tail
+        # because the tail is not on every path out of this method. Two returns
+        # below leave before it — the lifetime cap and the memory reap — and both
+        # used to skip these entirely. The mutex is the one with teeth: the
+        # release is the backstop for a session killed mid-test-run, and "killed
+        # mid-test-run" is exactly the shape of a watchdog kill, so the case it
+        # exists for was the case it never covered. Siblings on that repo then
+        # wait out the hook's stale TTL, and on the memory path the attempt that
+        # auto-resumes waits on a lock its own predecessor is still holding.
+        #
+        # The AskUserQuestion and end-of-turn returns above still miss it: they
+        # do their own proc.wait() well before this line, and moving cleanup in
+        # front of them is a change to two long-standing success paths that has
+        # nothing to do with the memory guard. Noted, not fixed here.
+        #
+        # Both are idempotent (the release no-ops unless this worktree owns the
+        # lock; the back-copy overwrites), so nothing cares that the tail path
+        # reaches this before doing its own work. It has to happen before the
+        # last-assistant-uuid lookup further down, which reads the JSONL out of
+        # the MAIN repo's project dir — i.e. only ever finds it once the
+        # back-copy has run.
+        if instance.worktree_path:
+            try:
+                await asyncio.to_thread(
+                    self._copy_session_from_worktree, instance, account_dir,
+                )
+            except Exception:
+                log.exception("Session back-copy failed for %s", instance.id)
+            try:
+                await asyncio.to_thread(
+                    self._release_test_mutex,
+                    instance.repo_path, instance.worktree_path,
+                )
+            except Exception:
+                log.exception("Test-mutex release failed for %s", instance.id)
+
         if lifetime_exceeded:
             return RunResult(
                 session_id=captured_session_id,
@@ -2698,36 +2792,29 @@ class ClaudeRunner:
             )
             memory_kill = None
 
+        # The other race worth standing down for: the user asked this session to
+        # stop (Steer, /kill) inside the same few seconds the guard chose to reap
+        # it. Reporting the reap would override an explicit instruction — the run
+        # is marked FAILED, then auto-resumed, so the session carries on after
+        # the person who stopped it has been told it stopped. Their intent wins,
+        # and falling through hands the classification to the normal path, which
+        # renders the quiet KILLED tombstone it asked for.
+        #
+        # (The bookkeeping half of this is already covered: the defensive discard
+        # at the top of this method clears a marker an early return skipped, so
+        # the concern here is the wrong outcome for THIS run, not a stale flag
+        # poisoning the next one.)
+        if memory_kill is not None and instance.id in self._intentional_kills:
+            log.warning(
+                "Memory reap for %s raced a requested stop — honouring the "
+                "stop (%s)", instance.id, memory_kill.summary(),
+            )
+            memory_kill = None
+
         if memory_kill is not None:
-            # session_id matters more here than on most failure paths: the whole
-            # point of the note below is to be delivered to a RESUMED attempt,
-            # and a reap lands mid-turn, long before the CLI emits a `result`
-            # event, so captured_session_id (stamped from the init event on turn
-            # one) is the only id that exists.
-            avail = memory_kill_avail_mb
-            return RunResult(
-                session_id=captured_session_id,
-                is_error=True,
-                error_message=(
-                    f"Stopped: this session's processes reached "
-                    f"{memory_kill.total_mb / 1024:.1f} GB of memory, over the "
-                    f"{config.SESSION_MEM_KILL_MB / 1024:.1f} GB ceiling for a "
-                    f"single session. Largest was {memory_kill.offender()}"
-                    + (
-                        f"; {avail / 1024:.1f} GB was free machine-wide."
-                        if avail is not None else "."
-                    )
-                ),
-                memory_kill_note=config.MEMORY_KILL_NUDGE_TEMPLATE.format(
-                    peak_gb=f"{memory_kill.total_mb / 1024:.1f}",
-                    limit_gb=f"{config.SESSION_MEM_KILL_MB / 1024:.1f}",
-                    offender=memory_kill.offender(),
-                    # "?" rather than a phrase: the template reads "About
-                    # {avail_gb} GB was free", so anything but a number-shaped
-                    # value produces a broken sentence in the one message whose
-                    # entire job is to be read carefully.
-                    avail_gb=f"{avail / 1024:.1f}" if avail is not None else "?",
-                ),
+            return _memory_kill_result(
+                events, memory_kill, memory_kill_avail_mb,
+                captured_session_id, poisoning_hits,
             )
 
         # Capture stderr for error info
@@ -2820,19 +2907,6 @@ class ClaudeRunner:
         # Save git diff for build tasks
         if instance.branch and not result.is_error:
             await self._save_diff(instance)
-
-        # Copy session files back from worktree to main repo project dir
-        if instance.worktree_path:
-            await asyncio.to_thread(
-                self._copy_session_from_worktree, instance, account_dir,
-            )
-            # The CLI process has exited, so no test run from this session
-            # can still be in flight — free the per-repo test-suite mutex
-            # if this session was killed/crashed while holding it.
-            await asyncio.to_thread(
-                self._release_test_mutex,
-                instance.repo_path, instance.worktree_path,
-            )
 
         # Mirror the JSONL the CLI just wrote to every other configured
         # account.  Keeps cross-account session storage in lockstep so a

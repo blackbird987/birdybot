@@ -47,6 +47,10 @@ Asserted here:
     only bot.log can see is not that), without threatening to stop it at 0.0 GB
   * a reap that lands in the same instant as a finishing turn stands down, so a
     build whose edits are already on disk is not failed and re-run
+  * the failure a reap reports still carries what the killed attempt got done —
+    its tool calls, its commands, its cost — because that record is assigned
+    onto the instance and the resumed attempt may never touch a file again, so
+    losing it makes a finished build read as "no changes made"
   * the note handed to the resumed session states the numbers, says a
     re-run unchanged will die again, and warns that ``&``/``nohup`` jobs count
     against the same ceiling — the failure mode that started this
@@ -881,6 +885,96 @@ def _check_guard_messages(failures: list[str]) -> None:
             "that is the normal shape of a killed run, so no memory kill would "
             "ever be reported"
         )
+    # Two result events can only come from a stream that contradicts itself, and
+    # the tie has to break the same way extract_result breaks it (the last one
+    # wins). Breaking it the other way would stand the reap down on a run that
+    # is then reported as an ordinary failure — no explanation, no resume.
+    if runner_mod._turn_completed_successfully([
+        {"type": "result", "is_error": False},
+        {"type": "result", "is_error": True},
+    ]):
+        failures.append(
+            "an early success result outvoted the final failure result, which "
+            "is not how extract_result reads the same stream"
+        )
+
+
+def _check_kill_result_keeps_the_work_record(failures: list[str]) -> None:
+    """A reaped attempt still has to report what it got done before it died.
+
+    ``_carry_forward_work_record`` folds the aborted attempt's record into the
+    attempt that replaces it, and it can only forward what the aborted result
+    carries. Built from scratch instead of from the captured events, the reap
+    result carries nothing — so a build that made every one of its edits and was
+    then reaped comes back with an empty tool list, and the chain reads that list
+    to decide whether a build changed code at all.
+    """
+    tree = memory.TreeMemory(
+        total_mb=13721.0, proc_count=7,
+        biggest_pid=282313, biggest_name="python", biggest_mb=13001.0,
+    )
+    # The shape a reaped run really leaves behind: turns of real work, tool
+    # calls, and NO `result` event, because the CLI never got to emit one.
+    events = [
+        {"type": "system", "subtype": "init", "session_id": BORN_SESSION},
+        {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "Edit", "input": {"file_path": "a.py"}},
+        ]}},
+        {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "Bash",
+             "input": {"command": "python upscale.py --tile 512"}},
+        ]}},
+    ]
+
+    result = runner_mod._memory_kill_result(
+        events, tree, avail_mb=1200.0,
+        session_id=BORN_SESSION, poisoning=["/main/repo/a.py"],
+    )
+
+    if not result.is_error:
+        failures.append("a reaped run was not reported as a failure")
+    if "Edit" not in (result.tools_used or []):
+        failures.append(
+            "the reaped attempt's tool list came back empty, so the resumed "
+            "attempt inherits nothing and a build that made all of its edits "
+            f"before being reaped renders as 'no changes made': "
+            f"{result.tools_used!r}"
+        )
+    if not any("upscale.py" in c for c in (result.bash_commands or [])):
+        failures.append(
+            f"the reaped attempt's command log was lost: {result.bash_commands!r}"
+        )
+    if result.session_id != BORN_SESSION:
+        failures.append(
+            f"the reaped result carries no resumable session id: "
+            f"{result.session_id!r}"
+        )
+    if result.path_poisoning != ["/main/repo/a.py"]:
+        failures.append(
+            f"main-repo path hits detected before the reap were dropped: "
+            f"{result.path_poisoning!r}"
+        )
+    # And the message the user actually reads — finalize_run prefers
+    # error_message over result_text, so this is the sentence that lands.
+    msg = result.error_message or ""
+    if "13.4 GB" not in msg or "282313" not in msg:
+        failures.append(f"the reap failure does not say what happened: {msg!r}")
+    if "1.2 GB" not in msg:
+        failures.append(
+            f"the reap failure omits how little was free machine-wide: {msg!r}"
+        )
+    note = result.memory_kill_note or ""
+    if "{" in note or "}" in note or "13.4" not in note:
+        failures.append(f"the resume note is unfilled or wrong: {note!r}")
+
+    # No reading of free memory available: the note must still be a sentence.
+    bare = runner_mod._memory_kill_result([], tree, None, None, None)
+    if "{" in (bare.memory_kill_note or ""):
+        failures.append("the resume note left a placeholder when free RAM was unknown")
+    if "None" in (bare.error_message or ""):
+        failures.append(
+            f"the reap failure printed a None: {bare.error_message!r}"
+        )
 
 
 def _check_nudge_text(failures: list[str]) -> None:
@@ -1041,6 +1135,11 @@ def _reap_result() -> RunResult:
         ),
         session_id=BORN_SESSION,
         num_turns=31,
+        # The reaped attempt did the editing. Whether that survives into the
+        # attempt that replaces it decides whether the chain sees a build that
+        # changed code or one that changed nothing.
+        tools_used=["Read", "Edit", "Bash"],
+        bash_commands=["python upscale.py --tile 512"],
         memory_kill_note=config.MEMORY_KILL_NUDGE_TEMPLATE.format(
             peak_gb="13.7", limit_gb="12.0",
             offender="python (pid 282313)", avail_gb="1.2",
@@ -1100,6 +1199,22 @@ async def _check_auto_resume(failures: list[str]) -> None:
                 "the memory note was left on the instance after the resume; a "
                 "cooldown re-queue hours later would open with stale news"
             )
+        # The resumed attempt reported no tools of its own (it only confirmed
+        # the work was already there), so everything in this list has to have
+        # been carried forward from the attempt that was reaped. finalize_run
+        # ASSIGNS this onto the Instance, so whatever is missing here is gone.
+        if "Edit" not in (result.tools_used or []):
+            failures.append(
+                "the reaped attempt's tool list did not survive into the run "
+                "that replaced it, so a build that made every edit before "
+                "being reaped reports as having changed no code: "
+                f"{result.tools_used!r}"
+            )
+        if not any("upscale.py" in c for c in (result.bash_commands or [])):
+            failures.append(
+                "the reaped attempt's command log was dropped on resume: "
+                f"{result.bash_commands!r}"
+            )
 
         # A session that keeps hitting the wall must stop, not loop.
         h2 = _Harness(tmp, [_reap_result()])
@@ -1152,6 +1267,7 @@ async def _amain() -> int:
     _check_installed_unit(failures)
     _check_runtime_readings(failures)
     _check_guard_messages(failures)
+    _check_kill_result_keeps_the_work_record(failures)
     _check_nudge_text(failures)
     await _check_auto_resume(failures)
 
