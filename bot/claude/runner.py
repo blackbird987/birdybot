@@ -2306,6 +2306,7 @@ class ClaudeRunner:
                                 f"{cg.max_mb / 1024:.1f}GB"
                                 if cg.max_mb is not None else "no limit",
                             )
+                            signalled: list[str] = []
                             try:
                                 signalled = await asyncio.to_thread(
                                     memory.kill_tree, proc.pid,
@@ -2317,8 +2318,21 @@ class ClaudeRunner:
                                     )
                             except Exception:
                                 log.exception(
-                                    "Memory reap failed for %s — falling back "
-                                    "to terminating the CLI only",
+                                    "Memory reap failed for %s", instance.id,
+                                )
+                            if not signalled:
+                                # kill_tree swallows per-process failures and
+                                # returns an empty list rather than raising, so
+                                # "nothing was signalled" is a silent outcome —
+                                # and one that must not be silent HERE. We have
+                                # already decided this run is over: leaving the
+                                # process alive would let it stream to
+                                # completion and then be reported as a memory
+                                # failure it recovered from, which is a lie in
+                                # whichever direction the run happened to end.
+                                log.warning(
+                                    "Memory reap signalled nothing for %s — "
+                                    "terminating the CLI directly",
                                     instance.id,
                                 )
                                 proc.terminate()
@@ -2326,11 +2340,20 @@ class ClaudeRunner:
                                 try:
                                     await on_progress(
                                         "Stopped — this session ran out of memory",
-                                        f"Its processes reached "
-                                        f"{tree.total_mb / 1024:.1f} GB (ceiling "
-                                        f"{kill_mb / 1024:.1f} GB), most of it in "
-                                        f"{tree.offender()}. Killing it here keeps "
-                                        f"the other sessions alive.",
+                                        # "largest single process", not "most of
+                                        # it": the figure is a sum across the
+                                        # tree, so on a session running many
+                                        # processes at once the biggest one can
+                                        # be a small share of the total. Saying
+                                        # otherwise would misdirect the reader
+                                        # in exactly the case that is hardest to
+                                        # diagnose.
+                                        f"Its {tree.proc_count} processes reached "
+                                        f"{tree.total_mb / 1024:.1f} GB between them "
+                                        f"(ceiling {kill_mb / 1024:.1f} GB); the "
+                                        f"largest single one was {tree.offender()} "
+                                        f"at {tree.biggest_mb / 1024:.1f} GB. Killing "
+                                        f"it here keeps the other sessions alive.",
                                     )
                                 except Exception:
                                     log.exception("Progress callback error on memory kill")
@@ -2351,11 +2374,13 @@ class ClaudeRunner:
                                 try:
                                     await on_progress(
                                         "Heads up — this session is using a lot of memory",
-                                        f"Its processes are at "
-                                        f"{tree.total_mb / 1024:.1f} GB, mostly "
-                                        f"{tree.offender()}. It will be stopped at "
-                                        f"{kill_mb / 1024:.1f} GB. If that's a job "
-                                        f"you started, make it smaller now.",
+                                        f"Its {tree.proc_count} processes are at "
+                                        f"{tree.total_mb / 1024:.1f} GB between them; "
+                                        f"the largest single one is {tree.offender()} "
+                                        f"at {tree.biggest_mb / 1024:.1f} GB. It will "
+                                        f"be stopped at {kill_mb / 1024:.1f} GB. If "
+                                        f"that's a job you started, make it smaller "
+                                        f"now.",
                                     )
                                 except Exception:
                                     log.exception("Progress callback error on memory warning")
@@ -2615,9 +2640,11 @@ class ClaudeRunner:
                     peak_gb=f"{memory_kill.total_mb / 1024:.1f}",
                     limit_gb=f"{config.SESSION_MEM_KILL_MB / 1024:.1f}",
                     offender=memory_kill.offender(),
-                    avail_gb=(
-                        f"{avail / 1024:.1f}" if avail is not None else "an unknown amount of"
-                    ),
+                    # "?" rather than a phrase: the template reads "About
+                    # {avail_gb} GB was free", so anything but a number-shaped
+                    # value produces a broken sentence in the one message whose
+                    # entire job is to be read carefully.
+                    avail_gb=f"{avail / 1024:.1f}" if avail is not None else "?",
                 ),
             )
 

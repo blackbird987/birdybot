@@ -142,6 +142,17 @@ MAX_PROCESS_LIFETIME_SECS: int = int(os.getenv("MAX_PROCESS_LIFETIME_SECS", "144
 # scripts/claude-bot.service) so the bot gets to act first and explain itself;
 # the cgroup limit is the backstop for a spike too fast to sample.
 # Set SESSION_MEM_KILL_MB=0 to disable the kill and keep warnings only.
+#
+# TODO: this threshold is per-session; MemoryMax is per-cgroup. Three sessions
+# at 5 GB each never trip it, but together they cross MemoryHigh and can reach
+# the cap, at which point the cgroup OOM killer picks the victim instead of the
+# bot — safe (the unit survives, OOMPolicy=continue) but unexplained, so the
+# session that dies gets no note telling it why. Doing better means the guard
+# comparing against the cgroup's own aggregate (memory.headroom is already read
+# in bot/claude/memory.py) and reaping the largest tree when the *total* is
+# short, not just when one session is. Not built yet: the incident was a single
+# runaway, and cross-session arbitration needs a policy for whose work is
+# forfeit that no measurement here can supply.
 SESSION_MEM_WARN_MB: int = int(os.getenv("SESSION_MEM_WARN_MB", "6144"))
 SESSION_MEM_KILL_MB: int = int(os.getenv("SESSION_MEM_KILL_MB", "12288"))
 # How often to sample. The tree walk costs a readdir plus a statm read per

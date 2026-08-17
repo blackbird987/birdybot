@@ -1065,25 +1065,39 @@ async def run() -> None:
 
     # One Ark notice for the whole outage, not one per dead session: an OOM kill
     # takes every running session at once, so per-thread notices would say the
-    # same thing ten times over. The marker is cleared as it's read so a later
-    # restart in the same hour doesn't re-announce an outage already reported.
-    if discord_bot and oom_reason and claude_memory.read_oom_marker(config.DATA_DIR):
-        claude_memory.clear_oom_marker(config.DATA_DIR)
+    # same thing ten times over.
+    #
+    # The reason is taken from the marker as well as from this boot's own
+    # journal read, and that fallback is the marker's entire reason to exist.
+    # The orphans are marked failed by the *first* boot after the kill, so if
+    # that boot dies anywhere between marking them and getting here, the next
+    # one finds nothing orphaned, never asks the journal, and the outage is
+    # never reported at all. Cleared only once the notice has actually landed,
+    # for the same reason — clearing it first would turn one failed send into
+    # silence.
+    notice_reason = oom_reason or claude_memory.read_oom_marker(config.DATA_DIR)
+    if discord_bot and notice_reason:
         lobby_id = str(getattr(discord_bot, "_lobby_channel_id", "") or "")
         if lobby_id:
+            # Zero is the normal count on the second-boot path above: the
+            # sessions were already marked failed by the boot that died.
+            took = (
+                f", taking {len(orphans)} running session(s) with it"
+                if orphans else ""
+            )
             try:
                 await discord_bot.messenger.send_text(
                     lobby_id,
                     f"⚠️ **The bot was killed for memory and has restarted.** "
-                    f"{oom_reason.capitalize()}, taking {len(orphans)} running "
-                    f"session(s) with it.\n"
-                    f"Their work is still on disk — the branches and worktrees "
-                    f"are untouched. Check `/status` and resume anything that "
-                    f"matters.\n"
+                    f"{notice_reason.capitalize()}{took}.\n"
+                    f"Any work in progress is still on disk — the branches and "
+                    f"worktrees are untouched. Check `/status` and resume "
+                    f"anything that matters.\n"
                     f"If this repeats, the machine is genuinely short on RAM: "
                     f"see the memory settings in `scripts/claude-bot.service` "
                     f"and `SESSION_MEM_KILL_MB`.",
                 )
+                claude_memory.clear_oom_marker(config.DATA_DIR)
             except Exception:
                 log.exception("Could not post OOM notice to the Ark")
 

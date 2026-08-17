@@ -142,20 +142,63 @@ Started claude-bot.service - Claude Code Discord bot.
 # matters -- a walk that stops at the child finds nothing.
 
 
-def _plant_tree(hold_secs: int = 60) -> subprocess.Popen:
-    """A shell whose child python holds HOG_MB and does nothing else."""
-    hog = (
-        f"import time; buf = bytearray({HOG_MB} * 1024 * 1024);\n"
-        # Touch every page: an untouched bytearray on Linux may not be resident
-        # yet, and RSS is what both the guard and the kernel actually count.
-        f"[buf.__setitem__(i, 1) for i in range(0, len(buf), 4096)];\n"
-        f"time.sleep({hold_secs})"
+# The two scripts the planted tree runs, written once per test process. They
+# take their arguments rather than baking them in, so the files are constant and
+# a single temp dir serves every case.
+_TREE_SCRIPTS: tuple[Path, Path] | None = None
+_TREE_DIR: tempfile.TemporaryDirectory | None = None
+
+
+def _tree_scripts() -> tuple[Path, Path]:
+    """Write the inner shell and the allocating python, returning both paths."""
+    global _TREE_SCRIPTS, _TREE_DIR
+    if _TREE_SCRIPTS is not None:
+        return _TREE_SCRIPTS
+
+    _TREE_DIR = tempfile.TemporaryDirectory(prefix="memguard-tree-")
+    base = Path(_TREE_DIR.name)
+
+    hog = base / "hog.py"
+    hog.write_text(
+        "import sys, time\n"
+        "buf = bytearray(int(sys.argv[1]) * 1024 * 1024)\n"
+        "# Touch every page: an untouched bytearray on Linux may not be\n"
+        "# resident yet, and RSS is what both the guard and the kernel count.\n"
+        "for i in range(0, len(buf), 4096):\n"
+        "    buf[i] = 1\n"
+        "time.sleep(float(sys.argv[2]))\n",
+        encoding="utf-8",
     )
+
+    inner = base / "inner.sh"
+    inner.write_text(
+        "# Two statements, not one. Given a single command dash exec()s it and\n"
+        "# replaces itself, which would collapse this level out of the tree and\n"
+        "# quietly turn a three-level test into a two-level one.\n"
+        '"$1" "$2" "$3" "$4"\n'
+        "exit $?\n",
+        encoding="utf-8",
+    )
+
+    _TREE_SCRIPTS = (inner, hog)
+    return _TREE_SCRIPTS
+
+
+def _plant_tree(hold_secs: int = 60) -> subprocess.Popen:
+    """Three real processes deep: shell -> shell -> python holding HOG_MB.
+
+    Three levels, not two, because that is the shape the incident had -- the
+    bot spawns the Claude CLI, the CLI runs a tool through a shell, and the
+    shell runs the thing that allocates. A walk that only looks at direct
+    children finds nothing, and that is precisely the blindness being tested.
+    """
+    inner, hog = _tree_scripts()
     return subprocess.Popen(
-        # The trailing `exit $?` is load-bearing: given a single command, dash
-        # exec()s it and replaces itself, collapsing the tree to one process
-        # and quietly turning this into a test of nothing.
-        ["/bin/sh", "-c", '"$1" -c "$2"; exit $?', "sh", sys.executable, hog],
+        # Same exec-optimisation trap at this level: hence the trailing exit.
+        [
+            "/bin/sh", "-c", '/bin/sh "$1" "$2" "$3" "$4" "$5"; exit $?', "sh",
+            str(inner), sys.executable, str(hog), str(HOG_MB), str(hold_secs),
+        ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -184,10 +227,12 @@ def _check_tree_measurement(failures: list[str]) -> None:
                 f"{sample.total_mb:.0f}MB ({sample.proc_count} procs) — this is "
                 "the 336MB blindness the incident was invisible behind"
             )
-        if sample.proc_count < 2:
+        if sample.proc_count < 3:
             failures.append(
                 f"tree walk saw {sample.proc_count} process(es); the planted "
-                "tree is a shell plus a python, so descendants were missed"
+                "tree is three deep (shell, shell, python), so either the walk "
+                "stopped at direct children or the tree collapsed and this case "
+                "is no longer testing depth at all"
             )
         if sample.error:
             failures.append(f"tree walk reported an error: {sample.error!r}")
@@ -399,12 +444,49 @@ def _check_descendants_signalled_first(failures: list[str]) -> None:
         failures.append(
             f"kill_tree did not signal the whole tree, only {terminated}"
         )
+    # Root-last is not enough. Signalling the middle level before the bottom
+    # one reparents the bottom one to init just as surely as signalling the root
+    # first would, and that is where the memory actually is.
+    if "grandchild" in terminated and "child" in terminated:
+        if terminated.index("grandchild") > terminated.index("child"):
+            failures.append(
+                "kill_tree signalled a parent before the process below it "
+                f"(order: {order}) — the deepest process is reparented out of "
+                "the tree while its parent is still dying"
+            )
 
 
 # --- Part 2: reading the previous run's verdict off the journal ---------------
 
 
+def _naive_reverse_scan(text: str) -> str | None:
+    """The logic this module was first written with, kept as a regression pin.
+
+    It walked backwards from the newest line and treated systemd's
+    "Consumed ... memory peak" summary as the boundary of the previous run.
+    systemd emits that summary *after* its "Failed with result" verdict, so on
+    the real journal of a real OOM kill this stops one line too early and
+    reports no OOM -- silently, for the exact incident it was written for.
+    """
+    for line in reversed(text.splitlines()):
+        if "Consumed" in line and "memory peak" in line:
+            return None
+        if "Failed with result 'oom-kill'" in line:
+            return "oom"
+    return None
+
+
 def _check_journal_verdict(failures: list[str]) -> None:
+    # The fixture has to keep the shape that broke the original parser,
+    # otherwise the cases below stop guarding anything. If this ever passes,
+    # the fixture was edited into a journal systemd does not actually produce.
+    if _naive_reverse_scan(JOURNAL_OOM) is not None:
+        failures.append(
+            "the OOM fixture no longer has the verdict-before-memory-peak "
+            "ordering that systemd really emits, so it has stopped covering "
+            "the bug the current parser exists to fix"
+        )
+
     verdict = memory._verdict_from_journal(JOURNAL_OOM)
     if not verdict:
         failures.append(
@@ -543,13 +625,20 @@ def _check_runtime_readings(failures: list[str]) -> None:
     if sys.platform == "linux" and avail is None:
         failures.append("available_mb() returned nothing on Linux")
 
+    # cgroup_memory() always returns a record; it is the *fields* that can be
+    # missing, so that is what has to be checked. If there is a cgroup v2 path
+    # to read at all, the anon figure has to come back -- headroom_mb() is built
+    # on it and answers None without it.
     cg = memory.cgroup_memory()
-    if cg is None:
-        if sys.platform == "linux":
-            failures.append("cgroup_memory() returned nothing on Linux")
-        return
-    if cg.anon_mb < 0 or cg.file_mb < 0:
-        failures.append(f"cgroup memory read as negative: {cg}")
+    if memory._own_cgroup_path() is not None and cg.anon_mb is None:
+        failures.append(
+            "this process has a cgroup v2 path but no anonymous-memory figure "
+            "was read from it, so headroom_mb() can never answer"
+        )
+    for field in ("anon_mb", "file_mb", "max_mb"):
+        val = getattr(cg, field)
+        if val is not None and val < 0:
+            failures.append(f"cgroup {field} read as negative: {val}")
     # Headroom is measured against anon only: page cache crossing the limit
     # triggers reclaim, not a kill, so counting it would cry wolf constantly.
     if cg.max_mb:
