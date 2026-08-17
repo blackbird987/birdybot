@@ -1089,7 +1089,10 @@ async def run() -> None:
                 await discord_bot.messenger.send_text(
                     lobby_id,
                     f"⚠️ **The bot was killed for memory and has restarted.** "
-                    f"{notice_reason.capitalize()}{took}.\n"
+                    # Not .capitalize() — that lowercases everything after the
+                    # first letter, so the day this reason carries a figure the
+                    # notice would read "13.9g".
+                    f"{notice_reason[:1].upper()}{notice_reason[1:]}{took}.\n"
                     f"Any work in progress is still on disk — the branches and "
                     f"worktrees are untouched. Check `/status` and resume "
                     f"anything that matters.\n"

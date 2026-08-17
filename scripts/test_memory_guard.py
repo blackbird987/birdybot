@@ -32,6 +32,12 @@ Asserted here:
     to: signalling only the root leaves the runaway alive, holding all of it
   * descendants are signalled before the root, so the runaway is never
     orphaned out of the tree it was about to be reaped from
+  * the reap never *waits* on the root, because asyncio spawned it and waiting
+    collects the exit status the runner is still expecting: driven against real
+    subprocesses, a reaped run must come back as the signal it was sent (-15,
+    or -9 for a root that ignores SIGTERM) and not as 255, since the runner's
+    "was this an intentional kill" test is a negative-returncode test and a
+    Kill racing a reap otherwise renders as a red failure
   * the journal verdict is read correctly off the *real* recorded output of
     both kills, including the trap that systemd logs its ``memory peak``
     summary line *after* the ``oom-kill`` verdict
@@ -461,19 +467,33 @@ def _check_descendants_signalled_first(failures: list[str]) -> None:
         def memory_info(self):
             return types.SimpleNamespace(rss=1024 * 1024)
 
+        def status(self):
+            # Everything obeyed SIGTERM. A process that has exited but not yet
+            # been reaped reads as a zombie, which is what tells the escalation
+            # to leave it alone.
+            return "zombie"
+
         def terminate(self):
             order.append(self.label)
 
         def kill(self):
             order.append(self.label + ":kill")
 
+    waited_on: list[int] = []
+
+    def _wait_procs(procs, timeout=None):
+        procs = list(procs)
+        waited_on.extend(p.pid for p in procs)
+        return procs, []
+
     fake = types.ModuleType("psutil")
     fake.Process = lambda pid: _Recorder(pid, "root")  # type: ignore[attr-defined]
     fake.NoSuchProcess = _NoSuchProcess  # type: ignore[attr-defined]
     fake.AccessDenied = _NoSuchProcess  # type: ignore[attr-defined]
     fake.Error = _NoSuchProcess  # type: ignore[attr-defined]
+    fake.STATUS_ZOMBIE = "zombie"  # type: ignore[attr-defined]
     # Everything died on SIGTERM, so no SIGKILL round is expected.
-    fake.wait_procs = lambda procs, timeout=None: (list(procs), [])  # type: ignore[attr-defined]
+    fake.wait_procs = _wait_procs  # type: ignore[attr-defined]
 
     saved = sys.modules.get("psutil")
     sys.modules["psutil"] = fake
@@ -507,6 +527,21 @@ def _check_descendants_signalled_first(failures: list[str]) -> None:
                 f"(order: {order}) — the deepest process is reparented out of "
                 "the tree while its parent is still dying"
             )
+    # The root is asyncio's child, and psutil.wait_procs calls waitpid on any
+    # child of this process. See _check_root_reaping_left_to_asyncio for the
+    # observable damage; this pins the mechanism at the call itself, where the
+    # mistake would actually be reintroduced.
+    if 1 in waited_on:
+        failures.append(
+            "kill_tree waited on the tree's root (pids waited on: "
+            f"{waited_on}) — that reaps the CLI's exit status out from under "
+            "asyncio, which then reports 255 instead of the signal"
+        )
+    if "root:kill" in order:
+        failures.append(
+            "kill_tree SIGKILLed a root that had already exited — a no-op "
+            "signal with a log line claiming it ignored SIGTERM"
+        )
 
 
 # --- Part 2: reading the previous run's verdict off the journal ---------------
@@ -1156,6 +1191,85 @@ def _success() -> RunResult:
     )
 
 
+async def _check_root_reaping_left_to_asyncio(failures: list[str]) -> None:
+    """The reap must not steal the CLI's exit status from asyncio.
+
+    ``psutil.wait_procs`` calls ``os.waitpid`` on any process that is a child of
+    this one, and the tree's root is precisely that — asyncio spawned it. Waiting
+    on it there means asyncio's own watcher finds the status already collected
+    and falls back to reporting **255**, which is not a signal-shaped returncode.
+    The runner's intentional-kill classifier requires one (``rc < 0``), so the
+    visible damage is a Kill or Steer landing in the same moment as a reap
+    rendering as a red failure instead of the quiet stop the user asked for.
+
+    Driven against real subprocesses because that is the only place the bug
+    lives: every stub of ``wait_procs`` in this file returns without calling
+    ``waitpid``, so a stub can only pin the call, never the consequence.
+    """
+    # A root with a child, so the descendant branch runs too.
+    spawn = (
+        "import subprocess,sys,time; "
+        "subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); "
+        "print('up', flush=True); time.sleep(60)"
+    )
+    ignores_sigterm = (
+        "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "print('up', flush=True); time.sleep(60)"
+    )
+
+    async def _reap(code: str, grace: float) -> tuple[int | None, float, int]:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-u", "-c", code,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            await asyncio.wait_for(proc.stdout.readline(), timeout=20)
+            started = time.monotonic()
+            signalled = await asyncio.to_thread(memory.kill_tree, proc.pid, grace)
+            waited = time.monotonic() - started
+            rc = await asyncio.wait_for(proc.wait(), timeout=20)
+            return rc, waited, len(signalled)
+        finally:
+            if proc.returncode is None:  # pragma: no cover -- cleanup only
+                proc.kill()
+                await proc.wait()
+
+    try:
+        rc, _waited, count = await _reap(spawn, 5.0)
+    except (asyncio.TimeoutError, OSError) as exc:
+        failures.append(f"could not drive a real reap: {exc!r}")
+        return
+    if rc != -15:
+        failures.append(
+            f"after a reap, asyncio reported returncode {rc} rather than -15 "
+            "(SIGTERM). 255 means psutil collected the exit status first, which "
+            "costs the runner its 'was this an intentional kill' test"
+        )
+    if count < 2:
+        failures.append(
+            f"reaped a two-process tree but only signalled {count}"
+        )
+
+    # A root that ignores SIGTERM must still be escalated — the poll that
+    # replaced the wait has to have a deadline, not just a zombie check.
+    try:
+        rc, waited, _count = await _reap(ignores_sigterm, 1.0)
+    except (asyncio.TimeoutError, OSError) as exc:
+        failures.append(f"could not drive a SIGTERM-ignoring reap: {exc!r}")
+        return
+    if rc != -9:
+        failures.append(
+            f"a root that ignores SIGTERM ended with returncode {rc}, not -9 — "
+            "it was never escalated to SIGKILL, so the memory it holds survives "
+            "the reap that was supposed to free it"
+        )
+    if waited >= 4.0:
+        failures.append(
+            f"escalating a 1s grace took {waited:.1f}s — the root is being "
+            "waited on for longer than its grace period"
+        )
+
+
 async def _check_auto_resume(failures: list[str]) -> None:
     tmp = tempfile.mkdtemp(prefix="memguard-")
     try:
@@ -1269,6 +1383,7 @@ async def _amain() -> int:
     _check_guard_messages(failures)
     _check_kill_result_keeps_the_work_record(failures)
     _check_nudge_text(failures)
+    await _check_root_reaping_left_to_asyncio(failures)
     await _check_auto_resume(failures)
 
     if failures:

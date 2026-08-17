@@ -1908,21 +1908,27 @@ class ClaudeRunner:
                         log.exception(
                             "Progress callback error during %s resume", kind,
                         )
-                resumed = await self._run_impl(
-                    instance, on_progress, on_stall,
-                    context, sibling_context,
-                    api_fallback=api_fallback,
-                    _provider=provider, _binary=binary,
-                    _recovery_state=recovery_state,
-                    on_recovery=on_recovery,
-                )
                 # _build_command normally consumes the marker, but the resume
                 # can end before it ever gets there — the refuse-to-spawn
-                # short-circuit above returns as soon as every account is on
+                # short-circuit returns as soon as every account is on
                 # cooldown, and that path re-queues this same Instance object
-                # for a later cooldown retry. Unmarking here covers every exit
-                # the recursion can take.
-                unmark()
+                # for a later cooldown retry. A `finally` rather than a plain
+                # statement after the await because raising is one of those
+                # exits too: _run_impl builds worktrees and spawns processes,
+                # and an Instance that survives the exception (a re-queue, or
+                # the user pressing Retry) would open with a recovery note
+                # about a run that ended hours ago.
+                try:
+                    resumed = await self._run_impl(
+                        instance, on_progress, on_stall,
+                        context, sibling_context,
+                        api_fallback=api_fallback,
+                        _provider=provider, _binary=binary,
+                        _recovery_state=recovery_state,
+                        on_recovery=on_recovery,
+                    )
+                finally:
+                    unmark()
                 # The aborted attempt did real work — its edits are on disk and
                 # the resumed attempt may never touch a file again.
                 return _carry_forward_work_record(result, resumed)

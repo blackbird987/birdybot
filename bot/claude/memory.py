@@ -167,6 +167,18 @@ def kill_tree(pid: int | None, grace_secs: float = 5.0) -> list[str]:
     it cannot be found here. It still counts against the cgroup, which is why
     ``cgroup_memory`` is read alongside the tree and why the recovery nudge
     tells the agent to check for background jobs it left running.
+
+    Nothing here ever waits on the *root*, and that restriction is load-bearing.
+    The root is the CLI process, which asyncio spawned and therefore owns:
+    ``psutil.wait_procs`` calls ``os.waitpid`` on any process that is a child of
+    this one, so waiting on the root reaps its exit status out from under
+    asyncio's child watcher, which then reports returncode 255 instead of the
+    signal it was sent. That is not cosmetic — the runner's intentional-kill
+    classifier requires a negative returncode, so a Kill or Steer that landed in
+    the same moment as a reap came back as a red failure instead of the quiet
+    stop the user asked for. The descendants are safe to wait on because they
+    are not our children; ``waitpid`` refuses them and psutil falls back to
+    polling ``/proc``.
     """
     signalled: list[str] = []
     if pid is None:
@@ -204,17 +216,57 @@ def kill_tree(pid: int | None, grace_secs: float = 5.0) -> list[str]:
 
     if not alive:
         return signalled
-    try:
-        _, survivors = psutil.wait_procs(alive, timeout=grace_secs)
-    except Exception:
-        survivors = alive
+    deadline = time.monotonic() + grace_secs
+    # Root excluded from the wait (see docstring) — asyncio owns its reaping.
+    descendants = [proc for proc in alive if proc.pid != pid]
+    survivors = descendants
+    if descendants:
+        try:
+            _, survivors = psutil.wait_procs(descendants, timeout=grace_secs)
+        except Exception:
+            survivors = descendants
     for proc in survivors:
         try:
             proc.kill()
             log.warning("SIGKILL for pid %s — ignored SIGTERM", proc.pid)
         except Exception:
             pass
+    if any(proc.pid == pid for proc in alive):
+        _escalate_root(root, pid, deadline)
     return signalled
+
+
+def _escalate_root(root, pid: int, deadline: float) -> None:
+    """SIGKILL the tree's root if it outlives ``deadline``, without reaping it.
+
+    Liveness is polled from ``/proc`` rather than inferred from a wait, because
+    a wait on this particular process is exactly what must not happen (see
+    ``kill_tree``). A process that has exited but not yet been reaped reads as a
+    zombie, which is the signal to stop: asyncio still owes it a ``waitpid`` and
+    SIGKILLing it would be a no-op with a misleading log line attached.
+    """
+    try:
+        import psutil  # type: ignore[import-not-found]
+    except ImportError:
+        return
+    while True:
+        try:
+            if root.status() == psutil.STATUS_ZOMBIE:
+                return  # already exited; asyncio will collect the status
+        except psutil.NoSuchProcess:
+            return  # already reaped
+        except Exception:
+            break  # can't tell — escalate rather than leave 13 GB standing
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.1)
+    try:
+        root.kill()
+        log.warning("SIGKILL for root pid %s — ignored SIGTERM", pid)
+    except psutil.NoSuchProcess:
+        pass
+    except Exception as exc:
+        log.warning("Could not SIGKILL root pid %s: %s", pid, type(exc).__name__)
 
 
 # --- cgroup: what the whole bot is using, and what it is allowed ---------------
