@@ -165,8 +165,8 @@ def kill_tree(pid: int | None, grace_secs: float = 5.0) -> list[str]:
     Known gap, deliberate: a job launched with `nohup ... &` whose launching
     shell has already exited is no longer a descendant of anything we hold, so
     it cannot be found here. It still counts against the cgroup, which is why
-    ``cgroup_usage_mb`` is reported alongside the tree and why the recovery
-    nudge tells the agent to check for background jobs it left running.
+    ``cgroup_memory`` is read alongside the tree and why the recovery nudge
+    tells the agent to check for background jobs it left running.
     """
     signalled: list[str] = []
     if pid is None:
@@ -348,45 +348,72 @@ def previous_run_was_oom_killed(unit: str = "claude-bot.service") -> str | None:
     return _verdict_from_journal(proc.stdout, unit)
 
 
+_OOM_VERDICT = "Failed with result 'oom-kill'"
+
+# How systemd reports that a *run* of the unit ended. Matched only on lines it
+# prefixes with the unit name, because the bot's own stdout lands in this same
+# journal and a log line reading "...: Succeeded" would otherwise be mistaken
+# for the unit exiting cleanly.
+_RUN_ENDED_MARKERS = (
+    "Failed with result",
+    "Deactivated successfully",
+    "Succeeded",
+)
+
+
 def _verdict_from_journal(text: str, unit: str = "claude-bot.service") -> str | None:
     """Decide, from raw journal text, whether the *previous* run died of OOM.
 
     Split out from the command that fetches it so the decision can be checked
     against real recorded output instead of only against a live system.
 
-    The window is bounded by start markers rather than scanned blindly
-    backwards, and getting that wrong is easy: systemd emits its resource
-    summary *after* the verdict, so the tail of a real OOM exit reads
+    Two traps here, and both produce a silently wrong answer rather than an
+    error — which matters more than usual, because a wrong answer here means the
+    user is told "interrupted by bot restart" for the second night running.
+
+    The first: systemd emits its resource summary *after* the verdict, so the
+    tail of a real OOM exit reads
 
         claude-bot.service: Failed with result 'oom-kill'.
         claude-bot.service: Consumed ... 13.9G memory peak, ...
         claude-bot.service: Scheduled restart job, restart counter is at 1.
+        Starting claude-bot.service - Claude Code Discord bot...
         Started claude-bot.service - Claude Code Discord bot.
 
-    A naive reverse scan that stops at the summary line therefore steps over
-    the very verdict it is looking for. Instead: find our own start line, and
-    look only between the start before it and it — that slice is exactly one
-    previous run, so a clean exit in between cannot surface an older kill.
+    A reverse scan that treats that summary as the end of the previous run steps
+    straight over the verdict it came to find.
+
+    The second: a run that ended *cleanly* hours after an earlier OOM must not
+    be blamed on it. So the scan walks back from our own start and stops at the
+    first line where systemd said how a run ended, reporting only what that line
+    says. Anything older belongs to a run before that one.
+
+    Deliberately assumes nothing about our own startup lines beyond "none of
+    them is a run-ended marker" — an earlier version bounded the window by
+    assuming the unit's ``Starting`` and ``Started`` lines are adjacent, which
+    ``ExecStartPre`` output is enough to break, and breaking it meant reading a
+    real OOM as a clean restart.
     """
     lines = text.splitlines()
-    starts = [
-        i for i, line in enumerate(lines)
-        if line.startswith(f"Started {unit}") or line.startswith(f"Starting {unit}")
-    ]
-    if not starts:
+    last_start: int | None = None
+    for i, line in enumerate(lines):
+        if line.startswith(f"Started {unit}") or line.startswith(f"Starting {unit}"):
+            last_start = i
+    if last_start is None:
         # No systemd start in the window — started by hand, or the unit is not
         # what is running. Nothing can be concluded about a previous exit.
         return None
-    ours = starts[-1]
-    # Walk back past our own "Starting"/"Started" pair to the previous run's.
-    prev = 0
-    for i in reversed(starts[:-1]):
-        if i < ours - 1:
-            prev = i
-            break
-    for line in lines[prev:ours]:
-        if "Failed with result 'oom-kill'" in line:
+    for line in reversed(lines[:last_start]):
+        if not line.startswith(f"{unit}: "):
+            continue
+        if _OOM_VERDICT in line:
             return "the machine ran out of memory and the kernel killed the bot"
+        if any(marker in line for marker in _RUN_ENDED_MARKERS):
+            # The previous run ended, and not this way. Note this is also what
+            # correctly reports "no" when a *descendant* was OOM-killed under
+            # OOMPolicy=continue: the unit survived that, so its own result is
+            # something else, and the bot was not the victim.
+            return None
     return None
 
 

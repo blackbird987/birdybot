@@ -1714,77 +1714,114 @@ class ClaudeRunner:
             # account-failure branches, neither of which can match this text
             # anyway — the no-turns heuristic needs an empty result and zero
             # turns, and a thrash has ~50 of them.
-            if result.is_error and is_context_thrash_error(error_text):
-                thrash_attempts = sum(
-                    1 for k in recovery_state if k.startswith("context_thrash:")
+            # Both recoveries below are the same move: the BOT ended this run
+            # (not the model, not the API), so pick the same conversation up
+            # again and open it with a note saying what happened. They differ
+            # only in policy — how many times, what the note is, what to call it.
+            #
+            # The mechanism lives in one place because it is eleven steps long
+            # and every way of getting it wrong is silent. Skip the
+            # session_account stamp and --resume lands on an account whose
+            # ~/.claude/projects/ has never seen this session. Skip the unmark
+            # and an unrelated cooldown retry opens hours later with a stale
+            # "your previous attempt was aborted". Skip the carry-forward and
+            # the aborted attempt's record of the files it already changed is
+            # lost. Fixing one copy of that and forgetting the other has
+            # already happened once in this file.
+            async def _resume_same_conversation(
+                kind: str,
+                max_retries: int,
+                subject: str,
+                mark: Callable[[], None],
+                unmark: Callable[[], None],
+                progress: Callable[[int], tuple[str, str]],
+            ) -> RunResult | None:
+                """Resume this run's conversation once more.
+
+                Returns None for "not handled" — out of retries, or no
+                conversation to resume — so the caller falls through to the
+                normal failure and the Retry button is still offered.
+
+                ``mark``/``unmark`` set and clear the ephemeral marker that
+                _build_command consumes to prefix the note onto the next
+                prompt. ``progress`` receives the number of resumes already
+                spent, for messages that count attempts.
+                """
+                attempts = sum(
+                    1 for k in recovery_state if k.startswith(f"{kind}:")
                 )
                 # Prefer the id the run just reported: on a FRESH spawn the
                 # instance has none, and the conversation we need to resume is
                 # the one the dead process created.
                 resume_id = result.session_id or instance.session_id
-                if (
-                    thrash_attempts < config.CONTEXT_THRASH_MAX_RETRIES
-                    and resume_id
-                ):
-                    recovery_state.add(f"context_thrash:{thrash_attempts + 1}")
-                    instance.session_id = resume_id
-                    if account_dir:
-                        # Session ownership is normally stamped only on
-                        # success; do it here too, or _pick_account has no
-                        # `prefer` hint and --resume can land on the account
-                        # the JSONL isn't on.
-                        instance.session_account = account_dir
-                    # Consumed by _build_command on the very next attempt.
-                    instance._context_thrash_retry = True
+                if attempts >= max_retries or not resume_id:
                     log.warning(
-                        "Autocompact thrash for %s (resume %d/%d) — resuming "
-                        "session %s automatically",
-                        instance.id, thrash_attempts + 1,
-                        config.CONTEXT_THRASH_MAX_RETRIES,
-                        resume_id[:12],
+                        "%s for %s not auto-resumed (resumes=%d/%d, session=%s)",
+                        subject, instance.id, attempts, max_retries,
+                        (resume_id or "none")[:12],
                     )
-                    if on_progress:
-                        try:
-                            await on_progress(
-                                "Context filled up — resuming automatically",
-                                f"The CLI stopped itself to avoid a compaction "
-                                f"loop; picking the session back up "
-                                f"(attempt {thrash_attempts + 2} of "
-                                f"{config.CONTEXT_THRASH_MAX_RETRIES + 1})",
-                            )
-                        except Exception:
-                            log.exception(
-                                "Progress callback error during thrash resume",
-                            )
-                    resumed = await self._run_impl(
-                        instance, on_progress, on_stall,
-                        context, sibling_context,
-                        api_fallback=api_fallback,
-                        _provider=provider, _binary=binary,
-                        _recovery_state=recovery_state,
-                        on_recovery=on_recovery,
-                    )
-                    # _build_command normally consumes the flag, but the resume
-                    # can end before it ever gets there — the refuse-to-spawn
-                    # short-circuit above returns as soon as every account is
-                    # on cooldown, and that path re-queues this same Instance
-                    # object for a later cooldown retry.  Left set, that retry
-                    # would open with "your previous attempt was aborted" hours
-                    # after the fact.  Clearing here covers every exit the
-                    # recursion can take.
-                    instance._context_thrash_retry = False
-                    # The aborted attempt did real work — its edits are on disk
-                    # and the resumed attempt may never touch a file again.
-                    return _carry_forward_work_record(result, resumed)
-                # Out of retries (or no conversation to resume): fall through
-                # to the normal failure so the Retry button is still offered.
+                    return None
+                recovery_state.add(f"{kind}:{attempts + 1}")
+                instance.session_id = resume_id
+                if account_dir:
+                    # Session ownership is normally stamped only on success; do
+                    # it here too, or _pick_account has no `prefer` hint.
+                    instance.session_account = account_dir
+                mark()  # consumed by _build_command on the very next attempt
                 log.warning(
-                    "Autocompact thrash for %s not auto-resumed "
-                    "(resumes=%d/%d, session=%s)",
-                    instance.id, thrash_attempts,
-                    config.CONTEXT_THRASH_MAX_RETRIES,
-                    (resume_id or "none")[:12],
+                    "%s for %s (resume %d/%d) — resuming session %s",
+                    subject, instance.id, attempts + 1, max_retries,
+                    resume_id[:12],
                 )
+                if on_progress:
+                    headline, detail = progress(attempts)
+                    try:
+                        await on_progress(headline, detail)
+                    except Exception:
+                        log.exception(
+                            "Progress callback error during %s resume", kind,
+                        )
+                resumed = await self._run_impl(
+                    instance, on_progress, on_stall,
+                    context, sibling_context,
+                    api_fallback=api_fallback,
+                    _provider=provider, _binary=binary,
+                    _recovery_state=recovery_state,
+                    on_recovery=on_recovery,
+                )
+                # _build_command normally consumes the marker, but the resume
+                # can end before it ever gets there — the refuse-to-spawn
+                # short-circuit above returns as soon as every account is on
+                # cooldown, and that path re-queues this same Instance object
+                # for a later cooldown retry. Unmarking here covers every exit
+                # the recursion can take.
+                unmark()
+                # The aborted attempt did real work — its edits are on disk and
+                # the resumed attempt may never touch a file again.
+                return _carry_forward_work_record(result, resumed)
+
+            if result.is_error and is_context_thrash_error(error_text):
+                def _mark_thrash() -> None:
+                    instance._context_thrash_retry = True
+
+                def _unmark_thrash() -> None:
+                    instance._context_thrash_retry = False
+
+                handled = await _resume_same_conversation(
+                    kind="context_thrash",
+                    max_retries=config.CONTEXT_THRASH_MAX_RETRIES,
+                    subject="Autocompact thrash",
+                    mark=_mark_thrash,
+                    unmark=_unmark_thrash,
+                    progress=lambda spent: (
+                        "Context filled up — resuming automatically",
+                        f"The CLI stopped itself to avoid a compaction loop; "
+                        f"picking the session back up (attempt {spent + 2} of "
+                        f"{config.CONTEXT_THRASH_MAX_RETRIES + 1})",
+                    ),
+                )
+                if handled is not None:
+                    return handled
 
             # Memory reap: the guard in _stream_output killed this run's process
             # tree for crossing SESSION_MEM_KILL_MB.  Resumed for the same reason
@@ -1800,62 +1837,29 @@ class ClaudeRunner:
             # no other parser can match it, but the ordering keeps every
             # "resume the same conversation" case in one place.
             if result.is_error and result.memory_kill_note:
-                mem_attempts = sum(
-                    1 for k in recovery_state if k.startswith("memory_kill:")
-                )
-                resume_id = result.session_id or instance.session_id
-                if mem_attempts < config.MEMORY_KILL_MAX_RETRIES and resume_id:
-                    recovery_state.add(f"memory_kill:{mem_attempts + 1}")
-                    instance.session_id = resume_id
-                    if account_dir:
-                        # Same reason as the thrash path: without this hint
-                        # _pick_account can send --resume to an account whose
-                        # ~/.claude/projects/ has never seen this session.
-                        instance.session_account = account_dir
-                    instance._memory_kill_note = result.memory_kill_note
-                    log.warning(
-                        "Memory reap for %s (resume %d/%d) — resuming session "
-                        "%s with the ceiling explained",
-                        instance.id, mem_attempts + 1,
-                        config.MEMORY_KILL_MAX_RETRIES, resume_id[:12],
-                    )
-                    if on_progress:
-                        try:
-                            await on_progress(
-                                "Out of memory — resuming with a smaller budget",
-                                "Picking the session back up and telling it what "
-                                "the ceiling is, so it can size the job to fit "
-                                "instead of hitting the same wall.",
-                            )
-                        except Exception:
-                            log.exception(
-                                "Progress callback error during memory resume",
-                            )
-                    resumed = await self._run_impl(
-                        instance, on_progress, on_stall,
-                        context, sibling_context,
-                        api_fallback=api_fallback,
-                        _provider=provider, _binary=binary,
-                        _recovery_state=recovery_state,
-                        on_recovery=on_recovery,
-                    )
-                    # Covers every exit the recursion can take without reaching
-                    # _build_command (the all-accounts-cooled short-circuit
-                    # re-queues this same Instance for a cooldown retry hours
-                    # later, and a stale note would open that run with a memory
-                    # kill that is no longer news).
+                note = result.memory_kill_note
+
+                def _mark_memory() -> None:
+                    instance._memory_kill_note = note
+
+                def _unmark_memory() -> None:
                     instance._memory_kill_note = None
-                    # The reaped attempt's edits are still on disk, and the
-                    # resumed attempt may well decide the job doesn't fit and
-                    # touch no files at all.
-                    return _carry_forward_work_record(result, resumed)
-                log.warning(
-                    "Memory reap for %s not auto-resumed (resumes=%d/%d, "
-                    "session=%s)",
-                    instance.id, mem_attempts,
-                    config.MEMORY_KILL_MAX_RETRIES,
-                    (resume_id or "none")[:12],
+
+                handled = await _resume_same_conversation(
+                    kind="memory_kill",
+                    max_retries=config.MEMORY_KILL_MAX_RETRIES,
+                    subject="Memory reap",
+                    mark=_mark_memory,
+                    unmark=_unmark_memory,
+                    progress=lambda _spent: (
+                        "Out of memory — resuming with a smaller budget",
+                        "Picking the session back up and telling it what the "
+                        "ceiling is, so it can size the job to fit instead of "
+                        "hitting the same wall.",
+                    ),
                 )
+                if handled is not None:
+                    return handled
 
             # Model-specific limit (e.g. "You've reached your Fable 5
             # limit"): the account is still healthy for every other model,
@@ -2370,17 +2374,30 @@ class ClaudeRunner:
                             # Told to the session, not just the log: while it is
                             # still running it can still choose a smaller batch.
                             # After the kill that choice is gone.
-                            if on_progress and kill_mb > 0:
+                            #
+                            # Said even when the kill is switched off, because
+                            # SESSION_MEM_KILL_MB=0 is documented as "warnings
+                            # only" and a warning nobody outside bot.log can see
+                            # is not that. What varies is the sentence about
+                            # being stopped, not whether the session hears.
+                            if on_progress:
+                                ceiling = (
+                                    f" It will be stopped at "
+                                    f"{kill_mb / 1024:.1f} GB."
+                                    if kill_mb > 0 else
+                                    " Nothing will stop it automatically — the "
+                                    "per-session kill is switched off here."
+                                )
                                 try:
                                     await on_progress(
                                         "Heads up — this session is using a lot of memory",
                                         f"Its {tree.proc_count} processes are at "
                                         f"{tree.total_mb / 1024:.1f} GB between them; "
                                         f"the largest single one is {tree.offender()} "
-                                        f"at {tree.biggest_mb / 1024:.1f} GB. It will "
-                                        f"be stopped at {kill_mb / 1024:.1f} GB. If "
-                                        f"that's a job you started, make it smaller "
-                                        f"now.",
+                                        f"at {tree.biggest_mb / 1024:.1f} GB."
+                                        + ceiling
+                                        + " If that's a job you started, make it "
+                                        "smaller now.",
                                     )
                                 except Exception:
                                     log.exception("Progress callback error on memory warning")
@@ -2615,6 +2632,23 @@ class ClaudeRunner:
                 is_error=True,
                 error_message=f"Process exceeded {config.MAX_PROCESS_LIFETIME_SECS // 3600}h lifetime limit",
             )
+
+        # A reap and a finishing turn can land in the same instant: the guard
+        # decides on its own cadence, and while its SIGTERMs go out the CLI can
+        # still flush the `result` event that says the turn completed. Reporting
+        # the reap then would mark a finished run as failed AND auto-resume it,
+        # redoing work whose output is already captured and whose edits are
+        # already on disk. The kill is not lost information either way — the
+        # guard logged it at ERROR the moment it fired.
+        if memory_kill is not None and any(
+            ev.get("type") == "result" and not ev.get("is_error", False)
+            for ev in events
+        ):
+            log.warning(
+                "Memory reap for %s raced a completed turn — reporting the "
+                "completion instead (%s)", instance.id, memory_kill.summary(),
+            )
+            memory_kill = None
 
         if memory_kill is not None:
             # session_id matters more here than on most failure paths: the whole

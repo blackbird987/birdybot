@@ -133,6 +133,47 @@ Started claude-bot.service - Claude Code Discord bot.
 2026-08-17 09:30:00 INFO    bot.app: Starting Claude Bot...
 """
 
+# The same kill, but the unit's own "Starting" and "Started" are not adjacent --
+# ExecStartPre waits up to two minutes for the NTFS volume to mount and can say
+# so. A parser that bounds its search by assuming those two lines are next to
+# each other reads this as a clean restart and says nothing about the OOM.
+JOURNAL_OOM_SLOW_START = """\
+claude-bot.service: Failed with result 'oom-kill'.
+claude-bot.service: Consumed 3h 5min CPU time, 13.9G memory peak.
+claude-bot.service: Scheduled restart job, restart counter is at 1.
+Starting claude-bot.service - Claude Code Discord bot...
+waiting for bot volume (attempt 3)
+waiting for bot volume (attempt 4)
+Started claude-bot.service - Claude Code Discord bot.
+"""
+
+# OOMPolicy=continue doing its job: a session's subprocess was OOM-killed and
+# the unit carried on running, then was restarted deliberately hours later. The
+# bot was never the victim, so nothing here should be blamed on memory -- saying
+# otherwise would report an outage that did not happen.
+JOURNAL_DESCENDANT_KILLED = """\
+claude-bot.service: A process of this unit has been killed by the OOM killer.
+claude-bot.service: The kernel OOM killer killed some processes in this unit.
+2026-08-18 03:10:00 ERROR   bot.claude.runner: Memory limit for t-8001
+2026-08-18 09:00:00 INFO    bot.app: Reboot requested, shutting down
+Stopping claude-bot.service - Claude Code Discord bot...
+claude-bot.service: Deactivated successfully.
+Stopped claude-bot.service - Claude Code Discord bot.
+Starting claude-bot.service - Claude Code Discord bot...
+Started claude-bot.service - Claude Code Discord bot.
+"""
+
+# The bot's own stdout shares this journal, and journald orders by receipt, so a
+# buffered log line can land after systemd's verdict. One containing the word
+# "Succeeded" must not read as the unit having exited cleanly.
+JOURNAL_OOM_NOISY_LOG = """\
+claude-bot.service: Failed with result 'oom-kill'.
+claude-bot.service: Consumed 13.9G memory peak.
+2026-08-17 01:09:59 INFO    bot.engine.workflows: verify step Succeeded for t-7376
+Starting claude-bot.service - Claude Code Discord bot...
+Started claude-bot.service - Claude Code Discord bot.
+"""
+
 
 # --- Part 1: measuring and reaping a real process tree ------------------------
 #
@@ -504,6 +545,25 @@ def _check_journal_verdict(failures: list[str]) -> None:
         )
     if memory._verdict_from_journal(JOURNAL_FIRST_BOOT) is not None:
         failures.append("a first boot was reported as following an OOM kill")
+
+    if not memory._verdict_from_journal(JOURNAL_OOM_SLOW_START):
+        failures.append(
+            "an OOM kill was missed because ExecStartPre logged something "
+            "between the unit's 'Starting' and 'Started' lines — on a slow "
+            "volume mount, which is exactly when the bot restarts, the reason "
+            "would go unreported"
+        )
+    if memory._verdict_from_journal(JOURNAL_DESCENDANT_KILLED) is not None:
+        failures.append(
+            "a session subprocess being OOM-killed was reported as the BOT "
+            "having been killed; under OOMPolicy=continue the unit survives "
+            "that, so this would announce an outage that never happened"
+        )
+    if not memory._verdict_from_journal(JOURNAL_OOM_NOISY_LOG):
+        failures.append(
+            "a bot log line containing 'Succeeded' was mistaken for the unit "
+            "exiting cleanly, masking the real OOM verdict behind it"
+        )
     if memory._verdict_from_journal("") is not None:
         failures.append("empty journal output produced a verdict")
     # No systemd start line at all: started by hand, nothing can be concluded.
