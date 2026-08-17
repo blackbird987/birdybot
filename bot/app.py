@@ -18,6 +18,7 @@ from bot.claude.auth_health import (
     relogin_command,
     unusable_reason,
 )
+from bot.claude import memory as claude_memory
 from bot.claude.runner import ClaudeRunner
 from bot.claude.types import InstanceStatus
 from bot.engine import commands as engine_commands
@@ -510,8 +511,25 @@ async def run() -> None:
     _audit_repo_portability(store)
 
     orphans = store.mark_orphans()
+    # Stays None on a clean restart and on every non-Linux host — read much
+    # later, when the orphan messages go out, so it must always be bound.
+    oom_reason: str | None = None
     if orphans:
         log.warning("Marked %d orphaned instances as failed", len(orphans))
+        # Ask *why* we restarted, but only when sessions actually died with us —
+        # on a clean restart there is nobody to tell, and the journal read isn't
+        # free. Every interruption used to collapse to "interrupted by bot
+        # restart", which is how the machine running out of memory twice in one
+        # night (2026-08-17, 01:09 and 02:34) presented as a bot bug and took a
+        # full forensic session to pin down. One question at startup replaces
+        # that whole investigation.
+        oom_reason = claude_memory.previous_run_was_oom_killed()
+        if oom_reason:
+            log.error(
+                "Previous run ended in an OOM kill — %s. %d session(s) died "
+                "with it.", oom_reason, len(orphans),
+            )
+            claude_memory.write_oom_marker(config.DATA_DIR, oom_reason)
 
     archive_count = store.archive_old()
     if archive_count:
@@ -1042,7 +1060,32 @@ async def run() -> None:
     # "interrupted" → immediate restart sequence.
     await _cleanup_orphan_messages(
         notifier, orphans, auto_resuming_sessions, drain_callback_channel_ids,
+        interrupt_reason=oom_reason,
     )
+
+    # One Ark notice for the whole outage, not one per dead session: an OOM kill
+    # takes every running session at once, so per-thread notices would say the
+    # same thing ten times over. The marker is cleared as it's read so a later
+    # restart in the same hour doesn't re-announce an outage already reported.
+    if discord_bot and oom_reason and claude_memory.read_oom_marker(config.DATA_DIR):
+        claude_memory.clear_oom_marker(config.DATA_DIR)
+        lobby_id = str(getattr(discord_bot, "_lobby_channel_id", "") or "")
+        if lobby_id:
+            try:
+                await discord_bot.messenger.send_text(
+                    lobby_id,
+                    f"⚠️ **The bot was killed for memory and has restarted.** "
+                    f"{oom_reason.capitalize()}, taking {len(orphans)} running "
+                    f"session(s) with it.\n"
+                    f"Their work is still on disk — the branches and worktrees "
+                    f"are untouched. Check `/status` and resume anything that "
+                    f"matters.\n"
+                    f"If this repeats, the machine is genuinely short on RAM: "
+                    f"see the memory settings in `scripts/claude-bot.service` "
+                    f"and `SESSION_MEM_KILL_MB`.",
+                )
+            except Exception:
+                log.exception("Could not post OOM notice to the Ark")
 
     # Restore interactive pending-prompt entries (Steer/Queue embeds) from
     # before the reboot.  Instances they reference are dead — we edit the
@@ -1141,6 +1184,7 @@ async def _cleanup_orphan_messages(
     orphans: list,
     auto_resuming_sessions: set[str] | None = None,
     drain_callback_channel_ids: set[str] | None = None,
+    interrupt_reason: str | None = None,
 ) -> None:
     """Update thinking messages for instances that were interrupted by a restart.
 
@@ -1150,6 +1194,11 @@ async def _cleanup_orphan_messages(
 
     Skips instances that will be auto-resumed (via chain resume or drain queue
     callback) to avoid the confusing "interrupted" → immediate restart sequence.
+
+    ``interrupt_reason`` names the cause when startup managed to establish one
+    (currently: the previous run was OOM-killed). It lands in the thread the
+    user is actually looking at, which is the difference between "something
+    happened at 2 AM" and an answer.
     """
     if not orphans:
         return
@@ -1182,7 +1231,8 @@ async def _cleanup_orphan_messages(
                     try:
                         await messenger.edit_thinking(
                             handle,
-                            f"{inst.display_id()} interrupted by bot restart",
+                            f"{inst.display_id()} interrupted by bot restart"
+                            + (f" — {interrupt_reason}" if interrupt_reason else ""),
                         )
                         log.info("Updated orphan thinking msg for %s in %s:%s",
                                  inst.id, platform, channel_id)

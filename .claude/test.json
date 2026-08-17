@@ -75,7 +75,8 @@
     "git_prompt_hardening": "python scripts/test_git_prompt_hardening.py",
     "meeting_watch": "python scripts/test_meeting_watch.py",
     "attachments": "python scripts/test_attachments.py",
-    "pending_image_lifecycle": "python scripts/test_pending_image_lifecycle.py"
+    "pending_image_lifecycle": "python scripts/test_pending_image_lifecycle.py",
+    "memory_guard": "python scripts/test_memory_guard.py"
   },
 
   "auth": {

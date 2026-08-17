@@ -124,6 +124,40 @@ STALL_TIMEOUT_SECS: int = int(os.getenv("STALL_TIMEOUT_SECS", "60"))
 # with API call open" from "actually hung locally".
 STALL_DIAG_RELOG_SECS: int = int(os.getenv("STALL_DIAG_RELOG_SECS", "60"))
 MAX_PROCESS_LIFETIME_SECS: int = int(os.getenv("MAX_PROCESS_LIFETIME_SECS", "14400"))
+
+# --- Per-session memory guard ---
+#
+# The runner watches the resident memory of each session's WHOLE process tree,
+# not just the CLI. The distinction is the entire point: on 2026-08-17 the
+# stall log for a session reported "336MB" while a grandchild three levels down
+# sat at 13.7 GB, seconds from taking the machine out. The CLI is a thin
+# supervisor; the memory always lives in what it spawned.
+#
+# WARN posts once into the thread so the session can see it is heading for
+# trouble while it can still do something about it. KILL reaps that session's
+# tree — deterministically, naming the session and the number — rather than
+# leaving the kernel to pick a victim across the whole machine.
+#
+# Defaults are sized to fire below the cgroup's MemoryMax (16G, see
+# scripts/claude-bot.service) so the bot gets to act first and explain itself;
+# the cgroup limit is the backstop for a spike too fast to sample.
+# Set SESSION_MEM_KILL_MB=0 to disable the kill and keep warnings only.
+SESSION_MEM_WARN_MB: int = int(os.getenv("SESSION_MEM_WARN_MB", "6144"))
+SESSION_MEM_KILL_MB: int = int(os.getenv("SESSION_MEM_KILL_MB", "12288"))
+# How often to sample. The tree walk costs a readdir plus a statm read per
+# process, so 30s is cheap even with ten sessions running; the sampler is also
+# what makes a slow leak visible in bot.log before it matters.
+SESSION_MEM_CHECK_SECS: int = int(os.getenv("SESSION_MEM_CHECK_SECS", "30"))
+# How many times a run may be auto-resumed after the guard killed it for
+# memory. Deliberately lower than CONTEXT_THRASH_MAX_RETRIES: a context thrash
+# is a bookkeeping problem that a fresh window genuinely fixes, whereas a
+# memory ceiling is physical, so a second identical attempt just burns twenty
+# minutes to hit the same wall. One retry buys the agent exactly one chance to
+# adapt (smaller batch, fewer frames, or an honest "this does not fit").
+# Clamped to 0..3; 0 disables auto-resume.
+MEMORY_KILL_MAX_RETRIES: int = max(
+    0, min(3, int(os.getenv("MEMORY_KILL_MAX_RETRIES", "1")))
+)
 # Total wall-clock budget for the post-build computational sensor step
 # (dotnet build / ruff / tsc). Sensors that don't fit are marked skipped.
 SENSOR_TOTAL_BUDGET_SECS: int = int(os.getenv("SENSOR_TOTAL_BUDGET_SECS", "900"))
@@ -306,6 +340,38 @@ CONTEXT_THRASH_NUDGE = (
     "`grep`/`wc` instead of dumping it, prefer targeted searches over broad "
     "ones, and delegate large-file sweeps to a subagent so the bulk never "
     "enters this context."
+)
+
+# Same slot, same reasoning, different wall: prepended to the prompt of an
+# attempt auto-resumed after the memory guard reaped the previous one. Carries
+# the actual numbers because they are the whole content of the advice — "use
+# less memory" is useless, "you were at 13.7 GB and 12.0 GB is the ceiling"
+# tells the agent how much smaller its batch has to get. The command that did
+# it is named for the same reason: the agent's own transcript ends before the
+# kill, so it cannot otherwise know which of its commands was the problem.
+# Placeholders: peak_gb, limit_gb, offender, avail_gb.
+MEMORY_KILL_NUDGE_TEMPLATE = (
+    "--- Automatic recovery: your previous attempt was stopped for memory ---\n"
+    "Your last run was killed by this bot, not by the CLI and not by an error "
+    "in your code: the processes it had running grew to {peak_gb} GB of "
+    "resident memory, past the {limit_gb} GB ceiling a single session is "
+    "allowed on this machine. The largest process at the time was "
+    "`{offender}`. About {avail_gb} GB was free machine-wide.\n"
+    "This is a hard physical limit, not a flaky failure. Re-running the same "
+    "command unchanged WILL be killed again — that exact loop is why this "
+    "guard exists. Before anything else, work out how to make the job fit: "
+    "smaller batch or tile size, fewer items per process, stream instead of "
+    "loading everything at once, process in chunks and write each one out, or "
+    "run on the GPU if the memory was a model on the CPU. If it genuinely "
+    "cannot be made to fit, say so plainly and stop — that is a useful answer "
+    "and far better than another kill.\n"
+    "Your work is NOT lost — every edit the killed attempt made is still on "
+    "disk. Take stock of what is already done FIRST and carry on from there; "
+    "in a repo that means `git status` and `git diff` before anything else.\n"
+    "One more thing worth checking: a background job you started with `&` or "
+    "`nohup` keeps running after the command that launched it returns, and it "
+    "counts against this same ceiling. If you left one running, it was killed "
+    "too."
 )
 
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
