@@ -256,6 +256,11 @@ class Instance:
     # is told why its predecessor was killed and that its edits are still on
     # disk. Not persisted — it describes one attempt, not the instance.
     _context_thrash_retry: bool = False
+    # Ephemeral twin of the above for the memory guard: holds the recovery note
+    # text (not a bool — the numbers are the substance) set just before the
+    # runner re-spawns a session it reaped for memory, consumed and cleared by
+    # _build_command. Not persisted; it describes one attempt.
+    _memory_kill_note: str | None = None
 
     def display_id(self) -> str:
         if self.name:
@@ -485,6 +490,13 @@ class RunResult:
     #           with action buttons attached)
     # None    — automatic kill (timeout, watchdog) or no intentional kill
     kill_reason: str | None = None
+    # Set when the per-session memory guard reaped this run's process tree
+    # (bot.claude.memory). Carries the ready-made recovery note, numbers already
+    # filled in, for the attempt that resumes: a plain bool would force the
+    # resume path to re-measure a tree that no longer exists. Distinct from
+    # ``killed_intentionally`` on purpose — nobody asked for this, it is a real
+    # failure with a specific cause, and the user needs to see it as one.
+    memory_kill_note: str | None = None
 
 
 class KillOutcome(str, Enum):

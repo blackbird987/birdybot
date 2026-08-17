@@ -69,5 +69,48 @@ RestartSec=10
 TimeoutStopSec=60
 KillMode=mixed
 
+# --- Memory: keep one runaway session from taking the whole bot down ---
+#
+# Every process a session spawns lands in THIS cgroup — the Claude CLI, the
+# shells it opens, and whatever those run. systemd's default OOMPolicy is
+# `stop`, which means the kernel killing any one of those descendants makes
+# systemd tear the entire unit down. That is not theoretical: on 2026-08-17 a
+# build running a diffusion-model experiment grew to 13.7 GB, the kernel
+# (correctly) shot the experiment, and systemd then killed the bot and all ten
+# other sessions with it — twice, 01:09 and 02:34, because the restart resumed
+# the same session and it re-ran the same job.
+#
+# `continue` scopes the damage to the process that actually overran: its shell
+# reports "Killed", the agent sees the error and can adapt, and every other
+# thread keeps answering. The main process being killed still restarts, since
+# Restart=always does not care why we exited.
+#
+# It also silences the desktop popup. Plasma ships a KDED plugin whose whole
+# job is to watch systemd for units that died this way
+# (/usr/lib64/qt6/plugins/kf6/kded/oom_notifier.so, "Memory Shortage
+# Avoided"); it keys on the unit's own oom-kill result, so a killed descendant
+# under `continue` never triggers it.
+OOMPolicy=continue
+
+# The cap is what stops the machine going short in the first place. Without it
+# the kernel picks a victim globally and the shortage is everyone's problem;
+# with it, the reclaim and the kill both happen inside this cgroup, and the
+# cgroup OOM killer picks the fattest process here — the runaway experiment,
+# never the ~250 MB bot.
+#
+# Sized against the Citadel machine: 31 GB total, of which the desktop
+# (Chrome, Discord, Plasma) normally holds 8-10 GB. Note these limits count
+# page cache as well as anonymous memory, and this cgroup routinely holds
+# ~10 GB of cache from reading repos and writing artifacts — that is fine and
+# is NOT a leak, because cache is reclaimable: crossing MemoryHigh evicts it
+# instead of killing anything, which is exactly the intended first response.
+#
+# Honest tradeoff: a job that genuinely needs 14 GB no longer fits alongside a
+# browser. That is the real state of this machine, and it is far better learned
+# as one clearly-labelled session failure than as a 2 AM machine-wide event.
+# Raise both if the box gets more RAM.
+MemoryHigh=12G
+MemoryMax=16G
+
 [Install]
 WantedBy=default.target

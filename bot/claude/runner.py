@@ -30,6 +30,7 @@ from bot.claude.auth_health import (
     relogin_command,
     unusable_reason,
 )
+from bot.claude import memory
 from bot.claude.branch_utils import canonical_branch
 from bot.claude.gitpaths import git_common_dir, git_dir, git_toplevel
 from bot.claude.parser import (
@@ -363,6 +364,17 @@ class StallSnapshot:
 
     cpu_percent: float | None = None
     rss_mb: float | None = None
+    # Memory of the whole process tree, not just the CLI. rss_mb above measures
+    # the supervisor, which is nearly always a few hundred MB no matter what is
+    # happening underneath it — during the 2026-08-17 OOM incident it read
+    # "336MB" while a grandchild sat at 13.7 GB. This is the field that tells
+    # you whether a session is in trouble.
+    tree_rss_mb: float | None = None
+    tree_proc_count: int | None = None
+    # The fattest process in the tree, as "name (pid N) X MB". The pid is part
+    # of it on purpose: this field exists to be read after the fact, and a name
+    # and a size alone cannot be looked up in `ps` an hour later.
+    tree_biggest: str | None = None
     conn_count: int | None = None
     https_conn_count: int | None = None
     children_count: int | None = None
@@ -378,6 +390,13 @@ class StallSnapshot:
             parts.append(f"CPU {self.cpu_percent:.0f}%")
         if self.rss_mb is not None:
             parts.append(f"{self.rss_mb:.0f}MB")
+        if self.tree_rss_mb is not None:
+            tree = f"tree {self.tree_rss_mb / 1024:.1f}GB"
+            if self.tree_proc_count:
+                tree += f"/{self.tree_proc_count}p"
+            if self.tree_biggest:
+                tree += f" top={self.tree_biggest}"
+            parts.append(tree)
         if self.conn_count is not None:
             parts.append(f"{self.conn_count} conns ({self.https_conn_count or 0}×:443)")
         if self.children_count is not None:
@@ -447,6 +466,25 @@ async def _capture_process_snapshot(
         snapshot.error = "psutil not installed"
         return snapshot
 
+    # Tree memory first, and in a call of its own, so that nothing below can
+    # cost us it. Everything in the CPU/connection block shares a single try and
+    # a single early return: one unexpected psutil error down there and the
+    # snapshot comes back with no fields at all — and the tree figure is the one
+    # that mattered during the 2026-08-17 incident, when the CLI's own RSS read
+    # a reassuring 336MB. It is also the cheap half (a readdir plus a small read
+    # per process, against a deliberate 2-second CPU sample), so measuring it
+    # first costs the rest of the snapshot nothing.
+    try:
+        tree = await asyncio.to_thread(memory.sample_tree, pid)
+    except Exception as exc:
+        tree = None
+        log.debug("Tree memory sample failed: %s", type(exc).__name__)
+    if tree is not None and tree.proc_count:
+        snapshot.tree_rss_mb = tree.total_mb
+        snapshot.tree_proc_count = tree.proc_count
+        if tree.biggest_name:
+            snapshot.tree_biggest = f"{tree.offender()} {tree.biggest_mb:.0f}MB"
+
     def _sample() -> tuple[float | None, float | None, int | None, int | None, int | None, str | None]:
         try:
             proc = psutil.Process(pid)
@@ -492,6 +530,126 @@ async def _capture_process_snapshot(
     if err:
         snapshot.error = err
     return snapshot
+
+
+# --- Memory guard: what the user is told, and when a reap is moot -------------
+#
+# Pulled out of the watchdog loop rather than written inline. Both messages are
+# pure functions of a tree measurement and the configured ceiling, they are the
+# only part of the guard the user ever reads, and inline they sat six levels of
+# indentation deep inside a 400-line method where nothing could reach them.
+
+
+def _turn_completed_successfully(events: list[dict]) -> bool:
+    """True if the stream's ``result`` event reports success.
+
+    Used to decide that a memory reap is moot, which means it has to agree with
+    ``extract_result`` about what success is — otherwise a run reported as
+    failed loses the memory explanation that would have gone with it. So this
+    reads the LAST ``result`` event, exactly as ``extract_result`` does, rather
+    than asking whether *any* of them looks successful. And it reads the same
+    default: a ``result`` event that omits ``is_error`` is a completed turn.
+    """
+    verdict: dict | None = None
+    for ev in events:
+        if ev.get("type") == "result":
+            verdict = ev
+    return verdict is not None and not verdict.get("is_error", False)
+
+
+def _memory_kill_detail(tree: memory.TreeMemory, kill_mb: int) -> str:
+    """The in-thread notice for a session the guard has decided to reap.
+
+    Says "largest single process", never "most of it": the headline figure is a
+    sum across the tree, so on a session running many processes at once the
+    biggest one can be a small share of the total. Saying otherwise would
+    misdirect the reader in exactly the case that is hardest to diagnose.
+    """
+    return (
+        f"Its {tree.proc_count} processes reached "
+        f"{tree.total_mb / 1024:.1f} GB between them "
+        f"(ceiling {kill_mb / 1024:.1f} GB); the largest single one was "
+        f"{tree.offender()} at {tree.biggest_mb / 1024:.1f} GB. "
+        f"Killing it here keeps the other sessions alive."
+    )
+
+
+def _memory_warning_detail(tree: memory.TreeMemory, kill_mb: int) -> str:
+    """The in-thread warning for a session that is heading for the ceiling.
+
+    Sent whether or not the kill is armed. ``SESSION_MEM_KILL_MB=0`` is
+    documented as "warnings only", and a warning nobody outside bot.log can see
+    is not that — so what varies with the setting is the sentence about being
+    stopped, not whether the session hears about it at all.
+    """
+    ceiling = (
+        f" It will be stopped at {kill_mb / 1024:.1f} GB."
+        if kill_mb > 0 else
+        " Nothing will stop it automatically — the per-session kill is "
+        "switched off here."
+    )
+    return (
+        f"Its {tree.proc_count} processes are at "
+        f"{tree.total_mb / 1024:.1f} GB between them; the largest single one "
+        f"is {tree.offender()} at {tree.biggest_mb / 1024:.1f} GB."
+        + ceiling
+        + " If that's a job you started, make it smaller now."
+    )
+
+
+def _memory_kill_result(
+    events: list[dict],
+    tree: memory.TreeMemory,
+    avail_mb: float | None,
+    session_id: str | None,
+    poisoning: list[str] | None = None,
+) -> RunResult:
+    """The failure a reaped run reports, built from what that run actually did.
+
+    Built on top of ``extract_result`` rather than from scratch, and that is the
+    whole reason it is a function. A reaped attempt has usually done real work,
+    and ``_carry_forward_work_record`` can only forward what this result
+    carries: hand it a bare ``RunResult`` and the attempt that resumes inherits
+    an empty ``tools_used`` — which the chain reads to decide whether a build
+    changed code at all, so a build that made every one of its edits before
+    being reaped comes back as "no changes made" and its diff is treated as
+    nothing. The cost, duration and token counters are the same story: this is
+    the only place the reaped attempt will ever report them from.
+
+    ``result_text`` is kept for the same reason the ordinary non-zero-exit path
+    keeps it — whatever the session managed to say before it died is still the
+    best account of what it was doing — while ``error_message`` below is what
+    the user is actually shown, because ``finalize_run`` prefers it.
+    """
+    result = extract_result(events)
+    result.is_error = True
+    # A reap lands mid-turn, long before the CLI emits a `result` event, so the
+    # id stamped from the init event on turn one is usually the only one there
+    # is — and the note below is worthless unless it reaches a RESUMED attempt.
+    if not result.session_id:
+        result.session_id = session_id
+    if poisoning:
+        result.path_poisoning = list(poisoning)
+    result.error_message = (
+        f"Stopped: this session's processes reached "
+        f"{tree.total_mb / 1024:.1f} GB of memory, over the "
+        f"{config.SESSION_MEM_KILL_MB / 1024:.1f} GB ceiling for a single "
+        f"session. Largest was {tree.offender()}"
+        + (
+            f"; {avail_mb / 1024:.1f} GB was free machine-wide."
+            if avail_mb is not None else "."
+        )
+    )
+    result.memory_kill_note = config.MEMORY_KILL_NUDGE_TEMPLATE.format(
+        peak_gb=f"{tree.total_mb / 1024:.1f}",
+        limit_gb=f"{config.SESSION_MEM_KILL_MB / 1024:.1f}",
+        offender=tree.offender(),
+        # "?" rather than a phrase: the template reads "About {avail_gb} GB was
+        # free", so anything but a number-shaped value produces a broken
+        # sentence in the one message whose entire job is to be read carefully.
+        avail_gb=f"{avail_mb / 1024:.1f}" if avail_mb is not None else "?",
+    )
+    return result
 
 
 class WorktreeRecoveryEvent(NamedTuple):
@@ -1683,48 +1841,84 @@ class ClaudeRunner:
             # account-failure branches, neither of which can match this text
             # anyway — the no-turns heuristic needs an empty result and zero
             # turns, and a thrash has ~50 of them.
-            if result.is_error and is_context_thrash_error(error_text):
-                thrash_attempts = sum(
-                    1 for k in recovery_state if k.startswith("context_thrash:")
+            # Both recoveries below are the same move: the BOT ended this run
+            # (not the model, not the API), so pick the same conversation up
+            # again and open it with a note saying what happened. They differ
+            # only in policy — how many times, what the note is, what to call it.
+            #
+            # The mechanism lives in one place because it is eleven steps long
+            # and every way of getting it wrong is silent. Skip the
+            # session_account stamp and --resume lands on an account whose
+            # ~/.claude/projects/ has never seen this session. Skip the unmark
+            # and an unrelated cooldown retry opens hours later with a stale
+            # "your previous attempt was aborted". Skip the carry-forward and
+            # the aborted attempt's record of the files it already changed is
+            # lost. Fixing one copy of that and forgetting the other has
+            # already happened once in this file.
+            async def _resume_same_conversation(
+                kind: str,
+                max_retries: int,
+                subject: str,
+                mark: Callable[[], None],
+                unmark: Callable[[], None],
+                progress: Callable[[int], tuple[str, str]],
+            ) -> RunResult | None:
+                """Resume this run's conversation once more.
+
+                Returns None for "not handled" — out of retries, or no
+                conversation to resume — so the caller falls through to the
+                normal failure and the Retry button is still offered.
+
+                ``mark``/``unmark`` set and clear the ephemeral marker that
+                _build_command consumes to prefix the note onto the next
+                prompt. ``progress`` receives the number of resumes already
+                spent, for messages that count attempts.
+                """
+                attempts = sum(
+                    1 for k in recovery_state if k.startswith(f"{kind}:")
                 )
                 # Prefer the id the run just reported: on a FRESH spawn the
                 # instance has none, and the conversation we need to resume is
                 # the one the dead process created.
                 resume_id = result.session_id or instance.session_id
-                if (
-                    thrash_attempts < config.CONTEXT_THRASH_MAX_RETRIES
-                    and resume_id
-                ):
-                    recovery_state.add(f"context_thrash:{thrash_attempts + 1}")
-                    instance.session_id = resume_id
-                    if account_dir:
-                        # Session ownership is normally stamped only on
-                        # success; do it here too, or _pick_account has no
-                        # `prefer` hint and --resume can land on the account
-                        # the JSONL isn't on.
-                        instance.session_account = account_dir
-                    # Consumed by _build_command on the very next attempt.
-                    instance._context_thrash_retry = True
+                if attempts >= max_retries or not resume_id:
                     log.warning(
-                        "Autocompact thrash for %s (resume %d/%d) — resuming "
-                        "session %s automatically",
-                        instance.id, thrash_attempts + 1,
-                        config.CONTEXT_THRASH_MAX_RETRIES,
-                        resume_id[:12],
+                        "%s for %s not auto-resumed (resumes=%d/%d, session=%s)",
+                        subject, instance.id, attempts, max_retries,
+                        (resume_id or "none")[:12],
                     )
-                    if on_progress:
-                        try:
-                            await on_progress(
-                                "Context filled up — resuming automatically",
-                                f"The CLI stopped itself to avoid a compaction "
-                                f"loop; picking the session back up "
-                                f"(attempt {thrash_attempts + 2} of "
-                                f"{config.CONTEXT_THRASH_MAX_RETRIES + 1})",
-                            )
-                        except Exception:
-                            log.exception(
-                                "Progress callback error during thrash resume",
-                            )
+                    return None
+                recovery_state.add(f"{kind}:{attempts + 1}")
+                instance.session_id = resume_id
+                if account_dir:
+                    # Session ownership is normally stamped only on success; do
+                    # it here too, or _pick_account has no `prefer` hint.
+                    instance.session_account = account_dir
+                mark()  # consumed by _build_command on the very next attempt
+                log.warning(
+                    "%s for %s (resume %d/%d) — resuming session %s",
+                    subject, instance.id, attempts + 1, max_retries,
+                    resume_id[:12],
+                )
+                if on_progress:
+                    headline, detail = progress(attempts)
+                    try:
+                        await on_progress(headline, detail)
+                    except Exception:
+                        log.exception(
+                            "Progress callback error during %s resume", kind,
+                        )
+                # _build_command normally consumes the marker, but the resume
+                # can end before it ever gets there — the refuse-to-spawn
+                # short-circuit returns as soon as every account is on
+                # cooldown, and that path re-queues this same Instance object
+                # for a later cooldown retry. A `finally` rather than a plain
+                # statement after the await because raising is one of those
+                # exits too: _run_impl builds worktrees and spawns processes,
+                # and an Instance that survives the exception (a re-queue, or
+                # the user pressing Retry) would open with a recovery note
+                # about a run that ended hours ago.
+                try:
                     resumed = await self._run_impl(
                         instance, on_progress, on_stall,
                         context, sibling_context,
@@ -1733,27 +1927,72 @@ class ClaudeRunner:
                         _recovery_state=recovery_state,
                         on_recovery=on_recovery,
                     )
-                    # _build_command normally consumes the flag, but the resume
-                    # can end before it ever gets there — the refuse-to-spawn
-                    # short-circuit above returns as soon as every account is
-                    # on cooldown, and that path re-queues this same Instance
-                    # object for a later cooldown retry.  Left set, that retry
-                    # would open with "your previous attempt was aborted" hours
-                    # after the fact.  Clearing here covers every exit the
-                    # recursion can take.
+                finally:
+                    unmark()
+                # The aborted attempt did real work — its edits are on disk and
+                # the resumed attempt may never touch a file again.
+                return _carry_forward_work_record(result, resumed)
+
+            if result.is_error and is_context_thrash_error(error_text):
+                def _mark_thrash() -> None:
+                    instance._context_thrash_retry = True
+
+                def _unmark_thrash() -> None:
                     instance._context_thrash_retry = False
-                    # The aborted attempt did real work — its edits are on disk
-                    # and the resumed attempt may never touch a file again.
-                    return _carry_forward_work_record(result, resumed)
-                # Out of retries (or no conversation to resume): fall through
-                # to the normal failure so the Retry button is still offered.
-                log.warning(
-                    "Autocompact thrash for %s not auto-resumed "
-                    "(resumes=%d/%d, session=%s)",
-                    instance.id, thrash_attempts,
-                    config.CONTEXT_THRASH_MAX_RETRIES,
-                    (resume_id or "none")[:12],
+
+                handled = await _resume_same_conversation(
+                    kind="context_thrash",
+                    max_retries=config.CONTEXT_THRASH_MAX_RETRIES,
+                    subject="Autocompact thrash",
+                    mark=_mark_thrash,
+                    unmark=_unmark_thrash,
+                    progress=lambda spent: (
+                        "Context filled up — resuming automatically",
+                        f"The CLI stopped itself to avoid a compaction loop; "
+                        f"picking the session back up (attempt {spent + 2} of "
+                        f"{config.CONTEXT_THRASH_MAX_RETRIES + 1})",
+                    ),
                 )
+                if handled is not None:
+                    return handled
+
+            # Memory reap: the guard in _stream_output killed this run's process
+            # tree for crossing SESSION_MEM_KILL_MB.  Resumed for the same reason
+            # a thrash is — halting a chain here would page the user at 2 AM over
+            # something the agent can fix itself — but resumed *once*, and only
+            # with the note that says how far over it went.  A silent re-run is
+            # the exact behaviour that turned one OOM into two on 2026-08-17:
+            # nothing told the resumed session what had happened, so it re-ran
+            # the same job and died the same way ninety minutes later.
+            #
+            # Sits after the thrash branch and before the account/model branches
+            # for the same reason that one does: the error text here is ours, so
+            # no other parser can match it, but the ordering keeps every
+            # "resume the same conversation" case in one place.
+            if result.is_error and result.memory_kill_note:
+                note = result.memory_kill_note
+
+                def _mark_memory() -> None:
+                    instance._memory_kill_note = note
+
+                def _unmark_memory() -> None:
+                    instance._memory_kill_note = None
+
+                handled = await _resume_same_conversation(
+                    kind="memory_kill",
+                    max_retries=config.MEMORY_KILL_MAX_RETRIES,
+                    subject="Memory reap",
+                    mark=_mark_memory,
+                    unmark=_unmark_memory,
+                    progress=lambda _spent: (
+                        "Out of memory — resuming with a smaller budget",
+                        "Picking the session back up and telling it what the "
+                        "ceiling is, so it can size the job to fit instead of "
+                        "hitting the same wall.",
+                    ),
+                )
+                if handled is not None:
+                    return handled
 
             # Model-specific limit (e.g. "You've reached your Fable 5
             # limit"): the account is still healthy for every other model,
@@ -2125,6 +2364,12 @@ class ClaudeRunner:
         process_start_time = last_output_time
         stall_warned = False
         lifetime_exceeded = False
+        # Set by the memory guard below when it reaps this session's tree. Holds
+        # the numbers, not a bool, because the numbers ARE the message — both
+        # the failure the user reads and the nudge the resumed attempt gets are
+        # useless without them.
+        memory_kill: memory.TreeMemory | None = None
+        memory_kill_avail_mb: float | None = None
         stall_check_task: asyncio.Task | None = None
         # End-of-turn watchdog: set when the LLM signals stop_reason="end_turn"
         # with no tool_use blocks (genuinely done).  If stdout then stays
@@ -2134,11 +2379,14 @@ class ClaudeRunner:
 
         async def check_stall():
             nonlocal stall_warned, lifetime_exceeded
+            nonlocal memory_kill, memory_kill_avail_mb
             # Re-log a fresh snapshot every STALL_DIAG_RELOG_SECS while still
             # stalled — gives a paper trail of CPU/conn state over the silent
             # period so we can tell "thinking with API call open" from
             # "actually hung with nothing in flight" after the fact.
             stall_last_logged = 0.0
+            mem_last_checked = 0.0
+            mem_warned = False
             while True:
                 await asyncio.sleep(10)
                 now = asyncio.get_event_loop().time()
@@ -2154,6 +2402,120 @@ class ClaudeRunner:
                     )
                     proc.terminate()
                     return
+
+                # Memory guard. Runs on its own cadence and regardless of
+                # whether the session looks stalled: the 2026-08-17 runaway was
+                # never stalled, it was streaming tool output the whole way up
+                # to 13.7 GB. Checked on every tick that is due, before the
+                # stall branch, because a tree at the ceiling is a decision to
+                # make now while a silent session is only worth a log line.
+                if (
+                    (config.SESSION_MEM_KILL_MB > 0 or config.SESSION_MEM_WARN_MB > 0)
+                    and now - mem_last_checked >= config.SESSION_MEM_CHECK_SECS
+                ):
+                    mem_last_checked = now
+                    try:
+                        tree = await asyncio.to_thread(memory.sample_tree, proc.pid)
+                    except Exception:
+                        # A sampler that can end a session is worse than no
+                        # sampler. Skip this tick and try again on the next.
+                        log.debug("Memory sample failed for %s", instance.id)
+                        tree = None
+
+                    if tree is not None and tree.proc_count:
+                        kill_mb = config.SESSION_MEM_KILL_MB
+                        warn_mb = config.SESSION_MEM_WARN_MB
+                        if kill_mb > 0 and tree.total_mb >= kill_mb:
+                            memory_kill = tree
+                            memory_kill_avail_mb = await asyncio.to_thread(
+                                memory.available_mb,
+                            )
+                            cg = await asyncio.to_thread(memory.cgroup_memory)
+                            log.error(
+                                "Memory limit for %s — %s over the %.1fGB "
+                                "ceiling; machine has %s free, cgroup anon "
+                                "%s of %s. Reaping the tree.",
+                                instance.id, tree.summary(), kill_mb / 1024,
+                                f"{memory_kill_avail_mb / 1024:.1f}GB"
+                                if memory_kill_avail_mb is not None else "?",
+                                f"{cg.anon_mb / 1024:.1f}GB"
+                                if cg.anon_mb is not None else "?",
+                                f"{cg.max_mb / 1024:.1f}GB"
+                                if cg.max_mb is not None else "no limit",
+                            )
+                            # Told BEFORE the reap, not after, and that ordering
+                            # is load-bearing. Reaping closes the CLI's stdout,
+                            # which ends the reader loop, whose `finally`
+                            # cancels this watchdog — and it will usually do so
+                            # while we are still parked inside kill_tree's grace
+                            # wait for a multi-gigabyte process to actually die.
+                            # Anything after that call is on a coin flip, so the
+                            # one message explaining the kill goes out first.
+                            # The decision is already irrevocable here.
+                            if on_progress:
+                                try:
+                                    await on_progress(
+                                        "Stopped — this session ran out of memory",
+                                        _memory_kill_detail(tree, kill_mb),
+                                    )
+                                except Exception:
+                                    log.exception("Progress callback error on memory kill")
+                            signalled: list[str] = []
+                            try:
+                                signalled = await asyncio.to_thread(
+                                    memory.kill_tree, proc.pid,
+                                )
+                                if signalled:
+                                    log.warning(
+                                        "Reaped for %s: %s",
+                                        instance.id, ", ".join(signalled),
+                                    )
+                            except Exception:
+                                log.exception(
+                                    "Memory reap failed for %s", instance.id,
+                                )
+                            if not signalled:
+                                # kill_tree swallows per-process failures and
+                                # returns an empty list rather than raising, so
+                                # "nothing was signalled" is a silent outcome —
+                                # and one that must not be silent HERE. We have
+                                # already decided this run is over: leaving the
+                                # process alive would let it stream to
+                                # completion and then be reported as a memory
+                                # failure it recovered from, which is a lie in
+                                # whichever direction the run happened to end.
+                                # Reached only when the tree is still standing,
+                                # so stdout has not closed, so this watchdog has
+                                # not been cancelled — the one case where code
+                                # after the reap is guaranteed to run is also the
+                                # one case that needs it.
+                                log.warning(
+                                    "Memory reap signalled nothing for %s — "
+                                    "terminating the CLI directly",
+                                    instance.id,
+                                )
+                                proc.terminate()
+                            return
+
+                        if warn_mb > 0 and tree.total_mb >= warn_mb and not mem_warned:
+                            mem_warned = True
+                            log.warning(
+                                "Memory warning for %s — %s (warn at %.1fGB, "
+                                "kill at %.1fGB)",
+                                instance.id, tree.summary(), warn_mb / 1024,
+                                kill_mb / 1024 if kill_mb > 0 else 0,
+                            )
+                            # Told to the session, not just the log: while it is
+                            # still running it can still choose a smaller batch.
+                            # After the kill that choice is gone.
+                            if on_progress:
+                                try:
+                                    await on_progress(
+                                        "Heads up — this session is using a lot of memory",
+                                        _memory_warning_detail(tree, kill_mb),
+                                    )
+                                except Exception:
+                                    log.exception("Progress callback error on memory warning")
 
                 # Stall warning (no auto-kill)
                 if elapsed_since_output > config.STALL_TIMEOUT_SECS:
@@ -2379,11 +2741,86 @@ class ClaudeRunner:
 
         await proc.wait()
 
+        # Post-exit worktree housekeeping, placed here rather than in the tail
+        # because the tail is not on every path out of this method. Two returns
+        # below leave before it — the lifetime cap and the memory reap — and both
+        # used to skip these entirely. The mutex is the one with teeth: the
+        # release is the backstop for a session killed mid-test-run, and "killed
+        # mid-test-run" is exactly the shape of a watchdog kill, so the case it
+        # exists for was the case it never covered. Siblings on that repo then
+        # wait out the hook's stale TTL, and on the memory path the attempt that
+        # auto-resumes waits on a lock its own predecessor is still holding.
+        #
+        # The AskUserQuestion and end-of-turn returns above still miss it: they
+        # do their own proc.wait() well before this line, and moving cleanup in
+        # front of them is a change to two long-standing success paths that has
+        # nothing to do with the memory guard. Noted, not fixed here.
+        #
+        # Both are idempotent (the release no-ops unless this worktree owns the
+        # lock; the back-copy overwrites), so nothing cares that the tail path
+        # reaches this before doing its own work. It has to happen before the
+        # last-assistant-uuid lookup further down, which reads the JSONL out of
+        # the MAIN repo's project dir — i.e. only ever finds it once the
+        # back-copy has run.
+        if instance.worktree_path:
+            try:
+                await asyncio.to_thread(
+                    self._copy_session_from_worktree, instance, account_dir,
+                )
+            except Exception:
+                log.exception("Session back-copy failed for %s", instance.id)
+            try:
+                await asyncio.to_thread(
+                    self._release_test_mutex,
+                    instance.repo_path, instance.worktree_path,
+                )
+            except Exception:
+                log.exception("Test-mutex release failed for %s", instance.id)
+
         if lifetime_exceeded:
             return RunResult(
                 session_id=captured_session_id,
                 is_error=True,
                 error_message=f"Process exceeded {config.MAX_PROCESS_LIFETIME_SECS // 3600}h lifetime limit",
+            )
+
+        # A reap and a finishing turn can land in the same instant: the guard
+        # decides on its own cadence, and while its SIGTERMs go out the CLI can
+        # still flush the `result` event that says the turn completed. Reporting
+        # the reap then would mark a finished run as failed AND auto-resume it,
+        # redoing work whose output is already captured and whose edits are
+        # already on disk. The kill is not lost information either way — the
+        # guard logged it at ERROR the moment it fired.
+        if memory_kill is not None and _turn_completed_successfully(events):
+            log.warning(
+                "Memory reap for %s raced a completed turn — reporting the "
+                "completion instead (%s)", instance.id, memory_kill.summary(),
+            )
+            memory_kill = None
+
+        # The other race worth standing down for: the user asked this session to
+        # stop (Steer, /kill) inside the same few seconds the guard chose to reap
+        # it. Reporting the reap would override an explicit instruction — the run
+        # is marked FAILED, then auto-resumed, so the session carries on after
+        # the person who stopped it has been told it stopped. Their intent wins,
+        # and falling through hands the classification to the normal path, which
+        # renders the quiet KILLED tombstone it asked for.
+        #
+        # (The bookkeeping half of this is already covered: the defensive discard
+        # at the top of this method clears a marker an early return skipped, so
+        # the concern here is the wrong outcome for THIS run, not a stale flag
+        # poisoning the next one.)
+        if memory_kill is not None and instance.id in self._intentional_kills:
+            log.warning(
+                "Memory reap for %s raced a requested stop — honouring the "
+                "stop (%s)", instance.id, memory_kill.summary(),
+            )
+            memory_kill = None
+
+        if memory_kill is not None:
+            return _memory_kill_result(
+                events, memory_kill, memory_kill_avail_mb,
+                captured_session_id, poisoning_hits,
             )
 
         # Capture stderr for error info
@@ -2476,19 +2913,6 @@ class ClaudeRunner:
         # Save git diff for build tasks
         if instance.branch and not result.is_error:
             await self._save_diff(instance)
-
-        # Copy session files back from worktree to main repo project dir
-        if instance.worktree_path:
-            await asyncio.to_thread(
-                self._copy_session_from_worktree, instance, account_dir,
-            )
-            # The CLI process has exited, so no test run from this session
-            # can still be in flight — free the per-repo test-suite mutex
-            # if this session was killed/crashed while holding it.
-            await asyncio.to_thread(
-                self._release_test_mutex,
-                instance.repo_path, instance.worktree_path,
-            )
 
         # Mirror the JSONL the CLI just wrote to every other configured
         # account.  Keeps cross-account session storage in lockstep so a
@@ -2605,6 +3029,17 @@ class ClaudeRunner:
         if getattr(instance, "_context_thrash_retry", False):
             instance._context_thrash_retry = False
             prompt = config.CONTEXT_THRASH_NUDGE + "\n\n" + prompt
+
+        # Memory-reap recovery note — same slot, same read-and-clear discipline,
+        # and for the same reason: --resume may replay the original JSONL system
+        # prompt verbatim, so the user-message slot is the only delivery that is
+        # guaranteed to reach the resumed agent. The text arrives pre-formatted
+        # from the run that was reaped, because the tree it measured is gone by
+        # the time this runs.
+        mem_note = getattr(instance, "_memory_kill_note", None)
+        if mem_note:
+            instance._memory_kill_note = None
+            prompt = mem_note + "\n\n" + prompt
 
         # API key file (only for providers that support API fallback)
         api_key_file: str | None = None
