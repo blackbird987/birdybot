@@ -291,6 +291,12 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
     if action == "watch_stop":
         watch = bot._store.get_watch(instance_id)
         if watch is None:
+            # Strip the button too — Discord keeps components live until the
+            # message is edited, so leaving it means a tap that keeps failing.
+            try:
+                await interaction.message.edit(view=None)
+            except Exception:
+                log.debug("watch stop stale-button strip failed", exc_info=True)
             await settle(interaction, "That watch has already finished or been stopped.")
             return
         bot._store.delete_watch(watch.id)

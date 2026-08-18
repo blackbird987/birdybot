@@ -122,11 +122,20 @@ check("  label", d["label"], "model fit")
 check("  prompt", d["prompt"], "Read the log.")
 
 check(
-    "done= alone is a valid trigger",
+    "done= plus log= is a valid trigger",
     (watches.parse_watch_directive(
-        '[BOT_CMD: /watch done="=== finished ==="]\n~~~watch\nGo.\n~~~\n'
+        '[BOT_CMD: /watch done="=== finished ===" log="run.log"]\n~~~watch\nGo.\n~~~\n'
     ) or {}).get("done"),
     "=== finished ===",
+)
+# A done marker with no log to look in can only ever expire — refused at parse
+# time so the caller explains it, instead of becoming a silent six-hour wait.
+check(
+    "done= without log= is refused",
+    watches.parse_watch_directive(
+        '[BOT_CMD: /watch done="=== finished ==="]\n~~~watch\nGo.\n~~~\n'
+    ),
+    None,
 )
 check(
     "no trigger (no pid, no done) is refused",
@@ -135,6 +144,18 @@ check(
     ),
     None,
 )
+
+# has_watch_directive tells "no directive" apart from "unarmable directive" —
+# the second has to be reported, and it shares the example-guards so merely
+# discussing the feature still doesn't trip it.
+ok("unarmable directive is still SEEN",
+   watches.has_watch_directive(
+       '[BOT_CMD: /watch label="nothing"]\n~~~watch\nGo.\n~~~\n') is True)
+ok("no directive at all reads as absent",
+   watches.has_watch_directive("just prose about watching a job") is False)
+ok("a quoted example is not seen as a directive",
+   watches.has_watch_directive(
+       '> [BOT_CMD: /watch pid=1]\n~~~watch\nGo.\n~~~\n') is False)
 check(
     "no ~~~watch body is refused",
     watches.parse_watch_directive("[BOT_CMD: /watch pid=1]"),
@@ -301,6 +322,16 @@ with tempfile.TemporaryDirectory() as td:
         proc.kill()
         proc.wait()
 
+    # A NAIVE armed_at (hand-edited or migrated state) used to raise TypeError
+    # inside the fire path, wedging the watch forever instead of resuming.
+    store3 = new_store(Path(td) / "c")
+    w3 = arm(store3, tmp, done="never", log="run.log")
+    w3.armed_at = "2020-01-01T00:00:00"          # no timezone offset
+    w3.timeout_at = "2020-01-01T00:01:00"
+    store3.update_watch(w3)
+    check("naive timestamps still fire rather than wedging",
+          asyncio.run(watches.poll_watches(store3, None)), 1)
+
     # A watch armed with an unreadable deadline must not wait forever.
     store2 = new_store(Path(td) / "b")
     w = arm(store2, tmp, pid=None, done="never")
@@ -308,6 +339,14 @@ with tempfile.TemporaryDirectory() as td:
     store2.update_watch(w)
     check("unreadable deadline fires rather than hanging",
           asyncio.run(watches.poll_watches(store2, None)), 1)
+
+
+# A log line is a file nobody wrote for Discord: a stray backtick would pair
+# with the progress bar's and mangle the heartbeat, and an @everyone would ping.
+ok("backticks in a log line are neutralised",
+   "`" not in watches._sanitize_excerpt("run `foo` done"))
+ok("@everyone in a log line cannot ping",
+   "@everyone" not in watches._sanitize_excerpt("WARN @everyone check this"))
 
 
 # ------------------------------------------------- invariants & clamping ---
@@ -438,6 +477,17 @@ with tempfile.TemporaryDirectory() as td:
         check("  resume prompt captured", w.prompt, "Pull the held-out numbers.")
         ok("  user is told it is watching",
            any("Watching" in t for _c, t in msg.posts))
+
+        # A /watch that cannot be armed must SAY so. Silence here is the exact
+        # dead-end the feature exists to remove: the turn thinks it is being
+        # watched, nothing is watching, and the thread dies quietly.
+        store_bad = new_store(tmp / "bad")
+        bad = ('[BOT_CMD: /watch done="finished"]\n~~~watch\nGo.\n~~~\n')
+        msg_bad = run_turn(store_bad, bad)
+        check("an unarmable /watch arms nothing",
+              store_bad.watch_for_channel("chan-1"), None)
+        ok("  but the drop is explained",
+           any("couldn't arm that watch" in t for _c, t in msg_bad.posts))
 
         # A /wake in a LATER turn retires the watch (the session changed its mind).
         run_turn(store, '[BOT_CMD: /wake delay=60]\n~~~wake\nCheck again.\n~~~\n')

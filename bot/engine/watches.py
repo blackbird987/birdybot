@@ -71,29 +71,50 @@ def parse_duration(raw: str | None, default: int) -> int:
         return default
 
 
-def parse_watch_directive(text: str) -> dict | None:
-    """Extract a ``[BOT_CMD: /watch ...]`` directive from a turn's output.
+def _unquoted_directives(text: str):
+    """Yield every ``[BOT_CMD: /watch ...]`` match that is a REQUEST.
 
-    Returns the raw kv dict plus the resume ``prompt``, or ``None`` when there
-    is no real (unquoted) directive carrying both a prompt and a trigger. A
-    directive with neither ``pid=`` nor ``done=`` has nothing to watch and is
-    treated as absent so the caller can surface it rather than arm a watch
-    that could only ever end in a timeout.
+    Skips EXAMPLES, not requests — the same three ways a directive can be a
+    quoted demo that ``lifecycle._parse_wake_directive`` guards against: a
+    quoted/code/heading line, a position inside an open ``` fence, or inline
+    backticks in prose. Discussing this feature must not arm it.
     """
     if not text:
-        return None
+        return
     for m in _WATCH_DIRECTIVE_RE.finditer(text):
         line_start = text.rfind("\n", 0, m.start()) + 1
-        # Skip EXAMPLES, not requests — the same three ways a directive can be
-        # a quoted demo that lifecycle._parse_wake_directive guards against:
-        # a quoted/code/heading line, a position inside an open ``` fence, or
-        # inline backticks in prose. Discussing this feature must not arm it.
         if _WATCH_QUOTED_PREFIX.match(text[line_start:m.start()]):
             continue
         if text.count("```", 0, m.start()) % 2 == 1:
             continue
         if m.start() > 0 and text[m.start() - 1] == "`":
             continue
+        yield m
+
+
+def has_watch_directive(text: str) -> bool:
+    """True if the turn WROTE a real /watch directive, parseable or not.
+
+    ``parse_watch_directive`` returning None is ambiguous on its own: no
+    directive at all, or one that couldn't be armed. The caller needs to tell
+    those apart, because the second case must be explained rather than met
+    with silence — an unexplained non-armed watch is exactly the dead-end
+    this feature exists to remove.
+    """
+    return any(True for _ in _unquoted_directives(text))
+
+
+def parse_watch_directive(text: str) -> dict | None:
+    """Extract a ``[BOT_CMD: /watch ...]`` directive from a turn's output.
+
+    Returns the raw kv dict plus the resume ``prompt``, or ``None`` when there
+    is no real (unquoted) directive carrying both a prompt and a usable
+    trigger. Usable means a ``pid=``, or a ``done=`` regex WITH the ``log=``
+    it is matched against — a done marker with nothing to read from can only
+    ever end in a timeout, so it is refused up front and reported by the
+    caller instead of silently becoming a six-hour wait.
+    """
+    for m in _unquoted_directives(text):
         kv: dict[str, str] = {}
         for kvm in _WATCH_KV_RE.finditer(m.group(1) or ""):
             val = kvm.group(2) if kvm.group(2) is not None else (
@@ -113,15 +134,16 @@ def parse_watch_directive(text: str) -> dict | None:
             except ValueError:
                 pid = None
         done_re = (kv.get("done") or "").strip()
-        if pid is None and not done_re:
-            # No trigger at all — nothing to poll. Skip so a later real
-            # directive can engage and the caller can explain the drop.
+        log_path = (kv.get("log") or "").strip()
+        if pid is None and not (done_re and log_path):
+            # No usable trigger: nothing to poll, or a done marker with no log
+            # to find it in. Skip so a later real directive can engage.
             continue
         return {
             "prompt": prompt,
             "pid": pid,
             "done": done_re,
-            "log": (kv.get("log") or "").strip(),
+            "log": log_path,
             "progress": (kv.get("progress") or "").strip(),
             "label": (kv.get("label") or "").strip(),
             "timeout": kv.get("timeout"),
@@ -213,10 +235,22 @@ def read_log_tail(watch: Watch) -> str:
         return ""
 
 
+def _sanitize_excerpt(raw: str) -> str:
+    """Make a line lifted out of a log file safe to paste into a message.
+
+    Two problems, both caused by echoing a file nobody wrote for Discord: a
+    stray backtick pairs with the progress bar's backticks and mangles the
+    whole heartbeat, and an ``@everyone`` in a build log would ping the server.
+    """
+    clean = raw.replace("`", "'")
+    clean = clean.replace("@everyone", "@\u200beveryone").replace("@here", "@\u200bhere")
+    return clean
+
+
 def _last_line(tail: str) -> str:
     for line in reversed(tail.splitlines()):
         if line.strip():
-            return line.strip()
+            return _sanitize_excerpt(line.strip())
     return ""
 
 
@@ -260,12 +294,30 @@ def parse_progress(tail: str, pattern: str) -> tuple[float, str] | None:
 _BAR_WIDTH = 16
 
 
-def _elapsed_secs(watch: Watch, now: datetime) -> int:
+def _parse_ts(raw: str) -> datetime | None:
+    """ISO timestamp -> aware UTC datetime, or None.
+
+    Everything this module writes is timezone-aware, but a hand-edited or
+    migrated state file can carry a NAIVE stamp — and subtracting one of those
+    from an aware ``now`` raises TypeError deep inside the fire path, where it
+    would wedge the watch permanently instead of resuming the thread. Assume
+    UTC for a naive stamp rather than letting the arithmetic explode.
+    """
     try:
-        armed = datetime.fromisoformat(watch.armed_at)
+        dt = datetime.fromisoformat(raw)
     except (TypeError, ValueError):
+        return None
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+
+
+def _elapsed_secs(watch: Watch, now: datetime) -> int:
+    armed = _parse_ts(watch.armed_at)
+    if armed is None:
         return 0
-    return max(0, int((now - armed).total_seconds()))
+    try:
+        return max(0, int((now - armed).total_seconds()))
+    except (TypeError, OverflowError, OSError):
+        return 0
 
 
 def render_heartbeat(watch: Watch, now: datetime) -> str:
@@ -349,10 +401,8 @@ def _fire_reason(watch: Watch, now: datetime) -> str | None:
                 log.debug("watch done regex invalid: %r", watch.done_re)
     if watch.pid and not process_alive(watch.pid, watch.pid_start):
         return "exited"
-    try:
-        if now >= datetime.fromisoformat(watch.timeout_at):
-            return "timeout"
-    except (TypeError, ValueError):
+    deadline = _parse_ts(watch.timeout_at)
+    if deadline is None or now >= deadline:
         return "timeout"          # unreadable deadline -> don't wait forever
     return None
 
@@ -409,7 +459,12 @@ async def poll_watches(
             log.exception("Watch %s check failed — leaving armed", watch.id)
             continue
         if reason is None:
-            await _beat(store, messenger, watch, now)
+            try:
+                await _beat(store, messenger, watch, now)
+            except Exception:
+                # A heartbeat is cosmetic; aborting the loop here would leave
+                # every watch after this one unpolled for the whole tick.
+                log.debug("watch %s heartbeat pass failed", watch.id, exc_info=True)
             continue
         # Fire: hand off to the ordinary wake path and stand down.
         try:
@@ -446,14 +501,9 @@ async def _beat(
     """Refresh (or first-post) the heartbeat message if it's due."""
     if messenger is None:
         return
-    if watch.last_beat_at:
-        try:
-            due = datetime.fromisoformat(watch.last_beat_at) + timedelta(
-                seconds=watch.every_secs)
-            if now < due:
-                return
-        except (TypeError, ValueError):
-            pass
+    last = _parse_ts(watch.last_beat_at) if watch.last_beat_at else None
+    if last is not None and now < last + timedelta(seconds=watch.every_secs):
+        return
     body = render_heartbeat(watch, now)
     try:
         if watch.heartbeat_msg_id:

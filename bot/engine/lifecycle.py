@@ -1618,6 +1618,21 @@ async def check_wake_request(
             watch.id, ctx.channel_id, watch.pid, watch.done_re, watch.timeout_at,
         )
         return
+    if watches.has_watch_directive(final_text):
+        # A /watch was WRITTEN but couldn't be armed. Staying silent here is
+        # the exact dead-end this feature removes — the turn believes it is
+        # being watched and nothing is. Say what was missing, then fall
+        # through: a /wake in the same turn is still a valid fallback.
+        log.info(
+            "Unarmable /watch directive in thread %s — nothing watched",
+            ctx.channel_id,
+        )
+        await _notice(
+            "(I couldn't arm that watch — a [BOT_CMD: /watch] needs a `pid=`, "
+            "or a `done=` marker together with the `log=` to find it in, plus "
+            "a `~~~watch` body holding the prompt to resume with. Nothing is "
+            "being watched.)"
+        )
 
     # Resolve the wake request: a [BOT_CMD: /wake] directive (primary) takes
     # precedence over the legacy data/wakes/<id>.json file (kept so a session on

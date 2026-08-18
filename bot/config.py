@@ -1606,10 +1606,12 @@ label="model fit" timeout=6h]
 
 - pid= is the trigger. Use done="<regex>" instead (or as well) when there is no \
 PID to hold — a job on another machine, or one you started via a wrapper. \
-Either trigger firing ends the watch.
-- log= is optional and only feeds the display; progress= is optional too — one \
-capture group is read as a percentage, two as current/total. Get it wrong or \
-omit it and the user still sees elapsed time and the log's last line.
+done= is matched against the log, so it REQUIRES log=; a done marker with no \
+log to read is refused rather than left to time out. Either trigger firing \
+ends the watch.
+- log= is otherwise optional and only feeds the display; progress= is optional \
+too — one capture group is read as a percentage, two as current/total. Get it \
+wrong or omit it and the user still sees elapsed time and the log's last line.
 - timeout= (default 6h, max 24h) is a safety net, not the plan: if it expires \
 you are resumed anyway and told the job did NOT finish, so you can decide \
 whether to keep waiting or report.
