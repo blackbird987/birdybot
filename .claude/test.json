@@ -76,7 +76,8 @@
     "meeting_watch": "python scripts/test_meeting_watch.py",
     "attachments": "python scripts/test_attachments.py",
     "pending_image_lifecycle": "python scripts/test_pending_image_lifecycle.py",
-    "memory_guard": "python scripts/test_memory_guard.py"
+    "memory_guard": "python scripts/test_memory_guard.py",
+    "orchestrator_join": "python scripts/test_orchestrator_join.py"
   },
 
   "auth": {

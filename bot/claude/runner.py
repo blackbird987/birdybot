@@ -3438,6 +3438,10 @@ class ClaudeRunner:
             parts.append(config.SPAWN_CAPPED_NOTICE)
         else:
             parts.append(config.SPAWN_CONTEXT)
+            # How a wave reports back, and how to answer a child that parked
+            # on a question. Depth-0 only: a spawned thread has no children.
+            parts.append(config.SPAWN_JOIN_CONTEXT)
+            parts.append(config.REPLY_CONTEXT)
         # /chain handoff — available at any depth (a spawned thread can still
         # ship its own work), so it's not gated behind the spawn depth check.
         parts.append(config.CHAIN_CONTEXT)

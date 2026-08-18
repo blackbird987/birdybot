@@ -794,6 +794,50 @@ class ClaudeBot(discord.Client):
 
         ctx.notify_parent_on_finalize = _notify_parent
 
+        # [BOT_CMD: /reply] — deliver a parent's answer into one of its own
+        # spawned children. The engine has already checked that the target is
+        # a thread THIS session spawned, so this closure only has to make the
+        # thread reachable and dispatch.
+        async def _reply_to_child(child_thread_id: str, prompt: str) -> bool:
+            lookup = _bot._forums.thread_to_project(child_thread_id)
+            if lookup is None:
+                log.warning("/reply — no thread mapping for child %s", child_thread_id)
+                return False
+            child_ch = _bot.get_channel(int(child_thread_id))
+            if isinstance(child_ch, discord.Thread) and child_ch.archived:
+                # A child that finished and got archived can still be answered;
+                # posting into it is what reopens it.
+                try:
+                    await child_ch.edit(archived=False)
+                except discord.HTTPException:
+                    log.debug("Could not unarchive child thread %s", child_thread_id)
+
+            async def _dispatch() -> None:
+                try:
+                    # source stays non-"user_message" so answering a child does
+                    # not reset that child's own spawn-wave counter.
+                    await _bot._replay_to_thread(
+                        child_thread_id, prompt, source="parent_reply",
+                    )
+                except Exception:
+                    log.exception("/reply dispatch failed for child %s", child_thread_id)
+
+            # Detached: the parent's turn is finalizing right now and must not
+            # block on the child's whole run.
+            asyncio.create_task(_dispatch())
+            return True
+
+        ctx.reply_to_child = _reply_to_child
+
+        # Orchestrator join: the /spawn dispatch loop finished, so this
+        # thread's wave roster is final. Re-check it in case every child
+        # already reported while the loop was still creating threads.
+        async def _wave_sealed() -> None:
+            from bot.discord.orchestrator import evaluate_wave_now
+            await evaluate_wave_now(_bot, _cid)
+
+        ctx.on_spawn_wave_sealed = _wave_sealed
+
         # Orchestrator wave-cap accessors. Both look up the thread's ForumProject
         # entry on demand so they reflect the latest state.json contents and
         # never operate on a stale snapshot.
