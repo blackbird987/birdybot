@@ -368,7 +368,11 @@ def _render_wave(children: list[ChildState], *, partial: bool) -> tuple[str, str
         excerpt = _excerpt_of(c)
         if excerpt:
             post_lines.append(excerpt)
-            prompt_lines.append(f"  Opens with: {excerpt}")
+            # Indent every line of the excerpt, not just the first — an
+            # unindented continuation line reads as a new list item and makes
+            # a two-child wave look like a six-child one.
+            body = excerpt.replace("\n", "\n  ")
+            prompt_lines.append(f"  Opens with: {body}")
         elif c.state in ("pending", "running", "gone"):
             prompt_lines.append("  No report — this child never reported back.")
 
