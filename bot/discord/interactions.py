@@ -285,6 +285,33 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
     except discord.InteractionResponded:
         pass  # already acked elsewhere (e.g. double-dispatch) — continue
 
+    # --- Stop watching a job (watch_stop:<watch_id>) ---
+    # The trailing portion is a watch id, not an instance id. Disarming leaves
+    # the job itself alone — it only means "stop resuming me when it ends".
+    if action == "watch_stop":
+        watch = bot._store.get_watch(instance_id)
+        if watch is None:
+            await settle(interaction, "That watch has already finished or been stopped.")
+            return
+        bot._store.delete_watch(watch.id)
+        label = watch.label or (f"pid {watch.pid}" if watch.pid else "the job")
+        log.info("Watch %s stopped by user in thread %s", watch.id, watch.channel_id)
+        try:
+            await interaction.message.edit(
+                content=f"⏹ Stopped watching **{label}** — the job itself is untouched.",
+                view=None,
+            )
+        except Exception:
+            log.debug("watch stop edit failed", exc_info=True)
+        # The thread is no longer busy, so let the ordinary tag/idle rules
+        # resume: without this it keeps the "active" tag it was holding.
+        try:
+            from bot.discord import tags
+            await tags.try_apply_tags_after_run(bot, str(interaction.channel_id))
+        except Exception:
+            log.debug("watch stop tag refresh failed", exc_info=True)
+        return
+
     # --- Fleet ship roster (Confirm / Cancel) — trailing portion is a token ---
     if action in ("fleet_confirm", "fleet_cancel"):
         from bot.discord import fleet

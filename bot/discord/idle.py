@@ -32,6 +32,20 @@ def _channel_has_running_task(bot: ClaudeBot, channel_id: str) -> bool:
     return False
 
 
+def _channel_has_armed_watch(bot: ClaudeBot, channel_id: str) -> bool:
+    """True while this thread is waiting on a watched job.
+
+    The turn has ended, so nothing else here counts it as busy — but a 💤 on a
+    thread the bot is actively polling for is the exact wrong signal, and the
+    heartbeat message editing itself under a sleeping title reads as broken.
+    """
+    try:
+        from bot.engine import watches
+        return watches.has_armed_watch(bot._store, channel_id)
+    except Exception:
+        return False
+
+
 def _channel_has_pending_prompt(channel_id: str) -> bool:
     """True if an interactive Queued embed with live buttons exists.
 
@@ -80,6 +94,9 @@ async def _apply_sleep(bot: ClaudeBot, channel_id: str, gen: int) -> None:
     # Don't sleep if a task is running, OR a pending-prompt embed has live
     # buttons the user might tap (archived threads reject interactions).
     if _channel_has_running_task(bot, channel_id):
+        bot._idle_timers.pop(channel_id, None)
+        return
+    if _channel_has_armed_watch(bot, channel_id):
         bot._idle_timers.pop(channel_id, None)
         return
     if _channel_has_pending_prompt(channel_id):

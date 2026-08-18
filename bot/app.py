@@ -773,8 +773,16 @@ async def run() -> None:
         ok = await discord_bot._replay_to_thread(channel_id, wake_prompt, source="wake")
         return "done" if ok else "drop"
 
+    def _watch_messenger():
+        # Late-bound like on_self_wake above: discord_bot is assigned further
+        # down this function, and this is only ever called on the 30s tick.
+        if discord_bot is None or not discord_bot._ready_event.is_set():
+            return None
+        return discord_bot.messenger
+
     scheduler = Scheduler(
         store, runner, on_result=on_schedule_result, on_wake=on_self_wake,
+        messenger_getter=_watch_messenger,
     )
     scheduler.recalculate_next_runs()
 

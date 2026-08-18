@@ -11,7 +11,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from bot import paths
-from bot.claude.types import ChainPhaseState, Instance, InstanceStatus, InstanceType, Schedule
+from bot.claude.types import (
+    ChainPhaseState,
+    Instance,
+    InstanceStatus,
+    InstanceType,
+    Schedule,
+    Watch,
+)
 from bot.engine.auto_fix import AutoFixState
 from bot.engine.deploy import DeployState
 
@@ -116,6 +123,11 @@ class StateStore:
         self._context: str | None = None
         self._aliases: dict[str, str] = {}      # name -> prompt
         self._schedules: dict[str, Schedule] = {}
+        # Event-triggered self-wakes (see bot/engine/watches.py). Kept apart
+        # from _schedules because they are polled on a condition, not a
+        # clock — a watch only becomes a Schedule at the moment it trips.
+        self._watches: dict[str, Watch] = {}
+        self._watch_counter: int = 0
         self._active_session_id: str | None = None  # Current conversation session
         self._verbose_level: int = 1  # 0=silent, 1=normal, 2=detailed
         self._effort: str = "high"  # reasoning effort: low/medium/high/max
@@ -249,6 +261,14 @@ class StateStore:
             for d in data.get("schedules", []):
                 sched = Schedule.from_dict(d)
                 self._schedules[sched.id] = sched
+            self._watch_counter = data.get("watch_counter", 0)
+            for d in data.get("watches", []):
+                try:
+                    w = Watch.from_dict(d)
+                except Exception:
+                    log.warning("Dropping malformed watch record", exc_info=True)
+                    continue
+                self._watches[w.id] = w
             log.info("Loaded state: %d instances, %d repos, %d schedules",
                      len(self._instances), len(self._repos), len(self._schedules))
         except Exception:
@@ -324,6 +344,8 @@ class StateStore:
             "model_cooldowns": self._model_cooldowns,
             "account_alerts": self._account_alerts,
             "schedules": [s.to_dict() for s in self._schedules.values()],
+            "watches": [w.to_dict() for w in self._watches.values()],
+            "watch_counter": self._watch_counter,
         }
         return json.dumps(data, separators=(",", ":"))
 
@@ -995,6 +1017,63 @@ class StateStore:
     def update_schedule(self, sched: Schedule) -> None:
         self._schedules[sched.id] = sched
         self.save()
+
+    # --- Watches (event-triggered self-wakes) -----------------------------
+
+    def add_watch(self, watch: Watch) -> Watch:
+        """Arm an event-triggered self-wake for ``watch.channel_id``.
+
+        Same one-per-thread invariant as ``add_wake``: a thread has a single
+        thing it is waiting on, so a fresh watch supersedes any existing one
+        rather than accumulating pollers that would each fire a resume.
+        """
+        for wid in [w.id for w in self._watches.values()
+                    if w.channel_id == watch.channel_id]:
+            del self._watches[wid]
+        self._watch_counter += 1
+        watch.id = f"w-{self._watch_counter:03d}"
+        self._watches[watch.id] = watch
+        self.save()
+        return watch
+
+    def cancel_wakes(self, channel_id: str) -> int:
+        """Drop any pending self-wake for ``channel_id``. Returns how many.
+
+        A thread waits on ONE thing. ``add_wake`` already supersedes wakes with
+        wakes; this is the cross-mechanism half — arming a watch must retire a
+        clock-based wake left over from an earlier turn, or the timer fires
+        while the job it replaced is still running.
+        """
+        stale = [sid for sid, s in self._schedules.items()
+                 if s.resume_thread and s.channel_id == channel_id]
+        for sid in stale:
+            del self._schedules[sid]
+        if stale:
+            self.save()
+        return len(stale)
+
+    def list_watches(self) -> list[Watch]:
+        return list(self._watches.values())
+
+    def get_watch(self, wid: str) -> Watch | None:
+        return self._watches.get(wid)
+
+    def watch_for_channel(self, channel_id: str) -> Watch | None:
+        for w in self._watches.values():
+            if w.channel_id == channel_id:
+                return w
+        return None
+
+    def update_watch(self, watch: Watch) -> None:
+        self._watches[watch.id] = watch
+        self.save()
+
+    def delete_watch(self, wid: str) -> bool:
+        if wid in self._watches:
+            del self._watches[wid]
+            self.save()
+            return True
+        return False
 
     # --- Stats ---
 

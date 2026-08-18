@@ -25,10 +25,15 @@ class Scheduler:
         runner: ClaudeRunner,
         on_result: Callable | None = None,
         on_wake: Callable | None = None,
+        messenger_getter: Callable | None = None,
     ) -> None:
         self._store = store
         self._runner = runner
         self._on_result = on_result  # async callback(instance, result, changed)
+        # () -> Messenger | None, resolved lazily because the Discord client is
+        # built after the scheduler. Only the watch heartbeat needs it; a None
+        # return means "no chat surface", and watches still fire without one.
+        self._messenger_getter = messenger_getter
         # async callback(channel_id, prompt) -> str for thread-bound self-wakes;
         # returns "busy" (re-arm), "drop"/"done" (consume). See _execute_schedule.
         self._on_wake = on_wake
@@ -56,6 +61,10 @@ class Scheduler:
                 await self._check_schedules()
             except Exception:
                 log.exception("Scheduler error")
+            try:
+                await self._check_watches()
+            except Exception:
+                log.exception("Watch poll error")
             await asyncio.sleep(30)
 
     async def _check_schedules(self) -> None:
@@ -71,6 +80,26 @@ class Scheduler:
 
             if now >= next_run:
                 await self._execute_schedule(sched)
+
+    async def _check_watches(self) -> None:
+        """Poll event-triggered self-wakes (see bot/engine/watches.py).
+
+        Runs AFTER _check_schedules on the same tick, so a watch that trips
+        here is picked up as a due wake on the next tick — under a minute
+        between the job exiting and the session resuming, with no second
+        polling loop in the process.
+        """
+        from bot.engine import watches
+
+        if not self._store.list_watches():
+            return
+        messenger = None
+        if self._messenger_getter is not None:
+            try:
+                messenger = self._messenger_getter()
+            except Exception:
+                log.debug("watch messenger lookup failed", exc_info=True)
+        await watches.poll_watches(self._store, messenger)
 
     async def _execute_schedule(self, sched: Schedule) -> None:
         # Thread-bound self-wake: resume the originating thread's session via
