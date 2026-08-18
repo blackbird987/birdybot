@@ -387,24 +387,35 @@ async def run_instance(
         except Exception:
             log.debug("auto-merge veto scheduling failed for %s", inst.id, exc_info=True)
 
-        # Orchestrator: if this thread was spawned by /spawn, post a
-        # COMPLETED/FAILED callback back into the parent thread with a
-        # Resume button. Only fires on terminal-success/failure states —
-        # KILLED (user-cancelled) does NOT callback. needs_input also
-        # suppresses: `finalize_run` flips status to COMPLETED whenever
-        # the model paused with a question (lifecycle.py:480-484), so a
-        # status-only check would falsely tell the parent "child done"
-        # while the child is actually waiting on a human reply. Wrapped
-        # so a post failure (parent archived/deleted, Discord error)
-        # never aborts child finalize.
-        if (ctx.notify_parent_on_finalize is not None
-                and not result.needs_input
-                and inst.status in (InstanceStatus.COMPLETED, InstanceStatus.FAILED)):
-            try:
-                status_label = "COMPLETED" if inst.status == InstanceStatus.COMPLETED else "FAILED"
-                await ctx.notify_parent_on_finalize(status_label, display_text)
-            except Exception:
-                log.exception("notify_parent_on_finalize failed for inst %s", inst.id)
+        # Orchestrator: if this thread was spawned by /spawn, tell the parent
+        # this child just landed so it can re-evaluate its wave.
+        #
+        # needs_input gets its OWN label rather than being suppressed. It is
+        # not a completion — `finalize_run` flips status to COMPLETED whenever
+        # the model paused with a question (lifecycle.py:480-484), so calling
+        # it done would tell the parent the child finished when it is actually
+        # parked. But staying silent (the old behaviour) meant a child could
+        # sit on a question indefinitely with nobody told: the parent's wave
+        # stalled until its timeout, and the user only found out by noticing.
+        # BLOCKED lets the parent — which wrote this child's brief — answer it.
+        #
+        # KILLED still doesn't call back: an intentional kill already returned
+        # above, and a user-cancelled child is reported by the wave join as a
+        # settled non-result. Wrapped so a post failure (parent archived or
+        # deleted, Discord error) never aborts child finalize.
+        if ctx.notify_parent_on_finalize is not None:
+            status_label = None
+            if result.needs_input:
+                status_label = "BLOCKED"
+            elif inst.status == InstanceStatus.COMPLETED:
+                status_label = "COMPLETED"
+            elif inst.status == InstanceStatus.FAILED:
+                status_label = "FAILED"
+            if status_label is not None:
+                try:
+                    await ctx.notify_parent_on_finalize(status_label, display_text)
+                except Exception:
+                    log.exception("notify_parent_on_finalize failed for inst %s", inst.id)
 
         # Track API fallback spending for daily budget cap
         if result.api_fallback_used and result.cost_usd:

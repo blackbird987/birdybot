@@ -543,6 +543,30 @@ WAKE_CLAIM_RE = re.compile(
 TURN_COMPLETE_SENTINEL = "[TURN_COMPLETE]"
 MAX_CONSEC_NUDGES: int = 2
 
+# --- Orchestrator join (parent waits for its whole spawn wave) ---------------
+# A parent that fans out N children used to get N separate callbacks, each with
+# its own Resume button, so the human was the join point. The wave is now
+# reported ONCE, when every child has settled. "Settled" is derived per child
+# from its own thread/instance records (terminal status and not parked on a
+# question) — never from a stored roster that a reboot could desynchronise.
+#
+# A child that dies without ever finalizing (crash, kill during a reboot) would
+# otherwise hold the wave open forever, so the autonomy loop releases a partial
+# wave once this many minutes have passed since the parent dispatched it. The
+# release names the children that never came back. 0 disables the partial
+# release — a wave then waits for its children however long they take. Either
+# way a wave nobody can act on any more (12h+, including every wave recorded
+# before this join existed) is retired silently rather than reported.
+ORCH_WAVE_TIMEOUT_MIN: int = int(os.getenv("ORCH_WAVE_TIMEOUT_MIN", "45"))
+# Resume the parent automatically once its wave closes, instead of waiting for
+# a "Resume parent" tap. Safe against runaway because the resumed turn cannot
+# spawn past _MAX_SPAWN_WAVES (bot/engine/commands.py) — a callback resume does
+# not reset that counter. A PARTIAL (timed-out) release never auto-resumes:
+# deciding whether to proceed without a straggler is a human call.
+ORCH_AUTO_RESUME: bool = os.getenv("ORCH_AUTO_RESUME", "1").strip().lower() not in (
+    "0", "false", "no", "off",
+)
+
 UNATTENDED_TURN_PROTOCOL = """\
 
 --- Unattended Turn — You MUST Signal How It Ends ---
@@ -747,6 +771,41 @@ Rules:
 - Up to 5 /spawn directives may run per response. To fan out parallel subsessions, emit multiple directive+body pairs back-to-back — each directive IMMEDIATELY followed by its own ~~~spawn body, then the next directive. A directive without its own body block is skipped; directives beyond 5 are ignored.
 - One short sentence in your response telling the user what's happening is enough; the substance lives in the ~~~spawn blocks. Don't restate the prompt bodies in prose — that's just noise.
 - The bot will reject a directive if: this thread was itself spawned (depth-1 cap), autopilot is running/paused on this thread, the repo is unknown, the body exceeds 32 KiB, or this thread has already spawned 12 children since your last real user message (run cap).
+"""
+
+# Answering your own children. Appended alongside SPAWN_CONTEXT (depth-0 only):
+# a spawned thread has no children of its own, and the engine refuses a /reply
+# whose target it did not spawn, so telling a depth-1 thread about this would
+# only produce directives that get rejected.
+REPLY_CONTEXT = """
+Answering a child session you spawned:
+When a child you spawned stops and asks a question, the bot tells you — not the user. You wrote that child's brief, so you are usually the one who can answer it. Reply to it directly instead of handing the question back to the user.
+
+Format (directive on its own line, immediately followed by its ~~~reply body):
+
+[BOT_CMD: /reply thread=1536292012725248061]
+~~~reply
+Your answer to the child, written as a message to it. Same shape as any instruction you would have put in its original prompt.
+~~~
+
+Rules:
+- `thread` (required): the child's thread id, exactly as given to you in the "waiting on an answer" notice.
+- You may only reply to threads YOU spawned. Any other id is refused.
+- Tilde fences (`~~~reply` / `~~~`), never backticks — same reason as /spawn.
+- Up to 5 /reply directives per response, each with its own adjacent body.
+- Hand the question to the user ONLY when the answer genuinely depends on something only they know (a preference, a credential, a business decision). A question about scope, approach, or which file to touch is yours to answer.
+- Your spawn wave stays open until that child finishes, so answering it is what lets the wave close.
+"""
+
+# Spawn-wave join. Appended alongside SPAWN_CONTEXT so a parent knows the
+# report it will be woken with is a set of file paths, not chat text, and that
+# it is expected to go read them.
+SPAWN_JOIN_CONTEXT = """
+How your spawned children report back:
+- You are NOT told about children one at a time. The bot waits until every child in the wave has finished, then wakes you once with all of them.
+- That wake-up lists each child's status and the absolute path to its FULL report file. The inline excerpt is only the report's opening lines — read the files before drawing conclusions or summarizing for the user.
+- A child that stopped to ask a question does not close the wave. You get a separate notice for it and are expected to answer it with /reply.
+- If a child never came back at all, the wave is released without it and says so. Report that gap plainly rather than filling it in.
 """
 
 # Depth-1 variant. Appended when instance.spawn_depth >= 1 — this thread was

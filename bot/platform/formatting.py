@@ -128,6 +128,9 @@ def _render_directive_chip(verb: str, args: str) -> str | None:
         ]
         if kv.get("title"):
             parts.append(f'"{_chip_value(kv["title"])}"')
+    elif verb == "reply":
+        if kv.get("thread"):
+            parts.append(f"answering <#{_chip_value(kv['thread'])}>")
     elif verb == "chain":
         # `preset=ship` and a bare `ship` are both accepted by the dispatcher.
         preset = kv.get("preset") or (args or "").strip().split(" ")[0]

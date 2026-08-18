@@ -272,6 +272,18 @@ class RequestContext:
     # the orchestrator loop can continue. Discord wires this; Telegram leaves
     # it None (no-op). Signature: (status, summary_text) -> None.
     notify_parent_on_finalize: Callable[[str, str], Awaitable[None]] | None = None
+    # [BOT_CMD: /reply] — platform-supplied callback that delivers a message
+    # into an ALREADY-EXISTING thread this session spawned, so a parent can
+    # answer a child that parked on a question instead of the human having to.
+    # The engine enforces the "only your own children" restriction before
+    # calling; the platform just dispatches. Signature:
+    # (child_thread_id, prompt) -> delivered?
+    reply_to_child: Callable[[str, str], Awaitable[bool]] | None = None
+    # Orchestrator join: called once this response's /spawn dispatch loop has
+    # handed out every child it is going to. The platform seals the wave and
+    # re-checks it, which closes the case where every child finished before
+    # the loop did (nothing else would be left to trigger the join).
+    on_spawn_wave_sealed: Callable[[], Awaitable[None]] | None = None
     # Orchestrator wave-cap accessor: returns the current spawn count for THIS
     # thread (the thread issuing the /spawn directive). Used by the engine to
     # enforce _MAX_SPAWN_WAVES across orchestration turns. Returns 0 if the

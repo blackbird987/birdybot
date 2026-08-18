@@ -899,9 +899,29 @@ async def run() -> None:
                         await _fire_scheduled_merge(store, runner, discord_bot, iid, meta)
                     except Exception:
                         log.exception("Scheduled merge fire failed for %s", iid)
+                ticks += 1
+                # Orchestrator: release spawn waves whose children never all
+                # came back — killed during a reboot, or dead before recording
+                # a session. The join is derived per child, so it self-corrects
+                # for everything EXCEPT a child that never reaches a terminal
+                # state at all; without this sweep such a wave would hold its
+                # parent open forever, which is worse than the per-child
+                # callbacks it replaced. Deliberately outside the ship-sweep
+                # overlap guard: this is a cheap scan and must not be starved
+                # by a fleet ship that runs for minutes.
+                if ticks % 5 == 0:
+                    try:
+                        from bot.discord.orchestrator import sweep_stale_waves
+                        n_released = await sweep_stale_waves(discord_bot)
+                        if n_released:
+                            log.info(
+                                "Orchestrator: released %d stale spawn wave(s)",
+                                n_released,
+                            )
+                    except Exception:
+                        log.exception("Stale spawn-wave sweep failed")
                 # Ship sweep every ~5 min, guarded against overlap (a fleet
                 # ship can run for minutes and may self-deploy/reboot).
-                ticks += 1
                 if ticks % 5 == 0 and not sweep_running["v"]:
                     sweep_running["v"] = True
 

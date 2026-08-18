@@ -243,6 +243,26 @@ class Instance:
     # Persisted alongside the instance so post-hoc inspection of state.json
     # shows which parent instance launched which child threads.
     spawn_dispatched_thread_ids: list[str] = field(default_factory=list)
+    # Orchestrator join: set once this instance's spawn wave has been reported
+    # back to the thread (all children settled, or the wave timed out and was
+    # released partially). The join itself is DERIVED — each child's state is
+    # recomputed from its own thread/instance records, so nothing here can go
+    # stale — but the release is a one-shot side effect (a post + an
+    # auto-resume), and this flag is what makes it idempotent across the
+    # per-child finalize callbacks and the timeout sweep racing each other.
+    spawn_wave_released: bool = False
+    # Orchestrator join: set once the dispatch loop that created this wave has
+    # finished handing out ALL its children. Children are appended to the
+    # roster above one at a time, so a child that fails instantly could
+    # otherwise finalize while later siblings are still being created — the
+    # join would see a roster of one, call it complete, and silently drop the
+    # rest. A wave is not joinable until it is sealed.
+    spawn_wave_sealed: bool = False
+    # Orchestrator join: how many times a child of THIS wave parking on a
+    # question has auto-resumed the parent. A parent answers its child, the
+    # child can ask again, and that exchange has no natural end — so the wave
+    # carries its budget, like every other self-driving loop in the bot.
+    spawn_blocked_resumes: int = 0
     _accounts_tried: set[str] = field(default_factory=set)  # Ephemeral: tracks accounts tried this run (not persisted)
     # Ephemeral: True when on_verify_release fail-closed because the verifier
     # output was unparseable (vs real phantom_bullets in the verdict). Read by
@@ -348,6 +368,9 @@ class Instance:
             "finishup_nudges": self.finishup_nudges,
             "spawn_depth": self.spawn_depth,
             "spawn_dispatched_thread_ids": self.spawn_dispatched_thread_ids,
+            "spawn_wave_released": self.spawn_wave_released,
+            "spawn_wave_sealed": self.spawn_wave_sealed,
+            "spawn_blocked_resumes": self.spawn_blocked_resumes,
         }
 
     @classmethod
@@ -428,6 +451,9 @@ class Instance:
                 or ([d["spawn_dispatched_thread_id"]]
                     if d.get("spawn_dispatched_thread_id") else [])
             ),
+            spawn_wave_released=d.get("spawn_wave_released", False),
+            spawn_wave_sealed=d.get("spawn_wave_sealed", False),
+            spawn_blocked_resumes=d.get("spawn_blocked_resumes", 0),
         )
 
 
