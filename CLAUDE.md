@@ -85,6 +85,45 @@ to the parent instead of making the user do it.
   blocked child. Target must be in this session's own dispatched ids.
 - Harness: `python scripts/test_orchestrator_join.py`
 
+## Watches — event-triggered self-wake (`bot/engine/watches.py`)
+
+A self-wake is a timer; a **watch** is the same wake with an *event* as its
+trigger. A session that starts a long detached job arms one instead of guessing
+a delay, and the thread stays visibly busy until the job actually ends.
+
+- Directive (parsed post-turn, same rules as `/wake` and `/spawn`):
+  ```
+  [BOT_CMD: /watch pid=959988 log="artifacts/run.log" label="sculpt fit" progress="(\d+)/(\d+) frames" every=120 timeout=6h]
+  ~~~watch
+  The sculpt fit finished. Read the tail of artifacts/run.log, ...
+  ~~~
+  ```
+  Capture the pid when launching: `setsid nohup ./job.sh > run.log 2>&1 < /dev/null & echo $!`
+- Triggers: `pid=` (process gone) or `done=` (regex appears in the log tail).
+  At least one is required, plus a non-empty body — otherwise nothing is armed.
+  `timeout=` is a safety net, never the plan.
+- **Only an explicit directive arms a watch.** Heuristic wake-arming was ripped
+  out twice for firing on prose that merely *discussed* a job — don't reintroduce
+  it here.
+- PID reuse is defended by capturing field 22 of `/proc/<pid>/stat` (start time)
+  at arm time; a mismatched token reads as "gone", not "still running". Zombie
+  (`Z`) also counts as finished.
+- Firing does **not** add a second resume path: the poller calls
+  `store.add_wake(..., next_run_at=now)`, so a tripped watch becomes an ordinary
+  due wake and inherits the runaway cap, busy re-arm and unattended-turn nudge.
+- One thing per thread: `add_watch` supersedes an existing watch, arming a watch
+  calls `cancel_wakes`, and arming a `/wake` deletes an armed watch.
+- Busy indication while it waits: the `active` forum tag is retained
+  (`bot/discord/tags.py`), the 💤 idle prefix is suppressed (`bot/discord/idle.py`),
+  and one heartbeat message **edits itself in place** (never re-posts — thread
+  name edits are rate-limited, message edits are not) with a progress bar,
+  elapsed time, log path, last log line and a "Stop watching" button
+  (`watch_stop` in `bot/discord/interactions.py`).
+- Persisted in `data/state.json` under `watches` / `watch_counter`, so a watch
+  survives a bot restart. Polled by `Scheduler._check_watches` each 30s tick.
+- Knobs: `WATCH_*` in `bot/config.py`. Harness:
+  `python scripts/test_watch.py`
+
 ## Computational Sensors (`.claude/sensors.json`)
 
 Chains run a deterministic sensor step (build → **sensors** → review_code → …)

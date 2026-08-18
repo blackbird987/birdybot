@@ -80,6 +80,37 @@ _check("shows the why", "collecting the last Gemini fixture" in _wake_out)
 _check("chip fits one line", all(len(c) <= _CHIP_MAX + 3 for c in _chips(_wake_out)))
 
 # ---- delay wording matches the confirmation notice ----
+# ---- /watch: the job being waited on, not a guessed delay ----
+print("/watch collapses to one line naming the job and its pid")
+_watch_raw = (
+    "Kicked the fit off in the background.\n\n"
+    '[BOT_CMD: /watch pid=959988 log="artifacts/sculpt/run.log" '
+    'progress="step (\\d+)/(\\d+)" label="sculpt fit (both arms)" timeout=6h]\n'
+    "~~~watch\n"
+    "Read the log and pull held-out IoU for both arms.\n"
+    "~~~\n\n"
+    "Nothing else to do until it lands."
+)
+_watch_out = collapse_bot_directives(_watch_raw)
+_check("watch: no BOT_CMD left", "[BOT_CMD:" not in _watch_out)
+_check("watch: no tilde body left", "~~~" not in _watch_out)
+_check("watch: prose above survives", _watch_out.startswith("Kicked the fit off"))
+_check("watch: prose below survives", _watch_out.rstrip().endswith("until it lands."))
+_check("watch: exactly one chip", len(_chips(_watch_out)) == 1)
+_check("watch: names the command", "`/watch`" in _watch_out)
+_check("watch: names the job", "sculpt fit (both arms)" in _watch_out)
+_check("watch: shows the pid", "pid 959988" in _watch_out)
+_check("watch: chip fits one line",
+       all(len(c) <= _CHIP_MAX + 3 for c in _chips(_watch_out)))
+
+_watch_done = collapse_bot_directives(
+    '[BOT_CMD: /watch done="=== finished ===" label="remote run"]\n'
+    "~~~watch\nGo.\n~~~\n"
+)
+_check("watch: done-marker trigger described",
+       "until done marker" in _watch_done)
+
+
 print("Chip delay wording matches check_wake_request's notice")
 _check("720s renders as 12 min", format_delay_secs(720) == "12 min")
 _check("chip reuses that exact string", f"in {format_delay_secs(720)}" in _wake_out)

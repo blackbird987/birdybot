@@ -608,6 +608,89 @@ class ChainPhaseState:
 
 
 @dataclass
+class Watch:
+    """An event-triggered self-wake: resume a thread when a JOB finishes.
+
+    A ``Schedule`` with ``resume_thread=True`` fires on a clock — the session
+    guesses a delay. A ``Watch`` fires on an EVENT: the watched process exits,
+    or a done-marker appears in its log. When it trips it does not invent a new
+    resume path — it calls ``store.add_wake`` and becomes exactly such a
+    Schedule, so the runaway cap, the busy re-arm, ``_replay_to_thread`` and
+    the unattended-turn protocol are all inherited unchanged.
+
+    ``pid_start`` is field 22 of ``/proc/<pid>/stat`` (process start time in
+    clock ticks) captured at arm time. PIDs are recycled; comparing the start
+    token means a recycled PID reads as "gone" rather than as "still running",
+    which would otherwise hold a thread until the safety timeout.
+    """
+    id: str                      # "w-001"
+    channel_id: str
+    prompt: str                  # resume prompt (the ~~~watch body)
+    label: str = ""
+    pid: int | None = None
+    pid_start: str = ""          # /proc/<pid>/stat field 22 at arm time
+    # True when the pid was ALREADY gone the moment the watch was armed. That
+    # is either an honest "it finished during my turn" or a captured WRAPPER
+    # pid (setsid/nohup forks when the caller is a process-group leader), and
+    # the two are indistinguishable from here — so the resume prompt says so
+    # instead of reporting a job that may never have run as finished.
+    pid_dead_at_arm: bool = False
+    log_path: str = ""
+    progress_re: str = ""        # 1 group -> percent, 2 groups -> cur/total
+    done_re: str = ""            # alternative trigger: marker in the log tail
+    armed_at: str = ""
+    timeout_at: str = ""
+    every_secs: int = 120        # heartbeat refresh cadence
+    heartbeat_msg_id: str | None = None
+    last_beat_at: str = ""
+    repo_name: str = ""
+    repo_path: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "channel_id": self.channel_id,
+            "prompt": self.prompt,
+            "label": self.label,
+            "pid": self.pid,
+            "pid_start": self.pid_start,
+            "pid_dead_at_arm": self.pid_dead_at_arm,
+            "log_path": self.log_path,
+            "progress_re": self.progress_re,
+            "done_re": self.done_re,
+            "armed_at": self.armed_at,
+            "timeout_at": self.timeout_at,
+            "every_secs": self.every_secs,
+            "heartbeat_msg_id": self.heartbeat_msg_id,
+            "last_beat_at": self.last_beat_at,
+            "repo_name": self.repo_name,
+            "repo_path": self.repo_path,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> Watch:
+        return cls(
+            id=d["id"],
+            channel_id=d["channel_id"],
+            prompt=d.get("prompt", ""),
+            label=d.get("label", ""),
+            pid=d.get("pid"),
+            pid_start=d.get("pid_start", ""),
+            pid_dead_at_arm=d.get("pid_dead_at_arm", False),
+            log_path=d.get("log_path", ""),
+            progress_re=d.get("progress_re", ""),
+            done_re=d.get("done_re", ""),
+            armed_at=d.get("armed_at", ""),
+            timeout_at=d.get("timeout_at", ""),
+            every_secs=d.get("every_secs", 120),
+            heartbeat_msg_id=d.get("heartbeat_msg_id"),
+            last_beat_at=d.get("last_beat_at", ""),
+            repo_name=d.get("repo_name", ""),
+            repo_path=d.get("repo_path", ""),
+        )
+
+
+@dataclass
 class Schedule:
     id: str                     # "s-001"
     prompt: str

@@ -122,6 +122,15 @@ def _render_directive_chip(verb: str, args: str) -> str | None:
             pass  # missing/garbage delay — the reason still carries the why
         if kv.get("reason"):
             parts.append(_chip_value(kv["reason"]))
+    elif verb == "watch":
+        if kv.get("label"):
+            parts.append(_chip_value(kv["label"]))
+        if kv.get("pid"):
+            parts.append(f"pid {_chip_value(kv['pid'])}")
+        elif kv.get("done"):
+            parts.append("until done marker")
+        if kv.get("log"):
+            parts.append(_chip_value(kv["log"]))
     elif verb == "spawn":
         parts += [
             _chip_value(kv[k]) for k in ("repo", "mode", "effort") if kv.get(k)

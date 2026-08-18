@@ -37,6 +37,7 @@ from bot.platform.formatting import (
     strip_summary_block,
     strip_verify_blocks,
 )
+from bot.engine import watches
 from bot.store import history as history_mod
 
 log = logging.getLogger(__name__)
@@ -1562,6 +1563,84 @@ async def check_wake_request(
             "reply when you want me to keep going."
         )
 
+    # A [BOT_CMD: /watch] directive outranks /wake in the same turn: it names
+    # the actual job rather than guessing how long it will take, so it is
+    # strictly better information. Handled here (not in a separate post-turn
+    # hook) so a watch shares the wake path's worktree gate, runaway budget and
+    # nudge accounting instead of quietly bypassing all three.
+    watch_data = watches.parse_watch_directive(final_text)
+    if watch_data is not None:
+        _reset_nudge()
+        if instance.branch:
+            _reset()
+            await _notice(
+                "(Can't watch a job from a build/worktree session — the "
+                "directory may be merged or discarded before it finishes. "
+                "Reply or tap a button when you want me to continue.)"
+            )
+            return
+        count = ctx.bump_wake_count() if ctx.bump_wake_count is not None else 1
+        if count > config.MAX_CONSEC_WAKES:
+            await _stop_capped()
+            return
+        existing = ctx.store.watch_for_channel(ctx.channel_id)
+        if (existing is None
+                and len(ctx.store.list_watches()) >= config.WATCH_MAX_ACTIVE):
+            _reset()
+            await _notice(
+                f"(Can't watch that — {config.WATCH_MAX_ACTIVE} jobs are "
+                "already being watched across all threads. Reply when you "
+                "want me to check on it.)"
+            )
+            return
+        watch = watches.build_watch(
+            watch_data,
+            channel_id=ctx.channel_id,
+            repo_name=instance.repo_name or "",
+            repo_path=instance.repo_path or "",
+        )
+        # Already gone before we even armed? Record it. The poller will fire on
+        # its next tick either way, but the resume prompt has to distinguish a
+        # job that finished during the turn from a captured WRAPPER pid — they
+        # look identical here, and only one of them means the work is done.
+        watch.pid_dead_at_arm = bool(
+            watch.pid and not watches.process_alive(watch.pid, watch.pid_start)
+        )
+        # Arming a watch retires whatever this thread was waiting on before —
+        # a leftover timer would otherwise fire mid-job and resume the session
+        # against a half-finished run.
+        ctx.store.cancel_wakes(ctx.channel_id)
+        ctx.store.add_watch(watch)
+        path.unlink(missing_ok=True)   # a stale legacy wake file is superseded too
+        label = watch.label or (f"pid {watch.pid}" if watch.pid else "that job")
+        if watch.pid_dead_at_arm:
+            msg = (f"⏳ Watching **{label}** — heads up, pid {watch.pid} is "
+                   "already gone, so either it just finished or that pid was a "
+                   "wrapper. Picking it up now.")
+        else:
+            msg = f"⏳ Watching **{label}** — I'll pick this up the moment it finishes."
+        await _notice(msg)
+        log.info(
+            "Armed watch %s for thread %s (pid=%s done=%r timeout=%s)",
+            watch.id, ctx.channel_id, watch.pid, watch.done_re, watch.timeout_at,
+        )
+        return
+    if watches.has_watch_directive(final_text):
+        # A /watch was WRITTEN but couldn't be armed. Staying silent here is
+        # the exact dead-end this feature removes — the turn believes it is
+        # being watched and nothing is. Say what was missing, then fall
+        # through: a /wake in the same turn is still a valid fallback.
+        log.info(
+            "Unarmable /watch directive in thread %s — nothing watched",
+            ctx.channel_id,
+        )
+        await _notice(
+            "(I couldn't arm that watch — a [BOT_CMD: /watch] needs a `pid=`, "
+            "or a `done=` marker together with the `log=` to find it in, plus "
+            "a `~~~watch` body holding the prompt to resume with. Nothing is "
+            "being watched.)"
+        )
+
     # Resolve the wake request: a [BOT_CMD: /wake] directive (primary) takes
     # precedence over the legacy data/wakes/<id>.json file (kept so a session on
     # cached older guidance still works). A directive supersedes any stale file
@@ -1647,6 +1726,12 @@ async def check_wake_request(
     if count > config.MAX_CONSEC_WAKES:
         await _stop_capped()
         return
+
+    # Same one-thing-per-thread invariant as the watch path: a turn that arms a
+    # timer has stopped waiting on whatever job it was watching.
+    armed_watch = ctx.store.watch_for_channel(ctx.channel_id)
+    if armed_watch is not None:
+        ctx.store.delete_watch(armed_watch.id)
 
     ctx.store.add_wake(
         prompt=prompt,

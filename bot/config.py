@@ -515,6 +515,28 @@ MAX_CONSEC_WAKES: int = 25                # stop a never-completing poll loop
 # directive is the only thing that arms a wake. WAKE_CLAIM_RE below survives
 # as a notice-only check.
 WAKE_FALLBACK_DELAY_SECS: int = 180
+
+# --- Watches: an event-triggered self-wake ----------------------------------
+# A wake fires on a clock, so a session facing a 40-minute job has to GUESS a
+# delay. A watch fires on the job itself: the bot polls the process (or a
+# done-marker in its log) on the scheduler's existing 30s tick and, the moment
+# it finishes, calls add_wake with next_run_at=now. So a watch is not a second
+# resume path — it is a wake whose trigger is an event, and everything
+# downstream of a wake (runaway cap, busy re-arm, _replay_to_thread, the
+# unattended-turn protocol) is inherited unchanged.
+WATCH_DEFAULT_TIMEOUT_SECS: int = int(os.getenv("WATCH_DEFAULT_TIMEOUT_SECS", "21600"))
+WATCH_MAX_TIMEOUT_SECS: int = 86400          # 24h — matches WAKE_MAX_DELAY_SECS
+# Heartbeat cadence. The heartbeat EDITS one message rather than posting, so
+# the floor exists to stay well clear of Discord's per-message edit limits
+# however small a session asks for.
+WATCH_HEARTBEAT_SECS: int = int(os.getenv("WATCH_HEARTBEAT_SECS", "120"))
+WATCH_MIN_HEARTBEAT_SECS: int = 60
+# Bytes of the watched log read per poll — enough to hold the last progress
+# line and the done marker, small enough that polling a multi-GB log is cheap.
+WATCH_LOG_TAIL_BYTES: int = 8192
+# Global ceiling. One watch per thread is enforced by add_watch; this stops a
+# fleet of threads from turning the 30s tick into a filesystem sweep.
+WATCH_MAX_ACTIVE: int = int(os.getenv("WATCH_MAX_ACTIVE", "40"))
 # Notice-only contradiction check: a turn that ASSERTS it armed a self-wake
 # ("Self-wake queued (~4 min)") while no directive parsed is narration of the
 # action without the action — the user gets a heads-up that nothing is
@@ -1562,6 +1584,46 @@ The ONLY time you skip self-wake is when the wait is trivial or the user is \
 clearly right there — then finish now and tell them to reply "update" or tap a \
 button. Never promise to watch something passively: either self-wake, or hand \
 it back to the user explicitly.
+
+BETTER THAN A TIMER — [BOT_CMD: /watch] when you can name the job
+If what you are waiting on is a process on THIS machine, do not guess a delay. \
+Watch the job itself: the bot polls it and resumes you the moment it finishes, \
+and meanwhile the user sees a live progress line in the thread instead of a \
+thread that looks dead.
+
+Background it so it survives your turn ending, and CAPTURE THE PID — that is \
+the step to not skip:
+
+  setsid nohup ./long_job.sh > run.log 2>&1 < /dev/null & echo $!
+
+CHECK the pid is still alive before you arm (`ls -d /proc/$PID`). setsid and \
+nohup FORK when the caller is already a process-group leader, so `$!` can hand \
+you a launcher that exits the instant the real job starts — arm on that and \
+you get woken immediately and told a job finished that never ran. If the pid \
+is gone or the job runs behind a wrapper script, use done= + log= instead.
+
+Then end your response with:
+
+[BOT_CMD: /watch pid=12345 log="run.log" progress="step (\\d+)/(\\d+)" \
+label="model fit" timeout=6h]
+~~~watch
+<what to do when it finishes — read the log, pull the numbers, report>
+~~~
+
+- pid= is the trigger. Use done="<regex>" instead (or as well) when there is no \
+PID to hold — a job on another machine, or one you started via a wrapper. \
+done= is matched against the log, so it REQUIRES log=; a done marker with no \
+log to read is refused rather than left to time out. Either trigger firing \
+ends the watch.
+- log= is otherwise optional and only feeds the display; progress= is optional \
+too — one capture group is read as a percentage, two as current/total. Get it \
+wrong or omit it and the user still sees elapsed time and the log's last line.
+- timeout= (default 6h, max 24h) is a safety net, not the plan: if it expires \
+you are resumed anyway and told the job did NOT finish, so you can decide \
+whether to keep waiting or report.
+- Same quoting rules as /wake — top level, not inside ``` or after >.
+- Use /wake for everything else: a deploy to propagate, an external API to \
+settle, anything with no local process to point at.
 """
 
 
