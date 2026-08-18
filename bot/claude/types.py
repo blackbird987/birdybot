@@ -629,6 +629,12 @@ class Watch:
     label: str = ""
     pid: int | None = None
     pid_start: str = ""          # /proc/<pid>/stat field 22 at arm time
+    # True when the pid was ALREADY gone the moment the watch was armed. That
+    # is either an honest "it finished during my turn" or a captured WRAPPER
+    # pid (setsid/nohup forks when the caller is a process-group leader), and
+    # the two are indistinguishable from here — so the resume prompt says so
+    # instead of reporting a job that may never have run as finished.
+    pid_dead_at_arm: bool = False
     log_path: str = ""
     progress_re: str = ""        # 1 group -> percent, 2 groups -> cur/total
     done_re: str = ""            # alternative trigger: marker in the log tail
@@ -648,6 +654,7 @@ class Watch:
             "label": self.label,
             "pid": self.pid,
             "pid_start": self.pid_start,
+            "pid_dead_at_arm": self.pid_dead_at_arm,
             "log_path": self.log_path,
             "progress_re": self.progress_re,
             "done_re": self.done_re,
@@ -669,6 +676,7 @@ class Watch:
             label=d.get("label", ""),
             pid=d.get("pid"),
             pid_start=d.get("pid_start", ""),
+            pid_dead_at_arm=d.get("pid_dead_at_arm", False),
             log_path=d.get("log_path", ""),
             progress_re=d.get("progress_re", ""),
             done_re=d.get("done_re", ""),

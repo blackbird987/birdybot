@@ -422,6 +422,21 @@ def _resume_prompt(watch: Watch, reason: str, now: datetime) -> str:
             f"**{label}** finished after {elapsed} — its log hit the done "
             "marker you were watching for."
         )
+    elif watch.pid_dead_at_arm:
+        # Fired on a pid that was already gone before the first poll. Could be
+        # an honest finish during the turn — or a WRAPPER pid: setsid/nohup
+        # fork when the caller is a process-group leader, so `echo $!` can
+        # hand back a launcher that exits instantly while the real job runs
+        # on. Reporting that as a clean finish is how a session ends up
+        # confidently describing output that was never produced.
+        head = (
+            f"The watch on **{label}** fired immediately — pid {watch.pid} was "
+            "already gone when the watch was armed. That means the job either "
+            "finished during your turn OR you captured a short-lived wrapper "
+            "pid instead of the job itself. Do NOT assume it succeeded: check "
+            "the log (and whether the real process is still running) before "
+            "reporting anything."
+        )
     else:
         head = f"**{label}** finished after {elapsed} — the process exited."
     if watch.log_path:

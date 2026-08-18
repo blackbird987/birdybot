@@ -1596,6 +1596,12 @@ the step to not skip:
 
   setsid nohup ./long_job.sh > run.log 2>&1 < /dev/null & echo $!
 
+CHECK the pid is still alive before you arm (`ls -d /proc/$PID`). setsid and \
+nohup FORK when the caller is already a process-group leader, so `$!` can hand \
+you a launcher that exits the instant the real job starts — arm on that and \
+you get woken immediately and told a job finished that never ran. If the pid \
+is gone or the job runs behind a wrapper script, use done= + log= instead.
+
 Then end your response with:
 
 [BOT_CMD: /watch pid=12345 log="run.log" progress="step (\\d+)/(\\d+)" \

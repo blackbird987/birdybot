@@ -1599,6 +1599,13 @@ async def check_wake_request(
             repo_name=instance.repo_name or "",
             repo_path=instance.repo_path or "",
         )
+        # Already gone before we even armed? Record it. The poller will fire on
+        # its next tick either way, but the resume prompt has to distinguish a
+        # job that finished during the turn from a captured WRAPPER pid — they
+        # look identical here, and only one of them means the work is done.
+        watch.pid_dead_at_arm = bool(
+            watch.pid and not watches.process_alive(watch.pid, watch.pid_start)
+        )
         # Arming a watch retires whatever this thread was waiting on before —
         # a leftover timer would otherwise fire mid-job and resume the session
         # against a half-finished run.
@@ -1606,10 +1613,10 @@ async def check_wake_request(
         ctx.store.add_watch(watch)
         path.unlink(missing_ok=True)   # a stale legacy wake file is superseded too
         label = watch.label or (f"pid {watch.pid}" if watch.pid else "that job")
-        if watch.pid and not watches.process_alive(watch.pid, watch.pid_start):
-            # Already gone — the job finished during this very turn. The poller
-            # fires on its next tick; say so rather than implying a long wait.
-            msg = f"⏳ Watching **{label}** — it already looks finished, picking it up now."
+        if watch.pid_dead_at_arm:
+            msg = (f"⏳ Watching **{label}** — heads up, pid {watch.pid} is "
+                   "already gone, so either it just finished or that pid was a "
+                   "wrapper. Picking it up now.")
         else:
             msg = f"⏳ Watching **{label}** — I'll pick this up the moment it finishes."
         await _notice(msg)

@@ -520,8 +520,12 @@ with tempfile.TemporaryDirectory() as td:
         proc.kill()
         proc.wait()
 
-    # A directive whose job already exited arms anyway and says so — the poller
-    # fires it on the next tick rather than the session waiting on nothing.
+    # A directive whose pid is ALREADY gone arms anyway (the poller fires it on
+    # the next tick rather than the session waiting on nothing) — but it must
+    # not be reported as a clean finish. `setsid`/`nohup` FORK when the caller
+    # is a process-group leader, so `echo $!` can hand back a launcher that
+    # exits instantly while the real job runs on; "finished after 0s" would
+    # then have the session confidently describe output that never existed.
     store4 = new_store(tmp / "e")
     dead = subprocess.Popen([sys.executable, "-c", "pass"])
     dead.wait()
@@ -529,10 +533,31 @@ with tempfile.TemporaryDirectory() as td:
         store4,
         f'[BOT_CMD: /watch pid={dead.pid} label="already done"]\n~~~watch\nGo.\n~~~\n',
     )
-    ok("already-finished job still arms", store4.watch_for_channel("chan-1") is not None)
-    ok("  and the notice says so",
-       any("already looks finished" in t for _c, t in msg.posts))
+    w4 = store4.watch_for_channel("chan-1")
+    ok("already-finished job still arms", w4 is not None)
+    ok("  dead-at-arm is recorded on the watch", bool(w4 and w4.pid_dead_at_arm))
+    ok("  and the notice warns it may be a wrapper pid",
+       any("wrapper" in t for _c, t in msg.posts))
     check("  next poll fires it", asyncio.run(watches.poll_watches(store4, None)), 1)
+    fired = [s for s in store4.list_schedules() if s.resume_thread][0]
+    ok("  resume prompt refuses to claim a clean finish",
+       "finished after" not in fired.prompt)
+    ok("  resume prompt names the wrapper-pid possibility", "wrapper" in fired.prompt)
+    ok("  resume prompt still carries the instruction", "Go." in fired.prompt)
+
+    # A LIVE pid must not be flagged — the warning has to stay rare enough to
+    # mean something.
+    store5 = new_store(tmp / "f")
+    live = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        run_turn(store5,
+                 f'[BOT_CMD: /watch pid={live.pid} label="live"]\n~~~watch\nGo.\n~~~\n')
+        w5 = store5.watch_for_channel("chan-1")
+        ok("a live pid is NOT flagged dead-at-arm",
+           w5 is not None and w5.pid_dead_at_arm is False)
+    finally:
+        live.kill()
+        live.wait()
 
 
 # ------------------------------------------------------------- summary ---
