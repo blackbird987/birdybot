@@ -149,13 +149,14 @@ class FakeBot:
 
 def _inst(iid, session, status, *, needs_input=False, children=(),
           result_file=None, created="2026-08-18T10:00:00+00:00",
-          released=False, summary=None, sealed=True):
+          released=False, summary=None, sealed=True, blocked_resumes=0):
     return Instance(
         id=iid, name=None, instance_type=InstanceType.QUERY, prompt="",
         repo_name="bot", repo_path="/tmp", status=status,
         session_id=session, created_at=created, needs_input=needs_input,
         spawn_dispatched_thread_ids=list(children),
         spawn_wave_released=released, spawn_wave_sealed=sealed,
+        spawn_blocked_resumes=blocked_resumes,
         result_file=result_file, summary=summary,
     )
 
@@ -472,10 +473,149 @@ def test_wave_seal() -> None:
            "sealing with a child still running says nothing and waits")
 
 
+def test_two_waves_on_one_parent() -> None:
+    print("\n[two waves on one parent]")
+    # A parent woken by wave A can dispatch wave B while A is still filling up.
+    # A child's callback must resolve the wave that LISTS that child, or wave B
+    # hijacks wave A's callbacks and neither ever closes.
+    threads = {
+        "100": FakeThreadInfo("100", "sp", "Parent"),
+        "101": FakeThreadInfo("101", "s1", "Wave A first", parent="100"),
+        "102": FakeThreadInfo("102", "s2", "Wave A second", parent="100"),
+        "103": FakeThreadInfo("103", "s3", "Wave B only", parent="100"),
+    }
+    wave_a = _inst("q-a", "sp", InstanceStatus.COMPLETED, children=["101", "102"],
+                   created="2026-08-18T10:00:00+00:00")
+    wave_b = _inst("q-b", "sp", InstanceStatus.COMPLETED, children=["103"],
+                   created="2026-08-18T11:00:00+00:00")
+    bot = FakeBot(threads, [
+        wave_a, wave_b,
+        _inst("q-1", "s1", InstanceStatus.COMPLETED),
+        _inst("q-2", "s2", InstanceStatus.RUNNING),
+        _inst("q-3", "s3", InstanceStatus.RUNNING),
+    ])
+    asyncio.run(_run_and_drain(orch.post_parent_callback(bot, "101", "COMPLETED", "a1")))
+    _check("1/2" in bot.messenger.posts[-1].text,
+           "a wave-A child is counted against wave A, not against the newer wave B")
+    _check(not wave_a.spawn_wave_released and not wave_b.spawn_wave_released,
+           "neither wave closes while each still has an outstanding child")
+
+    # Wave A's last child lands: A closes, B is untouched.
+    bot._store._instances[3] = _inst("q-2", "s2", InstanceStatus.COMPLETED)
+    asyncio.run(_run_and_drain(orch.post_parent_callback(bot, "102", "COMPLETED", "a2")))
+    _check(wave_a.spawn_wave_released, "wave A closes on its own last child")
+    _check(not wave_b.spawn_wave_released, "wave B is left open by wave A closing")
+    _check(len(bot.resumes) == 1, "closing wave A resumes the parent once")
+
+
+def test_abandoned_wave_retired_silently() -> None:
+    print("\n[abandoned wave]")
+    ancient = (datetime.now(timezone.utc) - timedelta(hours=30)).isoformat()
+    threads = {
+        "100": FakeThreadInfo("100", "sp", "Parent"),
+        "101": FakeThreadInfo("101", "s1", "Long done", parent="100"),
+    }
+    parent = _inst("q-p", "sp", InstanceStatus.COMPLETED, children=["101"],
+                   created=ancient)
+    bot = FakeBot(threads, [parent, _inst("q-1", "s1", InstanceStatus.COMPLETED)])
+    n = asyncio.run(_sweep_and_drain(bot))
+    _check(parent.spawn_wave_released, "a wave nobody can act on any more is closed out")
+    _check(not bot.messenger.posts,
+           "an ancient wave posts nothing — this is what absorbs waves recorded before the join existed")
+    _check(not bot.resumes, "an ancient wave never resumes a days-old parent")
+    _check(n == 0, "a retired wave is not counted as a release")
+
+
+def test_settled_wave_closed_without_callback() -> None:
+    print("\n[wave whose last child never called back]")
+    # A child the user kills takes an early return in finalize, so the parent is
+    # never told. Every child is settled, but nothing triggered the join — the
+    # sweep has to close it on its normal tick rather than making the parent
+    # wait out the full timeout for a demonstrably complete wave.
+    fresh = datetime.now(timezone.utc).isoformat()
+    threads = {
+        "100": FakeThreadInfo("100", "sp", "Parent"),
+        "101": FakeThreadInfo("101", "s1", "Finished", parent="100"),
+        "102": FakeThreadInfo("102", "s2", "Killed by user", parent="100"),
+    }
+    parent = _inst("q-p", "sp", InstanceStatus.COMPLETED, children=["101", "102"],
+                   created=fresh)
+    bot = FakeBot(threads, [parent,
+                            _inst("q-1", "s1", InstanceStatus.COMPLETED),
+                            _inst("q-2", "s2", InstanceStatus.KILLED)])
+    n = asyncio.run(_sweep_and_drain(bot))
+    _check(n == 1, "the sweep closes a fully-settled wave inside its timeout window")
+    _check("2/2" in bot.messenger.posts[0].text,
+           "it closes as complete, not as a partial release")
+    _check(len(bot.resumes) == 1, "a complete wave still auto-resumes the parent")
+
+
+def test_timeout_disabled() -> None:
+    print("\n[timeout disabled]")
+    old = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+    threads = {
+        "100": FakeThreadInfo("100", "sp", "Parent"),
+        "101": FakeThreadInfo("101", "s1", "Grinding away", parent="100"),
+    }
+    parent = _inst("q-p", "sp", InstanceStatus.COMPLETED, children=["101"], created=old)
+    bot = FakeBot(threads, [parent, _inst("q-1", "s1", InstanceStatus.RUNNING)])
+    prev = config.ORCH_WAVE_TIMEOUT_MIN
+    config.ORCH_WAVE_TIMEOUT_MIN = 0
+    try:
+        n = asyncio.run(_sweep_and_drain(bot))
+    finally:
+        config.ORCH_WAVE_TIMEOUT_MIN = prev
+    _check(n == 0 and not parent.spawn_wave_released,
+           "timeout 0 means a wave waits for its children however long they take")
+
+
+def test_blocked_resume_cap() -> None:
+    print("\n[blocked-child resume budget]")
+    threads = {
+        "100": FakeThreadInfo("100", "sp", "Parent"),
+        "101": FakeThreadInfo("101", "s1", "Keeps asking", parent="100"),
+    }
+
+    def _build(blocked_resumes):
+        parent = _inst("q-p", "sp", InstanceStatus.COMPLETED, children=["101"],
+                       blocked_resumes=blocked_resumes)
+        bot = FakeBot(threads, [
+            parent,
+            _inst("q-1", "s1", InstanceStatus.COMPLETED, needs_input=True),
+        ])
+        return parent, bot
+
+    parent, bot = _build(0)
+    asyncio.run(_run_and_drain(orch.post_parent_callback(bot, "101", "BLOCKED", "?")))
+    _check(len(bot.resumes) == 1, "the first question wakes the parent to answer it")
+    _check(parent.spawn_blocked_resumes == 1, "the wave is charged for that wake-up")
+
+    parent, bot = _build(orch._MAX_BLOCKED_RESUMES)
+    asyncio.run(_run_and_drain(orch.post_parent_callback(bot, "101", "BLOCKED", "?")))
+    _check(not bot.resumes,
+           "past the budget the parent is no longer woken — a parent/child question loop cannot run away")
+    _check(bot.messenger.posts and bot.messenger.posts[-1].buttons is not None,
+           "the notice still arrives, it just needs a tap")
+    _check(parent.spawn_blocked_resumes == orch._MAX_BLOCKED_RESUMES,
+           "a refused wake-up is not charged")
+
+    # A blocked child of a wave that is already gone has nothing bounding it.
+    parent, bot = _build(0)
+    parent.spawn_wave_released = True
+    asyncio.run(_run_and_drain(orch.post_parent_callback(bot, "101", "BLOCKED", "?")))
+    _check(not bot.resumes,
+           "a blocked child with no open wave to charge gets a button, not an auto-resume")
+
+
 def main() -> int:
     print("Orchestrator spawn-wave join regression test")
     test_child_states()
     test_wave_seal()
+    test_two_waves_on_one_parent()
+    test_abandoned_wave_retired_silently()
+    test_settled_wave_closed_without_callback()
+    test_timeout_disabled()
+    test_blocked_resume_cap()
     test_wave_join()
     test_blocked_child()
     test_timeout_sweep()

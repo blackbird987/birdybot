@@ -65,14 +65,22 @@ to the parent instead of making the user do it.
   `spawn_wave_sealed` when the dispatch loop ends. **A wave is not joinable
   before it is sealed** — otherwise a fast-failing first child closes the wave
   while its siblings are still being created.
+- A child's callback resolves the wave whose roster **contains that child**, not
+  the newest wave — a parent can have two waves open at once (wave 1 resumes it,
+  it dispatches wave 2).
 - On close, the parent's resume prompt carries each child's **full report file
   path** (`Instance.result_file`), not an excerpt. The human-facing post gets
   the excerpts.
 - Full wave -> parent auto-resumes (`ORCH_AUTO_RESUME`, default on), bounded by
   the existing 12-wave cap since `callback_resume` doesn't reset it. Partial or
   timed-out release -> manual "Resume parent" button.
-- Stale waves are released by a sweep in `autonomy_loop` after
-  `ORCH_WAVE_TIMEOUT_MIN` (default 45).
+- Sweep in `autonomy_loop` (every ~5 min): partial-releases a wave past
+  `ORCH_WAVE_TIMEOUT_MIN` (default 45; `0` = wait forever), closes a
+  fully-settled wave early (a killed child never calls back), and silently
+  *retires* any wave older than `_WAVE_ABANDON_HOURS` (12) — which is what
+  absorbs waves recorded before this feature existed.
+- Blocked-child wake-ups are budgeted at `_MAX_BLOCKED_RESUMES` (4) per wave
+  (`Instance.spawn_blocked_resumes`) — parent answers, child asks again, repeat.
 - `[BOT_CMD: /reply thread=<id>]` + `~~~reply` body lets a parent answer its own
   blocked child. Target must be in this session's own dispatched ids.
 - Harness: `python scripts/test_orchestrator_join.py`

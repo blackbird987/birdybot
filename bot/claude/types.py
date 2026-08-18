@@ -258,6 +258,11 @@ class Instance:
     # join would see a roster of one, call it complete, and silently drop the
     # rest. A wave is not joinable until it is sealed.
     spawn_wave_sealed: bool = False
+    # Orchestrator join: how many times a child of THIS wave parking on a
+    # question has auto-resumed the parent. A parent answers its child, the
+    # child can ask again, and that exchange has no natural end — so the wave
+    # carries its budget, like every other self-driving loop in the bot.
+    spawn_blocked_resumes: int = 0
     _accounts_tried: set[str] = field(default_factory=set)  # Ephemeral: tracks accounts tried this run (not persisted)
     # Ephemeral: True when on_verify_release fail-closed because the verifier
     # output was unparseable (vs real phantom_bullets in the verdict). Read by
@@ -365,6 +370,7 @@ class Instance:
             "spawn_dispatched_thread_ids": self.spawn_dispatched_thread_ids,
             "spawn_wave_released": self.spawn_wave_released,
             "spawn_wave_sealed": self.spawn_wave_sealed,
+            "spawn_blocked_resumes": self.spawn_blocked_resumes,
         }
 
     @classmethod
@@ -447,6 +453,7 @@ class Instance:
             ),
             spawn_wave_released=d.get("spawn_wave_released", False),
             spawn_wave_sealed=d.get("spawn_wave_sealed", False),
+            spawn_blocked_resumes=d.get("spawn_blocked_resumes", 0),
         )
 
 

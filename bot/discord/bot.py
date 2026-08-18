@@ -834,7 +834,7 @@ class ClaudeBot(discord.Client):
         # already reported while the loop was still creating threads.
         async def _wave_sealed() -> None:
             from bot.discord.orchestrator import evaluate_wave_now
-            await evaluate_wave_now(_bot, _cid)
+            await evaluate_wave_now(_bot, channel_id)
 
         ctx.on_spawn_wave_sealed = _wave_sealed
 

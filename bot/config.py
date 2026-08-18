@@ -553,7 +553,10 @@ MAX_CONSEC_NUDGES: int = 2
 # A child that dies without ever finalizing (crash, kill during a reboot) would
 # otherwise hold the wave open forever, so the autonomy loop releases a partial
 # wave once this many minutes have passed since the parent dispatched it. The
-# release names the children that never came back.
+# release names the children that never came back. 0 disables the partial
+# release — a wave then waits for its children however long they take. Either
+# way a wave nobody can act on any more (12h+, including every wave recorded
+# before this join existed) is retired silently rather than reported.
 ORCH_WAVE_TIMEOUT_MIN: int = int(os.getenv("ORCH_WAVE_TIMEOUT_MIN", "45"))
 # Resume the parent automatically once its wave closes, instead of waiting for
 # a "Resume parent" tap. Safe against runaway because the resumed turn cannot

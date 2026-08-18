@@ -21,9 +21,14 @@ final output to ``data/results/<id>.md`` and persists the path on the instance
 excerpt, so it reads the reports it cares about with its own file tools. No
 truncation ceiling, and no multi-KB blobs accumulating in ``state.json``.
 
-The one persisted addition is ``Instance.spawn_wave_released`` — a boolean
-making the release idempotent, because the per-child callbacks and the timeout
-sweep can both reach it.
+Three booleans/counters are persisted on the parent instance, and each exists
+because a purely derived join has one blind spot the records cannot answer:
+``spawn_wave_released`` (the release is a one-shot side effect — a post plus an
+auto-resume — and the per-child callbacks, the seal and the timeout sweep all
+race for it), ``spawn_wave_sealed`` (whether the dispatch loop has finished
+writing the roster; nothing else can tell a two-child wave from a four-child
+wave still being built), and ``spawn_blocked_resumes`` (the budget for the
+parent↔child question exchange, which is a loop and therefore bounded).
 
 Blocked children (parked on a question) do not settle. They are reported to the
 parent immediately, because the parent wrote the child's brief and is the right
@@ -59,6 +64,29 @@ _EXCERPT = 400
 # Terminal instance states. KILLED counts: a child the user cancelled is never
 # coming back, so it must settle or it would hold the wave open until timeout.
 _TERMINAL = (InstanceStatus.COMPLETED, InstanceStatus.FAILED, InstanceStatus.KILLED)
+# A wave this old is not released, it is retired: no post, no resume, just
+# marked done so the sweep stops re-examining it. Two cases need it. Waves
+# recorded before this join existed have `spawn_wave_released` defaulting to
+# False, so the first sweep after deploy would otherwise "release" every
+# historical wave at once — waking days-old parents and spraying The Ark. And a
+# wave stranded across a long outage is past being useful to anybody.
+_WAVE_ABANDON_HOURS = 12
+# A blocked child wakes its parent so the parent can answer it. If the parent's
+# answer makes the child ask again, that is a two-CLI-run ping-pong with no
+# natural end, so it is bounded like every other self-driving loop here
+# (_MAX_SPAWN_WAVES, CONTEXT_THRASH_MAX_RETRIES). Past the cap the notice still
+# arrives — it just needs a tap.
+_MAX_BLOCKED_RESUMES = 4
+# Detached resume tasks. asyncio only holds a weak reference to a running task,
+# so without this a resume could be garbage-collected mid-flight — silently,
+# and this is the task that spends money.
+_BG_TASKS: set[asyncio.Task] = set()
+
+
+def _spawn_detached(coro) -> None:
+    task = asyncio.create_task(coro)
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
 
 
 class ChildState(NamedTuple):
@@ -186,13 +214,11 @@ def _child_state(bot: ClaudeBot, child_thread_id: str) -> ChildState:
     return ChildState(child_thread_id, "completed", title, inst)
 
 
-def find_wave_instance(bot: ClaudeBot, parent_thread_id: str) -> Instance | None:
-    """The parent instance owning the current, unreleased spawn wave.
-
-    A parent thread accumulates one instance per turn; the wave belongs to the
-    newest one that actually dispatched children. Returns None when that wave
-    has already been released, so a late callback can't fire it twice.
-    """
+def _newest_wave(
+    bot: ClaudeBot, parent_thread_id: str, containing: str | None,
+) -> Instance | None:
+    """Newest unreleased wave on the parent's session, optionally one holding
+    a specific child. Ignores the seal — callers decide whether it matters."""
     lookup = bot._forums.thread_to_project(parent_thread_id)
     if lookup is None:
         return None
@@ -205,9 +231,29 @@ def find_wave_instance(bot: ClaudeBot, parent_thread_id: str) -> Instance | None
             continue
         if not inst.spawn_dispatched_thread_ids:
             continue
+        if containing is not None and containing not in inst.spawn_dispatched_thread_ids:
+            continue
         if best is None or (inst.created_at or "") > (best.created_at or ""):
             best = inst
     if best is None or best.spawn_wave_released:
+        return None
+    return best
+
+
+def find_wave_instance(
+    bot: ClaudeBot, parent_thread_id: str, *, containing: str | None = None,
+) -> Instance | None:
+    """The parent instance owning a current, joinable spawn wave.
+
+    A parent thread accumulates one instance per turn, and a parent resumed by
+    one wave can dispatch another while the first is still filling up. So a
+    child's callback resolves the wave that actually LISTS that child
+    (``containing``) rather than "the newest wave" — otherwise a second wave
+    would hijack the first wave's callbacks and neither would ever close.
+    Returns None once released, so a late callback can't fire it twice.
+    """
+    best = _newest_wave(bot, parent_thread_id, containing)
+    if best is None:
         return None
     if not best.spawn_wave_sealed:
         # The dispatch loop is still handing out children — the roster is
@@ -218,8 +264,8 @@ def find_wave_instance(bot: ClaudeBot, parent_thread_id: str) -> Instance | None
     return best
 
 
-def _wave_deadline_passed(inst: Instance) -> bool:
-    """True once a wave has been open longer than ORCH_WAVE_TIMEOUT_MIN."""
+def _wave_age_exceeds(inst: Instance, delta: timedelta) -> bool:
+    """True once the wave's dispatching turn is older than *delta*."""
     stamp = inst.finished_at or inst.created_at
     if not stamp:
         return False
@@ -229,8 +275,23 @@ def _wave_deadline_passed(inst: Instance) -> bool:
         return False
     if started.tzinfo is None:
         started = started.replace(tzinfo=timezone.utc)
-    cutoff = datetime.now(timezone.utc) - timedelta(minutes=config.ORCH_WAVE_TIMEOUT_MIN)
-    return started < cutoff
+    return started < datetime.now(timezone.utc) - delta
+
+
+def _wave_deadline_passed(inst: Instance) -> bool:
+    """True once a wave has been open longer than ORCH_WAVE_TIMEOUT_MIN.
+
+    A timeout of 0 disables the partial release entirely — a wave then waits
+    for its children however long they take.
+    """
+    if config.ORCH_WAVE_TIMEOUT_MIN <= 0:
+        return False
+    return _wave_age_exceeds(inst, timedelta(minutes=config.ORCH_WAVE_TIMEOUT_MIN))
+
+
+def _wave_abandoned(inst: Instance) -> bool:
+    """True once a wave is too old to be worth waking anyone over."""
+    return _wave_age_exceeds(inst, timedelta(hours=_WAVE_ABANDON_HOURS))
 
 
 # --- Rendering --------------------------------------------------------------
@@ -394,7 +455,7 @@ async def _deliver(
             except Exception:
                 log.exception("orchestrator auto-resume failed for %s", parent_id)
 
-        asyncio.create_task(_resume())
+        _spawn_detached(_resume())
 
 
 async def _notify_ark_undelivered(bot: ClaudeBot, parent_id: str, what: str) -> None:
@@ -488,13 +549,31 @@ async def post_parent_callback(
             log.info("orchestrator blocked-notice skipped — parent %s archived", parent_id)
             await _notify_ark_undelivered(bot, parent_id, "a blocked child session")
             return
-        await _deliver(
-            bot, parent_id, post_body, resume_prompt,
-            auto_resume=config.ORCH_AUTO_RESUME,
-        )
+        # Waking the parent to answer its child is the whole point, but the
+        # parent's answer can make the child ask again — so the wave that owns
+        # this child carries the budget for that exchange. The seal is
+        # deliberately ignored here: mid-dispatch the parent's turn still holds
+        # the channel lock, so the resume simply queues behind it, which is
+        # exactly when we want it to run.
+        owning = _newest_wave(bot, parent_id, child_thread_id)
+        auto = config.ORCH_AUTO_RESUME
+        if owning is None:
+            # No wave to charge it to (already released, or the roster is
+            # gone). Nothing bounds a loop here, so it needs a tap.
+            auto = False
+        elif owning.spawn_blocked_resumes >= _MAX_BLOCKED_RESUMES:
+            log.info(
+                "orchestrator: blocked-child auto-resume cap (%d) reached on wave %s",
+                _MAX_BLOCKED_RESUMES, owning.id,
+            )
+            auto = False
+        elif auto:
+            owning.spawn_blocked_resumes += 1
+            bot._store.update_instance(owning, critical=True)
+        await _deliver(bot, parent_id, post_body, resume_prompt, auto_resume=auto)
         return
 
-    wave_inst = find_wave_instance(bot, parent_id)
+    wave_inst = find_wave_instance(bot, parent_id, containing=child_thread_id)
     if wave_inst is None:
         # No open wave for this parent — either it was already released or the
         # dispatch record is gone. Nothing to join; stay quiet rather than
@@ -546,6 +625,13 @@ async def evaluate_wave_now(bot: ClaudeBot, parent_thread_id: str) -> None:
     await release_wave(bot, parent_thread_id, wave_inst, partial=False)
 
 
+def _retire_wave(bot: ClaudeBot, inst: Instance, reason: str) -> None:
+    """Close a wave without telling anyone — it is past being actionable."""
+    inst.spawn_wave_released = True
+    bot._store.update_instance(inst, critical=True)
+    log.info("orchestrator: retired spawn wave %s (%s)", inst.id, reason)
+
+
 async def sweep_stale_waves(bot: ClaudeBot) -> int:
     """Release waves whose children never all came back. Returns count released.
 
@@ -561,17 +647,28 @@ async def sweep_stale_waves(bot: ClaudeBot) -> int:
     for inst in bot._store.list_instances(all_=True):
         if not inst.spawn_dispatched_thread_ids or inst.spawn_wave_released:
             continue
-        if not _wave_deadline_passed(inst):
+
+        if _wave_abandoned(inst):
+            # Older than anyone could act on. Retire silently rather than
+            # posting a roundup nobody asked for and resuming a dead session —
+            # this is also what absorbs waves recorded before the join existed.
+            _retire_wave(bot, inst, f"older than {_WAVE_ABANDON_HOURS}h")
             continue
         parent_id = _thread_for_instance(bot, inst)
         if parent_id is None:
-            # Can't locate the thread that owns this wave — mark it released so
-            # the scan doesn't re-examine it on every tick forever.
-            inst.spawn_wave_released = True
-            bot._store.update_instance(inst, critical=True)
+            # Can't locate the thread that owns this wave — retire it so the
+            # scan doesn't re-examine it on every tick forever.
+            _retire_wave(bot, inst, "parent thread not resolvable")
             continue
         children = [_child_state(bot, tid) for tid in inst.spawn_dispatched_thread_ids]
         partial = any(not c.settled for c in children)
+        if partial and not _wave_deadline_passed(inst):
+            continue
+        # A fully-settled wave that reaches the sweep is one whose last child
+        # never called back — a child killed by the user takes an early return
+        # in finalize, so nothing tells the parent. Closing it here on the
+        # normal 5-minute tick beats making the parent wait out the timeout for
+        # a wave that is demonstrably complete.
         try:
             if await release_wave(bot, parent_id, inst, partial=partial):
                 released += 1
