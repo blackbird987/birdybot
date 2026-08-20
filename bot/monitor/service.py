@@ -14,6 +14,7 @@ from bot.monitor import fetcher, formatter
 log = logging.getLogger(__name__)
 
 DEFAULT_REFRESH_SECS = 14400  # 4 hours
+FAILURE_ALERT_INTERVAL_SECS = 86400  # re-alert at most once a day while broken
 
 
 class MonitorConfig:
@@ -65,6 +66,36 @@ class MonitorService:
             state["monitors"] = {}
         state["monitors"][name] = data
         self._store._platform_state["discord"] = state
+
+    # --- Failure alerting ---
+
+    def _should_alert_failure(self, mon: dict, failures: int) -> bool:
+        """Alert on the first failure, then at most once a day while it persists.
+
+        The previous rule fired exactly once and never again, so a monitor that
+        died in June sat broken until August with a single missed notification
+        as the only warning. Re-alerting is what makes a dead monitor noisy
+        enough to notice; a daily floor is what keeps it from being spam.
+        """
+        if failures <= 1:
+            mon["last_failure_alert_at"] = datetime.now(timezone.utc).isoformat()
+            return True
+
+        last = mon.get("last_failure_alert_at")
+        if not last:
+            mon["last_failure_alert_at"] = datetime.now(timezone.utc).isoformat()
+            return True
+        try:
+            when = datetime.fromisoformat(last)
+        except ValueError:
+            when = None
+        if when is not None:
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+            if (datetime.now(timezone.utc) - when).total_seconds() < FAILURE_ALERT_INTERVAL_SECS:
+                return False
+        mon["last_failure_alert_at"] = datetime.now(timezone.utc).isoformat()
+        return True
 
     # --- Lifecycle ---
 
@@ -149,13 +180,25 @@ class MonitorService:
             mon["consecutive_failures"] = mon.get("consecutive_failures", 0) + 1
             mon["last_fetch_at"] = datetime.now(timezone.utc).isoformat()
             self._save_monitor_state(name, mon)
-            embed = formatter.build_dashboard_embed(name, raw)
+            failures = mon["consecutive_failures"]
+            embed = formatter.build_dashboard_embed(
+                name, raw,
+                failures=failures,
+                last_success=mon.get("last_successful_fetch"),
+            )
             await self._edit_or_recreate(channel, name, mon, "dashboard_msg_id", embed)
-            # One-time alert
-            if mon["consecutive_failures"] == 1 and self._notifier:
+            should_alert = self._should_alert_failure(mon, failures)
+            self._save_monitor_state(name, mon)
+            if should_alert and self._notifier:
+                last_ok = mon.get("last_successful_fetch")
+                detail = (
+                    f" -- no data since {formatter._describe_age(last_ok)}"
+                    if failures > 1 else ""
+                )
                 try:
                     await self._notifier.broadcast(
-                        f"\u26a0\ufe0f Monitor **{name}**: authentication failed",
+                        f"\u26a0\ufe0f Monitor **{name}**: authentication failed"
+                        f" ({failures}x){detail}",
                         ttl=30,
                     )
                 except Exception:
@@ -173,10 +216,14 @@ class MonitorService:
                 embed = formatter.build_stale_banner(name, failures, last_ok)
                 await self._edit_or_recreate(channel, name, mon, "dashboard_msg_id", embed)
 
-            if failures == 10 and self._notifier:
+            should_alert = self._should_alert_failure(mon, failures)
+            self._save_monitor_state(name, mon)
+            if should_alert and self._notifier:
+                last_ok = mon.get("last_successful_fetch")
                 try:
                     await self._notifier.broadcast(
-                        f"\U0001f534 Monitor **{name}**: {failures} consecutive failures",
+                        f"\U0001f534 Monitor **{name}**: {failures} consecutive failures"
+                        f" -- no data since {formatter._describe_age(last_ok)}",
                         ttl=30,
                     )
                 except Exception:
@@ -216,7 +263,9 @@ class MonitorService:
         self._save_monitor_state(name, mon)
 
         # Build and edit embeds
-        dashboard_embed = formatter.build_dashboard_embed(name, raw, prev_snapshot)
+        dashboard_embed = formatter.build_dashboard_embed(
+            name, raw, prev_snapshot, last_success=now_iso,
+        )
         history_embed = formatter.build_history_embed(daily, weekly, monthly)
 
         await self._edit_or_recreate(channel, name, mon, "dashboard_msg_id", dashboard_embed)
@@ -254,6 +303,7 @@ class MonitorService:
     ) -> None:
         """Edit existing message or create a new one if it's gone."""
         msg_id = mon.get(msg_key)
+        stale_id: str | None = None
         if msg_id:
             try:
                 msg = await channel.fetch_message(int(msg_id))
@@ -261,8 +311,16 @@ class MonitorService:
                 return
             except discord.NotFound:
                 log.info("Monitor message %s deleted, recreating", msg_id)
-            except Exception:
-                log.debug("Failed to edit monitor message %s", msg_id, exc_info=True)
+            except Exception as exc:
+                # This used to log at debug, which the bot never emits at its
+                # INFO level -- so a recurring edit failure recreated the
+                # dashboard every ~30 days while leaving no trace of WHY.
+                log.warning(
+                    "Monitor %s: failed to edit %s message %s (%s: %s), recreating",
+                    name, msg_key, msg_id, type(exc).__name__, exc,
+                    exc_info=True,
+                )
+                stale_id = str(msg_id)
 
         # Send new message and pin it
         msg = await channel.send(embed=embed)
@@ -272,6 +330,28 @@ class MonitorService:
             log.debug("Failed to pin monitor message", exc_info=True)
         mon[msg_key] = str(msg.id)
         self._save_monitor_state(name, mon)
+
+        # Retire the message we could no longer edit. Left pinned it keeps
+        # showing whatever data it froze on, so the channel accumulates several
+        # contradictory "current" dashboards, all pinned, oldest first.
+        if stale_id:
+            await self._retire_stale_message(channel, stale_id)
+
+    async def _retire_stale_message(
+        self,
+        channel: discord.TextChannel | discord.Thread,
+        msg_id: str,
+    ) -> None:
+        """Unpin an abandoned monitor message so it stops posing as current."""
+        try:
+            old = await channel.fetch_message(int(msg_id))
+        except Exception:
+            return
+        try:
+            if old.pinned:
+                await old.unpin()
+        except Exception:
+            log.debug("Failed to unpin stale monitor message %s", msg_id, exc_info=True)
 
     # --- Snapshot merge ---
 

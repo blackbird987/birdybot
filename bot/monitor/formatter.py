@@ -51,6 +51,35 @@ def _truncate(text: str, limit: int, suffix: str = "\u2026") -> str:
     return text[: limit - len(suffix)] + suffix
 
 
+def _describe_age(iso_ts: str | None) -> str:
+    """Render a stored ISO timestamp as an absolute time plus how long ago it was.
+
+    A bare "never" or a raw ISO string tells you nothing at a glance; the whole
+    point of this line is answering "has this been broken for an hour or for
+    two months?" without doing date arithmetic in your head.
+    """
+    if not iso_ts:
+        return "never"
+    try:
+        when = datetime.fromisoformat(iso_ts)
+    except ValueError:
+        return iso_ts
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    stamp = when.strftime("%b %d, %H:%M UTC")
+    delta = datetime.now(timezone.utc) - when
+    secs = int(delta.total_seconds())
+    if secs < 0:
+        return stamp
+    if secs < 3600:
+        ago = f"{secs // 60}m ago"
+    elif secs < 86400:
+        ago = f"{secs // 3600}h ago"
+    else:
+        ago = f"{secs // 86400}d ago"
+    return f"{stamp} ({ago})"
+
+
 def _short_version(version: str | None) -> str:
     """Shorten '1.0.0+4dfd8b9f7cb37adc...' to '1.0.0+4dfd8b9'."""
     if not version:
@@ -86,6 +115,8 @@ def build_dashboard_embed(
     name: str,
     raw: dict[str, Any],
     prev_snapshot: dict | None = None,
+    failures: int = 0,
+    last_success: str | None = None,
 ) -> discord.Embed:
     """Build the main dashboard embed from raw API data."""
     summary = raw.get("summary")
@@ -93,9 +124,18 @@ def build_dashboard_embed(
     # Check for auth failure
     for ep_data in raw.values():
         if isinstance(ep_data, dict) and ep_data.get("_error") == "auth_failed":
+            # Say how long this has been broken. Without it the banner reads the
+            # same on minute one and on day seventy, so a monitor that died
+            # months ago is indistinguishable from one that just hiccuped.
+            lines = [
+                f"Authentication failed. Check `MONITOR_{name.upper()}_AUTH` in .env",
+            ]
+            if failures > 1:
+                lines.append(f"Failed {failures} consecutive times.")
+            lines.append(f"Last successful fetch: {_describe_age(last_success)}")
             embed = discord.Embed(
                 title=_truncate(f"\u26a0\ufe0f {name} \u2014 Auth Failed", MAX_TITLE),
-                description=f"Authentication failed. Check `MONITOR_{name.upper()}_AUTH` in .env",
+                description="\n".join(lines),
                 color=discord.Color.red(),
             )
             embed.set_footer(text=f"Last attempt: {datetime.now(timezone.utc).strftime('%b %d, %H:%M UTC')}")
@@ -279,7 +319,7 @@ def build_stale_banner(name: str, failures: int, last_fetch: str | None) -> disc
     """Build a warning embed when data is stale."""
     embed = discord.Embed(
         title=_truncate(f"\U0001f7e1 {name} \u2014 Stale Data", MAX_TITLE),
-        description=f"Failed to fetch data {failures} consecutive times.\nLast successful fetch: {last_fetch or 'never'}",
+        description=f"Failed to fetch data {failures} consecutive times.\nLast successful fetch: {_describe_age(last_fetch)}",
         color=discord.Color.yellow(),
     )
     embed.set_footer(text=f"Updated: {datetime.now(timezone.utc).strftime('%b %d, %H:%M UTC')}")
