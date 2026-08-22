@@ -22,7 +22,10 @@ from bot.claude.types import InstanceStatus
 from bot.discord.monitoring import monitor_setup
 from bot.engine import commands
 from bot.engine import sessions as sessions_mod
-from bot.platform.formatting import MODE_DISPLAY, VALID_MODES, format_age, mode_name
+from bot.platform.formatting import (
+    MODE_DISPLAY, VALID_MODES, format_age, mode_name, model_suggestions,
+    short_model_label,
+)
 from bot.store import history as history_mod
 
 if TYPE_CHECKING:
@@ -255,6 +258,33 @@ def setup(bot: ClaudeBot) -> None:
             await interaction.response.send_message("Unauthorized", ephemeral=True)
             return
         await bot._run_slash(interaction, lambda ctx: commands.on_effort(ctx, level))
+
+    async def model_autocomplete(
+        interaction: discord.Interaction, current: str,
+    ) -> list[app_commands.Choice[str]]:
+        """Suggest models this deployment actually runs, plus 'default'.
+
+        Never a closed list: whatever the user types is still submitted, so a
+        model released after this build still works by typing its name.
+        """
+        typed = current.strip().lower()
+        names = ["default", *model_suggestions(bot._store)]
+        out: list[app_commands.Choice[str]] = []
+        for name in names:
+            if typed and typed not in name:
+                continue
+            label = "default (normal routing)" if name == "default" else short_model_label(name)
+            out.append(app_commands.Choice(name=f"{label} — {name}"[:100], value=name))
+        return out[:25]
+
+    @bot.tree.command(name="model", description="Model for this thread", guild=guild_obj)
+    @app_commands.describe(name="Model name, or 'default' to clear the pin")
+    @app_commands.autocomplete(name=model_autocomplete)
+    async def cmd_model(interaction: discord.Interaction, name: str = ""):
+        if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
+            await interaction.response.send_message("Unauthorized", ephemeral=True)
+            return
+        await bot._run_slash(interaction, lambda ctx: commands.on_model(ctx, name))
 
     @bot.tree.command(name="provider", description="View or switch CLI provider", guild=guild_obj)
     @app_commands.describe(name="Provider: claude, cursor")

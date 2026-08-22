@@ -278,6 +278,16 @@ def _parse_model_routing(raw: str) -> dict[str, str]:
 # the category default handles the plan-vs-build split for everything else.
 MODEL_ROUTING: dict[str, str] = _parse_model_routing(os.getenv("MODEL_ROUTING", ""))
 
+# Explicit suggestion list for the /model autocomplete, e.g.
+# MODEL_CHOICES=opus,sonnet,haiku. Purely cosmetic -- /model accepts any
+# well-formed name whether or not it appears here. Unset (the normal case)
+# means the list is derived at runtime from the models this deployment has
+# actually run plus the ones its own settings reference, so it keeps up with
+# model renames and version bumps without a code change.
+MODEL_CHOICES: list[str] = [
+    m.strip().lower() for m in os.getenv("MODEL_CHOICES", "").split(",") if m.strip()
+]
+
 # Strong model for build-family origins (see BUILD_ORIGINS in types.py).
 # Applied at spawn time by workflows.resolve_spawn_model (spawn_from plus the
 # manual spawn sites); beats EXPLORE_MODEL and the DEFAULT_SESSION_MODEL
@@ -733,6 +743,7 @@ Settings:
 - /mode explore|build — switch permission mode
 - /verbose 0|1|2 — progress detail level (silent/normal/detailed)
 - /effort low|medium|high|max — reasoning effort level
+- /model <name> — model for this thread (`/model default` clears it)
 - /context set <text> — pin context to all prompts
 - /repo add|remove|create|switch|list — manage repos
 - /repo create <name> [path] [--github] [--public] — create new repo (git init + register)

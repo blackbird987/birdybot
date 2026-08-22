@@ -216,6 +216,9 @@ class RequestContext:
     context: str | None = None        # None=inherit, ""=cleared, str=set
     verbose_level: int | None = None
     effort: str | None = None         # None=inherit, "low"/"medium"/"high"/"max"
+    # Per-thread model pin (/model). None=inherit normal routing, ""=explicitly
+    # cleared back to routing, str=this exact --model for every run in the thread.
+    model: str | None = None
     # Session resolution callbacks (Discord race-condition fix)
     resolve_session_id: Callable[[], str | None] | None = None
     # Async so the platform wrapper can post a user-visible message when it
@@ -324,6 +327,16 @@ class RequestContext:
     def effective_effort(self) -> str:
         return self.effort if self.effort is not None else self.store.effort
 
+    @property
+    def effective_model(self) -> str | None:
+        """The model pinned to this thread, or None to use normal routing.
+
+        "" is the cleared sentinel (mirrors ``context``): the user explicitly
+        went back to default, which resolves the same as never having set one --
+        spawn-time routing first, then the deployment-wide default.
+        """
+        return self.model or None
+
     def update_mode(self, value: str) -> None:
         # Enforce mode ceiling for non-owners
         if self.mode_ceiling:
@@ -340,6 +353,10 @@ class RequestContext:
 
     def update_effort(self, value: str) -> None:
         self.effort = value
+
+    def update_model(self, value: str | None) -> None:
+        """Pin *value* as this thread's model; "" / None clears back to routing."""
+        self.model = value or ""
 
 
 class NotificationService:

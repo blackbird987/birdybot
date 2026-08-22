@@ -504,6 +504,87 @@ def effort_name(effort: str) -> str:
     return EFFORT_DISPLAY.get(effort, effort.capitalize())
 
 
+# --- Model Selection (/model) ---
+#
+# Deliberately NO table of model names here. Model names version-bump and get
+# renamed ("opus 5" -> "opus 6" -> something else entirely), so a hardcoded
+# whitelist would go stale and start rejecting the model the user actually
+# wants. Instead:
+#   * display goes through short_model_label(), which parses arbitrary shapes
+#     generically (vendor prefixes, date stamps, '-latest', numeric tails);
+#   * validation is a SHAPE check, not a membership check;
+#   * the suggestion list is derived at runtime from this deployment's own
+#     config plus the models it has actually run.
+
+# What a model identifier may look like on a command line: CLI aliases
+# ("opus"), full API ids ("claude-opus-4-8-20260101"), Bedrock-style
+# ("us.anthropic.claude-opus-5-v1:0"). Rejects spaces and shell metacharacters
+# so a fat-fingered "/model fable x" can never reach the command line, while
+# staying open to names that do not exist yet.
+_MODEL_SHAPE = re.compile(r"^[a-z0-9][a-z0-9._:-]{0,63}$")
+
+# Words meaning "stop pinning a model, go back to normal routing".
+MODEL_CLEAR_WORDS = frozenset({"default", "clear", "reset", "none", "auto"})
+
+
+def normalize_model(raw: str) -> str | None:
+    """Canonicalize a user-typed model name, or None if it cannot be one.
+
+    Not a whitelist -- any plausibly-shaped identifier passes, including models
+    released after this code was written. The CLI stays the real authority on
+    whether the name exists; see on_model's soft warning.
+    """
+    value = raw.strip().lower()
+    if not value or not _MODEL_SHAPE.match(value):
+        return None
+    return value
+
+
+def model_suggestions(store: object | None = None) -> list[str]:
+    """Model names to offer in /model autocomplete, most-recently-run first.
+
+    Sources, all runtime-derived so the list maintains itself:
+      1. ``MODEL_CHOICES`` env override, when a deployment wants explicit control.
+      2. Model names this bot has actually run (recorded per instance).
+      3. Model names this deployment's own settings already reference.
+    An empty list is fine -- free text still works.
+    """
+    if config.MODEL_CHOICES:
+        return list(config.MODEL_CHOICES)
+
+    ordered: list[str] = []
+    seen: set[str] = set()
+
+    def _add(name: object) -> None:
+        if not name:
+            return
+        canon = normalize_model(str(name))
+        if canon and canon not in seen:
+            seen.add(canon)
+            ordered.append(canon)
+
+    # Models this deployment has actually run, most recent first -- the best
+    # available signal for what the installed CLI accepts.
+    if store is not None:
+        try:
+            for inst in store.list_instances(all_=True):  # type: ignore[attr-defined]
+                _add(getattr(inst, "context_model", None))
+                _add(getattr(inst, "model", None))
+        except Exception:
+            pass  # suggestions are a convenience, never a failure path
+
+    # Models this deployment's config names.
+    _add(config.PRIMARY_MODEL)
+    _add(config.MODEL_FALLBACK)
+    _add(config.BUILD_MODEL)
+    _add(config.EXPLORE_MODEL)
+    _add(config.DEFAULT_SESSION_MODEL)
+    for routed in config.MODEL_ROUTING.values():
+        _add(routed)
+
+    return ordered
+
+
 # --- Status Icon ---
 
 def status_icon(status: InstanceStatus) -> str:

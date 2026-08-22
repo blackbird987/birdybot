@@ -39,10 +39,15 @@ _EXPLORE_MODEL_ORIGINS = frozenset(
 )
 
 
-def resolve_spawn_model(origin: InstanceOrigin) -> str | None:
+def resolve_spawn_model(
+    origin: InstanceOrigin, override: str | None = None,
+) -> str | None:
     """Pick the ``--model`` a spawned workflow step should carry, or None.
 
     Precedence, highest first:
+      0. *override* — the thread's own ``/model`` pin. An explicit human choice
+         beats configured routing: if the user pinned a model and then tapped
+         Build, silently running something else would be the surprising outcome.
       1. An explicit ``MODEL_ROUTING`` entry pins one specific origin.
       2. ``BUILD_ORIGINS`` (everything that touches real code) → ``BUILD_MODEL``.
       3. Legacy ``EXPLORE_MODEL`` for the mechanical plan-review steps.
@@ -51,8 +56,11 @@ def resolve_spawn_model(origin: InstanceOrigin) -> str | None:
          ``DEFAULT_SESSION_MODEL`` at command-build time.
 
     All of this loses to the model-limit failover downgrade, applied later in
-    the runner (``model_override`` beats ``instance.model``).
+    the runner (``model_override`` beats ``instance.model``) — so a thread
+    pinned to a model whose own quota is exhausted still runs, on the fallback.
     """
+    if override:
+        return override
     routed = config.MODEL_ROUTING.get(origin.value)
     if routed:
         return routed
@@ -835,7 +843,7 @@ async def spawn_from(
     # Per-origin model routing (plan-vs-build split). None leaves instance.model
     # unset so it falls through to DEFAULT_SESSION_MODEL at command-build time —
     # the same last-resort DIRECT sessions get. See resolve_spawn_model.
-    routed_model = resolve_spawn_model(cfg.origin)
+    routed_model = resolve_spawn_model(cfg.origin, ctx.effective_model)
     if routed_model:
         new_inst.model = routed_model
     new_inst.parent_id = source.id
@@ -990,7 +998,7 @@ async def spawn_resolver_detached(
     new_inst.origin = InstanceOrigin.RESOLVE_MERGE
     # Manual spawn (bypasses spawn_from) — apply the same plan-vs-build routing
     # so the conflict resolver runs on the strong build model, not the default.
-    new_inst.model = resolve_spawn_model(new_inst.origin)
+    new_inst.model = resolve_spawn_model(new_inst.origin, ctx.effective_model)
     new_inst.origin_platform = ctx.platform
     new_inst.effort = ctx.effective_effort
     new_inst.parent_id = source.id

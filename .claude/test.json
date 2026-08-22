@@ -78,6 +78,7 @@
     "attachments": "python scripts/test_attachments.py",
     "pending_image_lifecycle": "python scripts/test_pending_image_lifecycle.py",
     "memory_guard": "python scripts/test_memory_guard.py",
+    "model_command": "python scripts/test_model_command.py",
     "orchestrator_join": "python scripts/test_orchestrator_join.py"
   },
 
