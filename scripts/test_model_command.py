@@ -21,6 +21,8 @@ Run: ``python scripts/test_model_command.py``  (exit 0 on pass).
 
 from __future__ import annotations
 
+import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
+
 import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -164,8 +166,13 @@ def _test_suggestions_derive_from_history_and_config() -> list[str]:
     for want in ("claude-newmodel-3", "opus", "fable", "sonnet"):
         if want not in got:
             failures.append(f"model_suggestions missing {want!r} (got {got})")
-    if got and got[0] != "claude-newmodel-3":
-        failures.append(f"most-recently-run model should lead, got {got[0]!r}")
+    # Config aliases lead: they are what a human types, and they do not
+    # reshuffle every time another run finishes.
+    if got and got[0] != "fable":
+        failures.append(f"configured alias should lead, got {got[0]!r}")
+    if "claude-newmodel-3" in got and "fable" in got:
+        if got.index("claude-newmodel-3") < got.index("fable"):
+            failures.append(f"history should follow config, got {got}")
     if len(got) != len(set(got)):
         failures.append(f"model_suggestions returned duplicates: {got}")
     return failures
@@ -178,6 +185,19 @@ def _test_explicit_choices_win() -> list[str]:
         got = model_suggestions(store)
     if got != ["alpha", "beta"]:
         failures.append(f"MODEL_CHOICES override ignored: {got}")
+    return failures
+
+
+def _test_explicit_choices_are_normalized() -> list[str]:
+    """A hand-edited .env is untidy; the list still has to be usable as-is."""
+    failures: list[str] = []
+    with _cfg(model_choices=["  Opus 5  ", "FABLE-6", "fable-6", "", "opus"]):
+        got = model_suggestions(None)
+    if got != ["fable-6", "opus"]:
+        failures.append(
+            f"MODEL_CHOICES should drop unusable/duplicate entries and lowercase "
+            f"the rest, got {got}"
+        )
     return failures
 
 
@@ -304,6 +324,7 @@ def main() -> int:
         ("no-model-name-table", _test_source_has_no_model_name_table()),
         ("suggestions-derived", _test_suggestions_derive_from_history_and_config()),
         ("explicit-choices-win", _test_explicit_choices_win()),
+        ("choices-are-normalized", _test_explicit_choices_are_normalized()),
         ("suggestions-survive-broken-store", _test_suggestions_survive_a_broken_store()),
         ("empty-deployment", _test_empty_deployment_yields_empty_list()),
         ("thread-pin-round-trip", _test_thread_pin_round_trips()),

@@ -15,6 +15,8 @@ Run: ``python scripts/test_model_routing.py``  (exit 0 on pass).
 
 from __future__ import annotations
 
+import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
+
 import sys
 from contextlib import contextmanager
 from pathlib import Path

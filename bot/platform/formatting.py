@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import re
 from datetime import timedelta
+from typing import TYPE_CHECKING
 
 from dataclasses import dataclass, field
 
 from bot import config
 from bot.claude.types import CODE_CHANGE_TOOLS, PLAN_ORIGINS, Instance, InstanceOrigin, InstanceStatus, Schedule
 from bot.platform.base import ButtonSpec
+
+if TYPE_CHECKING:
+    from bot.store.state import StateStore
 
 
 # --- Shared Helpers ---
@@ -523,7 +527,13 @@ def effort_name(effort: str) -> str:
 # staying open to names that do not exist yet.
 _MODEL_SHAPE = re.compile(r"^[a-z0-9][a-z0-9._:-]{0,63}$")
 
-# Words meaning "stop pinning a model, go back to normal routing".
+# How many recent instances to mine for model names (see model_suggestions).
+_MODEL_HISTORY_SCAN = 200
+
+# Words meaning "stop pinning a model, go back to normal routing". "auto" is
+# in here on purpose even though Cursor has a real model by that name: clearing
+# the pin there falls through to CURSOR_MODEL, which is "auto" by default, so
+# both readings land on the same model.
 MODEL_CLEAR_WORDS = frozenset({"default", "clear", "reset", "none", "auto"})
 
 
@@ -540,18 +550,19 @@ def normalize_model(raw: str) -> str | None:
     return value
 
 
-def model_suggestions(store: object | None = None) -> list[str]:
-    """Model names to offer in /model autocomplete, most-recently-run first.
+def model_suggestions(store: "StateStore | None" = None) -> list[str]:
+    """Model names to offer in /model autocomplete. Never a closed list.
 
     Sources, all runtime-derived so the list maintains itself:
       1. ``MODEL_CHOICES`` env override, when a deployment wants explicit control.
-      2. Model names this bot has actually run (recorded per instance).
-      3. Model names this deployment's own settings already reference.
+      2. Model names this deployment's own settings already reference -- short
+         CLI aliases like "opus", listed first because they are what a human
+         types and they do not churn between runs.
+      3. Model names this bot has actually run (recorded per instance), newest
+         first -- usually full API ids, and the best available evidence of what
+         the installed CLI accepts.
     An empty list is fine -- free text still works.
     """
-    if config.MODEL_CHOICES:
-        return list(config.MODEL_CHOICES)
-
     ordered: list[str] = []
     seen: set[str] = set()
 
@@ -563,17 +574,13 @@ def model_suggestions(store: object | None = None) -> list[str]:
             seen.add(canon)
             ordered.append(canon)
 
-    # Models this deployment has actually run, most recent first -- the best
-    # available signal for what the installed CLI accepts.
-    if store is not None:
-        try:
-            for inst in store.list_instances(all_=True):  # type: ignore[attr-defined]
-                _add(getattr(inst, "context_model", None))
-                _add(getattr(inst, "model", None))
-        except Exception:
-            pass  # suggestions are a convenience, never a failure path
+    if config.MODEL_CHOICES:
+        # Explicit override: still normalized, so a stray "Opus 5 " in .env
+        # becomes a usable value instead of one the CLI would reject.
+        for choice in config.MODEL_CHOICES:
+            _add(choice)
+        return ordered
 
-    # Models this deployment's config names.
     _add(config.PRIMARY_MODEL)
     _add(config.MODEL_FALLBACK)
     _add(config.BUILD_MODEL)
@@ -582,7 +589,18 @@ def model_suggestions(store: object | None = None) -> list[str]:
     for routed in config.MODEL_ROUTING.values():
         _add(routed)
 
+    if store is not None:
+        try:
+            # Bounded: this runs per autocomplete keystroke, and the newest
+            # slice already covers every model still in rotation.
+            for inst in store.list_instances(all_=True)[:_MODEL_HISTORY_SCAN]:
+                _add(getattr(inst, "context_model", None))
+                _add(getattr(inst, "model", None))
+        except Exception:
+            pass  # suggestions are a convenience, never a failure path
+
     return ordered
+
 
 
 # --- Status Icon ---

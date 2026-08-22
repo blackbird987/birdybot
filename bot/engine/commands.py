@@ -22,6 +22,7 @@ from bot.claude.types import Instance, InstanceOrigin, InstanceStatus, InstanceT
 from bot.engine import lifecycle, pending as pending_mod, sessions as sessions_mod, workflows
 from bot.platform.base import ButtonSpec, RequestContext, SpawnArgs
 from bot.platform.formatting import (
+    MODEL_CLEAR_WORDS,
     VALID_MODES,
     action_button_specs,
     collapse_bot_directives,
@@ -34,10 +35,13 @@ from bot.platform.formatting import (
     merge_failed_banner,
     merge_failed_button_specs,
     mode_label,
+    model_suggestions,
+    normalize_model,
     queued_button_specs,
     redact_secrets,
     resolver_running_button_specs,
     running_button_specs,
+    short_model_label,
     strip_markdown,
     strip_verify_blocks,
 )
@@ -2327,10 +2331,6 @@ async def on_model(ctx: RequestContext, text: str) -> None:
     still carries the transcript), only the --model flag differs. There is
     deliberately no list of accepted model names -- see normalize_model.
     """
-    from bot.platform.formatting import (
-        MODEL_CLEAR_WORDS, model_suggestions, normalize_model, short_model_label,
-    )
-
     raw = text.strip()
     suggestions = model_suggestions(ctx.store)
     # Named as examples, never as the accepted set — any well-formed name works.

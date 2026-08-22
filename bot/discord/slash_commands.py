@@ -24,7 +24,7 @@ from bot.engine import commands
 from bot.engine import sessions as sessions_mod
 from bot.platform.formatting import (
     MODE_DISPLAY, VALID_MODES, format_age, mode_name, model_suggestions,
-    short_model_label,
+    normalize_model, short_model_label,
 )
 from bot.store import history as history_mod
 
@@ -275,6 +275,15 @@ def setup(bot: ClaudeBot) -> None:
                 continue
             label = "default (normal routing)" if name == "default" else short_model_label(name)
             out.append(app_commands.Choice(name=f"{label} — {name}"[:100], value=name))
+        # A model released after this build matches nothing above, and an
+        # autocomplete showing zero options is near-unusable on a phone. Offer
+        # what the user typed as a pickable option whenever it could be a model
+        # name — last, so it never sits where a real match was about to be
+        # tapped.
+        exact = normalize_model(typed) if typed else None
+        if exact and exact not in names:
+            out = out[:24]
+            out.append(app_commands.Choice(name=f"Use “{exact}”"[:100], value=exact))
         return out[:25]
 
     @bot.tree.command(name="model", description="Model for this thread", guild=guild_obj)
