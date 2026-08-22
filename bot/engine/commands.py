@@ -22,6 +22,7 @@ from bot.claude.types import Instance, InstanceOrigin, InstanceStatus, InstanceT
 from bot.engine import lifecycle, pending as pending_mod, sessions as sessions_mod, workflows
 from bot.platform.base import ButtonSpec, RequestContext, SpawnArgs
 from bot.platform.formatting import (
+    MODEL_CLEAR_WORDS,
     VALID_MODES,
     action_button_specs,
     collapse_bot_directives,
@@ -34,10 +35,13 @@ from bot.platform.formatting import (
     merge_failed_banner,
     merge_failed_button_specs,
     mode_label,
+    model_suggestions,
+    normalize_model,
     queued_button_specs,
     redact_secrets,
     resolver_running_button_specs,
     running_button_specs,
+    short_model_label,
     strip_markdown,
     strip_verify_blocks,
 )
@@ -1298,6 +1302,10 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
     )
     inst.origin_platform = ctx.platform
     inst.effort = ctx.effective_effort
+    # Per-thread /model pin. None (the normal case) leaves the instance
+    # unrouted so it falls through to DEFAULT_SESSION_MODEL at command-build
+    # time -- unchanged behaviour for every thread that never set one.
+    inst.model = ctx.effective_model
     inst.repo_name = repo_name or ""
     inst.repo_path = repo_path or ""
     # User identity and access control
@@ -1521,7 +1529,7 @@ async def on_bg(ctx: RequestContext, text: str) -> None:
     inst.origin = InstanceOrigin.BG
     # Manual spawn (bypasses spawn_from) — route through the plan-vs-build
     # split so a background build lands on the strong model, not the default.
-    inst.model = workflows.resolve_spawn_model(inst.origin)
+    inst.model = workflows.resolve_spawn_model(inst.origin, ctx.effective_model)
     inst.origin_platform = ctx.platform
     inst.effort = ctx.effective_effort
     inst.branch = f"{config.BRANCH_PREFIX}/{inst.id}"
@@ -1599,7 +1607,7 @@ async def on_release(ctx: RequestContext, text: str) -> None:
     inst.origin = InstanceOrigin.RELEASE
     # Manual spawn (bypasses spawn_from) — route through the plan-vs-build
     # split so release surgery (changelog/version edits) runs on the strong model.
-    inst.model = workflows.resolve_spawn_model(inst.origin)
+    inst.model = workflows.resolve_spawn_model(inst.origin, ctx.effective_model)
     inst.origin_platform = ctx.platform
     inst.effort = ctx.effective_effort
     inst.status = InstanceStatus.QUEUED
@@ -2314,6 +2322,66 @@ async def on_effort(ctx: RequestContext, text: str) -> None:
         )
 
 
+# --- /model ---
+
+async def on_model(ctx: RequestContext, text: str) -> None:
+    """View, pin, or clear the model this thread's sessions run on.
+
+    Takes effect on the NEXT turn: the session itself is unchanged (--resume
+    still carries the transcript), only the --model flag differs. There is
+    deliberately no list of accepted model names -- see normalize_model.
+    """
+    raw = text.strip()
+    suggestions = model_suggestions(ctx.store)
+    # Named as examples, never as the accepted set — any well-formed name works.
+    seen = f"\nSeen here: {', '.join(suggestions[:6])}" if suggestions else ""
+
+    if not raw:
+        pinned = ctx.effective_model
+        if pinned:
+            body = (
+                f"Model: **{short_model_label(pinned)}** (pinned to this thread)\n"
+                f"Change: `/model <name>` — clear: `/model default`{seen}"
+            )
+        else:
+            body = (
+                "Model: **default** — this thread follows normal routing.\n"
+                f"Pin one with: `/model <name>`{seen}"
+            )
+        await ctx.messenger.send_text(ctx.channel_id, body)
+        return
+
+    if raw.lower() in MODEL_CLEAR_WORDS:
+        ctx.update_model("")
+        await ctx.messenger.send_text(
+            ctx.channel_id,
+            "Model: **default** — back to normal routing from the next message.",
+        )
+        return
+
+    resolved = normalize_model(raw)
+    if not resolved:
+        await ctx.messenger.send_text(
+            ctx.channel_id,
+            f"`{raw}` doesn't look like a model name — "
+            f"letters, digits, `.` `-` `_` `:` only, no spaces.{seen}",
+        )
+        return
+
+    ctx.update_model(resolved)
+    lines = [f"Model: **{short_model_label(resolved)}** — from your next message in this thread."]
+    if suggestions and resolved not in suggestions:
+        # Soft warning, never a block: a name this deployment hasn't run yet is
+        # exactly what a newly released model looks like.
+        lines.append(
+            "Haven't seen this one run here before — if the CLI rejects it, "
+            "`/model default` puts it back."
+        )
+    if ctx.runner.active_instance_for_channel(ctx.channel_id):
+        lines.append("A run is in flight — it finishes on the old model.")
+    await ctx.messenger.send_text(ctx.channel_id, "\n".join(lines))
+
+
 # --- /provider ---
 
 async def on_provider(ctx: RequestContext, text: str) -> None:
@@ -2957,6 +3025,7 @@ async def on_help(ctx: RequestContext) -> None:
         "`/mode` — explore|plan|build\n"
         "`/verbose` — progress detail (0|1|2)\n"
         "`/effort` — reasoning effort (low|medium|high|max)\n"
+        "`/model` — model for this thread (or `default`)\n"
         "`/provider` — switch CLI provider (claude|cursor)\n"
         "`/context` — pinned context\n"
         "`/alias` — command shortcuts\n"

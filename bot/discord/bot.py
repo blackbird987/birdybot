@@ -592,6 +592,7 @@ class ClaudeBot(discord.Client):
             ctx.context = thread_info.context
             ctx.verbose_level = thread_info.verbose_level
             ctx.effort = thread_info.effort
+            ctx.model = thread_info.model
             ctx.spawn_depth_inherit = thread_info.spawn_depth
         if access_result:
             ctx.is_owner = access_result.is_owner

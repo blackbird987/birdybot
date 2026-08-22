@@ -57,6 +57,10 @@ class ThreadInfo:
     context: str | None = None        # None=inherit, ""=cleared, str=set
     verbose_level: int | None = None
     effort: str | None = None         # None=inherit, "low"/"medium"/"high"/"max"
+    # Model pin for this thread (/model). None=never set, ""=explicitly back
+    # to default routing, str=a --model name. Never validated against a list
+    # of known models -- see formatting.normalize_model for why.
+    model: str | None = None
     # User who created this thread (None = owner)
     user_id: str | None = None
     user_name: str | None = None
@@ -110,6 +114,8 @@ class ThreadInfo:
             d["verbose_level"] = self.verbose_level
         if self.effort is not None:
             d["effort"] = self.effort
+        if self.model is not None:
+            d["model"] = self.model
         if self.user_id is not None:
             d["user_id"] = self.user_id
         if self.user_name is not None:
@@ -143,6 +149,7 @@ class ThreadInfo:
             context=data.get("context"),
             verbose_level=data.get("verbose_level"),
             effort=data.get("effort"),
+            model=data.get("model"),
             user_id=data.get("user_id"),
             user_name=data.get("user_name"),
             user_ids=set(data.get("user_ids", [])),
@@ -1773,6 +1780,9 @@ class ForumManager:
             changed = True
         if ctx.effort is not None and ctx.effort != info.effort:
             info.effort = ctx.effort
+            changed = True
+        if ctx.model is not None and ctx.model != info.model:
+            info.model = ctx.model
             changed = True
         if changed:
             self.save_forum_map()
