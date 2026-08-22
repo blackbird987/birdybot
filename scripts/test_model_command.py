@@ -311,6 +311,78 @@ def _test_pin_reaches_command_line() -> list[str]:
     return failures
 
 
+def _test_autocomplete_never_dead_ends() -> list[str]:
+    """The dropdown must always offer something pickable for a usable name.
+
+    Registers the real slash commands on a real command tree and drives
+    /model's autocomplete callback. A model released after this build matches
+    nothing in the suggestion list, and an autocomplete showing zero options is
+    close to unusable on a phone -- so the typed name itself becomes the
+    option, but ONLY when nothing else matched, or a half-typed prefix would
+    sit next to the real match it is a prefix of.
+    """
+    import asyncio
+
+    import discord
+    from discord import app_commands
+
+    from bot.discord import slash_commands
+
+    class _StubBot:
+        def __init__(self, store):
+            self._store = store
+            self._guild_id = 1
+            self.tree = app_commands.CommandTree(
+                discord.Client(intents=discord.Intents.none())
+            )
+
+        def _is_owner(self, _uid):
+            return True
+
+        def _check_access(self, *_a, **_kw):  # pragma: no cover - never reached
+            raise AssertionError("access check should not run during autocomplete")
+
+        async def _run_slash(self, *_a, **_kw):  # pragma: no cover
+            pass
+
+    failures: list[str] = []
+    store = _FakeStore([_FakeInstance(context_model="claude-opus-5")])
+    with _cfg(primary_model="fable", build_model="opus"):
+        bot = _StubBot(store)
+        slash_commands.setup(bot)
+        cmd = bot.tree.get_command("model", guild=discord.Object(id=1))
+        if cmd is None:
+            return ["/model is not registered on the command tree"]
+        autocomplete = cmd._params["name"].autocomplete
+        if autocomplete is None:
+            return ["/model has no autocomplete attached"]
+
+        def offer(typed):
+            return [c.value for c in asyncio.run(autocomplete(None, typed))]
+
+        opened = offer("")
+        if "default" not in opened:
+            failures.append(f"opening the dropdown should offer 'default': {opened}")
+
+        unseen = offer("claude-opus-9")
+        if unseen != ["claude-opus-9"]:
+            failures.append(
+                f"a model this deployment never ran must still be pickable: {unseen}"
+            )
+
+        partial = offer("op")
+        if "opus" not in partial:
+            failures.append(f"'op' should match the model it prefixes: {partial}")
+        if "op" in partial:
+            failures.append("a half-typed prefix must not sit next to its real match")
+
+        junk = offer("fable x")
+        if junk:
+            failures.append(f"a value with a space must never be offered: {junk}")
+
+    return failures
+
+
 def _test_clear_words_cover_the_obvious_ones() -> list[str]:
     missing = [w for w in ("default", "clear", "reset") if w not in MODEL_CLEAR_WORDS]
     return [f"missing clear word(s): {missing}"] if missing else []
@@ -330,6 +402,7 @@ def main() -> int:
         ("thread-pin-round-trip", _test_thread_pin_round_trips()),
         ("pin-beats-routing", _test_pin_beats_spawn_routing()),
         ("pin-reaches-cli", _test_pin_reaches_command_line()),
+        ("autocomplete-never-dead-ends", _test_autocomplete_never_dead_ends()),
         ("clear-words", _test_clear_words_cover_the_obvious_ones()),
     ]
     total = sum(len(f) for _, f in checks)

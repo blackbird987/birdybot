@@ -276,14 +276,14 @@ def setup(bot: ClaudeBot) -> None:
             label = "default (normal routing)" if name == "default" else short_model_label(name)
             out.append(app_commands.Choice(name=f"{label} — {name}"[:100], value=name))
         # A model released after this build matches nothing above, and an
-        # autocomplete showing zero options is near-unusable on a phone. Offer
-        # what the user typed as a pickable option whenever it could be a model
-        # name — last, so it never sits where a real match was about to be
-        # tapped.
-        exact = normalize_model(typed) if typed else None
-        if exact and exact not in names:
-            out = out[:24]
-            out.append(app_commands.Choice(name=f"Use “{exact}”"[:100], value=exact))
+        # autocomplete showing zero options is near-unusable on a phone. Only
+        # then offer what the user typed: while they are still typing toward a
+        # name that IS listed, a second row holding their half-finished text is
+        # a mis-tap waiting to happen.
+        if not out:
+            exact = normalize_model(typed) if typed else None
+            if exact:
+                out.append(app_commands.Choice(name=f"Use “{exact}”"[:100], value=exact))
         return out[:25]
 
     @bot.tree.command(name="model", description="Model for this thread", guild=guild_obj)
