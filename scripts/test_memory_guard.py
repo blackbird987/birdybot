@@ -1373,22 +1373,25 @@ async def _check_auto_resume(failures: list[str]) -> None:
 #
 # The 2026-08-21 event is the one everything above structurally cannot catch.
 # No session breached its ceiling; the bot's cgroup recorded oom_kill 0 and
-# stayed inside its own policy the whole time. The machine still died: the
-# kernel ran a GLOBAL out-of-memory kill and shot the user's browser, and the
-# desktop froze for a minute.
+# stayed inside its own policy the whole time. The machine still died. The
+# kernel's dump at 16:55:50 is the record: under 230 MB free on a 31 GB box,
+# `Free swap = 68kB`, page cache squeezed to ~180 MB, then a GLOBAL
+# out-of-memory kill that shot a 5.44 GB Chrome and froze the desktop.
 #
 # Three separate blindnesses produced that, and each has a check below.
 #
 #   * Nothing ever asked what the MACHINE had left. Every limit in the guard
 #     above is an absolute number sized for an idle box. read_pressure() is the
-#     first reading that is about the machine rather than about us.
-#   * The largest process the bot was responsible for was not a session at all.
-#     A detached Roslyn compiler server sat on 3.3-4.9 GB — 45% of the bot's
-#     whole footprint — parented to PID 1, outside every tree the guard walks
-#     and inside the cgroup the whole time.
-#   * Five well-behaved sessions can finish a machine without any one of them
-#     misbehaving. Nothing could see across sessions, so the only thing that
-#     could act on the sum was the kernel.
+#     first reading that is about the machine rather than about us — and 230 MB
+#     free is unambiguous by any of its rules.
+#   * The big process was not a session. In that same task table a detached
+#     `dotnet` at 4.10 GB was the second-largest process on the whole machine,
+#     while the three `claude` sessions held 0.30, 0.31 and 0.34 GB. It was
+#     parented to PID 1: outside every tree the guard walks, inside the cgroup
+#     the whole time. Reaping every session would have freed under a gigabyte.
+#   * Sessions can still finish a machine collectively without any one of them
+#     misbehaving — not what happened here, but the per-session ceiling cannot
+#     see it either, and only the kernel could act on the sum.
 
 
 def _pressure(
@@ -1608,7 +1611,7 @@ def _kill_pid(pid: int | None) -> None:
 
 
 def _check_orphan_detection(failures: list[str]) -> None:
-    """The 4.9 GB nobody could see, and the four gates that stop a wrong kill."""
+    """The gigabytes nobody could see, and the gates that stop a wrong kill."""
     if memory._own_cgroup_path() is None or not memory.cgroup_pids():
         print("  (skipping orphan checks — no readable cgroup v2 on this host)")
         return
@@ -1641,8 +1644,8 @@ def _check_orphan_detection(failures: list[str]) -> None:
         if daemon_pid not in by_pid:
             failures.append(
                 "a reparented build daemon inside our own cgroup was not "
-                "found — this is the exact process the 2026-08-21 incident "
-                "hid 4.9 GB in"
+                "found — this is the exact shape of process the 2026-08-21 "
+                "incident hid 4.10 GB in"
             )
         elif not by_pid[daemon_pid].reclaimable:
             failures.append(
@@ -1728,6 +1731,25 @@ def _check_orphan_detection(failures: list[str]) -> None:
             )
         if owned.poll() is not None:
             failures.append("reap_orphans killed a process it was told not to")
+
+        # Same pid is not the same process. The scan samples CPU for a third of
+        # a second per candidate, so a daemon can exit and its number be handed
+        # to something else before the reap runs — and this code sends SIGKILL.
+        reused = memory.OrphanProcess(
+            pid=owned.pid, name="VBCSCompiler", reclaimable=True,
+            create_time=1.0,   # nothing on this machine started in 1970
+        )
+        if memory.reap_orphans([reused]):
+            failures.append(
+                "reap_orphans killed a pid whose start time had moved since "
+                "the scan; a recycled pid means it is signalling a process it "
+                "never examined"
+            )
+        if owned.poll() is not None:
+            failures.append(
+                "an unrelated process holding a recycled pid was killed by the "
+                "orphan sweep"
+            )
 
         target = by_pid.get(daemon_pid)
         if target is not None and target.reclaimable:
@@ -1866,7 +1888,7 @@ async def _check_fleet_arbitration(failures: list[str]) -> None:
     async def reclaim_fixes_it(why: str) -> list[str]:
         state["reclaimed"] = True
         r._read_pressure = lambda: calm       # type: ignore[assignment]
-        return ["VBCSCompiler (pid 1, 4.9GB)"]
+        return ["VBCSCompiler (pid 1, 4.1GB)"]
 
     r._reclaim_idle_daemons = reclaim_fixes_it   # type: ignore[assignment]
     if await r._fleet_arbitration("b", _tree(3100.0)) is not None:
@@ -1880,6 +1902,20 @@ async def _check_fleet_arbitration(failures: list[str]) -> None:
             "server sitting on gigabytes of nothing costs nothing to give up "
             "and a session's run does not"
         )
+
+    # SESSION_MEM_KILL_MB=0 is documented as "warnings only". The fleet path
+    # must honour that too, or the off switch only turns off half the guard.
+    saved_kill = config.SESSION_MEM_KILL_MB
+    config.SESSION_MEM_KILL_MB = 0
+    try:
+        r = _fleet_runner(fleet, crisis)
+        if await r._fleet_arbitration("b", _tree(3100.0)) is not None:
+            failures.append(
+                "a session was reaped for the fleet while SESSION_MEM_KILL_MB=0 "
+                "had switched killing off entirely"
+            )
+    finally:
+        config.SESSION_MEM_KILL_MB = saved_kill
 
     # Cooldown: a crunch does not clear the instant a victim dies.
     r = _fleet_runner(fleet, crisis)
@@ -2006,6 +2042,47 @@ async def _check_admission_gate(failures: list[str]) -> None:
             "anyway, so the last thing the user read was 'held'"
         )
 
+    # The hold is one more window with no process to signal. A Kill landing
+    # here must end the wait, not be swallowed while the session sits for
+    # minutes and then spawns into a thread that already said it stopped.
+    runner = ClaudeRunner()
+    runner._read_pressure = lambda: crisis   # type: ignore[assignment]
+
+    async def no_reclaim(why: str) -> list[str]:
+        return []
+
+    runner._reclaim_idle_daemons = no_reclaim   # type: ignore[assignment]
+    runner._intentional_kills.add(instance.id)
+    saved_wait = (config.MEM_ADMISSION_MAX_WAIT_SECS, config.MEM_ADMISSION_POLL_SECS)
+    config.MEM_ADMISSION_MAX_WAIT_SECS = 60
+    config.MEM_ADMISSION_POLL_SECS = 1
+    try:
+        started = time.monotonic()
+        await asyncio.wait_for(
+            runner._await_memory_headroom(instance, None), timeout=10,
+        )
+        held = time.monotonic() - started
+    except asyncio.TimeoutError:
+        held = 999.0
+    finally:
+        (config.MEM_ADMISSION_MAX_WAIT_SECS,
+         config.MEM_ADMISSION_POLL_SECS) = saved_wait
+        runner._intentional_kills.discard(instance.id)
+    if held > 2.0:
+        failures.append(
+            f"a Kill during the memory hold was ignored for {held:.0f}s; the "
+            "thread says the session stopped and it spawns anyway minutes later"
+        )
+
+    # The bounded-wait wording must survive a sub-minute setting; integer
+    # minutes render a 30s hold as "up to 0 min".
+    posts, _ = await drive([crisis], 2, 1)
+    joined = " ".join(" ".join(p) for p in posts)
+    if "0 min" in joined:
+        failures.append(
+            f"a short admission wait was described as '0 min': {joined!r}"
+        )
+
     # Switched off means off.
     saved_on = config.MEM_ADMISSION_ENABLED
     config.MEM_ADMISSION_ENABLED = False
@@ -2067,18 +2144,22 @@ def _check_fleet_kill_wording(failures: list[str]) -> None:
 
 def _check_budget_told_up_front(failures: list[str]) -> None:
     """The ceiling is stated before it is enforced, not only after a kill."""
+    kill_gb = f"{config.SESSION_MEM_KILL_MB / 1024:.0f}"
     budget = config.MEMORY_BUDGET_CONTEXT_TEMPLATE.format(
-        warn_gb=f"{config.SESSION_MEM_WARN_MB / 1024:.0f}",
-        kill_gb=f"{config.SESSION_MEM_KILL_MB / 1024:.0f}",
+        kill_gb=kill_gb, warn_line=" You get one warning at 4 GB.",
     )
     if "{" in budget or "}" in budget:
         failures.append(f"budget block left an unfilled placeholder: {budget!r}")
-    kill_gb = f"{config.SESSION_MEM_KILL_MB / 1024:.0f}"
     if kill_gb not in budget:
         failures.append(
             f"the budget block does not state the actual ceiling ({kill_gb} GB); "
             "a number written into the prose would go stale the moment it is retuned"
         )
+    # SESSION_MEM_WARN_MB=0 is a legal setting; promising a warning "at 0 GB"
+    # is worse than saying nothing about warnings.
+    silent = config.MEMORY_BUDGET_CONTEXT_TEMPLATE.format(kill_gb=kill_gb, warn_line="")
+    if "0 GB" in silent:
+        failures.append("the budget block promises a warning at 0 GB when warnings are off")
 
     instance = Instance(
         id="t-budget", name=None, instance_type=InstanceType.TASK,
@@ -2101,6 +2182,20 @@ def _check_budget_told_up_front(failures: list[str]) -> None:
         failures.append(
             f"the system prompt does not carry the live ceiling ({kill_gb} GB)"
         )
+    saved_warn = config.SESSION_MEM_WARN_MB
+    config.SESSION_MEM_WARN_MB = 0
+    try:
+        silent_prompt = ClaudeRunner()._build_system_prompt(instance)
+    finally:
+        config.SESSION_MEM_WARN_MB = saved_warn
+    if "warning in this thread at 0 GB" in silent_prompt:
+        failures.append(
+            "with warnings switched off the prompt still promises one at 0 GB"
+        )
+    if "Memory Budget" not in silent_prompt:
+        failures.append(
+            "switching warnings off also removed the ceiling from the prompt"
+        )
 
 
 async def _check_sensor_cleanup(failures: list[str]) -> None:
@@ -2110,7 +2205,7 @@ async def _check_sensor_cleanup(failures: list[str]) -> None:
     worker nodes running when it finishes, detached, so the next build is
     faster. Reparented to PID 1, they sit outside every process tree the guard
     walks while staying charged to the bot's cgroup — which is how one of them
-    came to hold 4.9 GB owned by nobody. The sweep above can reclaim it, but
+    came to hold gigabytes owned by nobody. The sweep above can reclaim it, but
     the sweep only runs once memory is already short; the step that started it
     knows exactly when it is done with it and can hand it back for free.
     """
@@ -2126,7 +2221,8 @@ async def _check_sensor_cleanup(failures: list[str]) -> None:
     elif "build-server shutdown" not in str(dotnet.get("cleanup", "")):
         failures.append(
             "the .NET sensor does not shut its build server down afterwards; "
-            "that server is what held 4.9 GB parented to PID 1 on 2026-08-21"
+            "a detached dotnet was the second-largest process on the machine "
+            "when it OOMed on 2026-08-21"
         )
 
     tmp = tempfile.mkdtemp(prefix="memguard-sensor-")

@@ -318,8 +318,9 @@ class CgroupMemory:
     max_mb: float | None = None     # MemoryMax, or None when unlimited
     # MemoryHigh: the throttle watermark, not a kill. Read alongside max
     # because it is the one that says "our own sessions are filling this" long
-    # before anything dies — on 2026-08-21 it had been crossed 746,489 times
-    # and nothing anywhere in the bot had looked at it.
+    # before anything dies. `memory.events` counts crossings in the millions
+    # over an uptime, which is why the guard reads the current anon-vs-high
+    # gap rather than that counter — but nothing in the bot had read either.
     high_mb: float | None = None
     oom_kills: int | None = None    # cumulative kills by the cgroup OOM killer
 
@@ -370,12 +371,17 @@ def cgroup_memory() -> CgroupMemory:
 #
 # Everything above this line answers "how is the bot doing against its own
 # limits". That question was answered correctly on 2026-08-21 and the machine
-# died anyway: the cgroup held 12.1 GB of anon against a 12 GB MemoryHigh —
-# inside policy, throttled 746,489 times — while the kernel ran a *global* OOM
-# kill and shot the user's browser. `memory.events` recorded oom_kill 0 for us.
-# The bot was neither the victim nor, by its own accounting, the offender. It
-# was simply the largest thing on a machine that had run out, and nothing in it
-# had ever asked what was left OUTSIDE its cgroup before spawning more work.
+# died anyway. The kernel's own dump at 16:55:50 is the record: 57249 free
+# pages — under 230 MB free on a 31 GB box — `Free swap = 68kB` with the whole
+# 8 GB of zram gone, page cache squeezed to ~180 MB, and ~25 GB of anonymous
+# memory nothing could reclaim. It ran a *global* OOM kill
+# (`constraint=CONSTRAINT_NONE ... global_oom`) and shot a 5.44 GB Chrome.
+# `memory.events` recorded oom_kill 0 for our unit: the bot was neither the
+# victim nor, by its own accounting, the offender, and nothing in it had ever
+# asked what was left OUTSIDE its cgroup before spawning more work.
+#
+# The available-memory rule below is the one that is *provably* early here:
+# 230 MB is far under any sane floor, and it was true before the kill.
 #
 # So this section reads the machine, not the unit. Four signals, because no one
 # of them is honest alone:
@@ -532,11 +538,13 @@ def read_pressure(
     * Available memory below ``critical_avail_mb`` is critical on its own.
       Nothing else needs to agree — there is no reading that makes 500 MB free
       acceptable.
-    * PSI at or above ``critical_psi_pct`` is critical on its own, and this is
-      the rule that would have caught the 2026-08-21 incident earliest. A
-      machine can be thrashing hard while ``available`` still shows gigabytes,
-      because the kernel counts reclaimable pages as available right up to the
-      moment it cannot reclaim them fast enough.
+    * PSI at or above ``critical_psi_pct`` is critical on its own. It is the
+      only rule that can fire *before* the others: a machine can be thrashing
+      hard while ``available`` still shows gigabytes, because the kernel counts
+      reclaimable pages as available right up to the moment it cannot reclaim
+      them fast enough. PSI was not recorded during the 2026-08-21 incident, so
+      whether it would have fired first there is a guess — the available-memory
+      rule provably would have, at under 230 MB free.
     * Full swap alone is only TIGHT. On zram a high figure is normal on a busy
       machine and says nothing about whether allocation will succeed — it takes
       a second signal (low available) to make it a crisis.
@@ -597,13 +605,19 @@ def read_pressure(
 # --- Memory nobody owns: what escaped the process trees but not the cgroup ----
 #
 # The per-session guard walks *downward* from each session's CLI process, so it
-# can only ever see what is still a descendant. On 2026-08-21 the single
-# largest process in the bot's cgroup was none of the sessions: a .NET Roslyn
-# compiler server (`VBCSCompiler`) holding between 3.3 and 4.9 GB, parented to
-# PID 1. `dotnet build` starts it deliberately detached and deliberately leaves
-# it running, so the next build is faster. It was 45% of the bot's entire
-# footprint and structurally invisible to every guard here: no session could be
-# blamed for it, and reaping any session would not have freed a byte of it.
+# can only ever see what is still a descendant. The kernel's task table from
+# the 2026-08-21 OOM shows what that misses: the second-largest process on the
+# entire machine was a `dotnet` at 4.10 GB, while the three `claude` sessions
+# running at that moment held 0.30, 0.31 and 0.34 GB between them. Not one
+# session was anywhere near its ceiling, and reaping every one of them would
+# have freed under a gigabyte.
+#
+# Investigating on 2026-08-24 found the shape of it still there: a detached
+# .NET Roslyn compiler server (`VBCSCompiler`) charged to the bot's cgroup and
+# parented to PID 1. `dotnet build` starts it deliberately detached and
+# deliberately leaves it running, so the next build is faster — which makes it
+# structurally invisible to every guard here. No session can be blamed for it,
+# and reaping any session does not free a byte of it.
 #
 # The cgroup is what makes this findable at all. A reparented process leaves
 # every process tree we hold, but it never leaves the cgroup it was charged to.
@@ -616,7 +630,7 @@ def read_pressure(
 # passed in and excluded by pid. And a build server that is genuinely mid-build
 # looks identical to an idle one by parentage alone, so "reclaimable" also
 # requires it to be doing nothing: a compiler server compiling burns CPU, one
-# sitting on 4.9 GB of nothing does not.
+# sitting on gigabytes of nothing does not.
 
 # Long-lived build/language daemons that exist purely as caches. Killing one
 # costs the next build a cold start and nothing else — they are designed to be
@@ -642,6 +656,13 @@ class OrphanProcess:
     age_secs: float = 0.0
     cpu_pct: float = 0.0
     reclaimable: bool = False   # a known cache daemon, idle, safe to restart
+    # Process start time, carried so the reap can prove it is still the same
+    # process. The scan samples CPU for a third of a second per candidate and
+    # the reap happens afterwards, so a daemon can exit and its pid be handed
+    # to something else in between — and this is code that sends SIGKILL. The
+    # /watch feature defends the identical hole with /proc/<pid>/stat field 22
+    # (see Watch.pid_start); psutil exposes the same clock as create_time().
+    create_time: float = 0.0
 
     def label(self) -> str:
         return f"{self.name or '?'} (pid {self.pid}, {self.rss_mb / 1024:.1f}GB)"
@@ -698,9 +719,9 @@ def find_orphans(
     """Processes in our cgroup that no live session owns, biggest first.
 
     Returns everything found above ``min_rss_mb`` — including the ones it will
-    not touch — because the log line is half the value here. A 4.9 GB process
-    that nobody can account for is worth seeing in bot.log every time, whether
-    or not anything is going to be done about it.
+    not touch — because the log line is half the value here. A multi-gigabyte
+    process that nobody can account for is worth seeing in bot.log every time,
+    whether or not anything is going to be done about it.
 
     ``reclaimable`` is the narrow subset that is safe to kill: a known cache
     daemon, old enough not to be mid-startup, idle enough not to be mid-build,
@@ -744,6 +765,7 @@ def find_orphans(
                 cmdline=cmdline,
                 rss_mb=rss_mb,
                 age_secs=max(0.0, now - proc.create_time()),
+                create_time=proc.create_time(),
             )
         except Exception:
             # Exited mid-walk, or not ours to inspect. Either way, skip.
@@ -772,6 +794,12 @@ def reap_orphans(orphans: list[OrphanProcess], grace_secs: float = 3.0) -> list[
     Only ever called with the reclaimable subset in mind, but it filters again
     itself: this is a function that kills things, and a caller that forgot to
     filter should reap nothing rather than everything.
+
+    Identity is re-proved per pid before any signal is sent. Between the scan
+    that produced these entries and this call, a daemon can exit and its pid be
+    reissued to something else entirely — a session's CLI, one of its builds,
+    or one of the user's own programs. Killing by a number alone is how that
+    becomes a silent, unattributable failure somewhere else on the machine.
     """
     reaped: list[str] = []
     targets = [o for o in orphans if o.reclaimable]
@@ -786,6 +814,16 @@ def reap_orphans(orphans: list[OrphanProcess], grace_secs: float = 3.0) -> list[
     for item in targets:
         try:
             proc = psutil.Process(item.pid)
+            # Same pid is not the same process. A start time that has moved
+            # means this number was reissued after the scan, so whatever holds
+            # it now was never examined and must not be signalled.
+            if item.create_time and abs(proc.create_time() - item.create_time) > 0.001:
+                log.warning(
+                    "Not reaping pid %d — it was reused since the scan "
+                    "(expected %s, found %s)",
+                    item.pid, item.name, proc.name(),
+                )
+                continue
             proc.terminate()
             procs.append(proc)
             reaped.append(item.label())

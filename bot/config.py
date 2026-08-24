@@ -159,10 +159,12 @@ SESSION_MEM_CHECK_SECS: int = int(os.getenv("SESSION_MEM_CHECK_SECS", "30"))
 # --- Machine-wide memory pressure ---
 #
 # Everything above is the bot measuring itself. These are the bot measuring the
-# machine, which is the gap that the 2026-08-21 incident lived in: the cgroup
-# held 12.1 GB against a 12 GB MemoryHigh — inside its own policy, never
-# OOM-killed — while the kernel ran a global OOM kill and shot the user's
-# browser. Nothing in the bot had ever asked what was left outside its cgroup.
+# machine, which is the gap that the 2026-08-21 incident lived in. The kernel's
+# dump at 16:55:50 recorded under 230 MB free on a 31 GB box and `Free swap =
+# 68kB`, then ran a *global* OOM kill and shot a 5.44 GB Chrome. Our unit's
+# `memory.events` recorded oom_kill 0 — every guard in the bot reported normal,
+# because none of them had ever asked what was left outside its cgroup. The
+# critical-available default below is set where that reading is unambiguous.
 #
 # Read by bot/claude/memory.py:read_pressure(), which turns them into one of
 # ok / tight / critical. Passed as arguments rather than read there directly so
@@ -213,10 +215,11 @@ MEM_ADMISSION_POLL_SECS: int = int(os.getenv("MEM_ADMISSION_POLL_SECS", "15"))
 # --- Reclaiming memory nobody owns ---
 #
 # Processes charged to the bot's cgroup that are no longer descendants of the
-# bot: build servers that outlive the build. On 2026-08-21 the single biggest
-# process the bot was responsible for was a detached .NET Roslyn compiler
-# server holding up to 4.9 GB — 45% of the bot's whole footprint, and invisible
-# to a guard that only walks downward from each session.
+# bot: build servers that outlive the build. In the kernel's task table from
+# the 2026-08-21 OOM, a `dotnet` at 4.10 GB was the second-largest process on
+# the whole machine while each `claude` session held ~0.3 GB — a detached .NET
+# Roslyn compiler server is invisible to a guard that only walks downward from
+# each session, and no session could have been reaped to free it.
 #
 # Anything above MEM_ORPHAN_MIN_MB is logged. Only known cache daemons that are
 # also idle and old enough get killed (see RECLAIMABLE_DAEMONS in
@@ -530,7 +533,10 @@ MEMORY_FLEET_KILL_NUDGE_TEMPLATE = (
 # enforcing it: the first thing it ever heard about memory was that its run had
 # just been destroyed. An agent that knows the budget in advance can choose a
 # streaming approach the first time instead of discovering the limit with a
-# twenty-minute job. Placeholders: warn_gb, kill_gb.
+# twenty-minute job. Placeholders: kill_gb, warn_line — the warning sentence is
+# passed in already rendered rather than as a bare number, because
+# SESSION_MEM_WARN_MB=0 is a legal setting and "you get one warning at 0 GB" is
+# worse than saying nothing about warnings at all.
 MEMORY_BUDGET_CONTEXT_TEMPLATE = (
     "--- Memory Budget ---\n"
     "This machine runs several sessions at once, alongside the user's own "
@@ -539,9 +545,8 @@ MEMORY_BUDGET_CONTEXT_TEMPLATE = (
     "freeze the machine.\n"
     "Your session has a ceiling of {kill_gb} GB of resident memory across "
     "EVERY process you start — not just the CLI, but any script, build, test "
-    "run, or background job it spawns, at any depth. You get one warning in "
-    "this thread at {warn_gb} GB. Past the ceiling your whole process tree is "
-    "killed and the run fails.\n"
+    "run, or background job it spawns, at any depth.{warn_line} Past the "
+    "ceiling your whole process tree is killed and the run fails.\n"
     "What that means when you work:\n"
     "- Prefer streaming or chunked processing over loading a whole dataset, "
     "model, or file set into memory at once. Write each chunk out as you go.\n"

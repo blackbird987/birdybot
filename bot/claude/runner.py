@@ -1480,9 +1480,10 @@ class ClaudeRunner:
         This is the first thing tried whenever memory is short, and it runs
         before anything that costs a session its work, because a build server
         sitting on gigabytes of nothing is free to give up and a session's run
-        is not. On 2026-08-21 the largest single process the bot was
-        responsible for was exactly this: a detached Roslyn compiler server at
-        up to 4.9 GB that no session owned and no guard could see.
+        is not. In the kernel's task table from the 2026-08-21 OOM a
+        detached `dotnet` at 4.10 GB was the second-largest process on the
+        whole machine, while each session held about 0.3 GB — nothing the
+        per-session guard could see, and nothing killing a session would free.
 
         Rate-limited and serialised — every session's watchdog can call it.
         """
@@ -1563,6 +1564,13 @@ class ClaudeRunner:
            take a second session for a spike the first kill already fixed.
         """
         if not config.SESSION_MEM_FLEET_ARBITRATION:
+            return None
+        # SESSION_MEM_KILL_MB=0 is documented as "warnings only". Reaping a
+        # session for the machine while the per-session kill is switched off
+        # would break that promise, and every message on this path quotes the
+        # ceiling the session was under — which reads as "under its own 0.0 GB
+        # ceiling" when there is no ceiling at all.
+        if config.SESSION_MEM_KILL_MB <= 0:
             return None
         if tree.total_mb < config.SESSION_MEM_FLEET_MIN_VICTIM_MB:
             return None
@@ -1652,6 +1660,14 @@ class ClaudeRunner:
         pressure = await asyncio.to_thread(self._read_pressure)
         if not pressure.is_critical():
             return
+        # A hold is one more window with no process to signal, and this file
+        # already carries the scar tissue for those: see
+        # _stopped_before_spawning. A Kill arriving while a session sits here
+        # would find nothing to terminate, evaporate, and the session would
+        # spawn minutes later into a thread that already said it had stopped.
+        # Returning is enough — _run_impl checks the mark before it spawns.
+        if instance.id in self._intentional_kills:
+            return
 
         await self._reclaim_idle_daemons(f"{instance.id} waiting to start")
         pressure = await asyncio.to_thread(self._read_pressure)
@@ -1665,6 +1681,12 @@ class ClaudeRunner:
         log.warning(
             "Holding %s before spawn — %s", instance.id, pressure.summary(),
         )
+        # The same formatter the /wake confirmation uses, so "up to 5 min" and
+        # "waited 45s" read the same way everywhere and a sub-minute admission
+        # wait cannot render as "0 min".
+        from bot.platform.formatting import format_delay_secs
+
+        budget = format_delay_secs(max(0, config.MEM_ADMISSION_MAX_WAIT_SECS))
         told = False
         started = asyncio.get_event_loop().time()
         deadline = started + max(0, config.MEM_ADMISSION_MAX_WAIT_SECS)
@@ -1677,13 +1699,16 @@ class ClaudeRunner:
                         f"This machine is out of memory right now — "
                         f"{pressure.human()}. Starting another session would "
                         f"make that worse, so this one is held until there is "
-                        f"room (up to "
-                        f"{config.MEM_ADMISSION_MAX_WAIT_SECS // 60} min, then "
-                        f"it starts anyway).",
+                        f"room (up to {budget}, then it starts anyway).",
                     )
                 except Exception:
                     log.exception("Progress callback error on memory hold")
             await asyncio.sleep(max(1, config.MEM_ADMISSION_POLL_SECS))
+            if instance.id in self._intentional_kills:
+                log.info(
+                    "Memory hold for %s abandoned — stop requested", instance.id,
+                )
+                return
             pressure = await asyncio.to_thread(self._read_pressure)
             if not pressure.is_critical():
                 waited = int(asyncio.get_event_loop().time() - started)
@@ -1711,7 +1736,7 @@ class ClaudeRunner:
             try:
                 await on_progress(
                     "Starting anyway — memory never freed up",
-                    f"Waited {config.MEM_ADMISSION_MAX_WAIT_SECS // 60} min and "
+                    f"Waited {budget} and "
                     f"the machine is still short ({pressure.human()}). Starting "
                     f"regardless rather than blocking your work indefinitely — "
                     f"but expect this session to be slow, and consider closing "
@@ -2878,7 +2903,9 @@ class ClaudeRunner:
                                 "largest of %d live sessions at %s. Reaping "
                                 "it rather than leaving the kernel to choose.",
                                 fleet_verdict.summary(), instance.id,
-                                len(self._tree_samples), tree.summary(),
+                                sum(1 for iid in self._tree_samples
+                                    if iid in self._processes),
+                                tree.summary(),
                             )
                             await reap_this_session(
                                 "Stopped — the machine ran out of memory",
@@ -3824,9 +3851,15 @@ class ClaudeRunner:
         # numbers are formatted from the live config rather than written into
         # the prose so a retuned ceiling cannot leave the prompt lying about it.
         if config.SESSION_MEM_KILL_MB > 0:
+            warn_line = (
+                f" You get one warning in this thread at "
+                f"{config.SESSION_MEM_WARN_MB / 1024:.0f} GB."
+                if 0 < config.SESSION_MEM_WARN_MB < config.SESSION_MEM_KILL_MB
+                else ""
+            )
             parts.append(config.MEMORY_BUDGET_CONTEXT_TEMPLATE.format(
-                warn_gb=f"{config.SESSION_MEM_WARN_MB / 1024:.0f}",
                 kill_gb=f"{config.SESSION_MEM_KILL_MB / 1024:.0f}",
+                warn_line=warn_line,
             ))
 
         # Spawn capability is depth-gated: a spawned (depth>=1) thread cannot

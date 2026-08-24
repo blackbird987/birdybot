@@ -110,10 +110,10 @@ OOMPolicy=continue
 # as one clearly-labelled session failure than as a 2 AM machine-wide event.
 # Raise both if the box gets more RAM.
 #
-# Lowered on 2026-08-21 from 12G/16G. The old numbers were not breached and the
-# machine died anyway: the cgroup sat at 12.1 GB of anonymous memory against a
-# 12 GB MemoryHigh — inside policy, oom_kill 0 for this unit — while the kernel
-# ran a GLOBAL out-of-memory kill and shot the user's browser. A 16 GB
+# Lowered on 2026-08-21 from 12G/16G. The old numbers were never breached and
+# the machine died anyway: `memory.events` recorded oom_kill 0 for this unit
+# while the kernel ran a GLOBAL out-of-memory kill (under 230 MB free, swap
+# down to 68 kB) and shot a 5.44 GB Chrome. A 16 GB
 # allowance for the bot alone is half of a 32 GB machine that is also running
 # a browser, a chat client and a charting app; staying under it was never
 # evidence of behaving well. MemoryHigh is now also read by the bot itself

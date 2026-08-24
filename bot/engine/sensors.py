@@ -279,9 +279,10 @@ async def _run_cleanup(spec: dict, cwd: str) -> None:
     leaves a Roslyn compiler server and MSBuild worker nodes running after it
     finishes, detached, so the next build is faster. They are reparented to
     PID 1, which puts them outside every process tree the memory guard walks
-    while leaving them charged to the bot's cgroup — on 2026-08-21 one of them
-    was holding up to 4.9 GB, 45% of the bot's entire footprint, owned by
-    nobody. A chain's sensor step is a guaranteed spawner of these, and it also
+    while leaving them charged to the bot's cgroup — in the kernel's task table
+    from the 2026-08-21 OOM a `dotnet` at 4.10 GB was the second-largest
+    process on the entire machine, owned by nobody. A chain's sensor step is a
+    guaranteed spawner of these, and it also
     knows exactly when it is done with them, so it is the cheapest possible
     place to clean up.
 
