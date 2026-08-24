@@ -1369,6 +1369,1011 @@ async def _check_auto_resume(failures: list[str]) -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# --- Part 5: the machine, not just the session --------------------------------
+#
+# The 2026-08-21 event is the one everything above structurally cannot catch.
+# No session breached its ceiling; the bot's cgroup recorded oom_kill 0 and
+# stayed inside its own policy the whole time. The machine still died. The
+# kernel's dump at 16:55:50 is the record: under 230 MB free on a 31 GB box,
+# `Free swap = 68kB`, page cache squeezed to ~180 MB, then a GLOBAL
+# out-of-memory kill that shot a 5.44 GB Chrome and froze the desktop.
+#
+# Three separate blindnesses produced that, and each has a check below.
+#
+#   * Nothing ever asked what the MACHINE had left. Every limit in the guard
+#     above is an absolute number sized for an idle box. read_pressure() is the
+#     first reading that is about the machine rather than about us — and 230 MB
+#     free is unambiguous by any of its rules.
+#   * The big process was not a session. In that same task table a detached
+#     `dotnet` at 4.10 GB was the second-largest process on the whole machine,
+#     while the three `claude` sessions held 0.30, 0.31 and 0.34 GB. It was
+#     parented to PID 1: outside every tree the guard walks, inside the cgroup
+#     the whole time. Reaping every session would have freed under a gigabyte.
+#   * Sessions can still finish a machine collectively without any one of them
+#     misbehaving — not what happened here, but the per-session ceiling cannot
+#     see it either, and only the kernel could act on the sum.
+
+
+def _pressure(
+    avail: float | None,
+    swap: float | None,
+    psi: float | None,
+    anon: float | None = None,
+    high: float | None = None,
+) -> memory.MemoryPressure:
+    """Drive the REAL classifier at fixed readings and fixed thresholds.
+
+    Thresholds are arguments to read_pressure() rather than config reads
+    precisely so this can exist: the cases that matter are edges the live
+    machine will not be sitting on when the harness happens to run.
+    """
+    saved = (
+        memory.available_mb, memory.swap_used_pct,
+        memory.psi_some_avg10, memory.cgroup_memory,
+    )
+    memory.available_mb = lambda: avail            # type: ignore[assignment]
+    memory.swap_used_pct = lambda: swap            # type: ignore[assignment]
+    memory.psi_some_avg10 = lambda: psi            # type: ignore[assignment]
+    memory.cgroup_memory = lambda: memory.CgroupMemory(  # type: ignore[assignment]
+        anon_mb=anon, high_mb=high,
+    )
+    try:
+        return memory.read_pressure(
+            critical_avail_mb=1024.0, tight_avail_mb=2560.0,
+            critical_swap_pct=90.0, critical_psi_pct=40.0, tight_psi_pct=10.0,
+        )
+    finally:
+        (memory.available_mb, memory.swap_used_pct,
+         memory.psi_some_avg10, memory.cgroup_memory) = saved  # type: ignore[assignment]
+
+
+def _check_pressure_classifier(failures: list[str]) -> None:
+    """The verdict that gates admission and cross-session reaping."""
+    cases = [
+        # readings                        expected  what it is
+        ((8000.0, 10.0, 0.0), memory.PRESSURE_OK,
+         "a roomy machine"),
+        ((2000.0, 10.0, 0.0), memory.PRESSURE_TIGHT,
+         "2 GB free, below the tight watermark"),
+        ((800.0, 10.0, 0.0), memory.PRESSURE_CRITICAL,
+         "0.8 GB free — critical on its own, nothing else needs to agree"),
+        ((8000.0, 100.0, 0.0), memory.PRESSURE_TIGHT,
+         "full swap on a machine with 8 GB free"),
+        ((2000.0, 100.0, 0.0), memory.PRESSURE_CRITICAL,
+         "full swap AND low available — the pair that means the next "
+         "allocation may not land"),
+        ((8000.0, 10.0, 61.0), memory.PRESSURE_CRITICAL,
+         "thrashing at 61% stall while available still reads 8 GB"),
+        ((8000.0, 10.0, 20.0), memory.PRESSURE_TIGHT,
+         "stalling but not thrashing"),
+    ]
+    for (avail, swap, psi), want, what in cases:
+        got = _pressure(avail, swap, psi)
+        if got.level != want:
+            failures.append(
+                f"{what}: read as {got.level!r}, expected {want!r} "
+                f"({got.summary()})"
+            )
+        if want != memory.PRESSURE_OK and not got.reasons:
+            failures.append(
+                f"{what}: verdict {got.level!r} with no evidence — a hold that "
+                "says 'waiting for memory' and nothing else is noise the user "
+                "cannot act on"
+            )
+
+    # Full swap alone must NOT be critical. On zram — which is what this
+    # machine swaps to — a 100% figure is ordinary on any busy day, and
+    # treating it as a crisis would hold every session start permanently.
+    swap_only = _pressure(8000.0, 100.0, 0.0)
+    if swap_only.is_critical():
+        failures.append(
+            "full swap alone was read as critical; on zram that is the normal "
+            "state of a busy machine and would hold every session forever"
+        )
+
+    # No readings at all (not Linux, or /proc unreadable) must be OK and must
+    # say so. A None reading treated as 0 would read as "0 MB free" and hold
+    # every session on a machine that is perfectly fine.
+    blind = _pressure(None, None, None)
+    if blind.level != memory.PRESSURE_OK:
+        failures.append(
+            f"a reading with no data came back {blind.level!r}; missing "
+            "readings must not be mistaken for bad ones"
+        )
+    if "no readings" not in blind.summary():
+        failures.append(
+            f"a blind pressure read summarised as {blind.summary()!r} instead "
+            "of saying it had nothing to go on"
+        )
+    if blind.human() != "memory looks fine" and blind.reasons:
+        failures.append("a blind read invented evidence it does not have")
+
+    # Ordering helper, used by every at_least() gate.
+    if not memory.pressure_at_least(memory.PRESSURE_CRITICAL, memory.PRESSURE_TIGHT):
+        failures.append("critical did not satisfy an at-least-tight test")
+    if memory.pressure_at_least(memory.PRESSURE_TIGHT, memory.PRESSURE_CRITICAL):
+        failures.append("tight satisfied an at-least-critical test")
+
+    # The live machine, at the configured thresholds: not asserting a verdict
+    # (it depends on what the user has open), only that it produces one.
+    live = memory.read_pressure()
+    if live.level not in memory._PRESSURE_ORDER:
+        failures.append(f"live pressure read produced an unknown level {live.level!r}")
+    if sys.platform == "linux" and live.avail_mb is None:
+        failures.append("live pressure read got no available-memory figure on Linux")
+    swap_now = memory.swap_used_pct()
+    if swap_now is not None and not (0.0 <= swap_now <= 100.0):
+        failures.append(f"swap_used_pct() reported {swap_now}%")
+    psi_now = memory.psi_some_avg10()
+    if psi_now is not None and not (0.0 <= psi_now <= 100.0):
+        failures.append(f"psi_some_avg10() reported {psi_now}%")
+
+
+def _check_over_own_high(failures: list[str]) -> None:
+    """"Are WE the ones filling it" — the gate that stops a wrong reap.
+
+    Machine-wide pressure caused by something outside this cgroup is not ours
+    to solve by killing our own work: the real offender would re-take the
+    memory immediately and the session's run would be gone for nothing. So a
+    fleet reap requires both a starving machine and our own cgroup being past
+    its MemoryHigh.
+    """
+    cases = [
+        ((11000.0, 10240.0), True, "past MemoryHigh"),
+        ((10240.0, 10240.0), True, "exactly at MemoryHigh"),
+        ((5000.0, 10240.0), False, "half of MemoryHigh"),
+        ((11000.0, None), False, "no MemoryHigh to compare against"),
+        ((None, 10240.0), False, "no anonymous-memory reading"),
+    ]
+    for (anon, high), want, what in cases:
+        got = memory.MemoryPressure(cgroup_anon_mb=anon, cgroup_high_mb=high).over_own_high()
+        if got is not want:
+            failures.append(
+                f"over_own_high() said {got} for {what}; expected {want}"
+            )
+    # Unknown must not read as "yes". A missing reading answering True would
+    # let a fleet reap fire on a machine whose memory nothing here is using.
+    if memory.MemoryPressure().over_own_high():
+        failures.append(
+            "a pressure reading with no cgroup figures claimed we were over "
+            "our own limit — that is a reap on no evidence"
+        )
+
+
+# --- Memory nobody owns -------------------------------------------------------
+
+
+_ORPHAN_DIR: tempfile.TemporaryDirectory | None = None
+
+
+def _orphan_scripts() -> tuple[Path, Path]:
+    """Two idle sleepers: one named like a build daemon, one not.
+
+    The name is the whole point. `find_orphans` matches against the full
+    command line, so a python script *called* VBCSCompiler.py is exactly as
+    reclaimable as the real Roslyn server and needs no .NET installed to test.
+    """
+    global _ORPHAN_DIR
+    if _ORPHAN_DIR is None:
+        _ORPHAN_DIR = tempfile.TemporaryDirectory(prefix="memguard-orphan-")
+    base = Path(_ORPHAN_DIR.name)
+    body = "import time\ntime.sleep(120)\n"
+    daemon = base / "VBCSCompiler.py"
+    plain = base / "somebody-elses-job.py"
+    for path in (daemon, plain):
+        if not path.exists():
+            path.write_text(body, encoding="utf-8")
+    # Named like a daemon and burning CPU: a compiler server mid-compile.
+    busy = base / "MSBuildTaskHost.py"
+    if not busy.exists():
+        busy.write_text(
+            "import time\n"
+            "end = time.time() + 120\n"
+            "while time.time() < end:\n"
+            "    pass\n",
+            encoding="utf-8",
+        )
+    return daemon, plain
+
+
+def _busy_orphan_script() -> Path:
+    """The daemon-named spinner planted by _orphan_scripts()."""
+    _orphan_scripts()
+    assert _ORPHAN_DIR is not None
+    return Path(_ORPHAN_DIR.name) / "MSBuildTaskHost.py"
+
+
+def _plant_orphan(script: Path) -> int | None:
+    """A process in our cgroup that is NOT a descendant of this one.
+
+    `setsid` forks and its parent exits immediately, so the surviving process
+    is reparented away and leaves every process tree the guard can walk — while
+    staying in the cgroup it was charged to, because cgroup membership is
+    inherited at fork and setsid does not change it. That is precisely the
+    shape the leaked compiler server had.
+    """
+    # --fork is load-bearing: setsid only forks on its own when it is already
+    # a process group leader, and without a fork it just exec()s in place and
+    # the "orphan" stays a plain child of this process.
+    proc = subprocess.Popen(
+        ["setsid", "--fork", sys.executable, str(script)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    proc.wait(timeout=10)
+    try:
+        import psutil
+    except ImportError:
+        return None
+    # Find it by command line: setsid's own pid is gone and the survivor's is
+    # not reported back to us.
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        for p in psutil.process_iter(["pid", "cmdline"]):
+            try:
+                if str(script) in " ".join(p.info["cmdline"] or []):
+                    return p.info["pid"]
+            except Exception:
+                continue
+        time.sleep(0.2)
+    return None
+
+
+def _kill_pid(pid: int | None) -> None:
+    if not pid:
+        return
+    try:
+        os.kill(pid, 9)
+    except OSError:
+        pass
+
+
+def _check_orphan_detection(failures: list[str]) -> None:
+    """The gigabytes nobody could see, and the gates that stop a wrong kill."""
+    if memory._own_cgroup_path() is None or not memory.cgroup_pids():
+        print("  (skipping orphan checks — no readable cgroup v2 on this host)")
+        return
+
+    daemon_script, plain_script = _orphan_scripts()
+    daemon_pid = _plant_orphan(daemon_script)
+    plain_pid = _plant_orphan(plain_script)
+    # A direct child, NOT reparented: the control case. It is unowned by
+    # parentage in exactly no sense, and must never be a candidate.
+    owned = subprocess.Popen(
+        [sys.executable, str(daemon_script)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        if daemon_pid is None or plain_pid is None:
+            failures.append(
+                "could not plant a reparented test process, so the orphan "
+                "scan was never exercised"
+            )
+            return
+
+        # min_rss 1 MB / min_age 0: an idle interpreter is a few MB and seconds
+        # old. The thresholds themselves are asserted separately below.
+        found = memory.find_orphans(
+            root_pid=os.getpid(), protected_pids=set(),
+            min_rss_mb=1.0, min_age_secs=0.0, cpu_idle_pct=50.0,
+        )
+        by_pid = {o.pid: o for o in found}
+
+        if daemon_pid not in by_pid:
+            failures.append(
+                "a reparented build daemon inside our own cgroup was not "
+                "found — this is the exact shape of process the 2026-08-21 "
+                "incident hid 4.10 GB in"
+            )
+        elif not by_pid[daemon_pid].reclaimable:
+            failures.append(
+                "an idle, reparented build daemon was found but judged "
+                "unreclaimable, so nothing would ever free it"
+            )
+
+        if plain_pid not in by_pid:
+            failures.append(
+                "an unowned process that is not a known daemon was not even "
+                "reported; the log line is half the value here"
+            )
+        elif by_pid[plain_pid].reclaimable:
+            failures.append(
+                "an unrecognised unowned process was marked reclaimable — the "
+                "name allowlist is the only thing standing between this "
+                "sweep and killing a user's detached job"
+            )
+
+        if owned.pid in by_pid:
+            failures.append(
+                "a live direct child of the caller was reported as unowned; "
+                "every running session would look orphaned"
+            )
+
+        # Gate: an armed /watch pid. A session that launched a long job with
+        # `setsid nohup ... &` — which is what the watch feature tells it to
+        # do — is reparented and unowned by exactly the same test.
+        watched = memory.find_orphans(
+            root_pid=os.getpid(), protected_pids={daemon_pid},
+            min_rss_mb=1.0, min_age_secs=0.0, cpu_idle_pct=50.0,
+        )
+        prot = {o.pid: o for o in watched}.get(daemon_pid)
+        if prot is None or prot.reclaimable:
+            failures.append(
+                "a pid an armed watch is waiting on was still reclaimable; "
+                "reaping it would silently destroy the job the thread is "
+                "visibly sitting and waiting for"
+            )
+
+        # Gate: age. Mid-startup is indistinguishable from leaked.
+        young = memory.find_orphans(
+            root_pid=os.getpid(), protected_pids=set(),
+            min_rss_mb=1.0, min_age_secs=3600.0, cpu_idle_pct=50.0,
+        )
+        fresh = {o.pid: o for o in young}.get(daemon_pid)
+        if fresh is None or fresh.reclaimable:
+            failures.append(
+                "a daemon seconds old was reclaimable despite a one-hour "
+                "minimum age; a compiler server is at its youngest exactly "
+                "when a build is starting"
+            )
+
+        # Gate: busy. A compiler server mid-compile burns CPU; killing it
+        # fails the build that is running right now.
+        busy = memory.find_orphans(
+            root_pid=os.getpid(), protected_pids=set(),
+            min_rss_mb=1.0, min_age_secs=0.0, cpu_idle_pct=0.0,
+        )
+        working = {o.pid: o for o in busy}.get(daemon_pid)
+        if working is None or working.reclaimable:
+            failures.append(
+                "a daemon was reclaimable at a zero-percent idle threshold, so "
+                "the busy check is not actually gating anything"
+            )
+
+        # Gate: size. Below the floor it is not reported at all.
+        big = memory.find_orphans(
+            root_pid=os.getpid(), protected_pids=set(),
+            min_rss_mb=100_000.0, min_age_secs=0.0, cpu_idle_pct=50.0,
+        )
+        if any(o.pid == daemon_pid for o in big):
+            failures.append("a few-MB process was reported above a 100 GB floor")
+
+        # reap_orphans re-filters on `reclaimable` itself. It is a function
+        # that kills things: a caller that forgot to filter must reap nothing,
+        # not everything.
+        decoy = memory.OrphanProcess(pid=owned.pid, name="python", reclaimable=False)
+        if memory.reap_orphans([decoy]):
+            failures.append(
+                "reap_orphans killed an entry flagged unreclaimable — the "
+                "second filter that makes a caller's mistake harmless is gone"
+            )
+        if owned.poll() is not None:
+            failures.append("reap_orphans killed a process it was told not to")
+
+        # Same pid is not the same process. The scan samples CPU for a third of
+        # a second per candidate, so a daemon can exit and its number be handed
+        # to something else before the reap runs — and this code sends SIGKILL.
+        reused = memory.OrphanProcess(
+            pid=owned.pid, name="VBCSCompiler", reclaimable=True,
+            create_time=1.0,   # nothing on this machine started in 1970
+        )
+        if memory.reap_orphans([reused]):
+            failures.append(
+                "reap_orphans killed a pid whose start time had moved since "
+                "the scan; a recycled pid means it is signalling a process it "
+                "never examined"
+            )
+        if owned.poll() is not None:
+            failures.append(
+                "an unrelated process holding a recycled pid was killed by the "
+                "orphan sweep"
+            )
+
+        # A daemon that was idle when scanned and is compiling by the time the
+        # reap runs. The scan samples 0.3s per candidate, serially, and the
+        # caller logs and hops threads afterwards — long enough for a real
+        # VBCSCompiler to go from 0% to 840% and back, which is what happened
+        # on this machine while this feature was being verified. Killing it
+        # here fails the build that is using it right now.
+        busy_pid = _plant_orphan(_busy_orphan_script())
+        if busy_pid is None:
+            failures.append("could not plant a busy daemon to test the reap-time idle check")
+        else:
+            try:
+                time.sleep(0.5)   # let it actually start spinning
+                # Scanned at an unreachable busy threshold, so it comes back
+                # flagged reclaimable with a real pid and a real start time —
+                # exactly the entry a scan would produce if it had sampled the
+                # 0.3s in which this process happened to be idle.
+                stale = next(
+                    (o for o in memory.find_orphans(
+                        root_pid=os.getpid(), protected_pids=set(),
+                        min_rss_mb=1.0, min_age_secs=0.0,
+                        cpu_idle_pct=100_000.0,
+                    ) if o.pid == busy_pid),
+                    None,
+                )
+                if stale is None or not stale.reclaimable:
+                    failures.append(
+                        "could not produce a reclaimable entry for the busy "
+                        "daemon, so the reap-time idle check was never exercised"
+                    )
+                    stale = memory.OrphanProcess(
+                        pid=busy_pid, name="MSBuildTaskHost", reclaimable=True,
+                    )
+                if memory.reap_orphans([stale], cpu_idle_pct=5.0):
+                    failures.append(
+                        "a daemon that went busy between the scan and the reap "
+                        "was still killed; the idle verdict it was killed on "
+                        "was seconds stale and a build was using it"
+                    )
+                if not _pid_alive(busy_pid):
+                    failures.append("a compiler server mid-compile was killed by the reap")
+                # ...and the same entry IS reaped once it goes quiet, so the
+                # new check is a gate and not a blanket refusal.
+                if memory.reap_orphans([stale], cpu_idle_pct=100_000.0):
+                    pass
+                else:
+                    failures.append(
+                        "the reap-time idle check refused a daemon even at an "
+                        "unreachable busy threshold, so it never reaps anything"
+                    )
+            finally:
+                _kill_pid(busy_pid)
+
+        target = by_pid.get(daemon_pid)
+        if target is not None and target.reclaimable:
+            reaped = memory.reap_orphans([target], grace_secs=3.0)
+            if not reaped:
+                failures.append("reap_orphans reported reaping nothing")
+            deadline = time.monotonic() + 8.0
+            while time.monotonic() < deadline and _pid_alive(daemon_pid):
+                time.sleep(0.2)
+            if _pid_alive(daemon_pid):
+                failures.append(
+                    f"the leaked daemon (pid {daemon_pid}) survived its reap"
+                )
+            if plain_pid and not _pid_alive(plain_pid):
+                failures.append(
+                    "reaping the daemon also took out the unrelated unowned "
+                    "process next to it"
+                )
+    finally:
+        _kill_pid(daemon_pid)
+        _kill_pid(plain_pid)
+        _hard_kill(owned)
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    # A zombie answers signal 0. Read its state to tell reaped from finished.
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        return stat.rsplit(")", 1)[1].split()[0] != "Z"
+    except OSError:
+        return False
+    except IndexError:
+        return True
+
+
+# --- Five well-behaved sessions ----------------------------------------------
+
+
+def _fleet_runner(
+    samples: dict[str, float], pressure: memory.MemoryPressure,
+) -> ClaudeRunner:
+    """A runner holding one memory sample per live session, with a fixed verdict."""
+    runner = ClaudeRunner()
+    for iid, mb in samples.items():
+        runner._tree_samples[iid] = memory.TreeMemory(
+            total_mb=mb, biggest_mb=mb, proc_count=3, biggest_name="python",
+            biggest_pid=1234,
+        )
+        runner._processes[iid] = object()  # type: ignore[assignment]
+    runner._read_pressure = lambda: pressure   # type: ignore[assignment]
+
+    async def no_reclaim(why: str) -> list[str]:
+        return []
+
+    runner._reclaim_idle_daemons = no_reclaim   # type: ignore[assignment]
+    return runner
+
+
+def _tree(mb: float) -> memory.TreeMemory:
+    return memory.TreeMemory(
+        total_mb=mb, biggest_mb=mb, proc_count=3, biggest_name="python",
+        biggest_pid=1234,
+    )
+
+
+async def _check_fleet_arbitration(failures: list[str]) -> None:
+    """Exactly one of five well-behaved sessions is chosen, and only when it helps."""
+    crisis = memory.MemoryPressure(
+        avail_mb=700.0, swap_pct=100.0, psi_pct=55.0,
+        cgroup_anon_mb=11000.0, cgroup_high_mb=10240.0,
+        level=memory.PRESSURE_CRITICAL,
+        reasons=("only 0.7 GB of memory is free machine-wide",),
+    )
+    calm = memory.MemoryPressure(
+        avail_mb=9000.0, cgroup_anon_mb=3000.0, cgroup_high_mb=10240.0,
+        level=memory.PRESSURE_OK,
+    )
+    # Machine starving, but the memory is not ours — a browser did this.
+    not_ours = memory.MemoryPressure(
+        avail_mb=700.0, cgroup_anon_mb=3000.0, cgroup_high_mb=10240.0,
+        level=memory.PRESSURE_CRITICAL, reasons=("only 0.7 GB free",),
+    )
+    fleet = {"a": 2600.0, "b": 3100.0, "c": 900.0}
+
+    # The largest live session is the one that goes.
+    r = _fleet_runner(fleet, crisis)
+    if await r._fleet_arbitration("b", _tree(3100.0)) is None:
+        failures.append(
+            "a starving machine with our own cgroup over its limit did not "
+            "pick the largest session; the kernel would choose instead, and "
+            "the session it killed would never be told why"
+        )
+    # ...and only that one. Two watchdogs must not both volunteer.
+    r = _fleet_runner(fleet, crisis)
+    if await r._fleet_arbitration("a", _tree(2600.0)) is not None:
+        failures.append(
+            "a session that is not the largest volunteered itself; with five "
+            "watchdogs running that unwinds the whole fleet over one spike"
+        )
+
+    # A calm machine reaps nobody, however big the session is.
+    r = _fleet_runner(fleet, calm)
+    if await r._fleet_arbitration("b", _tree(3100.0)) is not None:
+        failures.append("a session was reaped for the machine while the machine was fine")
+
+    # Starving, but not because of us.
+    r = _fleet_runner(fleet, not_ours)
+    if await r._fleet_arbitration("b", _tree(3100.0)) is not None:
+        failures.append(
+            "a session was killed for pressure created outside this cgroup — "
+            "the real offender would re-take the memory immediately and the "
+            "session's work would be gone for nothing"
+        )
+
+    # Too small to be worth taking.
+    small = {"a": 300.0, "b": 400.0}
+    r = _fleet_runner(small, crisis)
+    if await r._fleet_arbitration("b", _tree(400.0)) is not None:
+        failures.append(
+            f"a {400}MB session was reaped for the machine; below "
+            f"SESSION_MEM_FLEET_MIN_VICTIM_MB="
+            f"{config.SESSION_MEM_FLEET_MIN_VICTIM_MB} that frees nothing "
+            "worth having and destroys real work"
+        )
+
+    # Reclaim first: if giving up an idle daemon clears it, no session dies.
+    r = _fleet_runner(fleet, crisis)
+    state = {"reclaimed": False}
+
+    async def reclaim_fixes_it(why: str) -> list[str]:
+        state["reclaimed"] = True
+        r._read_pressure = lambda: calm       # type: ignore[assignment]
+        return ["VBCSCompiler (pid 1, 4.1GB)"]
+
+    r._reclaim_idle_daemons = reclaim_fixes_it   # type: ignore[assignment]
+    if await r._fleet_arbitration("b", _tree(3100.0)) is not None:
+        failures.append(
+            "a session was reaped even though reclaiming an idle build daemon "
+            "had already cleared the pressure for free"
+        )
+    if not state["reclaimed"]:
+        failures.append(
+            "cross-session arbitration never tried reclaiming first; a build "
+            "server sitting on gigabytes of nothing costs nothing to give up "
+            "and a session's run does not"
+        )
+
+    # SESSION_MEM_KILL_MB=0 is documented as "warnings only". The fleet path
+    # must honour that too, or the off switch only turns off half the guard.
+    saved_kill = config.SESSION_MEM_KILL_MB
+    config.SESSION_MEM_KILL_MB = 0
+    try:
+        r = _fleet_runner(fleet, crisis)
+        if await r._fleet_arbitration("b", _tree(3100.0)) is not None:
+            failures.append(
+                "a session was reaped for the fleet while SESSION_MEM_KILL_MB=0 "
+                "had switched killing off entirely"
+            )
+    finally:
+        config.SESSION_MEM_KILL_MB = saved_kill
+
+    # Cooldown: a crunch does not clear the instant a victim dies.
+    r = _fleet_runner(fleet, crisis)
+    r._fleet_last_reap = asyncio.get_event_loop().time()
+    if await r._fleet_arbitration("b", _tree(3100.0)) is not None:
+        failures.append(
+            f"a second session was reaped inside the "
+            f"{config.FLEET_REAP_COOLDOWN_SECS}s cooldown; the kernel needs "
+            "time to reclaim and the fleet would unwind in a minute"
+        )
+
+    # A finished session's lingering sample must not win the largest contest
+    # and thereby spare a live one that is genuinely the problem.
+    r = _fleet_runner({"b": 3100.0}, crisis)
+    r._tree_samples["dead"] = _tree(9000.0)   # no entry in _processes
+    if await r._fleet_arbitration("b", _tree(3100.0)) is None:
+        failures.append(
+            "a dead session's stale sample won the largest contest and spared "
+            "the live session that was actually filling the machine"
+        )
+
+    # Switched off means off.
+    saved = config.SESSION_MEM_FLEET_ARBITRATION
+    config.SESSION_MEM_FLEET_ARBITRATION = False
+    try:
+        r = _fleet_runner(fleet, crisis)
+        if await r._fleet_arbitration("b", _tree(3100.0)) is not None:
+            failures.append(
+                "cross-session arbitration fired with "
+                "SESSION_MEM_FLEET_ARBITRATION off"
+            )
+    finally:
+        config.SESSION_MEM_FLEET_ARBITRATION = saved
+
+
+async def _check_admission_gate(failures: list[str]) -> None:
+    """A starving machine's answer to 'start another session' is not 'yes'."""
+    instance = Instance(
+        id="t-admit", name=None, instance_type=InstanceType.TASK,
+        prompt="build it", repo_name="bot", repo_path="/tmp",
+        status=InstanceStatus.RUNNING, mode="build",
+    )
+    crisis = memory.MemoryPressure(
+        avail_mb=600.0, swap_pct=100.0, psi_pct=70.0,
+        level=memory.PRESSURE_CRITICAL,
+        reasons=("only 0.6 GB of memory is free machine-wide",),
+    )
+    calm = memory.MemoryPressure(avail_mb=9000.0, level=memory.PRESSURE_OK)
+    tight = memory.MemoryPressure(
+        avail_mb=2000.0, level=memory.PRESSURE_TIGHT, reasons=("2.0 GB free",),
+    )
+
+    async def drive(readings: list[memory.MemoryPressure], wait_secs: int, poll: int):
+        posts: list[tuple[str, str]] = []
+        runner = ClaudeRunner()
+        seq = list(readings)
+        runner._read_pressure = lambda: seq.pop(0) if len(seq) > 1 else seq[0]  # type: ignore[assignment]
+
+        async def no_reclaim(why: str) -> list[str]:
+            return []
+
+        runner._reclaim_idle_daemons = no_reclaim   # type: ignore[assignment]
+
+        async def on_progress(headline, detail=""):
+            posts.append((headline, detail))
+
+        saved = (config.MEM_ADMISSION_MAX_WAIT_SECS, config.MEM_ADMISSION_POLL_SECS)
+        config.MEM_ADMISSION_MAX_WAIT_SECS = wait_secs
+        config.MEM_ADMISSION_POLL_SECS = poll
+        started = time.monotonic()
+        try:
+            await runner._await_memory_headroom(instance, on_progress)
+        finally:
+            (config.MEM_ADMISSION_MAX_WAIT_SECS,
+             config.MEM_ADMISSION_POLL_SECS) = saved
+        return posts, time.monotonic() - started
+
+    # A machine with room starts the session immediately and says nothing.
+    posts, elapsed = await drive([calm], 60, 1)
+    if posts:
+        failures.append(f"a healthy machine posted a memory hold: {posts!r}")
+    if elapsed > 2.0:
+        failures.append(f"a healthy machine still took {elapsed:.1f}s to admit a session")
+
+    # TIGHT is not a hold. On this machine tight is most of the time, and a
+    # message the user learns to ignore is worse than no message.
+    posts, elapsed = await drive([tight], 60, 1)
+    if posts:
+        failures.append(
+            "a merely tight machine held a session start; holding on tight "
+            "means holding most of the time here"
+        )
+
+    # CRITICAL holds, tells the thread why, and releases when it clears.
+    posts, elapsed = await drive([crisis, crisis, calm], 60, 1)
+    if not posts:
+        failures.append(
+            "a session was started onto a machine with 0.6 GB free without a "
+            "word; adding another process is the bot's whole response"
+        )
+    else:
+        first = " ".join(posts[0])
+        if "0.6" not in first:
+            failures.append(
+                f"the hold message does not say how bad it is: {first!r} — "
+                "'waiting for memory' is noise, '0.6 GB free' is a fact"
+            )
+        if len(posts) < 2:
+            failures.append("the thread was told about the hold but never that it ended")
+    if elapsed > 20.0:
+        failures.append(f"a hold that should clear on the first poll took {elapsed:.1f}s")
+
+    # The wait is bounded: pressure the bot did not create must not block work
+    # forever. It proceeds, and says plainly that it gave up waiting.
+    posts, elapsed = await drive([crisis], 2, 1)
+    if elapsed > 12.0:
+        failures.append(
+            f"a bounded 2s hold ran {elapsed:.1f}s; a browser eating the "
+            "machine would block every session indefinitely"
+        )
+    if len(posts) < 2:
+        failures.append(
+            "a hold that timed out never told the thread it was starting "
+            "anyway, so the last thing the user read was 'held'"
+        )
+
+    # The hold is one more window with no process to signal. A Kill landing
+    # here must end the wait, not be swallowed while the session sits for
+    # minutes and then spawns into a thread that already said it stopped.
+    runner = ClaudeRunner()
+    runner._read_pressure = lambda: crisis   # type: ignore[assignment]
+
+    async def no_reclaim(why: str) -> list[str]:
+        return []
+
+    runner._reclaim_idle_daemons = no_reclaim   # type: ignore[assignment]
+    runner._intentional_kills.add(instance.id)
+    saved_wait = (config.MEM_ADMISSION_MAX_WAIT_SECS, config.MEM_ADMISSION_POLL_SECS)
+    config.MEM_ADMISSION_MAX_WAIT_SECS = 60
+    config.MEM_ADMISSION_POLL_SECS = 1
+    try:
+        started = time.monotonic()
+        await asyncio.wait_for(
+            runner._await_memory_headroom(instance, None), timeout=10,
+        )
+        held = time.monotonic() - started
+    except asyncio.TimeoutError:
+        held = 999.0
+    finally:
+        (config.MEM_ADMISSION_MAX_WAIT_SECS,
+         config.MEM_ADMISSION_POLL_SECS) = saved_wait
+        runner._intentional_kills.discard(instance.id)
+    if held > 2.0:
+        failures.append(
+            f"a Kill during the memory hold was ignored for {held:.0f}s; the "
+            "thread says the session stopped and it spawns anyway minutes later"
+        )
+
+    # The bounded-wait wording must survive a sub-minute setting; integer
+    # minutes render a 30s hold as "up to 0 min".
+    posts, _ = await drive([crisis], 2, 1)
+    joined = " ".join(" ".join(p) for p in posts)
+    if "0 min" in joined:
+        failures.append(
+            f"a short admission wait was described as '0 min': {joined!r}"
+        )
+
+    # Switched off means off.
+    saved_on = config.MEM_ADMISSION_ENABLED
+    config.MEM_ADMISSION_ENABLED = False
+    try:
+        posts, _ = await drive([crisis], 60, 1)
+        if posts:
+            failures.append("admission control held a session with MEM_ADMISSION_ENABLED off")
+    finally:
+        config.MEM_ADMISSION_ENABLED = saved_on
+
+
+def _check_fleet_kill_wording(failures: list[str]) -> None:
+    """A session reaped for the machine must not be told it misbehaved."""
+    pressure = memory.MemoryPressure(
+        avail_mb=700.0, swap_pct=100.0, psi_pct=55.0,
+        cgroup_anon_mb=11000.0, cgroup_high_mb=10240.0,
+        level=memory.PRESSURE_CRITICAL,
+        reasons=("only 0.7 GB of memory is free machine-wide", "swap is 100% full"),
+    )
+    detail = runner_mod._fleet_kill_detail(_tree(3100.0), pressure)
+    low = detail.lower()
+    if "machine ran out" not in low:
+        failures.append(
+            "the fleet-kill notice does not lead with the machine running out; "
+            "leading with this session's number invites the reader to conclude "
+            "it misbehaved when it did not"
+        )
+    if "not over its own" not in low:
+        failures.append(
+            "the fleet-kill notice never says the session was inside its own "
+            "ceiling, which is the one fact that distinguishes it from a "
+            "runaway"
+        )
+    if "0.7 GB" not in detail and "0.7" not in detail:
+        failures.append("the fleet-kill notice omits how short the machine actually was")
+    if "on disk" not in low:
+        failures.append("the fleet-kill notice does not say the work survived")
+
+    note = config.MEMORY_FLEET_KILL_NUDGE_TEMPLATE.format(
+        peak_gb="3.1", limit_gb="8.0", avail_gb="0.7", pressure=pressure.human(),
+    )
+    if "{" in note or "}" in note:
+        failures.append(f"fleet nudge left an unfilled placeholder: {note!r}")
+    low = note.lower()
+    for needed, why in (
+        ("3.1", "what this session was actually holding"),
+        ("8.0", "the ceiling it was NOT over"),
+        ("not over your own", "that this was not the usual over-limit kill"),
+        ("not lost", "that its edits are still on disk"),
+        ("nohup", "that a detached background job counts against the same ceiling"),
+    ):
+        if needed not in low and needed not in note:
+            failures.append(f"the fleet nudge omits {why}")
+    # The two nudges must not be interchangeable: "your job is too big" and
+    # "your job was the biggest of several" call for different next steps.
+    if note == config.MEMORY_KILL_NUDGE_TEMPLATE:
+        failures.append("the fleet nudge is the same text as the over-limit nudge")
+
+
+def _check_budget_told_up_front(failures: list[str]) -> None:
+    """The ceiling is stated before it is enforced, not only after a kill."""
+    kill_gb = f"{config.SESSION_MEM_KILL_MB / 1024:.0f}"
+    budget = config.MEMORY_BUDGET_CONTEXT_TEMPLATE.format(
+        kill_gb=kill_gb, warn_line=" You get one warning at 4 GB.",
+    )
+    if "{" in budget or "}" in budget:
+        failures.append(f"budget block left an unfilled placeholder: {budget!r}")
+    if kill_gb not in budget:
+        failures.append(
+            f"the budget block does not state the actual ceiling ({kill_gb} GB); "
+            "a number written into the prose would go stale the moment it is retuned"
+        )
+    # SESSION_MEM_WARN_MB=0 is a legal setting; promising a warning "at 0 GB"
+    # is worse than saying nothing about warnings.
+    silent = config.MEMORY_BUDGET_CONTEXT_TEMPLATE.format(kill_gb=kill_gb, warn_line="")
+    if "0 GB" in silent:
+        failures.append("the budget block promises a warning at 0 GB when warnings are off")
+
+    instance = Instance(
+        id="t-budget", name=None, instance_type=InstanceType.TASK,
+        prompt="do the thing", repo_name="bot",
+        repo_path=str(Path(__file__).resolve().parent.parent),
+        status=InstanceStatus.RUNNING, mode="build",
+    )
+    try:
+        prompt = ClaudeRunner()._build_system_prompt(instance)
+    except Exception as exc:
+        failures.append(f"could not build a system prompt to check the budget block: {exc}")
+        return
+    if config.SESSION_MEM_KILL_MB > 0 and "Memory Budget" not in prompt:
+        failures.append(
+            "the session's system prompt never mentions the memory budget, so "
+            "the first thing an agent hears about the ceiling is still that "
+            "its run was destroyed for exceeding it"
+        )
+    if f"{kill_gb} GB" not in prompt:
+        failures.append(
+            f"the system prompt does not carry the live ceiling ({kill_gb} GB)"
+        )
+    saved_warn = config.SESSION_MEM_WARN_MB
+    config.SESSION_MEM_WARN_MB = 0
+    try:
+        silent_prompt = ClaudeRunner()._build_system_prompt(instance)
+    finally:
+        config.SESSION_MEM_WARN_MB = saved_warn
+    if "warning in this thread at 0 GB" in silent_prompt:
+        failures.append(
+            "with warnings switched off the prompt still promises one at 0 GB"
+        )
+    if "Memory Budget" not in silent_prompt:
+        failures.append(
+            "switching warnings off also removed the ceiling from the prompt"
+        )
+
+
+async def _check_sensor_cleanup(failures: list[str]) -> None:
+    """The leak is closed where it is made, not swept up afterwards.
+
+    `dotnet build` deliberately leaves a Roslyn compiler server and MSBuild
+    worker nodes running when it finishes, detached, so the next build is
+    faster. Reparented to PID 1, they sit outside every process tree the guard
+    walks while staying charged to the bot's cgroup — which is how one of them
+    came to hold gigabytes owned by nobody. The sweep above can reclaim it, but
+    the sweep only runs once memory is already short; the step that started it
+    knows exactly when it is done with it and can hand it back for free.
+    """
+    from bot.engine import sensors
+
+    dotnet = next(
+        (s for s in sensors._default_sensors(["dotnet"])
+         if "dotnet" in str(s.get("command", ""))),
+        None,
+    )
+    if dotnet is None:
+        failures.append("the .NET stack no longer has a default sensor to clean up after")
+    elif "build-server shutdown" not in str(dotnet.get("cleanup", "")):
+        failures.append(
+            "the .NET sensor does not shut its build server down afterwards; "
+            "a detached dotnet was the second-largest process on the machine "
+            "when it OOMed on 2026-08-21"
+        )
+
+    tmp = tempfile.mkdtemp(prefix="memguard-sensor-")
+    try:
+        marker = os.path.join(tmp, "cleaned")
+        # A sensor that FAILS still has to release what it started — a failed
+        # build leaves exactly the same compiler server behind as a passing one.
+        result = await sensors._run_one(
+            {"name": "fails", "command": "false",
+             "cleanup": f"touch {marker}", "timeout_s": 30},
+            tmp, 60.0,
+        )
+        if not os.path.exists(marker):
+            failures.append(
+                "a sensor that failed never ran its cleanup, so a failed "
+                "build leaks the compiler server a passing one hands back"
+            )
+        if result.status != "fail":
+            failures.append(
+                f"a sensor whose command exited non-zero was reported "
+                f"{result.status!r}"
+            )
+
+        # A skipped sensor never invoked the tool, so there is nothing to
+        # release — and on a machine without dotnet the cleanup command does
+        # not exist either.
+        skip_marker = os.path.join(tmp, "should-not-exist")
+        skipped = await sensors._run_one(
+            {"name": "absent", "command": "definitely-not-a-real-tool-xyz",
+             "auto": True, "cleanup": f"touch {skip_marker}", "timeout_s": 30},
+            tmp, 60.0,
+        )
+        if skipped.status == "skipped" and os.path.exists(skip_marker):
+            failures.append(
+                "cleanup ran for a sensor that was never invoked"
+            )
+
+        # A cleanup that itself fails must change nothing. It leaves things as
+        # they already were, which is the status quo and not a regression worth
+        # failing a build over.
+        ok = await sensors._run_one(
+            {"name": "passes", "command": "true",
+             "cleanup": "definitely-not-a-real-tool-xyz", "timeout_s": 30},
+            tmp, 60.0,
+        )
+        if ok.status not in ("pass", "skipped"):
+            failures.append(
+                f"a passing sensor was reported {ok.status!r} because its "
+                "cleanup command did not exist"
+            )
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _check_thresholds_fit_the_machine(failures: list[str]) -> None:
+    """A ceiling above the machine's spare capacity can only fire too late."""
+    total = None
+    try:
+        import psutil
+        total = psutil.virtual_memory().total / (1024 * 1024)
+    except Exception:
+        pass
+    if total is None:
+        return
+    if config.SESSION_MEM_KILL_MB > total / 2:
+        failures.append(
+            f"the per-session ceiling ({config.SESSION_MEM_KILL_MB}MB) is more "
+            f"than half of this machine's {total / 1024:.0f}GB — a single "
+            "session may not exceed it until the machine is already lost"
+        )
+    if config.MEM_PRESSURE_TIGHT_AVAIL_MB <= config.MEM_PRESSURE_CRITICAL_AVAIL_MB:
+        failures.append(
+            "the tight watermark is not above the critical one, so nothing can "
+            "ever read as merely tight"
+        )
+    if config.SESSION_MEM_FLEET_MIN_VICTIM_MB >= config.SESSION_MEM_KILL_MB:
+        failures.append(
+            "the smallest session worth reaping for the machine is at or above "
+            "the per-session ceiling, so cross-session arbitration can only "
+            "fire on sessions the per-session guard already killed"
+        )
+
 async def _amain() -> int:
     failures: list[str] = []
 
@@ -1383,6 +2388,15 @@ async def _amain() -> int:
     _check_guard_messages(failures)
     _check_kill_result_keeps_the_work_record(failures)
     _check_nudge_text(failures)
+    _check_pressure_classifier(failures)
+    _check_over_own_high(failures)
+    _check_orphan_detection(failures)
+    _check_fleet_kill_wording(failures)
+    _check_budget_told_up_front(failures)
+    _check_thresholds_fit_the_machine(failures)
+    await _check_sensor_cleanup(failures)
+    await _check_fleet_arbitration(failures)
+    await _check_admission_gate(failures)
     await _check_root_reaping_left_to_asyncio(failures)
     await _check_auto_resume(failures)
 
@@ -1396,6 +2410,11 @@ async def _amain() -> int:
     print(f"      whole at {config.SESSION_MEM_KILL_MB}MB (below the unit's own cap), and resumed")
     print(f"      once ({config.MEMORY_KILL_MAX_RETRIES}x) knowing the ceiling. The unit survives a")
     print("      descendant being OOM-killed, and an OOM restart says so.")
+    print("      The machine itself is read too: a starving box holds new sessions,")
+    print("      leaked build daemons nobody owns are found in the cgroup and")
+    print("      reclaimed, exactly one of several well-behaved sessions is chosen")
+    print("      when the fleet together is the problem, and every session is told")
+    print(f"      its {config.SESSION_MEM_KILL_MB / 1024:.0f} GB budget before it is enforced.")
     return 0
 
 

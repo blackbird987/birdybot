@@ -574,6 +574,29 @@ def _memory_kill_detail(tree: memory.TreeMemory, kill_mb: int) -> str:
     )
 
 
+def _fleet_kill_detail(
+    tree: memory.TreeMemory, pressure: memory.MemoryPressure,
+) -> str:
+    """The in-thread notice for a session reaped because the MACHINE ran out.
+
+    Deliberately does not lead with this session's number. It was not over its
+    ceiling and saying "reached 3.1 GB" first invites the reader to conclude it
+    misbehaved, when the true statement is that several well-behaved sessions
+    plus the desktop added up to more than the machine has. The order is:
+    the machine ran out, we were the ones filling our own limit, this was the
+    biggest tree, so this is the one that went.
+    """
+    return (
+        f"The machine ran out of memory — {pressure.human()} — and the bot's "
+        f"sessions together are over their shared limit. This session was not "
+        f"over its own ceiling; it was simply the largest tree running "
+        f"({tree.total_mb / 1024:.1f} GB across {tree.proc_count} processes, "
+        f"biggest {tree.offender()}), so it is the one being stopped rather "
+        f"than leaving the kernel to pick. Its work is on disk and it will "
+        f"pick up from there."
+    )
+
+
 def _memory_warning_detail(tree: memory.TreeMemory, kill_mb: int) -> str:
     """The in-thread warning for a session that is heading for the ceiling.
 
@@ -603,6 +626,7 @@ def _memory_kill_result(
     avail_mb: float | None,
     session_id: str | None,
     poisoning: list[str] | None = None,
+    pressure: memory.MemoryPressure | None = None,
 ) -> RunResult:
     """The failure a reaped run reports, built from what that run actually did.
 
@@ -630,6 +654,29 @@ def _memory_kill_result(
         result.session_id = session_id
     if poisoning:
         result.path_poisoning = list(poisoning)
+    # "?" rather than a phrase, in both templates below: they read "About
+    # {avail_gb} GB was free", so anything but a number-shaped value produces a
+    # broken sentence in the one message whose entire job is to be read
+    # carefully.
+    avail_gb = f"{avail_mb / 1024:.1f}" if avail_mb is not None else "?"
+    if pressure is not None:
+        # Reaped for the machine, not for its own ceiling. Both the failure the
+        # user reads and the note the resumed attempt gets have to say that, or
+        # the agent spends its next run shrinking a job that was never too big.
+        result.error_message = (
+            f"Stopped to keep the machine alive: memory ran out "
+            f"machine-wide ({pressure.human()}) and this session's "
+            f"{tree.total_mb / 1024:.1f} GB was the largest of those running. "
+            f"It was under its own "
+            f"{config.SESSION_MEM_KILL_MB / 1024:.1f} GB ceiling."
+        )
+        result.memory_kill_note = config.MEMORY_FLEET_KILL_NUDGE_TEMPLATE.format(
+            peak_gb=f"{tree.total_mb / 1024:.1f}",
+            limit_gb=f"{config.SESSION_MEM_KILL_MB / 1024:.1f}",
+            avail_gb=avail_gb,
+            pressure=pressure.human(),
+        )
+        return result
     result.error_message = (
         f"Stopped: this session's processes reached "
         f"{tree.total_mb / 1024:.1f} GB of memory, over the "
@@ -644,10 +691,7 @@ def _memory_kill_result(
         peak_gb=f"{tree.total_mb / 1024:.1f}",
         limit_gb=f"{config.SESSION_MEM_KILL_MB / 1024:.1f}",
         offender=tree.offender(),
-        # "?" rather than a phrase: the template reads "About {avail_gb} GB was
-        # free", so anything but a number-shaped value produces a broken
-        # sentence in the one message whose entire job is to be read carefully.
-        avail_gb=f"{avail_mb / 1024:.1f}" if avail_mb is not None else "?",
+        avail_gb=avail_gb,
     )
     return result
 
@@ -713,6 +757,25 @@ class ClaudeRunner:
         self._store = store
         self._semaphore = asyncio.Semaphore(config.MAX_CONCURRENT)
         self._processes: dict[str, asyncio.subprocess.Process] = {}
+        # Latest memory reading for each LIVE session, written by that session's
+        # own watchdog every SESSION_MEM_CHECK_SECS. Shared state because the
+        # question "which of the running sessions is the largest" cannot be
+        # answered from inside any one of them, and that is precisely the
+        # question a machine-wide crunch asks. Entries are dropped alongside
+        # _processes so a finished session can never be picked as a victim.
+        self._tree_samples: dict[str, memory.TreeMemory] = {}
+        # Serialises the reclaim sweep and rate-limits it: every session's
+        # watchdog can reach it, and N sessions each walking the cgroup and
+        # sampling CPU on a machine that is already thrashing would be its own
+        # small denial of service.
+        self._reclaim_lock = asyncio.Lock()
+        self._reclaim_last = 0.0
+        # When the last cross-session reap happened. A crunch does not clear
+        # the instant a victim dies — the kernel takes time to reclaim, and the
+        # next session's watchdog would read the same critical pressure and
+        # reap itself too. Without this the whole fleet unwinds in one minute
+        # over a spike that one kill already fixed.
+        self._fleet_last_reap = 0.0
         # Task-level tracking: covers the full lifecycle of a query/workflow,
         # not just the subprocess.  Prevents reboot from slipping through
         # gaps between autopilot chain steps.
@@ -1339,6 +1402,11 @@ class ClaudeRunner:
         self._intentional_kills.discard(instance.id)
         self._kill_reasons.pop(instance.id, None)
         async with self._semaphore:
+            # Inside the slot, before the spawn. Holding the slot while waiting
+            # is the point: this session has been admitted by concurrency and
+            # is now being admitted by memory, and nothing behind it in the
+            # queue should slip past into a machine that is already out.
+            await self._await_memory_headroom(instance, on_progress)
             return await self._run_impl(
                 instance, on_progress, on_stall, context, sibling_context,
                 api_fallback=instance.api_fallback,
@@ -1380,6 +1448,310 @@ class ClaudeRunner:
             killed_intentionally=True,
             kill_reason=self._kill_reasons.get(instance.id),
         )
+
+    def _watched_pids(self) -> set[int]:
+        """Pids an armed /watch is waiting on — never reclaimable.
+
+        A watch exists precisely because a session launched a long job with
+        ``setsid nohup ... &`` and detached from it, which makes that job
+        reparented, unowned, and indistinguishable by parentage from a leaked
+        build daemon. Killing one would silently destroy the job the thread is
+        visibly sitting and waiting for.
+        """
+        if not self._store:
+            return set()
+        try:
+            return {
+                w.pid for w in self._store.list_watches()
+                if getattr(w, "pid", None)
+            }
+        except Exception:
+            # Never let a bookkeeping failure widen what the reaper considers
+            # fair game. No answer means protect nothing new, which the caller
+            # turns into "reap nothing" only because the pattern list is also
+            # required — but an empty set here is still the cautious direction
+            # relative to raising into a watchdog.
+            log.debug("Could not read watch pids", exc_info=True)
+            return set()
+
+    async def _reclaim_idle_daemons(self, why: str) -> list[str]:
+        """Kill leaked, idle build daemons in our cgroup. Returns what went.
+
+        This is the first thing tried whenever memory is short, and it runs
+        before anything that costs a session its work, because a build server
+        sitting on gigabytes of nothing is free to give up and a session's run
+        is not. In the kernel's task table from the 2026-08-21 OOM a
+        detached `dotnet` at 4.10 GB was the second-largest process on the
+        whole machine, while each session held about 0.3 GB — nothing the
+        per-session guard could see, and nothing killing a session would free.
+
+        Rate-limited and serialised — every session's watchdog can call it.
+        """
+        if not config.MEM_ORPHAN_SWEEP:
+            return []
+        async with self._reclaim_lock:
+            now = asyncio.get_event_loop().time()
+            if now - self._reclaim_last < config.SESSION_MEM_CHECK_SECS:
+                return []
+            self._reclaim_last = now
+            protected = self._watched_pids()
+            try:
+                orphans = await asyncio.to_thread(
+                    memory.find_orphans,
+                    os.getpid(),
+                    protected,
+                    config.MEM_ORPHAN_MIN_MB,
+                    config.MEM_ORPHAN_MIN_AGE_SECS,
+                    config.MEM_ORPHAN_CPU_IDLE_PCT,
+                )
+            except Exception:
+                log.debug("Orphan scan failed", exc_info=True)
+                return []
+            if not orphans:
+                return []
+            # Logged whether or not anything is reaped. Memory in our cgroup
+            # that belongs to no session is worth seeing every time — it is the
+            # class of problem that is invisible until someone goes looking.
+            log.warning(
+                "Unowned memory in our cgroup (%s): %s",
+                why,
+                ", ".join(
+                    f"{o.label()}{'' if o.reclaimable else ' [keeping]'}"
+                    for o in orphans
+                ),
+            )
+            reclaimable = [o for o in orphans if o.reclaimable]
+            if not reclaimable:
+                return []
+            reaped = await asyncio.to_thread(
+                memory.reap_orphans, reclaimable, 3.0,
+                config.MEM_ORPHAN_CPU_IDLE_PCT,
+            )
+            if reaped:
+                # Summed over what actually went, not over what was offered:
+                # reap_orphans drops candidates whose pid was reused or that
+                # went busy since the scan, and a headline that counted those
+                # would report memory that is still very much allocated.
+                by_label = {o.label(): o.rss_mb for o in reclaimable}
+                freed = sum(by_label.get(label, 0.0) for label in reaped)
+                log.warning(
+                    "Reclaimed %.1fGB of idle build daemons (%s): %s",
+                    freed / 1024, why, ", ".join(reaped),
+                )
+            return reaped
+
+    async def _fleet_arbitration(
+        self, instance_id: str, tree: memory.TreeMemory,
+    ) -> memory.MemoryPressure | None:
+        """Should this session be reaped for the machine? Reading, or None.
+
+        Answers the question the per-session ceiling structurally cannot: five
+        sessions at 2.5 GB never individually breach an 8 GB limit, and together
+        they finish a 32 GB machine that is also running a browser. Before this
+        the outcome of that was the cgroup OOM killer choosing a victim — safe,
+        because OOMPolicy=continue keeps the unit alive, but silent: the session
+        that died was never told why, and the user saw an unexplained failure.
+
+        Every gate here exists to stop a wrong kill, in the order that costs
+        least to evaluate:
+
+        1. Too small to be worth taking. Reaping the largest of five 400 MB
+           sessions frees nothing worth having and destroys real work.
+        2. The machine is not actually in trouble.
+        3. We are not the ones filling it. Machine-critical pressure caused by
+           something outside this cgroup is not ours to solve by killing our
+           own work — the offender would re-take the memory immediately and the
+           session's run would be gone for nothing.
+        4. Reclaim first. An idle build daemon holding gigabytes gives them up
+           for free; a session gives them up at the cost of its work. If that
+           alone clears it, nothing else happens.
+        5. Not the largest. Exactly one session can be the maximum of a shared
+           snapshot, which is what keeps two watchdogs from both volunteering.
+        6. A reap happened recently. The kernel needs time to reclaim, and a
+           second watchdog reading the same not-yet-recovered pressure would
+           take a second session for a spike the first kill already fixed.
+        """
+        if not config.SESSION_MEM_FLEET_ARBITRATION:
+            return None
+        # SESSION_MEM_KILL_MB=0 is documented as "warnings only". Reaping a
+        # session for the machine while the per-session kill is switched off
+        # would break that promise, and every message on this path quotes the
+        # ceiling the session was under — which reads as "under its own 0.0 GB
+        # ceiling" when there is no ceiling at all.
+        if config.SESSION_MEM_KILL_MB <= 0:
+            return None
+        if tree.total_mb < config.SESSION_MEM_FLEET_MIN_VICTIM_MB:
+            return None
+
+        pressure = await asyncio.to_thread(self._read_pressure)
+        if not pressure.is_critical() or not pressure.over_own_high():
+            return None
+
+        await self._reclaim_idle_daemons(f"machine critical, {instance_id} live")
+        pressure = await asyncio.to_thread(self._read_pressure)
+        if not pressure.is_critical() or not pressure.over_own_high():
+            log.info(
+                "Machine recovered without reaping a session (%s)",
+                pressure.summary(),
+            )
+            return None
+
+        # Compare only against sessions that are still running. A finished
+        # session's last sample lingers until its cleanup runs, and a dead
+        # session must never win the "largest" contest and thereby spare a live
+        # one that is genuinely the problem.
+        live = {
+            iid: sample for iid, sample in self._tree_samples.items()
+            if iid in self._processes
+        }
+        if not live:
+            return None
+        # Tie broken on the id so the choice is deterministic: two sessions
+        # reading an identical maximum must not both conclude they are it.
+        largest = max(live.items(), key=lambda kv: (kv[1].total_mb, kv[0]))[0]
+        if largest != instance_id:
+            return None
+
+        now = asyncio.get_event_loop().time()
+        if now - self._fleet_last_reap < config.FLEET_REAP_COOLDOWN_SECS:
+            log.warning(
+                "Machine still critical (%s) and %s is largest, but a session "
+                "was reaped %ds ago — waiting rather than cascading",
+                pressure.summary(), instance_id,
+                int(now - self._fleet_last_reap),
+            )
+            return None
+        self._fleet_last_reap = now
+        return pressure
+
+    def _read_pressure(self) -> memory.MemoryPressure:
+        """Machine pressure at the configured thresholds. Never raises."""
+        try:
+            return memory.read_pressure(
+                critical_avail_mb=config.MEM_PRESSURE_CRITICAL_AVAIL_MB,
+                tight_avail_mb=config.MEM_PRESSURE_TIGHT_AVAIL_MB,
+                critical_swap_pct=config.MEM_PRESSURE_CRITICAL_SWAP_PCT,
+                critical_psi_pct=config.MEM_PRESSURE_CRITICAL_PSI_PCT,
+                tight_psi_pct=config.MEM_PRESSURE_TIGHT_PSI_PCT,
+            )
+        except Exception:
+            log.debug("Pressure read failed", exc_info=True)
+            return memory.MemoryPressure()
+
+    async def _await_memory_headroom(
+        self,
+        instance: Instance,
+        on_progress: ProgressCallback | None,
+    ) -> None:
+        """Hold a starting session while the machine is out of memory.
+
+        MAX_CONCURRENT bounds how many sessions run at once and says nothing
+        about whether the machine can afford the next one. Before this, the
+        bot's only response to a starving machine was to add another process to
+        it — which is how five sessions, a browser and a detached compiler
+        server came to share 32 GB until the kernel picked a victim.
+
+        Three deliberate properties:
+
+        * It reclaims before it waits. An idle build daemon holding gigabytes
+          is usually the whole problem, and giving it up costs nothing.
+        * The wait is bounded, then it proceeds anyway with a warning. Pressure
+          the bot did not create would otherwise block work forever, and
+          refusing all work because a browser is fat is a worse failure than
+          starting one more CLI.
+        * It only ever holds on CRITICAL. Holding on TIGHT would mean holding
+          most of the time on this machine, which trains the user to ignore the
+          message and delays work that would have been fine.
+        """
+        if not config.MEM_ADMISSION_ENABLED:
+            return
+        pressure = await asyncio.to_thread(self._read_pressure)
+        if not pressure.is_critical():
+            return
+        # A hold is one more window with no process to signal, and this file
+        # already carries the scar tissue for those: see
+        # _stopped_before_spawning. A Kill arriving while a session sits here
+        # would find nothing to terminate, evaporate, and the session would
+        # spawn minutes later into a thread that already said it had stopped.
+        # Returning is enough — _run_impl checks the mark before it spawns.
+        if instance.id in self._intentional_kills:
+            return
+
+        await self._reclaim_idle_daemons(f"{instance.id} waiting to start")
+        pressure = await asyncio.to_thread(self._read_pressure)
+        if not pressure.is_critical():
+            log.info(
+                "%s released immediately — reclaim cleared the pressure (%s)",
+                instance.id, pressure.summary(),
+            )
+            return
+
+        log.warning(
+            "Holding %s before spawn — %s", instance.id, pressure.summary(),
+        )
+        # The same formatter the /wake confirmation uses, so "up to 5 min" and
+        # "waited 45s" read the same way everywhere and a sub-minute admission
+        # wait cannot render as "0 min".
+        from bot.platform.formatting import format_delay_secs
+
+        budget = format_delay_secs(max(0, config.MEM_ADMISSION_MAX_WAIT_SECS))
+        told = False
+        started = asyncio.get_event_loop().time()
+        deadline = started + max(0, config.MEM_ADMISSION_MAX_WAIT_SECS)
+        while asyncio.get_event_loop().time() < deadline:
+            if not told and on_progress:
+                told = True
+                try:
+                    await on_progress(
+                        "Waiting for memory before starting",
+                        f"This machine is out of memory right now — "
+                        f"{pressure.human()}. Starting another session would "
+                        f"make that worse, so this one is held until there is "
+                        f"room (up to {budget}, then it starts anyway).",
+                    )
+                except Exception:
+                    log.exception("Progress callback error on memory hold")
+            await asyncio.sleep(max(1, config.MEM_ADMISSION_POLL_SECS))
+            if instance.id in self._intentional_kills:
+                log.info(
+                    "Memory hold for %s abandoned — stop requested", instance.id,
+                )
+                return
+            pressure = await asyncio.to_thread(self._read_pressure)
+            if not pressure.is_critical():
+                waited = int(asyncio.get_event_loop().time() - started)
+                log.info(
+                    "Starting %s after %ds of memory hold (%s)",
+                    instance.id, waited, pressure.summary(),
+                )
+                if told and on_progress:
+                    try:
+                        await on_progress(
+                            "Starting now — memory freed up",
+                            f"Held for {waited}s. {pressure.summary()}.",
+                        )
+                    except Exception:
+                        log.exception("Progress callback error on memory release")
+                return
+
+        # Bounded, so this is a normal outcome and not a failure. Say plainly
+        # that the wait was given up on rather than implying it succeeded.
+        log.warning(
+            "Starting %s anyway — still short after %ds (%s)",
+            instance.id, config.MEM_ADMISSION_MAX_WAIT_SECS, pressure.summary(),
+        )
+        if told and on_progress:
+            try:
+                await on_progress(
+                    "Starting anyway — memory never freed up",
+                    f"Waited {budget} and "
+                    f"the machine is still short ({pressure.human()}). Starting "
+                    f"regardless rather than blocking your work indefinitely — "
+                    f"but expect this session to be slow, and consider closing "
+                    f"something.",
+                )
+            except Exception:
+                log.exception("Progress callback error on memory hold timeout")
 
     async def _run_impl(
         self,
@@ -2313,6 +2685,7 @@ class ClaudeRunner:
                 except OSError:
                     pass
             self._processes.pop(instance.id, None)
+            self._tree_samples.pop(instance.id, None)
             # Kill process on cancellation/unexpected error to avoid orphans
             if proc is not None and proc.returncode is None:
                 try:
@@ -2370,6 +2743,11 @@ class ClaudeRunner:
         # useless without them.
         memory_kill: memory.TreeMemory | None = None
         memory_kill_avail_mb: float | None = None
+        # Set only when the reap was a machine-wide arbitration rather than
+        # this session breaching its own ceiling. Its presence is what switches
+        # every downstream message onto the other explanation, so it is a
+        # reading and not a bool: the numbers are the whole content.
+        memory_kill_pressure: memory.MemoryPressure | None = None
         stall_check_task: asyncio.Task | None = None
         # End-of-turn watchdog: set when the LLM signals stop_reason="end_turn"
         # with no tool_use blocks (genuinely done).  If stdout then stays
@@ -2379,7 +2757,7 @@ class ClaudeRunner:
 
         async def check_stall():
             nonlocal stall_warned, lifetime_exceeded
-            nonlocal memory_kill, memory_kill_avail_mb
+            nonlocal memory_kill, memory_kill_avail_mb, memory_kill_pressure
             # Re-log a fresh snapshot every STALL_DIAG_RELOG_SECS while still
             # stalled — gives a paper trail of CPU/conn state over the silent
             # period so we can tell "thinking with API call open" from
@@ -2387,6 +2765,56 @@ class ClaudeRunner:
             stall_last_logged = 0.0
             mem_last_checked = 0.0
             mem_warned = False
+
+            async def reap_this_session(headline: str, detail: str) -> None:
+                """Tell the session why, then destroy its whole process tree.
+
+                Told BEFORE the reap, not after, and that ordering is
+                load-bearing. Reaping closes the CLI's stdout, which ends the
+                reader loop, whose ``finally`` cancels this watchdog — and it
+                will usually do so while we are still parked inside kill_tree's
+                grace wait for a multi-gigabyte process to actually die.
+                Anything after that call is on a coin flip, so the one message
+                explaining the kill goes out first. The decision is already
+                irrevocable by the time this is called.
+                """
+                if on_progress:
+                    try:
+                        await on_progress(headline, detail)
+                    except Exception:
+                        log.exception("Progress callback error on memory kill")
+                signalled: list[str] = []
+                try:
+                    signalled = await asyncio.to_thread(
+                        memory.kill_tree, proc.pid,
+                    )
+                    if signalled:
+                        log.warning(
+                            "Reaped for %s: %s",
+                            instance.id, ", ".join(signalled),
+                        )
+                except Exception:
+                    log.exception("Memory reap failed for %s", instance.id)
+                if not signalled:
+                    # kill_tree swallows per-process failures and returns an
+                    # empty list rather than raising, so "nothing was
+                    # signalled" is a silent outcome — and one that must not be
+                    # silent HERE. We have already decided this run is over:
+                    # leaving the process alive would let it stream to
+                    # completion and then be reported as a memory failure it
+                    # recovered from, which is a lie in whichever direction the
+                    # run happened to end. Reached only when the tree is still
+                    # standing, so stdout has not closed, so this watchdog has
+                    # not been cancelled — the one case where code after the
+                    # reap is guaranteed to run is also the one case that needs
+                    # it.
+                    log.warning(
+                        "Memory reap signalled nothing for %s — "
+                        "terminating the CLI directly",
+                        instance.id,
+                    )
+                    proc.terminate()
+
             while True:
                 await asyncio.sleep(10)
                 now = asyncio.get_event_loop().time()
@@ -2425,6 +2853,12 @@ class ClaudeRunner:
                     if tree is not None and tree.proc_count:
                         kill_mb = config.SESSION_MEM_KILL_MB
                         warn_mb = config.SESSION_MEM_WARN_MB
+                        # Shared so the fleet check below — which runs inside
+                        # a DIFFERENT session's watchdog — can compare trees.
+                        # No one session can answer "am I the largest", and
+                        # that is exactly the question a machine-wide crunch
+                        # asks.
+                        self._tree_samples[instance.id] = tree
                         if kill_mb > 0 and tree.total_mb >= kill_mb:
                             memory_kill = tree
                             memory_kill_avail_mb = await asyncio.to_thread(
@@ -2443,58 +2877,48 @@ class ClaudeRunner:
                                 f"{cg.max_mb / 1024:.1f}GB"
                                 if cg.max_mb is not None else "no limit",
                             )
-                            # Told BEFORE the reap, not after, and that ordering
-                            # is load-bearing. Reaping closes the CLI's stdout,
-                            # which ends the reader loop, whose `finally`
-                            # cancels this watchdog — and it will usually do so
-                            # while we are still parked inside kill_tree's grace
-                            # wait for a multi-gigabyte process to actually die.
-                            # Anything after that call is on a coin flip, so the
-                            # one message explaining the kill goes out first.
-                            # The decision is already irrevocable here.
-                            if on_progress:
-                                try:
-                                    await on_progress(
-                                        "Stopped — this session ran out of memory",
-                                        _memory_kill_detail(tree, kill_mb),
-                                    )
-                                except Exception:
-                                    log.exception("Progress callback error on memory kill")
-                            signalled: list[str] = []
-                            try:
-                                signalled = await asyncio.to_thread(
-                                    memory.kill_tree, proc.pid,
-                                )
-                                if signalled:
-                                    log.warning(
-                                        "Reaped for %s: %s",
-                                        instance.id, ", ".join(signalled),
-                                    )
-                            except Exception:
-                                log.exception(
-                                    "Memory reap failed for %s", instance.id,
-                                )
-                            if not signalled:
-                                # kill_tree swallows per-process failures and
-                                # returns an empty list rather than raising, so
-                                # "nothing was signalled" is a silent outcome —
-                                # and one that must not be silent HERE. We have
-                                # already decided this run is over: leaving the
-                                # process alive would let it stream to
-                                # completion and then be reported as a memory
-                                # failure it recovered from, which is a lie in
-                                # whichever direction the run happened to end.
-                                # Reached only when the tree is still standing,
-                                # so stdout has not closed, so this watchdog has
-                                # not been cancelled — the one case where code
-                                # after the reap is guaranteed to run is also the
-                                # one case that needs it.
-                                log.warning(
-                                    "Memory reap signalled nothing for %s — "
-                                    "terminating the CLI directly",
-                                    instance.id,
-                                )
-                                proc.terminate()
+                            await reap_this_session(
+                                "Stopped — this session ran out of memory",
+                                _memory_kill_detail(tree, kill_mb),
+                            )
+                            return
+
+                        # Cross-session arbitration: nobody is over their own
+                        # ceiling, but the machine has run out anyway. This is
+                        # the case the per-session guard structurally cannot
+                        # see, and the one that actually happened — five
+                        # reasonable sessions plus a browser, none of them
+                        # individually at fault, and the kernel picking the
+                        # victim in the end.
+                        #
+                        # Both conditions are required before anything dies.
+                        # Machine-critical alone is not enough: under pressure
+                        # the bot did not create, reaping our own sessions
+                        # frees memory the real offender immediately re-takes,
+                        # and charges a session's work for it. Over-our-own-
+                        # MemoryHigh alone is not enough either — that is a
+                        # throttle watermark, crossed routinely, and on its own
+                        # it means the cgroup is working as designed.
+                        fleet_verdict = await self._fleet_arbitration(
+                            instance.id, tree,
+                        )
+                        if fleet_verdict is not None:
+                            memory_kill = tree
+                            memory_kill_pressure = fleet_verdict
+                            memory_kill_avail_mb = fleet_verdict.avail_mb
+                            log.error(
+                                "Machine out of memory (%s) — %s is the "
+                                "largest of %d live sessions at %s. Reaping "
+                                "it rather than leaving the kernel to choose.",
+                                fleet_verdict.summary(), instance.id,
+                                sum(1 for iid in self._tree_samples
+                                    if iid in self._processes),
+                                tree.summary(),
+                            )
+                            await reap_this_session(
+                                "Stopped — the machine ran out of memory",
+                                _fleet_kill_detail(tree, fleet_verdict),
+                            )
                             return
 
                         if warn_mb > 0 and tree.total_mb >= warn_mb and not mem_warned:
@@ -2821,6 +3245,7 @@ class ClaudeRunner:
             return _memory_kill_result(
                 events, memory_kill, memory_kill_avail_mb,
                 captured_session_id, poisoning_hits,
+                pressure=memory_kill_pressure,
             )
 
         # Capture stderr for error info
@@ -3426,6 +3851,24 @@ class ClaudeRunner:
 
         # Bot capability context so Claude knows what the user can do
         parts.append(config.BOT_CONTEXT)
+
+        # The memory budget, stated before it is enforced. Until now the first
+        # thing an agent ever heard about memory was that its run had just been
+        # destroyed for exceeding a limit nobody had mentioned — advice arriving
+        # strictly after the only moment it could have been acted on. The
+        # numbers are formatted from the live config rather than written into
+        # the prose so a retuned ceiling cannot leave the prompt lying about it.
+        if config.SESSION_MEM_KILL_MB > 0:
+            warn_line = (
+                f" You get one warning in this thread at "
+                f"{config.SESSION_MEM_WARN_MB / 1024:.0f} GB."
+                if 0 < config.SESSION_MEM_WARN_MB < config.SESSION_MEM_KILL_MB
+                else ""
+            )
+            parts.append(config.MEMORY_BUDGET_CONTEXT_TEMPLATE.format(
+                kill_gb=f"{config.SESSION_MEM_KILL_MB / 1024:.0f}",
+                warn_line=warn_line,
+            ))
 
         # Spawn capability is depth-gated: a spawned (depth>=1) thread cannot
         # spawn again (commands.py recursion cap), so telling it the full
