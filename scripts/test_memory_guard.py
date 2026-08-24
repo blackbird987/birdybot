@@ -1563,7 +1563,24 @@ def _orphan_scripts() -> tuple[Path, Path]:
     for path in (daemon, plain):
         if not path.exists():
             path.write_text(body, encoding="utf-8")
+    # Named like a daemon and burning CPU: a compiler server mid-compile.
+    busy = base / "MSBuildTaskHost.py"
+    if not busy.exists():
+        busy.write_text(
+            "import time\n"
+            "end = time.time() + 120\n"
+            "while time.time() < end:\n"
+            "    pass\n",
+            encoding="utf-8",
+        )
     return daemon, plain
+
+
+def _busy_orphan_script() -> Path:
+    """The daemon-named spinner planted by _orphan_scripts()."""
+    _orphan_scripts()
+    assert _ORPHAN_DIR is not None
+    return Path(_ORPHAN_DIR.name) / "MSBuildTaskHost.py"
 
 
 def _plant_orphan(script: Path) -> int | None:
@@ -1750,6 +1767,58 @@ def _check_orphan_detection(failures: list[str]) -> None:
                 "an unrelated process holding a recycled pid was killed by the "
                 "orphan sweep"
             )
+
+        # A daemon that was idle when scanned and is compiling by the time the
+        # reap runs. The scan samples 0.3s per candidate, serially, and the
+        # caller logs and hops threads afterwards — long enough for a real
+        # VBCSCompiler to go from 0% to 840% and back, which is what happened
+        # on this machine while this feature was being verified. Killing it
+        # here fails the build that is using it right now.
+        busy_pid = _plant_orphan(_busy_orphan_script())
+        if busy_pid is None:
+            failures.append("could not plant a busy daemon to test the reap-time idle check")
+        else:
+            try:
+                time.sleep(0.5)   # let it actually start spinning
+                # Scanned at an unreachable busy threshold, so it comes back
+                # flagged reclaimable with a real pid and a real start time —
+                # exactly the entry a scan would produce if it had sampled the
+                # 0.3s in which this process happened to be idle.
+                stale = next(
+                    (o for o in memory.find_orphans(
+                        root_pid=os.getpid(), protected_pids=set(),
+                        min_rss_mb=1.0, min_age_secs=0.0,
+                        cpu_idle_pct=100_000.0,
+                    ) if o.pid == busy_pid),
+                    None,
+                )
+                if stale is None or not stale.reclaimable:
+                    failures.append(
+                        "could not produce a reclaimable entry for the busy "
+                        "daemon, so the reap-time idle check was never exercised"
+                    )
+                    stale = memory.OrphanProcess(
+                        pid=busy_pid, name="MSBuildTaskHost", reclaimable=True,
+                    )
+                if memory.reap_orphans([stale], cpu_idle_pct=5.0):
+                    failures.append(
+                        "a daemon that went busy between the scan and the reap "
+                        "was still killed; the idle verdict it was killed on "
+                        "was seconds stale and a build was using it"
+                    )
+                if not _pid_alive(busy_pid):
+                    failures.append("a compiler server mid-compile was killed by the reap")
+                # ...and the same entry IS reaped once it goes quiet, so the
+                # new check is a gate and not a blanket refusal.
+                if memory.reap_orphans([stale], cpu_idle_pct=100_000.0):
+                    pass
+                else:
+                    failures.append(
+                        "the reap-time idle check refused a daemon even at an "
+                        "unreachable busy threshold, so it never reaps anything"
+                    )
+            finally:
+                _kill_pid(busy_pid)
 
         target = by_pid.get(daemon_pid)
         if target is not None and target.reclaimable:

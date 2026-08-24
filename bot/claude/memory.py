@@ -788,18 +788,33 @@ def find_orphans(
     return found
 
 
-def reap_orphans(orphans: list[OrphanProcess], grace_secs: float = 3.0) -> list[str]:
+def reap_orphans(
+    orphans: list[OrphanProcess],
+    grace_secs: float = 3.0,
+    cpu_idle_pct: float = 5.0,
+) -> list[str]:
     """SIGTERM then SIGKILL every ``reclaimable`` entry. Returns what was reaped.
 
     Only ever called with the reclaimable subset in mind, but it filters again
     itself: this is a function that kills things, and a caller that forgot to
     filter should reap nothing rather than everything.
 
-    Identity is re-proved per pid before any signal is sent. Between the scan
-    that produced these entries and this call, a daemon can exit and its pid be
+    Two things are re-proved per pid before any signal is sent, because the
+    verdict this acts on was formed in ``find_orphans`` and the world moved on
+    after it.
+
+    *Identity.* A daemon can exit between the scan and this call and its pid be
     reissued to something else entirely — a session's CLI, one of its builds,
     or one of the user's own programs. Killing by a number alone is how that
     becomes a silent, unattributable failure somewhere else on the machine.
+
+    *Idleness.* The scan samples CPU for a third of a second per candidate,
+    serially, and the caller then logs and hops threads before getting here, so
+    the first candidate's "idle" is already seconds old. That is the same order
+    as a compile burst: a real VBCSCompiler was observed here going from 0% to
+    840% and back inside two minutes, which is exactly long enough to be judged
+    idle and then killed mid-build. Re-sampling costs 0.3s on a path that only
+    runs when memory is already short, and it is the last honest moment to ask.
     """
     reaped: list[str] = []
     targets = [o for o in orphans if o.reclaimable]
@@ -822,6 +837,16 @@ def reap_orphans(orphans: list[OrphanProcess], grace_secs: float = 3.0) -> list[
                     "Not reaping pid %d — it was reused since the scan "
                     "(expected %s, found %s)",
                     item.pid, item.name, proc.name(),
+                )
+                continue
+            # Idle when it was scanned is not idle now. A build that started in
+            # between would be destroyed by this signal.
+            cpu_now = proc.cpu_percent(interval=0.3)
+            if cpu_now >= cpu_idle_pct:
+                log.info(
+                    "Not reaping %s — it went busy since the scan (%.0f%% CPU); "
+                    "a build is using it right now",
+                    item.label(), cpu_now,
                 )
                 continue
             proc.terminate()

@@ -1523,9 +1523,17 @@ class ClaudeRunner:
             reclaimable = [o for o in orphans if o.reclaimable]
             if not reclaimable:
                 return []
-            freed = sum(o.rss_mb for o in reclaimable)
-            reaped = await asyncio.to_thread(memory.reap_orphans, reclaimable)
+            reaped = await asyncio.to_thread(
+                memory.reap_orphans, reclaimable, 3.0,
+                config.MEM_ORPHAN_CPU_IDLE_PCT,
+            )
             if reaped:
+                # Summed over what actually went, not over what was offered:
+                # reap_orphans drops candidates whose pid was reused or that
+                # went busy since the scan, and a headline that counted those
+                # would report memory that is still very much allocated.
+                by_label = {o.label(): o.rss_mb for o in reclaimable}
+                freed = sum(by_label.get(label, 0.0) for label in reaped)
                 log.warning(
                     "Reclaimed %.1fGB of idle build daemons (%s): %s",
                     freed / 1024, why, ", ".join(reaped),
