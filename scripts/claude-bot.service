@@ -109,8 +109,19 @@ OOMPolicy=continue
 # browser. That is the real state of this machine, and it is far better learned
 # as one clearly-labelled session failure than as a 2 AM machine-wide event.
 # Raise both if the box gets more RAM.
-MemoryHigh=12G
-MemoryMax=16G
+#
+# Lowered on 2026-08-21 from 12G/16G. The old numbers were not breached and the
+# machine died anyway: the cgroup sat at 12.1 GB of anonymous memory against a
+# 12 GB MemoryHigh — inside policy, oom_kill 0 for this unit — while the kernel
+# ran a GLOBAL out-of-memory kill and shot the user's browser. A 16 GB
+# allowance for the bot alone is half of a 32 GB machine that is also running
+# a browser, a chat client and a charting app; staying under it was never
+# evidence of behaving well. MemoryHigh is now also read by the bot itself
+# (bot/claude/memory.py) as the "our own sessions are the ones filling this"
+# signal that gates cross-session arbitration, so it is a threshold with a
+# second job and not only a throttle.
+MemoryHigh=10G
+MemoryMax=13G
 
 [Install]
 WantedBy=default.target

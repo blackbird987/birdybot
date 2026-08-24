@@ -32,6 +32,11 @@ _DETECT_SKIP_DIRS = frozenset({".worktrees", "node_modules", ".git"})
 _DEFAULT_POLICY = "block"
 _DEFAULT_MAX_FIX_ROUNDS = 2
 _DEFAULT_TIMEOUT_S = 180
+# Cleanup runs after a sensor has already produced its verdict, so it must not
+# be able to hold the chain up. `dotnet build-server shutdown` normally takes
+# a second or two; anything past this is killed and forgotten, and the general
+# orphan reaper picks up whatever survives.
+_CLEANUP_TIMEOUT_S = 30
 
 
 @dataclass
@@ -151,6 +156,10 @@ def _default_sensors(stacks: list[str]) -> list[dict]:
             "command": "dotnet build --nologo -v q",
             "timeout_s": 600,
             "auto": True,
+            # Hands back the compiler server and MSBuild nodes this build
+            # started. They otherwise survive detached, holding gigabytes,
+            # attached to no session — see _run_cleanup.
+            "cleanup": "dotnet build-server shutdown",
         })
     if "python" in stacks:
         # ruff only if installed — no compileall fallback (walks venvs).
@@ -263,7 +272,58 @@ async def _kill_tree(proc: asyncio.subprocess.Process) -> None:
         pass
 
 
+async def _run_cleanup(spec: dict, cwd: str) -> None:
+    """Run a sensor's ``cleanup`` command, if it has one. Never raises.
+
+    Exists for one specific and expensive habit: `dotnet build` deliberately
+    leaves a Roslyn compiler server and MSBuild worker nodes running after it
+    finishes, detached, so the next build is faster. They are reparented to
+    PID 1, which puts them outside every process tree the memory guard walks
+    while leaving them charged to the bot's cgroup — on 2026-08-21 one of them
+    was holding up to 4.9 GB, 45% of the bot's entire footprint, owned by
+    nobody. A chain's sensor step is a guaranteed spawner of these, and it also
+    knows exactly when it is done with them, so it is the cheapest possible
+    place to clean up.
+
+    The reaper in bot/claude/memory.py is the general fix and still catches
+    these when a session (rather than a sensor) starts them. This just means
+    the common case never gets there. Output and exit code are discarded: a
+    cleanup that fails leaves things exactly as they were before, which is the
+    status quo, not a regression worth reporting into a build's feedback.
+    """
+    command = str(spec.get("cleanup") or "").strip()
+    if not command:
+        return
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            command,
+            cwd=cwd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=(sys.platform != "win32"),
+        )
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=_CLEANUP_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            await _kill_tree(proc)
+    except Exception:
+        log.debug("Sensor cleanup %r failed", command, exc_info=True)
+
+
 async def _run_one(
+    spec: dict, cwd: str, budget_left: float,
+) -> SensorResult:
+    """Run one sensor, then release anything it left running."""
+    result = await _run_one_inner(spec, cwd, budget_left)
+    # Skipped means the tool was never invoked, so there is nothing it could
+    # have left behind — and on a machine without dotnet the cleanup command
+    # would not exist either.
+    if result.status != "skipped":
+        await _run_cleanup(spec, cwd)
+    return result
+
+
+async def _run_one_inner(
     spec: dict, cwd: str, budget_left: float,
 ) -> SensorResult:
     name = str(spec.get("name") or spec.get("command", "sensor"))

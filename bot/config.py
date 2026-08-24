@@ -143,22 +143,121 @@ MAX_PROCESS_LIFETIME_SECS: int = int(os.getenv("MAX_PROCESS_LIFETIME_SECS", "144
 # the cgroup limit is the backstop for a spike too fast to sample.
 # Set SESSION_MEM_KILL_MB=0 to disable the kill and keep warnings only.
 #
-# TODO: this threshold is per-session; MemoryMax is per-cgroup. Three sessions
-# at 5 GB each never trip it, but together they cross MemoryHigh and can reach
-# the cap, at which point the cgroup OOM killer picks the victim instead of the
-# bot — safe (the unit survives, OOMPolicy=continue) but unexplained, so the
-# session that dies gets no note telling it why. Doing better means the guard
-# comparing against the cgroup's own aggregate (memory.headroom is already read
-# in bot/claude/memory.py) and reaping the largest tree when the *total* is
-# short, not just when one session is. Not built yet: the incident was a single
-# runaway, and cross-session arbitration needs a policy for whose work is
-# forfeit that no measurement here can supply.
-SESSION_MEM_WARN_MB: int = int(os.getenv("SESSION_MEM_WARN_MB", "6144"))
-SESSION_MEM_KILL_MB: int = int(os.getenv("SESSION_MEM_KILL_MB", "12288"))
+# These numbers were lowered on 2026-08-21 (from 6 GB warn / 12 GB kill) after
+# a global OOM kill took the user's browser while the bot sat inside its own
+# limits. A 12 GB per-session ceiling was larger than the machine's entire
+# spare capacity with a browser, Discord and a chart app running: it could only
+# ever fire after the machine was already lost. A ceiling has to be reachable
+# before the thing it protects against happens, or it is decoration.
+SESSION_MEM_WARN_MB: int = int(os.getenv("SESSION_MEM_WARN_MB", "4096"))
+SESSION_MEM_KILL_MB: int = int(os.getenv("SESSION_MEM_KILL_MB", "8192"))
 # How often to sample. The tree walk costs a readdir plus a statm read per
 # process, so 30s is cheap even with ten sessions running; the sampler is also
 # what makes a slow leak visible in bot.log before it matters.
 SESSION_MEM_CHECK_SECS: int = int(os.getenv("SESSION_MEM_CHECK_SECS", "30"))
+
+# --- Machine-wide memory pressure ---
+#
+# Everything above is the bot measuring itself. These are the bot measuring the
+# machine, which is the gap that the 2026-08-21 incident lived in: the cgroup
+# held 12.1 GB against a 12 GB MemoryHigh — inside its own policy, never
+# OOM-killed — while the kernel ran a global OOM kill and shot the user's
+# browser. Nothing in the bot had ever asked what was left outside its cgroup.
+#
+# Read by bot/claude/memory.py:read_pressure(), which turns them into one of
+# ok / tight / critical. Passed as arguments rather than read there directly so
+# the harness can drive the classifier at fixed numbers.
+MEM_PRESSURE_CRITICAL_AVAIL_MB: float = float(
+    os.getenv("MEM_PRESSURE_CRITICAL_AVAIL_MB", "1024")
+)
+MEM_PRESSURE_TIGHT_AVAIL_MB: float = float(
+    os.getenv("MEM_PRESSURE_TIGHT_AVAIL_MB", "2560")
+)
+# Swap here is zram — compressed RAM. A high figure is normal on a busy machine
+# and does not by itself mean the next allocation fails, so full swap alone is
+# only TIGHT; it takes low available memory alongside it to be critical.
+MEM_PRESSURE_CRITICAL_SWAP_PCT: float = float(
+    os.getenv("MEM_PRESSURE_CRITICAL_SWAP_PCT", "90")
+)
+# Kernel pressure-stall percentages from /proc/pressure/memory: the share of
+# the last 10s in which some task was blocked waiting on memory. The only one
+# of these signals that reports thrashing rather than occupancy, and the one
+# that goes off earliest — `available` can still read in gigabytes while the
+# machine is spending most of its time reclaiming.
+MEM_PRESSURE_CRITICAL_PSI_PCT: float = float(
+    os.getenv("MEM_PRESSURE_CRITICAL_PSI_PCT", "40")
+)
+MEM_PRESSURE_TIGHT_PSI_PCT: float = float(
+    os.getenv("MEM_PRESSURE_TIGHT_PSI_PCT", "10")
+)
+
+# --- Admission control: don't add load to a machine that is already out ---
+#
+# MAX_CONCURRENT bounds how many sessions run at once; it says nothing about
+# whether the machine can afford the next one. When pressure reads critical a
+# starting session waits in its slot instead of spawning, after first trying to
+# reclaim idle build daemons (which is usually enough on its own).
+#
+# The wait is bounded and then proceeds anyway. Memory pressure the bot did not
+# create — a browser that ate 6 GB — would otherwise block work forever, and
+# refusing all work because something else is fat is a worse failure than
+# starting one more 400 MB CLI.
+MEM_ADMISSION_ENABLED: bool = os.getenv(
+    "MEM_ADMISSION_ENABLED", "1"
+).lower() in ("1", "true", "yes")
+MEM_ADMISSION_MAX_WAIT_SECS: int = int(
+    os.getenv("MEM_ADMISSION_MAX_WAIT_SECS", "300")
+)
+MEM_ADMISSION_POLL_SECS: int = int(os.getenv("MEM_ADMISSION_POLL_SECS", "15"))
+
+# --- Reclaiming memory nobody owns ---
+#
+# Processes charged to the bot's cgroup that are no longer descendants of the
+# bot: build servers that outlive the build. On 2026-08-21 the single biggest
+# process the bot was responsible for was a detached .NET Roslyn compiler
+# server holding up to 4.9 GB — 45% of the bot's whole footprint, and invisible
+# to a guard that only walks downward from each session.
+#
+# Anything above MEM_ORPHAN_MIN_MB is logged. Only known cache daemons that are
+# also idle and old enough get killed (see RECLAIMABLE_DAEMONS in
+# bot/claude/memory.py) — they cost the next build a cold start and nothing
+# else. Pids an armed /watch is waiting on are never touched.
+MEM_ORPHAN_SWEEP: bool = os.getenv(
+    "MEM_ORPHAN_SWEEP", "1"
+).lower() in ("1", "true", "yes")
+MEM_ORPHAN_MIN_MB: float = float(os.getenv("MEM_ORPHAN_MIN_MB", "256"))
+MEM_ORPHAN_MIN_AGE_SECS: float = float(os.getenv("MEM_ORPHAN_MIN_AGE_SECS", "60"))
+MEM_ORPHAN_CPU_IDLE_PCT: float = float(os.getenv("MEM_ORPHAN_CPU_IDLE_PCT", "5"))
+
+# --- Cross-session arbitration ---
+#
+# The per-session ceiling answers "is one session out of control". It cannot
+# answer "are five reasonable sessions collectively killing this machine",
+# which is the case where the cgroup OOM killer picks a victim instead of the
+# bot — safe, since OOMPolicy=continue keeps the unit alive, but silent: the
+# session that dies is never told why.
+#
+# So when the machine reads critical AND the bot's own cgroup is over its
+# MemoryHigh — i.e. we are demonstrably the ones filling it — the largest live
+# session tree is reaped and told exactly that. Both halves are required. Under
+# pressure the bot did not create, reaping our own sessions frees nothing the
+# offender will not immediately re-take, and costs a session's work for it.
+#
+# The victim floor exists because reaping the largest of five 400 MB sessions
+# is pure loss: it frees nothing worth having and destroys real work.
+SESSION_MEM_FLEET_ARBITRATION: bool = os.getenv(
+    "SESSION_MEM_FLEET_ARBITRATION", "1"
+).lower() in ("1", "true", "yes")
+SESSION_MEM_FLEET_MIN_VICTIM_MB: float = float(
+    os.getenv("SESSION_MEM_FLEET_MIN_VICTIM_MB", "1024")
+)
+# Quiet period after a cross-session reap. Freeing memory is not instant — the
+# kernel reclaims over seconds — so the next session's watchdog would read the
+# same critical pressure and take itself out for a spike the first kill already
+# fixed. Without this, one crunch unwinds the whole fleet in about a minute.
+FLEET_REAP_COOLDOWN_SECS: float = float(
+    os.getenv("FLEET_REAP_COOLDOWN_SECS", "120")
+)
 # How many times a run may be auto-resumed after the guard killed it for
 # memory. Deliberately lower than CONTEXT_THRASH_MAX_RETRIES: a context thrash
 # is a bookkeeping problem that a fresh window genuinely fixes, whereas a
@@ -393,6 +492,77 @@ MEMORY_KILL_NUDGE_TEMPLATE = (
     "`nohup` keeps running after the command that launched it returns, and it "
     "counts against this same ceiling. If you left one running, it was killed "
     "too."
+)
+
+# The same note for the other kind of memory kill: this session was not over
+# its own ceiling, the MACHINE ran out and this was the largest tree running.
+# Kept separate rather than parameterised because the advice differs at the
+# root — "your job is too big" and "your job was the biggest of several" call
+# for different next steps, and a template that hedges between them would give
+# useful guidance for neither. Placeholders: peak_gb, limit_gb, avail_gb,
+# pressure.
+MEMORY_FLEET_KILL_NUDGE_TEMPLATE = (
+    "--- Automatic recovery: your previous attempt was stopped for memory ---\n"
+    "Your last run was killed by this bot to keep the machine alive, and the "
+    "reason is worth reading carefully because it is NOT the usual one: you "
+    "were not over your own per-session ceiling of {limit_gb} GB. Your "
+    "processes were at {peak_gb} GB, and the machine as a whole ran out — "
+    "{pressure}, with about {avail_gb} GB free. Several sessions run here at "
+    "once alongside the user's own desktop applications; yours was simply the "
+    "largest tree at the moment something had to give.\n"
+    "So the fix is not necessarily to make the job much smaller — it is to "
+    "make it fit in a shared machine. Prefer streaming or chunked work over "
+    "loading everything at once, bound the parallelism of anything you launch, "
+    "and release memory between stages rather than holding it for the whole "
+    "run. If the job has a genuine floor above what is available here, say so "
+    "plainly and stop rather than being reaped a second time.\n"
+    "Your work is NOT lost — every edit the killed attempt made is still on "
+    "disk. Take stock of what is already done FIRST and carry on from there; "
+    "in a repo that means `git status` and `git diff` before anything else.\n"
+    "One more thing worth checking: a background job you started with `&` or "
+    "`nohup` keeps running after the command that launched it returns, and it "
+    "counts against this same ceiling. If you left one running, it was killed "
+    "too."
+)
+
+# Told to every session up front, in the system prompt, rather than only after
+# a kill. The old arrangement taught an agent about the memory ceiling by
+# enforcing it: the first thing it ever heard about memory was that its run had
+# just been destroyed. An agent that knows the budget in advance can choose a
+# streaming approach the first time instead of discovering the limit with a
+# twenty-minute job. Placeholders: warn_gb, kill_gb.
+MEMORY_BUDGET_CONTEXT_TEMPLATE = (
+    "--- Memory Budget ---\n"
+    "This machine runs several sessions at once, alongside the user's own "
+    "desktop applications (browser, chat, editors). Memory is shared and it is "
+    "the scarcest resource here — it has twice been exhausted badly enough to "
+    "freeze the machine.\n"
+    "Your session has a ceiling of {kill_gb} GB of resident memory across "
+    "EVERY process you start — not just the CLI, but any script, build, test "
+    "run, or background job it spawns, at any depth. You get one warning in "
+    "this thread at {warn_gb} GB. Past the ceiling your whole process tree is "
+    "killed and the run fails.\n"
+    "What that means when you work:\n"
+    "- Prefer streaming or chunked processing over loading a whole dataset, "
+    "model, or file set into memory at once. Write each chunk out as you go.\n"
+    "- Bound the parallelism of anything you launch. `-j$(nproc)` on a large "
+    "build, or a worker pool sized to the CPU count, multiplies peak memory by "
+    "the worker count.\n"
+    "- A job started with `&` or `nohup` keeps running after the command that "
+    "launched it returns and still counts against your ceiling. If you start "
+    "one, either wait for it or arm a `/watch` on it — never leave it running "
+    "unattended.\n"
+    "- Build servers outlive the build that started them and can hold "
+    "gigabytes doing nothing: run `dotnet build-server shutdown` after a .NET "
+    "build you are not about to repeat.\n"
+    "- Check before you commit to a big job rather than after: `free -m` costs "
+    "nothing, and a job sized to what is actually free beats one that gets "
+    "reaped at minute nineteen.\n"
+    "- If a job genuinely does not fit on this machine, say so plainly and "
+    "stop. That is a useful answer and far better than being killed for it.\n"
+    "If the machine is short on memory the bot may hold your session briefly "
+    "before it starts, or reap the largest running session. Neither is a bug, "
+    "and both are reported in the thread."
 )
 
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
