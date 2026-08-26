@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+- **The Control Room owns the one pin slot in every forum** (`bot/discord/channels.py`, `bot/discord/forums.py`, `bot/discord/bot.py`). A Discord forum holds a single pinned post, but three different creators each pinned their own on the way up — the control room, the session archive and the usage monitor — so the slot went to whichever request landed last. Because those posts are created concurrently during repo provisioning, the winner was a race, and nothing ever re-checked: **5 of 14 live forums (tweaky-henk, media-fetcher, deadcut, fundops, mindroom) had the Archive pinned instead of the Control Room.** The archive and monitor posts no longer pin themselves, and a new `reconcile_forum_pins()` runs once on ready — unpinning every other post in a forum before pinning the control room, so the result is the same whether Discord replaces an existing pin or refuses a second one. It also covers repos whose control room had gone to sleep: an archived thread rejects every field but `archived` (error 50083), so a sleeping control room is woken in its own request before it can take the pin — three of the five needed exactly that. Forums that are already correct issue zero API calls, which is what makes it safe on every startup. A pin failure that used to vanish into a debug log is now a warning naming the forum.
+
+### Added
+- `scripts/test_forum_pins.py` — 14 checks driving the real reconcile against a fake Discord client: the archive yields the slot, an already-correct forum issues no calls at all, a stray pinned session thread also yields, a control room missing from the cache is resolved over REST, a sleeping control room is unarchived before it is pinned, and a forum with no recorded control room pins nothing. `--live` reads the true pin state of every repo and personal forum over REST (no gateway, safe against the running singleton) and `--live --fix` repairs them. Registered in `.claude/test.json`.
+
 ## v0.101.9 — A long answer arrives whole, not as a stub (2026-08-26)
 
 ### Changed

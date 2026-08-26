@@ -900,6 +900,123 @@ class ForumManager:
                 await asyncio.gather(*tasks, return_exceptions=True)
                 await asyncio.sleep(0.5)
 
+    # --- Forum pins ---
+
+    async def reconcile_forum_pins(self) -> None:
+        """Make the Control Room the one pinned post in every forum.
+
+        A forum channel has a single pin slot. The archive and monitor posts
+        used to pin themselves right after creation, racing the control room
+        for that slot — whichever landed last won, and nothing ever
+        re-checked. This unpins everything else first, then pins the control
+        room, so the outcome is the same whether Discord replaces an existing
+        pin or rejects the second one.
+
+        Already-correct forums produce zero API calls, so this is cheap to run
+        on every startup.
+        """
+        for forum, control_id, tracked_ids in self._pin_scopes():
+            try:
+                await self._reconcile_forum_pin(forum, control_id, tracked_ids)
+            except Exception:
+                log.debug("Pin reconcile failed for forum %s", forum.id, exc_info=True)
+
+    def _pin_scopes(self) -> list[tuple[discord.ForumChannel, int | None, set[int]]]:
+        """(forum, control thread id, other bot-owned thread ids) per forum."""
+        scopes: list[tuple[discord.ForumChannel, int | None, set[int]]] = []
+
+        for proj in list(self._forum_projects.values()):
+            if not proj.forum_channel_id:
+                continue
+            forum = self._client.get_channel(int(proj.forum_channel_id))
+            if not isinstance(forum, discord.ForumChannel):
+                continue
+            tracked = {
+                int(t) for t in (
+                    proj.archive_thread_id,
+                    proj.monitor_thread_id,
+                    proj.legacy_verify_thread_id,
+                ) if t
+            }
+            control = int(proj.control_thread_id) if proj.control_thread_id else None
+            scopes.append((forum, control, tracked))
+
+        try:
+            cfg = load_access_config()
+        except Exception:
+            return scopes
+        for ua in cfg.users.values():
+            if not ua.forum_channel_id:
+                continue
+            forum = self._client.get_channel(int(ua.forum_channel_id))
+            if not isinstance(forum, discord.ForumChannel):
+                continue
+            tracked = {int(ua.archive_thread_id)} if ua.archive_thread_id else set()
+            control = int(ua.control_thread_id) if ua.control_thread_id else None
+            scopes.append((forum, control, tracked))
+
+        return scopes
+
+    async def _reconcile_forum_pin(
+        self,
+        forum: discord.ForumChannel,
+        control_id: int | None,
+        tracked_ids: set[int],
+    ) -> None:
+        """Unpin every post in *forum* except the control room, then pin it."""
+        candidates: dict[int, discord.Thread] = {
+            t.id: t for t in forum.threads if isinstance(t, discord.Thread)
+        }
+        wanted = set(tracked_ids)
+        if control_id:
+            wanted.add(control_id)
+        for tid in wanted - set(candidates):
+            th = await self._fetch_thread(tid)
+            if th is not None:
+                candidates[th.id] = th
+
+        changed = False
+        for th in list(candidates.values()):
+            if th.id == control_id or not th.flags.pinned:
+                continue
+            try:
+                await th.edit(pinned=False)
+                changed = True
+                log.info("Unpinned %r (%s) in forum %s — Control Room owns the pin",
+                         th.name, th.id, forum.name)
+            except Exception:
+                log.warning("Could not unpin %r in forum %s",
+                            th.name, forum.name, exc_info=True)
+
+        control = candidates.get(control_id) if control_id else None
+        if control is not None and not control.flags.pinned:
+            try:
+                # Discord rejects every field but `archived` on an archived
+                # thread (50083), so a control room that went to sleep has to
+                # be woken in its own request before it can take the pin.
+                if control.archived:
+                    await control.edit(archived=False)
+                await control.edit(pinned=True)
+                changed = True
+                log.info("Pinned Control Room %s in forum %s", control.id, forum.name)
+            except Exception:
+                log.warning("Could not pin Control Room in forum %s",
+                            forum.name, exc_info=True)
+
+        if changed:
+            # Channel edits are rate-limited — pace the repaired forums.
+            await asyncio.sleep(0.5)
+
+    async def _fetch_thread(self, thread_id: int) -> discord.Thread | None:
+        """Resolve a thread id from cache, falling back to a REST fetch."""
+        ch = self._client.get_channel(thread_id)
+        if ch is None:
+            try:
+                ch = await self._client.fetch_channel(thread_id)
+            except Exception:
+                return None
+        return ch if isinstance(ch, discord.Thread) else None
+
     # --- Archive Thread ---
 
     async def ensure_archive_thread(self, repo_name: str) -> discord.Thread | None:

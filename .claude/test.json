@@ -81,7 +81,8 @@
     "model_command": "python scripts/test_model_command.py",
     "model_routing": "python scripts/test_model_routing.py",
     "orchestrator_join": "python scripts/test_orchestrator_join.py",
-    "result_delivery": "python scripts/test_result_delivery.py"
+    "result_delivery": "python scripts/test_result_delivery.py",
+    "forum_pins": "python scripts/test_forum_pins.py"
   },
 
   "auth": {

@@ -93,17 +93,18 @@ async def create_archive_post(
     forum: discord.ForumChannel,
     repo_name: str,
 ) -> tuple[discord.Thread, discord.Message]:
-    """Create a pinned archive post inside a repo forum."""
+    """Create the archive post inside a repo forum.
+
+    Deliberately not pinned: a forum has a single pin slot and the Control
+    Room owns it (see reconcile_forum_pins). Pinning here used to race the
+    control room's own pin, and whichever landed last won.
+    """
     thread_with_msg = await forum.create_thread(
         name=ARCHIVE_NAME,
         content=f"**Session archive for {repo_name}**\nCompleted sessions are logged here automatically.",
     )
     thread = thread_with_msg.thread
     msg = thread_with_msg.message
-    try:
-        await thread.edit(pinned=True)
-    except Exception:
-        log.debug("Could not pin archive thread", exc_info=True)
     log.info("Created archive post %s in forum %s", thread.id, forum.name)
     return thread, msg
 
@@ -112,17 +113,16 @@ async def create_monitor_post(
     forum: discord.ForumChannel,
     name: str,
 ) -> tuple[discord.Thread, discord.Message]:
-    """Create a pinned monitor thread in a repo forum."""
+    """Create the monitor thread in a repo forum.
+
+    Not pinned — the Control Room owns the forum's single pin slot.
+    """
     thread_with_msg = await forum.create_thread(
         name=MONITOR_NAME,
         content=f"**Usage monitor: {name}**\nAuto-refreshes periodically.",
     )
     thread = thread_with_msg.thread
     msg = thread_with_msg.message
-    try:
-        await thread.edit(pinned=True)
-    except Exception:
-        log.debug("Could not pin monitor thread", exc_info=True)
     log.info("Created monitor post %s in forum %s", thread.id, forum.name)
     return thread, msg
 
@@ -712,7 +712,7 @@ async def create_repo_control_post(
     try:
         await result.thread.edit(pinned=True)
     except Exception:
-        log.debug("Could not pin control room thread", exc_info=True)
+        log.warning("Could not pin control room thread in forum %s", forum.name, exc_info=True)
 
     log.info("Created control room post %s in forum %s", result.thread.id, forum.name)
     return result.thread, result.message
@@ -773,7 +773,7 @@ async def create_user_control_post(
     try:
         await result.thread.edit(pinned=True)
     except Exception:
-        log.debug("Could not pin user control room", exc_info=True)
+        log.warning("Could not pin user control room in forum %s", forum.name, exc_info=True)
 
     log.info("Created control room post %s in user forum %s", result.thread.id, forum.name)
     return result.thread, result.message

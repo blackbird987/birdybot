@@ -34,6 +34,15 @@ Forum-based: one ForumChannel per project/repo, one thread per session.
 - Messages in forum thread → session auto-resumed
 - Dashboard embed pinned in The Ark (auto-updates on instance start/complete)
 - Per-repo control rooms live as pinned threads inside each repo's forum
+- **A forum has ONE pin slot and the Control Room owns it.** Archive and
+  monitor posts must never pin themselves — they used to, and racing the
+  control room left 5 of 14 forums with the Archive pinned instead.
+  `ForumManager.reconcile_forum_pins()` repairs this once on ready:
+  unpin everything else, wake the control room if it archived itself
+  (Discord rejects any other field on an archived thread, error 50083),
+  then pin it. No-ops on correct forums. Harness:
+  `python scripts/test_forum_pins.py` (add `--live` to read real state,
+  `--live --fix` to repair; REST-only, safe against the running bot)
 - Forum tags: active, completed, failed, cli, build
 
 Key data structures in `bot/discord/forums.py`:
