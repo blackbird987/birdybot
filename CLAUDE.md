@@ -25,6 +25,11 @@ python -m bot          # start the bot
 - Slash commands are guild-synced (instant registration)
 - 3-second interaction timeout — always `defer()` first
 - `intents.members = True` needed for permission overwrites on category creation
+- A forum has exactly **one** pin slot. A second pin is REJECTED (error 30047,
+  "Maximum number pinned threads in this channel reached (1)") — it does not
+  replace the incumbent, so anything already pinned must be unpinned first.
+- Archiving a forum post clears its pin, and an archived thread rejects every
+  field but `archived` (error 50083) — wake it before editing anything else.
 
 ## Discord Architecture (v0.3.0)
 
@@ -34,6 +39,17 @@ Forum-based: one ForumChannel per project/repo, one thread per session.
 - Messages in forum thread → session auto-resumed
 - Dashboard embed pinned in The Ark (auto-updates on instance start/complete)
 - Per-repo control rooms live as pinned threads inside each repo's forum
+- **A forum has ONE pin slot and the Control Room owns it.** Archive and
+  monitor posts must never pin themselves — they used to, and racing the
+  control room left 5 of 14 forums with the Archive pinned instead.
+  `ForumManager.reconcile_forum_pins()` repairs this once on ready:
+  unpin everything else, then pin the control room. Either edit wakes a
+  sleeping post first — Discord rejects every field but `archived` on an
+  archived thread (error 50083), so a post that auto-archived while holding
+  the slot would otherwise keep it forever. No edits on correct forums.
+  Harness:
+  `python scripts/test_forum_pins.py` (add `--live` to read real state,
+  `--live --fix` to repair; REST-only, safe against the running bot)
 - Forum tags: active, completed, failed, cli, build
 
 Key data structures in `bot/discord/forums.py`:

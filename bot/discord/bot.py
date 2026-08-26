@@ -1704,6 +1704,12 @@ class ClaudeBot(discord.Client):
             self._control_rooms_cleaned = True
             asyncio.create_task(self._forums.cleanup_all_control_rooms())
 
+        # A forum has one pin slot — make sure the Control Room holds it
+        # (one-time, non-blocking; no-ops on forums that are already right)
+        if not getattr(self, '_forum_pins_reconciled', False):
+            self._forum_pins_reconciled = True
+            asyncio.create_task(self._forums.reconcile_forum_pins())
+
         self._ready_event.set()
 
         # Start monitor service if there are enabled monitors
