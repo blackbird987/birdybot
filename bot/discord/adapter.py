@@ -426,8 +426,15 @@ class DiscordMessenger:
         return f"<@{user_id}>"
 
     def chunk_message(self, text: str) -> list[str]:
-        # Discord regular messages: 2000 char limit
-        return discord_fmt.chunk_message(text, limit=2000)
+        """Split into Discord-safe chunks, measured AFTER table conversion.
+
+        apply_discord_safety() rewrites pipe tables into code blocks at send
+        time, which grows the text. Measuring before that meant a chunk could
+        pass the 2000 check here and get cut on the way out.
+        """
+        return discord_fmt.chunk_message(
+            discord_fmt.convert_pipe_tables(text), limit=2000,
+        )
 
     async def on_repo_added(self, repo_name: str) -> None:
         """Create forum channel + control post for newly added repo."""

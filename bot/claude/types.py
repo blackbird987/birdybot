@@ -199,6 +199,8 @@ class Instance:
     manual_verify_reason: str | None = None  # WHY: line surfaced in the chain-completion summary
     deferred_revisions: list[str] = field(default_factory=list)  # Medium/Low revisions from plan review
     jsonl_uuid_by_msg_id: dict[str, str] = field(default_factory=dict)  # Discord msg_id -> JSONL assistant uuid (for "Branch from here")
+    expand_msg_ids: list[str] = field(default_factory=list)  # Overflow messages posted by Expand, deleted again by Collapse
+    result_collapsed: bool = False  # Result was too long to post inline -- the message is a preview card with an Expand button
     # Access control fields (non-owner sessions)
     is_owner_session: bool = True     # False for granted user sessions
     bash_policy: str = "full"         # current effective policy: "full"=Bash unrestricted; "allowlist"=non-owner allowlist guard; "none"=Bash disabled (e.g. read-only triage floor)
@@ -350,6 +352,8 @@ class Instance:
             "manual_verify_reason": self.manual_verify_reason,
             "deferred_revisions": self.deferred_revisions,
             "jsonl_uuid_by_msg_id": self.jsonl_uuid_by_msg_id,
+            "expand_msg_ids": self.expand_msg_ids,
+            "result_collapsed": self.result_collapsed,
             "is_owner_session": self.is_owner_session,
             "bash_policy": self.bash_policy,
             "bash_policy_baseline": self.bash_policy_baseline,
@@ -423,6 +427,8 @@ class Instance:
             manual_verify_reason=d.get("manual_verify_reason"),
             deferred_revisions=d.get("deferred_revisions", []),
             jsonl_uuid_by_msg_id=d.get("jsonl_uuid_by_msg_id", {}),
+            expand_msg_ids=d.get("expand_msg_ids", []),
+            result_collapsed=d.get("result_collapsed", False),
             is_owner_session=d.get("is_owner_session", True),
             bash_policy=d.get("bash_policy", "full"),
             # Default missing baseline to "full" — NOT to the loaded bash_policy.

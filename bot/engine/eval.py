@@ -297,21 +297,33 @@ def _check_tool_hygiene(inst: Instance) -> list[EvalFlag]:
     return flags
 
 
+# Chars past which a response is flagged as over-long. The prompt asks for
+# ~1200; 2500 is the "twice the target and still growing" line. The old check
+# only fired past 4000 AND only when paragraphs also averaged 300+ chars, so a
+# 6000-char answer written in tidy short paragraphs never registered — which is
+# exactly the shape the bot actually produces.
+_VERBOSE_RESULT_CHARS = 2500
+
+
 def _check_verbosity(inst: Instance, text: str) -> list[EvalFlag]:
     """Mobile-first constraint: is the response appropriately sized?"""
     flags: list[EvalFlag] = []
+    size = len(text)
+    if size <= _VERBOSE_RESULT_CHARS:
+        return flags
 
-    # Direct queries shouldn't produce walls of text
-    if inst.origin == InstanceOrigin.DIRECT and len(text) > 4000:
-        para_count = text.count("\n\n") + 1  # separators + 1 = paragraphs
-        avg_para_len = len(text) / para_count
-        if avg_para_len > 300:
-            flags.append(EvalFlag(
-                category="constraint_violation", severity="info",
-                message=(f"Long response ({len(text)} chars) with dense paragraphs "
-                         f"(avg {avg_para_len:.0f} chars) — mobile readability concern"),
-            ))
-
+    # Past the inline ceiling the result no longer arrives whole — it collapses
+    # to a preview card the user has to tap. That's a real cost, not a nit.
+    collapsed = size > config.RESULT_INLINE_MAX
+    flags.append(EvalFlag(
+        category="constraint_violation",
+        severity="warning" if collapsed else "info",
+        message=(
+            f"Over-long response ({size:,} chars) — mobile target is ~1200"
+            + (f"; past {config.RESULT_INLINE_MAX:,} it collapses behind Expand"
+               if collapsed else "")
+        ),
+    ))
     return flags
 
 
@@ -574,6 +586,9 @@ _ATTRIBUTION: tuple[tuple[str, str, str], ...] = (
     ("claim_grounding", "url", "HONESTY_CONSTRAINT"),
     ("narration", "doesn't describe", "CHAT_APP_CONSTRAINT"),
     ("narration", "short response", "CHAT_APP_CONSTRAINT"),
+    # "over-long" must precede the generic "mobile" rule — the length
+    # target lives in CHAT_APP_CONSTRAINT and both words are in that message.
+    ("constraint_violation", "over-long", "CHAT_APP_CONSTRAINT"),
     ("constraint_violation", "mobile", "MOBILE_HINT"),
     ("efficiency", "prompt-cache", "prompt assembly order (harness)"),
     ("efficiency", "context may be bloated", "context injection (harness)"),

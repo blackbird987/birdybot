@@ -27,7 +27,7 @@ from bot.platform.formatting import (
     action_button_specs,
     collapse_bot_directives,
     expanded_button_specs,
-    format_expanded_result_md,
+    format_expanded_result_chunks,
     format_instance_list_md,
     format_result_md,
     format_schedule_list_md,
@@ -3058,10 +3058,14 @@ async def _strip_post_merge_buttons(
     if result_msg_id == skip_msg_id:
         return  # Already handled by the caller's edit
     try:
-        formatted = format_result_md(inst)
-        markup = ctx.messenger.markdown_to_markup(formatted)
+        # Buttons only -- edit_text(text=None) leaves the body alone. It used
+        # to re-render the message from format_result_md(), which on a result
+        # posted inline meant replacing the last chunk of the actual answer
+        # with a two-line summary card, and on a collapsed one threw away the
+        # preview. Nothing about resolving a branch should rewrite what a
+        # finished session said.
         buttons = action_button_specs(inst)
-        await ctx.messenger.edit_text(ctx.channel_id, result_msg_id, markup, buttons)
+        await ctx.messenger.edit_text(ctx.channel_id, result_msg_id, None, buttons)
     except Exception:
         log.debug("Failed to strip buttons from %s result message", inst.id)
 
@@ -3523,6 +3527,24 @@ async def _on_resolve_cancel(
 
 # --- Callback dispatch ---
 
+async def _clear_expand_overflow(ctx: RequestContext, inst: Instance) -> None:
+    """Delete the follow-up messages a previous Expand posted.
+
+    Expand spills a long result across extra messages; Collapse (or a second
+    Expand) has to take them back down, or the thread accumulates orphaned
+    halves of an answer nobody asked for twice.
+    """
+    if not inst.expand_msg_ids:
+        return
+    for msg_id in list(inst.expand_msg_ids):
+        try:
+            await ctx.messenger.delete_message(ctx.channel_id, msg_id)
+        except Exception:
+            log.debug("Could not delete expand overflow message %s", msg_id)
+    inst.expand_msg_ids.clear()
+    ctx.store.update_instance(inst)
+
+
 async def handle_callback(
     ctx: RequestContext,
     action: str,
@@ -3812,20 +3834,32 @@ async def handle_callback(
             await ctx.messenger.send_text(ctx.channel_id, "Result file not available.")
             return
         result_text = Path(inst.result_file).read_text(encoding="utf-8")
-        expanded = format_expanded_result_md(inst, result_text)
+        # Expand posts the WHOLE result: chunk 0 replaces the card, the rest
+        # follow as plain messages. Collapse deletes the follow-ups again.
+        chunks = format_expanded_result_chunks(inst, result_text)
         buttons = expanded_button_specs(inst)
-        markup = ctx.messenger.markdown_to_markup(expanded)
+        await _clear_expand_overflow(ctx, inst)
+        head = ctx.messenger.markdown_to_markup(chunks[0])
         if source_msg_id:
-            await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, markup, buttons)
+            await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, head, buttons)
         else:
-            await ctx.messenger.send_text(ctx.channel_id, markup, buttons)
+            await ctx.messenger.send_text(ctx.channel_id, head, buttons)
+        for extra in chunks[1:]:
+            msg_id = await ctx.messenger.send_text(
+                ctx.channel_id, ctx.messenger.markdown_to_markup(extra), silent=True,
+            )
+            if msg_id:
+                inst.expand_msg_ids.append(str(msg_id))
+        if chunks[1:]:
+            ctx.store.update_instance(inst)
 
     elif action == "collapse":
         inst = ctx.store.get_instance(instance_id)
         if not inst:
             await ctx.messenger.send_text(ctx.channel_id, "Instance not found.")
             return
-        collapsed = format_result_md(inst)
+        await _clear_expand_overflow(ctx, inst)
+        collapsed = format_result_md(inst, preview=inst.read_result_text())
         buttons = action_button_specs(inst, show_expand=True)
         markup = ctx.messenger.markdown_to_markup(collapsed)
         if source_msg_id:
@@ -3954,14 +3988,9 @@ async def handle_callback(
         if inst and source_msg_id:
             inst.mode = actual
             ctx.store.update_instance(inst)
-            try:
-                show_expand = bool(
-                    inst.result_file
-                    and Path(inst.result_file).exists()
-                    and Path(inst.result_file).stat().st_size >= 2000
-                )
-            except OSError:
-                show_expand = False
+            # Third place that used to guess "is there more behind Expand?"
+            # from the result file's size. The delivery path records it.
+            show_expand = bool(inst.result_collapsed and inst.result_file)
             buttons = action_button_specs(inst, show_expand=show_expand)
             await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, None, buttons)
 

@@ -152,6 +152,24 @@ STALL_TIMEOUT_SECS: int = int(os.getenv("STALL_TIMEOUT_SECS", "60"))
 STALL_DIAG_RELOG_SECS: int = int(os.getenv("STALL_DIAG_RELOG_SECS", "60"))
 MAX_PROCESS_LIFETIME_SECS: int = int(os.getenv("MAX_PROCESS_LIFETIME_SECS", "14400"))
 
+# --- Result delivery sizing ---
+#
+# A finished answer is posted inline (as one or more plain messages) when it
+# fits INLINE_MAX; above that it collapses to a summary card with an Expand
+# button. The old threshold was 2000 -- one Discord message. Replaying the
+# 529 stored results through this same comparison (display text, after
+# directives are folded away) collapsed 407 of them (76%, median 3.3 KB) to
+# a 500-char first paragraph the user had to tap to read: collapsing was the
+# normal case, not the exception. At 6000 it is 55 (10%).
+RESULT_INLINE_MAX: int = int(os.getenv("RESULT_INLINE_MAX", "6000"))
+# Leading text shown on the collapse card for results too big to post inline.
+# extract_summary() only keeps the first paragraph (<=500 chars); this budget
+# lets the card carry several paragraphs so it stands alone.
+RESULT_PREVIEW_MAX: int = int(os.getenv("RESULT_PREVIEW_MAX", "1200"))
+# Expand posts the full result across follow-up messages; this caps how many
+# so a 500 KB log can't carpet-bomb the thread. Past it, /log has the file.
+RESULT_EXPAND_MAX_CHUNKS: int = int(os.getenv("RESULT_EXPAND_MAX_CHUNKS", "6"))
+
 # --- Per-session memory guard ---
 #
 # The runner watches the resident memory of each session's WHOLE process tree,
@@ -839,56 +857,23 @@ MOBILE_HINT = (
 # Separate block explaining the chat-app visibility constraint
 CHAT_APP_CONSTRAINT = """
 --- Communication Model ---
-IMPORTANT: The user is in a chat app (Discord). They see ONLY your final text responses. They CANNOT see tool calls, file contents, diffs, command output, or intermediate steps. Your text output is their ENTIRE window into what happened.
+The user is in a chat app (Discord), on a phone. They see ONLY your final text response — no tool calls, no file contents, no diffs, no command output, no text you wrote between tool calls. That final message is the entire deliverable.
 
-Always address the user directly — your audience is a person on their phone, not your tools or your own reasoning.
+Length: aim under 1200 characters. Long answers get collapsed behind a tap or cut off, so length costs you the reader. If the work genuinely needs more, lead with a 2-3 line answer that stands alone, then the detail underneath.
 
-You must narrate your work:
-- If you read a file → summarize what you found
-- If you edited code → show what changed (short before/after or description of the change)
-- If you ran a command → report success/failure and key output
-- If something errored → include the actual error message
-- If you searched code → share what you found or didn't find
-- If you diagnosed/tested something → explain what you checked, what the result was, and what fixed it
-- If something now works → explain WHY it works (what was wrong before, what changed)
+Report OUTCOMES, not steps. The user needs what is true now, what changed, and what it means — not a log of what you did. One line of "here is what I found and what it means" beats a paragraph per tool call.
+- Changed code → what it does differently now (not "I edited the file")
+- Ran something → did it pass, and the actual error text if it didn't
+- Diagnosed something → what was wrong, and why the fix addresses it
+- Found nothing → say so plainly, in one line
+- Skip the preamble, the recap of the request, and the closing summary of your own summary
 
-Bad: "I've updated the function." (user has no idea what changed)
-Good: "Changed `get_user()` to accept an optional `role` param — it now filters by role when provided, defaulting to the old behavior."
+Plain language, not identifiers:
+The user does not have the code open. Function and variable names mean nothing to them — a report built out of `SomeMethodName` -> `SomeOtherName` is unreadable noise. Describe each part by what it DOES, not what it is CALLED: not "`TrackBatchCloidsAsync` writes to `PendingExitWatchCloids`" but "the bot adds those order IDs to its watch-list". Include a literal identifier, path or command only when the user needs the exact string to act on it, in parentheses after the plain description. Exception: if they explicitly ask where something lives in the code, give real names and paths.
 
-Bad: "All good — token working now." (user has no idea what was wrong or what you tested)
-Good: "Tested the new token against GitLab's API — push and MR creation both succeed now. The old token was missing the `write_repository` scope."
-
-Think of it like pair programming over text — your partner can't see your screen.
-
-Plain-language storytelling (CRITICAL):
-The user does NOT have the code open and never will. Function names, class names,
-variable names, and internal identifiers mean NOTHING to them — a report built out
-of `SomeMethodName` -> `SomeOtherName` is unreadable noise.
-
-- Describe every component by what it DOES, not what it is CALLED.
-  Bad:  "`TrackBatchCloidsAsync` records them to `PendingExitWatchCloids`"
-  Good: "the bot writes the order IDs to its watch-list, so it knows to wake up
-         when one of those orders fills"
-- Tell findings as a story: what was supposed to happen, what you checked, what
-  actually happened, and what that means for the user.
-- Use an exact identifier ONLY when the user needs the literal string to act —
-  a command to run, a setting to flip, an error message to recognize — and put it
-  in parentheses after the plain-language description, never instead of it.
-- Test names, file paths, and log excerpts follow the same rule: lead with meaning,
-  keep the literal only if it's actionable.
-- If you catch yourself writing a numbered list where every item leads with a code
-  identifier, stop and rewrite it as prose about behavior.
-- Exception: if the user explicitly asks where something lives in the code, give
-  real names and file paths.
-
-- If you used subagents (Agent tool) to research → present ALL findings in your response.
-  The user can't see agent results — if you don't write the findings out, they're invisible.
-- Never reference findings without listing them. If you mention a count ("4 quick wins",
-  "3 issues"), every item MUST appear in your response with a brief description.
-- Your text output IS the deliverable. There is no other channel for the user to see results.
-- CRITICAL: If you write text between tool calls, the user MAY NOT see it. Never say
-  "as shown above" or "the analysis I shared earlier" — always include the full content
-  in your final response. If it's important, it must be in your last message.
+Nothing is invisible:
+- Findings from subagents are invisible unless you write them out. If you name a count ("3 issues"), every one must appear.
+- Never say "as shown above" or "the analysis I shared earlier" — earlier text may never have reached them. If it matters, it is in this message.
 """
 
 HONESTY_CONSTRAINT = """
