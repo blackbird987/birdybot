@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from datetime import timedelta
 from typing import TYPE_CHECKING
@@ -352,8 +353,67 @@ _MNEMONIC_PATTERN = re.compile(
 _HEX_KEY_PATTERN = re.compile(r'(?<![a-zA-Z0-9])[0-9a-fA-F]{64,}(?![a-zA-Z0-9])')
 
 
+# --- Literal .env secret stripping -------------------------------------------
+#
+# The patterns above recognise secret *shapes*, and an audit showed the two
+# that matter most to this bot have no recognisable shape: a bare Discord bot
+# token and a Discord webhook URL both survived every pattern here, bare and in
+# `NAME=value` form alike. A session that prints `env` while debugging, or a
+# traceback that carries the environment, would publish them into a thread
+# verbatim.
+#
+# So match on the *value* instead of the shape: pull the real secrets out of
+# config once and replace them literally. That has no false positives by
+# construction — it can only ever match the actual secret — and it needs no new
+# regex whenever a credential format changes. This is the pattern log_triage
+# has used all along; it just lived in one module instead of the shared path.
+_ENV_SECRET_NAMES = (
+    "DISCORD_BOT_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
+    "TWITTER_BEARER_TOKEN", "TEST_WEBHOOK_URL", "TEST_LOBBY_WEBHOOK_URL",
+)
+
+# Below this length a "secret" is more likely a placeholder than a credential,
+# and blanket-replacing a 3-character string would gut unrelated text.
+_ENV_SECRET_MIN_LEN = 8
+
+_env_secrets_cache: tuple[str, ...] | None = None
+
+
+def _env_secret_values() -> tuple[str, ...]:
+    """The literal secret strings to strip, collected once.
+
+    redact_secrets sits on the display hot path, so this must not re-read
+    config per call. A failure here degrades to regex-only redaction rather
+    than taking down every message the bot renders.
+    """
+    global _env_secrets_cache
+    if _env_secrets_cache is not None:
+        return _env_secrets_cache
+    values: list[str] = []
+    try:
+        for name in _ENV_SECRET_NAMES:
+            v = getattr(config, name, None) or os.getenv(name, "")
+            if v and isinstance(v, str) and len(v) >= _ENV_SECRET_MIN_LEN:
+                values.append(v)
+    except Exception:  # pragma: no cover - defensive
+        values = []
+    # Longest first: a webhook URL contains its own id/token substrings, and
+    # replacing the whole thing before its parts keeps the output readable.
+    values.sort(key=len, reverse=True)
+    _env_secrets_cache = tuple(dict.fromkeys(values))
+    return _env_secrets_cache
+
+
 def redact_secrets(text: str) -> str:
     """Scrub API keys, tokens, and secrets from text."""
+    # Literal pass FIRST, while every known secret is still verbatim. Running
+    # it last would leave a gap: a pattern below can chew a fragment out of a
+    # secret (``_HEX_KEY_PATTERN`` on a long hex run inside it, say) without
+    # removing the whole thing, and the surviving remainder would then no
+    # longer match the literal we are looking for.
+    for secret in _env_secret_values():
+        if secret in text:
+            text = text.replace(secret, '[REDACTED]')
     for pattern in _TOKEN_PATTERNS:
         text = pattern.sub('[REDACTED]', text)
     text = _CONN_STRING_PATTERN.sub(r'\1[REDACTED]\3', text)

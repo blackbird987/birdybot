@@ -10,6 +10,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from bot.procutil import install_root
+
 # On Windows, prevent subprocess console windows from popping up
 NOWND: dict = (
     {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
@@ -17,7 +19,32 @@ NOWND: dict = (
 
 # Load .env from project root
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(_PROJECT_ROOT / ".env", override=True)
+
+
+def _env_root() -> Path:
+    """Where `.env` actually lives for this checkout.
+
+    `.env` is gitignored, so a build worktree never has one. That used to be
+    invisible because the spawned session inherited the bot's whole
+    environment -- exactly the accidental-leak path the runner now closes
+    (`SESSION_STRIPPED_ENV_VARS`). With those variables stripped, a worktree
+    has to locate the main checkout's `.env` itself.
+
+    ``install_root`` already answers precisely this question -- its docstring
+    calls out the gitignored `.env` by name -- and it asks git
+    (``--git-common-dir``) rather than parsing `.git` by hand, so it survives
+    relative gitdir paths, submodules and nested worktrees. It costs a
+    subprocess, hence the fast path first: a normal checkout has its own
+    `.env` and never shells out.
+    """
+    if (_PROJECT_ROOT / ".env").is_file():
+        return _PROJECT_ROOT
+    root = install_root(_PROJECT_ROOT)
+    return root if (root / ".env").is_file() else _PROJECT_ROOT
+
+
+_ENV_ROOT = _env_root()
+load_dotenv(_ENV_ROOT / ".env", override=True)
 
 # Per-machine overlay, layered on top of the shared .env. Only for settings
 # that genuinely DIFFER between machines rather than being two names for one
@@ -26,7 +53,7 @@ load_dotenv(_PROJECT_ROOT / ".env", override=True)
 # another spelling of the same directory belongs in the path map below, not
 # here. No file = no overlay, which is the normal single-machine case.
 _PLATFORM_ENV = {"win32": "windows", "darwin": "darwin"}.get(sys.platform, "linux")
-_OVERLAY = _PROJECT_ROOT / f".env.{_PLATFORM_ENV}"
+_OVERLAY = _ENV_ROOT / f".env.{_PLATFORM_ENV}"
 if _OVERLAY.is_file():
     load_dotenv(_OVERLAY, override=True)
 
