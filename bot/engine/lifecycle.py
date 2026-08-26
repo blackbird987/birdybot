@@ -316,10 +316,13 @@ async def run_instance(
                 heartbeat_task.cancel()
 
         # Update thinking message to show completion.
-        # Skip entirely when kill_reason == "kill" — the Kill button handler
-        # in commands.py edits the same message id to "Killed <id>" with
-        # action buttons (Retry/Log), and we don't want to race that edit.
-        if handle and result.kill_reason != "kill":
+        # Skipped only when the killer will rewrite this very message — the
+        # Kill button turns the card it sits on into "Killed <id>" with
+        # Retry/Log attached, and a slow finalize must not overwrite that.
+        # Typed /kill posts a separate message and leaves the flag False, so
+        # we still resolve the card here rather than stranding it on
+        # "thinking...".
+        if handle and not result.kill_owns_card:
             elapsed = asyncio.get_event_loop().time() - start_time
             if elapsed >= 60:
                 elapsed_str = f"{elapsed / 60:.1f}m"
@@ -327,7 +330,12 @@ async def run_instance(
                 elapsed_str = f"{elapsed:.0f}s"
             escaped = ctx.messenger.escape(inst.display_id())
             if result.killed_intentionally:
-                icon, status = "", "steered"
+                # "steered" only when a replacement run is already starting;
+                # a plain stop is a stop.
+                if result.kill_reason == "steer":
+                    icon, status = "", "steered"
+                else:
+                    icon, status = "⏹", "stopped"
             elif result.needs_input:
                 icon, status = "❓", "asking a question"
             elif result.is_error:

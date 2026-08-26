@@ -517,11 +517,17 @@ class RunResult:
     killed_intentionally: bool = False
     # Kill reason set when an intentional kill fired via kill_and_wait.
     # "steer" — user asked for a replacement run (suppress kill embed entirely)
-    # "kill"  — user asked to terminate, no replacement (suppress lifecycle's
-    #           thinking edit; the button handler renders the visible state
-    #           with action buttons attached)
+    # "kill"  — user asked to terminate, no replacement run coming
     # None    — automatic kill (timeout, watchdog) or no intentional kill
     kill_reason: str | None = None
+    # True when the caller that fired the kill will itself rewrite the live
+    # progress message — the Kill button edits the very message it was
+    # attached to, turning it into "Killed <id>" with Retry/Log buttons.
+    # Lifecycle then skips its own terminal edit so a slow finalize can't
+    # overwrite that card.  Typed /kill has no such message (it posts a fresh
+    # one), so it leaves this False and lifecycle resolves the progress card
+    # itself — otherwise the card is stranded on "thinking..." forever.
+    kill_owns_card: bool = False
     # Set when the per-session memory guard reaped this run's process tree
     # (bot.claude.memory). Carries the ready-made recovery note, numbers already
     # filled in, for the attempt that resumes: a plain bool would force the

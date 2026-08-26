@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -60,6 +61,53 @@ log = logging.getLogger(__name__)
 
 # On Windows, prevent subprocess console windows from popping up
 _NOWND: dict = config.NOWND
+
+# Exit codes that mean "this process died from the signal we sent it".
+#
+# There are two shapes and we have to accept both.  When a process does NOT
+# handle the signal, the kernel kills it and Python reports a NEGATIVE
+# returncode (-15 for SIGTERM).  When a process DOES handle it — installs a
+# handler, shuts down cleanly, then exits — it exits normally with the shell's
+# 128+N convention, which is a POSITIVE returncode (143 for SIGTERM).
+#
+# Only the negative shape used to be accepted, and that quietly stopped
+# matching: the Claude CLI is now a compiled binary that traps SIGTERM and
+# exits 143.  Every Kill / Steer therefore failed the kill-shape filter, was
+# classified as a crash, and rendered as a red "Failed: Exit code 143" card —
+# and worse, reached the account-failover branch, where "no output, no turns"
+# reads as "this account fell over instantly".
+#
+# SIGINT is included because a Ctrl-C-style interrupt is the same intent, and
+# SIGKILL because ``kill()`` escalates to it after a 5s grace period.
+_KILL_SIGNALS = tuple(
+    sig for sig in (
+        signal.SIGTERM,
+        getattr(signal, "SIGKILL", None),  # POSIX only
+        signal.SIGINT,
+    ) if sig is not None
+)
+_SIGNAL_EXIT_CODES: frozenset[int] = frozenset(128 + int(s) for s in _KILL_SIGNALS)
+
+
+def is_kill_shape(returncode: int | None) -> bool:
+    """True when *returncode* is consistent with a signal we sent.
+
+    Only consulted after we already know we fired ``proc.terminate()`` on this
+    instance, so it is a corroboration test, not a detection test — its job is
+    to stop a process that genuinely crashed in the same second we asked it to
+    stop from being reported as a clean cancellation.
+
+    Windows is a blanket True: ``proc.terminate()`` there calls
+    ``TerminateProcess(handle, 1)``, which always yields returncode 1, and real
+    CLI failures exit 1 too — so there is no returncode that distinguishes
+    them and the test degenerates to "we called terminate".
+    """
+    if os.name == "nt":
+        return True
+    if returncode is None:
+        return False
+    return returncode < 0 or returncode in _SIGNAL_EXIT_CODES
+
 
 # Environment variables removed before spawning any Claude CLI subprocess.
 # These four are the bot's own Discord identity -- the token it logs in with,
@@ -822,6 +870,14 @@ class ClaudeRunner:
         # without conflating "kill button → no replacement coming" with
         # "steer → replacement run is already starting."
         self._kill_reasons: dict[str, str] = {}
+        # Second parallel map, cleared at the same three points: the subset of
+        # killed instances whose caller will rewrite the live progress message
+        # itself (the Kill button edits the message it was attached to).  Kept
+        # separate from _kill_reasons because it answers a different question
+        # — "why did this stop" vs "who renders the card" — and folding the
+        # two into one magic string is what let /kill and the Kill button
+        # drift apart in the first place.
+        self._kill_card_owners: set[str] = set()
 
         # Reboot draining: set when a reboot is queued to block new spawns
         self._draining = False
@@ -1423,6 +1479,7 @@ class ClaudeRunner:
         # discard) would stop a re-queued instance before it ever spawned.
         self._intentional_kills.discard(instance.id)
         self._kill_reasons.pop(instance.id, None)
+        self._kill_card_owners.discard(instance.id)
         async with self._semaphore:
             # Inside the slot, before the spawn. Holding the slot while waiting
             # is the point: this session has been admitted by concurrency and
@@ -1469,6 +1526,7 @@ class ClaudeRunner:
             session_id=instance.session_id,
             killed_intentionally=True,
             kill_reason=self._kill_reasons.get(instance.id),
+            kill_owns_card=instance.id in self._kill_card_owners,
         )
 
     def _watched_pids(self) -> set[int]:
@@ -2760,6 +2818,7 @@ class ClaudeRunner:
         # satisfies the kill-shape filter.
         self._intentional_kills.discard(instance.id)
         self._kill_reasons.pop(instance.id, None)
+        self._kill_card_owners.discard(instance.id)
 
         events: list[dict] = []
         captured_session_id: str | None = None
@@ -3334,29 +3393,23 @@ class ClaudeRunner:
         was_intentional = instance.id in self._intentional_kills
         try:
             if was_intentional and result.is_error:
-                # Require a kill-shape returncode in addition to the flag,
-                # so a process that genuinely crashed in the same window we
-                # asked to terminate doesn't get reclassified as KILLED on
-                # POSIX.  Negative returncode = signal (-15 SIGTERM,
-                # -9 SIGKILL).
-                #
-                # Windows limitation: ``proc.terminate()`` on Windows calls
-                # TerminateProcess(handle, 1), which always yields
-                # returncode 1.  Real CLI failures often also exit with 1,
-                # so this returncode filter degenerates to a no-op on
-                # Windows — there it effectively classifies on "we called
-                # terminate" alone.  The mitigation is that finalize_run
-                # preserves the original error_message on the Instance
-                # even when classified as KILLED, so /log + history still
-                # surface a real crash that coincided with a Steer.
-                rc = proc.returncode
-                kill_shape = (rc is not None and rc < 0) or os.name == "nt"
-                if kill_shape:
+                # Require a kill-shape returncode in addition to the flag, so a
+                # process that genuinely crashed in the same window we asked it
+                # to terminate isn't reclassified as KILLED — see
+                # ``is_kill_shape`` for which shapes count and why Windows
+                # can't be told apart.  The mitigation for that Windows blind
+                # spot is that finalize_run preserves the original
+                # error_message on the Instance even when classified as
+                # KILLED, so /log + history still surface a real crash that
+                # coincided with a Steer.
+                if is_kill_shape(proc.returncode):
                     result.killed_intentionally = True
                     result.kill_reason = self._kill_reasons.get(instance.id)
+                    result.kill_owns_card = instance.id in self._kill_card_owners
         finally:
             self._intentional_kills.discard(instance.id)
             self._kill_reasons.pop(instance.id, None)
+            self._kill_card_owners.discard(instance.id)
 
         if result.is_error:
             # Log raw events for debugging
@@ -4404,6 +4457,7 @@ class ClaudeRunner:
         self, instance_id: str, *,
         intentional: bool = False,
         reason: str | None = None,
+        owns_card: bool = False,
     ) -> bool:
         """Terminate a running CLI process.
 
@@ -4415,7 +4469,9 @@ class ClaudeRunner:
         already gone) leaves the set untouched.
 
         ``reason`` (when set) is stamped onto ``RunResult.kill_reason`` so
-        the lifecycle layer can distinguish user-Kill from Steer.
+        the lifecycle layer can distinguish user-Kill from Steer, and
+        ``owns_card`` onto ``RunResult.kill_owns_card`` so it knows whether
+        the caller is going to rewrite the live progress message itself.
 
         The one case where the mark IS recorded without a signal: the run is
         still live (its lifecycle task is registered) but sits *between*
@@ -4433,6 +4489,8 @@ class ClaudeRunner:
                 self._intentional_kills.add(instance_id)
                 if reason is not None:
                     self._kill_reasons[instance_id] = reason
+                if owns_card:
+                    self._kill_card_owners.add(instance_id)
                 log.info(
                     "Kill for %s arrived between attempts — retries stopped",
                     instance_id,
@@ -4448,6 +4506,8 @@ class ClaudeRunner:
                 self._intentional_kills.add(instance_id)
                 if reason is not None:
                     self._kill_reasons[instance_id] = reason
+                if owns_card:
+                    self._kill_card_owners.add(instance_id)
             try:
                 await asyncio.wait_for(proc.wait(), timeout=5)
             except asyncio.TimeoutError:
@@ -4465,6 +4525,7 @@ class ClaudeRunner:
         self, instance_id: str, timeout: float = 10.0,
         *, intentional: bool = True,
         reason: str | None = None,
+        owns_card: bool = False,
     ) -> KillOutcome:
         """Kill an instance and wait for its lifecycle task to fully finish.
 
@@ -4490,7 +4551,10 @@ class ClaudeRunner:
         """
         if instance_id not in self._active_tasks and instance_id not in self._processes:
             return KillOutcome.NOT_RUNNING
-        await self.kill(instance_id, intentional=intentional, reason=reason)
+        await self.kill(
+            instance_id, intentional=intentional, reason=reason,
+            owns_card=owns_card,
+        )
         # Wait for the lifecycle coroutine to finish its finally block
         # (end_task fires there and removes the instance from _active_tasks).
         loop = asyncio.get_running_loop()

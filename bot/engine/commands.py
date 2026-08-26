@@ -1720,6 +1720,50 @@ async def on_list(ctx: RequestContext, text: str) -> None:
 
 # --- /kill ---
 
+async def perform_kill(
+    ctx: RequestContext, inst: Instance, source_msg_id: str | None = None,
+) -> None:
+    """Stop a running instance and render the outcome. One path, two callers.
+
+    The Kill button and typed /kill used to be separate near-copies, and that
+    drift is exactly what produced the bug this function exists to prevent:
+    the button was taught to announce its intent (reason="kill") and the
+    command was not, so /kill fell through to the ordinary failure path — red
+    FAILED card, and on a multi-account setup a silent failover that restarted
+    the very work the user had just cancelled.
+
+    *source_msg_id* is the message the Kill button was attached to, when there
+    was one. Present -> we rewrite that card in place and tell the runner we
+    own it, so lifecycle leaves it alone. Absent (typed /kill) -> we post a
+    fresh message and lifecycle resolves the live progress card itself.
+    """
+    outcome = await ctx.runner.kill_and_wait(
+        # kill_and_wait, not kill, so the channel lock is always released —
+        # via lifecycle's finally block, or via the 10s force-clear net.
+        inst.id, reason="kill", owns_card=source_msg_id is not None,
+    )
+    if outcome == KillOutcome.NOT_RUNNING:
+        await ctx.messenger.send_text(
+            ctx.channel_id, "Process not found or already stopped.",
+        )
+        return
+    # On FORCE_CLEARED the lifecycle never reached finalize (genuinely wedged),
+    # so the engine layer owns the status flip — runner.py is store-agnostic.
+    if outcome == KillOutcome.FORCE_CLEARED:
+        inst.status = InstanceStatus.KILLED
+        inst.finished_at = datetime.now(timezone.utc).isoformat()
+        ctx.store.update_instance(inst, critical=True)
+    # Re-fetch in case finalize_run wrote new fields (status, finished_at,
+    # error) — render the buttons off the freshest view.
+    inst = ctx.store.get_instance(inst.id) or inst
+    text = f"Killed {ctx.messenger.escape(inst.display_id())}"
+    buttons = action_button_specs(inst) or None
+    if source_msg_id:
+        await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, text, buttons)
+    else:
+        await ctx.messenger.send_text(ctx.channel_id, text, buttons)
+
+
 async def on_kill(ctx: RequestContext, text: str) -> None:
     text = text.strip()
     if not text:
@@ -1731,14 +1775,7 @@ async def on_kill(ctx: RequestContext, text: str) -> None:
         await ctx.messenger.send_text(ctx.channel_id, f"Instance '{text}' not found.")
         return
 
-    killed = await ctx.runner.kill(inst.id)
-    if killed:
-        inst.status = InstanceStatus.KILLED
-        inst.finished_at = datetime.now(timezone.utc).isoformat()
-        ctx.store.update_instance(inst, critical=True)
-        await ctx.messenger.send_text(ctx.channel_id, f"Killed {inst.display_id()}")
-    else:
-        await ctx.messenger.send_text(ctx.channel_id, "Process not found or already stopped.")
+    await perform_kill(ctx, inst)
 
 
 # --- /retry ---
@@ -3557,32 +3594,7 @@ async def handle_callback(
         if not inst:
             await ctx.messenger.send_text(ctx.channel_id, "Instance not found.")
             return
-        # kill_and_wait (not kill) so the channel lock is always released —
-        # either via lifecycle's finally block, or via the 10s force-clear
-        # safety net.  reason="kill" routes finalize to suppress the
-        # lifecycle's terminal thinking-edit so the visible "Killed <id>"
-        # message we render below isn't overwritten.
-        outcome = await ctx.runner.kill_and_wait(instance_id, reason="kill")
-        if outcome == KillOutcome.NOT_RUNNING:
-            await ctx.messenger.send_text(ctx.channel_id, "Process not found or already stopped.")
-            return
-        # On FORCE_CLEARED the lifecycle never ran finalize (genuinely wedged),
-        # so the engine layer must own the status flip — runner.py is
-        # store-agnostic by design.
-        if outcome == KillOutcome.FORCE_CLEARED:
-            inst.status = InstanceStatus.KILLED
-            inst.finished_at = datetime.now(timezone.utc).isoformat()
-            ctx.store.update_instance(inst, critical=True)
-        # Re-fetch in case finalize_run wrote new fields (status, finished_at,
-        # error) — use the freshest view when rendering action buttons.
-        inst = ctx.store.get_instance(instance_id) or inst
-        buttons = action_button_specs(inst)
-        escaped = ctx.messenger.escape(inst.display_id())
-        markup = f"Killed {escaped}"
-        if source_msg_id:
-            await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, markup, buttons)
-        else:
-            await ctx.messenger.send_text(ctx.channel_id, markup, buttons)
+        await perform_kill(ctx, inst, source_msg_id)
 
     elif action == "retry":
         inst = ctx.store.get_instance(instance_id)
