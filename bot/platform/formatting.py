@@ -983,13 +983,46 @@ def queued_button_specs(
 
 # --- Formatting Functions (markdown — platform adapters convert as needed) ---
 
-def format_result_md(instance: Instance) -> str:
-    """Format completed/failed instance result as markdown."""
+def _leading_preview(text: str, budget: int) -> tuple[str, int]:
+    """First *budget* chars of *text*, cut on a paragraph/line/word boundary.
+
+    Returns (preview, chars_dropped). Unlike ``extract_summary`` this keeps
+    MULTIPLE paragraphs -- the collapse card has to stand on its own, and one
+    500-char paragraph out of a 4 KB answer does not.
+    """
+    text = text.strip()
+    if len(text) <= budget:
+        return text, 0
+    for sep in ("\n\n", "\n", " "):
+        cut = text.rfind(sep, budget // 2, budget)
+        if cut > 0:
+            break
+    else:
+        cut = budget
+    return text[:cut].rstrip(), len(text) - cut
+
+
+def format_result_md(instance: Instance, preview: str | None = None) -> str:
+    """Format completed/failed instance result as markdown.
+
+    *preview* is the full result text for a result too long to post inline.
+    When given, the card carries its leading paragraphs (up to
+    ``RESULT_PREVIEW_MAX``) plus how much is behind the Expand button,
+    instead of the <=500-char first paragraph in ``instance.summary``.
+    """
     parts = [f"**{instance.display_id()}**"]
 
     if instance.status == InstanceStatus.FAILED:
         error = redact_secrets(instance.error or 'Unknown error')
         parts.append(f"Failed: {error}")
+    elif preview and preview.strip():
+        cleaned = collapse_bot_directives(
+            strip_verify_blocks(redact_secrets(preview)),
+        )
+        body, dropped = _leading_preview(cleaned, config.RESULT_PREVIEW_MAX)
+        parts.append(body)
+        if dropped:
+            parts.append(f"-# +{dropped:,} more characters \u2014 Expand \u25bc")
     elif instance.summary:
         parts.append(redact_secrets(instance.summary))
 
@@ -1006,29 +1039,72 @@ def format_result_md(instance: Instance) -> str:
     return "\n".join(parts)
 
 
-def format_expanded_result_md(instance: Instance, result_text: str, budget: int = 3900) -> str:
-    """Format full result text for expanded view, truncated to budget.
+def format_expanded_result_chunks(
+    instance: Instance,
+    result_text: str,
+    first_budget: int = 3900,
+    rest_budget: int = 1900,
+    max_chunks: int | None = None,
+) -> list[str]:
+    """Full result text split for Expand: [edited embed, follow-up, ...].
 
-    Strips leftover ```verify-board``` fences — legacy markers a
-    stale-context session may still emit, not content the user needs — and
+    The old behaviour sliced the result at 3900 chars and appended
+    "... truncated" -- so tapping Expand on a 12 KB answer still showed a
+    third of it. Now the whole thing is posted: chunk 0 goes back into the
+    result embed (4096 cap), the rest go out as plain messages (2000 cap).
+    Only a result past ``max_chunks`` is cut, and then the marker says how
+    much is missing rather than just "truncated".
+
+    Strips leftover ```verify-board``` fences -- legacy markers a
+    stale-context session may still emit, not content the user needs -- and
     collapses [BOT_CMD: ...] directives to one line each. This path reads the
     raw result FILE, so without the collapse a folded ~~~plan body would eat
-    the whole budget and truncate the answer the user tapped Expand to see.
-    (`/log` still ships the file untouched — that's the full-fidelity copy.)
+    the whole budget. (`/log` still ships the file untouched.)
     """
+    if max_chunks is None:
+        max_chunks = config.RESULT_EXPAND_MAX_CHUNKS
     header = f"**{instance.display_id()}**\n\n"
-    text = collapse_bot_directives(strip_verify_blocks(redact_secrets(result_text)))
+    text = collapse_bot_directives(strip_verify_blocks(redact_secrets(result_text))).strip()
 
-    if len(text) > budget:
-        cut = text.rfind('\n', 0, budget)
+    chunks: list[str] = []
+    budget = first_budget - len(header)
+    remaining = text
+    while remaining and len(chunks) < max_chunks:
+        if len(remaining) <= budget:
+            chunks.append(remaining)
+            remaining = ""
+            break
+        cut = remaining.rfind('\n', 0, budget)
         if cut <= 0:
-            cut = text.rfind(' ', 0, budget)
+            cut = remaining.rfind(' ', 0, budget)
         if cut <= 0:
             cut = budget
-        text = text[:cut]
-        text += f"\n\n*... truncated — use /log {instance.id} for full output*"
+        piece = remaining[:cut]
+        remaining = remaining[cut:].lstrip('\n')
+        # Keep code fences balanced across the split.
+        if piece.count('```') % 2 != 0:
+            piece += '\n```'
+            remaining = '```\n' + remaining
+        chunks.append(piece)
+        budget = rest_budget
 
-    return header + text
+    if not chunks:
+        chunks = [""]
+    if remaining:
+        chunks[-1] += (
+            f"\n\n-# +{len(remaining):,} more characters \u2014 "
+            f"/log {instance.id} for the full output"
+        )
+
+    chunks[0] = header + chunks[0]
+    return chunks
+
+
+def format_expanded_result_md(instance: Instance, result_text: str, budget: int = 3900) -> str:
+    """First screen of the expanded result (compat wrapper)."""
+    return format_expanded_result_chunks(
+        instance, result_text, first_budget=budget, max_chunks=1,
+    )[0]
 
 
 def format_instance_list_md(instances: list[Instance]) -> str:

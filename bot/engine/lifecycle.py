@@ -1076,7 +1076,7 @@ async def send_result(
             )
             _record_msg(msg_id)
 
-        elif len(result_text) < 2000:
+        elif len(result_text) <= config.RESULT_INLINE_MAX:
             result_text = result_text + f"\n-# {session_loc}"
             markup = ctx.messenger.markdown_to_markup(result_text)
             chunks = ctx.messenger.chunk_message(markup)
@@ -1106,7 +1106,7 @@ async def send_result(
 
         else:
             expand_buttons = action_button_specs(inst, show_expand=True)
-            formatted = format_result_md(inst)
+            formatted = format_result_md(inst, preview=result_text)
             markup = ctx.messenger.markdown_to_markup(formatted)
             msg_id = await ctx.messenger.send_result(
                 ctx.channel_id, markup, metadata=meta,
