@@ -61,15 +61,22 @@ log = logging.getLogger(__name__)
 # On Windows, prevent subprocess console windows from popping up
 _NOWND: dict = config.NOWND
 
-# Environment variables removed before spawning a session. These four are the
-# bot's own Discord identity -- the token it logs in with, and the test webhooks
-# that on_message historically treated as the owner. Nothing a session does
-# needs them, so inheriting them only creates a way to leak them by accident.
+# Environment variables removed before spawning any Claude CLI subprocess.
+# These four are the bot's own Discord identity -- the token it logs in with,
+# and the test webhooks that on_message historically treated as the owner.
+# Nothing a session does needs them, so inheriting them only creates a way to
+# leak them by accident.
 #
 # The Anthropic key is popped separately (it depends on the API-fallback path)
 # and OPENAI_API_KEY / TWITTER_BEARER_TOKEN are deliberately NOT here: other
 # repos may legitimately read those from the inherited environment.
-_SESSION_STRIPPED_ENV_VARS: tuple[str, ...] = (
+#
+# Public because the log-triage subprocess (bot/discord/log_triage.py) spawns
+# a CLI too and has exactly the same reason to strip these. Kept separate from
+# `_ENV_SECRET_NAMES` in bot/platform/formatting.py on purpose -- that list
+# answers "what must never be PRINTED", this one answers "what must never be
+# INHERITED", and they genuinely differ at both ends.
+SESSION_STRIPPED_ENV_VARS: tuple[str, ...] = (
     "DISCORD_BOT_TOKEN",
     "TEST_WEBHOOK_URL",
     "TEST_LOBBY_WEBHOOK_URL",
@@ -1947,11 +1954,17 @@ class ClaudeRunner:
         # variable we failed to predict (toolchain homes, proxy settings,
         # SSH_AUTH_SOCK, GH_TOKEN) and fails confusingly mid-chain.
         #
-        # This is NOT a containment boundary. `.env` is still readable on disk,
-        # and bot/config.py re-reads it with override=True, so the bot's own
-        # scripts are unaffected by this pop. What it removes is the accidental
-        # path: an env dump, a crash trace, a logged subprocess environment.
-        for var in _SESSION_STRIPPED_ENV_VARS:
+        # This is NOT a containment boundary. `.env` is still readable on disk
+        # and config re-reads it with override=True, so the bot's own scripts
+        # keep working. What it removes is the accidental path: an env dump, a
+        # crash trace, a logged subprocess environment.
+        #
+        # That "keep working" depends on config._env_root() finding the main
+        # checkout's `.env` from inside a worktree, since `.env` is gitignored
+        # and worktrees have none. Removing that lookup would break every
+        # harness a build session runs on this repo -- the two changes are one
+        # unit, so keep them together.
+        for var in SESSION_STRIPPED_ENV_VARS:
             env.pop(var, None)
         if account_dir:
             env[provider.config_dir_env] = account_dir

@@ -406,6 +406,14 @@ def _env_secret_values() -> tuple[str, ...]:
 
 def redact_secrets(text: str) -> str:
     """Scrub API keys, tokens, and secrets from text."""
+    # Literal pass FIRST, while every known secret is still verbatim. Running
+    # it last would leave a gap: a pattern below can chew a fragment out of a
+    # secret (``_HEX_KEY_PATTERN`` on a long hex run inside it, say) without
+    # removing the whole thing, and the surviving remainder would then no
+    # longer match the literal we are looking for.
+    for secret in _env_secret_values():
+        if secret in text:
+            text = text.replace(secret, '[REDACTED]')
     for pattern in _TOKEN_PATTERNS:
         text = pattern.sub('[REDACTED]', text)
     text = _CONN_STRING_PATTERN.sub(r'\1[REDACTED]\3', text)
@@ -413,11 +421,6 @@ def redact_secrets(text: str) -> str:
     text = _MNEMONIC_PATTERN.sub(lambda m: m.group(1) + '=[REDACTED]', text)
     text = _KV_PATTERN.sub(lambda m: f'{m.group(1)}=[REDACTED] ', text)
     text = _HEX_KEY_PATTERN.sub('[REDACTED]', text)
-    # Literal pass last: the patterns above may have mangled part of a secret
-    # without removing it, but any untouched occurrence is still verbatim here.
-    for secret in _env_secret_values():
-        if secret in text:
-            text = text.replace(secret, '[REDACTED]')
     return text
 
 

@@ -10,6 +10,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from bot.procutil import install_root
+
 # On Windows, prevent subprocess console windows from popping up
 NOWND: dict = (
     {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
@@ -22,31 +24,23 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 def _env_root() -> Path:
     """Where `.env` actually lives for this checkout.
 
-    `.env` is gitignored, so a build worktree never has one -- it used to work
-    only because the spawned session inherited the bot's whole environment,
-    which is exactly the accidental-leak path the runner now closes. A worktree
-    must therefore find its main repo's `.env` itself rather than depend on
-    what it was handed.
+    `.env` is gitignored, so a build worktree never has one. That used to be
+    invisible because the spawned session inherited the bot's whole
+    environment -- exactly the accidental-leak path the runner now closes
+    (`SESSION_STRIPPED_ENV_VARS`). With those variables stripped, a worktree
+    has to locate the main checkout's `.env` itself.
 
-    A worktree's `.git` is a *file* containing `gitdir: <maindir>/.git/worktrees/<name>`,
-    so the main checkout is three parents up from that path. Falls back to the
-    project root unchanged when anything about that shape doesn't hold.
+    ``install_root`` already answers precisely this question -- its docstring
+    calls out the gitignored `.env` by name -- and it asks git
+    (``--git-common-dir``) rather than parsing `.git` by hand, so it survives
+    relative gitdir paths, submodules and nested worktrees. It costs a
+    subprocess, hence the fast path first: a normal checkout has its own
+    `.env` and never shells out.
     """
     if (_PROJECT_ROOT / ".env").is_file():
         return _PROJECT_ROOT
-    git_marker = _PROJECT_ROOT / ".git"
-    try:
-        if git_marker.is_file():
-            head = git_marker.read_text(encoding="utf-8").strip()
-            if head.startswith("gitdir:"):
-                gitdir = Path(head.split(":", 1)[1].strip())
-                # <main>/.git/worktrees/<name> -> <main>
-                main_root = gitdir.parent.parent.parent
-                if (main_root / ".env").is_file():
-                    return main_root
-    except OSError:
-        pass
-    return _PROJECT_ROOT
+    root = install_root(_PROJECT_ROOT)
+    return root if (root / ".env").is_file() else _PROJECT_ROOT
 
 
 _ENV_ROOT = _env_root()

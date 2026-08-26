@@ -122,40 +122,17 @@ def _seed_initial_offset(log_path: Path, max_lines: int) -> int:
 
 
 # --- Redaction ----------------------------------------------------------------
-
-def _collect_env_secrets() -> list[str]:
-    """Pull sensitive .env values out of config for post-redaction stripping."""
-    names = [
-        "DISCORD_BOT_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
-        "TWITTER_BEARER_TOKEN",
-    ]
-    values: list[str] = []
-    for n in names:
-        v = getattr(config, n, None) or os.getenv(n)
-        if v and len(v) >= 8:
-            values.append(v)
-    webhook_url = os.getenv("TEST_WEBHOOK_URL", "")
-    lobby_webhook_url = os.getenv("TEST_LOBBY_WEBHOOK_URL", "")
-    for v in (webhook_url, lobby_webhook_url):
-        if v and len(v) >= 8:
-            values.append(v)
-    return values
-
-
-def _redact(text: str, env_secrets: list[str]) -> str:
-    """Apply framework redaction + strip any residual .env secret strings.
-
-    ``redact_secrets`` now does the literal-value stripping this module
-    pioneered, so the shared pass covers the common names on its own. The
-    explicit loop stays because ``env_secrets`` is caller-supplied and may
-    carry values the shared collector doesn't know about.
-    """
-    from bot.platform.formatting import redact_secrets
-    out = redact_secrets(text)
-    for s in env_secrets:
-        if s and s in out:
-            out = out.replace(s, "[REDACTED]")
-    return out
+#
+# There is deliberately nothing here any more. This module used to collect the
+# .env secret values itself and strip them after calling the shared redactor,
+# because the shared redactor only knew secret *shapes* and missed the bare
+# Discord token and webhook URLs entirely. `redact_secrets` now does that
+# literal-value pass itself, over the same six names this module listed, so a
+# second copy here would be duplication that can only drift.
+#
+# Log content goes straight to Discord, so if a secret name ever needs adding,
+# add it to `_ENV_SECRET_NAMES` in bot/platform/formatting.py and every output
+# path gains it at once -- which is the whole point of it living there.
 
 
 # --- Claude -p call (stdin piping for Windows arg-limit safety) ---------------
@@ -175,6 +152,12 @@ async def _invoke_claude(content: bytes) -> str | None:
     env = os.environ.copy()
     env.pop("CLAUDE_CODE", None)
     env.pop("CLAUDECODE", None)
+    # Same reasoning as the session spawn: this is a Claude CLI process and it
+    # has no business holding the bot's Discord identity. It reads a log off
+    # stdin in a temp dir; nothing it does needs the token or the webhooks.
+    from bot.claude.runner import SESSION_STRIPPED_ENV_VARS
+    for var in SESSION_STRIPPED_ENV_VARS:
+        env.pop(var, None)
 
     proc = None
     try:
@@ -327,8 +310,6 @@ async def run_triage_service(bot: ClaudeBot, stop_event: asyncio.Event) -> None:
         bot._store.set_platform_state("discord", discord_state)
         log.info("Log triage: seeded initial offset to %d bytes", seeded)
 
-    env_secrets = _collect_env_secrets()
-
     while not stop_event.is_set():
         try:
             await asyncio.wait_for(
@@ -339,7 +320,7 @@ async def run_triage_service(bot: ClaudeBot, stop_event: asyncio.Event) -> None:
             pass  # interval elapsed — proceed with a triage tick
 
         try:
-            await _triage_tick(bot, log_path, env_secrets)
+            await _triage_tick(bot, log_path)
         except asyncio.CancelledError:
             return
         except Exception:
@@ -348,7 +329,7 @@ async def run_triage_service(bot: ClaudeBot, stop_event: asyncio.Event) -> None:
     log.info("Log triage service stopped")
 
 
-async def _triage_tick(bot: ClaudeBot, log_path: Path, env_secrets: list[str]) -> None:
+async def _triage_tick(bot: ClaudeBot, log_path: Path) -> None:
     discord_state = bot._store.get_platform_state("discord") or {}
     last_offset = int(discord_state.get("log_triage_last_offset", 0) or 0)
 
@@ -363,7 +344,10 @@ async def _triage_tick(bot: ClaudeBot, log_path: Path, env_secrets: list[str]) -
         return
 
     text = content.decode("utf-8", errors="replace")
-    redacted = _redact(text, env_secrets)
+    # Local import, as the removed _redact helper had: keeps bot.discord off
+    # bot.platform's import path at module load.
+    from bot.platform.formatting import redact_secrets
+    redacted = redact_secrets(text)
 
     verdict = await _invoke_claude(redacted.encode("utf-8"))
     if not verdict:
