@@ -21,6 +21,8 @@ so it is safe to run while the bot is up (this project is a singleton).
 """
 from __future__ import annotations
 
+import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
+
 import asyncio
 import json
 import sys
@@ -58,12 +60,13 @@ class FakeThread:
         if archived is not None:
             self._log.append((self.id, "archived", archived))
             self.archived = archived
-            return
+            return self  # discord.py returns the updated Thread
         # Mirrors Discord error 50083: an archived thread accepts nothing else.
         if self.archived:
             raise RuntimeError("Thread is archived (50083)")
         self._log.append((self.id, "pinned", pinned))
         self.flags.pinned = bool(pinned)
+        return self
 
 
 class FakeForum:
@@ -133,7 +136,7 @@ async def offline() -> int:
     check("unpin happens before pin",
           calls == [(ARCHIVE, "pinned", False), (CONTROL, "pinned", True)], str(calls))
 
-    print("case: already correct -> zero API calls")
+    print("case: already correct -> no edits issued")
     _, calls, final = await _run_case(
         "ok", [(CONTROL, "Control Room", True), (ARCHIVE, "Archive", False)],
         CONTROL, {ARCHIVE},
@@ -173,6 +176,17 @@ async def offline() -> int:
     check("control pinned despite being archived", final[CONTROL] is True)
     check("unarchive precedes the pin",
           calls == [(ARCHIVE, "pinned", False), (CONTROL, "archived", False),
+                    (CONTROL, "pinned", True)], str(calls))
+
+    print("case: the post holding the slot is asleep -> wake it, then unpin")
+    _, calls, final = await _run_case(
+        "archived-holder", [(CONTROL, "Control Room", False), (ARCHIVE, "Archive", True, True)],
+        CONTROL, {ARCHIVE},
+    )
+    check("sleeping archive still yields the pin", final[ARCHIVE] is False)
+    check("control pinned", final[CONTROL] is True)
+    check("archive woken before unpin",
+          calls == [(ARCHIVE, "archived", False), (ARCHIVE, "pinned", False),
                     (CONTROL, "pinned", True)], str(calls))
 
     print()
@@ -249,18 +263,28 @@ def live(fix: bool) -> int:
     wrong = 0
     for label, forum_id, threads in _scopes():
         control_id = threads.get("control")
-        states = {}
+        states: dict[str, bool | None] = {}   # None = the fetch failed
+        flags: dict[str, int] = {}
+        archived: dict[str, bool] = {}
         for kind, tid in threads.items():
             ch = _req(token, "GET", f"/channels/{tid}")
-            states[kind] = None if "_error" in ch else bool(ch.get("flags", 0) & PINNED_FLAG)
+            if "_error" in ch:
+                states[kind] = None
+            else:
+                flags[kind] = ch.get("flags", 0)
+                archived[kind] = bool((ch.get("thread_metadata") or {}).get("archived"))
+                states[kind] = bool(flags[kind] & PINNED_FLAG)
             time.sleep(0.12)
 
-        ok = states.get("control") is True and not any(
-            v for k, v in states.items() if k != "control"
-        )
+        # Same rule the reconcile applies: nothing but the control room may
+        # hold the slot, and the control room takes it when one is recorded.
+        others_pinned = any(v for k, v in states.items() if k != "control")
+        ok = not others_pinned and (states.get("control") is True if control_id else True)
         rendered = "  ".join(
             f"{k}={'PIN' if v else ('--' if v is False else 'ERR')}" for k, v in states.items()
         )
+        if not control_id:
+            rendered += "  (no control room recorded)"
         print(f"{label:34s} {rendered}{'' if ok else '   <- wrong'}")
         if ok:
             continue
@@ -268,22 +292,29 @@ def live(fix: bool) -> int:
         if not fix:
             continue
 
-        for kind, tid in threads.items():
-            if kind == "control" or states.get(kind) is not True:
-                continue
-            r = _req(token, "PATCH", f"/channels/{tid}", {"flags": 0})
-            print(f"    unpinned {kind}: {'ok' if '_error' not in r else r}")
-            time.sleep(0.5)
-        if control_id and states.get("control") is not True:
-            # An archived thread rejects every field but `archived` (50083).
-            cur = _req(token, "GET", f"/channels/{control_id}")
-            if (cur.get("thread_metadata") or {}).get("archived"):
-                _req(token, "PATCH", f"/channels/{control_id}", {"archived": False})
-                print("    unarchived control room first")
+        def _repin(kind, tid, want):
+            """Flip one thread's pin bit, waking it first if it is asleep.
+
+            Sends flags as a masked edit rather than a bare value so unrelated
+            channel flag bits survive — the same thing discord.py's
+            Thread.edit(pinned=...) does.
+            """
+            if archived.get(kind):
+                _req(token, "PATCH", f"/channels/{tid}", {"archived": False})
+                print(f"    woke {kind} first (it was archived)")
                 time.sleep(0.5)
-            r = _req(token, "PATCH", f"/channels/{control_id}", {"flags": PINNED_FLAG})
-            print(f"    pinned control: {'ok' if '_error' not in r else r}")
+            cur = flags.get(kind, 0)
+            value = (cur | PINNED_FLAG) if want else (cur & ~PINNED_FLAG)
+            r = _req(token, "PATCH", f"/channels/{tid}", {"flags": value})
+            print(f"    {'pinned' if want else 'unpinned'} {kind}: "
+                  f"{'ok' if '_error' not in r else r}")
             time.sleep(0.5)
+
+        for kind, tid in threads.items():
+            if kind != "control" and states.get(kind) is True:
+                _repin(kind, tid, False)
+        if control_id and states.get("control") is not True:
+            _repin("control", control_id, True)
 
     print()
     if wrong == 0:
@@ -295,7 +326,11 @@ def live(fix: bool) -> int:
 
 if __name__ == "__main__":
     if "--repo" in sys.argv:
-        LIVE_ROOT = Path(sys.argv[sys.argv.index("--repo") + 1]).resolve()
+        i = sys.argv.index("--repo") + 1
+        if i >= len(sys.argv):
+            print("--repo needs a directory")
+            sys.exit(2)
+        LIVE_ROOT = Path(sys.argv[i]).resolve()
     if "--live" in sys.argv:
         sys.exit(live(fix="--fix" in sys.argv))
     sys.exit(asyncio.run(offline()))

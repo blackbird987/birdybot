@@ -912,50 +912,65 @@ class ForumManager:
         room, so the outcome is the same whether Discord replaces an existing
         pin or rejects the second one.
 
-        Already-correct forums produce zero API calls, so this is cheap to run
-        on every startup.
+        An already-correct forum issues no edits, so this is cheap to run on
+        every startup.
         """
         for forum, control_id, tracked_ids in self._pin_scopes():
             try:
                 await self._reconcile_forum_pin(forum, control_id, tracked_ids)
             except Exception:
-                log.debug("Pin reconcile failed for forum %s", forum.id, exc_info=True)
+                log.warning("Pin reconcile failed for forum %s", forum.id, exc_info=True)
 
     def _pin_scopes(self) -> list[tuple[discord.ForumChannel, int | None, set[int]]]:
         """(forum, control thread id, other bot-owned thread ids) per forum."""
         scopes: list[tuple[discord.ForumChannel, int | None, set[int]]] = []
 
+        # One unparseable id must not cost the whole sweep — this runs as a
+        # fire-and-forget task, where a raised ValueError just disappears.
         for proj in list(self._forum_projects.values()):
-            if not proj.forum_channel_id:
-                continue
-            forum = self._client.get_channel(int(proj.forum_channel_id))
-            if not isinstance(forum, discord.ForumChannel):
-                continue
-            tracked = {
-                int(t) for t in (
-                    proj.archive_thread_id,
-                    proj.monitor_thread_id,
-                    proj.legacy_verify_thread_id,
-                ) if t
-            }
-            control = int(proj.control_thread_id) if proj.control_thread_id else None
-            scopes.append((forum, control, tracked))
+            try:
+                self._add_pin_scope(
+                    scopes, proj.forum_channel_id, proj.control_thread_id,
+                    (proj.archive_thread_id, proj.monitor_thread_id,
+                     proj.legacy_verify_thread_id),
+                )
+            except Exception:
+                log.debug("Skipping pin scope for repo %s", proj.repo_name, exc_info=True)
 
         try:
             cfg = load_access_config()
         except Exception:
+            log.debug("Could not load access config for pin reconcile", exc_info=True)
             return scopes
         for ua in cfg.users.values():
-            if not ua.forum_channel_id:
-                continue
-            forum = self._client.get_channel(int(ua.forum_channel_id))
-            if not isinstance(forum, discord.ForumChannel):
-                continue
-            tracked = {int(ua.archive_thread_id)} if ua.archive_thread_id else set()
-            control = int(ua.control_thread_id) if ua.control_thread_id else None
-            scopes.append((forum, control, tracked))
+            try:
+                self._add_pin_scope(
+                    scopes, ua.forum_channel_id, ua.control_thread_id,
+                    (ua.archive_thread_id,),
+                )
+            except Exception:
+                log.debug("Skipping pin scope for user forum", exc_info=True)
 
         return scopes
+
+    def _add_pin_scope(
+        self,
+        scopes: list[tuple[discord.ForumChannel, int | None, set[int]]],
+        forum_id: str | None,
+        control_id: str | None,
+        other_ids: tuple[str | None, ...],
+    ) -> None:
+        """Resolve one forum's ids and append its scope, if it is a live forum."""
+        if not forum_id:
+            return
+        forum = self._client.get_channel(int(forum_id))
+        if not isinstance(forum, discord.ForumChannel):
+            return
+        scopes.append((
+            forum,
+            int(control_id) if control_id else None,
+            {int(t) for t in other_ids if t},
+        ))
 
     async def _reconcile_forum_pin(
         self,
@@ -980,7 +995,7 @@ class ForumManager:
             if th.id == control_id or not th.flags.pinned:
                 continue
             try:
-                await th.edit(pinned=False)
+                await self._set_thread_pin(th, False)
                 changed = True
                 log.info("Unpinned %r (%s) in forum %s — Control Room owns the pin",
                          th.name, th.id, forum.name)
@@ -991,12 +1006,7 @@ class ForumManager:
         control = candidates.get(control_id) if control_id else None
         if control is not None and not control.flags.pinned:
             try:
-                # Discord rejects every field but `archived` on an archived
-                # thread (50083), so a control room that went to sleep has to
-                # be woken in its own request before it can take the pin.
-                if control.archived:
-                    await control.edit(archived=False)
-                await control.edit(pinned=True)
+                await self._set_thread_pin(control, True)
                 changed = True
                 log.info("Pinned Control Room %s in forum %s", control.id, forum.name)
             except Exception:
@@ -1006,6 +1016,20 @@ class ForumManager:
         if changed:
             # Channel edits are rate-limited — pace the repaired forums.
             await asyncio.sleep(0.5)
+
+    async def _set_thread_pin(self, thread: discord.Thread, pinned: bool) -> None:
+        """Pin or unpin a forum post, waking it first if it fell asleep.
+
+        Discord rejects every field but `archived` on an archived thread
+        (error 50083), so a post that auto-archived has to be woken in its own
+        request before its pin state can change. That applies to *unpinning*
+        too: a sleeping post that still holds the slot would otherwise keep it
+        forever and the control room could never take it. Waking it is the
+        lesser evil — Discord will auto-archive it again.
+        """
+        if thread.archived:
+            thread = await thread.edit(archived=False)
+        await thread.edit(pinned=pinned)
 
     async def _fetch_thread(self, thread_id: int) -> discord.Thread | None:
         """Resolve a thread id from cache, falling back to a REST fetch."""

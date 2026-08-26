@@ -38,9 +38,11 @@ Forum-based: one ForumChannel per project/repo, one thread per session.
   monitor posts must never pin themselves — they used to, and racing the
   control room left 5 of 14 forums with the Archive pinned instead.
   `ForumManager.reconcile_forum_pins()` repairs this once on ready:
-  unpin everything else, wake the control room if it archived itself
-  (Discord rejects any other field on an archived thread, error 50083),
-  then pin it. No-ops on correct forums. Harness:
+  unpin everything else, then pin the control room. Either edit wakes a
+  sleeping post first — Discord rejects every field but `archived` on an
+  archived thread (error 50083), so a post that auto-archived while holding
+  the slot would otherwise keep it forever. No edits on correct forums.
+  Harness:
   `python scripts/test_forum_pins.py` (add `--live` to read real state,
   `--live --fix` to repair; REST-only, safe against the running bot)
 - Forum tags: active, completed, failed, cli, build
