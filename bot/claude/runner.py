@@ -61,6 +61,21 @@ log = logging.getLogger(__name__)
 # On Windows, prevent subprocess console windows from popping up
 _NOWND: dict = config.NOWND
 
+# Environment variables removed before spawning a session. These four are the
+# bot's own Discord identity -- the token it logs in with, and the test webhooks
+# that on_message historically treated as the owner. Nothing a session does
+# needs them, so inheriting them only creates a way to leak them by accident.
+#
+# The Anthropic key is popped separately (it depends on the API-fallback path)
+# and OPENAI_API_KEY / TWITTER_BEARER_TOKEN are deliberately NOT here: other
+# repos may legitimately read those from the inherited environment.
+_SESSION_STRIPPED_ENV_VARS: tuple[str, ...] = (
+    "DISCORD_BOT_TOKEN",
+    "TEST_WEBHOOK_URL",
+    "TEST_LOBBY_WEBHOOK_URL",
+    "TEST_WEBHOOK_IDS",
+)
+
 
 def _is_primary_model(model: str | None) -> bool:
     """True when *model* resolves to the accounts' default primary model.
@@ -1925,6 +1940,19 @@ class ClaudeRunner:
             env.pop(var, None)
         if not api_fallback:
             env.pop("ANTHROPIC_API_KEY", None)
+        # The bot's own Discord identity has no business in a session's
+        # environment: nothing a session legitimately does needs it, and `env`
+        # is something a debugging turn prints without thinking. Deliberately a
+        # denylist, not an allowlist -- an allowlist drops whatever per-project
+        # variable we failed to predict (toolchain homes, proxy settings,
+        # SSH_AUTH_SOCK, GH_TOKEN) and fails confusingly mid-chain.
+        #
+        # This is NOT a containment boundary. `.env` is still readable on disk,
+        # and bot/config.py re-reads it with override=True, so the bot's own
+        # scripts are unaffected by this pop. What it removes is the accidental
+        # path: an env dump, a crash trace, a logged subprocess environment.
+        for var in _SESSION_STRIPPED_ENV_VARS:
+            env.pop(var, None)
         if account_dir:
             env[provider.config_dir_env] = account_dir
 

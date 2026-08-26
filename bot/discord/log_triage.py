@@ -143,7 +143,13 @@ def _collect_env_secrets() -> list[str]:
 
 
 def _redact(text: str, env_secrets: list[str]) -> str:
-    """Apply framework redaction + strip any residual .env secret strings."""
+    """Apply framework redaction + strip any residual .env secret strings.
+
+    ``redact_secrets`` now does the literal-value stripping this module
+    pioneered, so the shared pass covers the common names on its own. The
+    explicit loop stays because ``env_secrets`` is caller-supplied and may
+    carry values the shared collector doesn't know about.
+    """
     from bot.platform.formatting import redact_secrets
     out = redact_secrets(text)
     for s in env_secrets:

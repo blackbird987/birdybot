@@ -17,7 +17,40 @@ NOWND: dict = (
 
 # Load .env from project root
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(_PROJECT_ROOT / ".env", override=True)
+
+
+def _env_root() -> Path:
+    """Where `.env` actually lives for this checkout.
+
+    `.env` is gitignored, so a build worktree never has one -- it used to work
+    only because the spawned session inherited the bot's whole environment,
+    which is exactly the accidental-leak path the runner now closes. A worktree
+    must therefore find its main repo's `.env` itself rather than depend on
+    what it was handed.
+
+    A worktree's `.git` is a *file* containing `gitdir: <maindir>/.git/worktrees/<name>`,
+    so the main checkout is three parents up from that path. Falls back to the
+    project root unchanged when anything about that shape doesn't hold.
+    """
+    if (_PROJECT_ROOT / ".env").is_file():
+        return _PROJECT_ROOT
+    git_marker = _PROJECT_ROOT / ".git"
+    try:
+        if git_marker.is_file():
+            head = git_marker.read_text(encoding="utf-8").strip()
+            if head.startswith("gitdir:"):
+                gitdir = Path(head.split(":", 1)[1].strip())
+                # <main>/.git/worktrees/<name> -> <main>
+                main_root = gitdir.parent.parent.parent
+                if (main_root / ".env").is_file():
+                    return main_root
+    except OSError:
+        pass
+    return _PROJECT_ROOT
+
+
+_ENV_ROOT = _env_root()
+load_dotenv(_ENV_ROOT / ".env", override=True)
 
 # Per-machine overlay, layered on top of the shared .env. Only for settings
 # that genuinely DIFFER between machines rather than being two names for one
@@ -26,7 +59,7 @@ load_dotenv(_PROJECT_ROOT / ".env", override=True)
 # another spelling of the same directory belongs in the path map below, not
 # here. No file = no overlay, which is the normal single-machine case.
 _PLATFORM_ENV = {"win32": "windows", "darwin": "darwin"}.get(sys.platform, "linux")
-_OVERLAY = _PROJECT_ROOT / f".env.{_PLATFORM_ENV}"
+_OVERLAY = _ENV_ROOT / f".env.{_PLATFORM_ENV}"
 if _OVERLAY.is_file():
     load_dotenv(_OVERLAY, override=True)
 
