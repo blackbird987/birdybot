@@ -25,6 +25,11 @@ python -m bot          # start the bot
 - Slash commands are guild-synced (instant registration)
 - 3-second interaction timeout — always `defer()` first
 - `intents.members = True` needed for permission overwrites on category creation
+- A forum has exactly **one** pin slot. A second pin is REJECTED (error 30047,
+  "Maximum number pinned threads in this channel reached (1)") — it does not
+  replace the incumbent, so anything already pinned must be unpinned first.
+- Archiving a forum post clears its pin, and an archived thread rejects every
+  field but `archived` (error 50083) — wake it before editing anything else.
 
 ## Discord Architecture (v0.3.0)
 
