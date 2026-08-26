@@ -156,10 +156,11 @@ MAX_PROCESS_LIFETIME_SECS: int = int(os.getenv("MAX_PROCESS_LIFETIME_SECS", "144
 #
 # A finished answer is posted inline (as one or more plain messages) when it
 # fits INLINE_MAX; above that it collapses to a summary card with an Expand
-# button. The old threshold was 2000 -- one Discord message -- which measured
-# out as: 568 of 643 stored results (88%, median 4.4 KB) collapsed to a
-# 500-char first paragraph the user had to tap to read. Collapsing was the
-# normal case, not the exception. 6000 = three chunks of full text.
+# button. The old threshold was 2000 -- one Discord message. Replaying the
+# 529 stored results through this same comparison (display text, after
+# directives are folded away) collapsed 407 of them (76%, median 3.3 KB) to
+# a 500-char first paragraph the user had to tap to read: collapsing was the
+# normal case, not the exception. At 6000 it is 55 (10%).
 RESULT_INLINE_MAX: int = int(os.getenv("RESULT_INLINE_MAX", "6000"))
 # Leading text shown on the collapse card for results too big to post inline.
 # extract_summary() only keeps the first paragraph (<=500 chars); this budget

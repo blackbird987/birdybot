@@ -26,6 +26,7 @@ from bot.platform.formatting import (
     format_context_footer,
     format_delay_secs,
     format_duration,
+    format_inline_meta_line,
     format_tokens,
     format_result_md,
     mode_name,
@@ -1067,6 +1068,7 @@ async def send_result(
     try:
         if inst.status == InstanceStatus.FAILED or not result_text or finalize_info:
             # Failed/empty results use summary embed; finalize results use rich embed
+            inst.result_collapsed = False   # no Expand button on this shape
             formatted = format_result_md(inst)
             markup = ctx.messenger.markdown_to_markup(formatted)
             msg_id = await ctx.messenger.send_result(
@@ -1077,7 +1079,10 @@ async def send_result(
             _record_msg(msg_id)
 
         elif len(result_text) <= config.RESULT_INLINE_MAX:
-            result_text = result_text + f"\n-# {session_loc}"
+            inst.result_collapsed = False
+            result_text = result_text + "\n" + format_inline_meta_line(
+                inst, session_loc,
+            )
             markup = ctx.messenger.markdown_to_markup(result_text)
             chunks = ctx.messenger.chunk_message(markup)
             # Prepend mention to first chunk so user gets pinged.
@@ -1087,8 +1092,15 @@ async def send_result(
                 is_last = i == len(chunks) - 1
                 text = chunk
                 chunk_silent = silent
-                if mention and i == 0:
-                    combined = f"{mention}\n{chunk}"
+                # First choice is the top of the answer; failing that, the end
+                # of the last chunk. A chunk that filled to the 2000-char cap
+                # has no room for the mention, and that got likelier the moment
+                # the inline ceiling went up -- without the second try, a full
+                # first chunk means a message containing nothing but "@user".
+                if mention and (i == 0 or is_last):
+                    combined = (
+                        f"{mention}\n{chunk}" if i == 0 else f"{chunk}\n{mention}"
+                    )
                     if len(combined) <= 2000:
                         text = combined
                         mention = None  # consumed
@@ -1098,13 +1110,14 @@ async def send_result(
                     buttons if is_last else None, chunk_silent,
                 )
                 _record_msg(msg_id)
-            # Mention didn't fit in chunk — send separately
+            # Mention fit in neither end — send separately
             if mention:
                 await ctx.messenger.send_text(
                     ctx.channel_id, mention, silent=False,
                 )
 
         else:
+            inst.result_collapsed = True
             expand_buttons = action_button_specs(inst, show_expand=True)
             formatted = format_result_md(inst, preview=result_text)
             markup = ctx.messenger.markdown_to_markup(formatted)

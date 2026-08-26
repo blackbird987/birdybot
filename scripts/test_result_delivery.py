@@ -41,8 +41,10 @@ from bot import config
 from bot.claude.types import Instance, InstanceStatus, InstanceType
 from bot.discord.formatter import apply_discord_safety, chunk_message
 from bot.platform.formatting import (
+    _CUT_MARKER_ROOM,
     _leading_preview,
     format_expanded_result_chunks,
+    format_inline_meta_line,
     format_result_md,
 )
 
@@ -159,6 +161,52 @@ _check("text under the cap is untouched", apply_discord_safety("hello", 4096) ==
 _check(
     "content limit is respected too",
     len(apply_discord_safety(over, 2000)) <= 2000,
+)
+
+# ---- (f) the cut marker fits inside the budget it was sized for ----
+print("The 'more characters' marker is paid for, not bolted on")
+_check("marker room is reserved", _CUT_MARKER_ROOM >= 64)
+capped = format_expanded_result_chunks(inst, giant, max_chunks=4)
+_check("marked last chunk still fits a Discord message", len(capped[-1]) <= 2000)
+one = format_expanded_result_chunks(inst, giant, first_budget=3900, max_chunks=1)
+_check("single-chunk expand still fits an embed", len(one[0]) <= 4096)
+_check("single-chunk expand is marked", "more characters" in one[0])
+_check(
+    "max_chunks below 1 is clamped, not an empty list",
+    len(format_expanded_result_chunks(inst, mid, max_chunks=0)) == 1,
+)
+
+# ---- (g) an unbalanced fence never reaches the card ----
+print("A preview that lands mid-code-block closes it")
+fenced_head = "```python\n" + _para(4000, "x") + "\n```\n\ntail"
+card_f = format_result_md(inst, preview=fenced_head)
+_check("preview card has balanced fences", card_f.count("```") % 2 == 0)
+_check(
+    "the 'more characters' line is outside the code block",
+    card_f.rfind("```") < card_f.find("more characters"),
+)
+
+# ---- (h) inline delivery keeps the run facts ----
+print("An inline result still reports duration, tokens and cost")
+inst.duration_ms = 92000
+inst.input_tokens = 4000
+inst.output_tokens = 130
+inst.cost_usd = 0.0421
+line = format_inline_meta_line(inst, "opus · worktree: claude-bot/t-1")
+_check("meta line is one grey line", line.startswith("-# ") and "\n" not in line)
+_check("carries duration", "1.5m" in line)
+_check("carries tokens", "4.1k" in line)
+_check("carries cost", "$0.0421" in line)
+_check("carries where it ran", "worktree: claude-bot/t-1" in line)
+_check("stays short enough to ignore", len(line) < 120)
+
+blank = Instance(
+    id="q-1", name=None, instance_type=InstanceType.QUERY, prompt="p",
+    repo_name="bot", repo_path=_ROOT, status=InstanceStatus.COMPLETED,
+)
+_check(
+    "a run with no numbers yet still produces a valid line",
+    format_inline_meta_line(blank, "").startswith("-# "),
 )
 
 print()

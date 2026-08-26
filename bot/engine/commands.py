@@ -3058,10 +3058,14 @@ async def _strip_post_merge_buttons(
     if result_msg_id == skip_msg_id:
         return  # Already handled by the caller's edit
     try:
-        formatted = format_result_md(inst)
-        markup = ctx.messenger.markdown_to_markup(formatted)
+        # Buttons only -- edit_text(text=None) leaves the body alone. It used
+        # to re-render the message from format_result_md(), which on a result
+        # posted inline meant replacing the last chunk of the actual answer
+        # with a two-line summary card, and on a collapsed one threw away the
+        # preview. Nothing about resolving a branch should rewrite what a
+        # finished session said.
         buttons = action_button_specs(inst)
-        await ctx.messenger.edit_text(ctx.channel_id, result_msg_id, markup, buttons)
+        await ctx.messenger.edit_text(ctx.channel_id, result_msg_id, None, buttons)
     except Exception:
         log.debug("Failed to strip buttons from %s result message", inst.id)
 
@@ -3984,14 +3988,9 @@ async def handle_callback(
         if inst and source_msg_id:
             inst.mode = actual
             ctx.store.update_instance(inst)
-            try:
-                show_expand = bool(
-                    inst.result_file
-                    and Path(inst.result_file).exists()
-                    and Path(inst.result_file).stat().st_size >= 2000
-                )
-            except OSError:
-                show_expand = False
+            # Third place that used to guess "is there more behind Expand?"
+            # from the result file's size. The delivery path records it.
+            show_expand = bool(inst.result_collapsed and inst.result_file)
             buttons = action_button_specs(inst, show_expand=show_expand)
             await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, None, buttons)
 

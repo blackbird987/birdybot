@@ -897,24 +897,24 @@ async def spawn_from(
 
     ctx.store.update_instance(new_inst)
 
-    # Strip workflow buttons from source message, keep expand/log if truncated
+    # Strip workflow buttons from the source message, but keep Expand/log if
+    # that message is a preview card with the rest of the answer behind it.
+    # This used to be inferred from the result FILE being >= 2000 bytes, which
+    # is not the same quantity the delivery path measures (it measures display
+    # text, after directives are folded away) -- so it could hang an Expand
+    # button on a message that already holds the whole answer inline, where
+    # tapping it overwrites that text. The delivery path now records what it
+    # actually did.
     if strip_source_buttons and source_msg_id:
         try:
             preserve = None
-            if source.result_file and Path(source.result_file).exists():
-                try:
-                    size = Path(source.result_file).stat().st_size
-                    if size >= 2000:
-                        full = action_button_specs(source, show_expand=True)
-                        preserve = [
-                            row for row in full
-                            if any(b.callback_data.startswith(("expand:", "log:"))
-                                   for b in row)
-                        ]
-                        if not preserve:
-                            preserve = None
-                except OSError:
-                    pass
+            if source.result_collapsed and source.result_file:
+                full = action_button_specs(source, show_expand=True)
+                preserve = [
+                    row for row in full
+                    if any(b.callback_data.startswith(("expand:", "log:"))
+                           for b in row)
+                ] or None
             await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, None, buttons=preserve)
         except Exception:
             pass

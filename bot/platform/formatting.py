@@ -983,6 +983,57 @@ def queued_button_specs(
 
 # --- Formatting Functions (markdown — platform adapters convert as needed) ---
 
+def format_inline_meta_line(instance: Instance, session_loc: str) -> str:
+    """One grey `-#` line of run facts for a result posted as plain messages.
+
+    The embed path renders Duration / Tokens / Cost / Mode as inline fields.
+    A plain message has no fields, so raising the inline ceiling would have
+    quietly dropped all of them for every result between the old 2000-char
+    threshold and the new one. Same facts, one line, no embed.
+    """
+    bits: list[str] = []
+    dur = format_duration(instance.duration_ms)
+    if dur:
+        bits.append(dur)
+    total_tokens = instance.input_tokens + instance.output_tokens
+    if total_tokens:
+        bits.append(format_tokens(total_tokens))
+    if instance.cost_usd:
+        bits.append(f"${instance.cost_usd:.4f}")
+    bits.append(mode_name(instance.mode))
+    if session_loc:
+        bits.append(session_loc)
+    return "-# " + " \u00b7 ".join(bits)
+
+
+def _cut_index(text: str, budget: int) -> int:
+    """Index to split *text* at, preferring a paragraph/line/word boundary.
+
+    Only the back half of the budget is searched: a boundary near the start
+    would technically be "nicer" but yields a near-empty piece and one more
+    message than needed. Falls back to a hard cut at *budget* for text with no
+    break in that window at all (a long token, a base64 blob).
+    """
+    for sep in ("\n\n", "\n", " "):
+        cut = text.rfind(sep, budget // 2, budget)
+        if cut > 0:
+            return cut
+    return budget
+
+
+def _close_open_fence(text: str) -> str:
+    """Append a closing ``` if *text* ends inside a code block.
+
+    Any cut can land mid-fence, and an odd fence count doesn't just look wrong
+    -- everything after it in the message renders as monospace, which for a
+    preview card means the "more characters" line and the duration/cost line
+    get swallowed into the code block.
+    """
+    if text.count("```") % 2:
+        return text + "\n```"
+    return text
+
+
 def _leading_preview(text: str, budget: int) -> tuple[str, int]:
     """First *budget* chars of *text*, cut on a paragraph/line/word boundary.
 
@@ -992,14 +1043,9 @@ def _leading_preview(text: str, budget: int) -> tuple[str, int]:
     """
     text = text.strip()
     if len(text) <= budget:
-        return text, 0
-    for sep in ("\n\n", "\n", " "):
-        cut = text.rfind(sep, budget // 2, budget)
-        if cut > 0:
-            break
-    else:
-        cut = budget
-    return text[:cut].rstrip(), len(text) - cut
+        return _close_open_fence(text), 0
+    cut = _cut_index(text, budget)
+    return _close_open_fence(text[:cut].rstrip()), len(text) - cut
 
 
 def format_result_md(instance: Instance, preview: str | None = None) -> str:
@@ -1039,6 +1085,11 @@ def format_result_md(instance: Instance, preview: str | None = None) -> str:
     return "\n".join(parts)
 
 
+# Room held back on the final chunk for the "+N more characters" marker.
+# Generous on purpose: the count and the instance id both vary in width.
+_CUT_MARKER_ROOM = 96
+
+
 def format_expanded_result_chunks(
     instance: Instance,
     result_text: str,
@@ -1061,8 +1112,8 @@ def format_expanded_result_chunks(
     raw result FILE, so without the collapse a folded ~~~plan body would eat
     the whole budget. (`/log` still ships the file untouched.)
     """
-    if max_chunks is None:
-        max_chunks = config.RESULT_EXPAND_MAX_CHUNKS
+    max_chunks = max(1, config.RESULT_EXPAND_MAX_CHUNKS
+                     if max_chunks is None else max_chunks)
     header = f"**{instance.display_id()}**\n\n"
     text = collapse_bot_directives(strip_verify_blocks(redact_secrets(result_text))).strip()
 
@@ -1074,15 +1125,18 @@ def format_expanded_result_chunks(
             chunks.append(remaining)
             remaining = ""
             break
-        cut = remaining.rfind('\n', 0, budget)
-        if cut <= 0:
-            cut = remaining.rfind(' ', 0, budget)
-        if cut <= 0:
-            cut = budget
+        # On the last chunk we're allowed, hold back room for the marker that
+        # says what's missing -- appending it afterwards would push the chunk
+        # past the budget the caller sized its message for.
+        limit = budget
+        if len(chunks) == max_chunks - 1:
+            limit = max(1, budget - _CUT_MARKER_ROOM)
+        cut = _cut_index(remaining, limit)
         piece = remaining[:cut]
         remaining = remaining[cut:].lstrip('\n')
-        # Keep code fences balanced across the split.
-        if piece.count('```') % 2 != 0:
+        # Keep code fences balanced across the split, and reopen on the far
+        # side so the continuation still renders as code.
+        if piece.count('```') % 2:
             piece += '\n```'
             remaining = '```\n' + remaining
         chunks.append(piece)
