@@ -690,6 +690,126 @@ def _memory_warning_detail(tree: memory.TreeMemory, kill_mb: int) -> str:
     )
 
 
+def _fmt_duration(secs: float) -> str:
+    """Hours-and-minutes for a number the reader has to reason about.
+
+    "14407s" is what the log said about the run that should not have been
+    killed, and nobody reading it converts that to four hours in their head.
+    """
+    total = int(secs)
+    hours, rem = divmod(total, 3600)
+    minutes = rem // 60
+    if hours and minutes:
+        return f"{hours}h {minutes}m"
+    if hours:
+        return f"{hours}h"
+    if total < 60:
+        # Only the harness runs the watchdog at these speeds, but "past the 0m
+        # hard lifetime limit" is a sentence no one should have to read.
+        return f"{total}s"
+    return f"{minutes}m"
+
+
+def _lifetime_kill_detail(
+    elapsed_secs: float, silence_secs: float, hard_cap: bool,
+) -> str:
+    """The in-thread notice for a session the orphan safety-net is stopping.
+
+    Leads with the silence, not the age, because the silence is the actual
+    reason — the age only decided that we were allowed to look.
+    """
+    if hard_cap:
+        return (
+            f"It has been running for {_fmt_duration(elapsed_secs)}, past the "
+            f"{_fmt_duration(config.MAX_PROCESS_HARD_LIFETIME_SECS)} hard "
+            f"ceiling that applies however busy a run looks. Whatever it "
+            f"managed to say is kept, and the session can be resumed from "
+            f"where it got to."
+        )
+    return (
+        f"It produced nothing for {_fmt_duration(silence_secs)} after running "
+        f"for {_fmt_duration(elapsed_secs)}, which is the shape of a hung "
+        f"process rather than a slow one. Whatever it managed to say is kept, "
+        f"and the session can be resumed from where it got to."
+    )
+
+
+def _reaped_result_base(
+    events: list[dict],
+    session_id: str | None,
+    poisoning: list[str] | None,
+) -> RunResult:
+    """What a watchdog reap must preserve, whichever watchdog fired.
+
+    Both reaps — the memory guard and the orphan safety-net — kill a run that
+    has usually done real work, and both used to be written from scratch. The
+    lifetime cap returned a bare ``RunResult``, so four hours of work rendered
+    as an empty red FAILED card. Naming the salvage once is what stops the two
+    paths drifting apart again.
+
+    ``extract_result`` is the whole point: it carries the tool record (which
+    the chain reads via ``CODE_CHANGE_TOOLS`` to decide whether a build changed
+    code at all, so an empty list reads as "no changes made"), the bash log the
+    eval surface feeds on, the cost/duration/token counters — which is the only
+    place a reaped attempt will ever report them from — and ``result_text``,
+    which its own no-``result``-event fallback fills from the last substantial
+    assistant turn.
+
+    Deliberately NOT synthesised: ``num_turns``. The account-failover heuristic
+    reads ``>1 turn`` as proof the account took the turn, so inventing turns
+    here could hide a dead backup account. ``_carry_forward_work_record``
+    refuses to merge it for exactly the same reason.
+
+    ``error_message`` is left to the caller — it is what ``finalize_run``
+    actually shows the user, and it is the only part that differs between the
+    two reaps.
+    """
+    result = extract_result(events)
+    result.is_error = True
+    # A reap lands mid-turn, long before the CLI emits a `result` event, so the
+    # id stamped from the init event on turn one is usually the only one there
+    # is — and it is what makes Retry a resume rather than a fresh start.
+    if not result.session_id:
+        result.session_id = session_id
+    if poisoning:
+        result.path_poisoning = list(poisoning)
+    return result
+
+
+def _lifetime_kill_result(
+    events: list[dict],
+    session_id: str | None,
+    poisoning: list[str] | None,
+    elapsed_secs: float,
+    silence_secs: float,
+    hard_cap: bool,
+) -> RunResult:
+    """The failure an orphan-reaped run reports, built from what it did.
+
+    The wording MUST keep the substring "lifetime limit".
+    ``parser.is_account_agnostic_error`` matches on it to suppress the no-turns
+    account-failover heuristic. The salvaged ``result_text`` alone defeats that
+    heuristic in the common case, but a run reaped before it ever said anything
+    still has the exact "this account fell over instantly" shape, and that is
+    the case the phrase covers.
+    """
+    result = _reaped_result_base(events, session_id, poisoning)
+    if hard_cap:
+        result.error_message = (
+            f"Stopped after {_fmt_duration(elapsed_secs)}: past the "
+            f"{_fmt_duration(config.MAX_PROCESS_HARD_LIFETIME_SECS)} hard "
+            f"lifetime limit, which applies however busy a run looks."
+        )
+    else:
+        result.error_message = (
+            f"Stopped: no output for {_fmt_duration(silence_secs)} after "
+            f"{_fmt_duration(elapsed_secs)} of running — past the "
+            f"{_fmt_duration(config.MAX_PROCESS_LIFETIME_SECS)} lifetime "
+            f"limit, and silent long enough to look hung rather than slow."
+        )
+    return result
+
+
 def _memory_kill_result(
     events: list[dict],
     tree: memory.TreeMemory,
@@ -714,16 +834,12 @@ def _memory_kill_result(
     keeps it — whatever the session managed to say before it died is still the
     best account of what it was doing — while ``error_message`` below is what
     the user is actually shown, because ``finalize_run`` prefers it.
+
+    The salvage itself lives in ``_reaped_result_base``, shared with the orphan
+    safety-net's reap; the session id it carries is worthless unless it reaches
+    a RESUMED attempt, which is what the note below is for.
     """
-    result = extract_result(events)
-    result.is_error = True
-    # A reap lands mid-turn, long before the CLI emits a `result` event, so the
-    # id stamped from the init event on turn one is usually the only one there
-    # is — and the note below is worthless unless it reaches a RESUMED attempt.
-    if not result.session_id:
-        result.session_id = session_id
-    if poisoning:
-        result.path_poisoning = list(poisoning)
+    result = _reaped_result_base(events, session_id, poisoning)
     # "?" rather than a phrase, in both templates below: they read "About
     # {avail_gb} GB was free", so anything but a number-shaped value produces a
     # broken sentence in the one message whose entire job is to be read
@@ -2807,8 +2923,11 @@ class ClaudeRunner:
         """Read stdout line-by-line, parse stream-json, detect stalls.
 
         No inactivity timeout — processes run until they finish or the user
-        kills them.  A safety-net lifetime limit (default 4h) catches truly
-        orphaned processes.
+        kills them.  A safety-net catches truly orphaned processes: past
+        MAX_PROCESS_LIFETIME_SECS (default 4h) of age AND
+        MAX_PROCESS_SILENCE_SECS (default 30m) of producing nothing, with
+        MAX_PROCESS_HARD_LIFETIME_SECS (default 24h) as an age-only backstop.
+        Age alone never kills — see the branch in check_stall for why.
         """
         # Defensive: clear any stale intentional-kill marker from a prior
         # run on the same instance id (e.g. a previous lifetime-exceeded
@@ -2837,6 +2956,13 @@ class ClaudeRunner:
         process_start_time = last_output_time
         stall_warned = False
         lifetime_exceeded = False
+        # Set alongside lifetime_exceeded so the failure the user reads can say
+        # WHICH of the two conditions fired and with what numbers. A message
+        # that only says "4h limit" is what made the 2026-08-27 kill look
+        # reasonable in the log when it was not.
+        lifetime_elapsed_secs = 0.0
+        lifetime_silence_secs = 0.0
+        lifetime_hard_cap = False
         # Set by the memory guard below when it reaps this session's tree. Holds
         # the numbers, not a bool, because the numbers ARE the message — both
         # the failure the user reads and the nudge the resumed attempt gets are
@@ -2857,12 +2983,18 @@ class ClaudeRunner:
 
         async def check_stall():
             nonlocal stall_warned, lifetime_exceeded
+            nonlocal lifetime_elapsed_secs, lifetime_silence_secs
+            nonlocal lifetime_hard_cap
             nonlocal memory_kill, memory_kill_avail_mb, memory_kill_pressure
             # Re-log a fresh snapshot every STALL_DIAG_RELOG_SECS while still
             # stalled — gives a paper trail of CPU/conn state over the silent
             # period so we can tell "thinking with API call open" from
             # "actually hung with nothing in flight" after the fact.
             stall_last_logged = 0.0
+            # -inf, not 0: the clock here is monotonic, whose zero is an
+            # arbitrary boot-relative instant, so 0.0 would only happen to
+            # mean "never logged" because the epoch is far in the past.
+            old_but_alive_logged = float("-inf")
             mem_last_checked = 0.0
             mem_warned = False
 
@@ -2916,20 +3048,86 @@ class ClaudeRunner:
                     proc.terminate()
 
             while True:
-                await asyncio.sleep(10)
+                await asyncio.sleep(config.WATCHDOG_TICK_SECS)
                 now = asyncio.get_event_loop().time()
                 elapsed_since_output = now - last_output_time
                 elapsed_since_start = now - process_start_time
 
-                # Safety-net: kill truly orphaned processes
+                # Safety-net: kill truly orphaned processes.
+                #
+                # "Orphaned" is a claim about SILENCE, not about age, and for a
+                # long time this branch only measured age. On 2026-08-27 that
+                # killed a four-hour benchmark run that had produced output
+                # five minutes earlier and had not gone quiet for a single
+                # minute in its final two hours — it was mid-batch, waiting on
+                # subagents, at 350 MB and with live HTTPS connections open.
+                # Raising the number would only move the guillotine; a bench
+                # that farms work out in serial batches can legitimately run
+                # all day. So age is now the point at which we START asking,
+                # and continued output is the answer that keeps it alive.
+                #
+                # The hard cap is the backstop for the other direction: a
+                # process that heartbeats forever without ever finishing must
+                # not be immortal just because it is noisy.
                 if elapsed_since_start > config.MAX_PROCESS_LIFETIME_SECS:
-                    lifetime_exceeded = True
-                    log.warning(
-                        "Lifetime limit for %s — running for %ds",
-                        instance.id, int(elapsed_since_start),
+                    hard_cap = config.MAX_PROCESS_HARD_LIFETIME_SECS
+                    hit_hard_cap = (
+                        hard_cap > 0 and elapsed_since_start > hard_cap
                     )
-                    proc.terminate()
-                    return
+                    silent_enough = (
+                        elapsed_since_output
+                        >= config.MAX_PROCESS_SILENCE_SECS
+                    )
+                    if not silent_enough and not hit_hard_cap:
+                        # Old is not orphaned. Logged on its own slow cadence
+                        # so a legitimate all-day run still leaves a trail
+                        # without writing a line every ten seconds.
+                        if (
+                            now - old_but_alive_logged
+                            >= config.OLD_BUT_ALIVE_RELOG_SECS
+                        ):
+                            old_but_alive_logged = now
+                            log.info(
+                                "Past lifetime age for %s (%ds) but still "
+                                "producing output %ds ago — letting it work "
+                                "(reap after %ds silent)",
+                                instance.id, int(elapsed_since_start),
+                                int(elapsed_since_output),
+                                config.MAX_PROCESS_SILENCE_SECS,
+                            )
+                    else:
+                        lifetime_exceeded = True
+                        lifetime_elapsed_secs = elapsed_since_start
+                        lifetime_silence_secs = elapsed_since_output
+                        lifetime_hard_cap = hit_hard_cap
+                        log.warning(
+                            "Lifetime limit for %s — running for %ds, "
+                            "silent for %ds%s",
+                            instance.id, int(elapsed_since_start),
+                            int(elapsed_since_output),
+                            " (hard cap)" if hit_hard_cap else "",
+                        )
+                        # Told BEFORE the terminate, for the same reason
+                        # reap_this_session says its piece first: terminating
+                        # closes the CLI's stdout, which ends the reader loop,
+                        # whose ``finally`` cancels this watchdog. Anything
+                        # after that call is on a coin flip.
+                        if on_progress:
+                            try:
+                                await on_progress(
+                                    "Stopped — this session looked hung",
+                                    _lifetime_kill_detail(
+                                        elapsed_since_start,
+                                        elapsed_since_output,
+                                        hit_hard_cap,
+                                    ),
+                                )
+                            except Exception:
+                                log.exception(
+                                    "Progress callback error on lifetime kill",
+                                )
+                        proc.terminate()
+                        return
 
                 # Memory guard. Runs on its own cadence and regardless of
                 # whether the session looks stalled: the 2026-08-17 runaway was
@@ -3301,51 +3499,65 @@ class ClaudeRunner:
             except Exception:
                 log.exception("Test-mutex release failed for %s", instance.id)
 
-        if lifetime_exceeded:
-            return RunResult(
-                session_id=captured_session_id,
-                is_error=True,
-                error_message=f"Process exceeded {config.MAX_PROCESS_LIFETIME_SECS // 3600}h lifetime limit",
+        # Both watchdog reaps stand down for the same two races. Guarded as one
+        # block so the O(n) event walk below stays lazy on the ordinary path,
+        # where neither watchdog fired.
+        if memory_kill is not None or lifetime_exceeded:
+            reap_name = "Memory reap" if memory_kill is not None else "Orphan reap"
+            reap_detail = (
+                memory_kill.summary() if memory_kill is not None
+                else f"silent {int(lifetime_silence_secs)}s"
             )
 
-        # A reap and a finishing turn can land in the same instant: the guard
-        # decides on its own cadence, and while its SIGTERMs go out the CLI can
-        # still flush the `result` event that says the turn completed. Reporting
-        # the reap then would mark a finished run as failed AND auto-resume it,
-        # redoing work whose output is already captured and whose edits are
-        # already on disk. The kill is not lost information either way — the
-        # guard logged it at ERROR the moment it fired.
-        if memory_kill is not None and _turn_completed_successfully(events):
-            log.warning(
-                "Memory reap for %s raced a completed turn — reporting the "
-                "completion instead (%s)", instance.id, memory_kill.summary(),
-            )
-            memory_kill = None
+            # A reap and a finishing turn can land in the same instant: the
+            # watchdog decides on its own cadence, and while its SIGTERMs go out
+            # the CLI can still flush the `result` event that says the turn
+            # completed. Reporting the reap then would mark a finished run as
+            # failed AND auto-resume it, redoing work whose output is already
+            # captured and whose edits are already on disk. The kill is not lost
+            # information either way — it was logged the moment it fired.
+            if _turn_completed_successfully(events):
+                log.warning(
+                    "%s for %s raced a completed turn — reporting the "
+                    "completion instead (%s)", reap_name, instance.id, reap_detail,
+                )
+                memory_kill = None
+                lifetime_exceeded = False
 
-        # The other race worth standing down for: the user asked this session to
-        # stop (Steer, /kill) inside the same few seconds the guard chose to reap
-        # it. Reporting the reap would override an explicit instruction — the run
-        # is marked FAILED, then auto-resumed, so the session carries on after
-        # the person who stopped it has been told it stopped. Their intent wins,
-        # and falling through hands the classification to the normal path, which
-        # renders the quiet KILLED tombstone it asked for.
-        #
-        # (The bookkeeping half of this is already covered: the defensive discard
-        # at the top of this method clears a marker an early return skipped, so
-        # the concern here is the wrong outcome for THIS run, not a stale flag
-        # poisoning the next one.)
-        if memory_kill is not None and instance.id in self._intentional_kills:
-            log.warning(
-                "Memory reap for %s raced a requested stop — honouring the "
-                "stop (%s)", instance.id, memory_kill.summary(),
-            )
-            memory_kill = None
+            # The other race worth standing down for: the user asked this session
+            # to stop (Steer, /kill) inside the same few seconds the watchdog
+            # chose to reap it. Reporting the reap would override an explicit
+            # instruction — the run is marked FAILED, then auto-resumed, so the
+            # session carries on after the person who stopped it has been told it
+            # stopped. Their intent wins, and falling through hands the
+            # classification to the normal path, which renders the quiet KILLED
+            # tombstone it asked for.
+            #
+            # (The bookkeeping half of this is already covered: the defensive
+            # discard at the top of this method clears a marker an early return
+            # skipped, so the concern here is the wrong outcome for THIS run, not
+            # a stale flag poisoning the next one.)
+            elif instance.id in self._intentional_kills:
+                log.warning(
+                    "%s for %s raced a requested stop — honouring the stop (%s)",
+                    reap_name, instance.id, reap_detail,
+                )
+                memory_kill = None
+                lifetime_exceeded = False
 
         if memory_kill is not None:
             return _memory_kill_result(
                 events, memory_kill, memory_kill_avail_mb,
                 captured_session_id, poisoning_hits,
                 pressure=memory_kill_pressure,
+            )
+
+        if lifetime_exceeded:
+            return _lifetime_kill_result(
+                events, captured_session_id, poisoning_hits,
+                elapsed_secs=lifetime_elapsed_secs,
+                silence_secs=lifetime_silence_secs,
+                hard_cap=lifetime_hard_cap,
             )
 
         # Capture stderr for error info

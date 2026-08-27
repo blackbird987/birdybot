@@ -694,10 +694,15 @@ def is_account_agnostic_error(error_text: str) -> bool:
         "currently unavailable", "is unavailable", "model not found",
         "unknown model", "unrecognized arguments", "unknown option",
         "invalid argument", "no such option", "usage:",
-        # Our own process-lifetime ceiling.  It arrives with no output and no
-        # completed turns — the exact shape of "this account fell over
-        # instantly" — so without it here, a run that hit the 4h safety net
-        # would be handed to the backup account to burn another 4h.
+        # Our own process-lifetime ceiling.  It used to arrive with no output
+        # and no completed turns — the exact shape of "this account fell over
+        # instantly" — so without it here, a run that hit the safety net would
+        # be handed to the backup account to burn the same hours again. The
+        # reap now salvages the last assistant text, which on its own defeats
+        # the no-turns heuristic; `num_turns` stays 0 by design. This is the
+        # guarantee for the case salvage cannot cover: a run reaped before it
+        # ever said anything still has that exact shape.
+        # runner._lifetime_kill_result is required to keep the phrase.
         "lifetime limit",
     ]
     return any(p in lower for p in patterns)

@@ -150,7 +150,33 @@ STALL_TIMEOUT_SECS: int = int(os.getenv("STALL_TIMEOUT_SECS", "60"))
 # silent period so a forensic read of bot.log can distinguish "thinking
 # with API call open" from "actually hung locally".
 STALL_DIAG_RELOG_SECS: int = int(os.getenv("STALL_DIAG_RELOG_SECS", "60"))
+# Age past which a run becomes a CANDIDATE for the orphan safety-net. On its
+# own this no longer kills anything: it is the point at which the watchdog
+# starts asking whether the process is actually orphaned, which is a question
+# about silence, not about age. See MAX_PROCESS_SILENCE_SECS.
 MAX_PROCESS_LIFETIME_SECS: int = int(os.getenv("MAX_PROCESS_LIFETIME_SECS", "14400"))
+# How long a run past the age threshold must have produced NOTHING before the
+# safety-net reaps it. The cap exists to catch orphaned processes, and an
+# orphan is defined by silence — 2026-08-27 lost a four-hour benchmark that was
+# streaming steadily, mid-batch, five minutes after its last piece of real
+# work, purely for turning four hours old. Thirty minutes is far longer than
+# any single model turn or tool call and far shorter than the hours a genuinely
+# hung process would otherwise sit there. 0 restores the old age-only rule:
+# anything past MAX_PROCESS_LIFETIME_SECS dies whether or not it is working.
+MAX_PROCESS_SILENCE_SECS: int = int(os.getenv("MAX_PROCESS_SILENCE_SECS", "1800"))
+# Absolute backstop: kill at this age regardless of how chatty the process is,
+# so something that heartbeats forever without ever finishing is not immortal.
+# 0 disables it entirely.
+MAX_PROCESS_HARD_LIFETIME_SECS: int = int(
+    os.getenv("MAX_PROCESS_HARD_LIFETIME_SECS", "86400")
+)
+# Cadence for the "old but still working" log line, so a long legitimate run
+# leaves a paper trail without filling bot.log at the 10s watchdog tick.
+OLD_BUT_ALIVE_RELOG_SECS: int = int(os.getenv("OLD_BUT_ALIVE_RELOG_SECS", "3600"))
+# How often the stall/memory/lifetime watchdog wakes up. Only ever lowered by
+# the harness — every threshold above is expressed in seconds, so a test can
+# scale the whole watchdog down instead of sleeping through real minutes.
+WATCHDOG_TICK_SECS: float = float(os.getenv("WATCHDOG_TICK_SECS", "10"))
 
 # --- Result delivery sizing ---
 #
