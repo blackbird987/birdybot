@@ -507,6 +507,91 @@ def _repo_has_changes(repo_path: str) -> bool:
         return False
 
 
+def should_bind_session(result: RunResult) -> bool:
+    """Is this turn's session_id safe to register onto the thread?
+
+    Success always is.  A usage-limit failure also is, and must be: it is a
+    pause, not an ending — _do_cooldown_retry_locked resumes that exact
+    session_id, so a thread that doesn't learn it can never continue the work.
+
+    Every other error is refused.  A crashed or recovery-exhausted run can
+    emit a FRESH session_id carrying none of the thread's history, and
+    adopting that would silently amputate the conversation.
+
+    A run that recovered onto a fresh session AND then hit the limit still
+    binds — deliberately.  The old id is already unreachable at that point
+    (that is what recovery exhaustion means) and the retry resumes the new
+    one, so refusing here would strand the thread for a second time.
+    """
+    if not result.session_id:
+        return False
+    return (not result.is_error) or bool(result.usage_limit_reset)
+
+
+async def bind_thread_session(
+    ctx: RequestContext, inst: Instance, session_id: str | None,
+) -> None:
+    """Register *session_id* as the thread's session.
+
+    The one place that writes a finished turn's session back onto the thread.
+    Every later resume path — the next user message, a self-wake, a fired
+    /watch — reads ThreadInfo.session_id, so a turn that doesn't land here is
+    a turn the thread can never continue.
+
+    Callers decide eligibility; this only mutates.  The repo_name is passed so
+    the platform wrapper can refuse a rebind that crosses the thread's bound
+    repo (see bot.discord.forums.set_thread_session — RebindResult).
+    """
+    if not session_id:
+        return
+    # Non-Discord platforms track one global active session; Discord threads
+    # are isolated and carry their own via ctx.session_id.
+    if not ctx.session_id:
+        ctx.store.active_session_id = session_id
+    if ctx.on_session_resolved:
+        await ctx.on_session_resolved(session_id, inst.repo_name or None)
+
+
+async def backfill_thread_session(ctx: RequestContext, inst: Instance) -> bool:
+    """Give a sessionless thread the session this run just used.  Never rebinds.
+
+    For the four paths that call run_instance directly instead of going through
+    commands._execute_query: the cooldown auto-retry, /retry, the Retry button
+    and "continue on pay-per-use".  run_instance deliberately does not bind — a
+    workflow step's session belongs to the step, not the conversation — so
+    without this a thread that is already sessionless stays that way, and every
+    later resume path (the next message, a self-wake, a fired /watch) has
+    nothing to resume.  The pay-per-use button is the sharpest case: it is the
+    manual twin of the cooldown retry, fired from the very usage-limit card
+    whose lost binding this whole change exists to fix.
+
+    FILL A GAP, NEVER REBIND.  Each of those callers can also be pointed at a
+    workflow step or at an instance that belongs to another thread, and
+    rebinding from here would let one of those amputate a thread's chat
+    history.  Writing only into an EMPTY binding cannot lose anything.
+    Worktree builds are excluded on top of that: a build runs its own session
+    inside an isolated checkout and must not become a thread's chat session
+    even when the slot is free.
+
+    Returns True iff it wrote.  Never raises — a failed state write must not be
+    able to cost the caller its run or its answer.
+    """
+    if not inst.session_id or inst.worktree_path:
+        return False
+    # resolve_session_id is wired only by attach_session_callbacks, so its
+    # absence is a faithful "this context isn't thread-bound" — nothing to
+    # fill.  Its value is read live off ThreadInfo, so this is the current
+    # binding, not a stale copy taken before the run.
+    if ctx.resolve_session_id is None or ctx.resolve_session_id():
+        return False
+    try:
+        await bind_thread_session(ctx, inst, inst.session_id)
+        return True
+    except Exception:
+        log.exception("Failed to backfill thread session from %s", inst.id)
+        return False
+
+
 def finalize_run(ctx: RequestContext, inst: Instance, result: RunResult) -> None:
     """Apply RunResult to Instance and persist."""
     # Defense in depth: a synthetic RunResult from refuse-to-spawn or an

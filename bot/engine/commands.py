@@ -1389,21 +1389,29 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
 
         lifecycle.finalize_run(ctx, inst, result)
 
+        # Write session_id back immediately (before lock release), and BEFORE
+        # the cooldown early-return below.  A usage-limit failure is not the end
+        # of a conversation, it's a pause: _do_cooldown_retry_locked resumes
+        # this exact session_id.  Bailing out first meant the thread never
+        # learned it — so the retry's work was unreachable and the /watch it
+        # armed fired into "thread gone/sessionless, dropping" hours later
+        # (2026-08-27, three ev-nova children).
+        #
+        # Every other error still skips the bind — see should_bind_session.
+        #
+        # Non-fatal by design: this now sits ABOVE the cooldown scheduling and
+        # the result delivery, so a failed state write must not be able to cost
+        # the turn its retry or its answer.  It logs at ERROR, and the
+        # sessionless-wake fallback in app.on_self_wake is the safety net.
+        if lifecycle.should_bind_session(result):
+            try:
+                await lifecycle.bind_thread_session(ctx, inst, result.session_id)
+            except Exception:
+                log.exception("Failed to bind session for %s", inst.id)
+
         # Usage limit: schedule auto-retry instead of showing normal failure
         if await lifecycle.schedule_cooldown_retry(ctx, inst, result):
             return  # Timer loop picks this up — finally: end_task still fires
-
-        if not result.is_error and result.session_id:
-            # For Discord channels, update the per-request session_id (caller reads inst.session_id)
-            # For non-Discord platforms, update the store's global active_session_id
-            if not ctx.session_id:
-                ctx.store.active_session_id = result.session_id
-            # Write session_id back immediately (before lock release).
-            # Pass the instance's repo_name so the platform wrapper can refuse
-            # rebinds that cross the thread's bound repo (see Fix 2 in
-            # bot.discord.forums.set_thread_session — RebindResult).
-            if ctx.on_session_resolved:
-                await ctx.on_session_resolved(result.session_id, inst.repo_name or None)
 
         # Recovery exhausted: layer-3 fired in the runner (resume failed on every
         # account + index rebuild, fresh session was created).  The thread's prior
@@ -1832,6 +1840,10 @@ async def on_retry(ctx: RequestContext, text: str) -> None:
         ctx.store.update_instance(new_inst)
 
     await lifecycle.run_instance(ctx, new_inst, handle=handle)
+    # run_instance doesn't bind; fill a sessionless thread so a wake armed by
+    # this retry has something to resume.  Never rebinds — see
+    # lifecycle.backfill_thread_session.
+    await lifecycle.backfill_thread_session(ctx, new_inst)
 
 
 # --- /log ---
@@ -3646,6 +3658,7 @@ async def handle_callback(
             ctx.store.update_instance(new_inst)
 
         await lifecycle.run_instance(ctx, new_inst, handle=handle)
+        await lifecycle.backfill_thread_session(ctx, new_inst)
 
     elif action == "log":
         inst = ctx.store.get_instance(instance_id)
@@ -3988,6 +4001,9 @@ async def handle_callback(
             new_inst.message_ids.setdefault(ctx.platform, []).append(handle.get("message_id"))
             ctx.store.update_instance(new_inst)
         await lifecycle.run_instance(ctx, new_inst, handle=handle)
+        # Pay-per-use is the manual twin of the cooldown auto-retry — it fires
+        # from the same usage-limit card, so it needs the same backstop.
+        await lifecycle.backfill_thread_session(ctx, new_inst)
 
     elif action in ("mode_explore", "mode_plan", "mode_build"):
         target = action.split("_", 1)[1]  # "explore", "plan", or "build"

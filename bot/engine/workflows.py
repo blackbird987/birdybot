@@ -2842,7 +2842,10 @@ async def _run_autopilot_chain(
     # not just individual steps (which have gaps between them).
     chain_task_id = f"chain:{source_id}"
     # No session_id here — chain task is for reboot idle tracking only.
-    # Individual steps register their session via lifecycle.run_instance.
+    # Individual steps run through lifecycle.run_instance, which deliberately
+    # does NOT bind their session onto the thread (a step's session belongs to
+    # the step, not the conversation — see "A thread must always know its
+    # session" in CLAUDE.md).
     # Passing session_id would block spawn_from's check_spawn_allowed guard.
     ctx.runner.begin_task(chain_task_id)
     try:

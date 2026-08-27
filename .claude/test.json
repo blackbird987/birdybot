@@ -84,7 +84,8 @@
     "result_delivery": "python scripts/test_result_delivery.py",
     "forum_pins": "python scripts/test_forum_pins.py",
     "kill_shape": "python scripts/test_kill_shape.py",
-    "lifetime_cap": "python scripts/test_lifetime_cap.py"
+    "lifetime_cap": "python scripts/test_lifetime_cap.py",
+    "cooldown_session_bind": "python scripts/test_cooldown_session_bind.py"
   },
 
   "auth": {
