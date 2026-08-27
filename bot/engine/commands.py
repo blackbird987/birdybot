@@ -1389,21 +1389,21 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
 
         lifecycle.finalize_run(ctx, inst, result)
 
+        # Write session_id back immediately (before lock release), and BEFORE
+        # the cooldown early-return below.  A usage-limit failure is not the end
+        # of a conversation, it's a pause: _do_cooldown_retry_locked resumes
+        # this exact session_id.  Bailing out first meant the thread never
+        # learned it — so the retry's work was unreachable and the /watch it
+        # armed fired into "thread gone/sessionless, dropping" hours later
+        # (2026-08-27, three ev-nova children).
+        #
+        # Every other error still skips the bind — see should_bind_session.
+        if lifecycle.should_bind_session(result):
+            await lifecycle.bind_thread_session(ctx, inst, result.session_id)
+
         # Usage limit: schedule auto-retry instead of showing normal failure
         if await lifecycle.schedule_cooldown_retry(ctx, inst, result):
             return  # Timer loop picks this up — finally: end_task still fires
-
-        if not result.is_error and result.session_id:
-            # For Discord channels, update the per-request session_id (caller reads inst.session_id)
-            # For non-Discord platforms, update the store's global active_session_id
-            if not ctx.session_id:
-                ctx.store.active_session_id = result.session_id
-            # Write session_id back immediately (before lock release).
-            # Pass the instance's repo_name so the platform wrapper can refuse
-            # rebinds that cross the thread's bound repo (see Fix 2 in
-            # bot.discord.forums.set_thread_session — RebindResult).
-            if ctx.on_session_resolved:
-                await ctx.on_session_resolved(result.session_id, inst.repo_name or None)
 
         # Recovery exhausted: layer-3 fired in the runner (resume failed on every
         # account + index rebuild, fresh session was created).  The thread's prior

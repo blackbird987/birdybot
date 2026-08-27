@@ -122,6 +122,38 @@ instead of sleeping through real hours.
 
 Harness: `python scripts/test_lifetime_cap.py`
 
+## A thread must always know its session
+
+Every resume path — the next user message, a fired self-wake, a tripped
+`/watch`, a post-reboot replay — reads `ThreadInfo.session_id`. A turn that
+finishes without writing that back is a turn the thread can never continue,
+and the failure is *silent*: the wake fires, finds nothing, and drops.
+
+Two rules, both pinned by `scripts/test_cooldown_session_bind.py`:
+
+- **The bind happens before the cooldown early-return.** A usage limit is a
+  pause, not an ending: `_do_cooldown_retry_locked` resumes that exact
+  `session_id`. `_run_query` used to return to schedule the retry *first*, so a
+  limited turn never bound at all. On 2026-08-27 that lost three overnight
+  children — limit at 00:38, retried on the backup account at 01:55, work
+  finished by 02:45, wake-ups dropped as "gone/sessionless" while the instances
+  held a perfectly resumable id.
+- **Every path that runs a turn in a thread must bind, not just the chat one.**
+  `lifecycle.run_instance` does not bind, so anything calling it directly (the
+  cooldown retry) has to. This exact omission was already fixed once for
+  post-reboot replays — see the comment on `_replay_to_thread`.
+
+`should_bind_session` is where the eligibility rule lives, and it stays narrow.
+Success binds; a usage limit binds; **no other error does.** A crashed or
+recovery-exhausted run can emit a *fresh* `session_id` carrying none of the
+thread's history, and adopting that amputates the conversation. Worktree builds
+are excluded at the retry callsite for the same reason — a build's throwaway
+session must not become the thread's chat session.
+
+`on_self_wake` distinguishes "thread gone" (drop) from "thread alive but
+sessionless" (dispatch cold, log at WARNING). Lumping them together is what
+made the loss invisible for eight hours.
+
 ## Interrupting a session (Kill / Steer)
 
 A kill is only rendered as a quiet tombstone if `RunResult.killed_intentionally`

@@ -507,6 +507,46 @@ def _repo_has_changes(repo_path: str) -> bool:
         return False
 
 
+def should_bind_session(result: RunResult) -> bool:
+    """Is this turn's session_id safe to register onto the thread?
+
+    Success always is.  A usage-limit failure also is, and must be: it is a
+    pause, not an ending — _do_cooldown_retry_locked resumes that exact
+    session_id, so a thread that doesn't learn it can never continue the work.
+
+    Every other error is refused.  A crashed or recovery-exhausted run can
+    emit a FRESH session_id carrying none of the thread's history, and
+    adopting that would silently amputate the conversation.
+    """
+    if not result.session_id:
+        return False
+    return (not result.is_error) or bool(result.usage_limit_reset)
+
+
+async def bind_thread_session(
+    ctx: RequestContext, inst: Instance, session_id: str | None,
+) -> None:
+    """Register *session_id* as the thread's session.
+
+    The one place that writes a finished turn's session back onto the thread.
+    Every later resume path — the next user message, a self-wake, a fired
+    /watch — reads ThreadInfo.session_id, so a turn that doesn't land here is
+    a turn the thread can never continue.
+
+    Callers decide eligibility; this only mutates.  The repo_name is passed so
+    the platform wrapper can refuse a rebind that crosses the thread's bound
+    repo (see bot.discord.forums.set_thread_session — RebindResult).
+    """
+    if not session_id:
+        return
+    # Non-Discord platforms track one global active session; Discord threads
+    # are isolated and carry their own via ctx.session_id.
+    if not ctx.session_id:
+        ctx.store.active_session_id = session_id
+    if ctx.on_session_resolved:
+        await ctx.on_session_resolved(session_id, inst.repo_name or None)
+
+
 def finalize_run(ctx: RequestContext, inst: Instance, result: RunResult) -> None:
     """Apply RunResult to Instance and persist."""
     # Defense in depth: a synthetic RunResult from refuse-to-spawn or an

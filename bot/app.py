@@ -760,9 +760,21 @@ async def run() -> None:
         if not discord_bot._ready_event.is_set() or not discord_bot._forums.forum_projects:
             return "busy"
         lookup = discord_bot._forums.thread_to_project(channel_id)
-        if lookup is None or not lookup[1].session_id:
-            log.info("Self-wake: thread %s gone/sessionless, dropping", channel_id)
+        if lookup is None:
+            log.info("Self-wake: thread %s gone, dropping", channel_id)
             return "drop"          # dead/merged/closed thread — don't resurface
+        if not lookup[1].session_id:
+            # Thread is alive but has no session bound. Used to be lumped in
+            # with "gone" and dropped — which is how three overnight runs
+            # finished their work and then vanished in silence (2026-08-27).
+            # A wake body is written to stand on its own ("read the log tail,
+            # report the numbers"), so dispatching cold into the right thread
+            # beats saying nothing: _replay_to_thread starts a fresh session
+            # there. The bind fixes above make this a rare last resort.
+            log.warning(
+                "Self-wake: thread %s is alive but sessionless — dispatching "
+                "cold rather than dropping", channel_id,
+            )
         if runner.active_instance_for_channel(channel_id):
             return "busy"          # mid-turn — scheduler re-arms instead of colliding
         # A fired wake runs unattended. Append the end-of-turn protocol so this
@@ -1629,6 +1641,13 @@ async def _do_cooldown_retry_locked(store, runner, inst, discord_bot, channel_id
     t_info = lookup[1] if lookup else None
     repo_name = lookup[0].repo_name if lookup else inst.repo_name
     ctx = discord_bot._ctx(channel_id, thread_info=t_info, repo_name=repo_name)
+    # Wire the session callbacks so the session this retry produces gets
+    # registered onto the thread.  Without this the retry ran through
+    # lifecycle.run_instance, which never binds — so even a *successful* retry
+    # left the thread sessionless and unable to be resumed by a self-wake.
+    # Same omission that was fixed for post-reboot replays (_replay_to_thread).
+    if t_info is not None:
+        discord_bot._forums.attach_session_callbacks(ctx, t_info, str(channel_id))
     # Mark this as an unattended turn: nobody typed it, so lifecycle's
     # end-of-turn protocol applies (finish with [TURN_COMPLETE] or schedule a
     # wake, else get auto-nudged rather than silently stranding the thread).
@@ -1707,6 +1726,20 @@ async def _do_cooldown_retry_locked(store, runner, inst, discord_bot, channel_id
     log.info("Cooldown retry: %s → %s in channel %s", inst.id, new_inst.id, channel_id)
     try:
         await lifecycle.run_instance(ctx, new_inst, handle=handle)
+
+        # Belt-and-braces re-bind: run_instance doesn't bind, and the pre-limit
+        # turn may have been interrupted before it produced a session_id at all
+        # (or a mid-run recovery may have swapped it).  finalize_run has already
+        # written the authoritative id onto the instance by now.
+        #
+        # Worktree builds are excluded on purpose: a build runs its own
+        # throwaway session in an isolated checkout and must not steal the
+        # thread's chat binding.
+        if new_inst.session_id and not new_inst.worktree_path:
+            try:
+                await lifecycle.bind_thread_session(ctx, new_inst, new_inst.session_id)
+            except Exception:
+                log.exception("Failed to bind session after cooldown retry %s", new_inst.id)
 
         # Resume autopilot chain if this retry was mid-chain
         if (new_inst.status == InstanceStatus.COMPLETED
