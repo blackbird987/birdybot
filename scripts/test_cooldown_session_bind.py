@@ -3,22 +3,26 @@
 Background (2026-08-27, three ev-nova children). All three hit the account's
 weekly limit, were auto-retried on the backup account, did hours of real work,
 armed a /watch, and then their wake-ups were dropped with
-"thread gone/sessionless". Cause: `commands._run_query` returned early to
+"thread gone/sessionless". Cause: `commands._execute_query` returned early to
 schedule the cooldown retry BEFORE the line that writes the session_id onto
 ThreadInfo, and the retry path (`app._do_cooldown_retry_locked` ->
 `lifecycle.run_instance`) never binds at all. So the thread never learned which
 session it was talking to, and every later resume path — next user message,
 self-wake, fired /watch — had nothing to resume.
 
-Locks three things:
+Locks four things:
   1. should_bind_session: success and usage-limit bind; every other error
      doesn't (a crashed run can emit a FRESH session id whose adoption would
      amputate the thread's history).
   2. bind_thread_session actually reaches ForumManager.set_thread_session and
      mutates ThreadInfo — using the real production objects.
-  3. Source order in _run_query: the bind is above the cooldown early-return.
-     This is the exact regression; a future edit that swaps them back
-     reintroduces the silent overnight loss.
+  3. Source order in _execute_query: the bind is above the cooldown
+     early-return. This is the exact regression; a future edit that swaps them
+     back reintroduces the silent overnight loss.
+  4. The cooldown retry's backstop bind stays FILL-ONLY. Chain steps hit usage
+     limits too, and their session belongs to the step, not the conversation —
+     rebinding an already-bound thread from there would amputate the history
+     this whole change exists to protect.
 
 Run: python scripts/test_cooldown_session_bind.py
 Exit 0 = all pass, exit 1 = failures.
@@ -30,6 +34,7 @@ import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
 
 import asyncio
 import os
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -75,9 +80,17 @@ _check(
     ),
 )
 _check(
-    "recovery-exhausted fresh session does NOT bind",
+    "recovery-exhausted crash does NOT bind",
     not lifecycle.should_bind_session(
         RunResult(session_id="s-fresh", is_error=True, session_recovery_exhausted=True),
+    ),
+)
+_check(
+    "a recovered session that THEN hit the limit still binds "
+    "(old id is already unreachable; the retry resumes the new one)",
+    lifecycle.should_bind_session(
+        RunResult(session_id="s-new", is_error=True, usage_limit_reset=_reset,
+                  session_recovery_exhausted=True),
     ),
 )
 _check(
@@ -99,7 +112,7 @@ print("bind_thread_session — reaches ThreadInfo through the real ForumManager"
 
 
 class _FakeStore:
-    """Only the two attributes bind_thread_session touches."""
+    """The one attribute bind_thread_session touches."""
 
     active_session_id = None
 
@@ -123,7 +136,6 @@ class _Ctx:
         self.session_id = None
         self.store = _FakeStore()
         self.on_session_resolved = None
-        self.channel_id = "t-1"
 
 
 _fm, _info = _make_forums()
@@ -171,10 +183,29 @@ _check("None session id fires no callback", _resolved.result is None)
 # ------------------------------------------------- 3. source order in _run_query
 
 print()
-print("_run_query — bind sits ABOVE the cooldown early-return")
+print("_execute_query — bind sits ABOVE the cooldown early-return")
 
-_src = open(os.path.join(_ROOT, "bot", "engine", "commands.py"),
-            encoding="utf-8").read()
+
+def _func_body(source: str, header: str) -> str:
+    """Slice one top-level function out of a module, header to next def.
+
+    Scanning to end-of-file instead would let a match in a LATER function
+    satisfy a check about this one.
+    """
+    start = source.find(header)
+    if start == -1:
+        return ""
+    rest = source[start + len(header):]
+    end = re.search(r"^(?:async def |def |class )", rest, re.MULTILINE)
+    return rest[:end.start()] if end else rest
+
+
+_src = _func_body(
+    open(os.path.join(_ROOT, "bot", "engine", "commands.py"),
+         encoding="utf-8").read(),
+    "async def _execute_query(",
+)
+_check("_execute_query located", bool(_src))
 _i_bind = _src.find("lifecycle.should_bind_session(result)")
 _i_cooldown = _src.find("lifecycle.schedule_cooldown_retry(ctx, inst, result)")
 _check("bind callsite present", _i_bind != -1)
@@ -191,12 +222,15 @@ print()
 print("_do_cooldown_retry_locked — attaches callbacks and re-binds after the run")
 
 _app = open(os.path.join(_ROOT, "bot", "app.py"), encoding="utf-8").read()
-_body = _app[_app.find("async def _do_cooldown_retry_locked"):]
+_body = _func_body(_app, "async def _do_cooldown_retry_locked(")
+_check("_do_cooldown_retry_locked located", bool(_body))
 _check("attaches session callbacks",
        "attach_session_callbacks" in _body)
-_check("re-binds after run_instance",
+_check("binds after run_instance",
        "bind_thread_session" in _body)
-_check("worktree builds excluded from the re-bind",
+_check("fill-only: never rebinds a thread that already has a session",
+       "not t_info.session_id" in _body)
+_check("worktree builds excluded from the bind",
        "not new_inst.worktree_path" in _body)
 
 _check(

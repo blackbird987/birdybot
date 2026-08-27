@@ -1398,8 +1398,16 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
         # (2026-08-27, three ev-nova children).
         #
         # Every other error still skips the bind — see should_bind_session.
+        #
+        # Non-fatal by design: this now sits ABOVE the cooldown scheduling and
+        # the result delivery, so a failed state write must not be able to cost
+        # the turn its retry or its answer.  It logs at ERROR, and the
+        # sessionless-wake fallback in app.on_self_wake is the safety net.
         if lifecycle.should_bind_session(result):
-            await lifecycle.bind_thread_session(ctx, inst, result.session_id)
+            try:
+                await lifecycle.bind_thread_session(ctx, inst, result.session_id)
+            except Exception:
+                log.exception("Failed to bind session for %s", inst.id)
 
         # Usage limit: schedule auto-retry instead of showing normal failure
         if await lifecycle.schedule_cooldown_retry(ctx, inst, result):

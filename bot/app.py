@@ -1647,7 +1647,7 @@ async def _do_cooldown_retry_locked(store, runner, inst, discord_bot, channel_id
     # left the thread sessionless and unable to be resumed by a self-wake.
     # Same omission that was fixed for post-reboot replays (_replay_to_thread).
     if t_info is not None:
-        discord_bot._forums.attach_session_callbacks(ctx, t_info, str(channel_id))
+        discord_bot._forums.attach_session_callbacks(ctx, t_info, channel_id)
     # Mark this as an unattended turn: nobody typed it, so lifecycle's
     # end-of-turn protocol applies (finish with [TURN_COMPLETE] or schedule a
     # wake, else get auto-nudged rather than silently stranding the thread).
@@ -1727,15 +1727,23 @@ async def _do_cooldown_retry_locked(store, runner, inst, discord_bot, channel_id
     try:
         await lifecycle.run_instance(ctx, new_inst, handle=handle)
 
-        # Belt-and-braces re-bind: run_instance doesn't bind, and the pre-limit
-        # turn may have been interrupted before it produced a session_id at all
-        # (or a mid-run recovery may have swapped it).  finalize_run has already
-        # written the authoritative id onto the instance by now.
+        # Backstop bind: run_instance never binds, so if the interrupted turn
+        # was cut off before it produced a session_id at all, this retry's
+        # session is the only one the thread will ever see.  finalize_run has
+        # already written the authoritative id onto the instance by now.
         #
-        # Worktree builds are excluded on purpose: a build runs its own
-        # throwaway session in an isolated checkout and must not steal the
-        # thread's chat binding.
-        if new_inst.session_id and not new_inst.worktree_path:
+        # FILL A GAP, NEVER REBIND.  Anything that hits a usage limit lands
+        # here — chat turns, but also chain steps (plan, review, verify) whose
+        # session belongs to the step, not the conversation.  Those never
+        # rebind a thread on the normal path, so rebinding them only on the
+        # cooldown variant would let a step quietly amputate a thread's chat
+        # history.  Writing only into an EMPTY binding cannot lose anything.
+        #
+        # Worktree builds are excluded on top of that: a build runs its own
+        # session inside an isolated checkout and must not become the thread's
+        # chat session even when the slot is free.
+        if (t_info is not None and not t_info.session_id
+                and new_inst.session_id and not new_inst.worktree_path):
             try:
                 await lifecycle.bind_thread_session(ctx, new_inst, new_inst.session_id)
             except Exception:

@@ -517,6 +517,11 @@ def should_bind_session(result: RunResult) -> bool:
     Every other error is refused.  A crashed or recovery-exhausted run can
     emit a FRESH session_id carrying none of the thread's history, and
     adopting that would silently amputate the conversation.
+
+    A run that recovered onto a fresh session AND then hit the limit still
+    binds — deliberately.  The old id is already unreachable at that point
+    (that is what recovery exhaustion means) and the retry resumes the new
+    one, so refusing here would strand the thread for a second time.
     """
     if not result.session_id:
         return False
