@@ -10,7 +10,7 @@ ThreadInfo, and the retry path (`app._do_cooldown_retry_locked` ->
 session it was talking to, and every later resume path — next user message,
 self-wake, fired /watch — had nothing to resume.
 
-Locks four things:
+Locks five things:
   1. should_bind_session: success and usage-limit bind; every other error
      doesn't (a crashed run can emit a FRESH session id whose adoption would
      amputate the thread's history).
@@ -19,10 +19,13 @@ Locks four things:
   3. Source order in _execute_query: the bind is above the cooldown
      early-return. This is the exact regression; a future edit that swaps them
      back reintroduces the silent overnight loss.
-  4. The cooldown retry's backstop bind stays FILL-ONLY. Chain steps hit usage
-     limits too, and their session belongs to the step, not the conversation —
-     rebinding an already-bound thread from there would amputate the history
-     this whole change exists to protect.
+  4. backfill_thread_session fills an EMPTY binding and never rebinds, and
+     refuses an isolated worktree build outright.
+  5. Every direct run_instance caller outside the chain runner backfills
+     (cooldown retry, /retry, the Retry button, continue-on-pay-per-use).
+     run_instance never binds, so one of these added without a backfill
+     silently reintroduces the overnight loss. The chain runner is excluded
+     on purpose: a step's session belongs to the step, not the conversation.
 
 Run: python scripts/test_cooldown_session_bind.py
 Exit 0 = all pass, exit 1 = failures.
@@ -136,6 +139,7 @@ class _Ctx:
         self.session_id = None
         self.store = _FakeStore()
         self.on_session_resolved = None
+        self.resolve_session_id = None
 
 
 _fm, _info = _make_forums()
@@ -180,7 +184,76 @@ asyncio.run(lifecycle.bind_thread_session(_ctx, _inst, None))
 _check("None session id fires no callback", _resolved.result is None)
 
 
-# ------------------------------------------------- 3. source order in _run_query
+# --------------------------------------------- 3. backfill: fill a gap, never rebind
+
+print()
+print("backfill_thread_session — fills an empty binding only")
+
+_fm2, _info2 = _make_forums()
+_ctx2 = _Ctx()
+_ctx2.resolve_session_id = lambda: _info2.session_id or None
+
+
+async def _resolved2(sid, repo_name):
+    _fm2.set_thread_session("t-1", sid, repo_name)
+
+
+_ctx2.on_session_resolved = _resolved2
+
+_ran = _make_inst("q-10", "bot")
+_ran.session_id = "s-retry"
+
+_check(
+    "empty thread gets filled",
+    asyncio.run(lifecycle.backfill_thread_session(_ctx2, _ran)) is True,
+)
+_check("…and the id landed on ThreadInfo", _info2.session_id == "s-retry")
+
+_other = _make_inst("q-11", "bot")
+_other.session_id = "s-different"
+_check(
+    "a bound thread is NEVER rebound (a chain step must not amputate chat history)",
+    asyncio.run(lifecycle.backfill_thread_session(_ctx2, _other)) is False,
+)
+_check("…and the original binding survives", _info2.session_id == "s-retry")
+
+# Worktree build into an EMPTY thread: still refused.
+_fm3, _info3 = _make_forums()
+_ctx3 = _Ctx()
+_ctx3.resolve_session_id = lambda: _info3.session_id or None
+
+
+async def _resolved3(sid, repo_name):
+    _fm3.set_thread_session("t-1", sid, repo_name)
+
+
+_ctx3.on_session_resolved = _resolved3
+
+_build = _make_inst("b-1", "bot")
+_build.session_id = "s-build"
+_build.worktree_path = "/tmp/repo/.worktrees/b-1"
+_check(
+    "an isolated worktree build never becomes the thread's chat session",
+    asyncio.run(lifecycle.backfill_thread_session(_ctx3, _build)) is False,
+)
+_check("…thread left empty", _info3.session_id is None)
+
+_nosess = _make_inst("q-12", "bot")
+_check(
+    "no session id -> nothing to fill",
+    asyncio.run(lifecycle.backfill_thread_session(_ctx3, _nosess)) is False,
+)
+
+# A context with no resolve_session_id isn't thread-bound (non-Discord, or a
+# ctx nobody attached callbacks to) — silently do nothing.
+_ctx4 = _Ctx()
+_check(
+    "unattached context -> no-op",
+    asyncio.run(lifecycle.backfill_thread_session(_ctx4, _ran)) is False,
+)
+
+
+# ------------------------------------------------- 4. source order in _execute_query
 
 print()
 print("_execute_query — bind sits ABOVE the cooldown early-return")
@@ -216,22 +289,58 @@ _check(
 )
 
 
-# --------------------------------------------- 4. the retry path wires callbacks
+# ----------------------------------- 5. every direct run_instance caller backfills
 
 print()
-print("_do_cooldown_retry_locked — attaches callbacks and re-binds after the run")
+print("direct run_instance callers — each tops up a sessionless thread")
 
 _app = open(os.path.join(_ROOT, "bot", "app.py"), encoding="utf-8").read()
+_cmds = open(os.path.join(_ROOT, "bot", "engine", "commands.py"),
+             encoding="utf-8").read()
+_flows = open(os.path.join(_ROOT, "bot", "engine", "workflows.py"),
+              encoding="utf-8").read()
+
 _body = _func_body(_app, "async def _do_cooldown_retry_locked(")
 _check("_do_cooldown_retry_locked located", bool(_body))
-_check("attaches session callbacks",
+_check("cooldown retry attaches session callbacks (else it cannot bind at all)",
        "attach_session_callbacks" in _body)
-_check("binds after run_instance",
-       "bind_thread_session" in _body)
-_check("fill-only: never rebinds a thread that already has a session",
-       "not t_info.session_id" in _body)
-_check("worktree builds excluded from the bind",
-       "not new_inst.worktree_path" in _body)
+
+
+def _callers_missing_backfill(source: str) -> list[int]:
+    """run_instance call sites with no backfill within the following window.
+
+    Conversation-owning callers must top up a sessionless thread themselves —
+    run_instance never will.  A NEW direct caller added later without one
+    silently reintroduces the overnight loss, so this is checked structurally
+    rather than site-by-site.
+    """
+    lines = source.split("\n")
+    missing = []
+    for n, line in enumerate(lines):
+        if "lifecycle.run_instance(" not in line:
+            continue
+        window = "\n".join(lines[n:n + 12])
+        if "backfill_thread_session" not in window:
+            missing.append(n + 1)
+    return missing
+
+
+for _mod, _text, _expect in (("bot/app.py", _app, 1),
+                             ("bot/engine/commands.py", _cmds, 3)):
+    _sites = _text.count("lifecycle.run_instance(")
+    _check(f"{_mod}: found the expected {_expect} direct run_instance caller(s)",
+           _sites == _expect)
+    _gaps = _callers_missing_backfill(_text)
+    _check(f"{_mod}: every direct run_instance caller backfills the thread session",
+           not _gaps)
+    if _gaps:
+        print(f"        unbacked call sites at lines: {_gaps}")
+
+_check(
+    "workflows.py deliberately does NOT backfill (a step's session is the "
+    "step's, not the conversation's)",
+    "backfill_thread_session" not in _flows,
+)
 
 _check(
     "self-wake no longer lumps sessionless in with gone",

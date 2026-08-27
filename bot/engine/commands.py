@@ -1840,6 +1840,10 @@ async def on_retry(ctx: RequestContext, text: str) -> None:
         ctx.store.update_instance(new_inst)
 
     await lifecycle.run_instance(ctx, new_inst, handle=handle)
+    # run_instance doesn't bind; fill a sessionless thread so a wake armed by
+    # this retry has something to resume.  Never rebinds — see
+    # lifecycle.backfill_thread_session.
+    await lifecycle.backfill_thread_session(ctx, new_inst)
 
 
 # --- /log ---
@@ -3654,6 +3658,7 @@ async def handle_callback(
             ctx.store.update_instance(new_inst)
 
         await lifecycle.run_instance(ctx, new_inst, handle=handle)
+        await lifecycle.backfill_thread_session(ctx, new_inst)
 
     elif action == "log":
         inst = ctx.store.get_instance(instance_id)
@@ -3996,6 +4001,9 @@ async def handle_callback(
             new_inst.message_ids.setdefault(ctx.platform, []).append(handle.get("message_id"))
             ctx.store.update_instance(new_inst)
         await lifecycle.run_instance(ctx, new_inst, handle=handle)
+        # Pay-per-use is the manual twin of the cooldown auto-retry — it fires
+        # from the same usage-limit card, so it needs the same backstop.
+        await lifecycle.backfill_thread_session(ctx, new_inst)
 
     elif action in ("mode_explore", "mode_plan", "mode_build"):
         target = action.split("_", 1)[1]  # "explore", "plan", or "build"

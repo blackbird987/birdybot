@@ -1727,27 +1727,13 @@ async def _do_cooldown_retry_locked(store, runner, inst, discord_bot, channel_id
     try:
         await lifecycle.run_instance(ctx, new_inst, handle=handle)
 
-        # Backstop bind: run_instance never binds, so if the interrupted turn
-        # was cut off before it produced a session_id at all, this retry's
-        # session is the only one the thread will ever see.  finalize_run has
-        # already written the authoritative id onto the instance by now.
-        #
-        # FILL A GAP, NEVER REBIND.  Anything that hits a usage limit lands
-        # here — chat turns, but also chain steps (plan, review, verify) whose
-        # session belongs to the step, not the conversation.  Those never
-        # rebind a thread on the normal path, so rebinding them only on the
-        # cooldown variant would let a step quietly amputate a thread's chat
-        # history.  Writing only into an EMPTY binding cannot lose anything.
-        #
-        # Worktree builds are excluded on top of that: a build runs its own
-        # session inside an isolated checkout and must not become the thread's
-        # chat session even when the slot is free.
-        if (t_info is not None and not t_info.session_id
-                and new_inst.session_id and not new_inst.worktree_path):
-            try:
-                await lifecycle.bind_thread_session(ctx, new_inst, new_inst.session_id)
-            except Exception:
-                log.exception("Failed to bind session after cooldown retry %s", new_inst.id)
+        # Backstop: run_instance never binds, so if the interrupted turn was
+        # cut off before it produced a session_id at all, this retry's session
+        # is the only one the thread will ever see.  finalize_run has already
+        # written the authoritative id onto the instance by now.  Fill-only and
+        # worktree-excluded — the rule lives in backfill_thread_session, shared
+        # with /retry, the Retry button and continue-on-pay-per-use.
+        await lifecycle.backfill_thread_session(ctx, new_inst)
 
         # Resume autopilot chain if this retry was mid-chain
         if (new_inst.status == InstanceStatus.COMPLETED
