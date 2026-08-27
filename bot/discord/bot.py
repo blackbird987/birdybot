@@ -46,7 +46,7 @@ from bot.discord import spawn_colors
 from bot.discord import tags as tags_mod
 from bot.discord.forums import ForumManager, ThreadInfo
 from bot.discord.titles import generate_title_text, read_ai_title
-from bot.engine import commands
+from bot.engine import commands, memes
 from bot.platform.base import RequestContext, SpawnArgs, SpawnResult
 from bot.services.twitter import enrich_with_tweets
 
@@ -1961,6 +1961,12 @@ class ClaudeBot(discord.Client):
                 return
         else:
             msg_access = AccessResult(allowed=True, is_owner=True)
+
+        # Meme drop: handled inline and returned before any session routing,
+        # so a pasted link costs no tokens and spawns no thread. Claims every
+        # message in that channel, links or not - it is not a session channel.
+        if await memes.handle(message):
+            return
 
         text = message.content.strip()
         _image_paths: list[str] = []
