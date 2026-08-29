@@ -265,6 +265,21 @@ class Instance:
     # child can ask again, and that exchange has no natural end — so the wave
     # carries its budget, like every other self-driving loop in the bot.
     spawn_blocked_resumes: int = 0
+    # Orchestrator join: children whose story this wave could NOT close cleanly
+    # when it was released — anything that was not a plain completion (still
+    # running, never started, parked on a question, failed, killed). Those are
+    # the only children a later terminal outcome may be reported for: a child
+    # the wave already reported as COMPLETED is done, and a subsequent turn in
+    # its thread is ordinary follow-up chat, not a straggler, so it must not
+    # wake the parent. Written once, at release.
+    spawn_wave_unresolved_thread_ids: list[str] = field(default_factory=list)
+    # Orchestrator join: children of this wave whose report arrived AFTER the
+    # wave had already closed, and which have therefore been delivered on their
+    # own. A released wave used to swallow a late child's finalize entirely, so
+    # a straggler that a partial release had written off as "never came back"
+    # finished, wrote a full report, and told nobody. Recorded per child so a
+    # re-finalize (retry, replay) cannot post the same report twice.
+    spawn_late_reported_thread_ids: list[str] = field(default_factory=list)
     _accounts_tried: set[str] = field(default_factory=set)  # Ephemeral: tracks accounts tried this run (not persisted)
     # Ephemeral: True when on_verify_release fail-closed because the verifier
     # output was unparseable (vs real phantom_bullets in the verdict). Read by
@@ -375,6 +390,8 @@ class Instance:
             "spawn_wave_released": self.spawn_wave_released,
             "spawn_wave_sealed": self.spawn_wave_sealed,
             "spawn_blocked_resumes": self.spawn_blocked_resumes,
+            "spawn_late_reported_thread_ids": self.spawn_late_reported_thread_ids,
+            "spawn_wave_unresolved_thread_ids": self.spawn_wave_unresolved_thread_ids,
         }
 
     @classmethod
@@ -460,6 +477,12 @@ class Instance:
             spawn_wave_released=d.get("spawn_wave_released", False),
             spawn_wave_sealed=d.get("spawn_wave_sealed", False),
             spawn_blocked_resumes=d.get("spawn_blocked_resumes", 0),
+            spawn_late_reported_thread_ids=(
+                d.get("spawn_late_reported_thread_ids") or []
+            ),
+            spawn_wave_unresolved_thread_ids=(
+                d.get("spawn_wave_unresolved_thread_ids") or []
+            ),
         )
 
 

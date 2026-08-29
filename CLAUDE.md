@@ -239,6 +239,30 @@ to the parent instead of making the user do it.
   fully-settled wave early (a killed child never calls back), and silently
   *retires* any wave older than `_WAVE_ABANDON_HOURS` (12) — which is what
   absorbs waves recorded before this feature existed.
+- **The timeout is for a child that is gone, not one that is slow.** It only
+  fires while no outstanding child has a live CLI process (`_child_is_live`,
+  which asks the *runner* — a status field frozen on RUNNING by a crash would
+  otherwise disable the timeout for the exact case it exists for), up to
+  `ORCH_WAVE_MAX_MIN` (default 6h; `0` = no ceiling). Age-only, it guillotined
+  the conductor's 3h bench children at 45 minutes on every wave.
+- **A report that lands after its wave closed is still delivered.** A released
+  wave used to swallow the straggler's finalize on a `debug` line, so a child
+  the partial release had written off finished, wrote a full report, and told
+  nobody — which is what pushed the parent onto its self-wake fallback.
+  `_deliver_late_child` posts it on its own (full report path + "your earlier
+  'missing' conclusion is stale"), auto-resuming only when it was the last one
+  outstanding, and records it in `Instance.spawn_late_reported_thread_ids` so a
+  retry can't post it twice. No deadline is right for every child; this is what
+  makes a wrong release recoverable instead of lossy.
+- **Only a child the release could not account for may be reported late.**
+  `release_wave` snapshots those into `Instance.spawn_wave_unresolved_thread_ids`
+  (same await-free block as the released flag, so the two can't disagree), and
+  `_deliver_late_child` requires membership. Without that gate, every later turn
+  in a child thread — a user follow-up, a re-finalize — reads as a straggler and
+  wakes the parent. Gating on "the release was partial" is the tempting wrong
+  answer: a child paused by a usage limit is recorded FAILED and *settled*, so
+  its wave closes as complete, and the report from its retry is exactly the one
+  that must still arrive. Pre-existing waves carry an empty list and are inert.
 - Blocked-child wake-ups are budgeted at `_MAX_BLOCKED_RESUMES` (4) per wave
   (`Instance.spawn_blocked_resumes`) — parent answers, child asks again, repeat.
 - `[BOT_CMD: /reply thread=<id>]` + `~~~reply` body lets a parent answer its own
