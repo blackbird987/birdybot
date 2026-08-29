@@ -836,6 +836,15 @@ MAX_CONSEC_NUDGES: int = 2
 # way a wave nobody can act on any more (12h+, including every wave recorded
 # before this join existed) is retired silently rather than reported.
 ORCH_WAVE_TIMEOUT_MIN: int = int(os.getenv("ORCH_WAVE_TIMEOUT_MIN", "45"))
+# ...but the timeout is for children that are GONE, not for children that are
+# slow. A child whose CLI process is still running in this bot holds the wave
+# open past the deadline — a 3h benchmark child was otherwise guillotined at 45
+# minutes every single time, and the report it produced an hour later was then
+# dropped because the wave it belonged to had already closed. This is the
+# absolute ceiling on that extension so a child that heartbeats forever cannot
+# hold its parent open indefinitely. 0 disables the ceiling (deadline then
+# waits for the process however long it lives).
+ORCH_WAVE_MAX_MIN: int = int(os.getenv("ORCH_WAVE_MAX_MIN", "360"))
 # Resume the parent automatically once its wave closes, instead of waiting for
 # a "Resume parent" tap. Safe against runaway because the resumed turn cannot
 # spawn past _MAX_SPAWN_WAVES (bot/engine/commands.py) — a callback resume does

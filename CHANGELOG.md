@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+- **A spawned child that is merely slow is no longer written off as missing** (`bot/discord/orchestrator.py`, `bot/config.py`). The wave timeout was meant for children that *vanished* — killed during a reboot, dead before recording a session — but it only measured the wave's age, so it fired on children that were still working. The ev-nova conductor thread hit this on every single wave: a bench child dispatched at 08:01 was released at 08:49 as "0/1 children back (waited 45m)", ran until ~11:00, and finished fine. A wave past `ORCH_WAVE_TIMEOUT_MIN` is now held open while any outstanding child still has a **live CLI process** — asked of the runner (`is_session_active` / `active_instance_for_channel`), never of a stored status a crash could freeze on RUNNING — bounded by a new `ORCH_WAVE_MAX_MIN` ceiling (default 6h, `0` = off) so a child that heartbeats forever cannot hold its parent open indefinitely. A partial release also now prints the time it *actually* waited instead of the configured deadline, which had been claiming "waited 45m" on waves held open for hours.
+- **A child's report that arrives after its wave closed is delivered instead of dropped** (`bot/discord/orchestrator.py`, `bot/claude/types.py`). Once a wave was released, a straggler's finalize callback found no open wave and returned on a `debug` line nobody sees — so the child that the partial release had just described as "contributed nothing" finished, wrote a full report, and told no one. That is what forced the conductor to fall back to its own self-wake and go digging. A late child is now posted on its own with its full report path and the correction that the parent's earlier "this child is missing" conclusion is stale, auto-resuming the parent only once the last outstanding child of that wave is in (otherwise a button, so N stragglers cannot burn N parent turns). Recorded per child in `Instance.spawn_late_reported_thread_ids`, so a retry or replay cannot post the same report twice, and a wave old enough to have been retired (12h+) still wakes nobody. This is the safety net that makes a wrong release recoverable rather than lossy.
+
+### Added
+- `ORCH_WAVE_MAX_MIN` (default `360`) — absolute ceiling on how long a live child may hold its parent's wave open past the normal timeout.
+- `scripts/test_orchestrator_join.py` gains 17 checks across two new cases: a live child holds a past-deadline wave open (by session *and* by channel, for a child too young to have a session yet) while a stale RUNNING record still times out and the ceiling still forces a release; and a late child's report is delivered exactly once, carries its report path, auto-resumes only when nothing else is outstanding, and is refused for a retired wave.
+
 ## v0.101.13 — A paused turn remembers which thread it belongs to (2026-08-27)
 
 ### Fixed

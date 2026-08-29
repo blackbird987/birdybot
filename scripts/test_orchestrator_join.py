@@ -18,6 +18,11 @@ Covers, driving the real code over fake bot/store/forums seams:
 - a blocked child does not close the wave, and its notice names /reply
 - the timeout sweep releases a wave whose child never reached a terminal
   state, marks it partial, and does NOT auto-resume it
+- ...but a child with a LIVE process holds its wave open past that deadline
+  (up to ORCH_WAVE_MAX_MIN), while a stale RUNNING record left by a crash
+  still times out
+- a report that lands after its wave closed is delivered on its own, exactly
+  once, instead of being dropped
 - an archived parent gets an Ark notice instead of a silent log line
 - /reply pairing + the "only your own children" guard
 
@@ -130,13 +135,29 @@ class FakeChannel:
         self.locked = locked
 
 
+class FakeRunner:
+    """Stands in for the live process table the liveness check consults."""
+
+    def __init__(self, sessions=(), channels=()):
+        self._sessions = set(sessions)
+        self._channels = {str(c) for c in channels}
+
+    def is_session_active(self, session_id):
+        return bool(session_id) and session_id in self._sessions
+
+    def active_instance_for_channel(self, channel_id):
+        return "q-live" if str(channel_id) in self._channels else None
+
+
 class FakeBot:
-    def __init__(self, threads, instances, *, archived_parents=()):
+    def __init__(self, threads, instances, *, archived_parents=(),
+                 live_sessions=(), live_channels=()):
         self._forums = FakeForums(threads)
         self._store = FakeStore(instances)
         self.messenger = FakeMessenger()
         self._lobby_channel_id = "999"
         self._archived = set(archived_parents)
+        self._runner = FakeRunner(live_sessions, live_channels)
         self.resumes = []
 
     def get_channel(self, cid):
@@ -607,8 +628,126 @@ def test_blocked_resume_cap() -> None:
            "a blocked child with no open wave to charge gets a button, not an auto-resume")
 
 
+def test_live_child_holds_wave_open() -> None:
+    print("\n[a slow child is not a missing child]")
+    # The 45m timeout exists for children that VANISHED. It was firing on
+    # children that were merely slow: a 3h benchmark child got released as
+    # "never came back" every single time, and the report it produced an hour
+    # later was then dropped because its wave had closed.
+    old = (datetime.now(timezone.utc)
+           - timedelta(minutes=config.ORCH_WAVE_TIMEOUT_MIN + 30)).isoformat()
+    threads = {
+        "100": FakeThreadInfo("100", "sp", "Parent"),
+        "101": FakeThreadInfo("101", "s1", "Three-hour bench", parent="100"),
+    }
+
+    def _build(**kw):
+        parent = _inst("q-p", "sp", InstanceStatus.COMPLETED, children=["101"],
+                       created=old)
+        bot = FakeBot(threads, [parent, _inst("q-1", "s1", InstanceStatus.RUNNING)], **kw)
+        return parent, bot
+
+    parent, bot = _build(live_sessions=["s1"])
+    _check(asyncio.run(_sweep_and_drain(bot)) == 0,
+           "a wave past its deadline is held open while a child is still running")
+    _check(not parent.spawn_wave_released and not bot.messenger.posts,
+           "nothing is posted about a child that is simply taking a while")
+
+    # Same records, but the process is gone — a RUNNING status frozen by a
+    # crash or a reboot must NOT disable the timeout it was written for.
+    parent, bot = _build()
+    _check(asyncio.run(_sweep_and_drain(bot)) == 1,
+           "a stale RUNNING record with no live process still times out")
+    _check(parent.spawn_wave_released, "the vanished-child wave is released")
+
+    # A child too young to have recorded a session is live via its channel.
+    threads["102"] = FakeThreadInfo("102", None, "Just launched", parent="100")
+    parent = _inst("q-p", "sp", InstanceStatus.COMPLETED, children=["102"], created=old)
+    bot = FakeBot(threads, [parent], live_channels=["102"])
+    _check(asyncio.run(_sweep_and_drain(bot)) == 0,
+           "a child with no session yet but a live process also holds the wave")
+
+    # ...but not forever.
+    parent, bot = _build(live_sessions=["s1"])
+    prev = config.ORCH_WAVE_MAX_MIN
+    config.ORCH_WAVE_MAX_MIN = 1
+    try:
+        n = asyncio.run(_sweep_and_drain(bot))
+    finally:
+        config.ORCH_WAVE_MAX_MIN = prev
+    _check(n == 1 and parent.spawn_wave_released,
+           "past ORCH_WAVE_MAX_MIN a live child no longer holds its parent open")
+
+    # The partial release reports the real wait, not the configured deadline.
+    body = bot.messenger.posts[0].text
+    _check(f"waited {config.ORCH_WAVE_TIMEOUT_MIN + 30}m" in body,
+           "the release names how long it actually waited, not the knob")
+
+
+def test_late_child_report() -> None:
+    print("\n[a report that arrives after its wave closed]")
+    tmp = Path(tempfile.mkdtemp()) / "late.md"
+    tmp.write_text("BENCH RESULT: closure ruler beats the image fit.", encoding="utf-8")
+    threads = {
+        "100": FakeThreadInfo("100", "sp", "Parent"),
+        "101": FakeThreadInfo("101", "s1", "Straggler", parent="100"),
+        "102": FakeThreadInfo("102", "s2", "Sibling", parent="100"),
+    }
+
+    recent = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+
+    def _build(children):
+        parent = _inst("q-p", "sp", InstanceStatus.COMPLETED, children=children,
+                       released=True, created=recent)
+        insts = [parent, _inst("q-1", "s1", InstanceStatus.COMPLETED,
+                               result_file=str(tmp))]
+        if "102" in children:
+            insts.append(_inst("q-2", "s2", InstanceStatus.RUNNING))
+        return parent, FakeBot(threads, insts)
+
+    parent, bot = _build(["101"])
+    asyncio.run(_run_and_drain(orch.post_parent_callback(bot, "101", "COMPLETED", "done")))
+    _check(bool(bot.messenger.posts), "a straggler's report is delivered, not dropped")
+    _check("Late report" in bot.messenger.posts[-1].text,
+           "the post says plainly that this arrived after the wave closed")
+    _check(len(bot.resumes) == 1,
+           "the last outstanding child landing wakes the parent to use it")
+    prompt = bot.resumes[0][1]
+    _check(str(tmp) in prompt, "the parent is handed the full report path")
+    _check("out of date" in prompt,
+           "the parent is told its earlier 'this child is missing' conclusion is stale")
+    _check(parent.spawn_late_reported_thread_ids == ["101"],
+           "the late delivery is recorded on the wave")
+
+    # A re-finalize (retry, replay) must not post the same report twice.
+    posts_before = len(bot.messenger.posts)
+    asyncio.run(_run_and_drain(orch.post_parent_callback(bot, "101", "COMPLETED", "done")))
+    _check(len(bot.messenger.posts) == posts_before and len(bot.resumes) == 1,
+           "the same late child is never reported twice")
+
+    # With a sibling still running, one turn per straggler would be waste.
+    parent, bot = _build(["101", "102"])
+    asyncio.run(_run_and_drain(orch.post_parent_callback(bot, "101", "COMPLETED", "done")))
+    _check(not bot.resumes and bot.messenger.posts[-1].buttons is not None,
+           "a straggler with siblings still out gets a button, not an auto-resume")
+    _check("Still out" in bot.messenger.posts[-1].text,
+           "the post names who is still missing")
+
+    # A wave old enough to have been retired wakes nobody.
+    ancient = (datetime.now(timezone.utc) - timedelta(hours=30)).isoformat()
+    parent = _inst("q-p", "sp", InstanceStatus.COMPLETED, children=["101"],
+                   released=True, created=ancient)
+    bot = FakeBot(threads, [parent, _inst("q-1", "s1", InstanceStatus.COMPLETED,
+                                          result_file=str(tmp))])
+    asyncio.run(_run_and_drain(orch.post_parent_callback(bot, "101", "COMPLETED", "done")))
+    _check(not bot.messenger.posts and not bot.resumes,
+           "a child of a retired wave is not resurrected days later")
+
+
 def main() -> int:
     print("Orchestrator spawn-wave join regression test")
+    test_live_child_holds_wave_open()
+    test_late_child_report()
     test_child_states()
     test_wave_seal()
     test_two_waves_on_one_parent()
