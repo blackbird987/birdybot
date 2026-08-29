@@ -22,7 +22,9 @@ Covers, driving the real code over fake bot/store/forums seams:
   (up to ORCH_WAVE_MAX_MIN), while a stale RUNNING record left by a crash
   still times out
 - a report that lands after its wave closed is delivered on its own, exactly
-  once, instead of being dropped
+  once, instead of being dropped — but only for a child the release could not
+  account for, so a later turn in a cleanly-reported child's thread is not
+  mistaken for a straggler
 - an archived parent gets an Ark notice instead of a silent log line
 - /reply pairing + the "only your own children" guard
 
@@ -696,16 +698,33 @@ def test_late_child_report() -> None:
 
     recent = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
 
-    def _build(children):
+    def _build(children, *, created=recent, straggler_state=InstanceStatus.RUNNING):
+        """Release a wave for real, THEN let the straggler finish.
+
+        Driving the actual release is the point: it is what records which
+        children the wave could not account for, which is what the late path
+        is gated on.
+        """
         parent = _inst("q-p", "sp", InstanceStatus.COMPLETED, children=children,
-                       released=True, created=recent)
-        insts = [parent, _inst("q-1", "s1", InstanceStatus.COMPLETED,
-                               result_file=str(tmp))]
+                       created=created)
+        straggler = _inst("q-1", "s1", straggler_state)
+        insts = [parent, straggler]
         if "102" in children:
             insts.append(_inst("q-2", "s2", InstanceStatus.RUNNING))
-        return parent, FakeBot(threads, insts)
+        bot = FakeBot(threads, insts)
+        partial = straggler_state is InstanceStatus.RUNNING
+        asyncio.run(_run_and_drain(
+            orch.release_wave(bot, "100", parent, partial=partial),
+        ))
+        bot.messenger.posts.clear()
+        bot.resumes.clear()
+        straggler.status = InstanceStatus.COMPLETED
+        straggler.result_file = str(tmp)
+        return parent, bot
 
     parent, bot = _build(["101"])
+    _check(parent.spawn_wave_unresolved_thread_ids == ["101"],
+           "the release records the child it could not account for")
     asyncio.run(_run_and_drain(orch.post_parent_callback(bot, "101", "COMPLETED", "done")))
     _check(bool(bot.messenger.posts), "a straggler's report is delivered, not dropped")
     _check("Late report" in bot.messenger.posts[-1].text,
@@ -733,15 +752,25 @@ def test_late_child_report() -> None:
     _check("Still out" in bot.messenger.posts[-1].text,
            "the post names who is still missing")
 
-    # A wave old enough to have been retired wakes nobody.
-    ancient = (datetime.now(timezone.utc) - timedelta(hours=30)).isoformat()
-    parent = _inst("q-p", "sp", InstanceStatus.COMPLETED, children=["101"],
-                   released=True, created=ancient)
-    bot = FakeBot(threads, [parent, _inst("q-1", "s1", InstanceStatus.COMPLETED,
-                                          result_file=str(tmp))])
-    asyncio.run(_run_and_drain(orch.post_parent_callback(bot, "101", "COMPLETED", "done")))
+    # The gate. A child the wave already reported as COMPLETED is finished
+    # business; its thread staying usable afterwards (the user asks it a
+    # follow-up, a retry re-finalizes it) must not read as a straggler.
+    parent, bot = _build(["101"], straggler_state=InstanceStatus.COMPLETED)
+    _check(parent.spawn_wave_unresolved_thread_ids == [],
+           "a wave that accounted for every child records nothing unresolved")
+    asyncio.run(_run_and_drain(orch.post_parent_callback(bot, "101", "COMPLETED", "again")))
     _check(not bot.messenger.posts and not bot.resumes,
-           "a child of a retired wave is not resurrected days later")
+           "a later turn in a cleanly-reported child's thread does not wake the parent")
+
+    # A wave old enough to have been retired still shows its work — the report
+    # is real — but never resumes a parent that moved on days ago.
+    ancient = (datetime.now(timezone.utc) - timedelta(hours=30)).isoformat()
+    parent, bot = _build(["101"], created=ancient)
+    asyncio.run(_run_and_drain(orch.post_parent_callback(bot, "101", "COMPLETED", "done")))
+    _check(len(bot.messenger.posts) == 1 and bot.messenger.posts[-1].buttons is not None,
+           "a retired wave's late child is posted with a button, not auto-resumed")
+    _check(not bot.resumes,
+           "nobody is woken days later for a wave everyone has forgotten")
 
 
 def main() -> int:

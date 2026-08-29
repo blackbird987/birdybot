@@ -21,16 +21,19 @@ final output to ``data/results/<id>.md`` and persists the path on the instance
 excerpt, so it reads the reports it cares about with its own file tools. No
 truncation ceiling, and no multi-KB blobs accumulating in ``state.json``.
 
-Four fields are persisted on the parent instance, and each exists because a
+Five fields are persisted on the parent instance, and each exists because a
 purely derived join has one blind spot the records cannot answer:
 ``spawn_wave_released`` (the release is a one-shot side effect — a post plus an
 auto-resume — and the per-child callbacks, the seal and the timeout sweep all
 race for it), ``spawn_wave_sealed`` (whether the dispatch loop has finished
 writing the roster; nothing else can tell a two-child wave from a four-child
 wave still being built), ``spawn_blocked_resumes`` (the budget for the
-parent↔child question exchange, which is a loop and therefore bounded), and
-``spawn_late_reported_thread_ids`` (which stragglers have already been reported
-on their own after their wave closed).
+parent↔child question exchange, which is a loop and therefore bounded),
+``spawn_wave_unresolved_thread_ids`` (which children the release could not
+account for, snapshotting a derived state at the one instant it stops being
+recomputable — afterwards the records only say what the child is doing *now*,
+not what the parent was told), and ``spawn_late_reported_thread_ids`` (which of
+those stragglers have since been reported on their own).
 
 **The timeout is for children that are gone, not children that are slow.** A
 wave past ``ORCH_WAVE_TIMEOUT_MIN`` is held open while any outstanding child
@@ -282,31 +285,33 @@ def find_wave_instance(
     return best
 
 
-def _wave_age_exceeds(inst: Instance, delta: timedelta) -> bool:
-    """True once the wave's dispatching turn is older than *delta*."""
+def _wave_started(inst: Instance) -> datetime | None:
+    """When the wave's dispatching turn began, or None if unparseable."""
     stamp = inst.finished_at or inst.created_at
     if not stamp:
-        return False
+        return None
     try:
         started = datetime.fromisoformat(stamp)
     except (ValueError, TypeError):
-        return False
+        return None
     if started.tzinfo is None:
         started = started.replace(tzinfo=timezone.utc)
+    return started
+
+
+def _wave_age_exceeds(inst: Instance, delta: timedelta) -> bool:
+    """True once the wave's dispatching turn is older than *delta*."""
+    started = _wave_started(inst)
+    if started is None:
+        return False
     return started < datetime.now(timezone.utc) - delta
 
 
 def _wave_age_min(inst: Instance) -> int | None:
     """Whole minutes since the wave's dispatching turn, or None if unknown."""
-    stamp = inst.finished_at or inst.created_at
-    if not stamp:
+    started = _wave_started(inst)
+    if started is None:
         return None
-    try:
-        started = datetime.fromisoformat(stamp)
-    except (ValueError, TypeError):
-        return None
-    if started.tzinfo is None:
-        started = started.replace(tzinfo=timezone.utc)
     return max(0, int((datetime.now(timezone.utc) - started).total_seconds() // 60))
 
 
@@ -498,10 +503,11 @@ def _render_late(
         prompt_lines += ["", f"Still out from that same wave: {names}."]
     prompt_lines += [
         "",
-        "This wave was released before this child came back, so anything you "
-        "already said about it being missing is now out of date. Read the "
-        "report file above with your file tools — the excerpt is an opening, "
-        "not a summary — and fold the result into the work.",
+        "This wave was closed without a final result from this child, so "
+        "whatever you were told about it then — still running, failed, "
+        "contributed nothing — is now out of date. Read the report file above "
+        "with your file tools — the excerpt is an opening, not a summary — "
+        "and fold the result into the work.",
     ]
     return "\n".join(post_lines), "\n".join(prompt_lines)
 
@@ -612,12 +618,20 @@ async def release_wave(
     """
     if wave_inst.spawn_wave_released:
         return False
-    wave_inst.spawn_wave_released = True
-    bot._store.update_instance(wave_inst, critical=True)
-
     children = [
         _child_state(bot, tid) for tid in wave_inst.spawn_dispatched_thread_ids
     ]
+    # Record which children this release could NOT account for cleanly, in the
+    # same await-free block as the flag so the two can never disagree. Those
+    # are the only ones a later terminal outcome is allowed to be reported
+    # for; a child already reported as done is done, and its next turn is
+    # ordinary follow-up chat in that thread, not a straggler.
+    wave_inst.spawn_wave_released = True
+    wave_inst.spawn_wave_unresolved_thread_ids = [
+        c.thread_id for c in children if c.state != "completed"
+    ]
+    bot._store.update_instance(wave_inst, critical=True)
+
     post_body, resume_prompt = _render_wave(
         children, partial=partial, waited_min=_wave_age_min(wave_inst),
     )
@@ -739,6 +753,15 @@ async def _deliver_late_child(
     report was. Now the report arrives late instead of not at all, which makes
     every wrong release recoverable rather than lossy.
 
+    Gated on the release's own record of what it could not account for
+    (``spawn_wave_unresolved_thread_ids``). Gating on "the release was partial"
+    instead would be wrong in both directions: a child that hit a usage limit
+    is written down as failed and *settled*, so its wave closes as complete and
+    its retry's report — the thing the parent is actually waiting for — would
+    be dropped; while a wave every child completed cleanly would treat the
+    user's next chat message in a child thread as a straggler and wake the
+    parent for it.
+
     Bounded: recorded per child on the wave instance, so at most one late post
     per dispatched child no matter how often finalize re-fires.
     """
@@ -753,11 +776,11 @@ async def _deliver_late_child(
         # Unreleased but unjoinable = the dispatch loop is still sealing the
         # roster. Not late, just early — evaluate_wave_now owns this case.
         return
-    if _wave_abandoned(wave):
-        log.info(
-            "orchestrator: late child %s belongs to a retired wave (%s) — not posting",
-            child_thread_id, wave.id,
-        )
+    if child_thread_id not in wave.spawn_wave_unresolved_thread_ids:
+        # The release already told the parent this child had completed, or the
+        # wave predates the unresolved list entirely. Either way there is no
+        # missing conclusion to correct — this is a later turn in a child
+        # thread, and waking the parent for it would be spam.
         return
     if child_thread_id in wave.spawn_late_reported_thread_ids:
         return
@@ -784,10 +807,18 @@ async def _deliver_late_child(
     )
     # Only wake the parent once the picture is actually complete. With siblings
     # still running, an auto-resume per straggler would burn one parent turn per
-    # child for a report it will have to re-read when the rest land.
+    # child for a report it will have to re-read when the rest land. A wave old
+    # enough to have been retired still gets its post — the work is real — but
+    # never an unprompted resume: the parent has long since moved on.
+    stale = _wave_abandoned(wave)
+    if stale:
+        log.info(
+            "orchestrator: late child %s belongs to a retired wave (%s) — "
+            "posting without auto-resume", child_thread_id, wave.id,
+        )
     await _deliver(
         bot, parent_id, post_body, resume_prompt,
-        auto_resume=config.ORCH_AUTO_RESUME and not outstanding,
+        auto_resume=config.ORCH_AUTO_RESUME and not outstanding and not stale,
     )
 
 

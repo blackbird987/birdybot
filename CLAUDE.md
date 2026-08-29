@@ -254,6 +254,15 @@ to the parent instead of making the user do it.
   outstanding, and records it in `Instance.spawn_late_reported_thread_ids` so a
   retry can't post it twice. No deadline is right for every child; this is what
   makes a wrong release recoverable instead of lossy.
+- **Only a child the release could not account for may be reported late.**
+  `release_wave` snapshots those into `Instance.spawn_wave_unresolved_thread_ids`
+  (same await-free block as the released flag, so the two can't disagree), and
+  `_deliver_late_child` requires membership. Without that gate, every later turn
+  in a child thread — a user follow-up, a re-finalize — reads as a straggler and
+  wakes the parent. Gating on "the release was partial" is the tempting wrong
+  answer: a child paused by a usage limit is recorded FAILED and *settled*, so
+  its wave closes as complete, and the report from its retry is exactly the one
+  that must still arrive. Pre-existing waves carry an empty list and are inert.
 - Blocked-child wake-ups are budgeted at `_MAX_BLOCKED_RESUMES` (4) per wave
   (`Instance.spawn_blocked_resumes`) — parent answers, child asks again, repeat.
 - `[BOT_CMD: /reply thread=<id>]` + `~~~reply` body lets a parent answer its own
