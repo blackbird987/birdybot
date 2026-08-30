@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## v0.101.15 — A copy-paste block pastes clean (2026-08-30)
+
+### Fixed
+- **A copy-paste block now pastes clean** (`bot/config.py`, `bot/engine/eval.py`). Asked for an email draft, sessions were hard-wrapping the body inside the ``` fence at ~48 characters "to fit the phone" — and those were real newlines in the message content, not a rendering artifact, so every paste into a mail client arrived shredded and had to be unwrapped by hand. Nothing in the send path wraps text; pulling the raw message back off the Discord API is what proved the newlines were written by the model. `WORKING_CONTEXT`'s Discord Formatting block now states the rule: inside a fence, one paragraph is one long line, Discord soft-wraps it on screen by itself, and a newline is only ever written where it is part of the content. Fences are deliberately **not** unwrapped on the way out — a mechanical unwrap cannot tell an email paragraph from real code, a table or a diff.
+
+### Added
+- `eval._check_copy_block_wrapping` — reports the drift rather than trusting the prompt to hold. A prose fence whose lines are short and break mid-sentence (a line stopping on a word, continued by a lowercase word below it) is flagged, and `attribute_flag` points `/evals` at `WORKING_CONTEXT`. Code, tagged fences, shell-command blocks, tables and short bullet lists are excluded, so the check cannot train sessions out of fencing things.
+- `scripts/test_copy_block_wrapping.py` (registered in `.claude/test.json`) — 21 checks: the rule is in `WORKING_CONTEXT` and the prompt assembler still appends it, the real incident text is flagged and correctly attributed without shadowing the neighbouring over-long/mobile rules, the same email unwrapped is silent, every legitimate fence shape stays quiet, a wrapped fence beside a clean one flags exactly once, the flag's live count collapses so the digest can group it, and a result written with CRLF is still flagged — the last pinning a blind spot that would have made the check silently dead (`split("\n")` leaves a `\r` on every line, so no line ever ends on a word).
+
 ## v0.101.14 — A slow child is not a missing child (2026-08-29)
 
 ### Fixed

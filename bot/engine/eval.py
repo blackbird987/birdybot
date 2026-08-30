@@ -227,6 +227,7 @@ def evaluate_instance(inst: Instance) -> SessionEval:
         ev.flags.extend(_check_narration(inst, text))
         ev.flags.extend(_check_verbosity(inst, text))
         ev.flags.extend(_check_claim_grounding(inst, text))
+        ev.flags.extend(_check_copy_block_wrapping(inst, text))
     ev.flags.extend(_check_tool_hygiene(inst))
     ev.flags.extend(_check_efficiency(inst))
 
@@ -324,6 +325,129 @@ def _check_verbosity(inst: Instance, text: str) -> list[EvalFlag]:
                if collapsed else "")
         ),
     ))
+    return flags
+
+
+# --- Copy-paste block wrapping (WORKING_CONTEXT / Discord Formatting) ---
+#
+# Discord soft-wraps a long line to the phone's width on its own. A session
+# that hard-wraps the line *itself* bakes real newlines into whatever the user
+# pastes into their mail client, and they have to strip every one by hand.
+#
+# The signal is deliberately narrow: a line that stops on a word and is
+# continued by a lowercase word on the next line is a wrap, not a sentence
+# break. Nothing here rewrites the text -- a mechanical unwrap cannot tell an
+# email paragraph from real code, a table or a diff, so this only reports.
+
+_FENCE_RE = re.compile(r"```([^\n`]*)\n(.*?)```", re.DOTALL)
+
+# A tagged fence is asserting "this is code"; only these tags are prose.
+_PROSE_FENCE_TAGS = {"", "text", "txt", "plain", "email", "markdown", "md"}
+
+# Any of these on a line is enough to call it code rather than prose. English
+# keywords are deliberately absent: "if", "for", "from" and "return" are also
+# ordinary words, and matching them would read every English draft as code.
+# Nothing here needs to match a leading "#" or ">" either -- _is_prose_line has
+# already dropped those lines before this is asked.
+_CODEY_RE = re.compile(
+    r"(?:=|;|\{|\}|\(\)|->|=>|::|\|\||&&|^\s*\$|"
+    r"\b(?:def|import|function|const|npm|pip|sudo|chmod)\b)"
+)
+
+# Above this share of code-ish lines the fence is code, and its short lines
+# are load-bearing. Ordinary prose trips _CODEY_RE only on stray punctuation.
+_CODEY_SHARE = 0.2
+
+# A hard-wrapped block is short by construction. A block whose longest prose
+# line is past this was never reflowed to fit a phone.
+_WRAP_WIDTH_CEILING = 78
+
+# One mid-sentence break is a typo; three is a policy.
+_MIN_WRAP_EVENTS = 3
+
+# Prose punctuates sentences and uses long-ish lines. A block of shell commands
+# does neither, and each command starting with a lowercase word would otherwise
+# read as a continuation of the one above it.
+#
+# The sentence test looks for terminal punctuation ANYWHERE on the line, not at
+# the end of it. A hard-wrapped paragraph almost never ends a line on a period
+# -- that is the whole shape of the defect -- so an end-of-line test would miss
+# every case it exists to catch. "file.py stop" is not a sentence end: the
+# period has to be followed by whitespace.
+_SENTENCE_RE = re.compile(r"[.!?](?:\s|$)")
+_MIN_SENTENCE_LINES = 2
+_MIN_WORDS_PER_LINE = 5.0
+
+
+def _is_prose_line(line: str) -> bool:
+    """Is this a candidate wrapped line, rather than structure?"""
+    if not line.strip():
+        return False
+    if line[:1].isspace():          # indentation -> code, or a nested block
+        return False
+    if line.lstrip()[:1] in "-*#>|+":  # list item / heading / quote / table
+        return False
+    return len(line.split()) >= 3
+
+
+# A wrap stops on a word (or a comma); code stops on punctuation.
+_CONTINUES_RE = re.compile(r"[\w,]$")
+
+
+def _wrap_events(lines: list[str]) -> int:
+    """Count lines continued by a lowercase word on the next line.
+
+    Takes the body already split, so this and the guards above can never
+    disagree about where the lines are.
+    """
+    events = 0
+    for cur, nxt in zip(lines, lines[1:]):
+        if not _is_prose_line(cur) or not _is_prose_line(nxt):
+            continue
+        if not _CONTINUES_RE.search(cur):
+            continue
+        first = nxt.lstrip()[:1]
+        if first.isalpha() and first.islower():
+            events += 1
+    return events
+
+
+def _check_copy_block_wrapping(inst: Instance, text: str) -> list[EvalFlag]:
+    """Did Claude hard-wrap a block the user is meant to copy and paste?"""
+    flags: list[EvalFlag] = []
+
+    for tag, body in _FENCE_RE.findall(text):
+        if tag.strip().lower() not in _PROSE_FENCE_TAGS:
+            continue
+        # splitlines(), not split("\n"): a result file written with CRLF would
+        # otherwise leave a "\r" on every line, so no line would ever end on a
+        # word and the check would go silently dead.
+        lines = body.splitlines()
+        prose = [ln for ln in lines if _is_prose_line(ln)]
+        # N wrap events need N+1 prose lines, so this cannot hide a real one.
+        if len(prose) < _MIN_WRAP_EVENTS + 1:
+            continue
+        if max(len(ln) for ln in prose) > _WRAP_WIDTH_CEILING:
+            continue
+        codey = sum(1 for ln in prose if _CODEY_RE.search(ln))
+        if codey / len(prose) > _CODEY_SHARE:
+            continue
+        if sum(1 for ln in prose if _SENTENCE_RE.search(ln)) < _MIN_SENTENCE_LINES:
+            continue
+        if sum(len(ln.split()) for ln in prose) / len(prose) < _MIN_WORDS_PER_LINE:
+            continue
+        events = _wrap_events(lines)
+        if events < _MIN_WRAP_EVENTS:
+            continue
+        flags.append(EvalFlag(
+            category="constraint_violation", severity="warning",
+            message=(
+                f"Copy-paste block is hard-wrapped ({events} lines break "
+                f"mid-sentence) — the paste carries stray newlines"
+            ),
+            evidence=" / ".join(prose[:2])[:120],
+        ))
+
     return flags
 
 
@@ -588,6 +712,7 @@ _ATTRIBUTION: tuple[tuple[str, str, str], ...] = (
     ("narration", "short response", "CHAT_APP_CONSTRAINT"),
     # "over-long" must precede the generic "mobile" rule — the length
     # target lives in CHAT_APP_CONSTRAINT and both words are in that message.
+    ("constraint_violation", "hard-wrapped", "WORKING_CONTEXT"),
     ("constraint_violation", "over-long", "CHAT_APP_CONSTRAINT"),
     ("constraint_violation", "mobile", "MOBILE_HINT"),
     ("efficiency", "prompt-cache", "prompt assembly order (harness)"),
