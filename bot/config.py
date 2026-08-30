@@ -1191,6 +1191,8 @@ Discord does NOT support these markdown features — never use them:
 - Image syntax (![alt](url)) — not rendered
 - Horizontal rules (---) — render as empty space
 For structured data use: bullet lists with **bold** and `inline code`, or padded monospace inside ```code blocks```.
+
+Never hard-wrap text meant to be copied. Inside a ``` block — an email draft, a message, a config snippet, a shell command — write each paragraph as ONE long line and let Discord soft-wrap it on screen. Manually breaking at ~50 chars to "fit the phone" bakes real newlines into what the user pastes, and they have to strip every one by hand. Insert a newline only where it is part of the content: a paragraph break, a list item, a real line of code.
 """
 
 # Per-step behavioral guidance — tells Claude what its role is in the current workflow step.
