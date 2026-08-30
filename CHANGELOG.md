@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.101.15 — A copy-paste block pastes clean (2026-08-30)
+
 ### Fixed
 - **A copy-paste block now pastes clean** (`bot/config.py`, `bot/engine/eval.py`). Asked for an email draft, sessions were hard-wrapping the body inside the ``` fence at ~48 characters "to fit the phone" — and those were real newlines in the message content, not a rendering artifact, so every paste into a mail client arrived shredded and had to be unwrapped by hand. Nothing in the send path wraps text; pulling the raw message back off the Discord API is what proved the newlines were written by the model. `WORKING_CONTEXT`'s Discord Formatting block now states the rule: inside a fence, one paragraph is one long line, Discord soft-wraps it on screen by itself, and a newline is only ever written where it is part of the content. Fences are deliberately **not** unwrapped on the way out — a mechanical unwrap cannot tell an email paragraph from real code, a table or a diff.
 
