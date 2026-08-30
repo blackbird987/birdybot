@@ -47,9 +47,12 @@ from bot import config  # noqa: E402
 from bot.engine import eval as ev  # noqa: E402
 
 failures: list[str] = []
+checks = 0
 
 
 def check(label: str, ok: bool, detail: str = "") -> None:
+    global checks
+    checks += 1
     print(f"  {'PASS' if ok else 'FAIL'}  {label}" + (f" — {detail}" if detail else ""))
     if not ok:
         failures.append(label)
@@ -157,6 +160,11 @@ check("WORKING_CONTEXT forbids hard-wrapping copy blocks",
 check("it says why (the paste carries the newlines)",
       "bakes real newlines" in block)
 check("it names the one legitimate newline", "part of the content" in block)
+# The rule is worthless if the assembler stops handing the block to sessions.
+runner_src = (Path(__file__).resolve().parent.parent
+              / "bot" / "claude" / "runner.py").read_text(encoding="utf-8")
+check("the prompt assembler still appends WORKING_CONTEXT",
+      "parts.append(config.WORKING_CONTEXT)" in runner_src)
 
 print("\nDetection")
 hit = flags_for(INCIDENT)
@@ -182,6 +190,15 @@ for label, sample in (
 check("prose outside a fence is not flagged",
       flags_for(INCIDENT.replace("```", "")) == [])
 
+print("\nSurvives the shapes a result file can arrive in")
+# A result written with CRLF used to leave a "\r" on every line, so no line
+# ended on a word and the whole check went silently dead.
+check("CRLF line endings are still flagged",
+      len(flags_for(INCIDENT.replace("\n", "\r\n"))) == 1)
+two = INCIDENT + "\nAnd the tidy one:\n\n" + CLEAN
+check("one wrapped fence beside a clean one flags exactly once",
+      len(flags_for(two)) == 1, f"{len(flags_for(two))} flag(s)")
+
 print("\nAttribution")
 if hit:
     owner = ev.attribute_flag(hit[0].category, hit[0].message)
@@ -195,6 +212,13 @@ if hit:
     check("it does not swallow the mobile message",
           ev.attribute_flag("constraint_violation", "not mobile friendly") == "MOBILE_HINT")
 
+    # The message embeds the live count, and the digest only groups rows whose
+    # numbers have been collapsed. Without this, every wrapped block would be
+    # its own one-off row and none would ever reach the reporting threshold.
+    check("differing break counts collapse to one digest row",
+          ev.normalise_flag_message(hit[0].message)
+          == ev.normalise_flag_message(hit[0].message.replace("(7 ", "(4 ")))
+
 print()
 if failures:
     print("FAIL: copy-paste blocks")
@@ -202,7 +226,7 @@ if failures:
         print(f"  - {f}")
     sys.exit(1)
 
-print("PASS: a copy-paste block pastes clean.")
+print(f"PASS: a copy-paste block pastes clean ({checks} checks).")
 print("      The prompt rule ships in WORKING_CONTEXT, the real hard-wrapped")
 print("      email is flagged and attributed to that block, and the fences a")
 print("      session legitimately writes — code, shell commands, tables,")

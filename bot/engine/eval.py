@@ -347,9 +347,11 @@ _PROSE_FENCE_TAGS = {"", "text", "txt", "plain", "email", "markdown", "md"}
 # Any of these on a line is enough to call it code rather than prose. English
 # keywords are deliberately absent: "if", "for", "from" and "return" are also
 # ordinary words, and matching them would read every English draft as code.
+# Nothing here needs to match a leading "#" or ">" either -- _is_prose_line has
+# already dropped those lines before this is asked.
 _CODEY_RE = re.compile(
-    r"(=|;|\{|\}|\(\)|->|=>|::|\|\||&&|^\s*[#$>]|"
-    r"\b(def|import|function|const|npm|pip|sudo|chmod)\b)"
+    r"(?:=|;|\{|\}|\(\)|->|=>|::|\|\||&&|^\s*\$|"
+    r"\b(?:def|import|function|const|npm|pip|sudo|chmod)\b)"
 )
 
 # Above this share of code-ish lines the fence is code, and its short lines
@@ -372,7 +374,7 @@ _MIN_WRAP_EVENTS = 3
 # -- that is the whole shape of the defect -- so an end-of-line test would miss
 # every case it exists to catch. "file.py stop" is not a sentence end: the
 # period has to be followed by whitespace.
-_SENTENCE_RE = re.compile(r"[.!?](\s|$)")
+_SENTENCE_RE = re.compile(r"[.!?](?:\s|$)")
 _MIN_SENTENCE_LINES = 2
 _MIN_WORDS_PER_LINE = 5.0
 
@@ -388,15 +390,21 @@ def _is_prose_line(line: str) -> bool:
     return len(line.split()) >= 3
 
 
-def _wrap_events(body: str) -> int:
-    """Count lines continued by a lowercase word on the next line."""
-    lines = body.split("\n")
+# A wrap stops on a word (or a comma); code stops on punctuation.
+_CONTINUES_RE = re.compile(r"[\w,]$")
+
+
+def _wrap_events(lines: list[str]) -> int:
+    """Count lines continued by a lowercase word on the next line.
+
+    Takes the body already split, so this and the guards above can never
+    disagree about where the lines are.
+    """
     events = 0
     for cur, nxt in zip(lines, lines[1:]):
         if not _is_prose_line(cur) or not _is_prose_line(nxt):
             continue
-        # A wrap stops on a word (or a comma); code stops on punctuation.
-        if not re.search(r"[\w,]$", cur):
+        if not _CONTINUES_RE.search(cur):
             continue
         first = nxt.lstrip()[:1]
         if first.isalpha() and first.islower():
@@ -411,7 +419,12 @@ def _check_copy_block_wrapping(inst: Instance, text: str) -> list[EvalFlag]:
     for tag, body in _FENCE_RE.findall(text):
         if tag.strip().lower() not in _PROSE_FENCE_TAGS:
             continue
-        prose = [ln for ln in body.split("\n") if _is_prose_line(ln)]
+        # splitlines(), not split("\n"): a result file written with CRLF would
+        # otherwise leave a "\r" on every line, so no line would ever end on a
+        # word and the check would go silently dead.
+        lines = body.splitlines()
+        prose = [ln for ln in lines if _is_prose_line(ln)]
+        # N wrap events need N+1 prose lines, so this cannot hide a real one.
         if len(prose) < _MIN_WRAP_EVENTS + 1:
             continue
         if max(len(ln) for ln in prose) > _WRAP_WIDTH_CEILING:
@@ -423,7 +436,7 @@ def _check_copy_block_wrapping(inst: Instance, text: str) -> list[EvalFlag]:
             continue
         if sum(len(ln.split()) for ln in prose) / len(prose) < _MIN_WORDS_PER_LINE:
             continue
-        events = _wrap_events(body)
+        events = _wrap_events(lines)
         if events < _MIN_WRAP_EVENTS:
             continue
         flags.append(EvalFlag(
