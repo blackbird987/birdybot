@@ -1476,9 +1476,26 @@ def promises_continuation(text: str) -> bool:
     report quoting one of these phrases — including this feature's own
     documentation — can't trip it.
     """
+    return _promise_match(text) is not None
+
+
+def _promise_match(text: str) -> re.Match | None:
+    """The one place the promise scan is defined; see the two callers below."""
     cleaned = strip_verify_blocks(text or "")
     cleaned = _CLAIM_META_RE.sub(" ", cleaned)
-    return bool(config.WAKE_PROMISE_RE.search(cleaned))
+    return config.WAKE_PROMISE_RE.search(cleaned)
+
+
+def promise_evidence(text: str) -> str:
+    """The promising phrase itself, for a report. "" when there is none.
+
+    Deliberately scans the same CLEANED text as ``promises_continuation``
+    rather than the raw text: quoting the phrase out of a fence would
+    otherwise let a report show evidence for a promise the decision function
+    never saw.
+    """
+    match = _promise_match(text)
+    return match.group(0).strip()[:100] if match else ""
 
 
 def has_turn_complete_marker(text: str) -> bool:
@@ -1622,6 +1639,17 @@ def _parse_wake_directive(text: str) -> dict | None:
     return None
 
 
+def armed_a_directive(text: str) -> bool:
+    """True if this turn's text carries a usable ``/wake`` or ``/watch``.
+
+    The public form of the pair ``check_wake_request`` branches on, so a
+    caller that only has the text (``eval``) asks the same question the
+    runtime did instead of re-implementing the parse.
+    """
+    return (_parse_wake_directive(text) is not None
+            or watches.parse_watch_directive(text) is not None)
+
+
 async def check_wake_request(
     ctx: RequestContext, instance: Instance, *, final_text: str = "",
 ) -> None:
@@ -1669,94 +1697,116 @@ async def check_wake_request(
             except Exception:
                 log.debug("reset_nudge_count raised", exc_info=True)
 
+    async def _nudge_once(
+        *, prompt: str, log_msg: str, exhausted: str, capped: str, nudged: str,
+    ) -> None:
+        """Re-invoke this thread once with ``prompt``, under the shared cap.
+
+        One body for both dead-end nudges — the unattended turn that ended
+        mid-plan and the turn that promised to report back with nothing armed.
+        They differ only in wording, and letting them drift is how one gets
+        fixed while the other keeps failing (same lesson as ``perform_kill``).
+
+        The policy is the shared part: a context-exhausted session is handed to
+        the user instead of re-invoked, ``MAX_CONSEC_NUDGES`` consecutive
+        nudges stop with a notice, and otherwise the thread is resumed after
+        ``WAKE_MIN_DELAY_SECS``. Both counters are cleared on every terminal
+        branch so a thread that stops nudging starts clean.
+        """
+        if instance.warning_pinned:
+            # Context-exhausted: re-invoking only degrades it. Hand to the user.
+            _reset()
+            _reset_nudge()
+            await _notice(exhausted)
+            return
+        count = ctx.bump_nudge_count() if ctx.bump_nudge_count is not None else 1
+        if count > config.MAX_CONSEC_NUDGES:
+            _reset()
+            _reset_nudge()
+            await _notice(capped)
+            return
+        next_run_at = (
+            datetime.now(timezone.utc)
+            + timedelta(seconds=config.WAKE_MIN_DELAY_SECS)
+        ).isoformat()
+        ctx.store.add_wake(
+            prompt=prompt,
+            channel_id=ctx.channel_id,
+            next_run_at=next_run_at,
+            repo_name=instance.repo_name or "",
+            repo_path=instance.repo_path or "",
+        )
+        log.info(log_msg, ctx.channel_id, count)
+        await _notice(nudged)
+
     async def _nudge_or_stop() -> None:
         # An unattended turn (cooldown retry / self-wake fire) dead-ended: no
         # wake scheduled AND no [TURN_COMPLETE] marker. Left alone the thread
         # silently dies (the q-12314 dead-end). Re-invoke it once (capped) with
         # an explicit instruction to finish, wake, or signal completion.
-        if instance.warning_pinned:
-            # Context-exhausted: re-invoking only degrades it. Hand to the user.
-            _reset()
-            _reset_nudge()
-            await _notice(
+        await _nudge_once(
+            prompt=_NUDGE_PROMPT,
+            log_msg=("Auto-nudge scheduled for unattended dead-end in thread "
+                     "%s (nudge=%d)"),
+            exhausted=(
                 "⚠️ This unattended turn stopped mid-plan without finishing or "
                 "scheduling a follow-up, and the session is out of context — "
                 "start a fresh thread to carry it on."
-            )
-            return
-        count = ctx.bump_nudge_count() if ctx.bump_nudge_count is not None else 1
-        if count > config.MAX_CONSEC_NUDGES:
-            _reset()
-            _reset_nudge()
-            await _notice(
+            ),
+            capped=(
                 f"⏸ Stopped after {config.MAX_CONSEC_NUDGES} nudges — this "
                 "unattended turn kept ending mid-plan without finishing or "
                 "scheduling a follow-up. Reply or tap a button to continue."
-            )
-            return
-        next_run_at = (
-            datetime.now(timezone.utc)
-            + timedelta(seconds=config.WAKE_MIN_DELAY_SECS)
-        ).isoformat()
-        ctx.store.add_wake(
-            prompt=_NUDGE_PROMPT,
-            channel_id=ctx.channel_id,
-            next_run_at=next_run_at,
-            repo_name=instance.repo_name or "",
-            repo_path=instance.repo_path or "",
-        )
-        log.info(
-            "Auto-nudge scheduled for unattended dead-end in thread %s "
-            "(nudge=%d)", ctx.channel_id, count,
-        )
-        await _notice(
-            "↻ That turn ended mid-plan with nothing to resume it — nudging "
-            "myself to finish it or hand off cleanly."
+            ),
+            nudged=(
+                "↻ That turn ended mid-plan with nothing to resume it — nudging "
+                "myself to finish it or hand off cleanly."
+            ),
         )
 
     async def _promise_nudge() -> None:
-        # An ATTENDED turn promised to come back ("I'll report back when the
-        # tests finish") and armed nothing. The user is right there, but they
-        # have been told to expect a message that can never arrive — so this is
-        # a dead-end too, just a quieter one than the unattended case. Re-invoke
-        # once (shared cap) and let the session arm a real directive; this path
-        # never schedules a poll of its own.
-        if instance.warning_pinned:
-            _reset_nudge()
-            await _notice(
+        # The turn ended cleanly by its own account — attended, or unattended
+        # with [TURN_COMPLETE] — but it promised to come back ("I'll report
+        # back when the tests finish") and armed nothing. The user has been
+        # told to expect a message that can never arrive, so this is a dead-end
+        # too, just a quieter one. Re-invoke once and let the SESSION arm a
+        # real directive; this path never schedules a poll of its own.
+        await _nudge_once(
+            prompt=_PROMISE_NUDGE_PROMPT,
+            log_msg=("Promise nudge scheduled for thread %s — turn promised to "
+                     "report back with nothing armed (nudge=%d)"),
+            exhausted=(
                 "⚠️ This turn said it would report back later, but nothing is "
                 "armed to resume the thread and the session is out of context "
                 "— start a fresh thread to carry it on."
-            )
-            return
-        count = ctx.bump_nudge_count() if ctx.bump_nudge_count is not None else 1
-        if count > config.MAX_CONSEC_NUDGES:
-            _reset_nudge()
-            await _notice(
+            ),
+            capped=(
                 f"⏸ Stopped after {config.MAX_CONSEC_NUDGES} nudges — this "
                 "session kept promising to report back without arming a watch "
                 "or a self-wake. Reply or tap a button to continue."
-            )
-            return
-        next_run_at = (
-            datetime.now(timezone.utc)
-            + timedelta(seconds=config.WAKE_MIN_DELAY_SECS)
-        ).isoformat()
-        ctx.store.add_wake(
-            prompt=_PROMISE_NUDGE_PROMPT,
-            channel_id=ctx.channel_id,
-            next_run_at=next_run_at,
-            repo_name=instance.repo_name or "",
-            repo_path=instance.repo_path or "",
+            ),
+            nudged=(
+                "↻ That turn said it would report back but armed nothing to "
+                "resume the thread — asking it to watch the job properly."
+            ),
         )
-        log.info(
-            "Promise nudge scheduled for thread %s — turn promised to report "
-            "back with nothing armed (nudge=%d)", ctx.channel_id, count,
-        )
-        await _notice(
-            "↻ That turn said it would report back but armed nothing to "
-            "resume the thread — asking it to watch the job properly."
-        )
+
+    def _thread_has_pending_wake() -> bool:
+        """Is a self-wake armed for LATER — i.e. is the promise already backed?
+
+        Not the same question as "does a wake row exist". A firing wake resumes
+        the thread and is only deleted once that turn RETURNS (the try/finally
+        in ``Scheduler._execute_wake``, which awaits ``_replay_to_thread``), so
+        on a wake-sourced turn the row still in the store is the one being
+        consumed right now — it backs nothing, and counting it would suppress
+        the nudge for exactly the turns most likely to need it: "still running,
+        I'll report back", said by a turn a watch or a wake just resumed.
+        ``add_wake`` allows one wake per thread, so on such a turn the visible
+        row is always that one.
+        """
+        if ctx.source == "wake":
+            return False
+        return ctx.store.pending_wake_for_channel(ctx.channel_id) is not None
 
     async def _stop_capped() -> None:
         # Runaway cap hit: reset and tell the user we stopped (never a silent
@@ -1918,7 +1968,7 @@ async def check_wake_request(
         if (promises_continuation(final_text)
                 and not instance.branch
                 and ctx.store.watch_for_channel(ctx.channel_id) is None
-                and ctx.store.pending_wake_for_channel(ctx.channel_id) is None):
+                and not _thread_has_pending_wake()):
             await _promise_nudge()
             return
         _reset_nudge()

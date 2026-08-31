@@ -461,28 +461,40 @@ def _check_unarmed_promise(inst: Instance, text: str) -> list[EvalFlag]:
     and attributed to ``WAKE_GUIDANCE``, the block that is supposed to make the
     session arm the directive in the first place.
 
-    Judged from the result text alone: the promise fired and the text carries
-    no parsable directive. That is exactly the pair the runtime evaluates, and
-    it keeps eval free of any dependency on scheduler state that has since
-    moved on. The predicates are imported from the production modules so the
-    two can't drift.
-    """
-    from bot.engine import watches
-    from bot.engine.lifecycle import _parse_wake_directive, promises_continuation
+    Judged from the result text alone, using the production predicates so the
+    two can't drift. It has to be: ``evaluate_instance`` runs inside
+    ``finalize_run``, which is *before* ``check_wake_request``, so the runtime's
+    own decision does not exist yet and scheduler state would be read one tick
+    early.
 
-    if not promises_continuation(text):
+    Two known blind spots, both erring toward silence:
+
+    * A turn that promises while a watch armed on an EARLIER turn is still
+      running is fine, and the runtime stands its nudge down for exactly that
+      reason — but the store is not consulted here, so such a turn is flagged.
+    * A worktree build never gets ``WAKE_GUIDANCE`` injected and cannot arm
+      anything, so attributing a promise there to that block would be wrong;
+      those are skipped outright, matching the runtime's own branch gate.
+    """
+    # Local: lifecycle imports eval (to run this), so the dependency stays
+    # one-directional at module scope.
+    from bot.engine.lifecycle import (
+        armed_a_directive,
+        promise_evidence,
+        promises_continuation,
+    )
+
+    if inst.branch:
         return []
-    if (_parse_wake_directive(text) is not None
-            or watches.parse_watch_directive(text) is not None):
+    if not promises_continuation(text) or armed_a_directive(text):
         return []
-    match = config.WAKE_PROMISE_RE.search(text)
     return [EvalFlag(
         category="constraint_violation", severity="issue",
         message=(
             "Promised to report back later but armed no self-wake or watch — "
             "the thread had nothing to resume it"
         ),
-        evidence=(match.group(0)[:100] if match else ""),
+        evidence=promise_evidence(text),
     )]
 
 

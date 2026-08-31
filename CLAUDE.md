@@ -350,11 +350,28 @@ the session keeps "only an explicit directive arms anything" true, and puts
 the decision where the pid, the log path and the real duration are known. A
 false positive therefore costs one turn that answers `[TURN_COMPLETE]`.
 
+The detector has to survive this repo describing itself. Every guard in
+`WAKE_PROMISE_RE` exists because a sentence in these docs, a review report or
+a result file tripped it: a bare participle needs "in the background", that
+participle needs a first-person subject or a clause start (so "the scheduler
+is polling in the background" is prose, not a promise), a subjectless wait is
+rejected after "is/are/was/were/to", and the first-person contractions require
+their apostrophe — optional, and "id", "ill" and "im" read as "I'd", "I'll"
+and "I'm". Any new alternative must be checked the same way, against the
+archived result files rather than against invented examples.
+
 The nudge stands down whenever the thread already has something to resume it
 (an armed watch, a pending wake — which is how a tripped watch looks —, a
-worktree build, a context-exhausted session), shares `MAX_CONSEC_NUDGES` with
-the unattended nudge so the two can't ping-pong, and loses to the claim notice
-when both would fire. `eval._check_unarmed_promise` counts recurrences and
+worktree build, a context-exhausted session), shares `MAX_CONSEC_NUDGES` and
+one body (`_nudge_once`) with the unattended nudge so the two can't ping-pong
+or drift, and loses to the claim notice when both would fire.
+
+"Pending" means armed for *later*. `Scheduler._execute_wake` awaits the
+resumed turn and deletes the row in its `finally`, so during a wake-sourced
+turn the wake still in the store is the one being consumed —
+`_thread_has_pending_wake` discounts it. Counting it would silence the nudge
+for the likeliest case there is: a watch trips, the job is still running, and
+the resumed turn promises to report back again. `eval._check_unarmed_promise` counts recurrences and
 attributes them to `WAKE_GUIDANCE`, so `/evals` names the block that was
 supposed to prevent it.
 Harness: `python scripts/test_wake_promise_nudge.py`

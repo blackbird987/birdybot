@@ -826,8 +826,19 @@ WAKE_CLAIM_RE = re.compile(
 # name, so the detector and the guidance describe the same sentence. Code
 # spans and quoted phrases are stripped first (lifecycle._CLAIM_META_RE).
 
-# "I'll" / "I will" / "I'm" / "I am" / "I'm going to" — a first-person future.
-_I_FUTURE = r"\bi(?:'|\u2019)?(?:ll|m)\b|\bi\s+(?:will|am)\b"
+# "I'll" / "I will" / "I'm" / "I am" — a first-person future. The apostrophe
+# is REQUIRED on the contracted forms: with it optional, "ill" and "im" are
+# ordinary words that match, and "still waiting" matched through the "ill"
+# inside it until the leading \b was added. Claude does not drop apostrophes.
+_I_FUTURE = r"\bi(?:'|\u2019)(?:ll|m)\b|\bi\s+(?:will|am)\b"
+# A first-person subject in any tense — "I'm", "I've", "I left", "I kicked
+# off". Wider than _I_FUTURE because branch 3 only needs to know the running
+# job is Claude's, not that the sentence is in the future tense. Same mandatory
+# apostrophe, and here it is load-bearing: "id" is a word this repo writes in
+# nearly every paragraph ("the session id"), so an optional one turned "the
+# wave id keeps running in the background" into a promise.
+_I_SUBJECT = (r"\bi(?:'|\u2019)(?:m|ve|ll|d)\b|"
+              r"\bi\s+(?:am|have|will|left|started|kicked|ran|set|got)\b")
 # Nouns for the kind of job a turn waits on.
 _JOB_NOUN = (r"tests?|build|run|job|deploy(?:ment)?|backtest|ci\b|suite|"
              r"script|training|benchmark|bench\b|compile|install")
@@ -840,7 +851,9 @@ WAKE_PROMISE_RE = re.compile(
     #    "I'll report back", "I'm going to let you know", "I will update you".
     r"(?:" + _I_FUTURE + r")(?:\s+\w+){0,5}?\s+"
     r"(?:report\s+back|check\s+back|circle\s+back|follow\s+up|update\s+you|"
-    r"let\s+you\s+know|keep\s+you\s+posted|get\s+back\s+to\s+you|"
+    r"let\s+you\s+know|keep\s+you\s+posted|get\s+back\s+to\s+you|ping\s+you|"
+    r"come\s+back\s+(?:to\s+you|with)|"
+    r"tell\s+you\s+(?:how|what\s+(?:it|they)|when|the\s+result)|"
     r"report\s+(?:the|those|these)?\s*(?:results?|numbers?|outcome|findings?))"
 
     # 2. First-person future + a passive-watching verb. "watch out" and
@@ -850,13 +863,23 @@ WAKE_PROMISE_RE = re.compile(
     r"keep\s+an\s+eye\s+on|"
     r"wait(?:ing)?\s+(?:for|on)\s+(?!you\b|your\b|the\s+user\b|input\b))"
 
-    # 3. Bare participle, but ONLY over "in the background" — the phrase that
-    #    means "after this turn ends", which is the thing that never happens.
-    #    A job noun alone is far too loose: 520 real result files contained
-    #    "polling rules ... always run", "however healthy the watching looks"
-    #    and "answer it by watching the original run", none of them promises.
-    #    First-person forms ("I'm monitoring the build") are branch 2's job.
-    r"|\b(?:monitoring|polling|watching|keeping\s+an\s+eye\s+on|running)\b"
+    # 3. A participle over "in the background" — the phrase that means "after
+    #    this turn ends", which is the thing that never happens. Two guards,
+    #    both learned the hard way:
+    #    * The tail must be "in the background", not a job noun. A job noun
+    #      alone matched "polling rules ... always run", "however healthy the
+    #      watching looks" and "answer it by watching the original run" in the
+    #      520 archived result files — none of them promises.
+    #    * The participle must belong to CLAUDE: it starts a clause (a
+    #      subjectless "polling the job in the background") or follows a
+    #      first-person subject ("I left the suite running in the background").
+    #      Without that, third-person prose describing this very bot — "the
+    #      scheduler is polling in the background", "a watch keeps running in
+    #      the background" — fires the nudge, which is the same
+    #      documentation-trips-the-detector failure that got the predecessor
+    #      deleted. This repo writes those sentences constantly.
+    r"|(?:\A|[.;:\n][\s>*_#-]*|(?:" + _I_SUBJECT + r")[^.\n]{0,24}?\s)"
+    r"(?:monitoring|polling|watching|running|keeping\s+an\s+eye\s+on)\b"
     r"[^.\n]{0,40}?\bin\s+the\s+background\b"
 
     # 4. A completion clause tied to a first-person future, either order.
@@ -868,9 +891,17 @@ WAKE_PROMISE_RE = re.compile(
     r"\b(?:once|when|after|as\s+soon\s+as)\b[^.\n]{0,50}?\b(?:" + _JOB_NOUN
     + r")\b[^.\n]{0,40}?\b(?:" + _JOB_DONE + r")\b"
 
-    # 5. "waiting for the suite to finish" — no first person needed; the
-    #    sentence only makes sense as a promise to still be here afterward.
-    r"|\bwait(?:ing)?\s+(?:for|on)\b[^.\n]{0,40}?\bto\s+"
+    # 5. "Waiting for the suite to finish" — a subjectless wait, which only
+    #    makes sense as a promise to still be here afterward. First-person
+    #    forms ("I'm waiting for the deploy to land") are branch 2's job, so
+    #    this branch only has to cover the subjectless shape — and it must
+    #    NOT cover a third-person one. Without the lookbehinds, "the chain is
+    #    waiting for the build to finish" and "you'll need to wait for the
+    #    tests to finish" both read as promises; the first is a sentence this
+    #    repo writes about its own machinery, the second is advice to the user.
+    r"|(?<!\bis\s)(?<!\bare\s)(?<!\bwas\s)(?<!\bwere\s)(?<!\bbe\s)"
+    r"(?<!\bto\s)(?<!\bbeen\s)"
+    r"\bwait(?:ing)?\s+(?:for|on)\b[^.\n]{0,40}?\bto\s+"
     r"(?:finish|complete|land|end|be\s+done)\b",
     re.IGNORECASE,
 )

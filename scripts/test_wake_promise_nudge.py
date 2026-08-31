@@ -183,6 +183,33 @@ _detect("Self-wake queued (~4 min).", False)
 _detect("Unarmed polling rules are clamped so they always run a check.", False)
 _detect("However healthy the watching looks, a rule that has not run trips.", False)
 _detect("Answer it by watching the original run, not by guessing.", False)
+# Third-person prose about THIS bot's own machinery. The repo writes these
+# sentences constantly (CLAUDE.md, review reports, design notes) and none of
+# them is a promise — the participle has no first-person subject and does not
+# start a clause. Firing here is the exact failure that got the predecessor
+# regex deleted, so these are load-bearing negatives.
+_detect("The scheduler is polling in the background every 30 seconds.", False)
+_detect("A watch keeps running in the background until the pid is gone.", False)
+_detect("That job was running in the background when the bot restarted.", False)
+_detect("Builds run in the background in their own worktree.", False)
+# ...but the same participle WITH a first-person owner is a promise.
+_detect("I left the suite running in the background.", True)
+_detect("I've got the bench polling in the background.", True)
+_detect("Kicked it off. Watching the log in the background.", True)
+_detect("I'll ping you once the build lands.", True)
+_detect("I'll come back to you with the numbers when the run finishes.", True)
+_detect("Come back to me if it breaks.", False)
+# A first-person contraction needs its apostrophe. Without that, "id" — a word
+# this repo writes constantly — reads as "I'd", and "ill"/"im" as "I'll"/"I'm".
+_detect("The wave id keeps running in the background until the last child lands.", False)
+_detect("Still ill from that refactor, the id fields run in the background.", False)
+# A subjectless wait is a promise; a third-person or instructional one is not.
+_detect("Waiting for the suite to finish.", True)
+_detect("Kicked off the bench. Waiting for the run to complete.", True)
+_detect("I'm waiting for the deploy to land.", True)
+_detect("The chain is waiting for the build to finish before merging.", False)
+_detect("You will need to wait for the tests to finish first.", False)
+_detect("A step that was waiting for the deploy to land is now unblocked.", False)
 
 # ---- The nudge -----------------------------------------------------------
 print("Promise with nothing armed -> exactly one nudge, no poll")
@@ -201,6 +228,20 @@ _check("armed watch stands the nudge down", len(c.store.wakes) == 0)
 print("Promise while a wake is already pending -> nothing scheduled")
 c = _run(_PROMISE, pending_wake=object())
 _check("pending wake stands the nudge down", len(c.store.wakes) == 0)
+
+# ...but the wake that FIRED this turn is not a pending one. The scheduler
+# deletes a fired wake only after the resumed turn returns, so the row visible
+# here is the one being consumed — counting it would silence the nudge for the
+# likeliest case of all: a watch or wake resumes the thread, the job is still
+# running, and the turn says "I'll report back" again.
+print("Promise on a wake-fired turn -> the firing row does not stand it down")
+c = _run(_PROMISE + "\n[TURN_COMPLETE]", source="wake", pending_wake=object())
+_check("wake-fired turn still nudged", len(c.store.wakes) == 1)
+_check("and it is the promise nudge",
+       c.store.wakes and c.store.wakes[0] == _PROMISE_NUDGE_PROMPT)
+print("Promise on a cooldown-retry turn -> a pending wake still stands it down")
+c = _run(_PROMISE + "\n[TURN_COMPLETE]", source="cooldown", pending_wake=object())
+_check("cooldown turn consumes no wake row", len(c.store.wakes) == 0)
 
 print("Promise from a build/worktree session -> nothing scheduled")
 c = _run(_PROMISE, branch="claude-bot/t-1")
@@ -260,6 +301,32 @@ _check("nudge counter reset", c._nudge == 0)
 print("An unattended dead-end still nudges (unattended path untouched)")
 c = _run("Next I'll read the roadmap and re-verify.", source="cooldown")
 _check("unattended dead-end still re-invoked", len(c.store.wakes) == 1)
+
+# ---- The eval flag -------------------------------------------------------
+# The runtime recovers from this; eval counts how often it has to, and points
+# at the prompt block that was supposed to prevent it.
+print("eval flags the same turn and attributes it to WAKE_GUIDANCE")
+from bot.engine.eval import _ATTRIBUTION, _check_unarmed_promise  # noqa: E402
+
+_flags = _check_unarmed_promise(_Inst(), _PROMISE)
+_check("unarmed promise flagged", len(_flags) == 1)
+_check("evidence quotes the promising phrase",
+       bool(_flags) and bool(_flags[0].evidence))
+_check("evidence comes from the cleaned text, not a fenced quote",
+       not _check_unarmed_promise(
+           _Inst(), "Never say ```\nI'll report back when the tests finish\n```"))
+_check("owner is WAKE_GUIDANCE",
+       any(cat == "constraint_violation" and frag in _flags[0].message
+           and owner == "WAKE_GUIDANCE"
+           for cat, frag, owner in _ATTRIBUTION))
+_check("a turn that armed a watch is not flagged",
+       _check_unarmed_promise(_Inst(), _watch_txt) == [])
+_check("a turn that armed a wake is not flagged",
+       _check_unarmed_promise(_Inst(), _wake_txt) == [])
+_check("worktree build not flagged (WAKE_GUIDANCE is not injected there)",
+       _check_unarmed_promise(_Inst(branch="claude-bot/t-1"), _PROMISE) == [])
+_check("a clean turn is not flagged",
+       _check_unarmed_promise(_Inst(), "Fixed the parser. Suite is green.") == [])
 
 
 if _failures:
