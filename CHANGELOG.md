@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## v0.101.16 — The README describes the bot that exists (2026-08-31)
+
+### Changed
+- **README rewritten for the bot this actually is** (`README.md`). The public repo still documented the Telegram-era bot — `@BotFather` setup, a `YOUR_USERNAME` clone URL, no mention of Discord, forums, worktree builds, chains, spawn waves or watches. A stranger landing on it would have formed a wrong picture of the project. Rewritten to serve both readers: an architecture section for someone building their own version, and a setup/command reference for someone running this one. Every path, config filename, env var and slash command in it was checked against source.
+
+### Added
+- `LICENSE` — MIT, and a License section pointing at it.
+- GitHub repo description and topics (`claude-code`, `discord-bot`, `ai-agents`, `developer-tools`); the repo is public and had neither. GitHub-side settings, applied with `gh repo edit` and verified live — they are not part of this diff.
+
 ## v0.101.15 — A copy-paste block pastes clean (2026-08-30)
 
 ### Fixed
