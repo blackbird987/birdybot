@@ -1,6 +1,6 @@
 # Claude Code Bot
 
-Drive [Claude Code](https://docs.anthropic.com/en/docs/claude-code) from your phone. One Discord forum channel per repo, one thread per session — you approve work from a chat message and the bot builds it in an isolated git worktree, reviews it, verifies it by actually running the app, and merges. Ten-plus sessions run in parallel across projects and report back on their own.
+Drive [Claude Code](https://docs.anthropic.com/en/docs/claude-code) from your phone. One Discord forum channel per repo, one thread per session — you approve work from a chat message and the bot builds it in an isolated git worktree, reviews it, verifies it by actually running the app, and merges. Dozens of session threads stay open across projects and report back on their own; `MAX_CONCURRENT` bounds how many are actually executing at any moment.
 
 The repo directory and PyPI-style package name still say `claude-telegram-bot` / `claude-bot` — this started as a Telegram bot and the name stuck. It is a Discord bot now.
 
@@ -31,7 +31,7 @@ Data structures live in `bot/discord/forums.py`, persisted to `data/state.json`.
 
 Every build task gets its own worktree at `{repo}/.worktrees/{instance-id}/` on its own branch.
 
-- The main checkout never leaves `master` — no `git checkout` in the shared directory.
+- The main checkout never leaves its default branch (`master` or `main`, detected per repo) — no `git checkout` in the shared directory.
 - Parallel builds on the same repo don't collide.
 - Session files are copied between the main repo and the worktree so `--resume` keeps working.
 - A per-repo asyncio lock serializes git admin (worktree add/remove, merge, branch delete).
@@ -46,15 +46,15 @@ Work advances through named steps (`bot/engine/workflows.py`):
 review_loop → build → sensors → review_code → verify → done → verify_release → release → merge
 ```
 
-A session that has agreed a plan in chat hands it off with a `/chain` directive rather than building inline. Three presets:
+That is the full autopilot chain. A session that has already agreed a plan in chat skips `review_loop` and hands the plan straight to the pipeline with a `/chain` directive rather than building inline. Three presets:
 
 | Preset | Steps | Use |
 |---|---|---|
-| `ship` | build → sensors → review_code → verify → done → release → merge | approved, land it |
-| `hold` | same, minus merge | land it but let me look first |
+| `ship` | build → sensors → review_code → verify → done → verify_release → release → merge | approved, land it |
+| `hold` | same, minus `merge` | land it but let me look first |
 | `verify` | build → sensors → review_code → verify | build-and-verify loop, branch stays open |
 
-**`verify` means the app actually runs.** The step starts the application and exercises the changed feature through diagnostic endpoints — not lint, not typecheck, not a unit test suite. A repo declares how in `.claude/test.json`.
+**`verify` means the app actually runs.** The step brings the app up, drives the changed feature against it and reads the result back — not lint, not typecheck, not a unit-test suite. A repo declares how in `.claude/test.json`: a health command, start/stop commands, where the log lives and which markers count as failure, plus named interaction commands the step can call. A singleton app (this bot is one — one token, one state file) sets `"singleton": true` and the step drives the instance that is already running instead of booting a second one that would fight it for shared state.
 
 ### Computational sensors
 
@@ -141,7 +141,7 @@ Everything else has a default. The ones worth knowing:
 | Variable | Default | Description |
 |---|---|---|
 | `DISCORD_CATEGORY_NAME` | — | Name for the auto-provisioned private category |
-| `CLAUDE_BINARY` | `claude` | Path to the Claude CLI |
+| `CLAUDE_BINARY` | per provider | Path to the CLI binary (`claude`, or `agent` under the cursor provider) |
 | `CLAUDE_ACCOUNTS` | — | Comma-separated config dirs for multi-account failover |
 | `MAX_CONCURRENT` | `5` | Max parallel CLI instances |
 | `DAILY_BUDGET_USD` | `20.0` | Daily spend limit |
@@ -205,7 +205,7 @@ Slash commands are guild-synced, so they register instantly.
 **Scheduling**
 
 ```
-/schedule every <interval> <prompt>    recurring task
+/schedule every <N>m|h|d <prompt>      recurring task
 /schedule at <HH:MM> <prompt>          one-shot at a UTC time
 /schedule at +<duration> <prompt>      one-shot after a delay
 /schedule list | delete <id>
@@ -214,19 +214,19 @@ Slash commands are guild-synced, so they register instantly.
 **Per-thread settings** (nothing here is global)
 
 ```
-/mode explore|build      permission mode
-/model <name>            model for this thread
-/effort low|…|max        reasoning effort
-/verbose 0|1|2           progress detail
-/provider claude|cursor  CLI provider
-/context set <text>      context pinned to every prompt
-/alias set|list|delete   command shortcuts
+/mode explore|plan|build      permission mode
+/model <name>                 model for this thread
+/effort low|medium|high|max   reasoning effort
+/verbose 0|1|2                progress detail
+/provider claude|cursor       CLI provider
+/context set <text>           context pinned to every prompt
+/alias set|list|delete        command shortcuts
 ```
 
 **Repos and access**
 
 ```
-/repo add|remove|create|switch|list
+/repo add|create|remove|switch|list|deploy
 /access grant|revoke|list|set
 /diagnostics             toggle diagnostic scaffolding for this repo
 /monitor setup|refresh|remove|list
@@ -260,7 +260,7 @@ Four optional files in a repo's `.claude/` directory:
 
 | File | Controls |
 |---|---|
-| `test.json` | How to start, health-check and stop the app, plus the diagnostic endpoints the verify step drives |
+| `test.json` | How the verify step brings the app up, checks its health, drives it and reads its log |
 | `sensors.json` | Which deterministic checks run after build, and whether failures block or warn |
 | `workflow.json` | Merge autonomy — `hold`, `merge` or `ship` |
 | `deploy.json` | A deploy command, which adds a Deploy button to the repo's control room |
@@ -269,7 +269,7 @@ Four optional files in a repo's `.claude/` directory:
 
 ## Testing
 
-`scripts/` holds 43 standalone harnesses, one per hard-won behaviour — `test_forum_pins.py`, `test_lifetime_cap.py`, `test_orchestrator_join.py`, `test_kill_shape.py`, `test_cooldown_session_bind.py` and so on. Each runs on its own:
+`scripts/` holds 40-odd standalone harnesses, one per hard-won behaviour — `test_forum_pins.py`, `test_lifetime_cap.py`, `test_orchestrator_join.py`, `test_kill_shape.py`, `test_cooldown_session_bind.py` and so on. Each runs on its own:
 
 ```bash
 python scripts/test_orchestrator_join.py

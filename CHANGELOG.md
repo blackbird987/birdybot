@@ -7,7 +7,7 @@
 
 ### Added
 - `LICENSE` — MIT, and a License section pointing at it.
-- GitHub repo description and topics (`claude-code`, `discord-bot`, `ai-agents`, `developer-tools`); the repo is public and had neither.
+- GitHub repo description and topics (`claude-code`, `discord-bot`, `ai-agents`, `developer-tools`); the repo is public and had neither. GitHub-side settings, applied with `gh repo edit` and verified live — they are not part of this diff.
 
 ## v0.101.15 — A copy-paste block pastes clean (2026-08-30)
 
