@@ -228,6 +228,7 @@ def evaluate_instance(inst: Instance) -> SessionEval:
         ev.flags.extend(_check_verbosity(inst, text))
         ev.flags.extend(_check_claim_grounding(inst, text))
         ev.flags.extend(_check_copy_block_wrapping(inst, text))
+        ev.flags.extend(_check_unarmed_promise(inst, text))
     ev.flags.extend(_check_tool_hygiene(inst))
     ev.flags.extend(_check_efficiency(inst))
 
@@ -449,6 +450,40 @@ def _check_copy_block_wrapping(inst: Instance, text: str) -> list[EvalFlag]:
         ))
 
     return flags
+
+
+def _check_unarmed_promise(inst: Instance, text: str) -> list[EvalFlag]:
+    """Did Claude promise to report back without arming a watch or a self-wake?
+
+    The runtime already recovers from this (``lifecycle.check_wake_request``
+    re-invokes the session with ``_PROMISE_NUDGE_PROMPT``), but a recovery that
+    fires often is a prompt problem, not a runtime one — so it is counted here
+    and attributed to ``WAKE_GUIDANCE``, the block that is supposed to make the
+    session arm the directive in the first place.
+
+    Judged from the result text alone: the promise fired and the text carries
+    no parsable directive. That is exactly the pair the runtime evaluates, and
+    it keeps eval free of any dependency on scheduler state that has since
+    moved on. The predicates are imported from the production modules so the
+    two can't drift.
+    """
+    from bot.engine import watches
+    from bot.engine.lifecycle import _parse_wake_directive, promises_continuation
+
+    if not promises_continuation(text):
+        return []
+    if (_parse_wake_directive(text) is not None
+            or watches.parse_watch_directive(text) is not None):
+        return []
+    match = config.WAKE_PROMISE_RE.search(text)
+    return [EvalFlag(
+        category="constraint_violation", severity="issue",
+        message=(
+            "Promised to report back later but armed no self-wake or watch — "
+            "the thread had nothing to resume it"
+        ),
+        evidence=(match.group(0)[:100] if match else ""),
+    )]
 
 
 def _check_claim_grounding(inst: Instance, text: str) -> list[EvalFlag]:
@@ -713,6 +748,9 @@ _ATTRIBUTION: tuple[tuple[str, str, str], ...] = (
     # "over-long" must precede the generic "mobile" rule — the length
     # target lives in CHAT_APP_CONSTRAINT and both words are in that message.
     ("constraint_violation", "hard-wrapped", "WORKING_CONTEXT"),
+    # A promise with nothing armed is WAKE_GUIDANCE failing to land, not a
+    # length or formatting problem — matched before the generic rules below.
+    ("constraint_violation", "armed no self-wake", "WAKE_GUIDANCE"),
     ("constraint_violation", "over-long", "CHAT_APP_CONSTRAINT"),
     ("constraint_violation", "mobile", "MOBILE_HINT"),
     ("efficiency", "prompt-cache", "prompt assembly order (harness)"),

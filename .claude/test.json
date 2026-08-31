@@ -64,6 +64,7 @@
     "botcmd_collapse": "python scripts/test_botcmd_collapse.py",
     "wake_directive": "python scripts/test_wake_directive.py",
     "wake_promise": "python scripts/test_wake_promise.py",
+    "wake_promise_nudge": "python scripts/test_wake_promise_nudge.py",
     "watch": "python scripts/test_watch.py",
     "multi_spawn": "python scripts/test_multi_spawn.py",
     "chain_botcmd": "python scripts/test_chain_botcmd.py",

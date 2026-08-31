@@ -329,6 +329,36 @@ a delay, and the thread stays visibly busy until the job actually ends.
 - Knobs: `WATCH_*` in `bot/config.py`. Harness:
   `python scripts/test_watch.py`
 
+### A promise to report back is nudged, never auto-armed
+
+`lifecycle.check_wake_request` is where a finished turn is judged, and a turn
+that armed nothing has three possible endings:
+
+- **Unattended dead-end** (a cooldown retry or self-wake fire with no
+  `[TURN_COMPLETE]`) → `_nudge_or_stop` re-invokes it.
+- **A false claim** ("Self-wake queued (~4 min)") with no directive parsed →
+  notice only, `claims_self_wake`.
+- **A bare promise** ("I'll report back when the tests finish") → since
+  2026-08-31, `promises_continuation` + `_promise_nudge` re-invoke the session
+  once with `_PROMISE_NUDGE_PROMPT`. Before that it fell through to "ended
+  cleanly" and the thread died holding a promise nothing could keep.
+
+It **nudges rather than arms** on purpose. `WAKE_PROMISE_RE` is the name a
+deleted predecessor held: it *scheduled* a 3-minute wake off this same prose
+and fired phantom re-checks on text that merely discussed a build. Re-invoking
+the session keeps "only an explicit directive arms anything" true, and puts
+the decision where the pid, the log path and the real duration are known. A
+false positive therefore costs one turn that answers `[TURN_COMPLETE]`.
+
+The nudge stands down whenever the thread already has something to resume it
+(an armed watch, a pending wake — which is how a tripped watch looks —, a
+worktree build, a context-exhausted session), shares `MAX_CONSEC_NUDGES` with
+the unattended nudge so the two can't ping-pong, and loses to the claim notice
+when both would fire. `eval._check_unarmed_promise` counts recurrences and
+attributes them to `WAKE_GUIDANCE`, so `/evals` names the block that was
+supposed to prevent it.
+Harness: `python scripts/test_wake_promise_nudge.py`
+
 ## Computational Sensors (`.claude/sensors.json`)
 
 Chains run a deterministic sensor step (build → **sensors** → review_code → …)

@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Fixed
+- **A turn that promises to report back is no longer allowed to end with nothing armed** (`bot/config.py`, `bot/engine/lifecycle.py`, `bot/store/state.py`). A session that kicked off a test suite and finished with "I'll report back when the tests finish" left the thread with zero watches and zero pending wakes — its process exits when the turn does, so the promised message could never arrive and the thread silently died. `check_wake_request` had three outcomes and only two of them were covered: an *unattended* dead-end was nudged, a false *claim* of an armed self-wake was reported, and a plain promise fell through to "ended cleanly". `WAKE_PROMISE_RE` + `lifecycle.promises_continuation` now catch the promise, and `_promise_nudge` re-invokes the session once with `_PROMISE_NUDGE_PROMPT` so it arms a real `[BOT_CMD: /watch]` or `/wake` itself.
+- The nudge deliberately does **not** schedule a poll. An earlier `WAKE_PROMISE_RE` armed a 3-minute wake off the same prose and fired phantom re-checks on text that merely discussed a build; it was deleted for that. Re-invoking the session instead keeps the "only an explicit directive arms anything" rule intact, and makes a false positive cost one turn that answers `[TURN_COMPLETE]` rather than a phantom wake. Measured on 520 archived result files the detector fires on 1.3%, and the three false positives that surfaced there ("polling rules ... always run", "however healthy the watching looks", "watching the original run") are now excluded by requiring "in the background" for a bare participle.
+- The nudge stands down whenever the thread already has something to resume it — an armed watch, a pending wake (which is also how a tripped watch looks), a worktree build, or a context-exhausted session — shares the existing `MAX_CONSEC_NUDGES` cap with the unattended-turn nudge so the two can't ping-pong, and defers to the claim notice when both would fire.
+
+### Added
+- `StateStore.pending_wake_for_channel` — the read half of `add_wake`'s one-wake-per-thread invariant, so callers can ask whether a thread already has something to resume it without knowing that a wake is a `resume_thread` Schedule.
+- `eval._check_unarmed_promise` — counts the recurrence and attributes it to `WAKE_GUIDANCE`, the prompt block that is supposed to make the session arm the directive in the first place. A recovery that fires often is a prompt problem, not a runtime one.
+- Harness: `python scripts/test_wake_promise_nudge.py` (45 checks), registered in `.claude/test.json`.
+
+
 ## v0.101.16 — The README describes the bot that exists (2026-08-31)
 
 ### Changed

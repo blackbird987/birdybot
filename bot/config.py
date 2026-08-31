@@ -808,6 +808,73 @@ WAKE_CLAIM_RE = re.compile(
     re.IGNORECASE,
 )
 
+# NUDGE trigger, NOT a scheduling trigger. A turn that promises to continue
+# after it ends ("I'll report back when the tests finish") while arming no
+# [BOT_CMD: /wake] and no /watch leaves the thread nothing that can resume it —
+# the process exits the moment the turn does, so the promise IS the failure.
+#
+# The name is deliberately the one a deleted predecessor held. That earlier
+# WAKE_PROMISE_RE *armed* a 3-minute wake off this same prose and fired phantom
+# re-checks on text that merely discussed a build (see the note above
+# WAKE_FALLBACK_DELAY_SECS; scripts/test_wake_promise.py keeps that failure
+# mode dead). What makes the resurrection safe is that nothing here schedules a
+# poll: check_wake_request re-invokes the SESSION with _PROMISE_NUDGE_PROMPT,
+# and only an explicit directive it emits in reply arms anything. A false
+# positive costs one turn that answers [TURN_COMPLETE] — never a phantom wake.
+#
+# The phrasing tracks the promises BOT_CONTEXT_TAIL and WAKE_GUIDANCE ban by
+# name, so the detector and the guidance describe the same sentence. Code
+# spans and quoted phrases are stripped first (lifecycle._CLAIM_META_RE).
+
+# "I'll" / "I will" / "I'm" / "I am" / "I'm going to" — a first-person future.
+_I_FUTURE = r"\bi(?:'|\u2019)?(?:ll|m)\b|\bi\s+(?:will|am)\b"
+# Nouns for the kind of job a turn waits on.
+_JOB_NOUN = (r"tests?|build|run|job|deploy(?:ment)?|backtest|ci\b|suite|"
+             r"script|training|benchmark|bench\b|compile|install")
+# Verbs for that job ending.
+_JOB_DONE = (r"finish(?:e[sd])?|complet(?:e[sd]?|ing)|lands?|landed|"
+             r"is\s+done|are\s+done|wraps?\s+up|passes|succeeds?")
+
+WAKE_PROMISE_RE = re.compile(
+    # 1. First-person future + an explicit promise to come back to the user.
+    #    "I'll report back", "I'm going to let you know", "I will update you".
+    r"(?:" + _I_FUTURE + r")(?:\s+\w+){0,5}?\s+"
+    r"(?:report\s+back|check\s+back|circle\s+back|follow\s+up|update\s+you|"
+    r"let\s+you\s+know|keep\s+you\s+posted|get\s+back\s+to\s+you|"
+    r"report\s+(?:the|those|these)?\s*(?:results?|numbers?|outcome|findings?))"
+
+    # 2. First-person future + a passive-watching verb. "watch out" and
+    #    "wait for you/your reply" are excluded — those aren't job waits.
+    r"|(?:" + _I_FUTURE + r")(?:\s+\w+){0,3}?\s+"
+    r"(?:monitor(?:ing)?|watch(?:ing)?(?!\s+out)|poll(?:ing)?|keep\s+checking|"
+    r"keep\s+an\s+eye\s+on|"
+    r"wait(?:ing)?\s+(?:for|on)\s+(?!you\b|your\b|the\s+user\b|input\b))"
+
+    # 3. Bare participle, but ONLY over "in the background" — the phrase that
+    #    means "after this turn ends", which is the thing that never happens.
+    #    A job noun alone is far too loose: 520 real result files contained
+    #    "polling rules ... always run", "however healthy the watching looks"
+    #    and "answer it by watching the original run", none of them promises.
+    #    First-person forms ("I'm monitoring the build") are branch 2's job.
+    r"|\b(?:monitoring|polling|watching|keeping\s+an\s+eye\s+on|running)\b"
+    r"[^.\n]{0,40}?\bin\s+the\s+background\b"
+
+    # 4. A completion clause tied to a first-person future, either order.
+    #    "Once CI completes I'll pull the numbers" / the reverse.
+    r"|\b(?:once|when|after|as\s+soon\s+as)\b[^.\n]{0,50}?\b(?:" + _JOB_NOUN
+    + r")\b[^.\n]{0,40}?\b(?:" + _JOB_DONE + r")\b[^.\n]{0,60}?\b(?:"
+    + _I_FUTURE + r")"
+    r"|\b(?:" + _I_FUTURE + r")[^.\n]{0,60}?"
+    r"\b(?:once|when|after|as\s+soon\s+as)\b[^.\n]{0,50}?\b(?:" + _JOB_NOUN
+    + r")\b[^.\n]{0,40}?\b(?:" + _JOB_DONE + r")\b"
+
+    # 5. "waiting for the suite to finish" — no first person needed; the
+    #    sentence only makes sense as a promise to still be here afterward.
+    r"|\bwait(?:ing)?\s+(?:for|on)\b[^.\n]{0,40}?\bto\s+"
+    r"(?:finish|complete|land|end|be\s+done)\b",
+    re.IGNORECASE,
+)
+
 # --- Unattended-turn end-of-turn protocol -----------------------------------
 # A system-initiated turn (cooldown retry, self-wake fire) runs with NOBODY
 # watching. If it ends dangling — a "next I'll..." plan with no action — the

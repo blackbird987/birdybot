@@ -74,6 +74,12 @@ class _Store:
     def watch_for_channel(self, channel_id):
         return None
 
+    # Asked before the promise nudge fires (scripts/test_wake_promise_nudge.py):
+    # a thread that already has something to resume it is not a dead-end. No
+    # pending wakes in these cases, but the double still has to answer.
+    def pending_wake_for_channel(self, channel_id):
+        return None
+
     def list_watches(self):
         return []
 
