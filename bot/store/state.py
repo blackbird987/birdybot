@@ -1052,6 +1052,19 @@ class StateStore:
             self.save()
         return len(stale)
 
+    def pending_wake_for_channel(self, channel_id: str) -> Schedule | None:
+        """The pending self-wake bound to ``channel_id``, if any.
+
+        The read half of ``add_wake``'s one-wake-per-thread invariant. Callers
+        that want to know whether a thread already has something to resume it
+        ask here rather than scanning schedules themselves — a wake is a
+        ``resume_thread`` Schedule, which is not obvious from the outside.
+        """
+        for sched in self._schedules.values():
+            if sched.resume_thread and sched.channel_id == channel_id and sched.enabled:
+                return sched
+        return None
+
     def list_watches(self) -> list[Watch]:
         return list(self._watches.values())
 
