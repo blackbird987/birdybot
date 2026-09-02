@@ -24,6 +24,7 @@ from bot.discord import channels
 from bot.discord import spawn_colors
 from bot.discord import access as access_mod
 from bot.discord.access import load_access_config
+from bot.engine import repo_desc
 from bot.engine import sessions as sessions_mod
 from bot.platform.base import RequestContext
 from bot.platform.formatting import MODE_DISPLAY
@@ -394,6 +395,39 @@ class ForumManager:
         for proj in self._forum_projects.values():
             if proj.forum_channel_id == forum_id:
                 return proj
+        return None
+
+    def repo_for_channel(self, channel_id: str, channel=None) -> str | None:
+        """Which repo a channel belongs to, for any channel in a repo forum.
+
+        Three inputs resolve, in cost order: a *session* thread we recorded, a
+        repo's forum channel itself, and any other thread whose parent is one
+        of those forums. The third is the one that matters — a command typed
+        in the Control Room, the post that actually displays the blurb, is in
+        a thread `thread_to_project` never recorded.
+
+        Pass `channel` when the caller already holds the object. The Control
+        Room auto-archives like any forum post, and discord.py evicts an
+        archived thread from its cache, so `get_channel` returns None for
+        precisely the case this exists for; an interaction's own `channel` is
+        built from the gateway payload and is there either way.
+        """
+        lookup = self.thread_to_project(channel_id)
+        if lookup:
+            return lookup[0].repo_name
+        proj = self.forum_by_channel_id(channel_id)
+        if proj:
+            return proj.repo_name
+        if channel is None:
+            try:
+                channel = self._client.get_channel(int(channel_id))
+            except (TypeError, ValueError):
+                return None
+        parent_id = getattr(channel, "parent_id", None)
+        if parent_id:
+            proj = self.forum_by_channel_id(str(parent_id))
+            if proj:
+                return proj.repo_name
         return None
 
     def is_user_forum(self, forum_id: str) -> tuple[str, str] | None:
@@ -1384,9 +1418,13 @@ class ForumManager:
         repo_path = repos.get(repo_name, "")
         branch = await self._get_repo_branch(repo_path)
         has_remote = await self._has_git_remote(repo_path)
+        blurb = await repo_desc.refresh_repo_description(
+            self._store, repo_name, repo_path,
+        )
 
         thread, msg = await channels.create_repo_control_post(
             forum, repo_name, repo_path, branch, has_remote=has_remote,
+            description=blurb,
         )
         proj.control_thread_id = str(thread.id)
         proj.control_message_id = str(msg.id)
@@ -1544,6 +1582,9 @@ class ForumManager:
             branch = await self._get_repo_branch(repo_path)
             has_remote = await self._has_git_remote(repo_path)
             today_cost = self._store.get_repo_daily_cost(repo_name)
+            blurb = await repo_desc.refresh_repo_description(
+                self._store, repo_name, repo_path,
+            )
 
             ds = self._store.get_deploy_state(repo_name)
             # Build instance_id -> thread_id map for deploy state session links.
@@ -1575,6 +1616,7 @@ class ForumManager:
                 deploy_thread_ids=deploy_thread_ids,
                 usage_bar=usage_bar,
                 drain_status=drain_status,
+                description=blurb,
             )
             view = channels.build_control_view(
                 repo_name,

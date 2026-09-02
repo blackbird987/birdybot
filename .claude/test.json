@@ -87,7 +87,8 @@
     "kill_shape": "python scripts/test_kill_shape.py",
     "lifetime_cap": "python scripts/test_lifetime_cap.py",
     "cooldown_session_bind": "python scripts/test_cooldown_session_bind.py",
-    "copy_block_wrapping": "python scripts/test_copy_block_wrapping.py"
+    "copy_block_wrapping": "python scripts/test_copy_block_wrapping.py",
+    "repo_desc": "python scripts/test_repo_desc.py"
   },
 
   "auth": {

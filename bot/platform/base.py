@@ -183,6 +183,14 @@ class Messenger(Protocol):
         Default: no-op.
         """
 
+    async def on_repo_meta_changed(self, repo_name: str) -> None:
+        """Called after a repo's displayed metadata changed (e.g. its blurb).
+
+        Separate from on_deploy_state_changed so the call site reads as what
+        it is; both happen to redraw the same surface today.
+        Default: no-op.
+        """
+
     async def close_conversation(self, channel_id: str, *, skip_mention: bool = False) -> None:
         """Close/archive a conversation.
 

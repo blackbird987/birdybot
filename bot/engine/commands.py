@@ -19,7 +19,13 @@ from pathlib import Path
 from bot import config
 from bot.claude.gitpaths import git_toplevel
 from bot.claude.types import Instance, InstanceOrigin, InstanceStatus, InstanceType, KillOutcome, merge_msg_is_failure
-from bot.engine import lifecycle, pending as pending_mod, sessions as sessions_mod, workflows
+from bot.engine import (
+    lifecycle,
+    pending as pending_mod,
+    repo_desc,
+    sessions as sessions_mod,
+    workflows,
+)
 from bot.platform.base import ButtonSpec, RequestContext, SpawnArgs
 from bot.platform.formatting import (
     MODEL_CLEAR_WORDS,
@@ -2628,7 +2634,12 @@ async def on_schedule(ctx: RequestContext, text: str) -> None:
 
 # --- /repo ---
 
-_RESERVED_REPO_NAMES = {"add", "switch", "list", "create", "remove", "delete"}
+# "clear" is reserved for the same reason the subcommand names are: it is
+# an argument `/repo desc [name] clear` has to be able to tell apart from
+# a repo name, and a repo actually called "clear" would make that command
+# print a blurb instead of clearing one.
+_RESERVED_REPO_NAMES = {"add", "switch", "list", "create", "remove", "delete",
+                       "desc", "deploy", "clear"}
 
 
 def _validate_repo_name(name: str) -> str | None:
@@ -2716,6 +2727,7 @@ async def _create_repo(ctx: RequestContext, text: str) -> None:
                 f"this subdirectory and switched: {repo_path}"
             )
         await ctx.messenger.send_text(ctx.channel_id, note)
+        await repo_desc.refresh_repo_description(ctx.store, name, str(repo_path.resolve()))
         await ctx.messenger.on_repo_added(name)
         return
 
@@ -2773,7 +2785,64 @@ async def _create_repo(ctx: RequestContext, text: str) -> None:
             msg += "\nGitHub push skipped: `gh` CLI not installed."
 
     await ctx.messenger.send_text(ctx.channel_id, msg)
+    await repo_desc.refresh_repo_description(ctx.store, name, str(repo_path.resolve()))
     await ctx.messenger.on_repo_added(name)
+
+
+async def _repo_desc(ctx: RequestContext, rest: str) -> None:
+    """`/repo desc [name] [<text>|clear]` — the Control Room blurb.
+
+    Setting one writes `<repo>/.claude/repo.json`, not bot state: the sentence
+    describes the repo, so it belongs to the repo and travels with a clone.
+    """
+    repos = ctx.store.list_repos()
+    # The thread's own repo wins over the globally active one — /repo desc is
+    # typed inside a repo's forum, and defaulting to whatever was switched to
+    # last would write the sentence into the wrong repo's .claude/repo.json.
+    if ctx.repo_name and ctx.repo_name in repos:
+        default, default_path = ctx.repo_name, repos[ctx.repo_name]
+    else:
+        default, default_path = ctx.store.get_active_repo()
+    target, target_path, body = default, default_path, rest
+
+    # `/repo desc <name> <text>` only when the first word really names a
+    # registered repo — otherwise the whole of `rest` is the blurb, and a
+    # sentence starting with a repo's name would otherwise lose that word.
+    first, _, remainder = rest.partition(" ")
+    if rest in repos:
+        target, target_path, body = rest, repos[rest], ""
+    elif first in repos and remainder.strip():
+        target, target_path, body = first, repos[first], remainder.strip()
+
+    if not target or not target_path:
+        await ctx.messenger.send_text(
+            ctx.channel_id, "No repo set. Use /repo add <name> <path>")
+        return
+
+    if body:
+        text = None if body == "clear" else body.strip('"\'')
+        try:
+            await asyncio.to_thread(repo_desc.write_manual_description, target_path, text)
+        except OSError as e:
+            await ctx.messenger.send_text(ctx.channel_id, f"Could not set the description \u2014 {e}")
+            return
+        ctx.store.clear_repo_description(target)
+
+    blurb = await repo_desc.refresh_repo_description(ctx.store, target, target_path)
+    entry = ctx.store.get_repo_description_entry(target) or {}
+    source = entry.get("source") or ""
+
+    if body:
+        await ctx.messenger.on_repo_meta_changed(target)
+    if blurb:
+        note = f" (from {source})" if source else ""
+        await ctx.messenger.send_text(ctx.channel_id, f"**{target}** — {blurb}{note}")
+    else:
+        await ctx.messenger.send_text(
+            ctx.channel_id,
+            f"No description for `{target}`. Set one: `/repo desc <text>`\n"
+            f"Otherwise it is read from CLAUDE.md, README.md or package metadata.",
+        )
 
 
 async def on_repo(ctx: RequestContext, text: str) -> None:
@@ -2794,6 +2863,7 @@ async def on_repo(ctx: RequestContext, text: str) -> None:
             return
         ctx.store.add_repo(name, path)
         await ctx.messenger.send_text(ctx.channel_id, f"Repo '{name}' added: {path}")
+        await repo_desc.refresh_repo_description(ctx.store, name, path)
         await ctx.messenger.on_repo_added(name)
 
     elif text.startswith("create "):
@@ -2813,6 +2883,9 @@ async def on_repo(ctx: RequestContext, text: str) -> None:
             await ctx.messenger.send_text(ctx.channel_id, f"Switched to '{name}': {path}")
         else:
             await ctx.messenger.send_text(ctx.channel_id, f"Repo '{name}' not found.")
+
+    elif text == "desc" or text.startswith("desc "):
+        await _repo_desc(ctx, text[4:].strip())
 
     elif text == "list":
         repos = ctx.store.list_repos()
@@ -2873,7 +2946,8 @@ async def on_repo(ctx: RequestContext, text: str) -> None:
             await ctx.messenger.send_text(ctx.channel_id, "No repo set. Use /repo add <name> <path>")
 
     else:
-        await ctx.messenger.send_text(ctx.channel_id, "Usage: /repo add|remove|create|switch|list|deploy")
+        await ctx.messenger.send_text(
+            ctx.channel_id, "Usage: /repo add|remove|create|switch|list|desc|deploy")
 
 
 # --- /budget ---
@@ -3080,7 +3154,7 @@ async def on_help(ctx: RequestContext) -> None:
         "`/alias` — command shortcuts\n"
         "`/schedule` — recurring tasks\n"
         "`/deferred` — view/clear deferred review items\n"
-        "`/repo` — repo management (add|remove|create|switch|list)\n"
+        "`/repo` — repo management (add|remove|create|switch|list|desc)\n"
         "`/session` — list/resume desktop CLI sessions\n"
         "`/budget` — budget info/reset\n"
         "`/clear` — archive old instances\n"

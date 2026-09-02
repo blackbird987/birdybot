@@ -60,6 +60,15 @@ def _localise_paths(data: dict) -> None:
             if isinstance(path, str):
                 repos[name] = paths.translate(path)
 
+    # The blurb cache records the path it was derived from and re-derives when
+    # it differs. Untranslated, the other machine's spelling never matches and
+    # every refresh on this machine re-reads the files the cache exists to skip.
+    descs = data.get("repo_descriptions")
+    if isinstance(descs, dict):
+        for entry in descs.values():
+            if isinstance(entry, dict) and isinstance(entry.get("path"), str):
+                entry["path"] = paths.translate(entry["path"])
+
     for inst in data.get("instances") or []:
         if not isinstance(inst, dict):
             continue
@@ -112,6 +121,10 @@ class StateStore:
 
         self._instances: dict[str, Instance] = {}
         self._repos: dict[str, str] = {}       # name -> path
+        # name -> {"text", "source", "sig", "mtime", "path"} — the derived
+        # Control Room blurb, cached so a refresh is stat-only.
+        # See bot/engine/repo_desc.py.
+        self._repo_descriptions: dict[str, dict] = {}
         self._active_repo: str | None = None
         self._task_counter: int = 0
         self._query_counter: int = 0
@@ -205,6 +218,7 @@ class StateStore:
                 inst = Instance.from_dict(d)
                 self._instances[inst.id] = inst
             self._repos = data.get("repos", {})
+            self._repo_descriptions = data.get("repo_descriptions", {})
             self._active_repo = data.get("active_repo")
             self._task_counter = data.get("task_counter", 0)
             self._query_counter = data.get("query_counter", 0)
@@ -311,6 +325,7 @@ class StateStore:
         data = {
             "instances": [i.to_dict() for i in self._instances.values()],
             "repos": self._repos,
+            "repo_descriptions": self._repo_descriptions,
             "active_repo": self._active_repo,
             "task_counter": self._task_counter,
             "query_counter": self._query_counter,
@@ -606,6 +621,8 @@ class StateStore:
         if name not in self._repos:
             return False
         del self._repos[name]
+        # A name re-registered at a different path must re-derive its blurb.
+        self._repo_descriptions.pop(name, None)
         if self._active_repo == name:
             self._active_repo = next(iter(self._repos), None)
         # Clean up any persisted deploy status msg IDs for this repo
@@ -633,6 +650,37 @@ class StateStore:
 
     def list_repos(self) -> dict[str, str]:
         return dict(self._repos)
+
+    # --- Repo descriptions (Control Room blurb, see bot/engine/repo_desc.py) ---
+
+    def get_repo_description_entry(self, name: str) -> dict | None:
+        entry = self._repo_descriptions.get(name)
+        return entry if isinstance(entry, dict) else None
+
+    def set_repo_description(self, name: str, text: str, source: str,
+                             sig: str, mtime: float, path: str) -> None:
+        """Record a derived blurb. An empty ``text`` is a cached *miss* — a repo
+        that says nothing about itself must not be re-read on every refresh.
+
+        ``sig`` is the freshness key (see ``repo_desc.source_signature``);
+        ``mtime`` is the newest source mtime, carried only so this record is
+        legible when read out of ``data/state.json`` by hand.
+
+        Deferred to the auto-save loop, not written through. Control rooms
+        refresh on every instance start and completion, and a cache miss that
+        forced a full multi-megabyte rewrite of state.json would make the
+        cache cost more on the miss path than the reads it exists to avoid.
+        Losing an entry to a crash costs one re-derivation, nothing more.
+        """
+        self._repo_descriptions[name] = {
+            "text": text, "source": source,
+            "sig": sig, "mtime": mtime, "path": path,
+        }
+        self.mark_dirty()
+
+    def clear_repo_description(self, name: str) -> None:
+        if self._repo_descriptions.pop(name, None) is not None:
+            self.mark_dirty()
 
     # --- Mode ---
 
