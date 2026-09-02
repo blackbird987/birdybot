@@ -397,6 +397,30 @@ class ForumManager:
                 return proj
         return None
 
+    def repo_for_channel(self, channel_id: str) -> str | None:
+        """Which repo a channel belongs to, for any channel in a repo forum.
+
+        `thread_to_project` only knows *session* threads. A command typed in
+        the Control Room — the post that actually displays the blurb — is in a
+        thread this manager never recorded, so the parent forum is the fallback
+        that makes those posts resolve to their repo like any other thread.
+        """
+        lookup = self.thread_to_project(channel_id)
+        if lookup:
+            return lookup[0].repo_name
+        proj = self.forum_by_channel_id(channel_id)
+        if proj:
+            return proj.repo_name
+        try:
+            ch = self._client.get_channel(int(channel_id))
+        except (TypeError, ValueError):
+            return None
+        if isinstance(ch, discord.Thread) and ch.parent_id:
+            proj = self.forum_by_channel_id(str(ch.parent_id))
+            if proj:
+                return proj.repo_name
+        return None
+
     def is_user_forum(self, forum_id: str) -> tuple[str, str] | None:
         """Check if a forum is a user's personal forum. Returns (user_id, user_name) or None."""
         cfg = load_access_config()

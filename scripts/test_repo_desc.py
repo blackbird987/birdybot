@@ -463,6 +463,82 @@ check("a blurb with no path renders alone",
       nopath.description == "A thing.", str(nopath.description))
 
 
+# --- /repo desc targets the thread's repo ---------------------------------
+#
+# The bug this pins: the handler defaulted to the globally *active* repo, so
+# typing it in one repo's forum after a /repo switch wrote the sentence into
+# a different repo's .claude/repo.json. The Discord half is the other half of
+# the same bug — slash commands build a ctx with no repo at all, so cmd_repo
+# has to resolve the channel's repo before the engine ever sees it.
+
+print("\n/repo desc targeting")
+
+import asyncio as _asyncio  # noqa: E402
+
+from bot.engine import commands as _cmds  # noqa: E402
+
+
+class _Msgr:
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+        self.meta_changed: list[str] = []
+
+    async def send_text(self, channel_id, text, **kw):
+        self.sent.append(text)
+
+    async def on_repo_meta_changed(self, repo_name):
+        self.meta_changed.append(repo_name)
+
+
+class _Ctx:
+    def __init__(self, store, repo_name=None) -> None:
+        self.store = store
+        self.repo_name = repo_name
+        self.messenger = _Msgr()
+        self.channel_id = "1"
+
+
+here_store = StateStore(BASE / "desc-state.json", BASE / "results")
+thread_repo = repo({"CLAUDE.md": "# A\n\nThread repo.\n"})
+active_repo = repo({"CLAUDE.md": "# B\n\nActive repo.\n"})
+here_store.add_repo("threadrepo", thread_repo)
+here_store.add_repo("activerepo", active_repo)
+here_store.switch_repo("activerepo")
+
+ctx = _Ctx(here_store, repo_name="threadrepo")
+_asyncio.run(_cmds._repo_desc(ctx, "Typed in the thread."))
+check("the blurb lands in the thread's repo, not the active one",
+      (rd.repo_json_path(thread_repo).is_file()
+       and not rd.repo_json_path(active_repo).exists()),
+      f"thread={rd.repo_json_path(thread_repo).is_file()} "
+      f"active={rd.repo_json_path(active_repo).exists()}")
+check("and the control room for that repo is redrawn",
+      ctx.messenger.meta_changed == ["threadrepo"], str(ctx.messenger.meta_changed))
+
+# With no thread repo it still falls back to the active one.
+ctx2 = _Ctx(here_store, repo_name=None)
+_asyncio.run(_cmds._repo_desc(ctx2, "Typed with no thread repo."))
+check("with no thread repo it falls back to the active one",
+      rd.repo_json_path(active_repo).is_file())
+
+# An explicit name still wins over both.
+ctx3 = _Ctx(here_store, repo_name="activerepo")
+_asyncio.run(_cmds._repo_desc(ctx3, "threadrepo Named explicitly."))
+check("an explicit name beats the thread's repo",
+      _json.loads(rd.repo_json_path(thread_repo).read_text())["description"]
+      == "Named explicitly.")
+
+# The Discord half: cmd_repo must resolve the channel's repo, because
+# _run_slash builds its ctx without one.
+slash_src = (Path(__file__).resolve().parent.parent
+             / "bot" / "discord" / "slash_commands.py").read_text()
+check("the /repo slash command resolves the channel's repo into ctx",
+      "repo_for_channel" in slash_src)
+from bot.discord.forums import ForumManager  # noqa: E402
+check("ForumManager exposes that resolver",
+      callable(getattr(ForumManager, "repo_for_channel", None)))
+
+
 # --- This repo, for real --------------------------------------------------
 
 print("\nThis repo")

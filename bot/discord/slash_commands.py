@@ -342,7 +342,17 @@ def setup(bot: ClaudeBot) -> None:
                 "\n".join(lines), view=view, ephemeral=True,
             )
             return
-        await bot._run_slash(interaction, lambda ctx: commands.on_repo(ctx, args))
+        # _run_slash builds its ctx without a repo, so /repo desc would default
+        # to the globally active repo and write the sentence into the wrong
+        # repo's .claude/repo.json. Resolve the channel's own repo here rather
+        # than in _run_slash: every other slash command shares that ctx, and
+        # /bg would start running against a different repo than it does today.
+        async def _run(ctx):
+            if not ctx.repo_name:
+                ctx.repo_name = bot._forums.repo_for_channel(str(interaction.channel_id))
+            await commands.on_repo(ctx, args)
+
+        await bot._run_slash(interaction, _run)
 
     @bot.tree.command(name="session", description="List/resume sessions", guild=guild_obj)
     @app_commands.describe(args="resume <id> | drop")

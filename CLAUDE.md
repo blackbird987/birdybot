@@ -100,10 +100,16 @@ matches, and every refresh would re-read the files the cache exists to skip.
 
 `.claude/repo.json` is the manual override, written by `/repo desc <text>`
 (`/repo desc <name> <text>`, `/repo desc clear`, bare `/repo desc` to show it
-and its source). With no name it targets the **thread's** repo before the
-globally active one: the command is typed inside a repo's forum, and
-defaulting to whatever was `/repo switch`ed to last writes the sentence into
-the wrong repo. A repo whose directory is gone is refused, not created —
+and its source). With no name it targets the repo of the **channel it was
+typed in**, before the globally active one: the command is typed inside a
+repo's forum, and defaulting to whatever was `/repo switch`ed to last writes
+the sentence into the wrong repo. That needs both halves — the engine prefers
+`ctx.repo_name`, and `cmd_repo` has to fill it in, because `_run_slash` builds
+its ctx with no repo and the engine half alone is inert on the slash path.
+`ForumManager.repo_for_channel` resolves it, falling back to the parent forum
+so the Control Room post itself resolves like any session thread. It is wired
+into `/repo` only: setting it in `_run_slash` would also change which repo
+`/bg` runs in. A repo whose directory is gone is refused, not created —
 `mkdir(parents=True)` on a stale registration would conjure an empty tree that
 looks like the real thing. It is written into the *repo*, not into bot state, because
 the sentence describes the repo and should travel with a clone — and it sits

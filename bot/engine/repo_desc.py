@@ -28,6 +28,10 @@ log = logging.getLogger(__name__)
 
 MAX_LEN = 120
 
+# The manual override, relative to the repo root. Named once: it is both a
+# candidate source and the file /repo desc writes.
+REPO_JSON_REL = ".claude/repo.json"
+
 # Read at most this much of a markdown file. The blurb is in the first few
 # lines; a 400 KB README must not become a 400 KB read on the hot path.
 _MAX_READ_BYTES = 64 * 1024
@@ -143,7 +147,8 @@ def _breaks_paragraph(line: str) -> bool:
         or _RULE_RE.match(line)
         or _BULLET_RE.match(line)
         or _SETEXT_RE.fullmatch(line)
-        or line.startswith((">", "|", "<!--"))
+        or line.startswith((">", "|"))
+        or "<!--" in line
     )
 
 
@@ -237,7 +242,7 @@ def _from_toml(path: Path, tables: tuple[str, ...]) -> str | None:
 # entry carries its own parser, so a source added here cannot be half-wired —
 # there is no second dispatch table to forget.
 _SOURCES: tuple[tuple[str, str, Callable[[Path], str | None]], ...] = (
-    (".claude/repo.json", "repo.json", _from_json_description),
+    (REPO_JSON_REL, "repo.json", _from_json_description),
     ("CLAUDE.md", "CLAUDE.md", _from_markdown),
     ("README.md", "README.md", _from_markdown),
     ("pyproject.toml", "pyproject.toml",
@@ -382,7 +387,7 @@ async def refresh_repo_description(store, repo_name: str, repo_path: str) -> str
 
 
 def repo_json_path(repo_path: str) -> Path:
-    return Path(repo_path) / ".claude" / "repo.json"
+    return Path(repo_path) / REPO_JSON_REL
 
 
 def write_manual_description(repo_path: str, text: str | None) -> None:
@@ -415,6 +420,6 @@ def write_manual_description(repo_path: str, text: str | None) -> None:
     else:
         data.pop("description", None)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
+    tmp = path.parent / (path.name + ".tmp")
     tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     os.replace(tmp, path)
