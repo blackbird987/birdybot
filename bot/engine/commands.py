@@ -2791,8 +2791,14 @@ async def _repo_desc(ctx: RequestContext, rest: str) -> None:
     describes the repo, so it belongs to the repo and travels with a clone.
     """
     repos = ctx.store.list_repos()
-    active, active_path = ctx.store.get_active_repo()
-    target, target_path, body = active, active_path, rest
+    # The thread's own repo wins over the globally active one — /repo desc is
+    # typed inside a repo's forum, and defaulting to whatever was switched to
+    # last would write the sentence into the wrong repo's .claude/repo.json.
+    if ctx.repo_name and ctx.repo_name in repos:
+        default, default_path = ctx.repo_name, repos[ctx.repo_name]
+    else:
+        default, default_path = ctx.store.get_active_repo()
+    target, target_path, body = default, default_path, rest
 
     # `/repo desc <name> <text>` only when the first word really names a
     # registered repo — otherwise the whole of `rest` is the blurb, and a

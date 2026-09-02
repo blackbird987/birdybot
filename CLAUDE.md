@@ -86,7 +86,9 @@ snake_case is exactly what a developer README's first line contains.
 **The cache is the load-bearing part.** `refresh_control_room` runs on every
 instance start and completion, so the hot path is stat-only: six `os.stat`
 calls producing a signature, and the file bodies are re-read only when that
-signature moves. A repo that says nothing about itself caches the *miss*, so
+signature moves. The miss path defers its write (`mark_dirty`, picked up by
+the 60s auto-save) rather than saving through — `state.json` is megabytes, and
+a cache whose miss costs a full rewrite is worse than no cache. A repo that says nothing about itself caches the *miss*, so
 it costs stats rather than six failed opens forever. The signature names every
 candidate that exists together with its own mtime, deliberately not just the
 newest one: a source restored from a tarball or read over a mount with a
@@ -98,7 +100,12 @@ matches, and every refresh would re-read the files the cache exists to skip.
 
 `.claude/repo.json` is the manual override, written by `/repo desc <text>`
 (`/repo desc <name> <text>`, `/repo desc clear`, bare `/repo desc` to show it
-and its source). It is written into the *repo*, not into bot state, because
+and its source). With no name it targets the **thread's** repo before the
+globally active one: the command is typed inside a repo's forum, and
+defaulting to whatever was `/repo switch`ed to last writes the sentence into
+the wrong repo. A repo whose directory is gone is refused, not created —
+`mkdir(parents=True)` on a stale registration would conjure an empty tree that
+looks like the real thing. It is written into the *repo*, not into bot state, because
 the sentence describes the repo and should travel with a clone — and it sits
 next to the per-repo config files that already live there (`test.json`,
 `workflow.json`, `sensors.json`, `deploy.json`). Other keys in the file are

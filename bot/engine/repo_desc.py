@@ -11,7 +11,7 @@ The cache is the load-bearing part. `refresh_control_room` runs on every
 instance start and completion, several repos at a time; reading six files per
 refresh to render one sentence that changes once a month would be pure waste.
 So the hot path is stat-only, and the file bodies are read again only when the
-newest candidate file's mtime moves.
+signature over the candidate files moves (see :func:`source_signature`).
 """
 
 from __future__ import annotations
@@ -21,23 +21,12 @@ import json
 import logging
 import os
 import re
+from collections.abc import Callable
 from pathlib import Path
 
 log = logging.getLogger(__name__)
 
 MAX_LEN = 120
-
-# Candidate sources in priority order: the manual override first, then the two
-# files a human actually reads, then package metadata as a last resort. Each
-# entry is (relative path, parser name).
-_SOURCES: tuple[tuple[str, str], ...] = (
-    (".claude/repo.json", "repo.json"),
-    ("CLAUDE.md", "CLAUDE.md"),
-    ("README.md", "README.md"),
-    ("pyproject.toml", "pyproject.toml"),
-    ("package.json", "package.json"),
-    ("Cargo.toml", "Cargo.toml"),
-)
 
 # Read at most this much of a markdown file. The blurb is in the first few
 # lines; a 400 KB README must not become a 400 KB read on the hot path.
@@ -53,6 +42,7 @@ _RULE_RE = re.compile(r"^\s*([-*_])\1{2,}\s*$")
 _SETEXT_RE = re.compile(r"=+|-+")
 _BADGE_RE = re.compile(r"\[!\[[^\]]*\]\([^)]*\)\]\([^)]*\)|!\[[^\]]*\]\([^)]*\)|\[[^\]]*\]\([^)]*\)")
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
+_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 
 _LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
 _IMAGE_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
@@ -144,42 +134,48 @@ def _read_head(path: Path) -> str:
         return fh.read(_MAX_READ_BYTES)
 
 
-def _first_prose_line(text: str) -> str | None:
-    """First *paragraph* of a markdown document that reads as prose.
+def _breaks_paragraph(line: str) -> bool:
+    """True for a line that cannot be part of a prose paragraph."""
+    return bool(
+        not line
+        or _FENCE_RE.match(line)
+        or _HEADING_RE.match(line)
+        or _RULE_RE.match(line)
+        or _BULLET_RE.match(line)
+        or _SETEXT_RE.fullmatch(line)
+        or line.startswith((">", "|", "<!--"))
+    )
+
+
+def _first_prose_paragraph(text: str) -> str | None:
+    """First paragraph of a markdown document that reads as prose.
 
     Skips the title — both ``# ATX`` and the underlined ``setext`` spelling —
     fenced code, bullets, block quotes, HTML comments, horizontal rules, table
     rows and badge rows. A wrong blurb is worse than none, and the title is
     the wrong blurb: the control room embed already shows the repo's name.
     """
+    # Closed comments go first, so a one-line ``<!-- x -->`` and a comment
+    # spanning five lines behave identically; a state machine over the lines
+    # made those two cases disagree. An *unterminated* ``<!--`` survives the
+    # sub and stops the scan below rather than leaking its body as a blurb.
+    text = _COMMENT_RE.sub("", text)
     lines = text.splitlines()
     in_fence = False
-    in_comment = False
     i = 0
     while i < len(lines):
         stripped = lines[i].strip()
         i += 1
-        if in_comment:
-            if "-->" in stripped:
-                in_comment = False
-                after = stripped.split("-->", 1)[1].strip()
-                if after and not _HEADING_RE.match(after):
-                    return after
-            continue
         if _FENCE_RE.match(stripped):
             in_fence = not in_fence
             continue
         if in_fence or not stripped:
             continue
-        if stripped.startswith("<!--"):
-            if "-->" not in stripped:
-                in_comment = True
-            continue
+        if "<!--" in stripped:
+            return None
         if _HEADING_RE.match(stripped) or _RULE_RE.match(stripped):
             continue
-        if _BULLET_RE.match(stripped) or stripped.startswith(">"):
-            continue
-        if stripped.startswith("|"):
+        if _BULLET_RE.match(stripped) or stripped.startswith((">", "|")):
             continue
         if _is_badge_line(stripped):
             continue
@@ -192,20 +188,20 @@ def _first_prose_line(text: str) -> str | None:
         # line ends mid-sentence ("...take a plain-language request like"),
         # which as a blurb reads as truncation with no ellipsis to say so.
         para = [stripped]
-        while i < len(lines) and len("".join(para)) < _MAX_PARAGRAPH:
+        size = len(stripped)
+        while i < len(lines) and size < _MAX_PARAGRAPH:
             nxt = lines[i].strip()
-            if (not nxt or _FENCE_RE.match(nxt) or _HEADING_RE.match(nxt)
-                    or _RULE_RE.match(nxt) or _BULLET_RE.match(nxt)
-                    or nxt.startswith((">", "|", "<!--"))
-                    or _SETEXT_RE.fullmatch(nxt)):
+            if _breaks_paragraph(nxt):
                 break
             para.append(nxt)
+            size += len(nxt)
             i += 1
         return " ".join(para)
     return None
 
 
-def _from_repo_json(path: Path) -> str | None:
+def _from_json_description(path: Path) -> str | None:
+    """``description`` out of a JSON object — .claude/repo.json and package.json."""
     data = json.loads(_read_head(path))
     if isinstance(data, dict):
         value = data.get("description")
@@ -214,13 +210,8 @@ def _from_repo_json(path: Path) -> str | None:
     return None
 
 
-def _from_package_json(path: Path) -> str | None:
-    data = json.loads(_read_head(path))
-    if isinstance(data, dict):
-        value = data.get("description")
-        if isinstance(value, str):
-            return value
-    return None
+def _from_markdown(path: Path) -> str | None:
+    return _first_prose_paragraph(_read_head(path))
 
 
 def _from_toml(path: Path, tables: tuple[str, ...]) -> str | None:
@@ -241,18 +232,19 @@ def _from_toml(path: Path, tables: tuple[str, ...]) -> str | None:
     return None
 
 
-def _parse(rel: str, path: Path) -> str | None:
-    if rel == ".claude/repo.json":
-        return _from_repo_json(path)
-    if rel in ("CLAUDE.md", "README.md"):
-        return _first_prose_line(_read_head(path))
-    if rel == "pyproject.toml":
-        return _from_toml(path, ("project", "tool.poetry"))
-    if rel == "package.json":
-        return _from_package_json(path)
-    if rel == "Cargo.toml":
-        return _from_toml(path, ("package",))
-    return None
+# Candidate sources in priority order: the manual override first, then the two
+# files a human actually reads, then package metadata as a last resort. Each
+# entry carries its own parser, so a source added here cannot be half-wired —
+# there is no second dispatch table to forget.
+_SOURCES: tuple[tuple[str, str, Callable[[Path], str | None]], ...] = (
+    (".claude/repo.json", "repo.json", _from_json_description),
+    ("CLAUDE.md", "CLAUDE.md", _from_markdown),
+    ("README.md", "README.md", _from_markdown),
+    ("pyproject.toml", "pyproject.toml",
+     lambda p: _from_toml(p, ("project", "tool.poetry"))),
+    ("package.json", "package.json", _from_json_description),
+    ("Cargo.toml", "Cargo.toml", lambda p: _from_toml(p, ("package",))),
+)
 
 
 # --- resolution -----------------------------------------------------------
@@ -286,12 +278,12 @@ def resolve_repo_description_with_source(repo_path: str) -> tuple[str, str] | No
     """
     if not repo_path:
         return None
-    for rel, label in _SOURCES:
+    for rel, label, parser in _SOURCES:
         try:
             path = _candidate(repo_path, rel)
             if path is None:
                 continue
-            text = _finalise(_parse(rel, path))
+            text = _finalise(parser(path))
             if text:
                 return text, label
         except Exception:
@@ -324,7 +316,7 @@ def source_signature(repo_path: str) -> tuple[str, float]:
     """
     parts: list[str] = []
     newest = 0.0
-    for rel, _ in _SOURCES:
+    for rel, _label, _parser in _SOURCES:
         try:
             mtime = os.stat(os.path.join(repo_path, rel)).st_mtime
         except OSError:
@@ -398,8 +390,17 @@ def write_manual_description(repo_path: str, text: str | None) -> None:
 
     Other keys in the file are preserved — this sits next to test.json,
     workflow.json and sensors.json, and a future repo.json may well grow more
-    fields than this one.
+    fields than this one. The write is atomic for the same reason: a crash
+    between truncate and write would take those other keys with it.
+
+    A repo whose directory is missing is refused rather than created. ``mkdir(
+    parents=True)`` would otherwise conjure the whole tree, so setting a blurb
+    on a stale registration (a repo moved or deleted on disk) would silently
+    materialise an empty directory that looks like the real one.
     """
+    root = Path(repo_path)
+    if not root.is_dir():
+        raise OSError(f"repo directory does not exist: {repo_path}")
     path = repo_json_path(repo_path)
     data: dict = {}
     if path.is_file():
@@ -414,4 +415,6 @@ def write_manual_description(repo_path: str, text: str | None) -> None:
     else:
         data.pop("description", None)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)

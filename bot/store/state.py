@@ -670,16 +670,22 @@ class StateStore:
         ``sig`` is the freshness key (see ``repo_desc.source_signature``);
         ``mtime`` is the newest source mtime, carried only so this record is
         legible when read out of ``data/state.json`` by hand.
+
+        Deferred to the auto-save loop, not written through. Control rooms
+        refresh on every instance start and completion, and a cache miss that
+        forced a full multi-megabyte rewrite of state.json would make the
+        cache cost more on the miss path than the reads it exists to avoid.
+        Losing an entry to a crash costs one re-derivation, nothing more.
         """
         self._repo_descriptions[name] = {
             "text": text, "source": source,
             "sig": sig, "mtime": mtime, "path": path,
         }
-        self.save()
+        self.mark_dirty()
 
     def clear_repo_description(self, name: str) -> None:
         if self._repo_descriptions.pop(name, None) is not None:
-            self.save()
+            self.mark_dirty()
 
     # --- Mode ---
 

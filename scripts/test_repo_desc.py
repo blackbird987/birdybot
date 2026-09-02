@@ -179,6 +179,17 @@ path = repo({"README.md": "# Thing\n\n<!-- a note\nspanning lines -->\n\nThe pro
 check("multi-line HTML comments are skipped",
       rd.resolve_repo_description(path) == "The prose line.")
 
+path = repo({"README.md": "# Thing\n\n<!-- note --> The prose line.\n"})
+check("prose after a closed comment on the same line is kept",
+      rd.resolve_repo_description(path) == "The prose line.",
+      str(rd.resolve_repo_description(path)))
+
+# An unterminated comment must not leak its body as the blurb.
+path = repo({"README.md": "# Thing\n\n<!-- unterminated\nsecret internal note\n"})
+check("an unterminated HTML comment yields nothing",
+      rd.resolve_repo_description(path) is None,
+      str(rd.resolve_repo_description(path)))
+
 path = repo({"README.md": "Thing\n=====\n\n---\n\nThe prose line.\n"})
 check("horizontal rules are skipped",
       rd.resolve_repo_description(path) == "The prose line.")
@@ -337,6 +348,17 @@ check("clearing repo.json falls back to CLAUDE.md",
 check("clearing keeps the file for its other keys",
       rd.repo_json_path(path).is_file())
 
+# A registration whose directory is gone (moved, deleted) must be refused,
+# not silently re-created by mkdir(parents=True).
+missing = str(BASE / "not-a-repo" / "nested")
+try:
+    rd.write_manual_description(missing, "Should not land.")
+    refused = False
+except OSError:
+    refused = True
+check("a missing repo directory is refused, not conjured",
+      refused and not (BASE / "not-a-repo").exists())
+
 other = repo({"CLAUDE.md": "# T\n\nA different repo entirely.\n"})
 check("the same name at a different path re-derives",
       rd.refresh_repo_description_sync(store, "r", other) == "A different repo entirely.")
@@ -386,6 +408,9 @@ sfile = BASE / "state.json"
 store3 = StateStore(sfile, BASE / "results")
 store3.add_repo("thing", apath)
 store3.set_repo_description("thing", "Round tripped.", "CLAUDE.md", "sig", 1.5, apath)
+check("recording a blurb defers the write instead of rewriting state.json",
+      store3._dirty is True)
+store3.save()
 reloaded = StateStore(sfile, BASE / "results")
 check("the cache survives a save/load",
       reloaded.get_repo_description("thing") == "Round tripped.",
@@ -415,7 +440,8 @@ print("\nControl Room embed")
 
 from bot.discord import channels  # noqa: E402
 
-REPO_PATH = "/home/q/Programming/thing"
+# Derived, not hardcoded — a literal /home/... path fails check_portability.
+REPO_PATH = str(BASE / "thing")
 embed = channels.build_control_embed("thing", REPO_PATH, "master",
                                      description="A thing that does things.")
 desc = embed.description or ""
@@ -463,5 +489,5 @@ print(f"PASS: the Control Room says what the repo is about ({checks} checks).")
 print("      The blurb comes from repo.json, CLAUDE.md, README.md or package")
 print("      metadata in that order, skips titles/badges/code/bullets, is")
 print("      reduced to one plain line under 120 chars, and is re-derived only")
-print("      when a source file's mtime moves — so the refresh that runs on")
-print("      every instance event stays stat-only.")
+print("      when the signature over the source files moves — so the refresh")
+print("      that runs on every instance event stays stat-only.")
