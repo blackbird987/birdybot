@@ -22,6 +22,8 @@ the embed itself leads with the blurb and demotes the path.
 
 from __future__ import annotations
 
+import asyncio
+
 import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
 
 import os
@@ -83,6 +85,15 @@ def repo(files: dict[str, str]) -> str:
     root = BASE / f"r{n}"
     root.mkdir()
     return make_repo(root, files)
+
+
+
+def _raises_oserror(fn, *a):
+    try:
+        fn(*a)
+    except OSError:
+        return True
+    return False
 
 
 # --- Source precedence ----------------------------------------------------
@@ -203,6 +214,17 @@ check("a file of nothing but headings yields nothing",
       rd.resolve_repo_description(path) is None)
 
 
+# A badge row right under the paragraph, with no blank line between them --
+# the gather loop and the scan loop used to disagree about badges, so the
+# gather swallowed this into the blurb.
+check("a badge row touching the paragraph is not absorbed into it",
+      rd._first_prose_paragraph(
+          "# T\n\nReal sentence here.\n[![ci](a.svg)](b)\n")
+      == "Real sentence here.")
+check("nor is a bullet list that starts on the very next line",
+      rd._first_prose_paragraph("# T\n\nReal sentence here.\n- one\n- two\n")
+      == "Real sentence here.")
+
 # --- Cleanup and truncation -----------------------------------------------
 
 print("\nCleanup and truncation")
@@ -306,6 +328,16 @@ except OSError:
     check("a symlink pointing out of the repo is refused", True, "symlinks unsupported, skipped")
 
 
+
+def refresh(store, name, path):
+    """The one production entry point, driven synchronously for the harness.
+
+    There is no sync twin to test separately, on purpose -- the pair used to
+    exist and the sync half had no caller but this file.
+    """
+    return asyncio.run(rd.refresh_repo_description(store, name, path))
+
+
 # --- Cache ----------------------------------------------------------------
 
 print("\nCache")
@@ -313,38 +345,48 @@ print("\nCache")
 store = FakeStore()
 path = repo({"CLAUDE.md": "# T\n\nFirst wording.\n"})
 check("first call derives and records",
-      rd.refresh_repo_description_sync(store, "r", path) == "First wording."
+      refresh(store, "r", path) == "First wording."
       and store.writes == 1)
 
 check("a second call with nothing changed is a cache hit",
-      rd.refresh_repo_description_sync(store, "r", path) == "First wording."
+      refresh(store, "r", path) == "First wording."
       and store.writes == 1, f"{store.writes} write(s)")
 
-# Rewrite the body but restore the mtime: the cache must be believed, which is
-# what proves the hot path is not reading the file.
+# Rewrite the body to the same length and restore the mtime: nothing the
+# signature can see has moved, so the cache must be believed. That is what
+# proves the hot path stats rather than reads.
 claude_md = Path(path) / "CLAUDE.md"
 st = os.stat(claude_md)
-claude_md.write_text("# T\n\nSecond wording.\n", encoding="utf-8")
+claude_md.write_text("# T\n\nThird wording.\n", encoding="utf-8")
 os.utime(claude_md, (st.st_atime, st.st_mtime))
-check("unchanged mtime does not re-read the body",
-      rd.refresh_repo_description_sync(store, "r", path) == "First wording."
+check("same mtime and same size does not re-read the body",
+      refresh(store, "r", path) == "First wording."
       and store.writes == 1, f"{store.writes} write(s)")
 
-os.utime(claude_md, (st.st_atime, st.st_mtime + 10))
-check("a moved mtime re-derives",
-      rd.refresh_repo_description_sync(store, "r", path) == "Second wording."
+# Same mtime, different size: a restore that preserved timestamps (tar -p,
+# rsync -a) would otherwise serve the old blurb forever.
+claude_md.write_text("# T\n\nSecond wording, at a different length.\n",
+                     encoding="utf-8")
+os.utime(claude_md, (st.st_atime, st.st_mtime))
+check("a changed size re-derives even with the mtime preserved",
+      refresh(store, "r", path) == "Second wording, at a different length."
       and store.writes == 2, f"{store.writes} write(s)")
+
+os.utime(claude_md, (st.st_atime, st.st_mtime + 10))
+check("and so does a moved mtime",
+      refresh(store, "r", path) == "Second wording, at a different length."
+      and store.writes == 3, f"{store.writes} write(s)")
 
 # The manual override is a brand new file, so the newest mtime moves forward.
 rd.write_manual_description(path, "Hand written.")
 check("writing repo.json invalidates the cache",
-      rd.refresh_repo_description_sync(store, "r", path) == "Hand written.")
+      refresh(store, "r", path) == "Hand written.")
 check("and records where it came from",
       (store.entries["r"] or {}).get("source") == "repo.json")
 
 rd.write_manual_description(path, None)
 check("clearing repo.json falls back to CLAUDE.md",
-      rd.refresh_repo_description_sync(store, "r", path) == "Second wording.")
+      refresh(store, "r", path) == "Second wording, at a different length.")
 check("clearing keeps the file for its other keys",
       rd.repo_json_path(path).is_file())
 
@@ -361,41 +403,22 @@ check("a missing repo directory is refused, not conjured",
 
 other = repo({"CLAUDE.md": "# T\n\nA different repo entirely.\n"})
 check("the same name at a different path re-derives",
-      rd.refresh_repo_description_sync(store, "r", other) == "A different repo entirely.")
+      refresh(store, "r", other) == "A different repo entirely.")
 
 # A repo that says nothing must cache the miss, or every refresh pays six
 # failed opens for a line that will never exist.
 empty = repo({})
 store2 = FakeStore()
 check("a repo with no sources caches the miss",
-      rd.refresh_repo_description_sync(store2, "e", empty) is None and store2.writes == 1)
+      refresh(store2, "e", empty) is None and store2.writes == 1)
 check("and the miss is a cache hit next time",
-      rd.refresh_repo_description_sync(store2, "e", empty) is None and store2.writes == 1,
+      refresh(store2, "e", empty) is None and store2.writes == 1,
       f"{store2.writes} write(s)")
 
 check("an empty repo path is a no-op",
-      rd.refresh_repo_description_sync(store2, "x", "") is None)
+      refresh(store2, "x", "") is None)
 
 
-# --- The async twin -------------------------------------------------------
-
-# Production calls the async one; the sync twin exists for harnesses and
-# non-async callers. They must not drift.
-
-print("\nAsync twin")
-
-import asyncio  # noqa: E402
-
-astore = FakeStore()
-apath = repo({"CLAUDE.md": "# T\n\nAsync wording.\n"})
-check("the async twin derives",
-      asyncio.run(rd.refresh_repo_description(astore, "a", apath)) == "Async wording."
-      and astore.writes == 1)
-check("and hits the same cache",
-      asyncio.run(rd.refresh_repo_description(astore, "a", apath)) == "Async wording."
-      and astore.writes == 1, f"{astore.writes} write(s)")
-check("an empty repo path is a no-op",
-      asyncio.run(rd.refresh_repo_description(astore, "a", "")) is None)
 
 
 # --- State round-trip ------------------------------------------------------
@@ -405,6 +428,7 @@ print("\nState round-trip")
 from bot.store.state import StateStore  # noqa: E402
 
 sfile = BASE / "state.json"
+apath = repo({"CLAUDE.md": "# T\n\nRound tripped.\n"})
 store3 = StateStore(sfile, BASE / "results")
 store3.add_repo("thing", apath)
 store3.set_repo_description("thing", "Round tripped.", "CLAUDE.md", "sig", 1.5, apath)
@@ -413,8 +437,9 @@ check("recording a blurb defers the write instead of rewriting state.json",
 store3.save()
 reloaded = StateStore(sfile, BASE / "results")
 check("the cache survives a save/load",
-      reloaded.get_repo_description("thing") == "Round tripped.",
-      str(reloaded.get_repo_description("thing")))
+      (reloaded.get_repo_description_entry("thing") or {}).get("text")
+      == "Round tripped.",
+      str(reloaded.get_repo_description_entry("thing")))
 check("the whole entry survives",
       (reloaded.get_repo_description_entry("thing") or {}).get("sig") == "sig")
 
@@ -425,7 +450,7 @@ raw.pop("repo_descriptions")
 sfile.write_text(_json.dumps(raw))
 old_store = StateStore(sfile, BASE / "results")
 check("a state file without the key still loads",
-      old_store.get_repo_description("thing") is None
+      old_store.get_repo_description_entry("thing") is None
       and "thing" in old_store.list_repos())
 
 old_store.set_repo_description("thing", "x" * 5, "CLAUDE.md", "s", 1.0, apath)
@@ -473,8 +498,6 @@ check("a blurb with no path renders alone",
 
 print("\n/repo desc targeting")
 
-import asyncio as _asyncio  # noqa: E402
-
 from bot.engine import commands as _cmds  # noqa: E402
 
 
@@ -506,7 +529,7 @@ here_store.add_repo("activerepo", active_repo)
 here_store.switch_repo("activerepo")
 
 ctx = _Ctx(here_store, repo_name="threadrepo")
-_asyncio.run(_cmds._repo_desc(ctx, "Typed in the thread."))
+asyncio.run(_cmds._repo_desc(ctx, "Typed in the thread."))
 check("the blurb lands in the thread's repo, not the active one",
       (rd.repo_json_path(thread_repo).is_file()
        and not rd.repo_json_path(active_repo).exists()),
@@ -517,16 +540,19 @@ check("and the control room for that repo is redrawn",
 
 # With no thread repo it still falls back to the active one.
 ctx2 = _Ctx(here_store, repo_name=None)
-_asyncio.run(_cmds._repo_desc(ctx2, "Typed with no thread repo."))
+asyncio.run(_cmds._repo_desc(ctx2, "Typed with no thread repo."))
 check("with no thread repo it falls back to the active one",
       rd.repo_json_path(active_repo).is_file())
 
 # An explicit name still wins over both.
 ctx3 = _Ctx(here_store, repo_name="activerepo")
-_asyncio.run(_cmds._repo_desc(ctx3, "threadrepo Named explicitly."))
+asyncio.run(_cmds._repo_desc(ctx3, "threadrepo Named explicitly."))
 check("an explicit name beats the thread's repo",
       _json.loads(rd.repo_json_path(thread_repo).read_text())["description"]
       == "Named explicitly.")
+
+check("\"clear\" is reserved, so a repo cannot shadow /repo desc clear",
+      _cmds._validate_repo_name("clear") is not None)
 
 # The Discord half: cmd_repo must resolve the channel's repo, because
 # _run_slash builds its ctx without one.
@@ -534,9 +560,92 @@ slash_src = (Path(__file__).resolve().parent.parent
              / "bot" / "discord" / "slash_commands.py").read_text()
 check("the /repo slash command resolves the channel's repo into ctx",
       "repo_for_channel" in slash_src)
+check("and hands it the interaction's own channel, not just the id",
+      "interaction.channel)" in slash_src)
+
+# ...and the resolver itself, driven against a minimal fake manager so the
+# real method body runs.
 from bot.discord.forums import ForumManager  # noqa: E402
-check("ForumManager exposes that resolver",
-      callable(getattr(ForumManager, "repo_for_channel", None)))
+
+
+class _Proj:
+    def __init__(self, repo_name):
+        self.repo_name = repo_name
+
+
+class _FakeClient:
+    def __init__(self, chan=None):
+        self.chan = chan
+
+    def get_channel(self, cid):
+        return self.chan
+
+
+class _FakeFM:
+    """Just the three lookups repo_for_channel calls on self."""
+
+    def __init__(self, sessions=None, forums=None, chan=None):
+        self._sessions = sessions or {}
+        self._forums = forums or {}
+        self._client = _FakeClient(chan)
+
+    def thread_to_project(self, cid):
+        proj = self._sessions.get(cid)
+        return (proj, None) if proj else None
+
+    def forum_by_channel_id(self, cid):
+        return self._forums.get(cid)
+
+
+resolve = ForumManager.repo_for_channel
+
+
+class _Thread:
+    parent_id = 900
+
+
+check("a recorded session thread resolves to its repo",
+      resolve(_FakeFM(sessions={"5": _Proj("sess")}), "5") == "sess")
+check("a repo's forum channel resolves to itself",
+      resolve(_FakeFM(forums={"900": _Proj("fromforum")}), "900") == "fromforum")
+check("the Control Room resolves through its parent forum",
+      resolve(_FakeFM(forums={"900": _Proj("fromforum")}), "7", _Thread())
+      == "fromforum")
+check("an archived Control Room resolves too -- the cache would miss it",
+      resolve(_FakeFM(forums={"900": _Proj("fromforum")}, chan=_Thread()), "7")
+      == "fromforum")
+check("The Ark and other non-forum channels resolve to nothing",
+      resolve(_FakeFM(), "7") is None)
+check("and a non-numeric channel id does not raise",
+      resolve(_FakeFM(), "not-an-id") is None)
+
+# --- Manual override, hostile inputs --------------------------------------
+
+print("\nManual override")
+
+bad = repo({".claude/repo.json": '{"description": "x", "keep": 1,,}'})
+try:
+    rd.write_manual_description(bad, "New sentence.")
+    refused = False
+except OSError:
+    refused = True
+check("a repo.json we cannot parse is refused, never overwritten", refused)
+check("and its bytes are left exactly as they were",
+      (Path(bad) / ".claude" / "repo.json").read_text().endswith(",,}"))
+check("no .tmp file is stranded in the repo",
+      not (Path(bad) / ".claude" / "repo.json.tmp").exists())
+
+keeper = repo({".claude/repo.json": '{"description": "old", "other": [1, 2]}'})
+rd.write_manual_description(keeper, "new")
+kept = _json.loads((Path(keeper) / ".claude" / "repo.json").read_text())
+check("other keys survive a rewrite", kept == {"description": "new", "other": [1, 2]})
+rd.write_manual_description(keeper, None)
+kept = _json.loads((Path(keeper) / ".claude" / "repo.json").read_text())
+check("and survive a clear", kept == {"other": [1, 2]})
+
+check("a repo whose directory is gone is refused, not created",
+      _raises_oserror(rd.write_manual_description, str(BASE / "gone"), "x"))
+check("and nothing was conjured on disk", not (BASE / "gone").exists())
 
 
 # --- This repo, for real --------------------------------------------------

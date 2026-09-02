@@ -2634,7 +2634,12 @@ async def on_schedule(ctx: RequestContext, text: str) -> None:
 
 # --- /repo ---
 
-_RESERVED_REPO_NAMES = {"add", "switch", "list", "create", "remove", "delete", "desc", "deploy"}
+# "clear" is reserved for the same reason the subcommand names are: it is
+# an argument `/repo desc [name] clear` has to be able to tell apart from
+# a repo name, and a repo actually called "clear" would make that command
+# print a blurb instead of clearing one.
+_RESERVED_REPO_NAMES = {"add", "switch", "list", "create", "remove", "delete",
+                       "desc", "deploy", "clear"}
 
 
 def _validate_repo_name(name: str) -> str | None:

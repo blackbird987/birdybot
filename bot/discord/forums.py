@@ -397,13 +397,20 @@ class ForumManager:
                 return proj
         return None
 
-    def repo_for_channel(self, channel_id: str) -> str | None:
+    def repo_for_channel(self, channel_id: str, channel=None) -> str | None:
         """Which repo a channel belongs to, for any channel in a repo forum.
 
-        `thread_to_project` only knows *session* threads. A command typed in
-        the Control Room — the post that actually displays the blurb — is in a
-        thread this manager never recorded, so the parent forum is the fallback
-        that makes those posts resolve to their repo like any other thread.
+        Three inputs resolve, in cost order: a *session* thread we recorded, a
+        repo's forum channel itself, and any other thread whose parent is one
+        of those forums. The third is the one that matters — a command typed
+        in the Control Room, the post that actually displays the blurb, is in
+        a thread `thread_to_project` never recorded.
+
+        Pass `channel` when the caller already holds the object. The Control
+        Room auto-archives like any forum post, and discord.py evicts an
+        archived thread from its cache, so `get_channel` returns None for
+        precisely the case this exists for; an interaction's own `channel` is
+        built from the gateway payload and is there either way.
         """
         lookup = self.thread_to_project(channel_id)
         if lookup:
@@ -411,12 +418,14 @@ class ForumManager:
         proj = self.forum_by_channel_id(channel_id)
         if proj:
             return proj.repo_name
-        try:
-            ch = self._client.get_channel(int(channel_id))
-        except (TypeError, ValueError):
-            return None
-        if isinstance(ch, discord.Thread) and ch.parent_id:
-            proj = self.forum_by_channel_id(str(ch.parent_id))
+        if channel is None:
+            try:
+                channel = self._client.get_channel(int(channel_id))
+            except (TypeError, ValueError):
+                return None
+        parent_id = getattr(channel, "parent_id", None)
+        if parent_id:
+            proj = self.forum_by_channel_id(str(parent_id))
             if proj:
                 return proj.repo_name
         return None

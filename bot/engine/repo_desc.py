@@ -139,7 +139,14 @@ def _read_head(path: Path) -> str:
 
 
 def _breaks_paragraph(line: str) -> bool:
-    """True for a line that cannot be part of a prose paragraph."""
+    """True for a line that cannot be part of a prose paragraph.
+
+    One predicate, used by both loops in :func:`_first_prose_paragraph` --
+    the scan looking for the paragraph's first line and the gather taking the
+    rest of it. They were two overlapping lists and they drifted twice: once
+    over HTML comments, once over badge rows, which the gather would absorb
+    into a blurb because only the scan knew to skip them.
+    """
     return bool(
         not line
         or _FENCE_RE.match(line)
@@ -149,6 +156,7 @@ def _breaks_paragraph(line: str) -> bool:
         or _SETEXT_RE.fullmatch(line)
         or line.startswith((">", "|"))
         or "<!--" in line
+        or _is_badge_line(line)
     )
 
 
@@ -174,15 +182,13 @@ def _first_prose_paragraph(text: str) -> str | None:
         if _FENCE_RE.match(stripped):
             in_fence = not in_fence
             continue
-        if in_fence or not stripped:
+        if in_fence:
             continue
+        # Ahead of the shared predicate, which also matches "<!--": a comment
+        # still open here was never closed, and its body must not leak out.
         if "<!--" in stripped:
             return None
-        if _HEADING_RE.match(stripped) or _RULE_RE.match(stripped):
-            continue
-        if _BULLET_RE.match(stripped) or stripped.startswith((">", "|")):
-            continue
-        if _is_badge_line(stripped):
+        if _breaks_paragraph(stripped):
             continue
         # Setext heading: the line under it is all = or all -. Reached only
         # from a prose-looking line, so a bare "---" here cannot be a rule.
@@ -323,11 +329,14 @@ def source_signature(repo_path: str) -> tuple[str, float]:
     newest = 0.0
     for rel, _label, _parser in _SOURCES:
         try:
-            mtime = os.stat(os.path.join(repo_path, rel)).st_mtime
+            st = os.stat(os.path.join(repo_path, rel))
         except OSError:
             continue
-        parts.append(f"{rel}:{mtime!r}")
-        newest = max(newest, mtime)
+        # Size rides along free out of the same stat: a file restored with its
+        # mtime preserved (tar -p, rsync -a) but different content would
+        # otherwise keep serving the old blurb forever.
+        parts.append(f"{rel}:{st.st_mtime!r}:{st.st_size}")
+        newest = max(newest, st.st_mtime)
     return "|".join(parts), newest
 
 
@@ -346,28 +355,20 @@ def _record(store, repo_name: str, repo_path: str, signature: str, newest: float
     return text or None
 
 
-def refresh_repo_description_sync(store, repo_name: str, repo_path: str) -> str | None:
+async def refresh_repo_description(store, repo_name: str, repo_path: str) -> str | None:
     """Cached blurb for a repo, re-derived only when its sources changed.
 
     A repo that says nothing about itself caches the empty string, so the
     "nothing found" case costs stats rather than six failed opens per refresh.
-    """
-    if not repo_path:
-        return None
-    signature, newest = source_signature(repo_path)
-    cached = store.get_repo_description_entry(repo_name)
-    if _is_fresh(cached, repo_path, signature):
-        return cached.get("text") or None
-    return _record(store, repo_name, repo_path, signature, newest,
-                   resolve_repo_description_with_source(repo_path))
-
-
-async def refresh_repo_description(store, repo_name: str, repo_path: str) -> str | None:
-    """Async twin of :func:`refresh_repo_description_sync`.
 
     Only the filesystem work goes to a thread; the store is read and written
     on the event loop, because ``StateStore`` is not thread-safe and its save
     path rewrites the whole state file.
+
+    There is deliberately no sync twin. There was one, called by nothing but
+    the harness, and a sync/async pair of the same fifteen lines is a standing
+    invitation to fix one and not the other -- the harness would then have
+    gone on passing against a code path production never takes.
     """
     if not repo_path:
         return None
@@ -409,17 +410,29 @@ def write_manual_description(repo_path: str, text: str | None) -> None:
     path = repo_json_path(repo_path)
     data: dict = {}
     if path.is_file():
+        # A file we cannot parse is refused, not replaced. This one is
+        # committed to the repo next to test.json and workflow.json, so it may
+        # hold hand-written keys; treating a stray trailing comma as "empty"
+        # would silently delete them, which is the opposite of what the
+        # preservation above promises. The message names the file to fix.
         try:
             loaded = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                data = loaded
-        except Exception:
-            data = {}
+        except ValueError as exc:
+            raise OSError(f"{REPO_JSON_REL} is not valid JSON ({exc}); fix it first") from exc
+        if not isinstance(loaded, dict):
+            raise OSError(f"{REPO_JSON_REL} is not a JSON object; fix it first")
+        data = loaded
     if text:
         data["description"] = text
     else:
         data.pop("description", None)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.parent / (path.name + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    try:
+        tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception:
+        # Never strand a .tmp inside someone's repo -- it is not gitignored
+        # and would show up in their git status until they noticed it.
+        tmp.unlink(missing_ok=True)
+        raise

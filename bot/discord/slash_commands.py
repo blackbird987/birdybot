@@ -349,7 +349,8 @@ def setup(bot: ClaudeBot) -> None:
         # /bg would start running against a different repo than it does today.
         async def _run(ctx):
             if not ctx.repo_name:
-                ctx.repo_name = bot._forums.repo_for_channel(str(interaction.channel_id))
+                ctx.repo_name = bot._forums.repo_for_channel(
+                    str(interaction.channel_id), interaction.channel)
             await commands.on_repo(ctx, args)
 
         await bot._run_slash(interaction, _run)

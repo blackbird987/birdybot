@@ -653,11 +653,6 @@ class StateStore:
 
     # --- Repo descriptions (Control Room blurb, see bot/engine/repo_desc.py) ---
 
-    def get_repo_description(self, name: str) -> str | None:
-        entry = self._repo_descriptions.get(name)
-        text = entry.get("text") if isinstance(entry, dict) else None
-        return text or None
-
     def get_repo_description_entry(self, name: str) -> dict | None:
         entry = self._repo_descriptions.get(name)
         return entry if isinstance(entry, dict) else None
