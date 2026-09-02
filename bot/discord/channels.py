@@ -505,21 +505,32 @@ def build_control_embed(
     deploy_thread_ids: dict[str, str] | None = None,
     usage_bar: str | None = None,
     drain_status: str | None = None,
+    description: str | None = None,
 ) -> discord.Embed:
     """Build the embed for a repo control room post.
 
     Instance lists are optional — when omitted (initial creation),
     the embed shows just branch. When provided (refresh),
     it shows full dashboard data for this repo.
+
+    ``description`` is the derived "what is this repo about" blurb
+    (``bot/engine/repo_desc.py``). When present it leads and the path is
+    demoted to subtext, because a forum of ten repos reads as ten paths
+    otherwise and the user has to remember which is which.
     """
     running_instances = running_instances or []
     attention_instances = attention_instances or []
     completed_instances = completed_instances or []
     active_count = len(running_instances)
 
+    blurb = (description or "").strip()
+    if blurb and repo_path:
+        embed_desc = f"{blurb}\n-# {repo_path}"
+    else:
+        embed_desc = blurb or repo_path or ""
     embed = discord.Embed(
         title=f"{repo_name} \u2014 {CONTROL_ROOM_NAME}",
-        description=repo_path or "",
+        description=embed_desc[:4096],
         color=discord.Color.dark_grey(),
     )
 
@@ -703,9 +714,11 @@ async def create_repo_control_post(
     branch: str | None = None,
     usage_bar: str | None = None,
     has_remote: bool = False,
+    description: str | None = None,
 ) -> tuple[discord.Thread, discord.Message]:
     """Create a control room post in a repo forum with action buttons."""
-    embed = build_control_embed(repo_name, repo_path, branch, usage_bar=usage_bar)
+    embed = build_control_embed(repo_name, repo_path, branch, usage_bar=usage_bar,
+                                description=description)
     view = build_control_view(repo_name, active_count=0, has_remote=has_remote)
 
     result = await forum.create_thread(name=CONTROL_ROOM_NAME, embed=embed, view=view)

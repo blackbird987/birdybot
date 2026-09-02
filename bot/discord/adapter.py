@@ -456,6 +456,12 @@ class DiscordMessenger:
         if forums:
             await forums.refresh_control_room(repo_name)
 
+    async def on_repo_meta_changed(self, repo_name: str) -> None:
+        """Redraw the control room after a repo's blurb changed."""
+        forums = getattr(self._bot, "_forums", None)
+        if forums:
+            await forums.refresh_control_room(repo_name)
+
     async def is_conversation_closed(self, channel_id: str) -> bool:
         """Return True if the Discord thread is archived (or no longer reachable)."""
         try:

@@ -24,6 +24,7 @@ from bot.discord import channels
 from bot.discord import spawn_colors
 from bot.discord import access as access_mod
 from bot.discord.access import load_access_config
+from bot.engine import repo_desc
 from bot.engine import sessions as sessions_mod
 from bot.platform.base import RequestContext
 from bot.platform.formatting import MODE_DISPLAY
@@ -1384,9 +1385,13 @@ class ForumManager:
         repo_path = repos.get(repo_name, "")
         branch = await self._get_repo_branch(repo_path)
         has_remote = await self._has_git_remote(repo_path)
+        blurb = await repo_desc.refresh_repo_description(
+            self._store, repo_name, repo_path,
+        )
 
         thread, msg = await channels.create_repo_control_post(
             forum, repo_name, repo_path, branch, has_remote=has_remote,
+            description=blurb,
         )
         proj.control_thread_id = str(thread.id)
         proj.control_message_id = str(msg.id)
@@ -1544,6 +1549,9 @@ class ForumManager:
             branch = await self._get_repo_branch(repo_path)
             has_remote = await self._has_git_remote(repo_path)
             today_cost = self._store.get_repo_daily_cost(repo_name)
+            blurb = await repo_desc.refresh_repo_description(
+                self._store, repo_name, repo_path,
+            )
 
             ds = self._store.get_deploy_state(repo_name)
             # Build instance_id -> thread_id map for deploy state session links.
@@ -1575,6 +1583,7 @@ class ForumManager:
                 deploy_thread_ids=deploy_thread_ids,
                 usage_bar=usage_bar,
                 drain_status=drain_status,
+                description=blurb,
             )
             view = channels.build_control_view(
                 repo_name,
