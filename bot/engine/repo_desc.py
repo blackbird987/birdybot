@@ -418,9 +418,9 @@ def write_manual_description(repo_path: str, text: str | None) -> None:
         try:
             loaded = json.loads(path.read_text(encoding="utf-8"))
         except ValueError as exc:
-            raise OSError(f"{REPO_JSON_REL} is not valid JSON ({exc}); fix it first") from exc
+            raise OSError(f"{REPO_JSON_REL} is not valid JSON ({exc}); fix it by hand first") from exc
         if not isinstance(loaded, dict):
-            raise OSError(f"{REPO_JSON_REL} is not a JSON object; fix it first")
+            raise OSError(f"{REPO_JSON_REL} is not a JSON object; fix it by hand first")
         data = loaded
     if text:
         data["description"] = text

@@ -2824,7 +2824,7 @@ async def _repo_desc(ctx: RequestContext, rest: str) -> None:
         try:
             await asyncio.to_thread(repo_desc.write_manual_description, target_path, text)
         except OSError as e:
-            await ctx.messenger.send_text(ctx.channel_id, f"Could not write .claude/repo.json: {e}")
+            await ctx.messenger.send_text(ctx.channel_id, f"Could not set the description \u2014 {e}")
             return
         ctx.store.clear_repo_description(target)
 
