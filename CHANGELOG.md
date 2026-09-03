@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.101.18 — A session that will not compact is let go of, not resumed (2026-09-03)
+
 ### Fixed
 - **A session that outgrew the context window no longer wedges its thread** (`bot/claude/parser.py`, `bot/claude/runner.py`, `bot/claude/types.py`, `bot/config.py`, `bot/engine/commands.py`, `bot/engine/lifecycle.py`). The CLI aborts with `Prompt is too long · automatic compaction failed: …` when the conversation will not fit and cannot be summarised down. Nothing recognised that wording, so the run surfaced as a red FAILED card and the thread kept its binding to the un-loadable session — and the next message resumed it and died the same way. On 2026-09-03 that ran five times against session `1dbf08aa` (t-7998, t-7999, t-8000, q-16143, q-16158), each failing in seconds, with no escape but abandoning the thread.
 - `parser.is_context_overflow_error` now matches both real CLI wordings, length-guarded like `looks_like_fatal_auth_error` because the callsite falls back to `result.result_text` and this repo's own sessions write about the failure constantly. `_run_impl` answers it in two rungs: resume the same session **once** (`CONTEXT_OVERFLOW_RESUME_RETRIES`, default 1 — both failures seen in the wild came from the summariser rather than the transcript, and the abort costs seconds), then abandon the session and run fresh (`CONTEXT_OVERFLOW_FRESH`, default on). It is the inverse of the autocompact thrash next door and deliberately does not share its answer: a thrash counter is per-process so a resume clears it, while an oversized transcript is on disk and replays into the same failing summariser on every resume.
