@@ -581,6 +581,47 @@ def setup(bot: ClaudeBot) -> None:
             parts.append("No sessions found")
         await interaction.followup.send("\n".join(parts), ephemeral=True)
 
+    @bot.tree.command(name="reset", description="Unbind this thread's CLI session and start fresh here", guild=guild_obj)
+    async def cmd_reset(interaction: discord.Interaction):
+        """Escape hatch for a thread bound to a session the CLI can't load.
+
+        Keeps the thread (and its Discord history, which is what the next
+        turn's cold priming reads); drops only the session binding.
+        """
+        if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
+            await interaction.response.send_message("Unauthorized", ephemeral=True)
+            return
+        thread_id = str(interaction.channel_id)
+        if not bot._forums.thread_to_project(thread_id):
+            await interaction.response.send_message(
+                "This isn't a session thread.", ephemeral=True,
+            )
+            return
+        # Checked BEFORE the unbind, while the thread still names a session.
+        # A turn in flight writes its own session_id back when it finishes
+        # (lifecycle.should_bind_session), so a reset underneath one silently
+        # doesn't stick — and the whole point of this command is the case
+        # where the user has already watched the thread fail twice.
+        busy = bot._runner.active_instance_for_channel(thread_id)
+        dropped = bot._forums.clear_thread_session(thread_id)
+        if not dropped:
+            await interaction.response.send_message(
+                "This thread has no session bound — your next message already "
+                "starts fresh.", ephemeral=True,
+            )
+            return
+        msg = (
+            f"Session `{dropped[:12]}…` unbound. Your next message starts a "
+            "fresh session in this thread, primed with recent history."
+        )
+        if busy:
+            msg += (
+                f"\n\n⚠️ `{busy}` is still running here and will re-bind its "
+                "own session when it finishes — /kill it first if you want "
+                "this reset to stick."
+            )
+        await interaction.response.send_message(msg, ephemeral=True)
+
     @bot.tree.command(name="sync-channel", description="Refresh this thread's session history", guild=guild_obj)
     async def cmd_sync_channel(interaction: discord.Interaction):
         if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
