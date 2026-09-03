@@ -630,6 +630,44 @@ def is_context_thrash_error(error_text: str) -> bool:
     )
 
 
+def is_context_overflow_error(error_text: str) -> bool:
+    """The conversation no longer fits and the CLI could not compact it down.
+
+    Verbatim wording from claude (exit 1), both halves joined by the CLI's own
+    " \u00b7 ":
+
+        "Prompt is too long \u00b7 automatic compaction failed: summarization
+         produced empty response"
+        "Prompt is too long \u00b7 automatic compaction failed: API Error: ...
+         safeguards flagged this message ..."
+
+    The cousin of ``is_context_thrash_error`` and its exact opposite in what
+    the recovery must do.  A thrash counter lives in the CLI *process*, so
+    resuming the same conversation clears it.  This lives in the **session**:
+    the oversized transcript is on disk, and every resume replays it into the
+    same summariser that just failed.  Answering this one with "resume once
+    more" wedges the whole thread rather than one run -- which is exactly what
+    it did on 2026-09-03, five runs in a row against session 1dbf08aa before
+    the user had to abandon the thread by hand.
+
+    Length-guarded for the same reason as ``looks_like_fatal_auth_error``: the
+    caller falls back to ``result.result_text`` when ``error_message`` is
+    empty, and this repo's own sessions write about this failure constantly.
+    A real CLI abort is one line; a work product that merely mentions the
+    phrase must never cost a thread its session.
+    """
+    if not error_text:
+        return False
+    stripped = error_text.strip()
+    if len(stripped) > FATAL_ERROR_MAX_CHARS:
+        return False
+    lower = stripped.lower()
+    return (
+        "prompt is too long" in lower
+        or "automatic compaction failed" in lower
+    )
+
+
 def is_account_unusable_error(error_text: str) -> bool:
     """Account-level auth/subscription failure (cancelled sub, logged out).
 
@@ -704,6 +742,15 @@ def is_account_agnostic_error(error_text: str) -> bool:
         # ever said anything still has that exact shape.
         # runner._lifetime_kill_result is required to keep the phrase.
         "lifetime limit",
+        # An un-compactable session (see is_context_overflow_error). Same
+        # shape and the same trap: the CLI aborts before the turn does
+        # anything, so no output and no completed turns — "this account fell
+        # over instantly". Handing it to the backup subscription resumes the
+        # same oversized transcript on the same summariser and fails the same
+        # way, having spent a second account's quota to learn nothing. The
+        # transcript is on disk and belongs to no account.
+        "prompt is too long",
+        "automatic compaction failed",
     ]
     return any(p in lower for p in patterns)
 

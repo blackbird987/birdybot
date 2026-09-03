@@ -1362,7 +1362,9 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
         inst.message_ids.setdefault(ctx.platform, []).append(handle.get("message_id"))
         ctx.store.update_instance(inst)
 
-    on_progress, on_stall, heartbeat, on_recovery = lifecycle.make_progress_callbacks(
+    (
+        on_progress, on_stall, heartbeat, on_recovery, on_context_reset,
+    ) = lifecycle.make_progress_callbacks(
         ctx, inst, handle, ctx.effective_verbose,
     )
 
@@ -1375,6 +1377,7 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
                 inst, on_progress=on_progress, on_stall=on_stall,
                 context=ctx.effective_context,
                 on_recovery=on_recovery,
+                on_context_reset=on_context_reset,
             )
         finally:
             heartbeat_task.cancel()

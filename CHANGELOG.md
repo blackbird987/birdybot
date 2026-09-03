@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Fixed
+- **A session that outgrew the context window no longer wedges its thread** (`bot/claude/parser.py`, `bot/claude/runner.py`, `bot/claude/types.py`, `bot/config.py`, `bot/engine/lifecycle.py`). The CLI aborts with `Prompt is too long · automatic compaction failed: …` when the conversation will not fit and cannot be summarised down. Nothing recognised that wording, so the run surfaced as a red FAILED card and the thread kept its binding to the un-loadable session — and the next message resumed it and died the same way. On 2026-09-03 that ran five times against session `1dbf08aa` (t-7998, t-7999, t-8000, q-16143, q-16158), each failing in seconds, with no escape but abandoning the thread.
+- `parser.is_context_overflow_error` now matches both real CLI wordings, length-guarded like `looks_like_fatal_auth_error` because the callsite falls back to `result.result_text` and this repo's own sessions write about the failure constantly. `_run_impl` answers it in two rungs: resume the same session **once** (`CONTEXT_OVERFLOW_RESUME_RETRIES`, default 1 — both failures seen in the wild came from the summariser rather than the transcript, and the abort costs seconds), then abandon the session and run fresh (`CONTEXT_OVERFLOW_FRESH`, default on). It is the inverse of the autocompact thrash next door and deliberately does not share its answer: a thrash counter is per-process so a resume clears it, while an oversized transcript is on disk and replays into the same failing summariser on every resume.
+- The replacement session is primed rather than amnesiac. A new `on_context_reset` callback asks the platform layer for `build_prime_briefing(mode="resume")` — the ~12K-token budget built for exactly this loss, cache bypassed so it carries messages that landed while the dead session was still being retried — and `CONTEXT_OVERFLOW_NUDGE` rides in front of it to say the two things the new session cannot work out for itself: that it is genuinely new, and that its predecessor's edits are still on disk. The briefing is built before the session is cleared and is best-effort: a failure costs the new session its memory of the thread, never its existence.
+- `should_bind_session` now adopts a `session_recovery_exhausted` result even when it errored. That flag is only ever set by a path that first *proved* the old id unusable, so refusing to bind left the thread on a session that could never run again — the wedge itself, not a detail of it.
+- `is_account_agnostic_error` learned this wording too. An overflow abort has no output and no completed turns, which is the account-failover heuristic's exact signature for "this account fell over instantly", so a two-account setup would hand the same oversized transcript to the backup subscription to fail identically. Same trap as `lifetime limit`.
+
+### Added
+- **`/reset`** (`bot/discord/slash_commands.py`, `bot/discord/forums.py`) — unbinds the current thread's CLI session and drops its cached priming digest, so the next message starts a fresh session primed from the thread's real history. The manual twin of the recovery above, for when it is switched off or its fresh attempt died too; previously the only escape from a thread bound to an unloadable session was to abandon the thread and its history with it.
+- Harness: `python scripts/test_context_overflow.py`, registered in `.claude/test.json`.
+
 ## v0.101.17 — A repo introduces itself, and a promise gets kept (2026-09-02)
 
 ### Fixed

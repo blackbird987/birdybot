@@ -43,6 +43,7 @@ from bot.claude.parser import (
     extract_usage,
     format_ask_question,
     is_account_agnostic_error,
+    is_context_overflow_error,
     is_context_thrash_error,
     is_transient_error,
     iter_tool_blocks,
@@ -420,6 +421,13 @@ StallCallback = Callable     # async callback(instance_id: str, snapshot: StallS
 # Signature: async callback(reason: str, lost_session_id: str | None,
 #                            worktree_path: str | None)
 RecoveryCallback = Callable
+# Context-reset callback: asked for a briefing to hand the FRESH session that
+# replaces one whose transcript could not be compacted (see
+# parser.is_context_overflow_error). Returns quoted recent thread history, or
+# None when the platform has no history to offer. The runner cannot build this
+# itself -- it lives in the platform layer, which owns the thread.
+# Signature: async callback() -> str | None
+ContextResetCallback = Callable
 
 
 @dataclass
@@ -1574,6 +1582,7 @@ class ClaudeRunner:
         context: str | None = None,
         sibling_context: str | None = None,
         on_recovery: RecoveryCallback | None = None,
+        on_context_reset: ContextResetCallback | None = None,
     ) -> RunResult:
         """Run CLI for an instance. Blocks until completion or timeout."""
         # Fresh failover state per top-level run. The set is mutated via .add()
@@ -1606,6 +1615,7 @@ class ClaudeRunner:
                 instance, on_progress, on_stall, context, sibling_context,
                 api_fallback=instance.api_fallback,
                 on_recovery=on_recovery,
+                on_context_reset=on_context_reset,
             )
 
     def _stopped_before_spawning(self, instance: Instance) -> RunResult | None:
@@ -1961,6 +1971,7 @@ class ClaudeRunner:
         _binary: str | None = None,
         _recovery_state: set[str] | None = None,
         on_recovery: RecoveryCallback | None = None,
+        on_context_reset: ContextResetCallback | None = None,
     ) -> RunResult:
         # Snapshot provider + binary at entry — in-flight sessions keep their
         # provider even if a runtime switch happens mid-run.
@@ -2295,6 +2306,7 @@ class ClaudeRunner:
                             _provider=provider, _binary=binary,
                             _recovery_state=recovery_state,
                             on_recovery=on_recovery,
+                            on_context_reset=on_context_reset,
                         )
 
                 # Layer 2: try other account if we haven't yet and one is available.
@@ -2319,6 +2331,7 @@ class ClaudeRunner:
                             _provider=provider, _binary=binary,
                             _recovery_state=recovery_state,
                             on_recovery=on_recovery,
+                            on_context_reset=on_context_reset,
                         )
 
                 # Layer 3 (last resort): drop session and run blank.  Tag the
@@ -2370,6 +2383,7 @@ class ClaudeRunner:
                     _provider=provider, _binary=binary,
                     _recovery_state=recovery_state,
                     on_recovery=on_recovery,
+                    on_context_reset=on_context_reset,
                 )
                 fresh.session_recovery_exhausted = True
                 fresh.recovery_warning_posted = warning_posted
@@ -2513,6 +2527,7 @@ class ClaudeRunner:
                         _provider=provider, _binary=binary,
                         _recovery_state=recovery_state,
                         on_recovery=on_recovery,
+                        on_context_reset=on_context_reset,
                     )
                 finally:
                     unmark()
@@ -2581,6 +2596,125 @@ class ClaudeRunner:
                 if handled is not None:
                     return handled
 
+            # Context overflow: the conversation no longer fits and the CLI's
+            # automatic compaction failed on it.  Sits after both resume-the-
+            # same-conversation branches because it is the one case where that
+            # move is WRONG past the first attempt: the oversized transcript is
+            # on disk, so every resume feeds it back to the summariser that
+            # just failed.  Left unhandled it wedges the thread rather than the
+            # run -- the next message resumes the same session and dies the
+            # same way, forever, which is exactly what five consecutive runs
+            # did on 2026-09-03.
+            #
+            # Two rungs, in this order:
+            #   1. Resume once.  Both failures seen in the wild came from the
+            #      SUMMARISER, not the transcript ("summarization produced
+            #      empty response", and a safety flag on the summarisation
+            #      call), and those are per-call blips.  Nearly free: the CLI
+            #      aborts in seconds, before the turn does any work.
+            #   2. Abandon the session and run fresh, primed with the thread's
+            #      recent history.  This is the rung that actually unwedges the
+            #      thread, because a successful fresh run rebinds it (see
+            #      lifecycle.should_bind_session, which treats
+            #      session_recovery_exhausted as licence to adopt the new id --
+            #      the old one has been proven unusable by the rung above).
+            #
+            # The two rungs compose through recursion rather than a loop: the
+            # resumed attempt re-enters this branch, finds its retry budget
+            # spent, and falls through to the fresh path itself.
+            if result.is_error and is_context_overflow_error(error_text):
+                handled = await _resume_same_conversation(
+                    kind="context_overflow",
+                    max_retries=config.CONTEXT_OVERFLOW_RESUME_RETRIES,
+                    subject="Context overflow",
+                    # No note on this rung on purpose. The agent is about to
+                    # resume a conversation it never lost -- nothing happened
+                    # that it needs telling about, and a "you were aborted"
+                    # preamble on a transcript that is already at the limit
+                    # spends context to say nothing.
+                    mark=lambda: None,
+                    unmark=lambda: None,
+                    progress=lambda spent: (
+                        "Context filled up — retrying compaction",
+                        "The conversation outgrew the context window and "
+                        "compacting it failed; trying once more before "
+                        "starting a fresh session.",
+                    ),
+                )
+                if handled is not None:
+                    return handled
+
+                original_session_id = instance.session_id
+                if (
+                    config.CONTEXT_OVERFLOW_FRESH
+                    and original_session_id
+                    and "overflow_fresh" not in recovery_state
+                ):
+                    recovery_state.add("overflow_fresh")
+                    log.warning(
+                        "Context overflow for %s: session %s will not compact "
+                        "— abandoning it for a fresh session",
+                        instance.id, original_session_id[:12],
+                    )
+                    # Build the briefing BEFORE the session is cleared and
+                    # before the warning is posted: it reads Discord history,
+                    # which can fail slowly, and a failure here must cost the
+                    # new session its memory of the thread, not its existence.
+                    briefing: str | None = None
+                    if on_context_reset:
+                        try:
+                            briefing = await on_context_reset()
+                        except Exception:
+                            log.exception(
+                                "Context-reset briefing failed for %s",
+                                instance.id,
+                            )
+                    note = config.CONTEXT_OVERFLOW_NUDGE
+                    if briefing:
+                        note = f"{note}\n\n{briefing}"
+                    # Same ordering rule as Layer 3 above: tell the user while
+                    # the id is still known, and record whether it landed so
+                    # commands.py doesn't post its terser duplicate on top.
+                    warning_posted = False
+                    if on_recovery:
+                        try:
+                            await on_recovery(
+                                error_text or "Prompt is too long",
+                                original_session_id,
+                                instance.worktree_path,
+                            )
+                            warning_posted = True
+                        except Exception:
+                            log.exception(
+                                "on_recovery callback failed for %s",
+                                instance.id,
+                            )
+                    instance.session_id = None
+                    instance._context_overflow_note = note
+                    # A `finally` for the same reason the thrash unmark has
+                    # one: _run_impl can raise or return without ever reaching
+                    # _build_command (the refuse-to-spawn short-circuit), and
+                    # an Instance that survives carrying a stale "your previous
+                    # session could not be continued" would open a cooldown
+                    # retry hours later with a lie at the top of its prompt.
+                    try:
+                        fresh = await self._run_impl(
+                            instance, on_progress, on_stall,
+                            context, sibling_context,
+                            api_fallback=api_fallback,
+                            _provider=provider, _binary=binary,
+                            _recovery_state=recovery_state,
+                            on_recovery=on_recovery,
+                            on_context_reset=on_context_reset,
+                        )
+                    finally:
+                        instance._context_overflow_note = None
+                    fresh.session_recovery_exhausted = True
+                    fresh.recovery_warning_posted = warning_posted
+                    # The abandoned attempt may have edited files before the
+                    # context blew out; the fresh one may never touch a file.
+                    return _carry_forward_work_record(result, fresh)
+
             # Model-specific limit (e.g. "You've reached your Fable 5
             # limit"): the account is still healthy for every other model,
             # so never cool the WHOLE account down for this.  Route: another
@@ -2641,6 +2775,7 @@ class ClaudeRunner:
                             _provider=provider, _binary=binary,
                             _recovery_state=recovery_state,
                             on_recovery=on_recovery,
+                            on_context_reset=on_context_reset,
                         )
 
                     next_account = self._pick_account(
@@ -2671,6 +2806,7 @@ class ClaudeRunner:
                             _provider=provider, _binary=binary,
                             _recovery_state=recovery_state,
                             on_recovery=on_recovery,
+                            on_context_reset=on_context_reset,
                         )
                         # Backup died before doing any work (auth-dead, or
                         # its own account-wide cap): this account can still
@@ -2739,6 +2875,7 @@ class ClaudeRunner:
                             _provider=provider, _binary=binary,
                             _recovery_state=recovery_state,
                             on_recovery=on_recovery,
+                            on_context_reset=on_context_reset,
                         )
                         # If the failover target died before doing any work
                         # (e.g. paused/cancelled subscription -> 401), the turn
@@ -2779,6 +2916,7 @@ class ClaudeRunner:
                     api_fallback=False, _provider=provider, _binary=binary,
                     _recovery_state=recovery_state,
                     on_recovery=on_recovery,
+                    on_context_reset=on_context_reset,
                 )
 
             # Account-level failure (auth / cancelled subscription / can't start):
@@ -2871,6 +3009,7 @@ class ClaudeRunner:
                             _provider=provider, _binary=binary,
                             _recovery_state=recovery_state,
                             on_recovery=on_recovery,
+                            on_context_reset=on_context_reset,
                         )
                     if confident:
                         # Nowhere to fail over. Don't dead-end the turn on a
@@ -3771,6 +3910,16 @@ class ClaudeRunner:
         if mem_note:
             instance._memory_kill_note = None
             prompt = mem_note + "\n\n" + prompt
+
+        # Context-overflow recovery note — the third of the same family, and
+        # the only one that goes to a session with NO history behind it: the
+        # attempt this replaces was abandoned, not resumed, so this note plus
+        # the thread history quoted inside it is everything the new session
+        # knows. Read-and-clear like the two above, for the same reason.
+        overflow_note = getattr(instance, "_context_overflow_note", None)
+        if overflow_note:
+            instance._context_overflow_note = None
+            prompt = overflow_note + "\n\n" + prompt
 
         # API key file (only for providers that support API fallback)
         api_key_file: str | None = None

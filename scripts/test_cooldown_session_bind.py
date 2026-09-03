@@ -83,8 +83,9 @@ _check(
     ),
 )
 _check(
-    "recovery-exhausted crash does NOT bind",
-    not lifecycle.should_bind_session(
+    "recovery-exhausted crash binds (the OLD id was proven dead first, so "
+    "keeping it wedges the thread on every later message)",
+    lifecycle.should_bind_session(
         RunResult(session_id="s-fresh", is_error=True, session_recovery_exhausted=True),
     ),
 )

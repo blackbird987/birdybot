@@ -536,6 +536,52 @@ CONTEXT_THRASH_NUDGE = (
     "enters this context."
 )
 
+# How many times a run whose conversation overflowed the context window may be
+# re-tried on the SAME session before the session is abandoned (see
+# parser.is_context_overflow_error). Deliberately low, and for the opposite
+# reason to the thrash knob above: a thrash clears on resume, this does not.
+# The one retry buys the case where compaction failed inside the summariser
+# rather than because of the transcript -- an empty summary, or a safety flag
+# on the summarisation call itself -- and it is nearly free, because the CLI
+# aborts in seconds before the turn does any work. A second retry would only
+# delay the recovery that actually works. Clamped 0..3; 0 goes straight to a
+# fresh session.
+CONTEXT_OVERFLOW_RESUME_RETRIES: int = max(
+    0, min(3, int(os.getenv("CONTEXT_OVERFLOW_RESUME_RETRIES", "1")))
+)
+
+# Whether an un-compactable session is abandoned for a fresh one rather than
+# surfaced as a failure. On by default: without it the thread is wedged
+# permanently, because every later message resumes the same oversized
+# transcript and dies the same way. Set to 0 to get the old red-card behaviour
+# back (the Retry button still resumes, so this is diagnosis-only).
+CONTEXT_OVERFLOW_FRESH: bool = os.getenv("CONTEXT_OVERFLOW_FRESH", "1") != "0"
+
+# Prepended to the prompt of the fresh session that replaces an overflowed one,
+# ahead of the quoted thread history the platform layer supplies. Says the two
+# things the new session cannot find out for itself: that it is genuinely new
+# (so it must not act as if it remembers), and that the previous session's
+# edits are still on disk (so it must not start over). The "keep it smaller"
+# advice mirrors CONTEXT_THRASH_NUDGE because the wall is the same one.
+CONTEXT_OVERFLOW_NUDGE = (
+    "--- Automatic recovery: the previous session could not be continued ---\n"
+    "The conversation you were in grew past the context window and the CLI's "
+    "automatic compaction failed on it, so that session could not be resumed. "
+    "This is a BRAND NEW session: you have none of the earlier conversation, "
+    "only whatever thread history is quoted below. Do not answer as though you "
+    "remember the exchange, and do not invent what was decided — if something "
+    "you need is missing, look it up or ask.\n"
+    "Your work is NOT lost — every edit the previous session made is still on "
+    "disk. Take stock of what is already done FIRST and carry on from there; "
+    "do not start over. In a repo that means `git status` and `git diff` "
+    "before anything else.\n"
+    "To keep this session from hitting the same wall: read large files in "
+    "ranges (offset/limit) instead of whole, pipe command output through "
+    "`head`/`grep`/`wc` instead of dumping it, prefer targeted searches over "
+    "broad ones, and delegate large-file sweeps to a subagent so the bulk "
+    "never enters this context."
+)
+
 # Same slot, same reasoning, different wall: prepended to the prompt of an
 # attempt auto-resumed after the memory guard reaped the previous one. Carries
 # the actual numbers because they are the whole content of the advice — "use

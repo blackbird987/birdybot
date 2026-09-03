@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 from bot import config
 from bot.claude.models import context_tokens_from_usage
-from bot.claude.parser import looks_like_fatal_auth_error
+from bot.claude.parser import is_context_overflow_error, looks_like_fatal_auth_error
 from bot.claude.provider import get_provider
 from bot.claude.runner import RebootResult
 from bot.claude.types import (
@@ -290,9 +290,12 @@ async def run_instance(
     on_progress = None
     on_stall = None
     on_recovery = None
+    on_context_reset = None
     heartbeat_task = None
     if handle:
-        on_progress, on_stall, heartbeat, on_recovery = make_progress_callbacks(
+        (
+            on_progress, on_stall, heartbeat, on_recovery, on_context_reset,
+        ) = make_progress_callbacks(
             ctx, inst, handle, ctx.effective_verbose,
         )
         heartbeat_task = asyncio.create_task(heartbeat())
@@ -310,6 +313,7 @@ async def run_instance(
                 context=ctx.effective_context,
                 sibling_context=sibling_ctx,
                 on_recovery=on_recovery,
+                on_context_reset=on_context_reset,
             )
         finally:
             if heartbeat_task:
@@ -514,9 +518,19 @@ def should_bind_session(result: RunResult) -> bool:
     pause, not an ending — _do_cooldown_retry_locked resumes that exact
     session_id, so a thread that doesn't learn it can never continue the work.
 
-    Every other error is refused.  A crashed or recovery-exhausted run can
-    emit a FRESH session_id carrying none of the thread's history, and
-    adopting that would silently amputate the conversation.
+    A run whose session recovery was exhausted binds too, and for the same
+    shape of reason: that flag is only ever set by a path that first PROVED
+    the old id unusable — the conversation is filed on no account under any
+    spelling, or its transcript will not compact — and then deliberately
+    started a fresh session in its place.  Refusing here leaves the thread
+    bound to an id that can never run again, so the next message resumes it,
+    dies the same way, and the thread is wedged for good.  That is the
+    2026-09-03 "prompt too long" failure: five consecutive runs against one
+    un-compactable session, each starting from the same dead binding.
+
+    Every other error is refused.  A crashed run can emit a FRESH session_id
+    carrying none of the thread's history with nothing proven about the old
+    one, and adopting that would silently amputate the conversation.
 
     A run that recovered onto a fresh session AND then hit the limit still
     binds — deliberately.  The old id is already unreachable at that point
@@ -525,7 +539,11 @@ def should_bind_session(result: RunResult) -> bool:
     """
     if not result.session_id:
         return False
-    return (not result.is_error) or bool(result.usage_limit_reset)
+    return (
+        (not result.is_error)
+        or bool(result.usage_limit_reset)
+        or result.session_recovery_exhausted
+    )
 
 
 async def bind_thread_session(
@@ -752,7 +770,8 @@ def make_progress_callbacks(
     handle: MessageHandle,
     verbose: int = 1,
 ):
-    """Create on_progress, on_stall, and heartbeat closures.
+    """Create the on_progress, on_stall, heartbeat, on_recovery and
+    on_context_reset closures.
 
     The latest ``message.usage`` is cached at closure scope so the context
     footer persists across the 5s throttle on_progress and the 10s heartbeat
@@ -989,6 +1008,23 @@ def make_progress_callbacks(
         reason_line = (reason or "session not found").splitlines()[0][:200]
         reason_line = reason_line.replace("`", "'")
         path_safe = path.replace("`", "'")
+        # Two callers, two different endings. Layer 3 hands the user a thread
+        # that will start fresh on their NEXT message; the context-overflow
+        # recovery has already started the replacement run and is carrying on
+        # with this turn. Telling an overflow user to re-state their request
+        # would have them repeat work that is running in front of them.
+        if is_context_overflow_error(reason or ""):
+            tail = (
+                "The work is continuing now in a fresh session, primed with "
+                "this thread's recent messages — but it no longer has the "
+                "earlier conversation verbatim, so re-state anything that "
+                "matters if it looks like it lost the thread."
+            )
+        else:
+            tail = (
+                "Your next message will start with fresh context — "
+                "re-state what you want it to do."
+            )
         try:
             await ctx.messenger.send_text(
                 ctx.channel_id,
@@ -999,8 +1035,7 @@ def make_progress_callbacks(
                     f"• Worktree:   `{path_safe}`\n"
                     f"• Reason:     `{reason_line}`\n"
                     f"\n"
-                    f"Your next message will start with fresh context — "
-                    f"re-state what you want it to do."
+                    f"{tail}"
                 ),
             )
         except Exception:
@@ -1010,7 +1045,29 @@ def make_progress_callbacks(
                 exc_info=True,
             )
 
-    return on_progress, on_stall, heartbeat, on_recovery
+    # Context-overflow recovery: the runner is about to abandon a session whose
+    # transcript will not compact and start a fresh one in its place.  It asks
+    # here for something to hand the replacement, because the thread's history
+    # lives in the platform layer, not in the runner.
+    #
+    # mode="resume" rather than "cold" — the ~12K-token budget exists for
+    # exactly this shape of loss (the verbatim exchange is gone but the thread
+    # is mid-task), where the ~500-token cold brief is meant for a thread that
+    # has barely started.  It bypasses the cache by construction, so a briefing
+    # built here reflects the messages that landed while the dead session was
+    # still being retried.
+    async def on_context_reset() -> str | None:
+        if ctx.maybe_prime_briefing is None:
+            return None
+        try:
+            return await ctx.maybe_prime_briefing("resume")
+        except Exception:
+            log.exception(
+                "Context-reset briefing failed for %s", inst.id,
+            )
+            return None
+
+    return on_progress, on_stall, heartbeat, on_recovery, on_context_reset
 
 
 async def _try_apply_near_limit(

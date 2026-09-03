@@ -1753,6 +1753,32 @@ class ForumManager:
         self.save_forum_map()
         return RebindResult.ACCEPTED
 
+    def clear_thread_session(self, thread_id: str) -> str | None:
+        """Unbind this thread's CLI session; the next message starts cold.
+
+        The manual twin of the runner's context-overflow recovery, for when
+        that recovery is off or its fresh attempt died too.  A thread bound to
+        a session the CLI can no longer load has no other way out — every
+        message resumes the same dead id — and the only previous escape was to
+        abandon the thread and open a new one, losing the Discord history too.
+
+        Returns the session id that was dropped, or None if there was nothing
+        bound.  The cached priming digest goes with it: the next turn takes the
+        cold path and rebuilds one from the thread's real messages.
+        """
+        lookup = self.thread_to_project(thread_id)
+        if not lookup:
+            return None
+        _, info = lookup
+        old = info.session_id
+        if not old:
+            return None
+        info.session_id = None
+        self._prime_cache.pop(thread_id, None)
+        self.save_forum_map()
+        log.info("Thread %s session unbound (was %s)", thread_id, old[:12])
+        return old
+
     def attach_session_callbacks(self, ctx: RequestContext, thread_info: ThreadInfo, thread_id: str) -> None:
         """Wire up session resolution callbacks on a RequestContext.
 

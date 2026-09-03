@@ -298,6 +298,13 @@ class Instance:
     # runner re-spawns a session it reaped for memory, consumed and cleared by
     # _build_command. Not persisted; it describes one attempt.
     _memory_kill_note: str | None = None
+    # Third of the same family, for the context-overflow recovery: holds the
+    # pre-built note (recovery preamble + the thread's quoted recent history)
+    # handed to the FRESH session that replaces one whose transcript could not
+    # be compacted. Text rather than a bool because the briefing is assembled
+    # by the platform layer, which the runner cannot reach from _build_command.
+    # Not persisted; it describes one attempt.
+    _context_overflow_note: str | None = None
 
     def display_id(self) -> str:
         if self.name:
