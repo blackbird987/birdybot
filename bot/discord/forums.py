@@ -1774,7 +1774,7 @@ class ForumManager:
         if not old:
             return None
         info.session_id = None
-        self._prime_cache.pop(thread_id, None)
+        self.clear_prime_briefing(thread_id)
         self.save_forum_map()
         log.info("Thread %s session unbound (was %s)", thread_id, old[:12])
         return old

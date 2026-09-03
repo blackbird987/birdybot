@@ -11,9 +11,13 @@ session it was talking to, and every later resume path — next user message,
 self-wake, fired /watch — had nothing to resume.
 
 Locks five things:
-  1. should_bind_session: success and usage-limit bind; every other error
-     doesn't (a crashed run can emit a FRESH session id whose adoption would
-     amputate the thread's history).
+  1. should_bind_session: success, a usage limit, and a run whose session
+     recovery was exhausted all bind — the last because that flag is only set
+     by a path that first PROVED the old id unusable, so keeping the old id
+     wedges the thread on every later message (scripts/test_context_overflow.py
+     is the incident). Every OTHER error doesn't: a crashed run can emit a
+     FRESH session id whose adoption would amputate the thread's history with
+     nothing proven about the old one.
   2. bind_thread_session actually reaches ForumManager.set_thread_session and
      mutates ThreadInfo — using the real production objects.
   3. Source order in _execute_query: the bind is above the cooldown

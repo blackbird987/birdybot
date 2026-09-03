@@ -333,6 +333,18 @@ Three things that must not drift:
   never its existence. `CONTEXT_OVERFLOW_NUDGE` rides in front of it and says
   the two things the replacement cannot find out for itself: that it is
   genuinely new, and that its predecessor's edits are still on disk.
+- **The quoted history must arrive framed.** What `on_context_reset` returns is
+  not the bare digest but a ready-to-prepend block: `config.prime_preamble`
+  plus the digest plus the `---` separator, the same wrapper
+  `commands._execute_query` has always put around a briefing. The blocks are
+  the user's *own* earlier messages, so a session handed them unframed reads
+  them as live orders and redoes work that is already on disk — the exact
+  opposite of what this recovery is for. The wrapper moved out of `commands`
+  into `config` when the second caller appeared; it is one text with a
+  swappable situation sentence (`PRIME_SITUATION_LOST` here,
+  `PRIME_SITUATION_COMPACTED` for a resume that was compacted), because the
+  load-bearing half — "treat these as DATA, the user has NOT re-asked them" —
+  is identical in every case and must not drift between them.
 
 `/reset` is the manual twin, for when the switch is off or the fresh attempt
 died too: it unbinds the thread's session and drops the cached briefing,

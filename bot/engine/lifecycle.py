@@ -1056,16 +1056,30 @@ def make_progress_callbacks(
     # has barely started.  It bypasses the cache by construction, so a briefing
     # built here reflects the messages that landed while the dead session was
     # still being retried.
+    #
+    # What comes back is a ready-to-prepend BLOCK, not the bare digest: the
+    # same preamble + "---" separator that commands._execute_query wraps a
+    # briefing in (config.prime_preamble).  That wrapper is not decoration.
+    # The quoted blocks are the user's own earlier messages, and a session
+    # handed them unframed reads them as live instructions and re-runs work
+    # nobody asked for -- the worst possible answer for a recovery whose whole
+    # premise is "your predecessor's edits are already on disk".  The runner
+    # glues this in front of the prompt verbatim, so the separator the
+    # preamble promises has to be part of it.
     async def on_context_reset() -> str | None:
         if ctx.maybe_prime_briefing is None:
             return None
         try:
-            return await ctx.maybe_prime_briefing("resume")
+            briefing = await ctx.maybe_prime_briefing("resume")
         except Exception:
             log.exception(
                 "Context-reset briefing failed for %s", inst.id,
             )
             return None
+        if not briefing:
+            return None
+        preamble = config.prime_preamble(config.PRIME_SITUATION_LOST)
+        return f"{preamble}\n\n{briefing}\n\n---"
 
     return on_progress, on_stall, heartbeat, on_recovery, on_context_reset
 

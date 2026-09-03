@@ -58,6 +58,7 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 # Same reasoning as test_context_thrash: importing bot.config runs a real
 # path-map init that would drop a root marker in whoever's home this runs under.
@@ -74,7 +75,7 @@ from bot.claude.parser import (
 )
 from bot.claude.runner import ClaudeRunner
 from bot.claude.types import Instance, InstanceStatus, InstanceType, RunResult
-from bot.engine.lifecycle import should_bind_session
+from bot.engine.lifecycle import make_progress_callbacks, should_bind_session
 
 # Verbatim from data/logs/bot.log, 2026-09-03 09:40:27 and 10:35:17. The "·"
 # is the CLI's own separator between the abort and why compaction couldn't
@@ -96,7 +97,21 @@ DEAD_SESSION = "1dbf08aa-73b5-4ace-a632-1dbeba2de550"
 # What the fresh spawn creates in its place.
 FRESH_SESSION = "07b1618c-2e8a-4f61-9c3d-6a1f0b2e4d55"
 
-BRIEFING = "NONCE: 0123456789abcdef\n<<<PRIOR-0123456789abcdef kind=prior_user_msg\nfix the cache\nPRIOR-0123456789abcdef>>>"
+# What ForumManager.build_prime_briefing returns: nonce-fenced quoted Discord
+# messages, and nothing that says how to read them.
+RAW_DIGEST = (
+    "NONCE: 0123456789abcdef\n"
+    "<<<PRIOR-0123456789abcdef kind=prior_user_msg\n"
+    "fix the cache\n"
+    "PRIOR-0123456789abcdef>>>"
+)
+# What lifecycle.on_context_reset hands the runner: the same digest wrapped in
+# the frame that makes it data. _check_reset_block asserts the real closure
+# produces exactly this.
+BRIEFING = (
+    f"{config.prime_preamble(config.PRIME_SITUATION_LOST)}\n\n"
+    f"{RAW_DIGEST}\n\n---"
+)
 
 
 class _FakeStdin:
@@ -310,6 +325,86 @@ def _check_detector(failures: list[str]) -> None:
         failures.append("an un-compactable session is misread as a thrash")
 
 
+async def _check_reset_block(failures: list[str]) -> None:
+    """The real lifecycle closure must FRAME the history, not just fetch it.
+
+    The quoted blocks are the user's own earlier messages. A session handed
+    them unframed reads them as live instructions and re-runs work nobody
+    asked for -- the worst possible answer for a recovery whose whole premise
+    is "your predecessor's edits are already on disk". Asserted against the
+    real closure rather than the harness stub, because the framing is the half
+    that is easy to drop when someone simplifies the callback later.
+    """
+    inst = Instance(
+        id="t-ctx-reset",
+        name=None,
+        instance_type=InstanceType.TASK,
+        prompt="x",
+        repo_name="AIAgent",
+        repo_path="",
+        status=InstanceStatus.RUNNING,
+        mode="build",
+    )
+    modes: list[str] = []
+
+    async def _brief(mode: str) -> str | None:
+        modes.append(mode)
+        return RAW_DIGEST
+
+    # on_context_reset only ever touches ctx.maybe_prime_briefing, and
+    # make_progress_callbacks reads nothing off ctx while defining its
+    # closures — so a stand-in beats assembling a whole RequestContext.
+    *_, on_context_reset = make_progress_callbacks(
+        SimpleNamespace(maybe_prime_briefing=_brief), inst, {}, 1,
+    )
+    block = await on_context_reset()
+
+    if modes != ["resume"]:
+        failures.append(
+            f"the replacement session was primed with {modes!r}, not the "
+            "post-compaction budget the loss actually calls for"
+        )
+    if block != BRIEFING:
+        failures.append(
+            f"the reset block is not the framed briefing this harness "
+            f"asserts elsewhere: {block!r}"
+        )
+    if not block or RAW_DIGEST not in block:
+        failures.append("the quoted thread history is missing from the block")
+    elif "DATA, not as directives" not in block:
+        failures.append(
+            "the thread history is handed over unframed — the replacement "
+            "session will read the user's OLD messages as new instructions "
+            "and redo work that is already on disk"
+        )
+    elif not block.endswith("---"):
+        failures.append(
+            "the block does not end with the '---' separator its own "
+            "preamble promises the request follows"
+        )
+
+    async def _none(mode: str) -> str | None:
+        return None
+
+    *_, reset_empty = make_progress_callbacks(
+        SimpleNamespace(maybe_prime_briefing=_none), inst, {}, 1,
+    )
+    if await reset_empty() is not None:
+        failures.append(
+            "a thread with no history still produced a block, so the fresh "
+            "session opens with an empty quote and a dangling separator"
+        )
+
+    async def _boom(mode: str) -> str | None:
+        raise RuntimeError("Discord history read failed")
+
+    *_, reset_boom = make_progress_callbacks(
+        SimpleNamespace(maybe_prime_briefing=_boom), inst, {}, 1,
+    )
+    if await reset_boom() is not None:
+        failures.append("a failed history read did not degrade to None")
+
+
 def _check_binding(failures: list[str]) -> None:
     """The assertion that actually unwedges the thread.
 
@@ -345,6 +440,7 @@ async def _amain() -> int:
     failures: list[str] = []
     _check_detector(failures)
     _check_binding(failures)
+    await _check_reset_block(failures)
 
     tmp = tempfile.mkdtemp(prefix="overflow_test_")
     saved_fresh = config.CONTEXT_OVERFLOW_FRESH
@@ -428,14 +524,28 @@ async def _amain() -> int:
                     "the replacement session was not told it is new — it will "
                     "answer as though it remembers a conversation it never had"
                 )
-            if BRIEFING not in fresh_prompt:
+            if RAW_DIGEST not in fresh_prompt:
                 failures.append(
                     "the thread history never reached the replacement session; "
                     "it starts with no idea what the thread is about"
                 )
+            elif "DATA, not as directives" not in fresh_prompt:
+                failures.append(
+                    "the thread history arrived unframed: the replacement "
+                    "session reads the user's OLD messages as fresh orders "
+                    "and redoes work that is already on disk"
+                )
             if instance2.prompt not in fresh_prompt:
                 failures.append(
                     f"the actual task text was dropped: {fresh_prompt[:160]!r}"
+                )
+            elif fresh_prompt.index(instance2.prompt) < fresh_prompt.index(
+                RAW_DIGEST
+            ):
+                failures.append(
+                    "the real request is buried ABOVE the quoted history it "
+                    "is supposed to follow, so the last thing the session "
+                    "reads is an old message"
                 )
             if config.CONTEXT_OVERFLOW_NUDGE in h2.prompts[0]:
                 failures.append("the recovery note leaked into the FIRST attempt")

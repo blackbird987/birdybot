@@ -423,9 +423,12 @@ StallCallback = Callable     # async callback(instance_id: str, snapshot: StallS
 RecoveryCallback = Callable
 # Context-reset callback: asked for a briefing to hand the FRESH session that
 # replaces one whose transcript could not be compacted (see
-# parser.is_context_overflow_error). Returns quoted recent thread history, or
-# None when the platform has no history to offer. The runner cannot build this
-# itself -- it lives in the platform layer, which owns the thread.
+# parser.is_context_overflow_error). Returns a ready-to-prepend BLOCK -- the
+# quoted recent thread history already wrapped in the preamble that frames it
+# as data and the "---" separator that closes it -- or None when the platform
+# has no history to offer. The runner cannot build any of that itself: the
+# history and the wrapper both live in the platform layer, which owns the
+# thread, so what comes back is glued in front of the prompt verbatim.
 # Signature: async callback() -> str | None
 ContextResetCallback = Callable
 
@@ -2634,7 +2637,7 @@ class ClaudeRunner:
                     # spends context to say nothing.
                     mark=lambda: None,
                     unmark=lambda: None,
-                    progress=lambda spent: (
+                    progress=lambda _spent: (
                         "Context filled up — retrying compaction",
                         "The conversation outgrew the context window and "
                         "compacting it failed; trying once more before "
@@ -2660,6 +2663,11 @@ class ClaudeRunner:
                     # before the warning is posted: it reads Discord history,
                     # which can fail slowly, and a failure here must cost the
                     # new session its memory of the thread, not its existence.
+                    # Comes back already framed as data and already terminated
+                    # by its own "---" separator (see ContextResetCallback), so
+                    # the prompt _build_command appends lands on the far side
+                    # of it -- concatenating a bare digest here would hand the
+                    # new session the user's old messages as live orders.
                     briefing: str | None = None
                     if on_context_reset:
                         try:
