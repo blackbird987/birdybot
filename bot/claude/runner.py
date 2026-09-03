@@ -2668,8 +2668,21 @@ class ClaudeRunner:
                     # the prompt _build_command appends lands on the far side
                     # of it -- concatenating a bare digest here would hand the
                     # new session the user's old messages as live orders.
+                    # ...unless this turn's prompt already carries one.
+                    # A session only overflows once it is huge, which is
+                    # exactly the shape commands._execute_query primes on the
+                    # compacted-resume path, so the aborted attempt's prompt
+                    # very often already opens with a briefing built minutes
+                    # ago from the same thread. Asking for a second copy would
+                    # put ~12K tokens of the same quoted history twice into
+                    # the one session whose entire problem is size, under two
+                    # preambles that contradict each other about whether it
+                    # was resumed.
                     briefing: str | None = None
-                    if on_context_reset:
+                    already_primed = config.PRIME_PREAMBLE_MARKER in (
+                        instance.prompt or ""
+                    )
+                    if on_context_reset and not already_primed:
                         try:
                             briefing = await on_context_reset()
                         except Exception:
@@ -2677,6 +2690,11 @@ class ClaudeRunner:
                                 "Context-reset briefing failed for %s",
                                 instance.id,
                             )
+                    elif already_primed:
+                        log.info(
+                            "Context-overflow restart for %s reuses the "
+                            "briefing already in its prompt", instance.id,
+                        )
                     note = config.CONTEXT_OVERFLOW_NUDGE
                     if briefing:
                         note = f"{note}\n\n{briefing}"

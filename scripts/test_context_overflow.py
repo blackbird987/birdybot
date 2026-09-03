@@ -157,7 +157,12 @@ class _FakeProc:
 class _Harness:
     """One scripted run of the real cascade against a stubbed subprocess."""
 
-    def __init__(self, tmp: str, outcomes: list[RunResult], *, briefing=BRIEFING):
+    DEFAULT_PROMPT = "Make the backtest chart load from cache."
+
+    def __init__(
+        self, tmp: str, outcomes: list[RunResult], *,
+        briefing=BRIEFING, prompt: str = DEFAULT_PROMPT,
+    ):
         self.account = os.path.join(tmp, "acct_primary")
         self.repo = os.path.join(tmp, "repo")
         for p in (self.account, self.repo):
@@ -166,6 +171,7 @@ class _Harness:
         # None = no platform briefing available (a non-forum caller);
         # an Exception instance = the platform tried and blew up.
         self.briefing = briefing
+        self.prompt = prompt
         self.spawn_argvs: list[list[str]] = []
         self.prompts: list[str] = []
         self.progress: list[tuple[str, str]] = []
@@ -215,7 +221,7 @@ class _Harness:
             id=INSTANCE_ID,
             name=None,
             instance_type=InstanceType.TASK,
-            prompt="Make the backtest chart load from cache.",
+            prompt=self.prompt,
             repo_name="AIAgent",
             repo_path=self.repo,
             status=InstanceStatus.RUNNING,
@@ -678,6 +684,51 @@ async def _amain() -> int:
                 "a plain build failure cost the thread its session "
                 f"({instance5.session_id!r})"
             )
+
+        # --- Case 6: the prompt already carries a briefing -------------------
+        # A session only overflows once it is huge, which is exactly the shape
+        # commands._execute_query primes on the compacted-resume path. Asking
+        # the platform for a second copy would put the same ~12K tokens of
+        # quoted history TWICE into the one session whose problem is size.
+        primed_prompt = f"{BRIEFING}\n\n{_Harness.DEFAULT_PROMPT}"
+        h6 = _Harness(tmp, [
+            _overflow_result(),
+            _overflow_result(work=False),
+            RunResult(is_error=False, session_id=FRESH_SESSION, result_text="ok"),
+        ], prompt=primed_prompt)
+        result6, _instance6 = await h6.run()
+
+        if h6.reset_calls != 0:
+            failures.append(
+                "a second briefing was built for a prompt that already had "
+                f"one ({h6.reset_calls} rebuilds) — the replacement session "
+                "opens with the same history twice"
+            )
+        fresh6 = h6.prompts[-1]
+        if fresh6.count(RAW_DIGEST) != 1:
+            failures.append(
+                "the quoted thread history appears "
+                f"{fresh6.count(RAW_DIGEST)} times in the replacement "
+                "session's prompt; it must appear exactly once"
+            )
+        if fresh6.count(config.PRIME_PREAMBLE_MARKER) != 1:
+            failures.append(
+                "two briefing preambles reached the replacement session, and "
+                "they disagree about whether it was resumed"
+            )
+        if config.CONTEXT_OVERFLOW_NUDGE not in fresh6:
+            failures.append(
+                "skipping the rebuild also dropped the recovery note — the "
+                "replacement session is never told it is new"
+            )
+        if _Harness.DEFAULT_PROMPT not in fresh6:
+            failures.append("the actual task text was dropped from the reuse path")
+        if result6.session_id != FRESH_SESSION or not result6.session_recovery_exhausted:
+            failures.append(
+                "the reuse path did not complete the handover to the fresh "
+                f"session ({result6.session_id!r})"
+            )
+
     finally:
         config.CONTEXT_OVERFLOW_FRESH = saved_fresh
         shutil.rmtree(tmp, ignore_errors=True)

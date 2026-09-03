@@ -345,6 +345,15 @@ Three things that must not drift:
   `PRIME_SITUATION_COMPACTED` for a resume that was compacted), because the
   load-bearing half — "treat these as DATA, the user has NOT re-asked them" —
   is identical in every case and must not drift between them.
+- **It is asked for only once.** A session does not overflow until it is huge,
+  which is the exact shape `_execute_query` primes on the compacted-resume
+  path — so the aborted attempt's prompt very often *already* opens with a
+  briefing built minutes earlier from the same thread. The runner checks for
+  `config.PRIME_PREAMBLE_MARKER` in `instance.prompt` and reuses that one
+  rather than requesting a second, which would put ~12K tokens of the same
+  quoted history twice into the one session whose entire problem is size,
+  under two preambles disagreeing about whether it was resumed. The marker is
+  the preamble's own opening words, so the two cannot drift apart.
 
 `/reset` is the manual twin, for when the switch is off or the fresh attempt
 died too: it unbinds the thread's session and drops the cached briefing,
