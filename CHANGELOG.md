@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- **A named guest is locked down the moment they join** (`bot/discord/bot.py`, `bot/config.py`). Onboarding someone onto a server that is also a live community left a window: they accept the invite, and until the no-access role is assigned by hand they can see every channel `@everyone` can. `on_member_join` now assigns `GUEST_AUTO_ROLE` (default `Guest (no access)`) to anyone named in `GUEST_AUTO_ROLE_USERS`, matching either username or display name, and `_reconcile_guest_roles` repeats the check on ready so a guest who joined while the bot was down is still caught. It is keyed on an explicit username list rather than on "is not the owner" precisely because ordinary people join this guild — a broad predicate would silently blind them. A missing role or a failed assignment posts to The Ark instead of failing quietly, since the failure mode is an unrestricted guest. Harness: `python scripts/test_guest_lockdown.py` (11 checks).
+
 ### Fixed
 - **A repo grant now reaches only that repo** (`bot/discord/bot.py`, `bot/discord/access.py`). `check_user_access` was correctly scoped, but `_check_access` fell through behind it: a guest holding *any* grant was allowed in *every* repo, at that repo's own mode ceiling and bash policy. Granting one repo therefore granted the machine — the exact thing a per-repo grant exists to prevent. A resolved repo the user has no grant for is now a denial naming that repo. A channel whose repo genuinely cannot be resolved still resolves, but at the tightest settings the user holds anywhere: `get_most_restrictive_bash` is the new twin of `get_most_restrictive_ceiling`, added because the permissive default would otherwise quietly undo a `bash="none"` grant on precisely the path that skips the grant. Harness: `python scripts/test_access_scoping.py` (8 checks).
 

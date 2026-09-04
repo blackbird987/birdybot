@@ -104,6 +104,18 @@ DISCORD_USER_ID: int | None = (
     int(os.getenv("DISCORD_USER_ID")) if os.getenv("DISCORD_USER_ID") else None
 )
 DISCORD_CATEGORY_NAME: str | None = os.getenv("DISCORD_CATEGORY_NAME")
+
+# A named guest is pinned to a no-access role the moment they join, so the
+# window between accepting an invite and being locked down is not a window at
+# all. Scoped to explicit usernames -- an ordinary community member joining
+# must never be touched by this.
+GUEST_AUTO_ROLE: str = os.getenv("GUEST_AUTO_ROLE", "Guest (no access)")
+GUEST_AUTO_ROLE_USERS: tuple[str, ...] = tuple(
+    u.strip().lower()
+    for u in os.getenv("GUEST_AUTO_ROLE_USERS", "").split(",")
+    if u.strip()
+)
+
 DISCORD_ENABLED: bool = bool(DISCORD_BOT_TOKEN and DISCORD_GUILD_ID)
 
 # Test webhook IDs (comma-separated) — allow webhook messages to bypass bot/auth guards

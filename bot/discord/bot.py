@@ -1677,8 +1677,96 @@ class ClaudeBot(discord.Client):
         # per-view callbacks.  Registering would intercept custom_ids and
         # raise NotImplementedError (no callback on plain Button items).
 
+    # --- Guest lockdown ---
+
+    async def _apply_guest_role(self, member: "discord.Member", *, source: str) -> None:
+        """Pin a named guest to the no-access role.
+
+        The role denies View Channel on every channel, so the guest sees
+        nothing until an /access grant writes a member-level allow on their own
+        forum -- a member allow outranks a role deny, which is what makes
+        "nothing, then exactly one thing" expressible at all.
+
+        Deliberately keyed on an explicit username list rather than on "is not
+        the owner": this runs on a live community server where ordinary people
+        join, and a broad predicate here would silently blind them.
+        """
+        wanted = config.GUEST_AUTO_ROLE_USERS
+        if not wanted:
+            return
+        names = {
+            (member.name or "").lower(),
+            (getattr(member, "global_name", None) or "").lower(),
+        }
+        if not (names & set(wanted)):
+            return
+
+        guild = member.guild
+        role = discord.utils.get(guild.roles, name=config.GUEST_AUTO_ROLE)
+        if role is None:
+            log.error(
+                "Guest role %r not found — %s (%s) joined UNRESTRICTED",
+                config.GUEST_AUTO_ROLE, member.name, member.id,
+            )
+            await self._alert_owner(
+                f"⚠️ **{member.name}** joined but the `{config.GUEST_AUTO_ROLE}` "
+                "role does not exist — they can see the public channels. "
+                "Create the role and assign it manually.",
+            )
+            return
+        if role in member.roles:
+            return
+        try:
+            await member.add_roles(role, reason="Named guest — no-access lockdown")
+        except Exception:
+            log.exception("Failed to apply guest role to %s (%s)", member.name, member.id)
+            await self._alert_owner(
+                f"⚠️ Could not give **{member.name}** the `{role.name}` role "
+                "— assign it by hand now, they can currently see the public channels.",
+            )
+            return
+        log.info("Applied guest role to %s (%s) via %s", member.name, member.id, source)
+        await self._alert_owner(
+            f"🔒 **{member.name}** (`{member.id}`) joined and was locked down with "
+            f"`{role.name}` — they can see nothing. Grant their repo with "
+            f"`/access grant`.",
+        )
+
+    async def _alert_owner(self, text: str) -> None:
+        """Best-effort notice to The Ark. Never let it break the join path."""
+        try:
+            if self._lobby_channel_id:
+                ch = self.get_channel(int(self._lobby_channel_id))
+                if ch is not None:
+                    await ch.send(text)
+        except Exception:
+            log.debug("Failed to post owner alert", exc_info=True)
+
+    async def on_member_join(self, member: "discord.Member") -> None:
+        if member.guild.id != self._guild_id:
+            return
+        try:
+            await self._apply_guest_role(member, source="join")
+        except Exception:
+            log.exception("on_member_join failed for %s", member.id)
+
+    async def _reconcile_guest_roles(self) -> None:
+        """Catch a named guest who joined while the bot was down."""
+        if not config.GUEST_AUTO_ROLE_USERS:
+            return
+        guild = self.get_guild(self._guild_id)
+        if not guild:
+            return
+        for member in guild.members:
+            try:
+                await self._apply_guest_role(member, source="reconcile")
+            except Exception:
+                log.exception("Guest reconcile failed for %s", member.id)
+
     async def on_ready(self) -> None:
         log.info("Discord bot ready as %s", self.user)
+
+        await self._reconcile_guest_roles()
 
         if not self._voice_enabled and not getattr(self, "_voice_warning_logged", False):
             log.warning("OPENAI_API_KEY not configured — voice messages will be ignored")
