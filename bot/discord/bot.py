@@ -35,7 +35,7 @@ from discord import app_commands
 from bot import config
 from bot.discord import channels
 from bot.discord import access as access_mod
-from bot.discord.access import AccessResult, load_access_config, check_user_access, has_any_access, get_most_restrictive_ceiling, effective_mode as access_effective_mode
+from bot.discord.access import AccessResult, load_access_config, check_user_access, has_any_access, get_most_restrictive_ceiling, get_most_restrictive_bash, effective_mode as access_effective_mode
 from bot.discord.adapter import DiscordMessenger
 from bot.discord import dashboard as dashboard_mod
 from bot.discord import idle as idle_mod
@@ -606,9 +606,23 @@ class ClaudeBot(discord.Client):
             )
 
         if has_any_access(cfg, str(user_id)):
+            # A grant names ONE repo, and a resolved repo that is not among
+            # them is a denial -- not a fall-through onto the user's other
+            # grants. Allowing it here handed a guest granted repo A a session
+            # in repo B, at B's own settings, which is the whole of what a
+            # per-repo grant is supposed to prevent.
+            if repo_name:
+                return AccessResult(
+                    allowed=False, is_owner=False,
+                    reason=f"No access grant for `{repo_name}`",
+                )
+            # Repo genuinely unresolvable (a channel the resolver does not
+            # recognise). Allow, but at the tightest settings held anywhere --
+            # the permissive defaults would otherwise undo a bash="none" grant.
             return AccessResult(
                 allowed=True, is_owner=False,
                 mode_ceiling=get_most_restrictive_ceiling(cfg, str(user_id)),
+                bash_policy=get_most_restrictive_bash(cfg, str(user_id)),
             )
 
         return AccessResult(allowed=False, is_owner=False, reason="No access grant")

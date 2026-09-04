@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **A repo grant now reaches only that repo** (`bot/discord/bot.py`, `bot/discord/access.py`). `check_user_access` was correctly scoped, but `_check_access` fell through behind it: a guest holding *any* grant was allowed in *every* repo, at that repo's own mode ceiling and bash policy. Granting one repo therefore granted the machine — the exact thing a per-repo grant exists to prevent. A resolved repo the user has no grant for is now a denial naming that repo. A channel whose repo genuinely cannot be resolved still resolves, but at the tightest settings the user holds anywhere: `get_most_restrictive_bash` is the new twin of `get_most_restrictive_ceiling`, added because the permissive default would otherwise quietly undo a `bash="none"` grant on precisely the path that skips the grant. Harness: `python scripts/test_access_scoping.py` (8 checks).
+
 ## v0.101.18 — A session that will not compact is let go of, not resumed (2026-09-03)
 
 ### Fixed

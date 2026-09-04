@@ -231,6 +231,30 @@ def has_any_access(cfg: AccessConfig, user_id: str) -> bool:
     return bool(ua.global_access or ua.repos)
 
 
+def get_most_restrictive_bash(cfg: AccessConfig, user_id: str) -> str:
+    """Tightest bash policy across all of a user's grants.
+
+    The twin of get_most_restrictive_ceiling, and used by the same caller: a
+    guest in a channel whose repo cannot be resolved gets the strictest thing
+    they hold anywhere, never the permissive default. Granting one repo
+    bash="none" must not be undone by a channel the resolver did not
+    recognise.
+    """
+    ua = cfg.users.get(user_id)
+    if not ua:
+        return "none"
+    if ua.global_access:
+        return "allowlist"
+    _RANK = {"none": 0, "allowlist": 1, "full": 2}
+    tightest = "none"
+    tightest_rank = 99
+    for grant in ua.repos.values():
+        rank = _RANK.get(grant.bash_policy, 1)
+        if rank < tightest_rank:
+            tightest_rank, tightest = rank, grant.bash_policy
+    return tightest if tightest_rank < 99 else "none"
+
+
 def get_most_restrictive_ceiling(cfg: AccessConfig, user_id: str) -> str:
     """Get the most restrictive mode ceiling across all of a user's grants."""
     ua = cfg.users.get(user_id)
