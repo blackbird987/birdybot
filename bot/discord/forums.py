@@ -559,8 +559,8 @@ class ForumManager:
         """Move a repo's forum between the main and the archive category.
 
         Nothing is ever deleted here: the forum, its threads and its pinned
-        posts survive the move untouched. Returns a short description of what
-        happened, for the reply, the same shape as ``forget_repo``.
+        posts survive the move untouched. Returns a short human-readable
+        description of what happened, for logging and for the reply.
         """
         proj = self._forum_projects.get(repo_name)
         if proj is None or not proj.forum_channel_id:
@@ -571,20 +571,24 @@ class ForumManager:
         if channel is None:
             return "no forum channel found"
 
-        if hidden:
-            target = await self._archive_category()
-        else:
-            target = guild.get_channel(self._category_id) if self._category_id else None
-            if target is not None and not isinstance(target, discord.CategoryChannel):
-                target = None
-        if target is None:
-            return "could not resolve the target category"
-
-        if channel.category_id == target.id:
-            return "forum was already there"
-
+        # Resolving the target and moving into it happen under one lock:
+        # hiding several repos at once resolves the archive category several
+        # times, and ensure_archive_category scans-then-creates, so two
+        # concurrent hides would otherwise each create their own category.
         try:
             async with self._forum_lock:
+                if hidden:
+                    target = await self._archive_category()
+                else:
+                    target = (guild.get_channel(self._category_id)
+                              if self._category_id else None)
+                    if target is not None and not isinstance(
+                            target, discord.CategoryChannel):
+                        target = None
+                if target is None:
+                    return "could not resolve the target category"
+                if channel.category_id == target.id:
+                    return "forum was already there"
                 await channel.edit(category=target, sync_permissions=True)
         except discord.HTTPException as exc:
             log.warning("Could not move forum for %s: %s", repo_name, exc)
@@ -602,10 +606,16 @@ class ForumManager:
     ) -> bool:
         """Un-hide a repo the moment real work starts in it.
 
-        Hiding parks a forum out of the sidebar, so a schedule firing (or a
+        Hiding parks a forum out of the sidebar, so a self-wake firing (or a
         spawn landing) inside a hidden repo would post its result somewhere
         the user has stopped looking. Work is the strongest possible signal
         that the repo is not dormant after all, so it retrieves itself.
+
+        Called from all three ways something reaches a forum:
+        ``get_or_create_session_thread`` (a new thread), the forum-message
+        route in ``bot.py`` (the user typing in an existing one), and
+        ``_replay_to_thread`` (every unattended resume). Adding a fourth
+        without calling this parks work where nobody will see it.
 
         Returns True if the repo was hidden and has now been brought back.
         """
@@ -654,6 +664,15 @@ class ForumManager:
         given, it replaces the sanitized topic-derived thread name (used by
         /spawn to inject a color prefix at create-time).
         """
+        # A run in a hidden repo un-hides it. This has to sit above the
+        # already-has-a-thread early return below: a resumed session in a
+        # hidden repo is exactly the case that would otherwise keep posting
+        # into a parked forum nobody is looking at.
+        try:
+            await self.wake_repo_if_dormant(repo_name)
+        except Exception:
+            log.debug("Wake-on-work check failed for %s", repo_name, exc_info=True)
+
         # Check if session already has a thread
         if session_id:
             result = self.session_to_thread(session_id)
@@ -671,13 +690,6 @@ class ForumManager:
                 # Thread gone — remove stale mapping
                 for proj in self._forum_projects.values():
                     proj.threads.pop(tid, None)
-
-        # A run in a hidden repo un-hides it before its forum is resolved;
-        # otherwise the thread lands in a parked forum and is never seen.
-        try:
-            await self.wake_repo_if_dormant(repo_name)
-        except Exception:
-            log.debug("Wake-on-work check failed for %s", repo_name, exc_info=True)
 
         # Resolve the target forum
         if forum_channel_id:
@@ -918,9 +930,14 @@ class ForumManager:
                     proj.repo_name,
                 )
 
-        # Ensure control room posts exist for all repo forums. A hidden repo
-        # is skipped throughout this reconcile: nothing is drawn into a forum
-        # that was deliberately parked, and it costs no startup API calls.
+        # Ensure control room posts exist for all repo forums. Hidden repos
+        # are skipped here (and in the archive-thread loop and _pin_scopes
+        # below): those three *create or redraw* something in a forum that
+        # was deliberately parked. The other reconcile passes -- thread-name
+        # normalization, stale-tag clearing, legacy verify cleanup, archive
+        # migration, auto-follow -- deliberately still run on hidden repos:
+        # they repair state that must be correct whenever the forum comes
+        # back, and skipping them would leave a woken repo subtly stale.
         for repo_name, proj in self._forum_projects.items():
             if self._store.is_repo_dormant(repo_name):
                 continue

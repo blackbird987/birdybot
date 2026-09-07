@@ -1026,6 +1026,18 @@ class ClaudeBot(discord.Client):
             log.warning("replay_to_thread: no thread mapping for %s", channel_id)
             return False
         proj, info = lookup
+        # Every unattended resume lands here: a fired self-wake, a tripped
+        # /watch, a `--here` schedule, an orchestrator wave join, a
+        # post-reboot replay. None of them go through
+        # get_or_create_session_thread (the thread already exists), so
+        # without this a hidden repo would keep working and keep posting
+        # into a forum parked out of the sidebar.
+        try:
+            await self._forums.wake_repo_if_dormant(
+                proj.repo_name, notify_channel_id=channel_id)
+        except Exception:
+            log.debug("Wake-on-work check failed for %s",
+                      proj.repo_name, exc_info=True)
         session_id = info.session_id or None
         resolved_repo = repo_name or (
             proj.repo_name if proj.repo_name != "_default" else None

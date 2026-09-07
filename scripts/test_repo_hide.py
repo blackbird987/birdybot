@@ -14,11 +14,14 @@ Three things have to hold or hiding is a way to lose work:
     read ``list_active_repos()``.
   * hiding is reversible and leaves no orphan state: unregistering a repo
     clears the flag, so a name re-registered later does not come back hidden.
-  * work in a hidden repo un-hides it. A schedule firing inside a parked forum
-    would otherwise post its result where nobody is looking.
+  * work in a hidden repo un-hides it. A self-wake firing or a spawn landing
+    inside a parked forum would otherwise post where nobody is looking, so
+    every path that can surface something in a forum has to wake the repo
+    first.
 
 Asserted here: the store API and its persistence, the command surface
-(hide/unhide/list, multiple names at once, reserved words), and the wake path.
+(hide/unhide/list, multiple names at once, reserved words), the wake itself,
+and -- structurally -- that all three entry points into a forum call it.
 """
 
 from __future__ import annotations
@@ -121,6 +124,10 @@ check("removing a hidden repo drops it from the dormant set",
 reloaded.add_repo("deskforge", str(tmp / "deskforge"))
 check("re-registering the same name does not come back hidden",
       not reloaded.is_repo_dormant("deskforge"))
+reloaded.set_repo_dormant("deskforge", True)
+reloaded.add_repo("deskforge", str(tmp / "deskforge2"))
+check("re-pointing a hidden repo with /repo add un-hides it",
+      not reloaded.is_repo_dormant("deskforge"))
 
 # --- 4. Round trip ---------------------------------------------------------
 print("\nround trip")
@@ -170,7 +177,26 @@ check("a repo hidden alongside it stays hidden",
 msg.sent.clear()
 run(commands.on_repo(ctx, "hide"))
 check("a bare /repo hide explains itself instead of hiding everything",
-      "Usage" in msg.sent[-1] and store.list_dormant_repos() == ["memepipe"])
+      "Usage: /repo hide <name>" in msg.sent[-1]
+      and store.list_dormant_repos() == ["memepipe"], msg.sent[-1])
+
+msg.sent.clear()
+run(commands.on_repo(ctx, "unhide"))
+check("and a bare /repo unhide reaches its own handler, not the fallback",
+      "Usage: /repo unhide <name>" in msg.sent[-1]
+      and store.list_dormant_repos() == ["memepipe"], msg.sent[-1])
+
+msg.sent.clear()
+run(commands.on_repo(ctx, "wat"))
+check("the /repo usage line advertises hide and unhide",
+      "hide|unhide" in msg.sent[-1], msg.sent[-1])
+
+msg.sent.clear()
+store.set_repo_dormant("aiagent", True)
+run(commands.on_repo(ctx, ""))
+check("bare /repo says how many repos are parked",
+      "2 hidden" in msg.sent[-1], msg.sent[-1])
+store.set_repo_dormant("aiagent", False)
 
 check("switching to a hidden repo still works",
       store.switch_repo("memepipe") and store.get_active_repo()[0] == "memepipe")
@@ -218,6 +244,30 @@ fm.unhide_repo_forum = _boom
 woke = run(fm.wake_repo_if_dormant("memepipe"))
 check("a failed channel move still un-hides the repo in state",
       woke and not store.is_repo_dormant("memepipe"))
+
+# --- 8. Every way into a forum goes through the wake -----------------------
+# Structural, because the failure is silent: a path added later that posts
+# into a forum without waking it parks work where nobody is looking, and no
+# unit test of the store would notice.
+print("\nwake coverage")
+import inspect  # noqa: E402
+from bot.discord import bot as discord_bot_mod  # noqa: E402
+
+src = inspect.getsource(ForumManager.get_or_create_session_thread)
+check("get_or_create_session_thread wakes the repo",
+      "wake_repo_if_dormant" in src)
+check("and it wakes BEFORE the already-has-a-thread early return",
+      src.index("wake_repo_if_dormant") < src.index("session_to_thread"),
+      "a resumed session in a hidden repo would keep posting into it")
+
+replay = inspect.getsource(discord_bot_mod.ClaudeBot._replay_to_thread)
+check("every unattended resume (self-wake, watch, --here schedule, spawn "
+      "join, reboot replay) wakes the repo",
+      "wake_repo_if_dormant" in replay)
+
+on_msg = inspect.getsource(discord_bot_mod)
+check("and so does a user message in an existing forum thread",
+      on_msg.count("wake_repo_if_dormant") >= 2, str(on_msg.count("wake_repo_if_dormant")))
 
 tmpdir.cleanup()
 

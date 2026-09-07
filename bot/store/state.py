@@ -619,6 +619,11 @@ class StateStore:
 
     def add_repo(self, name: str, path: str) -> None:
         self._repos[name] = path
+        # Registering a repo is the opposite of parking it. remove_repo
+        # already clears the flag, but a hidden repo re-pointed at a new
+        # path with /repo add (no remove first) would otherwise come back
+        # invisible, with nothing on screen to explain why.
+        self._dormant_repos.discard(name)
         if not self._active_repo:
             self._active_repo = name
         self.save()

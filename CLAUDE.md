@@ -185,18 +185,29 @@ Three things that must not drift:
   reconcile loops that would otherwise redraw control rooms and repair pin
   slots in a forum nobody is looking at. A hidden repo is still switchable
   and still startable *by name*; naming one is intent.
-- **Work in a hidden repo un-hides it.** A schedule firing, a spawn landing
+- **Work in a hidden repo un-hides it.** A spawn landing, a self-wake firing
   or a message in one of its threads would otherwise post into a parked
-  forum and be seen by nobody. `wake_repo_if_dormant` is the single funnel,
-  called from `get_or_create_session_thread` (every new session thread) and
-  from the forum-message route in `bot.py` (an existing thread), and it
-  clears the flag even if the channel move fails, because a repo left flagged
-  dormant while its work runs is the failure this exists to prevent. This is
-  what makes hiding safe enough to do casually.
+  forum and be seen by nobody. `wake_repo_if_dormant` is the one
+  implementation, and it has exactly three callers, one per way something
+  can appear in a forum:
+  `get_or_create_session_thread` (a new session thread; it sits **above**
+  that function's already-has-a-thread early return, because a *resumed*
+  session in a hidden repo is precisely the case that would keep posting
+  into the parked forum), the forum-message route in `bot.py` (the user
+  types in an existing thread), and `_replay_to_thread` (every unattended
+  resume: a fired self-wake, a tripped `/watch`, a `--here` schedule, an
+  orchestrator wave join, a post-reboot replay -- none of which touch
+  `get_or_create_session_thread`, since their thread already exists). A
+  plain schedule deliberately wakes nothing: its result is broadcast to the
+  owner, not posted into the repo forum, so there is nothing parked to
+  miss. The flag is cleared even if the channel move fails, because a repo
+  left flagged dormant while its work runs is the failure this exists to
+  prevent. This is what makes hiding safe enough to do casually.
 
-`remove_repo` discards the dormant flag along with the cached blurb, so a
-name re-registered later does not come back hidden. `hide` and `unhide` are
-reserved repo names.
+`add_repo` and `remove_repo` both discard the dormant flag, so a name
+re-registered later cannot come back invisible with nothing on screen to
+explain why. `hide` and `unhide` are reserved repo names, and both take
+several names at once.
 
 Harness: `python scripts/test_repo_hide.py`
 

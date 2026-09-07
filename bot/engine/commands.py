@@ -2831,7 +2831,7 @@ async def _repo_desc(ctx: RequestContext, rest: str) -> None:
         )
 
 
-async def _repo_set_visibility(ctx: RequestContext, rest: str, hidden: bool) -> None:
+async def _repo_set_visibility(ctx: RequestContext, rest: str, *, hidden: bool) -> None:
     """Handle /repo hide <name...> and /repo unhide <name...>.
 
     Hiding parks the repo's forum out of the way and drops it from every
@@ -2903,10 +2903,11 @@ async def on_repo(ctx: RequestContext, text: str) -> None:
         else:
             await ctx.messenger.send_text(ctx.channel_id, f"Repo '{name}' not found.")
 
-    elif text.startswith("hide ") or text.startswith("unhide "):
-        hidden = text.startswith("hide ")
-        rest = text[5:] if hidden else text[7:]
-        await _repo_set_visibility(ctx, rest.strip(), hidden)
+    elif text == "hide" or text.startswith("hide "):
+        await _repo_set_visibility(ctx, text[4:].strip(), hidden=True)
+
+    elif text == "unhide" or text.startswith("unhide "):
+        await _repo_set_visibility(ctx, text[6:].strip(), hidden=False)
 
     elif text.startswith("switch "):
         name = text[7:].strip()
@@ -2980,14 +2981,24 @@ async def on_repo(ctx: RequestContext, text: str) -> None:
 
     elif not text:
         name, path = ctx.store.get_active_repo()
+        # The Discord switch menu only appears with two or more *visible*
+        # repos, so hiding all but one lands here. Say how many are parked,
+        # or the repos look lost rather than hidden.
+        hidden = ctx.store.list_dormant_repos()
+        suffix = (f"\n-# {len(hidden)} hidden - `/repo list` to see them"
+                  if hidden else "")
         if name:
-            await ctx.messenger.send_text(ctx.channel_id, f"Active repo: {name} ({path})")
+            await ctx.messenger.send_text(
+                ctx.channel_id, f"Active repo: {name} ({path}){suffix}")
         else:
-            await ctx.messenger.send_text(ctx.channel_id, "No repo set. Use /repo add <name> <path>")
+            await ctx.messenger.send_text(
+                ctx.channel_id,
+                f"No repo set. Use /repo add <name> <path>{suffix}")
 
     else:
         await ctx.messenger.send_text(
-            ctx.channel_id, "Usage: /repo add|remove|create|switch|list|desc|deploy")
+            ctx.channel_id,
+            "Usage: /repo add|remove|create|switch|list|hide|unhide|desc|deploy")
 
 
 # --- /budget ---
