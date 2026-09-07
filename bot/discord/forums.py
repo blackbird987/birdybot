@@ -543,6 +543,120 @@ class ForumManager:
             self.save_forum_map()
             return forum
 
+    async def _archive_category(self) -> "discord.CategoryChannel | None":
+        """The category that parks hidden repo forums, created on demand."""
+        guild = self._client.get_guild(self._guild_id)
+        if not guild or not guild.me or not self._category_id:
+            return None
+        base = guild.get_channel(self._category_id)
+        if not base or not isinstance(base, discord.CategoryChannel):
+            return None
+        return await channels.ensure_archive_category(
+            guild, base, guild.me, owner_id=self._discord_user_id,
+        )
+
+    async def _move_repo_forum(self, repo_name: str, hidden: bool) -> str:
+        """Move a repo's forum between the main and the archive category.
+
+        Nothing is ever deleted here: the forum, its threads and its pinned
+        posts survive the move untouched. Returns a short human-readable
+        description of what happened, for logging and for the reply.
+        """
+        proj = self._forum_projects.get(repo_name)
+        if proj is None or not proj.forum_channel_id:
+            return "no forum was registered"
+
+        guild = self._client.get_guild(self._guild_id)
+        channel = guild.get_channel(int(proj.forum_channel_id)) if guild else None
+        if channel is None:
+            return "no forum channel found"
+
+        # Resolving the target and moving into it happen under one lock:
+        # hiding several repos at once resolves the archive category several
+        # times, and ensure_archive_category scans-then-creates, so two
+        # concurrent hides would otherwise each create their own category.
+        try:
+            async with self._forum_lock:
+                if hidden:
+                    target = await self._archive_category()
+                else:
+                    target = (guild.get_channel(self._category_id)
+                              if self._category_id else None)
+                    if target is not None and not isinstance(
+                            target, discord.CategoryChannel):
+                        target = None
+                if target is None:
+                    return "could not resolve the target category"
+                if channel.category_id == target.id:
+                    return "forum was already there"
+                # sync_permissions is deliberately NOT set. A repo forum can
+                # carry its own overwrites -- a per-repo access grant is one
+                # extra entry on the forum itself, not on the category -- and
+                # syncing would overwrite the forum's list with the archive
+                # category's, silently revoking that guest. Unhiding would
+                # then sync to the main category and still not restore it.
+                # The move alone is the mechanism; the forum keeps the
+                # private overwrites it was created with either way.
+                await channel.edit(category=target)
+        except discord.HTTPException as exc:
+            log.warning("Could not move forum for %s: %s", repo_name, exc)
+            return f"moving the forum channel failed: {exc}"
+        except Exception as exc:
+            log.warning("Could not move forum for %s", repo_name, exc_info=True)
+            return f"moving the forum channel failed: {exc}"
+
+        log.info("Moved forum %s for repo %s into %s",
+                 proj.forum_channel_id, repo_name, target.name)
+        return f"forum moved to {target.name}"
+
+    async def wake_repo_if_dormant(
+        self, repo_name: str, notify_channel_id: str | None = None,
+    ) -> bool:
+        """Un-hide a repo the moment real work starts in it.
+
+        Hiding parks a forum out of the sidebar, so a self-wake firing (or a
+        spawn landing) inside a hidden repo would post its result somewhere
+        the user has stopped looking. Work is the strongest possible signal
+        that the repo is not dormant after all, so it retrieves itself.
+
+        Called from all three ways something reaches a forum:
+        ``get_or_create_session_thread`` (a new thread), the forum-message
+        route in ``bot.py`` (the user typing in an existing one), and
+        ``_replay_to_thread`` (every unattended resume). Adding a fourth
+        without calling this parks work where nobody will see it.
+
+        Returns True if the repo was hidden and has now been brought back.
+        """
+        if not repo_name or repo_name == "_default":
+            return False
+        if not self._store.is_repo_dormant(repo_name):
+            return False
+        self._store.set_repo_dormant(repo_name, False)
+        try:
+            await self.unhide_repo_forum(repo_name)
+        except Exception:
+            log.warning("Could not un-park forum for woken repo %s",
+                        repo_name, exc_info=True)
+        log.info("Repo %s un-hidden, work started in it", repo_name)
+        if notify_channel_id:
+            try:
+                ch = self._client.get_channel(int(notify_channel_id))
+                if isinstance(ch, (discord.TextChannel, discord.Thread)):
+                    await ch.send(
+                        f"-# `{repo_name}` was hidden; un-hiding it, work "
+                        f"just started here.")
+            except Exception:
+                log.debug("Could not post un-hide notice", exc_info=True)
+        return True
+
+    async def hide_repo_forum(self, repo_name: str) -> str:
+        """Park a repo's forum in the archive category (nothing is deleted)."""
+        return await self._move_repo_forum(repo_name, hidden=True)
+
+    async def unhide_repo_forum(self, repo_name: str) -> str:
+        """Bring a hidden repo's forum back into the main category."""
+        return await self._move_repo_forum(repo_name, hidden=False)
+
     async def get_or_create_session_thread(
         self, repo_name: str, session_id: str | None, topic: str,
         origin: str = "bot",
@@ -558,6 +672,15 @@ class ForumManager:
         given, it replaces the sanitized topic-derived thread name (used by
         /spawn to inject a color prefix at create-time).
         """
+        # A run in a hidden repo un-hides it. This has to sit above the
+        # already-has-a-thread early return below: a resumed session in a
+        # hidden repo is exactly the case that would otherwise keep posting
+        # into a parked forum nobody is looking at.
+        try:
+            await self.wake_repo_if_dormant(repo_name)
+        except Exception:
+            log.debug("Wake-on-work check failed for %s", repo_name, exc_info=True)
+
         # Check if session already has a thread
         if session_id:
             result = self.session_to_thread(session_id)
@@ -815,8 +938,17 @@ class ForumManager:
                     proj.repo_name,
                 )
 
-        # Ensure control room posts exist for all repo forums
+        # Ensure control room posts exist for all repo forums. Hidden repos
+        # are skipped here (and in the archive-thread loop and _pin_scopes
+        # below): those three *create or redraw* something in a forum that
+        # was deliberately parked. The other reconcile passes -- thread-name
+        # normalization, stale-tag clearing, legacy verify cleanup, archive
+        # migration, auto-follow -- deliberately still run on hidden repos:
+        # they repair state that must be correct whenever the forum comes
+        # back, and skipping them would leave a woken repo subtly stale.
         for repo_name, proj in self._forum_projects.items():
+            if self._store.is_repo_dormant(repo_name):
+                continue
             if proj.forum_channel_id and not proj.control_thread_id:
                 try:
                     await self.ensure_control_post(repo_name)
@@ -825,6 +957,8 @@ class ForumManager:
 
         # Ensure archive threads exist for all repo forums
         for repo_name, proj in self._forum_projects.items():
+            if self._store.is_repo_dormant(repo_name):
+                continue
             if proj.forum_channel_id and not proj.archive_thread_id:
                 try:
                     await self.ensure_archive_thread(repo_name)
@@ -962,6 +1096,10 @@ class ForumManager:
         # One unparseable id must not cost the whole sweep — this runs as a
         # fire-and-forget task, where a raised ValueError just disappears.
         for proj in list(self._forum_projects.values()):
+            # A hidden repo's forum is parked out of sight; repairing its pin
+            # slot is API calls spent on a sidebar nobody is looking at.
+            if self._store.is_repo_dormant(proj.repo_name):
+                continue
             try:
                 self._add_pin_scope(
                     scopes, proj.forum_channel_id, proj.control_thread_id,

@@ -176,6 +176,14 @@ class Messenger(Protocol):
         Default: no-op.
         """
 
+    async def on_repo_visibility_changed(self, repo_name: str, hidden: bool) -> None:
+        """Called after a repo was hidden or unhidden.
+
+        The platform parks (or retrieves) whatever surface represents the repo.
+        Nothing is destroyed: the repo stays registered either way.
+        Default: no-op.
+        """
+
     async def on_deploy_state_changed(self, repo_name: str) -> None:
         """Called after deploy state is updated post-merge.
 

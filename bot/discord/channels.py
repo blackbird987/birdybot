@@ -67,6 +67,41 @@ async def ensure_category(
     return category
 
 
+# Suffix appended to the bot's own category name to build the parking lot for
+# hidden repos. A separate category (not a permission overwrite) is the only
+# thing that actually shrinks the sidebar: Discord shows the server owner every
+# channel regardless of overwrites, so denying view_channel hides nothing from
+# the person who asked for it.
+ARCHIVE_CATEGORY_SUFFIX = " \u00b7 Archive"
+
+
+async def ensure_archive_category(
+    guild: discord.Guild,
+    base_category: discord.CategoryChannel,
+    bot_member: discord.Member,
+    owner_id: int | None = None,
+) -> discord.CategoryChannel:
+    """Find or create the category that parks hidden repo forums.
+
+    Named after the bot's own category so the pair sorts together, and created
+    with the same private overwrites, positioned directly after it.
+    """
+    name = f"{base_category.name}{ARCHIVE_CATEGORY_SUFFIX}"
+    for cat in guild.categories:
+        if cat.name.lower() == name.lower():
+            return cat
+
+    overwrites = _private_overwrites(guild, bot_member, owner_id)
+    category = await guild.create_category(name, overwrites=overwrites)
+    log.info("Created hidden-repo category %s (%s)", category.id, category.name)
+    try:
+        await category.edit(position=base_category.position + 1)
+    except Exception:
+        # Position is cosmetic; a failure here must not fail the hide.
+        log.debug("Could not position archive category", exc_info=True)
+    return category
+
+
 async def ensure_lobby(
     category: discord.CategoryChannel,
     name: str = "the-ark",
