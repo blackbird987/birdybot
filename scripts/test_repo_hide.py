@@ -260,6 +260,11 @@ check("and it wakes BEFORE the already-has-a-thread early return",
       src.index("wake_repo_if_dormant") < src.index("session_to_thread"),
       "a resumed session in a hidden repo would keep posting into it")
 
+move = inspect.getsource(ForumManager._move_repo_forum)
+check("the move never syncs permissions to the archive category",
+      "sync_permissions=True" not in move,
+      "a repo forum carrying its own access grant would lose it")
+
 replay = inspect.getsource(discord_bot_mod.ClaudeBot._replay_to_thread)
 check("every unattended resume (self-wake, watch, --here schedule, spawn "
       "join, reboot replay) wakes the repo",

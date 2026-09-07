@@ -589,7 +589,15 @@ class ForumManager:
                     return "could not resolve the target category"
                 if channel.category_id == target.id:
                     return "forum was already there"
-                await channel.edit(category=target, sync_permissions=True)
+                # sync_permissions is deliberately NOT set. A repo forum can
+                # carry its own overwrites -- a per-repo access grant is one
+                # extra entry on the forum itself, not on the category -- and
+                # syncing would overwrite the forum's list with the archive
+                # category's, silently revoking that guest. Unhiding would
+                # then sync to the main category and still not restore it.
+                # The move alone is the mechanism; the forum keeps the
+                # private overwrites it was created with either way.
+                await channel.edit(category=target)
         except discord.HTTPException as exc:
             log.warning("Could not move forum for %s: %s", repo_name, exc)
             return f"moving the forum channel failed: {exc}"

@@ -174,7 +174,15 @@ Three things that must not drift:
   forum is *moved*, into a `<bot category> · Archive` category created on
   demand next to the main one (`channels.ensure_archive_category`,
   `forums._move_repo_forum`). The channel, its threads and its pinned posts
-  survive the move untouched.
+  survive the move untouched. The move must **not** pass
+  `sync_permissions=True`: a repo forum can carry its own overwrites, since a
+  per-repo access grant is one extra entry on the forum rather than on the
+  category, and syncing replaces the forum's list with the destination
+  category's -- silently revoking that guest, with an unhide syncing to the
+  main category and still not restoring it. Confirmed against the live API:
+  a synced move took a forum from 4 overwrites to 3 and dropped the grant
+  role; an unsynced one round-tripped all 4. The move alone hides the forum;
+  it keeps the private overwrites it was created with either way.
 - **`list_repos()` stays unfiltered, deliberately.** It has dozens of callers
   that resolve a repo *path* through it: resume, merge, worktree recovery,
   deploy, session fork. A hidden repo has to keep working for all of them, so
