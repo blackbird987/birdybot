@@ -125,6 +125,10 @@ class StateStore:
         # Control Room blurb, cached so a refresh is stat-only.
         # See bot/engine/repo_desc.py.
         self._repo_descriptions: dict[str, dict] = {}
+        # Repos hidden from Discord's sidebar and every picker. Display-only:
+        # a dormant repo stays registered and its path stays resolvable, so
+        # old threads still resume. See list_active_repos().
+        self._dormant_repos: set[str] = set()
         self._active_repo: str | None = None
         self._task_counter: int = 0
         self._query_counter: int = 0
@@ -219,6 +223,7 @@ class StateStore:
                 self._instances[inst.id] = inst
             self._repos = data.get("repos", {})
             self._repo_descriptions = data.get("repo_descriptions", {})
+            self._dormant_repos = set(data.get("dormant_repos", []) or [])
             self._active_repo = data.get("active_repo")
             self._task_counter = data.get("task_counter", 0)
             self._query_counter = data.get("query_counter", 0)
@@ -326,6 +331,7 @@ class StateStore:
             "instances": [i.to_dict() for i in self._instances.values()],
             "repos": self._repos,
             "repo_descriptions": self._repo_descriptions,
+            "dormant_repos": sorted(self._dormant_repos),
             "active_repo": self._active_repo,
             "task_counter": self._task_counter,
             "query_counter": self._query_counter,
@@ -621,8 +627,10 @@ class StateStore:
         if name not in self._repos:
             return False
         del self._repos[name]
-        # A name re-registered at a different path must re-derive its blurb.
+        # A name re-registered at a different path must re-derive its blurb,
+        # and must not come back hidden.
         self._repo_descriptions.pop(name, None)
+        self._dormant_repos.discard(name)
         if self._active_repo == name:
             self._active_repo = next(iter(self._repos), None)
         # Clean up any persisted deploy status msg IDs for this repo
@@ -650,6 +658,41 @@ class StateStore:
 
     def list_repos(self) -> dict[str, str]:
         return dict(self._repos)
+
+    # --- Dormant (hidden) repos ---
+    #
+    # Hiding is a *display* state, never a registration state. `list_repos()`
+    # is deliberately unfiltered: dozens of callers use it to resolve a repo
+    # path for resume, merge, worktree and deploy work, and a hidden repo has
+    # to keep working for all of them. Only the surfaces that draw a list for
+    # a human read `list_active_repos()`.
+
+    def set_repo_dormant(self, name: str, dormant: bool) -> bool:
+        """Hide or unhide a registered repo. False if it is not registered."""
+        if name not in self._repos:
+            return False
+        if dormant:
+            if name in self._dormant_repos:
+                return True
+            self._dormant_repos.add(name)
+        else:
+            if name not in self._dormant_repos:
+                return True
+            self._dormant_repos.discard(name)
+        self.save()
+        return True
+
+    def is_repo_dormant(self, name: str) -> bool:
+        return name in self._dormant_repos
+
+    def list_dormant_repos(self) -> list[str]:
+        """Registered repos that are currently hidden, in registration order."""
+        return [n for n in self._repos if n in self._dormant_repos]
+
+    def list_active_repos(self) -> dict[str, str]:
+        """`list_repos()` minus the hidden ones, for pickers and dashboards."""
+        return {n: p for n, p in self._repos.items()
+                if n not in self._dormant_repos}
 
     # --- Repo descriptions (Control Room blurb, see bot/engine/repo_desc.py) ---
 

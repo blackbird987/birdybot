@@ -1164,9 +1164,11 @@ Settings:
 - /effort low|medium|high|max — reasoning effort level
 - /model <name> — model for this thread (`/model default` clears it)
 - /context set <text> — pin context to all prompts
-- /repo add|remove|create|switch|list — manage repos
+- /repo add|remove|create|switch|list|hide|unhide — manage repos
 - /repo create <name> [path] [--github] [--public] — create new repo (git init + register)
 - /repo remove <name> — unregister a repo (does not delete files)
+- /repo hide <name...> - hide a repo's forum from Discord (stays registered, nothing deleted; it un-hides itself when work starts in it)
+- /repo unhide <name...> - bring a hidden repo back
 - /provider claude|cursor — switch CLI provider
 - /alias set|list|delete — saved command shortcuts
 - /new — start a fresh conversation

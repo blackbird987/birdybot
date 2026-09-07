@@ -158,6 +158,48 @@ Key data structures in `bot/discord/forums.py`:
 - `ThreadInfo`: thread_id + session_id + origin + topic
 - Persisted in `data/state.json` under `platform_state.discord.forum_projects`
 
+## A repo you are not using is hidden, not removed
+
+Twenty registered repos are twenty forums in one category, and most of them
+are not being worked on this month. `/repo hide <name...>` parks a repo;
+`/repo unhide <name...>` brings it back. Nothing is unregistered, nothing is
+deleted, and `/repo list` still shows a hidden repo under its own `Hidden:`
+heading; that listing is how you find one again.
+
+Three things that must not drift:
+
+- **Permission overwrites are not the mechanism, and never were.** Discord
+  shows the server owner every channel regardless of overwrites, so denying
+  `view_channel` hides nothing from the one person who asked for it. The
+  forum is *moved*, into a `<bot category> · Archive` category created on
+  demand next to the main one (`channels.ensure_archive_category`,
+  `forums._move_repo_forum`). The channel, its threads and its pinned posts
+  survive the move untouched.
+- **`list_repos()` stays unfiltered, deliberately.** It has dozens of callers
+  that resolve a repo *path* through it: resume, merge, worktree recovery,
+  deploy, session fork. A hidden repo has to keep working for all of them, so
+  filtering there would turn "hide" into "quietly break". Hiding is display
+  state: only surfaces that draw a list for a human read
+  `list_active_repos()` / `is_repo_dormant()`: the dashboard's Projects
+  field, the `/repo` switch menu, the `/new` repo picker, and the startup
+  reconcile loops that would otherwise redraw control rooms and repair pin
+  slots in a forum nobody is looking at. A hidden repo is still switchable
+  and still startable *by name*; naming one is intent.
+- **Work in a hidden repo un-hides it.** A schedule firing, a spawn landing
+  or a message in one of its threads would otherwise post into a parked
+  forum and be seen by nobody. `wake_repo_if_dormant` is the single funnel,
+  called from `get_or_create_session_thread` (every new session thread) and
+  from the forum-message route in `bot.py` (an existing thread), and it
+  clears the flag even if the channel move fails, because a repo left flagged
+  dormant while its work runs is the failure this exists to prevent. This is
+  what makes hiding safe enough to do casually.
+
+`remove_repo` discards the dormant flag along with the cached blurb, so a
+name re-registered later does not come back hidden. `hide` and `unhide` are
+reserved repo names.
+
+Harness: `python scripts/test_repo_hide.py`
+
 ## Build Isolation (Git Worktrees)
 
 Build tasks use git worktrees for parallel isolation:

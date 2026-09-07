@@ -450,6 +450,23 @@ class DiscordMessenger:
             if refresh:
                 asyncio.create_task(refresh())
 
+    async def on_repo_visibility_changed(self, repo_name: str, hidden: bool) -> None:
+        """Park a hidden repo's forum in the archive category, or bring it back."""
+        forums = getattr(self._bot, "_forums", None)
+        if not forums:
+            return
+        try:
+            if hidden:
+                await forums.hide_repo_forum(repo_name)
+            else:
+                await forums.unhide_repo_forum(repo_name)
+        except Exception:
+            log.warning("Failed to move forum for %s (hidden=%s)",
+                        repo_name, hidden, exc_info=True)
+        refresh = getattr(self._bot, "_refresh_dashboard", None)
+        if refresh:
+            asyncio.create_task(refresh())
+
     async def on_deploy_state_changed(self, repo_name: str) -> None:
         """Refresh the control room embed for this repo."""
         forums = getattr(self._bot, "_forums", None)

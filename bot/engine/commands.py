@@ -2625,7 +2625,7 @@ async def on_schedule(ctx: RequestContext, text: str) -> None:
 # a repo name, and a repo actually called "clear" would make that command
 # print a blurb instead of clearing one.
 _RESERVED_REPO_NAMES = {"add", "switch", "list", "create", "remove", "delete",
-                       "desc", "deploy", "clear"}
+                       "desc", "deploy", "clear", "hide", "unhide"}
 
 
 def _validate_repo_name(name: str) -> str | None:
@@ -2831,6 +2831,47 @@ async def _repo_desc(ctx: RequestContext, rest: str) -> None:
         )
 
 
+async def _repo_set_visibility(ctx: RequestContext, rest: str, hidden: bool) -> None:
+    """Handle /repo hide <name...> and /repo unhide <name...>.
+
+    Hiding parks the repo's forum out of the way and drops it from every
+    picker; it never unregisters the repo or deletes a thread. Several names
+    at once, because a sidebar is decluttered in one go, not one repo per
+    command.
+    """
+    names = [n for n in rest.replace(",", " ").split() if n]
+    if not names:
+        verb = "hide" if hidden else "unhide"
+        await ctx.messenger.send_text(
+            ctx.channel_id, f"Usage: /repo {verb} <name> [name ...]")
+        return
+
+    done: list[str] = []
+    lines: list[str] = []
+    for name in names:
+        if not ctx.store.set_repo_dormant(name, hidden):
+            lines.append(f"❌ `{name}`: not found")
+            continue
+        done.append(name)
+        try:
+            await ctx.messenger.on_repo_visibility_changed(name, hidden)
+        except Exception:
+            log.warning("on_repo_visibility_changed failed for %s", name, exc_info=True)
+
+    if done:
+        if hidden:
+            lines.append(
+                f"🙈 Hidden: {', '.join(f'`{n}`' for n in done)}\n"
+                f"Nothing was deleted: the repo, its forum and every thread "
+                f"in it are intact. Bring it back with "
+                f"`/repo unhide {done[0]}`, or it comes back on its own the "
+                f"moment work starts in it.")
+        else:
+            lines.append(f"👁 Visible again: {', '.join(f'`{n}`' for n in done)}")
+
+    await ctx.messenger.send_text(ctx.channel_id, "\n".join(lines))
+
+
 async def on_repo(ctx: RequestContext, text: str) -> None:
     text = text.strip()
 
@@ -2862,6 +2903,11 @@ async def on_repo(ctx: RequestContext, text: str) -> None:
         else:
             await ctx.messenger.send_text(ctx.channel_id, f"Repo '{name}' not found.")
 
+    elif text.startswith("hide ") or text.startswith("unhide "):
+        hidden = text.startswith("hide ")
+        rest = text[5:] if hidden else text[7:]
+        await _repo_set_visibility(ctx, rest.strip(), hidden)
+
     elif text.startswith("switch "):
         name = text[7:].strip()
         if ctx.store.switch_repo(name):
@@ -2877,10 +2923,18 @@ async def on_repo(ctx: RequestContext, text: str) -> None:
         repos = ctx.store.list_repos()
         active, _ = ctx.store.get_active_repo()
         if repos:
-            lines = []
+            # Hidden repos are still listed: hiding takes them out of the
+            # sidebar and the pickers, not out of the registry, and this is
+            # where you go to find one again.
+            lines, hidden_lines = [], []
             for name, path in repos.items():
                 marker = " *" if name == active else ""
-                lines.append(f"  {name}{marker} → {path}")
+                entry = f"  {name}{marker} → {path}"
+                (hidden_lines if ctx.store.is_repo_dormant(name)
+                 else lines).append(entry)
+            if hidden_lines:
+                lines.append("\nHidden (`/repo unhide <name>`):")
+                lines.extend(hidden_lines)
             await ctx.messenger.send_text(ctx.channel_id, "\n".join(lines))
         else:
             await ctx.messenger.send_text(ctx.channel_id, "No repos registered.")

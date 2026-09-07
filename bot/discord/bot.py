@@ -2383,6 +2383,14 @@ class ClaudeBot(discord.Client):
 
                     if lookup:
                         proj, info = lookup
+                        # Posting in a hidden repo's thread is work in that
+                        # repo: same rule as starting a run in one.
+                        try:
+                            await self._forums.wake_repo_if_dormant(
+                                proj.repo_name, notify_channel_id=channel_id)
+                        except Exception:
+                            log.debug("Wake-on-work check failed for %s",
+                                      proj.repo_name, exc_info=True)
                         # Track interacting user for close mentions
                         info.user_ids.add(str(message.author.id))
                         session_id = info.session_id or None

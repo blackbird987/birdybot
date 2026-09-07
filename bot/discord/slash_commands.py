@@ -318,7 +318,10 @@ def setup(bot: ClaudeBot) -> None:
             await interaction.response.send_message("Unauthorized", ephemeral=True)
             return
         stripped = args.strip()
-        repos = bot._store.list_repos()
+        # The menu is a picker, so it shows what you actually work on. A
+        # hidden repo is still switchable by typing its name.
+        repos = bot._store.list_active_repos()
+        hidden_count = len(bot._store.list_dormant_repos())
         if len(repos) >= 2 and stripped in ("", "switch"):
             active, _ = bot._store.get_active_repo()
             select = discord.ui.Select(
@@ -338,6 +341,9 @@ def setup(bot: ClaudeBot) -> None:
             for name, path in repos.items():
                 marker = " \\*" if name == active else ""
                 lines.append(f"`{name}`{marker} → `{path}`")
+            if hidden_count:
+                lines.append(
+                    f"-# {hidden_count} hidden · `/repo list` to see them")
             await interaction.response.send_message(
                 "\n".join(lines), view=view, ephemeral=True,
             )
@@ -449,6 +455,12 @@ def setup(bot: ClaudeBot) -> None:
                 if grant:
                     new_thread_mode = access_effective_mode(grant, new_thread_mode)
 
+        # Hidden repos drop out of the *picker* but stay startable by name:
+        # naming one explicitly is intent, and the repo un-hides itself as
+        # soon as the session starts.
+        pickable_repos = [r for r in available_repos
+                          if not bot._store.is_repo_dormant(r)]
+
         repo = repo.strip()
         if repo:
             lower_map = {k.lower(): k for k in available_repos}
@@ -464,17 +476,17 @@ def setup(bot: ClaudeBot) -> None:
                 user_id=user_id, user_name=user_name,
             )
         else:
-            if len(available_repos) == 0:
+            if len(pickable_repos) == 0:
                 await interaction.response.send_message("No repos available.", ephemeral=True)
-            elif len(available_repos) == 1:
+            elif len(pickable_repos) == 1:
                 await interaction.response.defer(ephemeral=True)
                 await bot._create_new_session(
-                    interaction, available_repos[0], mode=new_thread_mode,
+                    interaction, pickable_repos[0], mode=new_thread_mode,
                     user_id=user_id, user_name=user_name,
                 )
             else:
                 view = discord.ui.View(timeout=60)
-                for name in available_repos:
+                for name in pickable_repos:
                     btn = discord.ui.Button(
                         label=name, style=discord.ButtonStyle.primary,
                         custom_id=f"new_repo:{name}",
