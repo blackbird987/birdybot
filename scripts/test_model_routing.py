@@ -29,8 +29,11 @@ from bot.engine.workflows import resolve_spawn_model
 
 
 # Origins that must stay unrouted (None → DEFAULT_SESSION_MODEL thinking model).
+# PROMPT_REVIEW reads a bounded table and writes prose about it, behind a
+# read-only floor. It builds nothing, so it takes the thinking model like any
+# other analysis run.
 _THINKING_ORIGINS = frozenset(
-    {InstanceOrigin.DIRECT} | set(PLAN_ORIGINS)
+    {InstanceOrigin.DIRECT, InstanceOrigin.PROMPT_REVIEW} | set(PLAN_ORIGINS)
 )
 
 # Button/preset actions that never become a spawned instance origin, so they

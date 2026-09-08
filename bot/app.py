@@ -940,6 +940,16 @@ async def run() -> None:
                             )
                     except Exception:
                         log.exception("Stale spawn-wave sweep failed")
+                # Weekly prompt review. Checked on the same 5-minute cadence
+                # as the sweeps, but gated on a PERSISTED timestamp rather
+                # than on `ticks`: a reboot resets the counter, which would
+                # otherwise either fire on every restart or skip the week.
+                if ticks % 5 == 0:
+                    try:
+                        from bot.discord.prompt_review import maybe_run_weekly
+                        asyncio.create_task(maybe_run_weekly(discord_bot))
+                    except Exception:
+                        log.exception("Prompt review scheduling failed")
                 # Ship sweep every ~5 min, guarded against overlap (a fleet
                 # ship can run for minutes and may self-deploy/reboot).
                 if ticks % 5 == 0 and not sweep_running["v"]:

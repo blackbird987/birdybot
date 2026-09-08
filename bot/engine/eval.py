@@ -229,7 +229,6 @@ def evaluate_instance(inst: Instance) -> SessionEval:
         ev.flags.extend(_check_claim_grounding(inst, text))
         ev.flags.extend(_check_copy_block_wrapping(inst, text))
         ev.flags.extend(_check_unarmed_promise(inst, text))
-    ev.flags.extend(_check_tool_hygiene(inst))
     ev.flags.extend(_check_efficiency(inst))
 
     _save_eval(ev)
@@ -238,8 +237,24 @@ def evaluate_instance(inst: Instance) -> SessionEval:
 
 # --- Heuristic checks ---
 
-_READ_CMD_RE = re.compile(r'\b(cat|head|tail|less|sed\s+-n)\b')
-_SEARCH_CMD_RE = re.compile(r'\b(grep|rg|find\s+\.\s+-name|find\s+\.\s+-type)\b')
+# There is deliberately no tool-hygiene check here any more, and adding one
+# back would be wrong rather than merely noisy.
+#
+# It flagged every Bash command that read a file (`cat`, `head`, `sed -n`) or
+# searched (`grep`, `find`) as "should use the Read/Grep tool". But the Claude
+# provider extends every CLI invocation with `--permission-mode
+# bypassPermissions` unconditionally (`bot/claude/provider.py`, the "always
+# bypass" line -- a non-interactive bot cannot answer permission prompts), and
+# Claude Code's own bypass-permissions system text instructs the session to
+# prefer Bash for reading and searching, falling back to the dedicated tools
+# only when Bash cannot do the job.
+#
+# So the check penalised behaviour the harness itself requires, on every run
+# this bot has ever started. It also fired per command rather than per session:
+# over the 30 days to 2026-09-08 it produced 47,319 "Bash used for file
+# reading" and 25,754 "Bash used for search" flags out of ~76,000 total, which
+# buried every other finding. `tool_hygiene` is retired below so the flags
+# already on disk stay out of future digests too.
 
 
 def _check_narration(inst: Instance, text: str) -> list[EvalFlag]:
@@ -271,30 +286,6 @@ def _check_narration(inst: Instance, text: str) -> list[EvalFlag]:
             category="narration", severity="info",
             message="Files read/searched but very short response — may be missing context for user",
         ))
-
-    return flags
-
-
-def _check_tool_hygiene(inst: Instance) -> list[EvalFlag]:
-    """Check actual Bash commands for dedicated-tool-worthy operations."""
-    flags: list[EvalFlag] = []
-
-    for cmd in inst.bash_commands:
-        # Skip very short commands (likely just `cd` or similar)
-        if len(cmd) < 4:
-            continue
-        if _READ_CMD_RE.search(cmd):
-            flags.append(EvalFlag(
-                category="tool_hygiene", severity="warning",
-                message="Bash used for file reading (should use Read tool)",
-                evidence=cmd.split("\n")[0][:80],
-            ))
-        if _SEARCH_CMD_RE.search(cmd):
-            flags.append(EvalFlag(
-                category="tool_hygiene", severity="warning",
-                message="Bash used for search (should use Grep/Glob)",
-                evidence=cmd.split("\n")[0][:80],
-            ))
 
     return flags
 
@@ -771,9 +762,24 @@ _ATTRIBUTION: tuple[tuple[str, str, str], ...] = (
     ("efficiency", "revision rounds", "PLAN_REVIEW_PROMPT"),
     ("efficiency", "code review looped", "CODE_REVIEW_PROMPT"),
     ("efficiency", "chain cost", "chain budget (harness)"),
-    ("tool_hygiene", "", "tool gating (harness, not prompt-owned)"),
     ("test_failure", "", "VERIFY_PROMPT"),
 )
+
+
+# Categories whose check has been withdrawn. The flags they produced are still
+# sitting in `data/evals` -- tens of thousands of them -- and a retired check's
+# output must not go on outranking live findings in a digest just because the
+# files outlive the code.
+#
+# Filtered where flags are AGGREGATED for a human, never in `load_evals`: a
+# per-instance eval view should still show what was actually recorded at the
+# time, and rewriting history on read would make an old session unexplainable.
+_RETIRED_CATEGORIES: frozenset[str] = frozenset({"tool_hygiene"})
+
+
+def is_retired_flag(category: str) -> bool:
+    """True for a flag whose check no longer exists (see `_RETIRED_CATEGORIES`)."""
+    return category in _RETIRED_CATEGORIES
 
 
 def attribute_flag(category: str, message: str) -> str:
@@ -790,9 +796,9 @@ class DigestRow:
     """One recurring flag, with who owns it.
 
     ``count`` is the number of SESSIONS the flag appeared in, not the number
-    of times it fired. Per-command checks (tool hygiene) can fire dozens of
-    times in a single session, which would otherwise bury every other finding
-    and make one talkative session look like a systemic problem.
+    of times it fired. A per-command check fires once per tool call and so can
+    fire dozens of times in a single session, which would otherwise bury every
+    other finding and make one talkative session look like a systemic problem.
     """
     category: str
     message: str
@@ -866,6 +872,10 @@ def build_digest(
         # let a single long session outrank a habit spread across fifty.
         seen_here: set[tuple[str, str]] = set()
         for flag in ev.flags:
+            # A withdrawn check's flags stay on disk forever; they must not
+            # keep outranking live findings here.
+            if is_retired_flag(flag.category):
+                continue
             norm = normalise_flag_message(flag.message)
             key = (flag.category, norm)
             slot = grouped.setdefault(key, {

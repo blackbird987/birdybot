@@ -84,6 +84,31 @@ def setup(bot: ClaudeBot) -> None:
             return
         await bot._run_slash(interaction, lambda ctx: commands.on_evals(ctx, days))
 
+    @bot.tree.command(name="promptreview", description="Propose prompt-block edits from the eval record", guild=guild_obj)
+    @app_commands.describe(days="Window in days (default 7)")
+    async def cmd_prompt_review(interaction: discord.Interaction, days: int = 0):
+        # Owner only: it reads the whole eval record and opens a build against
+        # the bot's own instructions.
+        if not bot._is_owner(interaction.user.id):
+            await interaction.response.send_message("Owner only.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        from bot.discord.prompt_review import run_review
+        window = max(1, min(days, 90)) if days else None
+        await interaction.followup.send(
+            "Prompt review starting. It posts into the **Prompt Review** "
+            "thread in The Ark.", ephemeral=True,
+        )
+        try:
+            outcome = await run_review(bot, window)
+        except Exception:
+            log.exception("/promptreview failed")
+            outcome = "Prompt review failed. See the log."
+        try:
+            await interaction.followup.send(outcome, ephemeral=True)
+        except discord.HTTPException:
+            log.debug("/promptreview outcome follow-up failed", exc_info=True)
+
     @bot.tree.command(name="usage", description="Token usage & rate limit estimates", guild=guild_obj)
     @app_commands.describe(force="Force refresh (bypass cache)")
     async def cmd_usage(interaction: discord.Interaction, force: bool = False):
