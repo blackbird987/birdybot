@@ -129,6 +129,14 @@ async def handle_ark_button(
 
     action = custom_id.split(":")[1]
 
+    # Prompt review carries its own sub-action and instance id in the trailing
+    # segments (ark:promptreview:<action>:<instance_id>), so it is routed off
+    # the whole id rather than the single-word action below.
+    if action == "promptreview":
+        from bot.discord.prompt_review import handle_button
+        await handle_button(bot, interaction, custom_id)
+        return
+
     if action == "new_repo":
         view = discord.ui.View(timeout=60)
         view.add_item(discord.ui.Button(

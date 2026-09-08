@@ -755,6 +755,16 @@ PLAN_BLOCK_LIMIT_USD: float = float(os.getenv("PLAN_BLOCK_LIMIT_USD", "0"))
 # Session evaluation
 EVAL_ENABLED: bool = os.getenv("EVAL_ENABLED", "1").lower() in ("1", "true", "yes")
 
+# Weekly prompt review: aggregate the eval record, have one read-only agent
+# propose edits to the prompt blocks, post the diff for approval. It never
+# writes to the files it reviews. See bot/engine/prompt_review.py.
+# Inert without EVAL_ENABLED: with no evals there is no input.
+PROMPT_REVIEW_ENABLED: bool = os.getenv(
+    "PROMPT_REVIEW_ENABLED", "1").lower() in ("1", "true", "yes")
+PROMPT_REVIEW_WINDOW_DAYS: int = int(os.getenv("PROMPT_REVIEW_WINDOW_DAYS", "7"))
+PROMPT_REVIEW_INTERVAL_DAYS: int = int(os.getenv("PROMPT_REVIEW_INTERVAL_DAYS", "7"))
+PROMPT_REVIEW_MAX_PROPOSALS: int = int(os.getenv("PROMPT_REVIEW_MAX_PROPOSALS", "3"))
+
 # Recent-session history injected into every system prompt.
 # SESSION_HISTORY_RANKING="relevance" keeps the entries most related to the
 # current prompt; "recency" selects newest-first instead, and exists as a
