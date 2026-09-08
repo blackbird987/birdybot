@@ -749,10 +749,16 @@ class Schedule:
     enabled: bool = True
     # Self-wake (resume_thread=True): instead of spawning a fresh instance and
     # broadcasting to The Ark, fire this schedule by resuming the session in
-    # channel_id via _replay_to_thread. Set by check_wake_request; always a
-    # one-shot (is_recurring=False).
+    # channel_id via _replay_to_thread. Set by check_wake_request, which always
+    # makes a one-shot; a recurring one (is_recurring=True) is a *nudge*,
+    # declared in config/nudges.json and reconciled in by bot.engine.nudges.
     resume_thread: bool = False
     channel_id: str | None = None
+    # Stable identity for a declared nudge, matching the key in
+    # config/nudges.json. Empty for everything else. Reconciliation matches on
+    # this rather than on the generated id, so a nudge survives edits to its
+    # prompt and cannot be duplicated across restarts.
+    label: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -770,6 +776,7 @@ class Schedule:
             "enabled": self.enabled,
             "resume_thread": self.resume_thread,
             "channel_id": self.channel_id,
+            "label": self.label,
         }
 
     @classmethod
@@ -789,4 +796,5 @@ class Schedule:
             enabled=d.get("enabled", True),
             resume_thread=d.get("resume_thread", False),
             channel_id=d.get("channel_id"),
+            label=d.get("label", ""),
         )

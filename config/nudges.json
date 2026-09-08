@@ -1,0 +1,48 @@
+{
+  "_comment": [
+    "Recurring messages the bot sends into a thread WITHOUT being asked first.",
+    "Reconciled into live schedules on every startup by bot/engine/nudges.py, so",
+    "editing this file is the only step needed to change, add or remove one.",
+    "",
+    "Fields: label (stable id, never reuse), thread_id (Discord thread the message",
+    "lands in), at (HH:MM wall clock), tz (IANA zone), days (weekday list or null",
+    "for every day), every_days (interval in days, default 1), repo, prompt.",
+    "Set enabled:false to park one without losing the wording.",
+    "",
+    "The prompt is delivered to that thread's session exactly like a self-wake, so",
+    "the target repo's own CLAUDE.md governs how the message is written. Keep the",
+    "prompt about WHAT to ask, not how to phrase it."
+  ],
+  "nudges": [
+    {
+      "label": "vin-daily-log",
+      "repo": "vin-coach",
+      "thread_id": "1545730176598413342",
+      "at": "17:30",
+      "tz": "Europe/Amsterdam",
+      "days": ["mon", "tue", "wed", "thu", "fri"],
+      "every_days": 1,
+      "prompt": "End-of-day nudge. Vin has not written; you are starting this. Send ONE short question asking what he worked on today, phrased so it can be answered one-handed on a phone. If the workspace is missing something specific and more valuable than the generic question, ask for that instead, using the priority order in CLAUDE.md: a feedback-round count on any closed or closing edit first, then the ritual live on the edit in play. Do not send a list, do not recap, do not explain that this is an automated message. One question, then end the turn."
+    },
+    {
+      "label": "vin-thursday-claudio",
+      "repo": "vin-coach",
+      "thread_id": "1545730176598413342",
+      "at": "16:00",
+      "tz": "Europe/Amsterdam",
+      "days": ["thu"],
+      "every_days": 7,
+      "prompt": "Thursday chase, for Friday's half-day with Claudio. Vin has not written; you are starting this. Ask ONE question aimed at getting two or three specific things he can bring tomorrow: what did he second-guess this week, a shot, a cut, a choice he was not sure about. 'Nothing to ask' is the failure mode, so make the question concrete enough that a real answer is easier than a shrug. If no word came in about what got assigned at Monday's meeting, fold that into this same message rather than sending a second one. One question, then end the turn."
+    },
+    {
+      "label": "vin-feedback-rounds",
+      "repo": "vin-coach",
+      "thread_id": "1545730176598413342",
+      "at": "16:00",
+      "tz": "Europe/Amsterdam",
+      "days": ["tue"],
+      "every_days": 7,
+      "prompt": "Weekly chase for the feedback-round count, the one number that becomes a trend line at the October check-in. Read projects/ and find every edit that has closed or shipped with its round count still blank. Ask about the OLDEST one only, however many are blank, however long ago it shipped. Offer the shortcut: a screenshot of the review comments and you will count the rounds yourself. If nothing is blank, send nothing at all and end the turn silently rather than inventing a question. One message, then end the turn."
+    }
+  ]
+}

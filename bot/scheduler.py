@@ -16,6 +16,34 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+def _step_from(due_iso: str | None, interval_secs: int,
+               now: datetime) -> datetime:
+    """Next fire time, stepped in whole intervals from ``due_iso``.
+
+    Advancing from the row's own due time (rather than from ``now``) is what
+    keeps a wall-clock anchor: a 16:00 daily nudge that actually fired at
+    16:00:24 must next fire at 16:00, not 16:00:24. Whole intervals are skipped
+    until the result is in the future, so downtime collapses to a single fire
+    rather than a burst. Falls back to ``now + interval`` when the row has no
+    usable due time.
+    """
+    if not due_iso or interval_secs <= 0:
+        return now + timedelta(seconds=max(interval_secs, 1))
+    try:
+        nxt = datetime.fromisoformat(due_iso)
+    except (ValueError, TypeError):
+        return now + timedelta(seconds=interval_secs)
+    if nxt.tzinfo is None:
+        nxt = nxt.replace(tzinfo=timezone.utc)
+    step = timedelta(seconds=interval_secs)
+    if nxt <= now:
+        # Integer arithmetic rather than a while loop: a row left over from a
+        # months-long gap would otherwise spin thousands of iterations.
+        missed = int((now - nxt) / step) + 1
+        nxt += step * missed
+    return nxt
+
+
 class Scheduler:
     """Manages scheduled/recurring tasks on an asyncio loop."""
 
@@ -183,27 +211,45 @@ class Scheduler:
         """Fire a thread-bound self-wake via the on_wake callback.
 
         on_wake resumes the thread's session. It returns "busy" if a turn is
-        already active there — in which case we re-arm 60s out rather than
+        already active there, in which case we re-arm 60s out rather than
         interleaving with a live exchange. Any other outcome (handled, dropped,
-        or an exception) consumes the one-shot. The try/finally guarantees the
+        or an exception) settles the fire. The try/finally guarantees the
         schedule is always settled, so a throwing callback can't leave it
-        enabled and retrying every 30s. Consumed wakes are deleted (not disabled)
-        so they don't accumulate in state.json — note the resumed turn may have
-        already superseded this row via add_wake, so delete_schedule tolerates a
-        missing id.
+        enabled and retrying every 30s.
+
+        Two shapes settle differently:
+
+        * One-shot (``is_recurring`` False), the ordinary self-wake. Deleted
+          rather than disabled so they don't accumulate in state.json; note the
+          resumed turn may have already superseded this row via add_wake, so
+          delete_schedule tolerates a missing id.
+        * Recurring, a declared nudge (see bot.engine.nudges). Re-armed and
+          kept, because it is config, not ephemera. The next fire is stepped
+          from the row's own due time, not from now, so a nudge written for
+          16:00 stays at 16:00 instead of drifting later by however long the
+          scheduler tick and the resumed turn took. Whole intervals are skipped
+          until the result is in the future, so a bot that was down for three
+          days sends one message on the way back up, not three.
         """
         log.info("Firing self-wake %s -> thread %s", sched.id, sched.channel_id)
-        rearm = False
+        rearm_secs: int | None = None
         try:
             if self._on_wake is not None:
                 outcome = await self._on_wake(sched.channel_id, sched.prompt)
-                rearm = outcome == "busy"
+                if outcome == "busy":
+                    rearm_secs = 60
+                elif sched.is_recurring and sched.interval_secs:
+                    rearm_secs = sched.interval_secs
         except Exception:
             log.exception("Self-wake callback error for %s", sched.id)
+            if sched.is_recurring and sched.interval_secs:
+                rearm_secs = sched.interval_secs
         finally:
-            if rearm:
-                sched.next_run_at = (
-                    datetime.now(timezone.utc) + timedelta(seconds=60)
+            if rearm_secs is not None:
+                now = datetime.now(timezone.utc)
+                sched.last_run_at = now.isoformat()
+                sched.next_run_at = _step_from(
+                    sched.next_run_at, rearm_secs, now,
                 ).isoformat()
                 self._store.update_schedule(sched)
             else:
@@ -214,6 +260,12 @@ class Scheduler:
         now = datetime.now(timezone.utc)
         for sched in self._store.list_schedules():
             if not sched.is_recurring or not sched.interval_secs:
+                continue
+            if sched.label:
+                # Declared nudge: bot.engine.nudges anchors these to a wall
+                # clock time. The generic recovery below ("missed a run, go in
+                # 30s") would fire an evening nudge at whatever hour the bot
+                # restarted, so leave them alone.
                 continue
             if sched.last_run_at:
                 try:

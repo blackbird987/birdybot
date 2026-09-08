@@ -809,6 +809,15 @@ LOGS_DIR: Path = DATA_DIR / "logs"
 STATE_FILE: Path = DATA_DIR / "state.json"
 LOG_FILE: Path = LOGS_DIR / "bot.log"
 
+# Declared nudges (bot/engine/nudges.py): recurring messages the bot sends into
+# a thread unprompted. Deliberately in the repo, not in DATA_DIR: data/ is
+# gitignored runtime state, and a habit engine that disappears on a state reset
+# fails silently, which is the one failure mode a nudge cannot have.
+NUDGES_FILE: Path = Path(
+    _paths.translate(os.getenv("NUDGES_FILE"))
+    or str(_PROJECT_ROOT / "config" / "nudges.json")
+).resolve()
+
 # Base directory for new repos (optional — falls back to sibling of active repo)
 REPOS_BASE_DIR: Path | None = (
     Path(_paths.translate(v)).resolve() if (v := os.getenv("REPOS_BASE_DIR")) else None

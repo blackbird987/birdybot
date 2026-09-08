@@ -798,6 +798,21 @@ async def run() -> None:
     )
     scheduler.recalculate_next_runs()
 
+    # Declared nudges are reconciled after recalculate_next_runs (which skips
+    # labelled rows) so the config, not the generic missed-run recovery, owns
+    # their clock. Reconciling every boot is what makes editing config/nudges.json
+    # the only step needed to change what the bot sends unprompted.
+    from bot.engine import nudges as _nudges
+    try:
+        _nudge_summary = _nudges.reconcile(store, config.NUDGES_FILE)
+        if any(_nudge_summary.get(k) for k in
+               ("created", "updated", "removed", "error")):
+            log.info("Nudges reconciled: %s", _nudge_summary)
+    except Exception:
+        # Never let a nudge config fault stop the bot from booting; reconcile()
+        # already swallows config errors, so reaching here means a real bug.
+        log.exception("Nudge reconciliation failed")
+
     # Background tasks
     async def auto_save_loop():
         tick = 0
