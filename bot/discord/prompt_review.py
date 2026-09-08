@@ -41,6 +41,7 @@ _STATE_REJECTED = "prompt_review_rejected"
 # Bounded: the oldest fall off, because a rejection from a year of prompt
 # churn ago is about text that no longer exists.
 _MAX_REJECTED = 50
+_MAX_PENDING = 20
 
 
 # --- State helpers ------------------------------------------------------------
@@ -280,15 +281,6 @@ async def _post_outcome(bot, thread, inst, report: pr.ReviewReport) -> None:
         return
 
     targets = [p.target() for p in report.proposals]
-    _save_state(bot, lambda st: st.setdefault(_STATE_PENDING, {}).__setitem__(
-        inst.id,
-        {
-            "fingerprint": fp,
-            "targets": targets,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        },
-    ))
-
     embed = discord.Embed(
         title=f"Prompt review: {len(report.proposals)} proposal(s)",
         description=_embed_body(report, inst),
@@ -309,10 +301,35 @@ async def _post_outcome(bot, thread, inst, report: pr.ReviewReport) -> None:
         await thread.send(embed=embed, view=view)
     except discord.HTTPException:
         log.exception("Prompt review: failed to post proposal for %s", inst.id)
+        return
+
+    # Recorded only after the message carrying the buttons is actually up.
+    # Recording first leaves an entry no button can ever reach if the send
+    # fails, and the entry is what a click is validated against.
+    _save_state(bot, lambda st: _record_pending(st, inst.id, fp, targets))
+
+
+def _record_pending(st: dict, instance_id: str, fp: str, targets: list[str]) -> None:
+    """Add one pending proposal set, evicting the oldest past `_MAX_PENDING`.
+
+    Nothing removes an entry whose buttons were never clicked, so without a
+    cap this grows for the life of the bot inside `state.json`.
+    """
+    pending = st.setdefault(_STATE_PENDING, {})
+    pending[instance_id] = {
+        "fingerprint": fp,
+        "targets": targets,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if len(pending) > _MAX_PENDING:
+        for stale in sorted(
+            pending, key=lambda k: pending[k].get("created_at") or ""
+        )[:len(pending) - _MAX_PENDING]:
+            pending.pop(stale, None)
 
 
 def _embed_body(report: pr.ReviewReport, inst) -> str:
-    """Embed description: summary first, full report always reachable."""
+    """Embed description: an index of the proposals, not a second copy."""
     lines: list[str] = []
     if report.net_lines:
         lines.append(f"**Net lines:** {report.net_lines}")
@@ -322,20 +339,15 @@ def _embed_body(report: pr.ReviewReport, inst) -> str:
     if report.ignored:
         lines.append("")
         lines.append("-# dropped: " + "; ".join(report.ignored[:3]))
+    # Deliberately no diffs here. `lifecycle.run_instance` has already rendered
+    # the agent's full report into this same thread, immediately above; pasting
+    # it again under the buttons would make the reader scroll past the same
+    # text twice to find them. This embed is the index and the controls.
     lines.append("")
-    body = "\n".join(lines)
-
-    # The diffs are the bulk and the embed limit is 4096. Include as much of
-    # the report as fits, and always name the file that holds all of it. A
-    # truncated proposal with no way to read the rest is worse than a pointer.
-    detail = report.raw.strip()
-    budget = 3900 - len(body)
-    if len(detail) > budget:
-        detail = detail[:max(0, budget - 40)] + "\n…(truncated)"
-    body += detail
+    lines.append("-# The full text of each proposal is in the report above.")
     if inst.result_file:
-        body += f"\n\n-# full report: `{inst.result_file}`"
-    return body[:4096]
+        lines.append(f"-# full report: `{inst.result_file}`")
+    return "\n".join(lines)[:4096]
 
 
 # --- The weekly gate ----------------------------------------------------------

@@ -208,6 +208,20 @@ _ORIGIN_LABEL_OVERRIDES: dict[InstanceOrigin, str] = {
 }
 
 
+# Origins whose output is a REPORT, not a turn in a conversation. Nothing they
+# emit is dispatched as a [BOT_CMD:] directive.
+#
+# The prompt review is pointed straight at the documents that carry literal
+# directive examples: the /watch block in CLAUDE.md, the /spawn, /reply, /image
+# and /repo lines in WORKING_CONTEXT. Quoting one of those inside a proposal is
+# the normal thing for it to do, and every directive parser would then arm it
+# for real. The quoted-prefix guards in those parsers do not save us: an
+# example indented inside a fence starts with whitespace, not a backtick.
+_NO_DIRECTIVE_ORIGINS: frozenset[InstanceOrigin] = frozenset({
+    InstanceOrigin.PROMPT_REVIEW,
+})
+
+
 def _origin_label(origin: InstanceOrigin) -> str:
     """Human-readable prefix for completion messages, e.g. 'review-code '."""
     if origin in _ORIGIN_LABEL_OVERRIDES:
@@ -383,7 +397,8 @@ async def run_instance(
         # [BOT_CMD: /image] — post pictures BEFORE the result embed so the
         # workflow buttons stay the last thing in the thread. Raw text: the
         # collapsed copy above has already had the directives stripped out.
-        if result.result_text and not result.is_error:
+        dispatch_directives = inst.origin not in _NO_DIRECTIVE_ORIGINS
+        if result.result_text and not result.is_error and dispatch_directives:
             from bot.engine.images import deliver_images
             await deliver_images(ctx, result.result_text, inst)
         await send_result(
@@ -442,7 +457,7 @@ async def run_instance(
         # silently instead of dispatched or explicitly refused by the
         # handler's gates (autopilot, depth, wave cap, budget). Local import:
         # commands imports lifecycle at module level.
-        if result.result_text and not result.is_error:
+        if result.result_text and not result.is_error and dispatch_directives:
             from bot.engine.commands import _execute_bot_commands
             await _execute_bot_commands(ctx, result.result_text, source_inst=inst)
 
@@ -455,7 +470,8 @@ async def run_instance(
         # reset the runaway counter. Pass the raw result text so the directive
         # can be parsed and a turn that CLAIMED a self-wake but scheduled
         # nothing gets a notice-only heads-up instead of a silent dead-end.
-        await check_wake_request(ctx, inst, final_text=result.result_text)
+        if dispatch_directives:
+            await check_wake_request(ctx, inst, final_text=result.result_text)
 
     except asyncio.CancelledError:
         # Shutdown cancelled this task. The 30s drain in app.py keeps the

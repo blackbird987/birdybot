@@ -765,6 +765,25 @@ def action_button_specs(
     if instance.origin == InstanceOrigin.RESOLVE_MERGE:
         return rows
 
+    # Prompt review: its result is a report posted in The Ark, not a turn in a
+    # repo conversation. The Ark is not a repo forum, so Retry / Plan / Build &
+    # Ship / Branch would all resolve against whichever repo happens to be
+    # globally active, and the review's own Approve / Reject buttons are posted
+    # separately by bot/discord/prompt_review.py. Keep only the controls that
+    # mean something here: stopping it, reading its log, and expanding a report
+    # too long to render inline.
+    if instance.origin == InstanceOrigin.PROMPT_REVIEW:
+        if instance.status in (InstanceStatus.RUNNING, InstanceStatus.QUEUED):
+            rows.append([ButtonSpec("Kill", f"kill:{iid}")])
+        elif instance.status == InstanceStatus.FAILED:
+            rows.append([ButtonSpec("Log", f"log:{iid}")])
+        if show_expand:
+            rows.append([
+                ButtonSpec("Expand \u25bc", f"expand:{iid}"),
+                ButtonSpec("Full Log", f"log:{iid}"),
+            ])
+        return rows
+
     # Done origin: if branch is pending merge and no autopilot, show Merge/Discard
     if instance.origin == InstanceOrigin.DONE and instance.status == InstanceStatus.COMPLETED:
         if instance.branch and not has_autopilot_chain:

@@ -796,9 +796,9 @@ class DigestRow:
     """One recurring flag, with who owns it.
 
     ``count`` is the number of SESSIONS the flag appeared in, not the number
-    of times it fired. Per-command checks (tool hygiene) can fire dozens of
-    times in a single session, which would otherwise bury every other finding
-    and make one talkative session look like a systemic problem.
+    of times it fired. A per-command check fires once per tool call and so can
+    fire dozens of times in a single session, which would otherwise bury every
+    other finding and make one talkative session look like a systemic problem.
     """
     category: str
     message: str

@@ -258,6 +258,11 @@ print()
 print("the reviewing agent runs behind the read-only floor")
 
 from bot.discord import prompt_review as dpr  # noqa: E402
+from bot.engine import lifecycle  # noqa: E402
+from bot.platform import formatting  # noqa: E402
+from bot.claude.types import (  # noqa: E402
+    Instance, InstanceOrigin, InstanceStatus, InstanceType,
+)
 
 _run_src = inspect.getsource(dpr._run_review_locked)
 check("the review instance is created in explore mode",
@@ -307,6 +312,80 @@ _app_text = (_root / "bot" / "app.py").read_text(encoding="utf-8")
 check("app.py still has exactly one direct run_instance caller",
       _app_text.count("lifecycle.run_instance(") == 1,
       str(_app_text.count("lifecycle.run_instance(")))
+
+# ------------------------- 8. the report is inert: no directives, no repo buttons
+
+print()
+print("a report is not a turn: nothing it emits is dispatched")
+
+_life_text = (_root / "bot" / "engine" / "lifecycle.py").read_text(encoding="utf-8")
+check("lifecycle names the origins whose output is never dispatched",
+      "_NO_DIRECTIVE_ORIGINS" in _life_text
+      and "InstanceOrigin.PROMPT_REVIEW," in _life_text)
+
+_run_src = inspect.getsource(lifecycle.run_instance)
+check("the gate is computed once from the instance origin",
+      "dispatch_directives = inst.origin not in _NO_DIRECTIVE_ORIGINS" in _run_src)
+for _dispatcher in ("deliver_images", "_execute_bot_commands", "check_wake_request"):
+    # Each dispatcher must sit under the gate. The proposals quote the literal
+    # /watch, /spawn, /image and /repo examples out of the very files being
+    # reviewed, so an ungated one arms them for real.
+    _idx = _run_src.index(f"{_dispatcher}(ctx")
+    _before = _run_src[:_idx]
+    check(f"{_dispatcher} is gated on it",
+          "dispatch_directives" in _before.rsplit("\n\n", 1)[-1])
+
+_specs = formatting.action_button_specs
+_review_inst = Instance(
+    id="pr-1", name=None, instance_type=InstanceType.QUERY, prompt="x",
+    repo_name="bot", repo_path="/tmp/bot",
+    status=InstanceStatus.COMPLETED, origin=InstanceOrigin.PROMPT_REVIEW,
+    session_id="sess-1",
+)
+_ids = [b.callback_data for row in _specs(_review_inst, show_expand=True) for b in row]
+check("a finished review offers no repo-scoped buttons",
+      not any(i.split(":")[0] in
+              {"retry", "new", "plan", "build_and_ship", "done", "branch",
+               "share", "merge", "discard", "commit", "review_code"}
+              for i in _ids),
+      str(_ids))
+check("but a long report can still be expanded and its log read",
+      any(i.startswith("expand:") for i in _ids)
+      and any(i.startswith("log:") for i in _ids),
+      str(_ids))
+
+_review_inst.status = InstanceStatus.RUNNING
+_running_ids = [b.callback_data for row in _specs(_review_inst) for b in row]
+check("a running review can still be killed",
+      _running_ids == ["kill:pr-1"], str(_running_ids))
+
+
+# ------------------------------- 9. a pending proposal is recorded, then bounded
+
+print()
+print("the buttons exist before the state that validates them")
+
+_post_full = inspect.getsource(dpr._post_outcome)
+check("the pending entry is written only after the send succeeded",
+      _post_full.index("await thread.send(embed=embed") < _post_full.index("_record_pending"))
+check("a failed send records nothing",
+      "log.exception(\"Prompt review: failed to post proposal" in _post_full
+      and "return" in _post_full.split("failed to post proposal")[1][:120])
+
+_pending: dict = {}
+for _i in range(dpr._MAX_PENDING + 5):
+    dpr._record_pending(_pending, f"i-{_i:03d}", f"fp{_i}", ["a :: b"])
+    # Distinct timestamps: created_at has second resolution in the real path,
+    # so the eviction order is asserted on values we control.
+    _pending[dpr._STATE_PENDING][f"i-{_i:03d}"]["created_at"] = f"2026-01-01T00:00:{_i:02d}"
+_keys = sorted(_pending[dpr._STATE_PENDING])
+check("the pending map is capped", len(_keys) == dpr._MAX_PENDING, str(len(_keys)))
+check("and it is the oldest that is evicted",
+      _keys[0] == f"i-{5:03d}", _keys[0])
+
+_body_src = inspect.getsource(dpr._embed_body)
+check("the embed indexes the report instead of pasting it again",
+      "report.raw" not in _body_src)
 
 tmpdir.cleanup()
 

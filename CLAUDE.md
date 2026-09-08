@@ -618,10 +618,13 @@ could edit them. It reads one bounded table (25 rows, 8K chars, built by
 `build_review_input` from `eval.build_digest`), never the eval directory. What
 comes back is parsed into at most `PROMPT_REVIEW_MAX_PROPOSALS` (3) blocks and
 posted to The Ark with Approve and Reject buttons. Approve does not write
-anything either: it opens a normal build thread with the diff as its brief, so
-a prompt edit lands through the same review-and-verify chain as any other
-change. That is the whole safety argument, and it is asserted on the created
-`Instance` rather than on the prose of a brief.
+anything either: it opens an ordinary build session in the repo's own forum
+with the proposal as its brief, carrying the usual Review Code / Commit / Done
+buttons, so the edit is made and inspected by the normal path rather than by
+the reviewer. It is not a chain and it does not auto-branch: only `/bg`
+branches, so this edits in place like any other build-mode message. That is the
+whole safety argument, and it is asserted on the created `Instance` rather than
+on the prose of a brief.
 
 **Frequency is not correctness.** The finding that made this necessary is also
 the trap it has to avoid. `tool_hygiene` flagged every Bash `cat`, `head`,
@@ -648,8 +651,23 @@ before it may touch anything:
 stated in the brief, and a dropped block is recorded in `ReviewReport.ignored`
 instead of vanishing.
 
-Three more things that must not drift:
+Four more things that must not drift:
 
+- **Nothing it writes is dispatched as a directive.** Its whole job is to quote
+  the documents that carry the literal `[BOT_CMD: /watch ...]`, `/spawn`,
+  `/reply`, `/image` and `/repo add` examples, so a proposal that quotes one
+  would otherwise arm it for real: a watch on a pid that does not exist, a
+  spawn into a repo. The quoted-prefix guards in each parser do not help, since
+  an example indented inside a fence starts with whitespace, not a backtick.
+  `lifecycle._NO_DIRECTIVE_ORIGINS` is where that is settled once, for all
+  three dispatchers (`deliver_images`, `_execute_bot_commands`,
+  `check_wake_request`), keyed on origin rather than on the text.
+- **Its result card carries no repo buttons.** The review's thread lives in The
+  Ark, which is not a repo forum, so a Retry, Plan, Build & Ship or Branch
+  button on it resolves against whatever repo happens to be globally active.
+  `action_button_specs` returns early for the origin with only Kill, Log and
+  the Expand row; the Approve and Reject buttons are posted separately, on the
+  proposal embed.
 - **A retired check's flags stop counting, but its files stay readable.**
   `_RETIRED_CATEGORIES` is skipped inside `build_digest`'s grouping loop and in
   `report.py`, deliberately **not** in `load_evals`: the per-instance view has
