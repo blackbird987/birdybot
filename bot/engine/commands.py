@@ -3271,6 +3271,58 @@ async def _strip_post_merge_buttons(
         log.debug("Failed to strip buttons from %s result message", inst.id)
 
 
+async def _finish_resolved_branch(
+    ctx: RequestContext, inst: Instance, msg: str, source_msg_id: str | None,
+) -> None:
+    """Report a merge/discard against a branch that was already resolved.
+
+    The Merge and Discard branches of the button dispatcher held byte-identical
+    copies of this, which is the drift shape perform_kill was written to end:
+    the history cleanup below was added to one of them first.
+    """
+    ctx.store.clear_pending_merge(inst.id)
+    # History may still record the original branch -- clean it up so future
+    # sessions don't see a stale "(branch: X)" line.
+    try:
+        from bot.store import history as history_mod
+        stale = history_mod.get_branch_for_instance(inst.id)
+        if stale:
+            history_mod.clear_branch(stale)
+    except Exception:
+        pass
+    escaped = ctx.messenger.escape(msg)
+    if source_msg_id:
+        await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, escaped)
+    else:
+        await ctx.messenger.send_text(ctx.channel_id, escaped)
+
+
+async def _finish_branch_action(
+    ctx: RequestContext, inst: Instance, escaped: str, source_msg_id: str | None,
+) -> None:
+    """Post the outcome of a merge/discard and tidy up if the branch is gone.
+
+    `escaped` arrives ready to send because Merge appends an unescaped failure
+    banner to it and Discard does not; everything after that point was the same
+    thirteen lines in both branches.
+    """
+    # Pass updated buttons when branch was resolved (strips Merge/Discard)
+    buttons = action_button_specs(inst) if not inst.branch else None
+    if source_msg_id:
+        await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, escaped, buttons)
+    else:
+        await ctx.messenger.send_text(ctx.channel_id, escaped)
+    # Also strip buttons from the result embed if it's a different message
+    if not inst.branch:
+        await _strip_post_merge_buttons(ctx, inst, skip_msg_id=source_msg_id)
+    # Close thread if this was a post-Done merge/discard (branch resolved)
+    if inst.origin == InstanceOrigin.DONE and not inst.branch:
+        try:
+            await ctx.messenger.close_conversation(ctx.channel_id, skip_mention=True)
+        except Exception:
+            pass
+
+
 # --- Merge-conflict resolver helpers ---
 
 _RESOLVE_TIMEOUT_SECONDS = 900  # 15 min cap on resolver run
@@ -3823,21 +3875,7 @@ async def handle_callback(
         # Early guard: branch already cleared by a prior merge/discard
         if not inst.branch:
             msg = await ctx.runner.merge_branch(inst)  # returns "Already merged (...)"
-            ctx.store.clear_pending_merge(inst.id)
-            # History may still record the original branch — clean it up so
-            # future sessions don't see a stale "(branch: X)" line.
-            try:
-                from bot.store import history as history_mod
-                stale = history_mod.get_branch_for_instance(inst.id)
-                if stale:
-                    history_mod.clear_branch(stale)
-            except Exception:
-                pass
-            escaped = ctx.messenger.escape(msg)
-            if source_msg_id:
-                await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, escaped)
-            else:
-                await ctx.messenger.send_text(ctx.channel_id, escaped)
+            await _finish_resolved_branch(ctx, inst, msg, source_msg_id)
             return
         branch_name = inst.branch  # Save before merge clears it
         msg = await ctx.runner.merge_branch(inst)
@@ -3863,21 +3901,7 @@ async def handle_callback(
         # **bold** + `code` markdown is intentional. Same escape model as the
         # /merge slash and resolve_merge follow-ups above.
         escaped = f"{ctx.messenger.escape(msg)}{banner_suffix}"
-        # Pass updated buttons when branch was resolved (strips Merge/Discard)
-        buttons = action_button_specs(inst) if not inst.branch else None
-        if source_msg_id:
-            await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, escaped, buttons)
-        else:
-            await ctx.messenger.send_text(ctx.channel_id, escaped)
-        # Also strip buttons from the result embed if it's a different message
-        if not inst.branch:
-            await _strip_post_merge_buttons(ctx, inst, skip_msg_id=source_msg_id)
-        # Close thread if this was a post-Done merge (branch resolved)
-        if inst.origin == InstanceOrigin.DONE and not inst.branch:
-            try:
-                await ctx.messenger.close_conversation(ctx.channel_id, skip_mention=True)
-            except Exception:
-                pass
+        await _finish_branch_action(ctx, inst, escaped, source_msg_id)
 
     elif action == "discard":
         inst = ctx.store.get_instance(instance_id)
@@ -3902,20 +3926,7 @@ async def handle_callback(
         # Early guard: branch already cleared by a prior merge/discard
         if not inst.branch:
             outcome = await ctx.runner.discard_branch(inst)  # returns "Already discarded (...)"
-            msg = outcome.message
-            ctx.store.clear_pending_merge(inst.id)
-            try:
-                from bot.store import history as history_mod
-                stale = history_mod.get_branch_for_instance(inst.id)
-                if stale:
-                    history_mod.clear_branch(stale)
-            except Exception:
-                pass
-            escaped = ctx.messenger.escape(msg)
-            if source_msg_id:
-                await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, escaped)
-            else:
-                await ctx.messenger.send_text(ctx.channel_id, escaped)
+            await _finish_resolved_branch(ctx, inst, outcome.message, source_msg_id)
             return
         branch_name = inst.branch  # Save before discard clears it
         outcome = await ctx.runner.discard_branch(inst)
@@ -3927,21 +3938,7 @@ async def handle_callback(
         if "failed" not in msg.lower():
             ctx.store.clear_pending_merge(inst.id)
         escaped = ctx.messenger.escape(msg)
-        # Pass updated buttons when branch was resolved (strips Merge/Discard)
-        buttons = action_button_specs(inst) if not inst.branch else None
-        if source_msg_id:
-            await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, escaped, buttons)
-        else:
-            await ctx.messenger.send_text(ctx.channel_id, escaped)
-        # Also strip buttons from the result embed if it's a different message
-        if not inst.branch:
-            await _strip_post_merge_buttons(ctx, inst, skip_msg_id=source_msg_id)
-        # Close thread if this was a post-Done discard (branch resolved)
-        if inst.origin == InstanceOrigin.DONE and not inst.branch:
-            try:
-                await ctx.messenger.close_conversation(ctx.channel_id, skip_mention=True)
-            except Exception:
-                pass
+        await _finish_branch_action(ctx, inst, escaped, source_msg_id)
 
     elif action == "resolve_merge":
         await _on_resolve_merge(ctx, instance_id, source_msg_id)
