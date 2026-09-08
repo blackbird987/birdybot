@@ -740,6 +740,86 @@ to the build session for self-fixing (`bot/engine/sensors.py`).
 - Sits alongside the other per-repo config files: `.claude/test.json`
   (verify policy + diagnostics) and `.claude/workflow.json` (merge autonomy).
 
+## The machine has two resources, and only one of them was governed
+
+Everything under the memory guard measures memory. On 2026-09-08 the desktop
+became unusable while the bot sat well inside every one of those limits, and
+the logs from it are almost useless because each line answers the wrong
+question — how much memory was free — during an incident where the answer was
+always "plenty".
+
+The readings that mattered, on a 12-core box: load average **110**, one Roslyn
+`VBCSCompiler` at **605% CPU** with six sessions live, CPU PSI 9-18%, IO PSI
+11-24%. Memory PSI was 3%, available memory never dropped below 11 GB, and the
+100%-full swap belonged to Steam, Telegram and Plasma — the bot's cgroup held
+0.88 GB of it. `read_pressure` returned TIGHT and was **right**; nothing was
+wrong with memory. The unit simply had no `CPUWeight` or `IOWeight` at all, so
+this cgroup fought Plasma and the browser at the default weight of 100, and a
+compile farm always wins a fair fight against a desktop.
+
+Three layers, because there are three distinct contests and one knob cannot
+settle them:
+
+- **Bot versus you** — `CPUWeight=20`, `IOWeight=20` in
+  `claude-bot.service`. Weight, **not `CPUQuota`**, and that distinction is the
+  whole design: weights bind only under contention, so an unattended machine
+  still runs builds across all 12 cores at full speed, while a machine you are
+  sitting at keeps roughly five sixths of the CPU. A quota would buy the
+  desktop's responsiveness with permanently slower builds — the wrong trade for
+  a box that is usually unattended. Applied to a *running* unit with
+  `systemctl --user set-property --runtime`, which is how it landed without
+  restarting six live sessions.
+
+  The durable copy is `scripts/claude-bot.service`, which is the one that
+  matters: `~/.config/systemd/user/claude-bot.service` is an install-time copy
+  with the paths rewritten, and `migrate-off-windows-disk.sh` regenerates it.
+  A resource setting added only to the deployed copy survives until the next
+  migration and then silently disappears. Both carry it.
+- **Bot versus its own sessions** — `config.SESSION_CPU_NICE` (10), applied by
+  `runner._lower_priority` immediately after the spawn. `CPUWeight` settles the
+  cgroup's share against the desktop and says nothing about how that share is
+  divided *inside* it, which is why the bot stopped answering Discord: a
+  ~250 MB asyncio loop that must reply within 3 seconds was competing at equal
+  priority with six CLIs and a 605% compiler, and a missed gateway heartbeat
+  disconnects. Niceness survives exec and is inherited by children, so one call
+  covers the CLI, its shells, dotnet and Roslyn without the runner hunting them
+  down.
+
+  **It is deliberately not a `preexec_fn`.** That is the obvious way to do it
+  and the wrong one here: CPython runs `preexec_fn` in the child between fork
+  and exec, where only async-signal-safe work is legal, and this bot forks from
+  a process with well over a hundred threading callsites. A child that lands on
+  a lock another thread held at fork time deadlocks before exec and hangs the
+  spawn forever while holding the runner's slot. Doing it from the parent costs
+  a few microseconds in which the CLI runs at normal priority — harmless, since
+  node spends hundreds of milliseconds starting before it forks anything — and
+  its worst case is a session that runs fast rather than one that never runs.
+  The target is computed from the supervisor's *own* nice, so a unit that later
+  grows a `Nice=` cannot silently close the gap.
+- **Bot versus the machine** — `MemoryPressure.cpu_psi_pct` / `io_psi_pct`,
+  recorded and logged, **deliberately never escalated on.** With the two
+  weights in place, CPU saturation costs throughput and no longer costs anyone
+  their desktop, so a gate here would hold sessions back to fix something that
+  no longer hurts. What was missing was never enforcement; it was that the next
+  incident of this shape be diagnosable from `bot.log` alone.
+
+Two things that must not drift:
+
+- **Each PSI signal keeps its own reader.** `psi_some_avg10` (memory),
+  `cpu_psi_avg10` and `io_psi_avg10` all wrap `_psi_some_avg10` rather than
+  sharing one parameterised entry point. The harness stubs the memory reader;
+  a single shared seam let that stub silently decide the CPU answer too, which
+  is how a test can describe a machine as memory-starved and CPU-idle in the
+  same breath.
+- **CPU and IO print only next to a reading the verdict was made from.** They
+  are context for a memory verdict, not a verdict of their own. A pressure read
+  that could measure nothing must still summarise as having nothing to go on —
+  quoting `/proc/pressure/cpu` at it makes a total failure of the memory
+  readings look like a healthy machine. `summary()` gates both on `bits` being
+  non-empty; `test_memory_guard.py` asserts it.
+
+Harness: `python scripts/test_memory_guard.py`
+
 ## Multi-Account Setup
 
 The bot supports failover across multiple Claude subscriptions. When the active

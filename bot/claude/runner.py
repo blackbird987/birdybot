@@ -63,6 +63,51 @@ log = logging.getLogger(__name__)
 # On Windows, prevent subprocess console windows from popping up
 _NOWND: dict = config.NOWND
 
+
+def _lower_priority(pid: int) -> None:
+    """Renice a freshly spawned session CLI below the bot's own priority.
+
+    Applied from the parent *after* the spawn, deliberately, and NOT as a
+    ``preexec_fn``. preexec_fn is the obvious way to do this and it is the
+    wrong one here: CPython runs it in the child between fork and exec, where
+    only async-signal-safe work is legal, and this bot forks from a process
+    with well over a hundred threading callsites. A child that lands on a
+    lock some other thread held at fork time — the allocator's, logging's —
+    deadlocks before exec, which would hang a session spawn permanently while
+    holding the runner's slot. The documented failure mode is far worse than
+    the problem being solved.
+
+    The cost of doing it here instead is a window of a few microseconds in
+    which the CLI runs at the bot's own priority. That is safe in a way the
+    deadlock is not: the CLI is node and spends hundreds of milliseconds
+    starting up before it forks anything, so nothing real is created inside
+    the window, and the worst case is a session that runs at normal priority
+    rather than one that never runs at all.
+
+    Niceness survives exec and is inherited by children, so this single call
+    covers the whole tree the session goes on to build — its shells, dotnet,
+    Roslyn, npm — without the runner having to find them.
+
+    The target is computed from the supervisor's *own* nice rather than set
+    absolutely, because SESSION_CPU_NICE is documented as a distance below the
+    supervisor: a unit that later grows a ``Nice=`` would otherwise silently
+    close that gap. Clamped to 19, the floor the scheduler accepts. Only ever
+    an increase, which needs no privileges — a decrease would, and config
+    clamps negatives away so one is never attempted.
+    """
+    nice = config.SESSION_CPU_NICE
+    # setpriority is POSIX-only; on Windows there is no nice(2) ladder to walk.
+    if not nice or not hasattr(os, "setpriority"):
+        return
+    try:
+        own = os.getpriority(os.PRIO_PROCESS, 0)
+        os.setpriority(os.PRIO_PROCESS, pid, min(19, own + nice))
+    except (OSError, ValueError):
+        # Includes the process already having exited. Best-effort by design:
+        # a session running at full priority is a slower machine, not a fault.
+        log.debug("Could not renice session pid %s", pid, exc_info=True)
+
+
 # Exit codes that mean "this process died from the signal we sent it".
 #
 # There are two shapes and we have to accept both.  When a process does NOT
@@ -2186,6 +2231,10 @@ class ClaudeRunner:
             # Register immediately so kill/cleanup works even if stdin write fails
             instance.pid = proc.pid
             self._processes[instance.id] = proc
+            # No await between the spawn and here, so this is the earliest the
+            # child can be reniced from the parent. See _lower_priority for
+            # why it is not done in a preexec_fn.
+            _lower_priority(proc.pid)
 
             # Closes the last of the no-process windows: spawning is itself an
             # await, so a kill can land after the checks above and still find

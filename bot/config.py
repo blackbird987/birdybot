@@ -239,6 +239,32 @@ SESSION_MEM_KILL_MB: int = int(os.getenv("SESSION_MEM_KILL_MB", "8192"))
 # what makes a slow leak visible in bot.log before it matters.
 SESSION_MEM_CHECK_SECS: int = int(os.getenv("SESSION_MEM_CHECK_SECS", "30"))
 
+# --- CPU: the supervisor must outrank the work it supervises ---
+#
+# scripts/claude-bot.service caps this cgroup's CPU share against the desktop.
+# That settles bot-versus-you; it does nothing about bot-versus-its-own-
+# sessions, and on 2026-09-08 that second contest is what made the bot stop
+# answering Discord. Six CLIs and a 605%-CPU Roslyn compiler shared the same
+# weight as the ~250 MB asyncio loop that has to reply within 3 seconds or
+# lose the interaction, and a heartbeat that misses its window disconnects the
+# gateway — so the bot looked dead while every session it owned ran fine.
+#
+# This is a distance *below* the supervisor's own nice, not an absolute value:
+# runner._lower_priority reads the bot's current priority and sets the child to
+# that plus this, so a unit that later grows a `Nice=` cannot silently close
+# the gap. The bot itself stays where systemd put it. Niceness survives exec
+# and is inherited by children, so the one call at spawn covers the CLI, its
+# shells, dotnet, Roslyn and the rest of the tree without the runner having to
+# find them.
+#
+# 10 is a full priority class below the supervisor and still well above idle:
+# under contention the loop gets roughly ten times the share of any one
+# session, while an otherwise-quiet machine runs builds at full speed. Set to
+# 0 to disable. Negative values need privileges the user unit does not have,
+# so they are clamped away rather than failing the spawn.
+SESSION_CPU_NICE: int = max(0, min(19, int(os.getenv("SESSION_CPU_NICE", "10"))))
+
+
 # --- Machine-wide memory pressure ---
 #
 # Everything above is the bot measuring itself. These are the bot measuring the

@@ -123,5 +123,31 @@ OOMPolicy=continue
 MemoryHigh=10G
 MemoryMax=13G
 
+# --- CPU and IO: the bot must never make the desktop unusable ---
+#
+# Everything above governs memory. On 2026-09-08 the machine became unusable
+# with 15 GB free and memory PSI at 3%: a single Roslyn VBCSCompiler was
+# holding 605% CPU (6 of 12 cores) while six sessions ran, load average
+# reached 110, and CPU PSI ran at 9-18% with IO PSI at 11-24%. Every memory
+# guard correctly declined to act, because memory was never the resource that
+# ran out. The unit had no CPU or IO settings at all, which meant this cgroup
+# competed with Plasma, the browser and Discord at the default weight of 100 —
+# equal footing — and a compile farm always wins a fair fight against a
+# desktop.
+#
+# Weight, deliberately, and NOT CPUQuota. These are proportional shares that
+# only bind under contention: on an idle machine the bot still gets all 12
+# cores and a build is no slower than it was. A quota would cap throughput
+# even when nothing else wants the CPU, which pays for the desktop's
+# responsiveness with permanently slower builds — the wrong trade for a
+# machine that is usually unattended.
+#
+# 20 against the desktop's default 100 means that when both want everything,
+# the bot gets about a sixth and the desktop keeps the rest. That is the right
+# ratio for this box: bot work is nearly always something you started and then
+# walked away from, so it is the side that can afford to wait.
+CPUWeight=20
+IOWeight=20
+
 [Install]
 WantedBy=default.target

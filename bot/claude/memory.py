@@ -434,10 +434,16 @@ def swap_used_pct() -> float | None:
         return None
 
 
-def psi_some_avg10() -> float | None:
-    """Percent of the last 10s that *some* task stalled on memory, or None.
+def _psi_some_avg10(resource: str) -> float | None:
+    """Percent of the last 10s that *some* task stalled on ``resource``, or None.
 
-    Read straight from ``/proc/pressure/memory`` rather than through psutil,
+    ``resource`` is one of memory / cpu / io. The three public readers below
+    wrap this rather than sharing one parameterised entry point, so that each
+    signal has its own seam: a test stubbing memory PSI must not also decide
+    what the CPU reading says, and one that did would make a machine look
+    memory-starved and CPU-idle in the same breath.
+
+    Read straight from ``/proc/pressure/<resource>`` rather than through psutil,
     which does not expose PSI. Absent on non-Linux and on kernels built without
     ``CONFIG_PSI``, both of which read as None rather than as zero — "no
     thrashing" and "cannot tell" must not collapse into the same value.
@@ -445,7 +451,7 @@ def psi_some_avg10() -> float | None:
     if sys.platform != "linux":
         return None
     try:
-        raw = Path("/proc/pressure/memory").read_text(encoding="utf-8")
+        raw = Path(f"/proc/pressure/{resource}").read_text(encoding="utf-8")
     except OSError:
         return None
     for line in raw.splitlines():
@@ -461,6 +467,21 @@ def psi_some_avg10() -> float | None:
     return None
 
 
+def psi_some_avg10() -> float | None:
+    """Memory stall percentage — the only PSI reading anything escalates on."""
+    return _psi_some_avg10("memory")
+
+
+def cpu_psi_avg10() -> float | None:
+    """CPU stall percentage. Recorded for the log, never escalated on."""
+    return _psi_some_avg10("cpu")
+
+
+def io_psi_avg10() -> float | None:
+    """IO stall percentage. Recorded for the log, never escalated on."""
+    return _psi_some_avg10("io")
+
+
 @dataclass
 class MemoryPressure:
     """How close the whole machine is to being out, and why.
@@ -469,11 +490,25 @@ class MemoryPressure:
     message can use directly. Both matter: a hold that says "waiting for memory"
     is noise, one that says "1.2 GB free and swap is full" is a fact the user
     can act on.
+
+    The name is narrower than the contents: ``cpu_psi_pct`` and ``io_psi_pct``
+    are carried here too, and nothing escalates on either. They ride along
+    because every caller that wants to describe the machine already holds one
+    of these, and renaming the class to match would churn twenty-odd callsites
+    and the harness for two diagnostic fields. The verdict is memory's alone —
+    read ``level`` accordingly.
     """
 
     avail_mb: float | None = None
     swap_pct: float | None = None
     psi_pct: float | None = None
+    # Recorded, never escalated on. The 2026-09-08 incident was a CPU
+    # exhaustion (load 110 on 12 cores) that every reading above scored as
+    # healthy, and the logs from it are unreadable as a result: each one
+    # states how much memory was free, which was never the question. These
+    # two make the next one diagnosable from bot.log alone.
+    cpu_psi_pct: float | None = None
+    io_psi_pct: float | None = None
     cgroup_anon_mb: float | None = None
     cgroup_high_mb: float | None = None
     level: str = PRESSURE_OK
@@ -506,6 +541,29 @@ class MemoryPressure:
             bits.append(f"swap {self.swap_pct:.0f}%")
         if self.psi_pct is not None:
             bits.append(f"psi {self.psi_pct:.0f}%")
+        # Did any reading the verdict is actually made from land? Asked
+        # explicitly rather than by testing whether `bits` is still empty,
+        # which is true here today only because of the order of the appends
+        # above it — moving the cgroup block up would silently start printing
+        # CPU numbers on a read that measured nothing.
+        measured = any(
+            v is not None for v in (self.avail_mb, self.swap_pct, self.psi_pct)
+        )
+        # CPU and IO are context for a memory verdict, not verdicts of their
+        # own, so they appear only next to one. A read that could measure
+        # nothing must still summarise as having nothing to go on rather than
+        # quoting whatever /proc/pressure/cpu happened to say — losing every
+        # memory reading is a fault, and it should look like one.
+        #
+        # Labelled, because a second bare percentage beside the memory one
+        # reads as more of the same. Hidden below 1%: on a healthy machine
+        # both are 0 and would be noise on every line the bot logs.
+        if measured:
+            for label, value in (
+                ("cpu-psi", self.cpu_psi_pct), ("io-psi", self.io_psi_pct),
+            ):
+                if value is not None and value >= 1.0:
+                    bits.append(f"{label} {value:.0f}%")
         if self.cgroup_anon_mb is not None:
             own = f"ours {self.cgroup_anon_mb / 1024:.1f}GB"
             if self.cgroup_high_mb is not None:
@@ -553,6 +611,8 @@ def read_pressure(
     out.avail_mb = available_mb()
     out.swap_pct = swap_used_pct()
     out.psi_pct = psi_some_avg10()
+    out.cpu_psi_pct = cpu_psi_avg10()
+    out.io_psi_pct = io_psi_avg10()
     cg = cgroup_memory()
     out.cgroup_anon_mb = cg.anon_mb
     out.cgroup_high_mb = cg.high_mb
