@@ -197,6 +197,9 @@ check("90m", watches.parse_duration("90m", 0), 5400)
 check("45s", watches.parse_duration("45s", 0), 45)
 check("bare number is seconds", watches.parse_duration("300", 0), 300)
 check("2d", watches.parse_duration("2d", 0), 172800)
+check("2w", watches.parse_duration("2w", 0), 1209600)
+check("a unit typo falls back, not its prefix",
+      watches.parse_duration("3days", 777), 777)
 check("garbage falls back", watches.parse_duration("soonish", 777), 777)
 check("None falls back", watches.parse_duration(None, 777), 777)
 
@@ -377,14 +380,25 @@ with tempfile.TemporaryDirectory() as td:
     ok("has_armed_watch is false for a bare thread",
        not watches.has_armed_watch(store, "chan-nope"))
 
-    # Clamping: a session asking for a 10-day timeout or a 1s heartbeat.
+    # A multi-day timeout is HONOURED, not clamped — the ceiling moved off 24h
+    # so a watch can sit on a job that legitimately runs for days.
     w = watches.build_watch(
-        {"prompt": "x", "pid": None, "done": "z", "timeout": "10d", "every": "1s"},
+        {"prompt": "x", "pid": None, "done": "z", "timeout": "10d", "every": "300"},
+        channel_id="chan-3d",
+    )
+    span = (datetime.fromisoformat(w.timeout_at)
+            - datetime.fromisoformat(w.armed_at)).total_seconds()
+    check("a 10d timeout survives past the old 24h cap", int(span), 10 * 86400)
+
+    # Clamping: a session asking for a wildly out-of-range timeout or a 1s
+    # heartbeat still lands on the ceiling/floor.
+    w = watches.build_watch(
+        {"prompt": "x", "pid": None, "done": "z", "timeout": "365d", "every": "1s"},
         channel_id="chan-3",
     )
     span = (datetime.fromisoformat(w.timeout_at)
             - datetime.fromisoformat(w.armed_at)).total_seconds()
-    check("timeout clamped to the 24h ceiling", int(span), config.WATCH_MAX_TIMEOUT_SECS)
+    check("timeout clamped to the ceiling", int(span), config.WATCH_MAX_TIMEOUT_SECS)
     check("heartbeat clamped to the floor", w.every_secs, config.WATCH_MIN_HEARTBEAT_SECS)
 
 

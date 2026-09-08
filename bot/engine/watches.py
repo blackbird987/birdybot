@@ -33,6 +33,7 @@ from bot import config
 from bot.claude.types import Watch
 from bot.platform.base import ButtonSpec
 from bot.platform.formatting import format_delay_secs
+from bot.textutil import parse_duration
 
 if TYPE_CHECKING:
     from bot.platform.base import Messenger
@@ -50,25 +51,10 @@ _WATCH_DIRECTIVE_RE = re.compile(r"\[BOT_CMD:\s*/watch(?:\s+(.+?))?\s*\]")
 _WATCH_BODY_RE = re.compile(r"~~~watch\s*\n(.*?)\n~~~", re.DOTALL)
 _WATCH_KV_RE = re.compile(r'''(\w+)=(?:"([^"]*)"|'([^']*)'|(\S+))''')
 _WATCH_QUOTED_PREFIX = re.compile(r"^\s*(?:>|`|```|#{1,3}\s)")
-_DURATION_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([smhd]?)\s*$", re.IGNORECASE)
-_DURATION_MULT = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
-
-
-def parse_duration(raw: str | None, default: int) -> int:
-    """``"6h"`` / ``"90m"`` / ``"3600"`` -> seconds. Garbage -> ``default``.
-
-    Sessions write durations the way humans do, and a typo'd unit must not
-    silently drop a watch — it falls back to the default like /wake's delay.
-    """
-    if raw is None:
-        return default
-    m = _DURATION_RE.match(str(raw))
-    if not m:
-        return default
-    try:
-        return int(float(m.group(1)) * _DURATION_MULT[m.group(2).lower()])
-    except (ValueError, KeyError, OverflowError):
-        return default
+# `parse_duration` now lives in `bot.textutil` and is re-exported here: /wake's
+# delay= grew the same unit suffixes, and the chip that renders both sits in
+# `bot.platform`, upstream of this package. Kept importable under this name
+# because callers and the harness already reach for `watches.parse_duration`.
 
 
 def _unquoted_directives(text: str):

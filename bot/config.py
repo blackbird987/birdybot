@@ -866,8 +866,17 @@ PENDING_IMAGES_SWEEP_SECS: int = int(os.getenv("PENDING_IMAGES_SWEEP_SECS", "360
 # so it works regardless of the session's cwd (worktree builds run elsewhere).
 WAKE_DIR: Path = DATA_DIR / "wakes"
 # Self-wake delay clamp and runaway cap.
+#
+# The ceiling was 24h until 2026-09-08 and that was the only thing stopping a
+# longer timer: a wake is stored as an ordinary one-shot schedule, polled on
+# the scheduler's 30s tick, persisted in state.json and never expired or
+# pruned, so nothing else in the path cares how far out it sits. 30d is a
+# sanity guard on a garbage number, not a policy — and it is deliberately not
+# unbounded, because a wake that fires weeks later resumes a session whose CLI
+# transcript may have been cleaned up by then (the runner recovers from "No
+# conversation found" by running fresh, but the thread loses its history).
 WAKE_MIN_DELAY_SECS: int = 30
-WAKE_MAX_DELAY_SECS: int = 86400          # 24h
+WAKE_MAX_DELAY_SECS: int = int(os.getenv("WAKE_MAX_DELAY_SECS", "2592000"))  # 30d
 MAX_CONSEC_WAKES: int = 25                # stop a never-completing poll loop
 # Default delay for a /wake directive that carries a prompt but omits (or
 # typos) delay= — arm with something sane instead of dropping the request.
@@ -890,7 +899,9 @@ WAKE_FALLBACK_DELAY_SECS: int = 180
 # downstream of a wake (runaway cap, busy re-arm, _replay_to_thread, the
 # unattended-turn protocol) is inherited unchanged.
 WATCH_DEFAULT_TIMEOUT_SECS: int = int(os.getenv("WATCH_DEFAULT_TIMEOUT_SECS", "21600"))
-WATCH_MAX_TIMEOUT_SECS: int = 86400          # 24h — matches WAKE_MAX_DELAY_SECS
+WATCH_MAX_TIMEOUT_SECS: int = int(
+    os.getenv("WATCH_MAX_TIMEOUT_SECS", "2592000")   # 30d — matches WAKE_MAX_DELAY_SECS
+)
 # Heartbeat cadence. The heartbeat EDITS one message rather than posting, so
 # the floor exists to stay well clear of Discord's per-message edit limits
 # however small a session asks for.
@@ -2014,8 +2025,11 @@ if it is, run the planned tests and report the result; if it's still running, \
 emit a fresh [BOT_CMD: /wake] to keep polling>
 ~~~
 
-- delay is in seconds, clamped to [30, 86400] (30s–24h). Pick one that fits the \
-job (~120-300s for a deploy to land, longer for a long backtest).
+- delay is seconds by default, and accepts a unit suffix: 45s, 90m, 6h, 3d, \
+2w. Clamped to [30s, 30d]. Pick one that fits the job (~120-300s for a deploy \
+to land, hours for a long backtest, days for "check whether that PR got \
+reviewed"). A delay of days is fine and supported — do not shrink one into a \
+poll loop of short wakes just to stay under a day.
 - The ~~~wake body IS the prompt that re-invokes THIS session in THIS thread \
 after the delay — that is how you continue; it is not optional decoration.
 - To poll a still-running job, emit a fresh [BOT_CMD: /wake] each time you wake, \
@@ -2062,7 +2076,8 @@ ends the watch.
 - log= is otherwise optional and only feeds the display; progress= is optional \
 too — one capture group is read as a percentage, two as current/total. Get it \
 wrong or omit it and the user still sees elapsed time and the log's last line.
-- timeout= (default 6h, max 24h) is a safety net, not the plan: if it expires \
+- timeout= (default 6h, max 30d; same units as delay=) is a safety net, not \
+the plan: if it expires \
 you are resumed anyway and told the job did NOT finish, so you can decide \
 whether to keep waiting or report.
 - Same quoting rules as /wake — top level, not inside ``` or after >.

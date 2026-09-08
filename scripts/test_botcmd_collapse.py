@@ -115,6 +115,23 @@ print("Chip delay wording matches check_wake_request's notice")
 _check("720s renders as 12 min", format_delay_secs(720) == "12 min")
 _check("chip reuses that exact string", f"in {format_delay_secs(720)}" in _wake_out)
 
+# A unit-suffixed delay used to hit the chip's int() and vanish from the
+# summary line, leaving the user a wake with no stated duration.
+print("Chip renders a unit-suffixed, multi-day delay")
+_wake_days = collapse_bot_directives(
+    '[BOT_CMD: /wake delay=3d reason="PR review lands"]\n'
+    "~~~wake\nCheck whether it got reviewed.\n~~~\n"
+)
+_check("3d renders as days, not hours", format_delay_secs(3 * 86400) == "3.0 d")
+_check("chip quotes the armed delay", "in 3.0 d" in _wake_days)
+_check("chip still carries the reason", "PR review lands" in _wake_days)
+_wake_bad = collapse_bot_directives(
+    '[BOT_CMD: /wake delay=soon reason="garbage delay"]\n~~~wake\nx\n~~~\n'
+)
+_check("garbage delay omits the duration but keeps the reason",
+       "in " not in _wake_bad.split("garbage delay")[0].split("wake")[-1]
+       and "garbage delay" in _wake_bad)
+
 # ---- /spawn: repo, mode, title ----
 print("/spawn collapses with repo, mode and title")
 _spawn_out = collapse_bot_directives(

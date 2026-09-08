@@ -40,6 +40,7 @@ from bot.platform.formatting import (
 )
 from bot.engine import watches
 from bot.store import history as history_mod
+from bot.textutil import parse_duration
 
 log = logging.getLogger(__name__)
 _NOWND: dict = config.NOWND
@@ -1712,12 +1713,12 @@ def _parse_wake_directive(text: str) -> dict | None:
             continue
         # Coerce delay to a sane int here (default on absent/garbage) so a
         # typo'd delay can't silently drop a directive that carries a prompt.
+        # Unit suffixes go through the SAME grammar as /watch's timeout=
+        # ("3d", "90m", bare seconds): once the ceiling moved past 24h a
+        # session writing delay=3d was the obvious spelling, and the old
+        # int(float(...)) turned it into the 180s fallback without a word.
         raw_delay = kv.get("delay") or kv.get("delay_secs")
-        try:
-            delay_secs = (int(float(raw_delay)) if raw_delay is not None
-                          else config.WAKE_FALLBACK_DELAY_SECS)
-        except (TypeError, ValueError):
-            delay_secs = config.WAKE_FALLBACK_DELAY_SECS
+        delay_secs = parse_duration(raw_delay, config.WAKE_FALLBACK_DELAY_SECS)
         return {
             "prompt": prompt,
             "delay_secs": delay_secs,

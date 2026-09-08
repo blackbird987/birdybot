@@ -533,6 +533,23 @@ a delay, and the thread stays visibly busy until the job actually ends.
 - Triggers: `pid=` (process gone) or `done=` (regex appears in the log tail).
   At least one is required, plus a non-empty body — otherwise nothing is armed.
   `timeout=` is a safety net, never the plan.
+- **A timer may be days long.** Both ceilings — `/wake delay=` and `/watch
+  timeout=` — are 30 days, not the 24h they were until 2026-09-08. Nothing else
+  in the path had to change for that: a wake is an ordinary one-shot schedule,
+  polled on the same 30s tick, persisted and never pruned, so its distance out
+  was only ever the clamp's business. It is still bounded because a wake firing
+  weeks later resumes a session whose CLI transcript may have been cleaned up by
+  then — the runner recovers from "No conversation found" by running fresh, but
+  the thread loses its history.
+  Both directives share **one** duration grammar (`45s`/`90m`/`6h`/`3d`/`2w`, or
+  a bare number of seconds), and so does the chip that renders them back. It
+  lives in `bot/textutil.py` rather than next to `/watch`, because the chip
+  renderer is in `bot.platform`, upstream of `bot.engine`, and a leaf module is
+  the only home all three can import without closing a cycle. It is anchored, so
+  `3days` falls back to the caller's default instead of parsing as its `3d`
+  prefix. Before it was shared, `delay=3d` hit an `int(float(...))` and became
+  the 180-second fallback in silence — the failure any new spelling here must
+  not reintroduce.
 - **Only an explicit directive arms a watch.** Heuristic wake-arming was ripped
   out twice for firing on prose that merely *discussed* a job — don't reintroduce
   it here.
