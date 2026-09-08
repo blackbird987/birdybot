@@ -2032,6 +2032,27 @@ class ClaudeRunner:
         # No-conversation-found recovery added by the dementia fix).
         recovery_state: set[str] = _recovery_state if _recovery_state is not None else set()
 
+        async def _reenter(**overrides) -> RunResult:
+            """Re-run this turn after a recovery step, forwarding every argument.
+
+            Ten rungs below re-enter _run_impl with the same eleven arguments;
+            only api_fallback ever differs, and the api-fallback rung passes it
+            through `overrides`.  Written out at each rung it was ten copies of
+            one call, which is how a twelfth parameter gets forwarded by nine
+            of them and dropped by the tenth.  The closure reads `provider`,
+            `binary` and `recovery_state` at call time, exactly as the inlined
+            copies did — none of the three is ever rebound.
+            """
+            return await self._run_impl(
+                instance, on_progress, on_stall,
+                context, sibling_context,
+                api_fallback=overrides.get("api_fallback", api_fallback),
+                _provider=provider, _binary=binary,
+                _recovery_state=recovery_state,
+                on_recovery=on_recovery,
+                on_context_reset=on_context_reset,
+            )
+
         # Waiting on the semaphore, and the gap between one attempt ending and
         # the next starting, are both windows with no process to signal.
         stopped = self._stopped_before_spawning(instance)
@@ -2351,15 +2372,7 @@ class ClaudeRunner:
                         # Clear _accounts_tried so the picker can revisit the
                         # owning account on the retry.
                         instance._accounts_tried.discard(owning_account or "")
-                        return await self._run_impl(
-                            instance, on_progress, on_stall,
-                            context, sibling_context,
-                            api_fallback=api_fallback,
-                            _provider=provider, _binary=binary,
-                            _recovery_state=recovery_state,
-                            on_recovery=on_recovery,
-                            on_context_reset=on_context_reset,
-                        )
+                        return await _reenter()
 
                 # Layer 2: try other account if we haven't yet and one is available.
                 if (
@@ -2376,15 +2389,7 @@ class ClaudeRunner:
                             instance.session_id[:12], account_dir[-20:],
                             next_account[-20:], instance.id,
                         )
-                        return await self._run_impl(
-                            instance, on_progress, on_stall,
-                            context, sibling_context,
-                            api_fallback=api_fallback,
-                            _provider=provider, _binary=binary,
-                            _recovery_state=recovery_state,
-                            on_recovery=on_recovery,
-                            on_context_reset=on_context_reset,
-                        )
+                        return await _reenter()
 
                 # Layer 3 (last resort): drop session and run blank.  Tag the
                 # downstream result so commands.py can surface a "lost prior
@@ -2428,15 +2433,7 @@ class ClaudeRunner:
                 # still apply after this reset.
                 instance._accounts_tried = set()
                 recovery_state.add("exhausted")
-                fresh = await self._run_impl(
-                    instance, on_progress, on_stall,
-                    context, sibling_context,
-                    api_fallback=api_fallback,
-                    _provider=provider, _binary=binary,
-                    _recovery_state=recovery_state,
-                    on_recovery=on_recovery,
-                    on_context_reset=on_context_reset,
-                )
+                fresh = await _reenter()
                 fresh.session_recovery_exhausted = True
                 fresh.recovery_warning_posted = warning_posted
                 # Don't poison the retry path: if the fallback produced no
@@ -2572,15 +2569,7 @@ class ClaudeRunner:
                 # the user pressing Retry) would open with a recovery note
                 # about a run that ended hours ago.
                 try:
-                    resumed = await self._run_impl(
-                        instance, on_progress, on_stall,
-                        context, sibling_context,
-                        api_fallback=api_fallback,
-                        _provider=provider, _binary=binary,
-                        _recovery_state=recovery_state,
-                        on_recovery=on_recovery,
-                        on_context_reset=on_context_reset,
-                    )
+                    resumed = await _reenter()
                 finally:
                     unmark()
                 # The aborted attempt did real work — its edits are on disk and
@@ -2773,15 +2762,7 @@ class ClaudeRunner:
                     # session could not be continued" would open a cooldown
                     # retry hours later with a lie at the top of its prompt.
                     try:
-                        fresh = await self._run_impl(
-                            instance, on_progress, on_stall,
-                            context, sibling_context,
-                            api_fallback=api_fallback,
-                            _provider=provider, _binary=binary,
-                            _recovery_state=recovery_state,
-                            on_recovery=on_recovery,
-                            on_context_reset=on_context_reset,
-                        )
+                        fresh = await _reenter()
                     finally:
                         instance._context_overflow_note = None
                     fresh.session_recovery_exhausted = True
@@ -2843,15 +2824,7 @@ class ClaudeRunner:
                                 log.exception(
                                     "Progress callback error during failover",
                                 )
-                        return await self._run_impl(
-                            instance, on_progress, on_stall,
-                            context, sibling_context,
-                            api_fallback=api_fallback,
-                            _provider=provider, _binary=binary,
-                            _recovery_state=recovery_state,
-                            on_recovery=on_recovery,
-                            on_context_reset=on_context_reset,
-                        )
+                        return await _reenter()
 
                     next_account = self._pick_account(
                         exclude=instance._accounts_tried,
@@ -2874,15 +2847,7 @@ class ClaudeRunner:
                                 log.exception(
                                     "Progress callback error during failover",
                                 )
-                        inner = await self._run_impl(
-                            instance, on_progress, on_stall,
-                            context, sibling_context,
-                            api_fallback=api_fallback,
-                            _provider=provider, _binary=binary,
-                            _recovery_state=recovery_state,
-                            on_recovery=on_recovery,
-                            on_context_reset=on_context_reset,
-                        )
+                        inner = await _reenter()
                         # Backup died before doing any work (auth-dead, or
                         # its own account-wide cap): this account can still
                         # run the fallback model — keep working instead of
@@ -2943,15 +2908,7 @@ class ClaudeRunner:
                                 )
                             except Exception:
                                 log.exception("Progress callback error during failover")
-                        inner = await self._run_impl(
-                            instance, on_progress, on_stall,
-                            context, sibling_context,
-                            api_fallback=api_fallback,
-                            _provider=provider, _binary=binary,
-                            _recovery_state=recovery_state,
-                            on_recovery=on_recovery,
-                            on_context_reset=on_context_reset,
-                        )
+                        inner = await _reenter()
                         # If the failover target died before doing any work
                         # (e.g. paused/cancelled subscription -> 401), the turn
                         # is still fundamentally usage-limited. Carry the
@@ -2986,13 +2943,7 @@ class ClaudeRunner:
                 log.info("Transient error for %s, retrying in 30s", instance.id)
                 instance.retry_count = 1
                 await asyncio.sleep(30)
-                return await self._run_impl(
-                    instance, on_progress, on_stall, context, sibling_context,
-                    api_fallback=False, _provider=provider, _binary=binary,
-                    _recovery_state=recovery_state,
-                    on_recovery=on_recovery,
-                    on_context_reset=on_context_reset,
-                )
+                return await _reenter(api_fallback=False)
 
             # Account-level failure (auth / cancelled subscription / can't start):
             # no reset time, so fail over to another account.
@@ -3077,15 +3028,7 @@ class ClaudeRunner:
                                 log.exception(
                                     "Progress callback error during failover"
                                 )
-                        return await self._run_impl(
-                            instance, on_progress, on_stall,
-                            context, sibling_context,
-                            api_fallback=api_fallback,
-                            _provider=provider, _binary=binary,
-                            _recovery_state=recovery_state,
-                            on_recovery=on_recovery,
-                            on_context_reset=on_context_reset,
-                        )
+                        return await _reenter()
                     if confident:
                         # Nowhere to fail over. Don't dead-end the turn on a
                         # raw 401 (the t-6570 symptom): if any other account is
