@@ -1778,24 +1778,29 @@ async def on_kill(ctx: RequestContext, text: str) -> None:
 
 # --- /retry ---
 
-async def on_retry(ctx: RequestContext, text: str) -> None:
-    text = text.strip()
-    if not text:
-        await ctx.messenger.send_text(ctx.channel_id, "Usage: /retry <id|name>")
-        return
+async def _start_retry(
+    ctx: RequestContext, inst: Instance, source_msg_id: str | None = None,
+) -> tuple[Instance, dict] | None:
+    """Clone `inst` for a re-run and post its progress card.
 
-    inst = ctx.store.get_instance(text)
-    if not inst:
-        await ctx.messenger.send_text(ctx.channel_id, f"Instance '{text}' not found.")
-        return
+    Typed /retry and the Retry button were near-copies of this block — the
+    same drift perform_kill exists to end, and the reason the button could be
+    fixed while the command kept the old behaviour.  `source_msg_id` is the
+    message the button sat on: present means the card it was posted under is
+    cleared first, absent (the typed path) means there is no card to clear.
 
+    Returns None, after telling the user why, when the retry cannot start.
+    The caller runs the instance and backfills the thread session itself:
+    run_instance never binds, and that pairing is checked at every call site
+    by scripts/test_cooldown_session_bind.py.
+    """
     if not check_budget(ctx):
         await ctx.messenger.send_text(ctx.channel_id, "Daily budget exceeded.")
-        return
+        return None
 
     if inst.repo_path and not Path(inst.repo_path).is_dir():
         await ctx.messenger.send_text(ctx.channel_id, "Repo path no longer valid.")
-        return
+        return None
 
     new_inst = ctx.store.create_instance(
         instance_type=inst.instance_type,
@@ -1820,6 +1825,12 @@ async def on_retry(ctx: RequestContext, text: str) -> None:
         new_inst.worktree_path = inst.worktree_path
     ctx.store.update_instance(new_inst)
 
+    if source_msg_id:
+        try:
+            await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, None)
+        except Exception:
+            pass
+
     escaped = ctx.messenger.escape(new_inst.display_id())
     handle = await ctx.messenger.send_thinking(
         ctx.channel_id, f"⏳ {escaped} retrying...",
@@ -1828,6 +1839,24 @@ async def on_retry(ctx: RequestContext, text: str) -> None:
     if handle.get("message_id"):
         new_inst.message_ids.setdefault(ctx.platform, []).append(handle.get("message_id"))
         ctx.store.update_instance(new_inst)
+    return new_inst, handle
+
+
+async def on_retry(ctx: RequestContext, text: str) -> None:
+    text = text.strip()
+    if not text:
+        await ctx.messenger.send_text(ctx.channel_id, "Usage: /retry <id|name>")
+        return
+
+    inst = ctx.store.get_instance(text)
+    if not inst:
+        await ctx.messenger.send_text(ctx.channel_id, f"Instance '{text}' not found.")
+        return
+
+    started = await _start_retry(ctx, inst)
+    if not started:
+        return
+    new_inst, handle = started
 
     await lifecycle.run_instance(ctx, new_inst, handle=handle)
     # run_instance doesn't bind; fill a sessionless thread so a wake armed by
@@ -3736,49 +3765,10 @@ async def handle_callback(
         if not inst:
             await ctx.messenger.send_text(ctx.channel_id, "Instance not found.")
             return
-        if not check_budget(ctx):
-            await ctx.messenger.send_text(ctx.channel_id, "Daily budget exceeded.")
+        started = await _start_retry(ctx, inst, source_msg_id)
+        if not started:
             return
-        if inst.repo_path and not Path(inst.repo_path).is_dir():
-            await ctx.messenger.send_text(ctx.channel_id, "Repo path no longer valid.")
-            return
-        new_inst = ctx.store.create_instance(
-            instance_type=inst.instance_type,
-            prompt=inst.prompt,
-            name=f"{inst.name}-retry" if inst.name else None,
-            mode=inst.mode,
-        )
-        new_inst.origin = inst.origin
-        # Faithful replay: carry the source instance's model so a retried build
-        # stays on the model it ran (routing preserved across retries).
-        new_inst.model = inst.model
-        new_inst.origin_platform = ctx.platform
-        new_inst.effort = ctx.effective_effort
-        new_inst.parent_id = inst.id
-        new_inst.repo_name = inst.repo_name
-        new_inst.repo_path = inst.repo_path
-        if inst.session_id:
-            new_inst.session_id = inst.session_id
-        if inst.branch:
-            new_inst.branch = inst.branch
-            new_inst.original_branch = inst.original_branch
-            new_inst.worktree_path = inst.worktree_path
-        ctx.store.update_instance(new_inst)
-
-        if source_msg_id:
-            try:
-                await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, None)
-            except Exception:
-                pass
-
-        escaped = ctx.messenger.escape(new_inst.display_id())
-        handle = await ctx.messenger.send_thinking(
-            ctx.channel_id, f"⏳ {escaped} retrying...",
-            buttons=running_button_specs(new_inst.id),
-        )
-        if handle.get("message_id"):
-            new_inst.message_ids.setdefault(ctx.platform, []).append(handle.get("message_id"))
-            ctx.store.update_instance(new_inst)
+        new_inst, handle = started
 
         await lifecycle.run_instance(ctx, new_inst, handle=handle)
         await lifecycle.backfill_thread_session(ctx, new_inst)

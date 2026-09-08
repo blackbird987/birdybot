@@ -32,7 +32,7 @@ from bot.claude.auth_health import (
     unusable_reason,
 )
 from bot.claude import memory
-from bot.claude.branch_utils import canonical_branch
+from bot.claude.branch_utils import canonical_branch, clear_stale_branches
 from bot.claude.gitpaths import git_common_dir, git_dir, git_toplevel
 from bot.claude.parser import (
     RunResult,
@@ -8268,14 +8268,14 @@ class ClaudeRunner:
                 # Branch already merged; clear stale branch refs on all
                 # instances (including source) so this case doesn't recur
                 # on every startup.
-                self._clear_stale_branches_static(store, branch_name)
+                clear_stale_branches(store, branch_name)
                 continue
 
             try:
                 msg = await self.merge_branch(inst)
                 store.update_instance(inst)
                 if not merge_msg_is_failure(msg):
-                    self._clear_stale_branches_static(store, branch_name)
+                    clear_stale_branches(store, branch_name)
                 messages.append(f"merge {branch_name}: {msg}")
             except Exception as e:
                 log.warning("startup auto-merge: merge %s raised", branch_name, exc_info=True)
@@ -8394,24 +8394,3 @@ class ClaudeRunner:
         )
 
         return cleaned
-
-    @staticmethod
-    def _clear_stale_branches_static(store, branch_name: str) -> int:
-        """Clear branch/worktree_path on ALL instances sharing a branch name.
-
-        Also nulls the branch field in history.jsonl so resumed sessions don't
-        see stale branch refs in their system prompt.
-        """
-        count = 0
-        for inst in store.list_instances(all_=True):
-            if inst.branch == branch_name:
-                inst.branch = None
-                inst.worktree_path = None
-                store.update_instance(inst)
-                count += 1
-        try:
-            from bot.store import history as history_mod
-            history_mod.clear_branch(branch_name)
-        except Exception:
-            pass
-        return count

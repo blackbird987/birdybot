@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Literal
 
 from bot import config
+from bot.claude.branch_utils import clear_stale_branches  # re-exported for callers
 from bot.claude.gitpaths import git_dir_stat
 from bot.claude.types import (
     BUILD_ORIGINS, CODE_CHANGE_TOOLS, ChainPhaseState, Instance, InstanceOrigin,
@@ -2768,29 +2769,6 @@ async def on_release_chain(
         async with ctx.runner.release_lock_scope(repo_path_for_lock, "release-chain"):
             return await spawn_from(ctx, source_id, cfg, source_msg_id=source_msg_id)
     return await spawn_from(ctx, source_id, cfg, source_msg_id=source_msg_id)
-
-
-def clear_stale_branches(store, branch_name: str) -> int:
-    """Clear branch/worktree_path on ALL instances sharing a branch name.
-
-    Also nulls the branch field in history.jsonl so resumed sessions don't
-    see stale branch refs in their system prompt.
-
-    Returns the number of instances updated.
-    """
-    count = 0
-    for inst in store.list_instances(all_=True):
-        if inst.branch == branch_name:
-            inst.branch = None
-            inst.worktree_path = None
-            store.update_instance(inst)
-            count += 1
-    try:
-        from bot.store import history as history_mod
-        history_mod.clear_branch(branch_name)
-    except Exception:
-        pass
-    return count
 
 
 def _eval_chain_safe(
