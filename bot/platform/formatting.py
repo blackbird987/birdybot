@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from bot import config
 from bot.claude.types import CODE_CHANGE_TOOLS, PLAN_ORIGINS, Instance, InstanceOrigin, InstanceStatus, Schedule
 from bot.platform.base import ButtonSpec
+from bot.textutil import parse_duration
 
 if TYPE_CHECKING:
     from bot.store.state import StateStore
@@ -121,10 +122,14 @@ def _render_directive_chip(verb: str, args: str) -> str | None:
     if verb == "image":
         return None
     if verb == "wake":
-        try:
-            parts.append(f"in {format_delay_secs(int(kv.get('delay', '')))}")
-        except ValueError:
-            pass  # missing/garbage delay — the reason still carries the why
+        # Same duration grammar the directive parser applies ("3d", "90m",
+        # bare seconds), so the chip quotes the delay that was actually armed
+        # rather than dropping the unit-suffixed spellings on the floor. A
+        # missing/garbage delay yields the 0 sentinel and is simply omitted —
+        # the reason still carries the why.
+        secs = parse_duration(kv.get("delay") or kv.get("delay_secs"), 0)
+        if secs > 0:
+            parts.append(f"in {format_delay_secs(secs)}")
         if kv.get("reason"):
             parts.append(_chip_value(kv["reason"]))
     elif verb == "watch":
@@ -216,7 +221,12 @@ def format_delay_secs(secs: int) -> str:
         return f"{secs}s"
     if secs < 5400:
         return f"{round(secs / 60)} min"
-    return f"{round(secs / 3600, 1)} h"
+    # Days above 36h: the wake ceiling is 30d and a watch can run for days, so
+    # without this rung a week-long timer renders as "168.0 h" in both the
+    # "I'll check back in ~X" notice and the watch heartbeat's elapsed line.
+    if secs < 129600:
+        return f"{round(secs / 3600, 1)} h"
+    return f"{round(secs / 86400, 1)} d"
 
 
 def format_tokens(count: int) -> str:
