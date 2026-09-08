@@ -465,13 +465,6 @@ class StateStore:
                 return inst
         return None
 
-    def find_by_message(self, platform: str, message_id: str) -> Instance | None:
-        """Find instance by platform message ID."""
-        for inst in self._instances.values():
-            if message_id in inst.message_ids.get(platform, []):
-                return inst
-        return None
-
     def list_instances(self, all_: bool = False) -> list[Instance]:
         """Return instances, most recent first. Default: last 24h only."""
         now = datetime.now(timezone.utc)
@@ -564,9 +557,6 @@ class StateStore:
             return 0.0
         return self._daily_cost
 
-    def get_total_cost(self) -> float:
-        return self._total_cost
-
     def get_repo_daily_cost(self, repo_name: str) -> float:
         """Sum today's costs for instances of a specific repo.
 
@@ -604,16 +594,6 @@ class StateStore:
         if self._fallback_cost_date != today:
             return 0.0
         return self._fallback_cost
-
-    def get_top_spenders(self, limit: int = 5) -> list[Instance]:
-        """Return top-spending instances today."""
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        instances = [
-            i for i in self._instances.values()
-            if i.cost_usd and i.created_at.startswith(today)
-        ]
-        instances.sort(key=lambda i: i.cost_usd or 0, reverse=True)
-        return instances[:limit]
 
     # --- Repo Registry ---
 
@@ -1620,9 +1600,6 @@ class StateStore:
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
         self.save()
-
-    def get_scheduled_merge(self, instance_id: str) -> dict | None:
-        return self._scheduled_merges.get(instance_id)
 
     def get_scheduled_merge_by_session(
         self, session_id: str | None,

@@ -508,12 +508,7 @@ class ClaudeBot(discord.Client):
     @property
     def messenger(self) -> DiscordMessenger:
         if self._messenger is None:
-            self._messenger = DiscordMessenger(
-                bot=self,
-                guild_id=self._guild_id,
-                lobby_channel_id=self._lobby_channel_id,
-                category_id=self._category_id,
-            )
+            self._messenger = DiscordMessenger(bot=self)
         return self._messenger
 
     def _is_owner(self, user_id: int) -> bool:
@@ -986,23 +981,14 @@ class ClaudeBot(discord.Client):
     def _cancel_sleep(self, channel_id: str) -> None:
         idle_mod.cancel_sleep(self, channel_id)
 
-    async def _set_thread_sleeping(self, channel) -> None:
-        await idle_mod.set_thread_sleeping(self, channel)
-
     async def _clear_thread_sleeping(self, channel) -> None:
         await idle_mod.clear_thread_sleeping(self, channel)
-
-    async def _apply_thread_tags(self, thread, status, origin="bot", mode=None) -> None:
-        await tags_mod.apply_thread_tags(thread, status, origin, mode)
 
     async def _try_apply_tags_after_run(self, channel_id: str) -> None:
         await tags_mod.try_apply_tags_after_run(self, channel_id)
 
     async def _set_thread_active_tag(self, channel, active: bool) -> None:
         await tags_mod.set_thread_active_tag(self, channel, active)
-
-    async def _monitor_setup(self, name: str) -> str:
-        return await monitoring_mod.monitor_setup(self, name)
 
     def _init_monitor_service(self) -> None:
         monitoring_mod.init_monitor_service(self)
@@ -2479,50 +2465,6 @@ class ClaudeBot(discord.Client):
             # owns the lifecycle now; nudge it so a burst can't sit over cap.
             if _image_paths:
                 self._schedule_pending_image_sweep()
-
-    async def _route_lobby_message(
-        self, message: discord.Message, text: str, repo_name: str | None,
-    ) -> None:
-        """Route a lobby message to a forum thread."""
-        repo_name = repo_name or "_default"
-        asyncio.create_task(self._forums.ensure_control_post(repo_name))
-        thread = await self._forums.get_or_create_session_thread(
-            repo_name, None, text,
-            user_id=str(message.author.id),
-            user_name=message.author.display_name,
-        )
-        if thread:
-            try:
-                await thread.add_user(message.author)
-            except Exception:
-                log.warning("Failed to auto-follow user %s in thread %s",
-                            message.author.id, thread.id)
-            try:
-                await message.delete()
-            except Exception:
-                pass
-            asyncio.create_task(self._send_redirect(thread))
-            tid = str(thread.id)
-            self._cancel_sleep(tid)
-            await self._clear_thread_sleeping(thread)
-            asyncio.create_task(self._set_thread_active_tag(thread, True))
-            asyncio.create_task(self._refresh_dashboard())
-            lookup = self._forums.thread_to_project(tid)
-            t_info = lookup[1] if lookup else None
-            ctx = self._ctx(tid, repo_name=repo_name if repo_name != "_default" else None,
-                            thread_info=t_info, source="user_message")
-            if t_info:
-                self._forums.attach_session_callbacks(ctx, t_info, tid)
-            try:
-                await commands.on_text(ctx, text)
-            finally:
-                self._forums.persist_ctx_settings(ctx)
-                await self._forums.update_pending_thread(tid)
-                summary = self._forums.get_latest_summary(tid)
-                asyncio.create_task(self._generate_smart_title(thread, text, summary))
-                asyncio.create_task(self._try_apply_tags_after_run(tid))
-                self._schedule_sleep(tid)
-                asyncio.create_task(self._refresh_dashboard())
 
     # --- Dashboard (delegated to dashboard_mod) ---
 

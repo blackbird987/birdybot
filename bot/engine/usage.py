@@ -500,18 +500,6 @@ async def get_current_block(force: bool = False) -> UsageBlock | None:
     return _parse_block(data)
 
 
-async def get_daily_summary(force: bool = False) -> UsageDaily | None:
-    """Get today's usage (thin wrapper over unified 7-day fetch)."""
-    daily, _ = await _fetch_daily_range(force=force)
-    return daily
-
-
-async def get_weekly_summary(force: bool = False) -> UsageWeekly | None:
-    """Get 7-day usage aggregate (thin wrapper over unified fetch)."""
-    _, weekly = await _fetch_daily_range(force=force)
-    return weekly
-
-
 async def get_usage_details(force: bool = False) -> str:
     """Rich usage text for /usage command.  Returns formatted string.
 

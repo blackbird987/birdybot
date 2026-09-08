@@ -10,10 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Awaitable
-
-if TYPE_CHECKING:
-    from bot.platform.base import RequestContext
+from typing import Any, Callable, Awaitable
 
 log = logging.getLogger(__name__)
 

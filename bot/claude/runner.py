@@ -53,7 +53,7 @@ from bot.claude.parser import (
 )
 from bot.claude.provider import ProviderConfig, get_provider
 from bot.claude.types import (
-    Instance, InstanceOrigin, InstanceStatus, InstanceType, KillOutcome,
+    Instance, InstanceOrigin, InstanceStatus, KillOutcome,
     REPO_UNUSABLE_MARKER, merge_msg_is_failure,
 )
 from bot.store import history as history_mod
@@ -5021,14 +5021,6 @@ class ClaudeRunner:
             if await self.kill(iid):
                 killed += 1
         return killed
-
-    def queue_position(self, instance_id: str) -> int | None:
-        """Approximate queue position (not exact with asyncio.Semaphore)."""
-        # Semaphore doesn't expose waiter count directly
-        waiters = getattr(self._semaphore, '_waiters', None)
-        if waiters is None:
-            return None
-        return len(waiters)
 
     # --- Per-repo locking ---
 

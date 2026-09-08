@@ -73,12 +73,6 @@ class Messenger(Protocol):
         """Return the platform identifier (e.g. 'discord')."""
         ...
 
-    async def create_conversation(
-        self, instance_id: str, summary: str, is_task: bool,
-    ) -> str:
-        """Create a conversation space. Returns channel_id."""
-        ...
-
     async def send_thinking(
         self, channel_id: str, text: str,
         buttons: list[list[ButtonSpec]] | None = None,
@@ -417,16 +411,3 @@ class NotificationService:
             await messenger.delete_message(channel_id, msg_id)
         except Exception:
             pass
-
-    async def broadcast_result(
-        self, text: str,
-        metadata: dict | None = None,
-        buttons: list[list[ButtonSpec]] | None = None,
-        silent: bool = False,
-    ) -> None:
-        """Send result to all registered platforms."""
-        for platform, (messenger, channel_id) in self._messengers.items():
-            try:
-                await messenger.send_result(channel_id, text, metadata, buttons, silent)
-            except Exception:
-                log.exception("Failed to broadcast result to %s", platform)

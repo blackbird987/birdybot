@@ -688,25 +688,6 @@ def _save_chain_eval(ev: ChainEval) -> None:
         log.debug("Failed to save chain eval for %s", ev.chain_id, exc_info=True)
 
 
-def load_session_eval(instance_id: str) -> SessionEval | None:
-    """Load the persisted SessionEval for a single instance, or None.
-
-    Returns None if eval is disabled, the file doesn't exist, or it can't
-    be parsed. Cheap one-shot read for embed-render time.
-    """
-    if not EVALS_DIR.exists():
-        return None
-    path = EVALS_DIR / f"{instance_id}.json"
-    if not path.is_file():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return SessionEval.from_dict(data)
-    except Exception:
-        log.debug("Failed to load eval for %s", instance_id, exc_info=True)
-        return None
-
-
 def load_evals(since_hours: int = 24) -> list[SessionEval]:
     """Load session evals from the last N hours."""
     if not EVALS_DIR.exists():

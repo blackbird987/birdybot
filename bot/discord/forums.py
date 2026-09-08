@@ -27,7 +27,6 @@ from bot.discord.access import load_access_config
 from bot.engine import repo_desc
 from bot.engine import sessions as sessions_mod
 from bot.platform.base import RequestContext
-from bot.platform.formatting import MODE_DISPLAY
 
 if TYPE_CHECKING:
     from bot.discord.adapter import DiscordMessenger

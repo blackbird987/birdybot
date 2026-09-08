@@ -44,11 +44,9 @@ from bot.platform.formatting import (
     model_suggestions,
     normalize_model,
     queued_button_specs,
-    redact_secrets,
     resolver_running_button_specs,
     running_button_specs,
     short_model_label,
-    strip_markdown,
     strip_verify_blocks,
 )
 from bot.textutil import clip

@@ -15,7 +15,7 @@ from discord import app_commands
 from bot.discord import access as access_mod
 from bot.discord import channels
 from bot.discord.access import (
-    AccessResult, load_access_config, check_user_access,
+    load_access_config, check_user_access,
     effective_mode as access_effective_mode,
 )
 from bot.claude.types import InstanceStatus
@@ -23,7 +23,7 @@ from bot.discord.monitoring import monitor_setup
 from bot.engine import commands
 from bot.engine import sessions as sessions_mod
 from bot.platform.formatting import (
-    MODE_DISPLAY, VALID_MODES, format_age, mode_name, model_suggestions,
+    MODE_DISPLAY, VALID_MODES, format_age, model_suggestions,
     normalize_model, short_model_label,
 )
 from bot.store import history as history_mod

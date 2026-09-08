@@ -272,16 +272,6 @@ def get_most_restrictive_ceiling(cfg: AccessConfig, user_id: str) -> str:
     return rank_to_mode.get(min_rank, "explore")
 
 
-def get_user_repos(cfg: AccessConfig, user_id: str) -> list[str]:
-    """Get list of repo names a user has access to. Empty list for global_access (means 'all')."""
-    ua = cfg.users.get(user_id)
-    if not ua:
-        return []
-    if ua.global_access:
-        return []  # means "all" — caller should handle
-    return list(ua.repos.keys())
-
-
 def effective_mode(grant: RepoAccess, requested_mode: str) -> str:
     """Enforce mode ceiling. Returns the effective mode."""
     _MODE_RANK = {"explore": 0, "plan": 1, "build": 2}

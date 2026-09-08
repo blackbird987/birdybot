@@ -29,7 +29,7 @@ import sys
 import time
 from collections.abc import Container
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -39,8 +39,6 @@ from bot.claude.auth_health import clear_cache as clear_auth_cache
 from bot.claude.auth_health import credentials_usable
 
 if TYPE_CHECKING:
-    import discord
-
     from bot.discord.bot import ClaudeBot
 
 log = logging.getLogger(__name__)
