@@ -82,13 +82,6 @@ _paths.init(
 )
 
 
-# --- Telegram (stripped — shell only, not started) ---
-TELEGRAM_BOT_TOKEN: str | None = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_USER_ID: int | None = (
-    int(os.getenv("TELEGRAM_USER_ID")) if os.getenv("TELEGRAM_USER_ID") else None
-)
-TELEGRAM_ENABLED: bool = False  # Telegram stripped — shell only
-
 # --- Discord ---
 DISCORD_BOT_TOKEN: str | None = os.getenv("DISCORD_BOT_TOKEN")
 DISCORD_GUILD_ID: int | None = (
