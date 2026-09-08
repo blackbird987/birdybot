@@ -322,7 +322,6 @@ class CgroupMemory:
     # over an uptime, which is why the guard reads the current anon-vs-high
     # gap rather than that counter — but nothing in the bot had read either.
     high_mb: float | None = None
-    oom_kills: int | None = None    # cumulative kills by the cgroup OOM killer
 
     def headroom_mb(self) -> float | None:
         """MB of anonymous memory left before MemoryMax, or None if unlimited.
@@ -355,13 +354,6 @@ def cgroup_memory() -> CgroupMemory:
                 out.anon_mb = int(val) / _MB
             elif key == "file":
                 out.file_mb = int(val) / _MB
-    except (OSError, ValueError):
-        pass
-    try:
-        for line in (cg / "memory.events").read_text(encoding="utf-8").splitlines():
-            key, _, val = line.partition(" ")
-            if key == "oom_kill":
-                out.oom_kills = int(val)
     except (OSError, ValueError):
         pass
     return out

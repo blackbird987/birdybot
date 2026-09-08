@@ -1404,8 +1404,6 @@ async def _spawn_deploy_fix(
     await spawn_fix_session(
         bot, repo_name,
         trigger="deploy",
-        error_summary=error_summary,
-        error_output=error_output,
         fix_prompt=prompt,
         max_retries=deploy_config.get("auto_fix_retries", 1),
         max_cost_usd=2.0,
@@ -1469,8 +1467,6 @@ async def _post_deploy_healthcheck(
                     await spawn_fix_session(
                         bot, repo_name,
                         trigger="healthcheck",
-                        error_summary=f"Health check failed: {cmd}",
-                        error_output=error_output,
                         fix_prompt=prompt,
                         max_retries=1,
                         max_cost_usd=1.5,

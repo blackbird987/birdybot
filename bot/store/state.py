@@ -1812,10 +1812,7 @@ class StateStore:
             return f"{m.group(1)} {m.group(2)[:40]}"
         return text[:50]
 
-    def append_deferred(
-        self, repo_name: str, items: list[str],
-        thread_id: str = "", topic: str = "",
-    ) -> None:
+    def append_deferred(self, repo_name: str, items: list[str]) -> None:
         """Append deferred revision items to the repo's TODO.md (deduplicated).
 
         Uses normalized key matching to prevent the same item from

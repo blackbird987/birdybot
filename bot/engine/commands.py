@@ -1119,7 +1119,7 @@ async def _run_query(ctx: RequestContext, prompt: str) -> None:
 async def _execute_query(ctx: RequestContext, prompt: str) -> None:
     # Block spawns during reboot drain. Active-session overlap is no longer
     # rejected here — the per-channel lock + Queued embed handle it visibly.
-    spawn_err = ctx.runner.check_spawn_allowed(ctx.session_id)
+    spawn_err = ctx.runner.check_spawn_allowed()
     if spawn_err:
         if ctx.runner.is_draining:
             ctx.runner.queue_for_replay({

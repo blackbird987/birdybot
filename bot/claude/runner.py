@@ -4623,13 +4623,14 @@ class ClaudeRunner:
             return None
         return self._active_channels.get(str(channel_id))
 
-    def check_spawn_allowed(self, session_id: str | None = None) -> str | None:
+    def check_spawn_allowed(self) -> str | None:
         """Return an error message if spawning is blocked, or None if OK.
 
-        Active-session case is no longer rejected here — the per-channel lock
-        in ``bot.engine.commands._get_channel_lock`` serializes same-channel
-        spawns cleanly and the Queued-embed UX handles it visibly.  We only
-        reject during reboot drain.
+        Took a session_id until the active-session rejection was removed: the
+        per-channel lock in ``bot.engine.commands._get_channel_lock``
+        serializes same-channel spawns cleanly and the Queued-embed UX handles
+        it visibly.  We only reject during reboot drain, which no caller can
+        influence, so the argument had no reader left.
         """
         if self._draining:
             return "Reboot in progress — try again shortly."

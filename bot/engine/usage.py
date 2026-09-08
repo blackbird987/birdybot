@@ -239,8 +239,6 @@ def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:
 class UsageBlock:
     """Current 5h billing block."""
 
-    start_time: str
-    end_time: str
     is_active: bool
     input_tokens: int
     output_tokens: int
@@ -471,8 +469,6 @@ def _parse_block(data: dict | None) -> UsageBlock | None:
         br = block.get("burnRate") or {}
         proj = block.get("projection") or {}
         return UsageBlock(
-            start_time=block.get("startTime", ""),
-            end_time=block.get("endTime", ""),
             is_active=True,
             input_tokens=tc.get("inputTokens", 0),
             output_tokens=tc.get("outputTokens", 0),

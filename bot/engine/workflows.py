@@ -765,8 +765,7 @@ async def spawn_from(
 
     # Block spawns during reboot drain. Same-session overlap is allowed —
     # the channel lock + Queued embed serialize it visibly.
-    check_session = source.session_id if cfg.resume_session else None
-    spawn_err = ctx.runner.check_spawn_allowed(check_session)
+    spawn_err = ctx.runner.check_spawn_allowed()
     if spawn_err:
         if ctx.runner.is_draining:
             # If this session has an active autopilot chain, don't queue the
@@ -975,7 +974,7 @@ async def spawn_resolver_detached(
             )
             return None
 
-    spawn_err = ctx.runner.check_spawn_allowed(None)
+    spawn_err = ctx.runner.check_spawn_allowed()
     if spawn_err:
         await ctx.messenger.send_text(ctx.channel_id, spawn_err)
         return None
@@ -2824,7 +2823,6 @@ async def _run_autopilot_chain(
     # does NOT bind their session onto the thread (a step's session belongs to
     # the step, not the conversation — see "A thread must always know its
     # session" in CLAUDE.md).
-    # Passing session_id would block spawn_from's check_spawn_allowed guard.
     ctx.runner.begin_task(chain_task_id)
     try:
         for step in steps:
@@ -3510,12 +3508,7 @@ async def _run_autopilot_chain(
 
         # Persist deferred revisions to per-repo backlog
         if chain_deferred and result and result.repo_name:
-            original = ctx.store.get_instance(source_id)
-            topic = original.prompt[:60] if original and original.prompt else ""
-            ctx.store.append_deferred(
-                result.repo_name, chain_deferred,
-                thread_id=result.id, topic=topic,
-            )
+            ctx.store.append_deferred(result.repo_name, chain_deferred)
 
         # Evaluate the completed chain
         outcome = "merged" if "merge" in completed_steps else "completed"

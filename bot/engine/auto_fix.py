@@ -34,8 +34,6 @@ async def spawn_fix_session(
     bot: Any,
     repo_name: str,
     trigger: str,
-    error_summary: str,
-    error_output: str,
     fix_prompt: str,
     *,
     max_retries: int = 1,
