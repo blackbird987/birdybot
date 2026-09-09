@@ -414,7 +414,6 @@ class MonitorService:
     ) -> None:
         """Roll old dailies into weekly, old weeklies into monthly. Idempotent."""
         now = datetime.now(timezone.utc)
-        today = now.strftime("%Y-%m-%d")
 
         # Dailies older than 7 days -> weekly
         to_roll: list[dict] = []
