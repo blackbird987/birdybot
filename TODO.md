@@ -33,6 +33,8 @@
 
 - [ ] **Auto-merge: handle untracked-file collisions in main repo.** When the branch wants to add a file that already exists as an *untracked* file in master's working tree, git aborts before creating `MERGE_HEAD` ("error: The following untracked working tree files would be overwritten by merge"). "Resolve with Claude" can't help — there's no conflict state to resolve, so the resolver loops on the same failure. Detect this `failure_kind` specifically and either (a) auto-stash/move the conflicting untracked files aside, attempt the merge, and restore on abort, or (b) surface a dedicated "Move untracked files aside and retry" button instead of the generic resolver path. Symptom seen in thread `1505364903580401795`.
 
+- [ ] **Two test scripts fail at HEAD and are still unregistered** (`scripts/test_extract_latest_plan_text.py`, `scripts/test_model_limit_failover.py`). Found 2026-09-09 while registering the other 24 unregistered scripts. Both are real failures, not environment noise, and both were verified failing under `.venv/bin/python`. The plan-text extractor's fake store lacks a method the code under test calls; the model-limit failover test produces many genuine assertion failures. They are deliberately left OUT of `.claude/test.json` because registering them would turn the documented verify gate red for every future build in this repo. Fix them, then register them, in that order.
+
 ## Deferred Revisions
 <!-- Auto-managed by code review. Remove items when addressed. -->
 - [ ] [UX/UI] Mention text should vary by outcome not just path (Low)
