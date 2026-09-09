@@ -21,11 +21,9 @@ import logging
 import subprocess
 from pathlib import Path
 
-from bot import config
+from bot.procutil import run_capture
 
 log = logging.getLogger(__name__)
-
-_NOWND: dict = config.NOWND
 
 
 def git_toplevel(repo: str) -> str | None:
@@ -90,10 +88,7 @@ def git_dir_stat(repo: str) -> str | None:
 
 def _rev_parse(repo: str, flag: str) -> str | None:
     try:
-        r = subprocess.run(
-            ["git", "-C", repo, "rev-parse", flag],
-            capture_output=True, text=True, timeout=10, **_NOWND,
-        )
+        r = run_capture(["git", "-C", repo, "rev-parse", flag], timeout=10)
     except (OSError, subprocess.TimeoutExpired):
         log.warning("git rev-parse %s failed in %s", flag, repo, exc_info=True)
         return None

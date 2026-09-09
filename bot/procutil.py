@@ -3,7 +3,8 @@ alive, and what its children inherit.
 
 Everything here is about the bot's own process rather than about anything it
 manages — which is why locating a running bot and fixing the environment its
-subprocesses are born into (``harden_git_env``) sit in the same file.
+subprocesses are born into (``harden_git_env``, ``run_capture``) sit in the
+same file.
 
 Stdlib only, and deliberately free of any bot import — the control scripts
 that need it (``botctl.py``, ``smoke_test.py``, ``relaunch.py``) load it
@@ -32,6 +33,28 @@ import time
 from pathlib import Path
 
 IS_WINDOWS = sys.platform == "win32"
+
+# On Windows, prevent subprocess console windows from popping up. Re-exported
+# as ``config.NOWND``, which is the spelling most of the bot already uses.
+NOWND: dict = {"creationflags": subprocess.CREATE_NO_WINDOW} if IS_WINDOWS else {}
+
+
+def run_capture(cmd, **kwargs) -> "subprocess.CompletedProcess[str]":
+    """``subprocess.run`` capturing text output, with the Windows no-window flags.
+
+    A pure passthrough: every other keyword goes straight through to
+    ``subprocess.run``, so a call site that needs ``check=``, ``timeout=``,
+    ``input=`` or an explicit ``encoding=`` keeps its exact semantics and its
+    exact defaults. It exists only because ``capture_output=True, text=True,
+    **NOWND`` was written out at a hundred and twenty five git call sites
+    spread over eleven modules, each of which spelled the flags dict under a
+    different local alias.
+
+    It lives here, with the rest of what the bot's subprocesses are born into,
+    because this is the only module upstream of ``bot.config`` that every one
+    of those callers can import without closing a cycle.
+    """
+    return subprocess.run(cmd, capture_output=True, text=True, **kwargs, **NOWND)
 
 
 def detached_kwargs() -> dict:

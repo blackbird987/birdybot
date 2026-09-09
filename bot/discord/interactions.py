@@ -1601,8 +1601,7 @@ async def _handle_sync_git(
     bot: ClaudeBot, interaction: discord.Interaction, repo_name: str,
 ) -> None:
     """Bidirectional git sync: pull from remote (ff-only), then push local changes + tags."""
-    import subprocess
-    from bot.config import NOWND
+    from bot.procutil import run_capture
 
     repos = bot._store.list_repos()
     repo_path = repos.get(repo_name)
@@ -1617,10 +1616,8 @@ async def _handle_sync_git(
 
     try:
         # Step 1a: Fetch branches (must succeed)
-        fetch = await asyncio.to_thread(
-            subprocess.run,
-            ["git", "fetch", "origin"],
-            cwd=repo_path, capture_output=True, text=True, timeout=30, **NOWND,
+        fetch = await asyncio.to_thread(run_capture, 
+            ["git", "fetch", "origin"], cwd=repo_path, timeout=30,
         )
         if fetch.returncode != 0:
             detail = (fetch.stderr or fetch.stdout or "").strip()
@@ -1631,25 +1628,19 @@ async def _handle_sync_git(
             return
 
         # Step 1b: Fetch tags with --force (non-fatal if it fails)
-        tag_fetch = await asyncio.to_thread(
-            subprocess.run,
-            ["git", "fetch", "origin", "--tags", "--force"],
-            cwd=repo_path, capture_output=True, text=True, timeout=15, **NOWND,
+        tag_fetch = await asyncio.to_thread(run_capture, 
+            ["git", "fetch", "origin", "--tags", "--force"], cwd=repo_path, timeout=15,
         )
         if tag_fetch.returncode != 0:
             log.warning("Tag fetch failed for %s: %s", repo_name,
                         (tag_fetch.stderr or "")[:200])
 
         # Step 2: Check ahead/behind counts
-        ahead_result = await asyncio.to_thread(
-            subprocess.run,
-            ["git", "rev-list", "--count", "@{upstream}..HEAD"],
-            cwd=repo_path, capture_output=True, text=True, timeout=10, **NOWND,
+        ahead_result = await asyncio.to_thread(run_capture, 
+            ["git", "rev-list", "--count", "@{upstream}..HEAD"], cwd=repo_path, timeout=10,
         )
-        behind_result = await asyncio.to_thread(
-            subprocess.run,
-            ["git", "rev-list", "--count", "HEAD..@{upstream}"],
-            cwd=repo_path, capture_output=True, text=True, timeout=10, **NOWND,
+        behind_result = await asyncio.to_thread(run_capture, 
+            ["git", "rev-list", "--count", "HEAD..@{upstream}"], cwd=repo_path, timeout=10,
         )
 
         if ahead_result.returncode != 0 or behind_result.returncode != 0:
@@ -1665,10 +1656,8 @@ async def _handle_sync_git(
         # Step 3: Pull if behind (fast-forward only)
         if behind > 0:
             # Check for dirty worktree before attempting pull
-            status = await asyncio.to_thread(
-                subprocess.run,
-                ["git", "status", "--porcelain"],
-                cwd=repo_path, capture_output=True, text=True, timeout=10, **NOWND,
+            status = await asyncio.to_thread(run_capture, 
+                ["git", "status", "--porcelain"], cwd=repo_path, timeout=10,
             )
             if status.returncode == 0 and status.stdout.strip():
                 await interaction.followup.send(
@@ -1677,10 +1666,8 @@ async def _handle_sync_git(
                 )
                 return
 
-            pull = await asyncio.to_thread(
-                subprocess.run,
-                ["git", "pull", "--ff-only"],
-                cwd=repo_path, capture_output=True, text=True, timeout=30, **NOWND,
+            pull = await asyncio.to_thread(run_capture, 
+                ["git", "pull", "--ff-only"], cwd=repo_path, timeout=30,
             )
             if pull.returncode != 0:
                 detail = (pull.stderr or pull.stdout or "").strip()
@@ -1724,10 +1711,8 @@ async def _handle_sync_git(
 
         # Step 4: Push if ahead
         if ahead > 0:
-            result = await asyncio.to_thread(
-                subprocess.run,
-                ["git", "push"],
-                cwd=repo_path, capture_output=True, text=True, timeout=30, **NOWND,
+            result = await asyncio.to_thread(run_capture, 
+                ["git", "push"], cwd=repo_path, timeout=30,
             )
             if result.returncode == 0:
                 parts.append(f"pushed {ahead} commit{'s' if ahead != 1 else ''}")
@@ -1740,10 +1725,8 @@ async def _handle_sync_git(
                 return
 
         # Step 5: Push tags (best-effort)
-        tag_result = await asyncio.to_thread(
-            subprocess.run,
-            ["git", "push", "--tags"],
-            cwd=repo_path, capture_output=True, text=True, timeout=30, **NOWND,
+        tag_result = await asyncio.to_thread(run_capture, 
+            ["git", "push", "--tags"], cwd=repo_path, timeout=30,
         )
         if tag_result.returncode == 0:
             tag_lines = [

@@ -6,13 +6,13 @@ import asyncio
 import logging
 import os
 import signal
-import subprocess
 import sys
 import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from bot import config, paths
+from bot.procutil import run_capture
 from bot.claude.auth_health import (
     REASON_NO_DIR,
     relogin_command,
@@ -36,7 +36,6 @@ from bot.scheduler import Scheduler
 from bot.store.state import StateStore
 
 log = logging.getLogger(__name__)
-_NOWND: dict = config.NOWND
 
 
 def setup_logging() -> None:
@@ -136,10 +135,8 @@ def _detect_update_branch() -> str:
     if config.AUTO_UPDATE_BRANCH:
         return config.AUTO_UPDATE_BRANCH
     try:
-        result = subprocess.run(
-            ["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
-            cwd=str(config._PROJECT_ROOT),
-            capture_output=True, text=True, timeout=10, **_NOWND,
+        result = run_capture(["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
+            cwd=str(config._PROJECT_ROOT), timeout=10,
         )
         if result.returncode == 0:
             # "refs/remotes/origin/main" -> "main"
@@ -178,11 +175,8 @@ async def auto_update_loop(
             repo_lock = runner._get_repo_lock(str(config._PROJECT_ROOT))
             async with repo_lock:
                 # 1. Fetch
-                fetch = await asyncio.to_thread(
-                    subprocess.run,
-                    ["git", "fetch", "origin", "--tags", "--force"],
-                    cwd=str(config._PROJECT_ROOT),
-                    capture_output=True, text=True, timeout=30, **_NOWND,
+                fetch = await asyncio.to_thread(run_capture, ["git", "fetch", "origin", "--tags", "--force"],
+                    cwd=str(config._PROJECT_ROOT), timeout=30,
                 )
                 if fetch.returncode != 0:
                     err = fetch.stderr.strip() or "unknown error"
@@ -196,17 +190,11 @@ async def auto_update_loop(
                     continue
 
                 # 2. Compare HEAD vs remote
-                local_head = await asyncio.to_thread(
-                    subprocess.run,
-                    ["git", "rev-parse", "HEAD"],
-                    cwd=str(config._PROJECT_ROOT),
-                    capture_output=True, text=True, timeout=10, **_NOWND,
+                local_head = await asyncio.to_thread(run_capture, 
+                    ["git", "rev-parse", "HEAD"], cwd=str(config._PROJECT_ROOT), timeout=10,
                 )
-                remote_head = await asyncio.to_thread(
-                    subprocess.run,
-                    ["git", "rev-parse", f"origin/{branch}"],
-                    cwd=str(config._PROJECT_ROOT),
-                    capture_output=True, text=True, timeout=10, **_NOWND,
+                remote_head = await asyncio.to_thread(run_capture, ["git", "rev-parse", f"origin/{branch}"],
+                    cwd=str(config._PROJECT_ROOT), timeout=10,
                 )
                 if local_head.returncode != 0 or remote_head.returncode != 0:
                     if not failure_notified:
@@ -226,11 +214,8 @@ async def auto_update_loop(
                     continue
 
                 # 3. Get commit log for notification
-                log_result = await asyncio.to_thread(
-                    subprocess.run,
-                    ["git", "log", "--oneline", f"{local_sha}..{remote_sha}"],
-                    cwd=str(config._PROJECT_ROOT),
-                    capture_output=True, text=True, timeout=10, **_NOWND,
+                log_result = await asyncio.to_thread(run_capture, ["git", "log", "--oneline", f"{local_sha}..{remote_sha}"],
+                    cwd=str(config._PROJECT_ROOT), timeout=10,
                 )
                 if log_result.returncode == 0 and log_result.stdout.strip():
                     commits = log_result.stdout.strip().splitlines()
@@ -256,11 +241,8 @@ async def auto_update_loop(
                          n_commits, branch)
 
                 # 4. Pull (ff-only)
-                pull = await asyncio.to_thread(
-                    subprocess.run,
-                    ["git", "pull", "--ff-only", "origin", branch],
-                    cwd=str(config._PROJECT_ROOT),
-                    capture_output=True, text=True, timeout=30, **_NOWND,
+                pull = await asyncio.to_thread(run_capture, ["git", "pull", "--ff-only", "origin", branch],
+                    cwd=str(config._PROJECT_ROOT), timeout=30,
                 )
                 if pull.returncode != 0:
                     err = pull.stderr.strip() or "unknown error"
@@ -275,11 +257,8 @@ async def auto_update_loop(
 
                 # 4b. Verify HEAD actually moved (defensive — Fix 1 should
                 # catch the no-op case, but guard against edge cases)
-                post_pull = await asyncio.to_thread(
-                    subprocess.run,
-                    ["git", "rev-parse", "HEAD"],
-                    cwd=str(config._PROJECT_ROOT),
-                    capture_output=True, text=True, timeout=10, **_NOWND,
+                post_pull = await asyncio.to_thread(run_capture, 
+                    ["git", "rev-parse", "HEAD"], cwd=str(config._PROJECT_ROOT), timeout=10,
                 )
                 if post_pull.returncode == 0 and post_pull.stdout.strip() == local_sha:
                     log.error(
@@ -290,11 +269,8 @@ async def auto_update_loop(
 
             # 5. pip install (non-fatal)
             try:
-                await asyncio.to_thread(
-                    subprocess.run,
-                    [sys.executable, "-m", "pip", "install", "-e", ".", "--quiet"],
-                    cwd=str(config._PROJECT_ROOT),
-                    capture_output=True, text=True, timeout=120, **_NOWND,
+                await asyncio.to_thread(run_capture, [sys.executable, "-m", "pip", "install", "-e", ".", "--quiet"],
+                    cwd=str(config._PROJECT_ROOT), timeout=120,
                 )
             except Exception:
                 log.warning("Auto-update: pip install failed (non-fatal)", exc_info=True)

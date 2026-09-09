@@ -4,18 +4,12 @@ from __future__ import annotations
 
 import os
 import re
-import subprocess
 import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
 
-from bot.procutil import install_root
-
-# On Windows, prevent subprocess console windows from popping up
-NOWND: dict = (
-    {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
-)
+from bot.procutil import NOWND, install_root  # noqa: F401  -- re-exported
 
 # Load .env from project root
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent

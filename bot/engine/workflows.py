@@ -6,13 +6,13 @@ import asyncio
 import json
 import logging
 import re
-import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
 from bot import config
+from bot.procutil import run_capture
 from bot.claude.branch_utils import clear_stale_branches  # re-exported for callers
 from bot.claude.gitpaths import git_dir_stat
 from bot.claude.types import (
@@ -1201,12 +1201,9 @@ async def _attempt_inline_worktree_recovery(
     try:
         repo_lock = runner._get_repo_lock(inst.repo_path)
         async with repo_lock:
-            r = await asyncio.to_thread(
-                subprocess.run,
-                ["git", "worktree", "add", "--force",
+            r = await asyncio.to_thread(run_capture, ["git", "worktree", "add", "--force",
                  inst.worktree_path, inst.branch],
-                cwd=inst.repo_path, capture_output=True, text=True,
-                encoding="utf-8", errors="replace", **config.NOWND,
+                cwd=inst.repo_path, encoding='utf-8', errors='replace',
             )
     except Exception as e:
         log.warning(
@@ -2267,7 +2264,6 @@ def _find_prior_build_for_chain(
     )
 
 
-_NOWND: dict = config.NOWND
 _DIFF_PAYLOAD_CAP = 20 * 1024  # 20KB before truncation
 
 # Anchored regex: ## [Unreleased] header, capture until next ## header or EOF.
@@ -2289,10 +2285,8 @@ def _git_head_sha(repo_path: str) -> str | None:
     # and return CompletedProcess(stdout=None, returncode=0). Force utf-8
     # with replace so non-decodable bytes never produce None stdout.
     try:
-        r = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=repo_path, capture_output=True, timeout=5,
-            text=True, encoding="utf-8", errors="replace", **_NOWND,
+        r = run_capture(["git", "rev-parse", "HEAD"],
+            cwd=repo_path, timeout=5, encoding='utf-8', errors='replace',
         )
         if r.returncode != 0:
             return None
@@ -2306,10 +2300,8 @@ def _git_head_sha(repo_path: str) -> str | None:
 def _git_log_messages(repo_path: str, entry_sha: str) -> str:
     """Concatenated commit messages from entry_sha..HEAD (newest first)."""
     try:
-        r = subprocess.run(
-            ["git", "log", f"{entry_sha}..HEAD", "--format=%B%x00"],
-            cwd=repo_path, capture_output=True, timeout=10,
-            text=True, encoding="utf-8", errors="replace", **_NOWND,
+        r = run_capture(["git", "log", f"{entry_sha}..HEAD", "--format=%B%x00"],
+            cwd=repo_path, timeout=10, encoding='utf-8', errors='replace',
         )
         if r.returncode != 0:
             return ""
@@ -2323,10 +2315,8 @@ def _git_log_messages(repo_path: str, entry_sha: str) -> str:
 
 def _git_diff_stat(repo_path: str, entry_sha: str) -> str:
     try:
-        r = subprocess.run(
-            ["git", "diff", "--stat", f"{entry_sha}..HEAD"],
-            cwd=repo_path, capture_output=True, timeout=10,
-            text=True, encoding="utf-8", errors="replace", **_NOWND,
+        r = run_capture(["git", "diff", "--stat", f"{entry_sha}..HEAD"],
+            cwd=repo_path, timeout=10, encoding='utf-8', errors='replace',
         )
         return (r.stdout or "") if r.returncode == 0 else ""
     except Exception:
@@ -2341,10 +2331,8 @@ def _git_diff_payload(repo_path: str, entry_sha: str) -> tuple[str, bool, list[s
     that fell outside the window.
     """
     try:
-        r = subprocess.run(
-            ["git", "diff", f"{entry_sha}..HEAD"],
-            cwd=repo_path, capture_output=True, timeout=15,
-            text=True, encoding="utf-8", errors="replace", **_NOWND,
+        r = run_capture(["git", "diff", f"{entry_sha}..HEAD"],
+            cwd=repo_path, timeout=15, encoding='utf-8', errors='replace',
         )
         diff = (r.stdout or "") if r.returncode == 0 else ""
     except Exception:
@@ -2357,10 +2345,8 @@ def _git_diff_payload(repo_path: str, entry_sha: str) -> tuple[str, bool, list[s
 
     files: list[str] = []
     try:
-        rf = subprocess.run(
-            ["git", "diff", "--name-only", f"{entry_sha}..HEAD"],
-            cwd=repo_path, capture_output=True, timeout=10,
-            text=True, encoding="utf-8", errors="replace", **_NOWND,
+        rf = run_capture(["git", "diff", "--name-only", f"{entry_sha}..HEAD"],
+            cwd=repo_path, timeout=10, encoding='utf-8', errors='replace',
         )
         if rf.returncode == 0:
             files = [ln.strip() for ln in (rf.stdout or "").splitlines() if ln.strip()]

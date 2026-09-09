@@ -32,13 +32,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
-import subprocess
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import discord
 
-from bot import config
+from bot.procutil import run_capture
 from bot.claude.types import Instance, InstanceStatus
 from bot.platform.base import ButtonSpec
 from bot.platform.formatting import merge_failed_banner, merge_failed_button_specs
@@ -81,9 +80,8 @@ class ShipTarget:
 def _commits_ahead(repo_path: str, base: str, branch: str) -> int:
     """Count commits on ``branch`` not yet on ``base`` (0 on any error)."""
     try:
-        r = subprocess.run(
-            ["git", "-C", repo_path, "rev-list", "--count", f"{base}..{branch}"],
-            capture_output=True, text=True, timeout=10, **config.NOWND,
+        r = run_capture(
+            ["git", "-C", repo_path, "rev-list", "--count", f"{base}..{branch}"], timeout=10,
         )
         return int(r.stdout.strip()) if r.returncode == 0 else 0
     except Exception:

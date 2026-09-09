@@ -12,7 +12,6 @@ import enum
 import logging
 import re
 import secrets
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -20,6 +19,7 @@ from typing import TYPE_CHECKING
 import discord
 
 from bot import config
+from bot.procutil import run_capture
 from bot.discord import channels
 from bot.discord import spawn_colors
 from bot.discord import access as access_mod
@@ -33,7 +33,6 @@ if TYPE_CHECKING:
     from bot.store.state import StateStore
 
 log = logging.getLogger(__name__)
-_NOWND: dict = config.NOWND
 
 # Thread names a control room may still be carrying from an older version.
 # Includes the current name so a thread that already matches is recognised
@@ -1510,10 +1509,8 @@ class ForumManager:
         if not repo_path:
             return None
         try:
-            result = await asyncio.to_thread(
-                subprocess.run,
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                cwd=repo_path, capture_output=True, text=True, **_NOWND,
+            result = await asyncio.to_thread(run_capture, 
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_path,
             )
             return result.stdout.strip() if result.returncode == 0 else None
         except Exception:
@@ -1526,11 +1523,7 @@ class ForumManager:
         if repo_path in self._remote_cache:
             return self._remote_cache[repo_path]
         try:
-            result = await asyncio.to_thread(
-                subprocess.run,
-                ["git", "remote"],
-                cwd=repo_path, capture_output=True, text=True, **_NOWND,
-            )
+            result = await asyncio.to_thread(run_capture, ["git", "remote"], cwd=repo_path)
             has = result.returncode == 0 and bool(result.stdout.strip())
         except Exception:
             has = False

@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from bot import config
+from bot.procutil import run_capture
 from bot.claude.auth_health import account_label
 from bot.claude.auth_health import clear_cache as clear_auth_cache
 from bot.claude.auth_health import credentials_usable
@@ -121,11 +122,7 @@ def write_credentials(data: dict) -> bool:
 def verify_cli() -> bool:
     """Check if Claude CLI can authenticate (runs `claude --version`)."""
     try:
-        result = subprocess.run(
-            [config.CLAUDE_BINARY, "--version"],
-            capture_output=True, text=True, timeout=15,
-            **config.NOWND,
-        )
+        result = run_capture([config.CLAUDE_BINARY, "--version"], timeout=15)
         return result.returncode == 0
     except Exception:
         log.debug("CLI verify failed", exc_info=True)

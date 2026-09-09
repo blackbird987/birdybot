@@ -5,14 +5,13 @@ from __future__ import annotations
 import json
 import logging
 import re
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from bot import config
+from bot.procutil import run_capture
 
 log = logging.getLogger(__name__)
-_NOWND: dict = config.NOWND
 
 DEPLOY_CONFIG_PATH = ".claude/deploy.json"
 
@@ -121,10 +120,7 @@ def detect_version(repo_path: str) -> str | None:
 def get_head_ref(repo_path: str) -> str:
     """Get short HEAD commit hash."""
     try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            cwd=repo_path, capture_output=True, text=True, timeout=10, **_NOWND,
-        )
+        result = run_capture(["git", "rev-parse", "--short", "HEAD"], cwd=repo_path, timeout=10)
         return result.stdout.strip() if result.returncode == 0 else ""
     except Exception:
         return ""
@@ -141,9 +137,8 @@ def get_latest_version_tag_ref(repo_path: str) -> str:
         return ""
     try:
         # ^{} dereferences annotated tags to the commit object
-        result = subprocess.run(
-            ["git", "rev-parse", "--short", f"{tag}^{{}}"],
-            cwd=repo_path, capture_output=True, text=True, timeout=10, **_NOWND,
+        result = run_capture(
+            ["git", "rev-parse", "--short", f"{tag}^{{}}"], cwd=repo_path, timeout=10,
         )
         return result.stdout.strip() if result.returncode == 0 else ""
     except Exception:
@@ -153,9 +148,8 @@ def get_latest_version_tag_ref(repo_path: str) -> str:
 def _get_latest_version_tag(repo_path: str) -> str | None:
     """Get the latest version tag name (vX.Y.Z)."""
     try:
-        result = subprocess.run(
-            ["git", "tag", "--list", "v*", "--sort=-version:refname"],
-            cwd=repo_path, capture_output=True, text=True, timeout=10, **_NOWND,
+        result = run_capture(
+            ["git", "tag", "--list", "v*", "--sort=-version:refname"], cwd=repo_path, timeout=10,
         )
         if result.returncode == 0:
             tags = result.stdout.strip().splitlines()
@@ -197,9 +191,8 @@ def get_recent_commits(repo_path: str, since_ref: str, limit: int = 5) -> list[s
     if not since_ref:
         return []
     try:
-        result = subprocess.run(
-            ["git", "log", "--oneline", f"{since_ref}..HEAD", f"-{limit}"],
-            cwd=repo_path, capture_output=True, text=True, timeout=10, **_NOWND,
+        result = run_capture(["git", "log", "--oneline", f"{since_ref}..HEAD", f"-{limit}"],
+            cwd=repo_path, timeout=10,
         )
         if result.returncode == 0:
             return [line.strip() for line in result.stdout.strip().splitlines() if line.strip()]

@@ -7,10 +7,10 @@ import json
 import logging
 import os
 import re
-import subprocess
 from datetime import datetime, timedelta, timezone
 
 from bot import config
+from bot.procutil import run_capture
 from bot.claude.models import context_tokens_from_usage
 from bot.claude.parser import is_context_overflow_error, looks_like_fatal_auth_error
 from bot.claude.provider import get_provider
@@ -43,7 +43,6 @@ from bot.store import history as history_mod
 from bot.textutil import parse_duration
 
 log = logging.getLogger(__name__)
-_NOWND: dict = config.NOWND
 
 MAX_COOLDOWN_RETRIES = 3
 
@@ -518,10 +517,7 @@ async def run_instance(
 def _repo_has_changes(repo_path: str) -> bool:
     """Check if a repo has uncommitted changes (staged or unstaged)."""
     try:
-        r = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=repo_path, capture_output=True, timeout=5, text=True, **_NOWND,
-        )
+        r = run_capture(["git", "status", "--porcelain"], cwd=repo_path, timeout=5)
         return bool(r.stdout.strip())
     except Exception:
         log.warning("Failed to check repo changes in %s", repo_path, exc_info=True)

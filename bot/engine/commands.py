@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from bot import config
+from bot.procutil import run_capture
 from bot.claude.gitpaths import git_toplevel
 from bot.claude.types import Instance, InstanceOrigin, InstanceStatus, InstanceType, KillOutcome, merge_msg_is_failure
 from bot.engine import (
@@ -51,7 +52,7 @@ from bot.platform.formatting import (
 )
 from bot.textutil import clip
 
-from bot.claude.runner import ClaudeRunner, MERGE_FAIL_DIVERGED, _NOWND, git_fail_reason
+from bot.claude.runner import ClaudeRunner, MERGE_FAIL_DIVERGED, git_fail_reason
 
 log = logging.getLogger(__name__)
 
@@ -2740,7 +2741,7 @@ async def _create_repo(ctx: RequestContext, text: str) -> None:
                 created_dir = True
             subprocess.run(
                 ["git", "init", "-b", "main"], cwd=str(repo_path),
-                capture_output=True, check=True, **_NOWND,
+                capture_output=True, check=True, **config.NOWND,
             )
         await asyncio.to_thread(_init)
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
@@ -2766,10 +2767,9 @@ async def _create_repo(ctx: RequestContext, text: str) -> None:
         visibility = "--public" if public else "--private"
         try:
             def _gh_create():
-                return subprocess.run(
-                    ["gh", "repo", "create", name, visibility,
+                return run_capture(["gh", "repo", "create", name, visibility,
                      "--source", str(repo_path), "--push"],
-                    capture_output=True, text=True, cwd=str(repo_path), **_NOWND,
+                    cwd=str(repo_path),
                 )
             result = await asyncio.to_thread(_gh_create)
             if result.returncode == 0:
@@ -3326,50 +3326,31 @@ def _resolver_prep_worktree(inst: Instance) -> tuple[str | None, list[str], str 
     if not inst.original_branch:
         return ("No original_branch on instance — cannot resolve.", [], None)
     wt = inst.worktree_path
-    _N = _NOWND
 
     # Best-effort abort any leftover merge state. If there's no merge in
     # progress this is a harmless no-op (non-zero exit, ignored).
-    subprocess.run(
-        ["git", "merge", "--abort"],
-        cwd=wt, capture_output=True, text=True, **_N,
-    )
+    run_capture(["git", "merge", "--abort"], cwd=wt)
 
-    head_r = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=wt, capture_output=True, text=True, **_N,
-    )
+    head_r = run_capture(["git", "rev-parse", "HEAD"], cwd=wt)
     if head_r.returncode != 0:
         return (f"Could not read worktree HEAD: {head_r.stderr.strip()}", [], None)
     pre_sha = head_r.stdout.strip()
 
     # Merge ORIGINAL into FEATURE so resolution lands on the feature ref.
     # We don't pass --no-ff; we want the natural merge attempt.
-    merge_r = subprocess.run(
-        ["git", "merge", "--no-commit", "--no-ff", inst.original_branch],
-        cwd=wt, capture_output=True, text=True, **_N,
-    )
+    merge_r = run_capture(["git", "merge", "--no-commit", "--no-ff", inst.original_branch], cwd=wt)
     # Conflicts → returncode != 0 AND files in --diff-filter=U.
-    conflicts_r = subprocess.run(
-        ["git", "diff", "--name-only", "--diff-filter=U"],
-        cwd=wt, capture_output=True, text=True, **_N,
-    )
+    conflicts_r = run_capture(["git", "diff", "--name-only", "--diff-filter=U"], cwd=wt)
     conflicts = [f.strip() for f in conflicts_r.stdout.splitlines() if f.strip()]
     if merge_r.returncode == 0 and not conflicts:
         # Merge succeeded cleanly on replay — the original failure must have
         # been transient. Commit and let the caller skip the resolver.
-        subprocess.run(
-            ["git", "commit", "--no-edit"],
-            cwd=wt, capture_output=True, text=True, **_N,
-        )
+        run_capture(["git", "commit", "--no-edit"], cwd=wt)
         return ("CLEAN", [], pre_sha)
     if not conflicts:
         # Non-zero exit without unmerged paths — something unexpected.
         detail = (merge_r.stderr or merge_r.stdout or "").strip()
-        subprocess.run(
-            ["git", "merge", "--abort"],
-            cwd=wt, capture_output=True, text=True, **_N,
-        )
+        run_capture(["git", "merge", "--abort"], cwd=wt)
         return (f"Replay failed with no conflict files: {detail}", [], None)
     return (None, conflicts, pre_sha)
 
@@ -3379,20 +3360,13 @@ def _resolver_verify(inst: Instance, pre_sha: str | None) -> tuple[bool, str]:
     if not inst.worktree_path or not Path(inst.worktree_path).is_dir():
         return (False, "worktree missing")
     wt = inst.worktree_path
-    _N = _NOWND
 
-    merge_head = subprocess.run(
-        ["git", "rev-parse", "--verify", "MERGE_HEAD"],
-        cwd=wt, capture_output=True, text=True, **_N,
-    )
+    merge_head = run_capture(["git", "rev-parse", "--verify", "MERGE_HEAD"], cwd=wt)
     if merge_head.returncode == 0:
         return (False, "merge still in progress (MERGE_HEAD present)")
 
     if pre_sha:
-        head_r = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=wt, capture_output=True, text=True, **_N,
-        )
+        head_r = run_capture(["git", "rev-parse", "HEAD"], cwd=wt)
         if head_r.returncode != 0:
             return (False, "could not read post-merge HEAD")
         post_sha = head_r.stdout.strip()
@@ -3526,11 +3500,7 @@ async def _on_resolve_merge(
     if not spawned:
         # Roll back the replayed merge so a retry has a clean slate.
         # Keep deferred_text intact so the next Resolve attempt can deliver it.
-        await asyncio.to_thread(
-            subprocess.run,
-            ["git", "merge", "--abort"],
-            cwd=inst.worktree_path, capture_output=True, text=True, **_NOWND,
-        )
+        await asyncio.to_thread(run_capture, ["git", "merge", "--abort"], cwd=inst.worktree_path)
         return
     resolver_inst, task = spawned
     if deferred:
@@ -3582,10 +3552,8 @@ async def _on_resolve_merge(
     if timed_out:
         # Abort the half-resolved merge so subsequent attempts have a clean tree.
         if inst.worktree_path and Path(inst.worktree_path).is_dir():
-            await asyncio.to_thread(
-                subprocess.run,
-                ["git", "merge", "--abort"],
-                cwd=inst.worktree_path, capture_output=True, text=True, **_NOWND,
+            await asyncio.to_thread(run_capture, 
+                ["git", "merge", "--abort"], cwd=inst.worktree_path,
             )
         await _post_resolver_failure(
             ctx, inst, source_msg_id,
@@ -3598,10 +3566,8 @@ async def _on_resolve_merge(
     if not ok:
         # Abort any half-merge state.
         if inst.worktree_path and Path(inst.worktree_path).is_dir():
-            await asyncio.to_thread(
-                subprocess.run,
-                ["git", "merge", "--abort"],
-                cwd=inst.worktree_path, capture_output=True, text=True, **_NOWND,
+            await asyncio.to_thread(run_capture, 
+                ["git", "merge", "--abort"], cwd=inst.worktree_path,
             )
         await _post_resolver_failure(
             ctx, inst, source_msg_id,
@@ -3744,11 +3710,7 @@ async def _on_resolve_cancel(
             ctx.store.update_instance(resolver_inst, critical=True)
     # Abort any half-merge so subsequent attempts start clean.
     if inst.worktree_path and Path(inst.worktree_path).is_dir():
-        await asyncio.to_thread(
-            subprocess.run,
-            ["git", "merge", "--abort"],
-            cwd=inst.worktree_path, capture_output=True, text=True, **_NOWND,
-        )
+        await asyncio.to_thread(run_capture, ["git", "merge", "--abort"], cwd=inst.worktree_path)
     text = "Resolver cancelled. Tap **Resolve with Claude**, **Try Merge Again**, or **Discard**."
     if source_msg_id:
         try:
