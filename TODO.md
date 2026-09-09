@@ -17,19 +17,19 @@
 
 - [ ] **Audit `_restore_stash` for unmerged-index leakage after stash-pop conflicts.** The t-4114 orphaned-index recovery (`bot/claude/runner.py:_check_main_repo_clean` Path B) catches the symptom downstream, but the precise pre-existing path that left the main repo in this state is most likely the `_restore_stash` call inside `_merge_branch_sync`'s failure handler — a stash pop with conflicts can leave unmerged stages in the index, and we currently swallow the result instead of either aborting or surfacing the leftover state. Trace the failure path: stash push (line ~2935) → merge attempt → conflict → `git merge --abort` → `_restore_stash` (in both the auto-resolve-fail and `CalledProcessError` paths) — and confirm whether the stash pop is the leak source. If so, gate the pop on a clean index post-abort, or auto-recover via the same `git reset --merge` ladder Path B uses.
 
-- [ ] **`subprocess.run` boilerplate in `bot/claude/runner.py`**: 82 call sites, 63 of them sharing the exact kwarg set `capture_output=True, text=True, **_NOWND`, with the rest adding `check=`, `timeout=` or `encoding=`. A `_run_capture` passthrough would collapse each four-line call to one or two and is the largest single reduction left in the repo's biggest file. Left alone deliberately: the call sites are the merge, worktree and stash git admin paths, where harness coverage is partial and a mis-transformed kwarg fails only on a conflict path nothing exercises. Take it with a mechanical 1:1 mapping check, not by hand.
+- [x] **`subprocess.run` boilerplate** (done): `procutil.run_capture` now carries all 125 capture sites across eleven modules, and `NOWND` moved there with it so `config.NOWND` is a re-export. Transformed by AST rather than by hand, and proved by expanding the helper back to the kwargs it forwards and diffing the call tables before and after. Two sites in the merge-file path stay on `subprocess.run` because they capture bytes, and one in `commands.py` because it passes `check=` without `text=`.
 
-- [ ] **Two working verification scripts never run** (`scripts/verify_chain_meta.py`, `scripts/verify_t3559.py`): both still pass today, both were written alongside the feature commit they verify (autopilot chain meta, and skipping title-gen jsonls in the `/session` picker), and neither is named `test_*.py`, so the suite has never picked them up. Either rename them into the harness set or delete them; leaving them is un-run coverage that will rot silently.
+- [x] **Two working verification scripts never run** (done): both registered in `.claude/test.json` under `chain_meta` and `session_picker_filter`, and both gained the `import _bootstrap` line `check_portability.py` requires of any registered harness that imports `bot`.
 
 - [ ] **Guard boilerplate duplicated between `spawn_from` and `spawn_resolver_detached`** (`bot/engine/workflows.py:766` and `:977`): the same drain check, budget check and repo-path check, eleven lines, with only the session guard differing. Small enough that a helper plus its docstring roughly breaks even on lines, so it was left alone; worth folding in if a fourth guard is ever added to one of them.
 
-- [ ] **The plan-action button rows are written twice** (`bot/platform/formatting.py:855` and `:883`): the same Autopilot / Autopilot (Hold) / Review Plan / Build & Ship / Done rows, at two indent levels, gated the same way on `has_autopilot_chain`. A `_plan_action_rows(iid, has_autopilot_chain)` helper would net about six lines.
+- [x] **The plan-action button rows are written twice** (done): both blocks now call `_plan_action_rows(iid, has_autopilot_chain)`. Checked against the old code over all 130,560 reachable instance states, zero differences.
 
 - [ ] **`scripts/make_hypotheek_dossier.py` is a personal document generator sitting in `scripts/`**: Dutch, generates a Word file for a mortgage meeting, unrelated to the bot. It is gitignored and untracked, so it was left completely alone rather than deleted. Move it out of the repo when convenient.
 
-- [ ] **One dead local**: `today` at `bot/monitor/service.py:417` is assigned and never read. Not worth its own commit; fold it into the next change in that file.
+- [x] **One dead local** (done): `today` in the usage rollup is gone. An AST sweep of `bot/` for other assigned-never-read locals found none.
 
-- [ ] **Deduplicate mode-handling logic** — 3 near-identical `_handle_control_mode` blocks in `bot/discord/interactions.py` (owner control room, user control room, inline mode select). Extract a shared helper.
+- [x] **Deduplicate mode-handling logic** (stale, nothing to do): `_handle_control_mode` does not exist anywhere in the repo. `git log -S` puts its deletion in a646c3a, "Add effort buttons to session embeds, remove mode from control rooms". Two mode blocks remain, both in `bot/engine/commands.py` (`on_mode` and the `mode_explore`/`mode_plan`/`mode_build` callback branch), which is below the three-duplicate bar.
 
 - [ ] **Auto-merge: handle untracked-file collisions in main repo.** When the branch wants to add a file that already exists as an *untracked* file in master's working tree, git aborts before creating `MERGE_HEAD` ("error: The following untracked working tree files would be overwritten by merge"). "Resolve with Claude" can't help — there's no conflict state to resolve, so the resolver loops on the same failure. Detect this `failure_kind` specifically and either (a) auto-stash/move the conflicting untracked files aside, attempt the merge, and restore on abort, or (b) surface a dedicated "Move untracked files aside and retry" button instead of the generic resolver path. Symptom seen in thread `1505364903580401795`.
 
@@ -42,14 +42,14 @@
 - [ ] [UX/UI] Notify control room thread when file-based config is auto-registered (Medium)
 - [ ] [UX/UI] Followup message says "Rebooting" even after timeout force-reboot (Low)
 - [ ] [Modularity] BOT_CMD scanner belongs in its own module (Low)
-- [ ] [DRY/Cleanup] Extract git helper methods to a shared location (Low)
+- [x] [DRY/Cleanup] Extract git helper methods to a shared location — done, `procutil.run_capture`
 - [ ] [Performance] Skip auto-follow for owner-only repos (Low)
 - [ ] [UX/UI] Show cache age when serving stale fallback data (Low)
-- [ ] [DRY/Cleanup] Extract chain resume logic into shared helper (Low)
-- [ ] [DRY/Cleanup] Extract instance-cloning helper shared by retry and PPU (Low)
+- [x] [DRY/Cleanup] Extract chain resume logic into shared helper — not extractable: the three `advance_chain_phase` calls are 3-4 lines each at different points of one `while` loop, each immediately followed by `break` or `continue`, so the control flow cannot move into a function
+- [x] [DRY/Cleanup] Extract instance-cloning helper shared by retry and PPU — done, `StateStore.clone_instance_for_rerun`, shared by `/retry`, the Retry button, the cooldown auto-retry and pay-per-use
 - [ ] [Bug Risk] Discard path leaves stale completed tag on archived thread (Medium)
 - [ ] [Reliability] apply_thread_tags silently swallows tag-creation failures (Low)
-- [ ] [DRY/Cleanup] Merged check duplicated across two call sites (Low)
+- [x] [DRY/Cleanup] Merged check duplicated across two call sites — already unified: one `merge-base --is-ancestor` remains, and the ahead/behind check is the shared `fleet._commits_ahead`
 - [ ] [DRY/Cleanup] Setup steps should be a one-shot script (Low)
 - [ ] [Integration] Verification plan assumes Cursor CLI is free to test (Low)
 - [ ] [UX/UI] Failed CI should tag thread for visibility (Medium)
