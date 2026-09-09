@@ -757,6 +757,26 @@ def resolver_running_button_specs(instance_id: str) -> list[list[ButtonSpec]]:
     ]]
 
 
+def _plan_action_rows(iid: str, has_autopilot_chain: bool) -> list[list[ButtonSpec]]:
+    """The button rows offered when a plan is on the table.
+
+    Hide the Autopilot starters when a chain is already paused — Continue
+    Autopilot elsewhere on the card is the correct resumption path.
+    """
+    rows: list[list[ButtonSpec]] = []
+    if not has_autopilot_chain:
+        rows.append([
+            ButtonSpec("Autopilot", f"autopilot:{iid}"),
+            ButtonSpec("Autopilot (Hold)", f"autopilot_hold:{iid}"),
+        ])
+    rows.append([
+        ButtonSpec("Review Plan", f"review_plan:{iid}"),
+        ButtonSpec("Build & Ship", f"build_and_ship:{iid}"),
+        ButtonSpec("Done", f"done:{iid}"),
+    ])
+    return rows
+
+
 def action_button_specs(
     instance: Instance, show_expand: bool = False,
     has_autopilot_chain: bool = False,
@@ -849,19 +869,8 @@ def action_button_specs(
                     ButtonSpec("Done", f"done:{iid}"),
                 ])
             else:
-                # Plan created or revisions applied. Hide Autopilot starters
-                # when a chain is already paused — Continue Autopilot below
-                # is the correct resumption path.
-                if not has_autopilot_chain:
-                    rows.append([
-                        ButtonSpec("Autopilot", f"autopilot:{iid}"),
-                        ButtonSpec("Autopilot (Hold)", f"autopilot_hold:{iid}"),
-                    ])
-                rows.append([
-                    ButtonSpec("Review Plan", f"review_plan:{iid}"),
-                    ButtonSpec("Build & Ship", f"build_and_ship:{iid}"),
-                    ButtonSpec("Done", f"done:{iid}"),
-                ])
+                # Plan created or revisions applied
+                rows.extend(_plan_action_rows(iid, has_autopilot_chain))
         elif made_code_changes:
             # Edited/wrote files in-place (no branch)
             rows.append([
@@ -879,17 +888,7 @@ def action_button_specs(
         elif session_has_plan:
             # Fallback: session has a plan from a prior instance, and this
             # instance didn't do anything code-related — offer plan actions.
-            # Skip Autopilot starters when a chain is already paused.
-            if not has_autopilot_chain:
-                rows.append([
-                    ButtonSpec("Autopilot", f"autopilot:{iid}"),
-                    ButtonSpec("Autopilot (Hold)", f"autopilot_hold:{iid}"),
-                ])
-            rows.append([
-                ButtonSpec("Review Plan", f"review_plan:{iid}"),
-                ButtonSpec("Build & Ship", f"build_and_ship:{iid}"),
-                ButtonSpec("Done", f"done:{iid}"),
-            ])
+            rows.extend(_plan_action_rows(iid, has_autopilot_chain))
         else:
             # Default buttons + workflow row when session exists
             rows.append([
