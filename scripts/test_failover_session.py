@@ -24,6 +24,8 @@ Run: ``python scripts/test_failover_session.py``  (exit 0 on pass).
 
 from __future__ import annotations
 
+import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
+
 import asyncio
 import os
 import shutil

@@ -5,6 +5,8 @@ allowed in every repo, at that repo's own settings. This pins the denial, and
 pins that an unresolvable channel drops to the tightest policy the user holds
 rather than to the permissive defaults.
 """
+import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
+
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import bot.discord.bot as B

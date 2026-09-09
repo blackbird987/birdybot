@@ -20,6 +20,8 @@ Run: ``python scripts/verify_plan_floor.py``
 
 from __future__ import annotations
 
+import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
+
 import sys
 from pathlib import Path
 

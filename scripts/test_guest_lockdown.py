@@ -6,6 +6,8 @@ This pins that the assignment happens on join, that it is idempotent, that a
 failure is loud rather than silent, and -- the one that matters on a live
 community server -- that an ordinary joiner is never given it.
 """
+import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
+
 import asyncio, os, sys, types
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 

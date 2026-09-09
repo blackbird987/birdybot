@@ -9,6 +9,8 @@ could go wrong.
 
 from __future__ import annotations
 
+import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
+
 import asyncio
 import os
 import sys

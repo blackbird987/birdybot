@@ -8,6 +8,8 @@ Self-contained: writes a fake session jsonl and monkeypatches the file lookup.
 Run: python scripts/test_ai_title.py
 """
 
+import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
+
 import os
 import sys
 import tempfile

@@ -25,6 +25,8 @@ a write path fails this suite.
 
 from __future__ import annotations
 
+import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
+
 import contextlib
 import io
 import json
