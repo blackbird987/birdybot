@@ -64,6 +64,18 @@ log = logging.getLogger(__name__)
 _NOWND: dict = config.NOWND
 
 
+def _run_capture(cmd, **kwargs) -> "subprocess.CompletedProcess[str]":
+    """``subprocess.run`` capturing text output, with the Windows no-window flags.
+
+    A pure passthrough: every other keyword goes straight through to
+    ``subprocess.run``, so a call site that needs ``check=``, ``timeout=``,
+    ``input=`` or an explicit ``encoding=`` keeps its exact semantics and its
+    exact defaults. It exists only because the git admin paths below repeat
+    ``capture_output=True, text=True, **_NOWND`` eighty times over.
+    """
+    return subprocess.run(cmd, capture_output=True, text=True, **kwargs, **_NOWND)
+
+
 def _lower_priority(pid: int) -> None:
     """Renice a freshly spawned session CLI below the bot's own priority.
 
@@ -4085,9 +4097,8 @@ class ClaudeRunner:
         default_branch = instance.original_branch
         if not default_branch:
             try:
-                r = subprocess.run(
-                    ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-                    cwd=repo, capture_output=True, text=True, **_NOWND,
+                r = _run_capture(
+                    ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], cwd=repo,
                 )
                 if r.returncode == 0 and r.stdout.strip():
                     default_branch = r.stdout.strip().split("/", 1)[-1]
@@ -4097,10 +4108,7 @@ class ClaudeRunner:
             default_branch = "master"
 
         try:
-            log_r = subprocess.run(
-                ["git", "log", "-10", "--oneline", default_branch],
-                cwd=repo, capture_output=True, text=True, **_NOWND,
-            )
+            log_r = _run_capture(["git", "log", "-10", "--oneline", default_branch], cwd=repo)
         except Exception:
             return ""
         if log_r.returncode != 0:
@@ -4113,10 +4121,7 @@ class ClaudeRunner:
         # so resumed/compacted spawns can compute "since I started" deltas.
         if not instance.master_baseline_head:
             try:
-                head_r = subprocess.run(
-                    ["git", "rev-parse", default_branch],
-                    cwd=repo, capture_output=True, text=True, **_NOWND,
-                )
+                head_r = _run_capture(["git", "rev-parse", default_branch], cwd=repo)
                 if head_r.returncode == 0:
                     sha = head_r.stdout.strip()
                     if sha:
@@ -4134,10 +4139,10 @@ class ClaudeRunner:
         # against blind rebuild-after-compaction.
         if instance.master_baseline_head:
             try:
-                since_r = subprocess.run(
+                since_r = _run_capture(
                     ["git", "log", "--oneline",
                      f"{instance.master_baseline_head}..{default_branch}"],
-                    cwd=repo, capture_output=True, text=True, **_NOWND,
+                    cwd=repo,
                 )
             except Exception:
                 since_r = None
@@ -4171,10 +4176,10 @@ class ClaudeRunner:
         # Branch-vs-master diff stat — surfaces "branch already merged" cases.
         if instance.branch and instance.branch != default_branch:
             try:
-                diff_r = subprocess.run(
+                diff_r = _run_capture(
                     ["git", "diff", "--stat",
                      f"{default_branch}...{instance.branch}"],
-                    cwd=repo, capture_output=True, text=True, **_NOWND,
+                    cwd=repo,
                 )
             except Exception:
                 diff_r = None
@@ -4196,10 +4201,10 @@ class ClaudeRunner:
                     # the warning and a cautious LLM bails before touching
                     # any files. See thread 1506256492884660256.
                     try:
-                        anc_r = subprocess.run(
+                        anc_r = _run_capture(
                             ["git", "merge-base", "--is-ancestor",
                              instance.branch, default_branch],
-                            cwd=repo, capture_output=True, text=True, **_NOWND,
+                            cwd=repo,
                         )
                     except Exception:
                         anc_r = None
@@ -5050,16 +5055,10 @@ class ClaudeRunner:
             Path(wt_dir).parent.mkdir(parents=True, exist_ok=True)
 
             # Create worktree with a new branch from current HEAD (master/main)
-            result = subprocess.run(
-                ["git", "worktree", "add", wt_dir, "-b", branch],
-                cwd=repo, capture_output=True, text=True, **_NOWND,
-            )
+            result = _run_capture(["git", "worktree", "add", wt_dir, "-b", branch], cwd=repo)
             if result.returncode != 0:
                 # Branch might already exist (retry/resume) — try without -b
-                subprocess.run(
-                    ["git", "worktree", "add", wt_dir, branch],
-                    cwd=repo, capture_output=True, text=True, check=True, **_NOWND,
-                )
+                _run_capture(["git", "worktree", "add", wt_dir, branch], cwd=repo, check=True)
 
             instance.worktree_path = wt_dir
             instance.original_branch = default_branch
@@ -5277,11 +5276,7 @@ class ClaudeRunner:
         # `git add -A` in the worktree can't stage it onto the build branch.
         exclude_line = ".claude/settings.local.json"
         try:
-            r = subprocess.run(
-                ["git", "rev-parse", "--git-common-dir"],
-                cwd=repo_path, capture_output=True, text=True,
-                check=True, **_NOWND,
-            )
+            r = _run_capture(["git", "rev-parse", "--git-common-dir"], cwd=repo_path, check=True)
             common_dir = r.stdout.strip()
         except subprocess.CalledProcessError:
             log.warning(
@@ -5365,27 +5360,20 @@ class ClaudeRunner:
     def _get_default_branch(repo_path: str) -> str:
         """Determine the default branch (master or main)."""
         for candidate in ("master", "main"):
-            r = subprocess.run(
-                ["git", "rev-parse", "--verify", f"refs/heads/{candidate}"],
-                cwd=repo_path, capture_output=True, text=True, **_NOWND,
+            r = _run_capture(
+                ["git", "rev-parse", "--verify", f"refs/heads/{candidate}"], cwd=repo_path,
             )
             if r.returncode == 0:
                 return candidate
         # Fallback: use HEAD if it's not a bot-managed branch
         _prefix = f"{config.BRANCH_PREFIX}/"
-        r = subprocess.run(
-            ["git", "symbolic-ref", "--short", "HEAD"],
-            cwd=repo_path, capture_output=True, text=True, **_NOWND,
-        )
+        r = _run_capture(["git", "symbolic-ref", "--short", "HEAD"], cwd=repo_path)
         if r.returncode == 0:
             head = r.stdout.strip()
             if head and not head.startswith(_prefix):
                 return head
         # Last resort: find any non-bot-managed branch
-        r = subprocess.run(
-            ["git", "branch", "--format=%(refname:short)"],
-            cwd=repo_path, capture_output=True, text=True, **_NOWND,
-        )
+        r = _run_capture(["git", "branch", "--format=%(refname:short)"], cwd=repo_path)
         if r.returncode == 0:
             for line in r.stdout.strip().splitlines():
                 branch = line.strip()
@@ -6088,10 +6076,7 @@ class ClaudeRunner:
             # Diff runs in worktree (where changes are) against the merge base
             diff_cwd = instance.worktree_path or instance.repo_path
             base = instance.original_branch or "HEAD~1"
-            result = subprocess.run(
-                ["git", "diff", base, "--", "."],
-                cwd=diff_cwd, capture_output=True, text=True, **_NOWND,
-            )
+            result = _run_capture(["git", "diff", base, "--", "."], cwd=diff_cwd)
             if (result.stdout or "").strip():
                 diff_path = config.RESULTS_DIR / f"{instance.id}.diff"
                 diff_path.write_text(result.stdout, encoding="utf-8")
@@ -6141,10 +6126,7 @@ class ClaudeRunner:
                 "Main repo %s has leftover MERGE_HEAD — attempting cleanup", repo,
             )
             try:
-                subprocess.run(
-                    ["git", "merge", "--abort"],
-                    cwd=repo, capture_output=True, text=True, **_NOWND,
-                )
+                _run_capture(["git", "merge", "--abort"], cwd=repo)
             except Exception:
                 log.warning(
                     "git merge --abort raised in %s", repo, exc_info=True,
@@ -6164,10 +6146,7 @@ class ClaudeRunner:
         # unmerged stages. After Path A's abort succeeds, the index is
         # usually clean — but the abort+stash-pop interaction can leave
         # residue, so always check.
-        unmerged = subprocess.run(
-            ["git", "ls-files", "--unmerged"],
-            cwd=repo, capture_output=True, text=True, **_NOWND,
-        )
+        unmerged = _run_capture(["git", "ls-files", "--unmerged"], cwd=repo)
         if unmerged.returncode != 0 or not (unmerged.stdout or "").strip():
             return PrecheckResult()
 
@@ -6184,15 +6163,9 @@ class ClaudeRunner:
 
         # First try the gentle path: `git reset --merge` keeps unrelated
         # working-tree edits intact and just drops merge-only stages.
-        reset_r = subprocess.run(
-            ["git", "reset", "--merge"],
-            cwd=repo, capture_output=True, text=True, **_NOWND,
-        )
+        reset_r = _run_capture(["git", "reset", "--merge"], cwd=repo)
         if reset_r.returncode == 0:
-            recheck = subprocess.run(
-                ["git", "ls-files", "--unmerged"],
-                cwd=repo, capture_output=True, text=True, **_NOWND,
-            )
+            recheck = _run_capture(["git", "ls-files", "--unmerged"], cwd=repo)
             if not (recheck.stdout or "").strip():
                 log.info(
                     "Cleared orphaned unmerged index in %s via `git reset --merge`",
@@ -6209,10 +6182,7 @@ class ClaudeRunner:
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         label = f"auto-stash poisoned-index-recovery {timestamp}"
 
-        create_r = subprocess.run(
-            ["git", "stash", "create"],
-            cwd=repo, capture_output=True, text=True, **_NOWND,
-        )
+        create_r = _run_capture(["git", "stash", "create"], cwd=repo)
         stash_sha = (create_r.stdout or "").strip()
         if create_r.returncode != 0 or not stash_sha:
             log.error(
@@ -6228,10 +6198,7 @@ class ClaudeRunner:
                 ),
             )
 
-        store_r = subprocess.run(
-            ["git", "stash", "store", "-m", label, stash_sha],
-            cwd=repo, capture_output=True, text=True, **_NOWND,
-        )
+        store_r = _run_capture(["git", "stash", "store", "-m", label, stash_sha], cwd=repo)
         if store_r.returncode != 0:
             # Stash object exists as a loose commit; user can still recover
             # it via `git stash apply <sha>` even without the ref. Warn but
@@ -6251,10 +6218,7 @@ class ClaudeRunner:
             )
 
         # Now safe to nuke: working tree + index are captured in the stash.
-        hard_r = subprocess.run(
-            ["git", "reset", "--hard", "HEAD"],
-            cwd=repo, capture_output=True, text=True, **_NOWND,
-        )
+        hard_r = _run_capture(["git", "reset", "--hard", "HEAD"], cwd=repo)
         if hard_r.returncode != 0:
             log.error(
                 "git reset --hard HEAD failed in %s after stash: rc=%d %s",
@@ -6270,10 +6234,7 @@ class ClaudeRunner:
             )
 
         # Final sanity check.
-        final = subprocess.run(
-            ["git", "ls-files", "--unmerged"],
-            cwd=repo, capture_output=True, text=True, **_NOWND,
-        )
+        final = _run_capture(["git", "ls-files", "--unmerged"], cwd=repo)
         if (final.stdout or "").strip():
             log.error(
                 "Orphaned unmerged index survived `git reset --hard HEAD` in %s",
@@ -6313,14 +6274,14 @@ class ClaudeRunner:
         failure — callers treat that as "no candidates" and skip tagging.
         """
         try:
-            r = subprocess.run(
+            r = _run_capture(
                 [
                     "git", "log", "--first-parent",
                     f"-{_TAG_WALKBACK_CAP}",
                     "--format=%H%x09%s",
                     f"HEAD^1..{branch_tip}",
                 ],
-                cwd=repo, capture_output=True, text=True, **_NOWND,
+                cwd=repo,
             )
         except Exception:
             log.exception("git log for release-commit window failed in %s", repo)
@@ -6365,10 +6326,10 @@ class ClaudeRunner:
             # the tag-object SHA, which never equals the commit SHA we
             # compare against — falsely tripping the no-clobber branch on
             # an annotated tag that's actually already correct.
-            existing = subprocess.run(
+            existing = _run_capture(
                 ["git", "rev-parse", "--verify",
                  f"refs/tags/{tag_name}^{{commit}}"],
-                cwd=repo, capture_output=True, text=True, **_NOWND,
+                cwd=repo,
             )
             if existing.returncode == 0:
                 where = (existing.stdout or "").strip()
@@ -6384,10 +6345,7 @@ class ClaudeRunner:
                     tag_name, where[:7], sha[:7], repo,
                 )
                 return None, candidate_shas
-            create = subprocess.run(
-                ["git", "tag", tag_name, sha],
-                cwd=repo, capture_output=True, text=True, **_NOWND,
-            )
+            create = _run_capture(["git", "tag", tag_name, sha], cwd=repo)
             if create.returncode != 0:
                 log.error(
                     "git tag %s %s failed in %s: %s",
@@ -6444,10 +6402,7 @@ class ClaudeRunner:
         like "in sync" rather than block the merge.
         """
         try:
-            r = subprocess.run(
-                ["git", "rev-list", "--count", range_spec],
-                cwd=repo, capture_output=True, text=True, timeout=10, **_NOWND,
-            )
+            r = _run_capture(["git", "rev-list", "--count", range_spec], cwd=repo, timeout=10)
         except (OSError, subprocess.TimeoutExpired):
             log.warning("rev-list --count %s failed in %s", range_spec, repo,
                         exc_info=True)
@@ -6492,9 +6447,8 @@ class ClaudeRunner:
                 ver_name = m.group(1)
                 # Untagged for one of two reasons — name taken (no-clobber)
                 # or tag creation failed. Tell the user which.
-                tag_exists = subprocess.run(
-                    ["git", "rev-parse", "--verify", f"refs/tags/{ver_name}"],
-                    cwd=repo, capture_output=True, text=True, **_NOWND,
+                tag_exists = _run_capture(
+                    ["git", "rev-parse", "--verify", f"refs/tags/{ver_name}"], cwd=repo,
                 ).returncode == 0
                 if tag_exists:
                     return (
@@ -6511,10 +6465,7 @@ class ClaudeRunner:
         if ver is None:
             return ""
         try:
-            r = subprocess.run(
-                ["git", "tag", "-l", "v*"],
-                cwd=repo, capture_output=True, text=True, timeout=10, **_NOWND,
-            )
+            r = _run_capture(["git", "tag", "-l", "v*"], cwd=repo, timeout=10)
         except (OSError, subprocess.TimeoutExpired):
             return ""
         if r.returncode != 0:
@@ -6546,10 +6497,7 @@ class ClaudeRunner:
         until the abort clears them — don't get misclassified.
         """
         try:
-            r = subprocess.run(
-                ["git", "ls-files", "--unmerged"],
-                cwd=repo, capture_output=True, text=True, **_NOWND,
-            )
+            r = _run_capture(["git", "ls-files", "--unmerged"], cwd=repo)
         except Exception:
             log.warning(
                 "ls-files --unmerged raised during classification in %s",
@@ -6587,18 +6535,16 @@ class ClaudeRunner:
         # message.  Manual `git branch -D` outside the bot would also land
         # here, which is acceptable: that workflow isn't supported, and the
         # alternative (failing loudly on the legitimate restart case) is worse.
-        ref_check = subprocess.run(
-            ["git", "rev-parse", "--verify", f"refs/heads/{instance.branch}"],
-            cwd=repo, capture_output=True, text=True, **_NOWND,
+        ref_check = _run_capture(
+            ["git", "rev-parse", "--verify", f"refs/heads/{instance.branch}"], cwd=repo,
         )
         if ref_check.returncode != 0:
             # Branch is gone but the worktree dir may linger if the prior run
             # crashed between `git merge` and `git worktree remove`.  Best-
             # effort cleanup so we don't leak it for /branches to find later.
             if instance.worktree_path and Path(instance.worktree_path).exists():
-                subprocess.run(
-                    ["git", "worktree", "remove", instance.worktree_path, "--force"],
-                    cwd=repo, capture_output=True, text=True, **_NOWND,
+                _run_capture(
+                    ["git", "worktree", "remove", instance.worktree_path, "--force"], cwd=repo,
                 )
             stale_branch = instance.branch
             instance.branch = None
@@ -6626,10 +6572,7 @@ class ClaudeRunner:
             self._copy_session_from_worktree(instance, None)
 
             # Re-verify original_branch exists; re-detect if stale
-            r = subprocess.run(
-                ["git", "rev-parse", "--verify", f"refs/heads/{target}"],
-                cwd=repo, capture_output=True, text=True, **_NOWND,
-            )
+            r = _run_capture(["git", "rev-parse", "--verify", f"refs/heads/{target}"], cwd=repo)
             if r.returncode != 0:
                 target = self._get_default_branch(repo)
                 instance.original_branch = target
@@ -6640,10 +6583,7 @@ class ClaudeRunner:
             # the count behind the cap.
             dirty_files: list[str] = []
             dirty_total = 0
-            status_r = subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=repo, capture_output=True, text=True, **_NOWND,
-            )
+            status_r = _run_capture(["git", "status", "--porcelain"], cwd=repo)
             if status_r.stdout.strip():
                 parsed = [
                     line[3:].strip() for line in status_r.stdout.strip().splitlines()
@@ -6652,10 +6592,10 @@ class ClaudeRunner:
                 dirty_files = parsed[:5]  # display cap only — dirty_total carries truth
                 log.info("Stashing dirty working tree in %s before merge (%d files): %s",
                          repo, dirty_total, ", ".join(dirty_files))
-                stash_r = subprocess.run(
+                stash_r = _run_capture(
                     ["git", "stash", "push", "-m",
                      f"auto-stash for merge {instance.branch}"],
-                    cwd=repo, capture_output=True, text=True, **_NOWND,
+                    cwd=repo,
                 )
                 if stash_r.returncode == 0:
                     stashed = True
@@ -6665,10 +6605,7 @@ class ClaudeRunner:
             self._ensure_union_merge_driver(repo)
 
             # Ensure main repo is on the correct branch before merging
-            subprocess.run(
-                ["git", "checkout", target],
-                cwd=repo, capture_output=True, text=True, check=True, **_NOWND,
-            )
+            _run_capture(["git", "checkout", target], cwd=repo, check=True)
 
             # Sync target with origin before merging: releases can land on
             # origin from another machine first, and merging/tagging against
@@ -6676,17 +6613,14 @@ class ClaudeRunner:
             # Offline-tolerant — a failed fetch degrades to a local merge
             # with a visible note rather than blocking.
             sync_note = ""
-            has_remote = subprocess.run(
-                ["git", "remote", "get-url", "origin"],
-                cwd=repo, capture_output=True, text=True, **_NOWND,
+            has_remote = _run_capture(
+                ["git", "remote", "get-url", "origin"], cwd=repo,
             ).returncode == 0
             if has_remote:
                 fetch_err: str | None = None
                 try:
-                    fetch_r = subprocess.run(
-                        ["git", "fetch", "origin", "--tags", "--prune"],
-                        cwd=repo, capture_output=True, text=True,
-                        timeout=30, **_NOWND,
+                    fetch_r = _run_capture(
+                        ["git", "fetch", "origin", "--tags", "--prune"], cwd=repo, timeout=30,
                     )
                     if fetch_r.returncode != 0:
                         fetch_err = (fetch_r.stderr or fetch_r.stdout or "").strip()
@@ -6732,9 +6666,8 @@ class ClaudeRunner:
                             f"{stash_status}{recovery_suffix}"
                         )
                     if behind and not ahead:
-                        ff_r = subprocess.run(
-                            ["git", "merge", "--ff-only", f"origin/{target}"],
-                            cwd=repo, capture_output=True, text=True, **_NOWND,
+                        ff_r = _run_capture(
+                            ["git", "merge", "--ff-only", f"origin/{target}"], cwd=repo,
                         )
                         if ff_r.returncode != 0:
                             ff_detail = (ff_r.stderr or ff_r.stdout or "").strip()
@@ -6762,10 +6695,10 @@ class ClaudeRunner:
             # -X ours silently kept master's hunk on every conflict, which
             # invisibly clobbered the second of two parallel builds touching
             # the same file.
-            merge_r = subprocess.run(
+            merge_r = _run_capture(
                 ["git", "merge", instance.branch, "--no-ff",
                  "-m", f"Merge {instance.branch} ({instance.display_id()})"],
-                cwd=repo, capture_output=True, text=True, **_NOWND,
+                cwd=repo,
             )
 
             auto_resolved = 0
@@ -6782,10 +6715,7 @@ class ClaudeRunner:
                                 instance.branch, exc_info=True)
                     auto_resolved = -1
                 if auto_resolved < 0:
-                    subprocess.run(
-                        ["git", "merge", "--abort"],
-                        cwd=repo, capture_output=True, text=True, **_NOWND,
-                    )
+                    _run_capture(["git", "merge", "--abort"], cwd=repo)
                     self._last_merge_failure_kind[instance.id] = (
                         self._classify_post_abort_state(repo)
                     )
@@ -6802,9 +6732,8 @@ class ClaudeRunner:
 
             # Remove worktree (--force handles uncommitted changes)
             if instance.worktree_path and Path(instance.worktree_path).exists():
-                r = subprocess.run(
-                    ["git", "worktree", "remove", instance.worktree_path, "--force"],
-                    cwd=repo, capture_output=True, text=True, **_NOWND,
+                r = _run_capture(
+                    ["git", "worktree", "remove", instance.worktree_path, "--force"], cwd=repo,
                 )
                 if r.returncode != 0:
                     log.warning("git worktree remove failed for %s: %s",
@@ -6812,23 +6741,14 @@ class ClaudeRunner:
                     # Fallback: manual removal + prune
                     try:
                         shutil.rmtree(instance.worktree_path, ignore_errors=True)
-                        subprocess.run(
-                            ["git", "worktree", "prune"],
-                            cwd=repo, capture_output=True, text=True, **_NOWND,
-                        )
+                        _run_capture(["git", "worktree", "prune"], cwd=repo)
                     except Exception:
                         pass
 
             # Delete branch (-d safe after merge; -D fallback if -d fails)
-            r = subprocess.run(
-                ["git", "branch", "-d", instance.branch],
-                cwd=repo, capture_output=True, text=True, **_NOWND,
-            )
+            r = _run_capture(["git", "branch", "-d", instance.branch], cwd=repo)
             if r.returncode != 0:
-                subprocess.run(
-                    ["git", "branch", "-D", instance.branch],
-                    cwd=repo, capture_output=True, text=True, **_NOWND,
-                )
+                _run_capture(["git", "branch", "-D", instance.branch], cwd=repo)
 
             # Clean up worktree project dir
             self._cleanup_worktree_session_dir(instance)
@@ -6854,10 +6774,8 @@ class ClaudeRunner:
                 if not has_remote:
                     log.info("No remote 'origin' in %s — skipping push", repo)
                     push_note = "\nℹ️ No remote configured — local merge is fine"
-                elif (push_r := subprocess.run(
-                    ["git", "push", "origin", target],
-                    cwd=repo, capture_output=True, text=True,
-                    timeout=30, **_NOWND,
+                elif (push_r := _run_capture(
+                    ["git", "push", "origin", target], cwd=repo, timeout=30,
                 )).returncode != 0:
                     push_detail = (push_r.stderr or push_r.stdout or "").strip()
                     log.error("Push to origin after merge in %s: %s",
@@ -6875,10 +6793,7 @@ class ClaudeRunner:
                         tag_names: list[str] = []
                         seen: set[str] = set()
                         for sha in candidate_shas:
-                            tag_r = subprocess.run(
-                                ["git", "tag", "--points-at", sha],
-                                cwd=repo, capture_output=True, text=True, **_NOWND,
-                            )
+                            tag_r = _run_capture(["git", "tag", "--points-at", sha], cwd=repo)
                             if tag_r.returncode != 0:
                                 log.debug(
                                     "git tag --points-at %s failed in %s (rc=%d), skipping",
@@ -6891,10 +6806,8 @@ class ClaudeRunner:
                                     seen.add(name)
                                     tag_names.append(name)
                         if tag_names:
-                            tag_push_r = subprocess.run(
-                                ["git", "push", "origin"] + tag_names,
-                                cwd=repo, capture_output=True, text=True,
-                                timeout=30, **_NOWND,
+                            tag_push_r = _run_capture(
+                                ["git", "push", "origin"] + tag_names, cwd=repo, timeout=30,
                             )
                             if tag_push_r.returncode != 0:
                                 tag_detail = (tag_push_r.stderr or tag_push_r.stdout or "").strip()
@@ -6948,10 +6861,7 @@ class ClaudeRunner:
             )
         except subprocess.CalledProcessError as e:
             # Abort any in-progress merge to keep main repo clean for other sessions
-            subprocess.run(
-                ["git", "merge", "--abort"],
-                cwd=instance.repo_path, capture_output=True, text=True, **_NOWND,
-            )
+            _run_capture(["git", "merge", "--abort"], cwd=instance.repo_path)
             self._last_merge_failure_kind[instance.id] = (
                 self._classify_post_abort_state(repo)
             )
@@ -6978,10 +6888,7 @@ class ClaudeRunner:
             )
             if not merge_succeeded and _merge_head.exists():
                 try:
-                    subprocess.run(
-                        ["git", "merge", "--abort"],
-                        cwd=repo, capture_output=True, text=True, **_NOWND,
-                    )
+                    _run_capture(["git", "merge", "--abort"], cwd=repo)
                     log.warning(
                         "Aborted leftover merge in %s during finally cleanup", repo,
                     )
@@ -6997,10 +6904,7 @@ class ClaudeRunner:
         the fallback signal.
         """
         try:
-            r = subprocess.run(
-                ["git", "diff", "--name-only", "--diff-filter=U"],
-                cwd=repo, capture_output=True, text=True, **_NOWND,
-            )
+            r = _run_capture(["git", "diff", "--name-only", "--diff-filter=U"], cwd=repo)
             if r.returncode != 0:
                 return []
             return [ln for ln in r.stdout.splitlines() if ln.strip()]
@@ -7032,10 +6936,7 @@ class ClaudeRunner:
         return its merge-result string with stash status appended.
         """
         try:
-            check_r = subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=repo, capture_output=True, text=True, **_NOWND,
-            )
+            check_r = _run_capture(["git", "status", "--porcelain"], cwd=repo)
             # Narrow the dirty check to TRACKED changes only. Untracked
             # entries (`??`) don't block a stash pop unless there's an
             # actual filename collision — and if there is, the existing
@@ -7060,10 +6961,7 @@ class ClaudeRunner:
                     "\nℹ️ Stashed changes not auto-restored (tracked changes present after merge). "
                     "Recover with `git stash pop` — list with `git stash list`."
                 )
-            pop_r = subprocess.run(
-                ["git", "stash", "pop"],
-                cwd=repo, capture_output=True, text=True, **_NOWND,
-            )
+            pop_r = _run_capture(["git", "stash", "pop"], cwd=repo)
             if pop_r.returncode != 0:
                 # A conflicted pop leaves UNMERGED index entries, and
                 # `git checkout -- .` refuses to touch those ("path ... is
@@ -7078,10 +6976,7 @@ class ClaudeRunner:
                 # the user's work still survives in stash@{0} either way.
                 rollback_ok = False
                 try:
-                    rb_r = subprocess.run(
-                        ["git", "reset", "--hard", "HEAD"],
-                        cwd=repo, capture_output=True, text=True, **_NOWND,
-                    )
+                    rb_r = _run_capture(["git", "reset", "--hard", "HEAD"], cwd=repo)
                     rollback_ok = rb_r.returncode == 0
                     if not rollback_ok:
                         log.warning(
@@ -7168,10 +7063,9 @@ class ClaudeRunner:
         # paths with non-ASCII/special chars, which would feed literal
         # quotes into the pathspecs below and miss the file.  utf-8 matches
         # git's on-disk path encoding so the round-trip survives non-ASCII.
-        status_r = subprocess.run(
+        status_r = _run_capture(
             ["git", "status", "--porcelain", "-z"],
-            cwd=toplevel, capture_output=True, text=True,
-            encoding="utf-8", errors="replace", **_NOWND,
+            cwd=toplevel, encoding="utf-8", errors="replace",
         )
 
         conflicts: list[tuple[str, str]] = []
@@ -7203,10 +7097,7 @@ class ClaudeRunner:
         for code, filepath in conflicts:
             if code in ("UD", "DD"):
                 # Feature branch deleted — accept deletion
-                r = subprocess.run(
-                    ["git", "rm", "--", filepath],
-                    cwd=toplevel, capture_output=True, text=True, **_NOWND,
-                )
+                r = _run_capture(["git", "rm", "--", filepath], cwd=toplevel)
                 if r.returncode != 0:
                     log.warning("git rm failed for %s: %s",
                                 filepath, r.stderr.strip())
@@ -7222,10 +7113,7 @@ class ClaudeRunner:
                 if not self._checkout_theirs(toplevel, filepath):
                     return -1
 
-        commit_r = subprocess.run(
-            ["git", "commit", "--no-edit"],
-            cwd=toplevel, capture_output=True, text=True, **_NOWND,
-        )
+        commit_r = _run_capture(["git", "commit", "--no-edit"], cwd=toplevel)
         if commit_r.returncode != 0:
             log.warning("Failed to commit auto-resolved merge for %s: %s",
                         branch, commit_r.stderr.strip())
@@ -7288,10 +7176,7 @@ class ClaudeRunner:
                 # Clean merge — write result back
                 target = Path(toplevel) / filepath
                 target.write_bytes(mf.stdout)
-                subprocess.run(
-                    ["git", "add", "--", filepath],
-                    cwd=toplevel, capture_output=True, text=True, **_NOWND,
-                )
+                _run_capture(["git", "add", "--", filepath], cwd=toplevel)
                 log.info("merge-file resolved %s cleanly", filepath)
                 return True
 
@@ -7316,18 +7201,12 @@ class ClaudeRunner:
         ``toplevel`` must be the git working-tree root — ``filepath`` is
         toplevel-relative porcelain output.
         """
-        r1 = subprocess.run(
-            ["git", "checkout", "--theirs", "--", filepath],
-            cwd=toplevel, capture_output=True, text=True, **_NOWND,
-        )
+        r1 = _run_capture(["git", "checkout", "--theirs", "--", filepath], cwd=toplevel)
         if r1.returncode != 0:
             log.warning("checkout --theirs failed for %s: %s",
                         filepath, r1.stderr.strip())
             return False
-        r2 = subprocess.run(
-            ["git", "add", "--", filepath],
-            cwd=toplevel, capture_output=True, text=True, **_NOWND,
-        )
+        r2 = _run_capture(["git", "add", "--", filepath], cwd=toplevel)
         if r2.returncode != 0:
             log.warning("git add failed for %s: %s",
                         filepath, r2.stderr.strip())
@@ -7389,10 +7268,7 @@ class ClaudeRunner:
         # dirty seconds later.
         status = None
         for attempt in (1, 2):
-            status = subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=wt, capture_output=True, text=True, **_NOWND,
-            )
+            status = _run_capture(["git", "status", "--porcelain"], cwd=wt)
             if status.returncode == 0 and status.stdout.strip():
                 break
             log.warning(
@@ -7410,10 +7286,7 @@ class ClaudeRunner:
                 "clean or status failing after retry", instance.id,
             )
             return None
-        add_r = subprocess.run(
-            ["git", "add", "-A"],
-            cwd=wt, capture_output=True, text=True, **_NOWND,
-        )
+        add_r = _run_capture(["git", "add", "-A"], cwd=wt)
         if add_r.returncode != 0:
             log.warning(
                 "auto_commit_dirty_worktree: git add failed for %s: %s",
@@ -7426,20 +7299,14 @@ class ClaudeRunner:
             f"finishing. The autopilot guard committed the changes so the "
             f"chain could continue."
         )
-        commit_r = subprocess.run(
-            ["git", "commit", "-m", commit_msg, "--no-verify"],
-            cwd=wt, capture_output=True, text=True, **_NOWND,
-        )
+        commit_r = _run_capture(["git", "commit", "-m", commit_msg, "--no-verify"], cwd=wt)
         if commit_r.returncode != 0:
             log.warning(
                 "auto_commit_dirty_worktree: git commit failed for %s: %s",
                 wt, commit_r.stderr.strip(),
             )
             return None
-        sha_r = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=wt, capture_output=True, text=True, **_NOWND,
-        )
+        sha_r = _run_capture(["git", "rev-parse", "HEAD"], cwd=wt)
         sha = sha_r.stdout.strip() if sha_r.returncode == 0 else "(unknown)"
         log.info(
             "auto_commit_dirty_worktree: rescued %s with commit %s on %s",
@@ -7500,23 +7367,16 @@ class ClaudeRunner:
         # (orphaned, only fsck-recoverable) or destroys the changes
         # outright depending on git's mood.
         if preserve_if_dirty and wt_exists:
-            status = subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=worktree_path, capture_output=True, text=True, **_NOWND,
-            )
+            status = _run_capture(["git", "status", "--porcelain"], cwd=worktree_path)
             if status.returncode == 0 and status.stdout.strip():
-                add_r = subprocess.run(
-                    ["git", "add", "-A"],
-                    cwd=worktree_path, capture_output=True, text=True, **_NOWND,
-                )
+                add_r = _run_capture(["git", "add", "-A"], cwd=worktree_path)
                 if add_r.returncode == 0:
                     commit_msg = (
                         f"WIP: build halted with uncommitted changes "
                         f"({instance.id})"
                     )
-                    commit_r = subprocess.run(
-                        ["git", "commit", "-m", commit_msg, "--no-verify"],
-                        cwd=worktree_path, capture_output=True, text=True, **_NOWND,
+                    commit_r = _run_capture(
+                        ["git", "commit", "-m", commit_msg, "--no-verify"], cwd=worktree_path,
                     )
                     if commit_r.returncode == 0:
                         preserved_branch = instance.branch
@@ -7539,10 +7399,7 @@ class ClaudeRunner:
 
         # Each cleanup step is independent — continue on failure
         if wt_exists:
-            r = subprocess.run(
-                ["git", "worktree", "remove", worktree_path, "--force"],
-                cwd=repo, capture_output=True, text=True, **_NOWND,
-            )
+            r = _run_capture(["git", "worktree", "remove", worktree_path, "--force"], cwd=repo)
             if r.returncode != 0:
                 log.warning("Failed to remove worktree %s: %s", worktree_path, r.stderr.strip())
                 errors.append(f"worktree remove: {r.stderr.strip()}")
@@ -7550,10 +7407,7 @@ class ClaudeRunner:
         # Skip branch deletion when we just preserved a WIP commit on it —
         # that's the whole point of preservation.
         if not preserved_branch:
-            r = subprocess.run(
-                ["git", "branch", "-D", instance.branch],
-                cwd=repo, capture_output=True, text=True, **_NOWND,
-            )
+            r = _run_capture(["git", "branch", "-D", instance.branch], cwd=repo)
             if r.returncode != 0:
                 log.warning("Failed to delete branch %s: %s", instance.branch, r.stderr.strip())
                 errors.append(f"branch delete: {r.stderr.strip()}")
@@ -7620,25 +7474,18 @@ class ClaudeRunner:
           - "skip": unsafe (diverged, missing branches, git error)
         """
         # Verify target branch exists
-        r = subprocess.run(
-            ["git", "rev-parse", "--verify", f"refs/heads/{target}"],
-            cwd=repo, capture_output=True, text=True, **_NOWND,
-        )
+        r = _run_capture(["git", "rev-parse", "--verify", f"refs/heads/{target}"], cwd=repo)
         if r.returncode != 0:
             return ("skip", f"target branch '{target}' missing")
 
         # Verify source branch exists
-        r = subprocess.run(
-            ["git", "rev-parse", "--verify", f"refs/heads/{branch}"],
-            cwd=repo, capture_output=True, text=True, **_NOWND,
-        )
+        r = _run_capture(["git", "rev-parse", "--verify", f"refs/heads/{branch}"], cwd=repo)
         if r.returncode != 0:
             return ("skip", f"source branch '{branch}' missing")
 
         # Compute ahead/behind: left=target-only, right=branch-only
-        r = subprocess.run(
-            ["git", "rev-list", "--left-right", "--count", f"{target}...{branch}"],
-            cwd=repo, capture_output=True, text=True, **_NOWND,
+        r = _run_capture(
+            ["git", "rev-list", "--left-right", "--count", f"{target}...{branch}"], cwd=repo,
         )
         if r.returncode != 0:
             return ("skip", f"rev-list failed: {(r.stderr or '').strip()}")
@@ -7672,12 +7519,11 @@ class ClaudeRunner:
             # Explicit /* glob: ``refs/heads/{prefix}/`` (no glob) is treated as
             # an exact ref name, missing all branches. ``refs/heads/{prefix}/*``
             # matches every direct child.
-            result = subprocess.run(
+            result = _run_capture(
                 ["git", "for-each-ref",
                  "--format=%(refname:short)",
                  f"refs/heads/{config.BRANCH_PREFIX}/*"],
-                cwd=repo_path, capture_output=True, text=True,
-                encoding="utf-8", errors="replace", **_NOWND,
+                cwd=repo_path, encoding="utf-8", errors="replace",
             )
             if result.returncode != 0:
                 log.warning(
@@ -7710,10 +7556,9 @@ class ClaudeRunner:
         in by the caller is stale.
         """
         try:
-            r = subprocess.run(
+            r = _run_capture(
                 ["git", "worktree", "list", "--porcelain"],
-                cwd=repo_path, capture_output=True, text=True,
-                encoding="utf-8", errors="replace", **_NOWND,
+                cwd=repo_path, encoding="utf-8", errors="replace",
             )
             if r.returncode != 0:
                 return set()
@@ -7755,10 +7600,8 @@ class ClaudeRunner:
         if not wt.is_dir():
             return ("error", f"worktree dir missing: {worktree_path}")
         try:
-            r = subprocess.run(
-                ["git", "ls-tree", "-r", branch],
-                cwd=repo_path, capture_output=True, text=True,
-                encoding="utf-8", errors="replace", **_NOWND,
+            r = _run_capture(
+                ["git", "ls-tree", "-r", branch], cwd=repo_path, encoding="utf-8", errors="replace",
             )
             if r.returncode != 0:
                 return ("error", f"ls-tree failed: {(r.stderr or '').strip()[:200]}")
@@ -7787,11 +7630,10 @@ class ClaudeRunner:
                     return ("diverged", f"missing tracked file: {rel}")
                 paths_in_order.append(rel)
                 stdin_lines.append(str(f))
-            r = subprocess.run(
+            r = _run_capture(
                 ["git", "hash-object", "--stdin-paths"],
-                cwd=repo_path, capture_output=True, text=True,
-                encoding="utf-8", errors="replace",
-                input="\n".join(stdin_lines) + "\n", **_NOWND,
+                cwd=repo_path, encoding="utf-8", errors="replace",
+                input="\n".join(stdin_lines) + "\n",
             )
             if r.returncode != 0:
                 return ("error", f"hash-object failed: {(r.stderr or '').strip()[:200]}")
@@ -7936,10 +7778,9 @@ class ClaudeRunner:
             repo_name = path_to_name.get(repo_path, repo_path)
             # Ensure the branch still exists at all — if not, this isn't a
             # partial-worktree case, it's a fully-cleaned-up case.
-            r = subprocess.run(
+            r = _run_capture(
                 ["git", "rev-parse", "--verify", f"refs/heads/{inst.branch}"],
-                cwd=repo_path, capture_output=True, text=True,
-                encoding="utf-8", errors="replace", **_NOWND,
+                cwd=repo_path, encoding="utf-8", errors="replace",
             )
             if r.returncode != 0:
                 events.append(WorktreeRecoveryEvent(
@@ -7983,11 +7824,10 @@ class ClaudeRunner:
                 repo_lock = self._get_repo_lock(repo_path)
                 async with repo_lock:
                     r = await asyncio.to_thread(
-                        subprocess.run,
+                        _run_capture,
                         ["git", "worktree", "add", "--force",
                          str(wt_dir), inst.branch],
-                        cwd=repo_path, capture_output=True, text=True,
-                        encoding="utf-8", errors="replace", **_NOWND,
+                        cwd=repo_path, encoding="utf-8", errors="replace",
                     )
             except Exception as e:
                 events.append(WorktreeRecoveryEvent(
@@ -8050,10 +7890,8 @@ class ClaudeRunner:
 
             try:
                 subj_proc = await asyncio.to_thread(
-                    subprocess.run,
-                    ["git", "log", "-1", "--pretty=%H%n%s"],
-                    cwd=inst.worktree_path, capture_output=True, text=True,
-                    encoding="utf-8", errors="replace", **_NOWND,
+                    _run_capture, ["git", "log", "-1", "--pretty=%H%n%s"],
+                    cwd=inst.worktree_path, encoding="utf-8", errors="replace",
                 )
             except Exception:
                 continue
@@ -8075,10 +7913,9 @@ class ClaudeRunner:
 
             try:
                 tag_proc = await asyncio.to_thread(
-                    subprocess.run,
+                    _run_capture,
                     ["git", "rev-parse", "--verify", f"refs/tags/{version}"],
-                    cwd=inst.repo_path, capture_output=True, text=True,
-                    encoding="utf-8", errors="replace", **_NOWND,
+                    cwd=inst.repo_path, encoding="utf-8", errors="replace",
                 )
             except Exception:
                 continue
@@ -8249,18 +8086,12 @@ class ClaudeRunner:
         precheck = self._check_main_repo_clean(repo_path)
         if precheck.error:
             return precheck.error
-        r = subprocess.run(
-            ["git", "symbolic-ref", "--short", "HEAD"],
-            cwd=repo_path, capture_output=True, text=True, **_NOWND,
-        )
+        r = _run_capture(["git", "symbolic-ref", "--short", "HEAD"], cwd=repo_path)
         current = r.stdout.strip() if r.returncode == 0 else ""
         if not current.startswith(f"{config.BRANCH_PREFIX}/"):
             return None
         target = self._get_default_branch(repo_path)
-        r = subprocess.run(
-            ["git", "checkout", target],
-            cwd=repo_path, capture_output=True, text=True, **_NOWND,
-        )
+        r = _run_capture(["git", "checkout", target], cwd=repo_path)
         if r.returncode != 0:
             log.warning("Failed to checkout %s in %s: %s",
                         target, repo_path, r.stderr.strip())
@@ -8304,10 +8135,9 @@ class ClaudeRunner:
             wt_name = branch.split("/")[-1] if "/" in branch else branch
             wt_dir = Path(repo_path) / ".worktrees" / wt_name
             if wt_dir.exists():
-                r = subprocess.run(
+                r = _run_capture(
                     ["git", "worktree", "remove", str(wt_dir), "--force"],
-                    cwd=repo_path, capture_output=True, text=True,
-                    encoding="utf-8", errors="replace", **_NOWND,
+                    cwd=repo_path, encoding="utf-8", errors="replace",
                 )
                 if r.returncode != 0:
                     cleaned.append(
@@ -8317,10 +8147,8 @@ class ClaudeRunner:
                     # Do NOT fall through to rmtree — silent destruction of
                     # uncommitted work was exactly the bug we are fixing.
                     continue
-            r = subprocess.run(
-                ["git", "branch", "-D", branch],
-                cwd=repo_path, capture_output=True, text=True,
-                encoding="utf-8", errors="replace", **_NOWND,
+            r = _run_capture(
+                ["git", "branch", "-D", branch], cwd=repo_path, encoding="utf-8", errors="replace",
             )
             if r.returncode != 0:
                 cleaned.append(
@@ -8331,10 +8159,8 @@ class ClaudeRunner:
             cleaned.append(f"cleaned orphan {branch}")
 
         # Prune any worktree registrations pointing to deleted directories
-        subprocess.run(
-            ["git", "worktree", "prune"],
-            cwd=repo_path, capture_output=True, text=True,
-            encoding="utf-8", errors="replace", **_NOWND,
+        _run_capture(
+            ["git", "worktree", "prune"], cwd=repo_path, encoding="utf-8", errors="replace",
         )
 
         return cleaned
