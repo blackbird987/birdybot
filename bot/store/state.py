@@ -443,6 +443,50 @@ class StateStore:
         self.save()
         return inst
 
+    def clone_instance_for_rerun(
+        self,
+        inst: Instance,
+        *,
+        name_suffix: str | None = None,
+        origin_platform: str,
+        effort: str,
+        model: str | None,
+    ) -> Instance:
+        """Clone *inst* into a fresh QUEUED instance for a re-run.
+
+        Shared by /retry and the Retry button, the cooldown auto-retry, and
+        continue-on-pay-per-use. Each caller still sets what it alone owns
+        (``api_fallback``, ``cooldown_retries``, a prompt suffix), still calls
+        ``update_instance``, and still backfills the thread's session itself:
+        see "A thread must always know its session".
+
+        ``model`` is a parameter, not a copy. Both retry paths pass
+        ``inst.model`` for faithful replay, so a re-run build stays on
+        BUILD_MODEL. Pay-per-use passes None deliberately: the provider
+        ignores it under ``api_fallback``, and a later plain retry must not
+        inherit a model the pay-per-use turn never ran on.
+        """
+        new_inst = self.create_instance(
+            instance_type=inst.instance_type,
+            prompt=inst.prompt,
+            name=f"{inst.name}-{name_suffix}" if inst.name and name_suffix else None,
+            mode=inst.mode,
+        )
+        new_inst.origin = inst.origin
+        new_inst.model = model
+        new_inst.origin_platform = origin_platform
+        new_inst.effort = effort
+        new_inst.parent_id = inst.id
+        new_inst.repo_name = inst.repo_name
+        new_inst.repo_path = inst.repo_path
+        if inst.session_id:
+            new_inst.session_id = inst.session_id
+        if inst.branch:
+            new_inst.branch = inst.branch
+            new_inst.original_branch = inst.original_branch
+            new_inst.worktree_path = inst.worktree_path
+        return new_inst
+
     def get_instance(self, id_or_name: str) -> Instance | None:
         # Try by ID first
         inst = self._instances.get(id_or_name)

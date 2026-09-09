@@ -1689,28 +1689,13 @@ async def _do_cooldown_retry_locked(store, runner, inst, discord_bot, channel_id
         pass
 
     # Create new instance from original
-    new_inst = store.create_instance(
-        instance_type=inst.instance_type,
-        prompt=inst.prompt,
-        mode=inst.mode,
+    new_inst = store.clone_instance_for_rerun(
+        inst,
+        origin_platform=inst.origin_platform,
+        effort=inst.effort,
+        model=inst.model,
     )
-    new_inst.origin = inst.origin
-    # Faithful replay: carry the source instance's model so a cooldown auto-retry
-    # resumes on the model it was running (e.g. a build stays on BUILD_MODEL
-    # instead of dropping to DEFAULT_SESSION_MODEL). Matches the retry paths.
-    new_inst.model = inst.model
-    new_inst.origin_platform = inst.origin_platform
-    new_inst.effort = inst.effort
-    new_inst.parent_id = inst.id
-    new_inst.repo_name = inst.repo_name
-    new_inst.repo_path = inst.repo_path
     new_inst.cooldown_retries = inst.cooldown_retries  # Carry count forward
-    if inst.session_id:
-        new_inst.session_id = inst.session_id
-    if inst.branch:
-        new_inst.branch = inst.branch
-        new_inst.original_branch = inst.original_branch
-        new_inst.worktree_path = inst.worktree_path
     # If the prior turn was running in a worktree (build / build-derived),
     # the cooldown can interrupt mid-edit. The resumed agent often thinks
     # the task is already done — leaving uncommitted edits stranded. Nudge

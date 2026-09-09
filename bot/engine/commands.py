@@ -1802,27 +1802,13 @@ async def _start_retry(
         await ctx.messenger.send_text(ctx.channel_id, "Repo path no longer valid.")
         return None
 
-    new_inst = ctx.store.create_instance(
-        instance_type=inst.instance_type,
-        prompt=inst.prompt,
-        name=f"{inst.name}-retry" if inst.name else None,
-        mode=inst.mode,
+    new_inst = ctx.store.clone_instance_for_rerun(
+        inst,
+        name_suffix="retry",
+        origin_platform=ctx.platform,
+        effort=ctx.effective_effort,
+        model=inst.model,
     )
-    new_inst.origin = inst.origin
-    # Faithful replay: carry the source instance's model so a retried build
-    # stays on the model it ran (routing preserved across retries).
-    new_inst.model = inst.model
-    new_inst.origin_platform = ctx.platform
-    new_inst.effort = ctx.effective_effort
-    new_inst.parent_id = inst.id
-    new_inst.repo_name = inst.repo_name
-    new_inst.repo_path = inst.repo_path
-    if inst.session_id:
-        new_inst.session_id = inst.session_id
-    if inst.branch:
-        new_inst.branch = inst.branch
-        new_inst.original_branch = inst.original_branch
-        new_inst.worktree_path = inst.worktree_path
     ctx.store.update_instance(new_inst)
 
     if source_msg_id:
@@ -4075,26 +4061,15 @@ async def handle_callback(
         inst.cooldown_channel_id = None
         ctx.store.update_instance(inst)
         # Create new instance with api_fallback flag
-        new_inst = ctx.store.create_instance(
-            instance_type=inst.instance_type,
-            prompt=inst.prompt,
-            name=f"{inst.name}-ppu" if inst.name else None,
-            mode=inst.mode,
+        new_inst = ctx.store.clone_instance_for_rerun(
+            inst,
+            name_suffix="ppu",
+            origin_platform=ctx.platform,
+            effort=ctx.effective_effort,
+            model=None,
         )
-        new_inst.origin = inst.origin
-        new_inst.origin_platform = ctx.platform
-        new_inst.effort = ctx.effective_effort
-        new_inst.parent_id = inst.id
-        new_inst.repo_name = inst.repo_name
-        new_inst.repo_path = inst.repo_path
         new_inst.api_fallback = True
         new_inst.cooldown_retries = 0
-        if inst.session_id:
-            new_inst.session_id = inst.session_id
-        if inst.branch:
-            new_inst.branch = inst.branch
-            new_inst.original_branch = inst.original_branch
-            new_inst.worktree_path = inst.worktree_path
         ctx.store.update_instance(new_inst)
         if source_msg_id:
             try:
