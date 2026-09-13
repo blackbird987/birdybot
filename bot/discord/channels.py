@@ -406,6 +406,63 @@ async def ensure_forum_tags(forum: discord.ForumChannel) -> dict[str, discord.Fo
 # --- Per-user forum helpers ---
 
 
+# What a granted user needs in their own forum. read_message_history is the
+# one that bites: without it Discord shows only messages that arrive while the
+# client is open, so every app restart opens on an empty thread even though
+# nothing was deleted. Attachments, embeds and reactions matter because the
+# coaching flows ask guests to send screenshots rather than retype them.
+GUEST_FORUM_ALLOWS: dict[str, bool] = {
+    "view_channel": True,
+    "send_messages": True,
+    "send_messages_in_threads": True,
+    "create_public_threads": True,
+    "read_message_history": True,
+    "attach_files": True,
+    "embed_links": True,
+    "add_reactions": True,
+}
+
+
+async def _resolve_member(guild: discord.Guild, user_id: int):
+    """Member from cache, falling back to the API. None if they left."""
+    member = guild.get_member(int(user_id))
+    if member:
+        return member
+    try:
+        return await guild.fetch_member(int(user_id))
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        return None
+
+
+async def reconcile_guest_overwrite(
+    forum: discord.ForumChannel, guild: discord.Guild, user_id: int,
+) -> bool:
+    """Make sure a granted user holds every allow in GUEST_FORUM_ALLOWS.
+
+    Forums created before an allow was added never got it, so this runs on
+    every startup, not only at creation. Only missing allows are added; any
+    other setting on the overwrite is kept. Returns True if it changed anything.
+    """
+    member = await _resolve_member(guild, user_id)
+    if not member:
+        log.warning("User %s not in guild; cannot reconcile forum %s",
+                    user_id, forum.id)
+        return False
+    overwrite = forum.overwrites_for(member)
+    missing = [k for k, v in GUEST_FORUM_ALLOWS.items()
+               if getattr(overwrite, k) is not v]
+    if not missing:
+        return False
+    overwrite.update(**{k: GUEST_FORUM_ALLOWS[k] for k in missing})
+    await forum.set_permissions(
+        member, overwrite=overwrite,
+        reason="Granted user forum permissions: " + ", ".join(missing),
+    )
+    log.info("Forum %s: granted %s to user %s", forum.id,
+             ", ".join(missing), user_id)
+    return True
+
+
 async def ensure_user_forum(
     guild: discord.Guild,
     category: discord.CategoryChannel,
@@ -428,20 +485,19 @@ async def ensure_user_forum(
         if isinstance(ch, discord.ForumChannel) and ch.name == forum_name:
             log.info("Found existing user forum %s (%s)", ch.id, ch.name)
             await _reconcile_auto_archive(ch, auto_archive)
+            await reconcile_guest_overwrite(ch, guild, user_id)
             # Sync tags
             await sync_user_forum_tags(ch, repo_names)
             return ch
 
     # Build permissions: deny @everyone, allow bot + owner + user
     overwrites = _private_overwrites(guild, bot_member, owner_id)
-    member = guild.get_member(user_id)
+    member = await _resolve_member(guild, user_id)
     if member:
-        overwrites[member] = discord.PermissionOverwrite(
-            view_channel=True,
-            send_messages=True,
-            send_messages_in_threads=True,
-            create_public_threads=True,
-        )
+        overwrites[member] = discord.PermissionOverwrite(**GUEST_FORUM_ALLOWS)
+    else:
+        log.warning("User %s not found in guild; forum %s created without "
+                    "their overwrite, startup will retry", user_id, forum_name)
 
     forum = await guild.create_forum(
         name=forum_name,

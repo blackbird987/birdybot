@@ -1799,6 +1799,10 @@ class ClaudeBot(discord.Client):
         self._forums.load_forum_map()
         await self._forums.reconcile_forums()
 
+        # Granted users' forums predate some permissions (message history
+        # among them); top them up. Idempotent, so reconnects cost nothing.
+        asyncio.create_task(self._forums.reconcile_user_forum_permissions())
+
         # Clean up orphaned messages in control rooms (one-time, non-blocking)
         if not getattr(self, '_control_rooms_cleaned', False):
             self._control_rooms_cleaned = True

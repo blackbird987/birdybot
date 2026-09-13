@@ -490,6 +490,31 @@ class ForumManager:
 
         return forum
 
+    async def reconcile_user_forum_permissions(self) -> int:
+        """Bring every granted user's forum overwrite up to date.
+
+        Runs on startup so a permission added to GUEST_FORUM_ALLOWS reaches
+        forums that already exist. Idempotent: no API call when nothing is
+        missing. Returns how many forums were changed.
+        """
+        guild = self._client.get_guild(self._guild_id)
+        if not guild:
+            return 0
+        changed = 0
+        for uid, ua in load_access_config().users.items():
+            if not ua.forum_channel_id:
+                continue
+            forum = guild.get_channel(int(ua.forum_channel_id))
+            if not isinstance(forum, discord.ForumChannel):
+                continue
+            try:
+                if await channels.reconcile_guest_overwrite(forum, guild, int(uid)):
+                    changed += 1
+            except Exception:
+                log.warning("Failed to reconcile permissions on forum %s for user %s",
+                            forum.id, uid, exc_info=True)
+        return changed
+
     async def sync_user_forum_tags(self, user_id: str) -> None:
         """Sync a user's forum tags to match their current access grants."""
         cfg = load_access_config()

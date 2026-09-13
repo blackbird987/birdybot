@@ -97,6 +97,7 @@
     "branch_scan": "python scripts/test_branch_scan.py",
     "failover_session": "python scripts/test_failover_session.py",
     "fleet_ship": "python scripts/test_fleet_ship.py",
+    "guest_forum_perms": "python scripts/test_guest_forum_perms.py",
     "guest_lockdown": "python scripts/test_guest_lockdown.py",
     "halt_text": "python scripts/test_halt_text.py",
     "image_directive": "python scripts/test_image_directive.py",
