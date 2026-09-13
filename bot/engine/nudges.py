@@ -141,6 +141,34 @@ def load(path: Path) -> list[dict]:
     return out
 
 
+def next_fire(path: Path, label: str,
+              now: datetime | None = None) -> datetime | None:
+    """When the nudge ``label`` should fire next, per its declared schedule.
+
+    The scheduler re-arms a fired nudge with this rather than adding its
+    interval, because an interval knows nothing about weekdays or DST: a
+    mon-fri nudge stepped by 24 hours fires on Saturday, and one stepped
+    across late October lands an hour off until the next restart.
+
+    Returns None when the answer cannot come from the config (the label is
+    gone, the file is broken, or the entry repeats every N days with no
+    weekday list, which a wall clock alone cannot express). The caller then
+    falls back to stepping by the interval.
+    """
+    try:
+        entries = load(path)
+    except Exception as exc:
+        log.warning("nudges.json unreadable while re-arming %s: %s", label, exc)
+        return None
+    for entry in entries:
+        if entry["label"] != label:
+            continue
+        if entry["days"] is None and entry["every_days"] != 1:
+            return None
+        return next_occurrence(entry["at"], entry["days"], entry["tz"], now=now)
+    return None
+
+
 def reconcile(store, path: Path, now: datetime | None = None) -> dict:
     """Bring live schedules in line with ``config/nudges.json``.
 

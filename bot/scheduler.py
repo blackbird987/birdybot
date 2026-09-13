@@ -248,9 +248,17 @@ class Scheduler:
             if rearm_secs is not None:
                 now = datetime.now(timezone.utc)
                 sched.last_run_at = now.isoformat()
-                sched.next_run_at = _step_from(
-                    sched.next_run_at, rearm_secs, now,
-                ).isoformat()
+                nxt = None
+                if sched.label and rearm_secs == sched.interval_secs:
+                    # A declared nudge follows its own weekdays and wall
+                    # clock; stepping by the interval would fire a mon-fri
+                    # nudge on Saturday.
+                    from bot import config
+                    from bot.engine import nudges
+                    nxt = nudges.next_fire(config.NUDGES_FILE, sched.label, now)
+                if nxt is None:
+                    nxt = _step_from(sched.next_run_at, rearm_secs, now)
+                sched.next_run_at = nxt.isoformat()
                 self._store.update_schedule(sched)
             else:
                 self._store.delete_schedule(sched.id)

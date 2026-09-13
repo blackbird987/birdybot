@@ -49,6 +49,7 @@ sys.path.insert(0, _ROOT)
 from bot.engine.nudges import (  # noqa: E402
     NudgeConfigError,
     load,
+    next_fire,
     next_occurrence,
     reconcile,
 )
@@ -245,6 +246,36 @@ def test_rearm_after_downtime() -> None:
           "2026-09-12T15:30:00+00:00")
 
 
+def test_rearm_respects_weekdays() -> None:
+    print("\n(e2) re-arming follows the declared weekdays, not the interval")
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        path = _cfg(tmp, [
+            {"label": "weekday", "thread_id": "1", "prompt": "p", "at": "17:30",
+             "tz": "Europe/Amsterdam", "days": ["mon", "tue", "wed", "thu", "fri"]},
+            {"label": "thursday", "thread_id": "1", "prompt": "p", "at": "16:00",
+             "tz": "Europe/Amsterdam", "days": ["thu"], "every_days": 7},
+            {"label": "every3", "thread_id": "1", "prompt": "p", "at": "09:00",
+             "tz": "Europe/Amsterdam", "every_days": 3},
+        ])
+        # The live incident: fired Friday 11 Sept 17:30:03 CEST, then Saturday.
+        friday_fire = datetime(2026, 9, 11, 15, 30, 3, tzinfo=UTC)
+        nxt = next_fire(path, "weekday", friday_fire)
+        check("friday fire re-arms to monday", local(nxt), "Mon 17:30 CEST")
+        thu_fire = datetime(2026, 10, 22, 14, 0, 5, tzinfo=UTC)
+        check("thursday before the DST change stays at 16:00 local",
+              local(next_fire(path, "thursday", thu_fire)), "Thu 16:00 CET")
+        check("every-3-days with no weekdays defers to the interval",
+              next_fire(path, "every3", friday_fire), None)
+        check("unknown label defers to the interval",
+              next_fire(path, "gone", friday_fire), None)
+        (tmp / "broken.json").write_text("{nope")
+        check("broken config defers to the interval",
+              next_fire(tmp / "broken.json", "weekday", friday_fire), None)
+    finally:
+        shutil.rmtree(tmp)
+
+
 def test_bad_config() -> None:
     print("\n(f) a bad config is loud, and leaves the live nudges alone")
     tmp = Path(tempfile.mkdtemp())
@@ -310,6 +341,7 @@ def main() -> int:
     test_convergence_and_no_delay()
     test_survives_neighbours()
     test_rearm_after_downtime()
+    test_rearm_respects_weekdays()
     test_bad_config()
     test_shipped_config()
     print()
