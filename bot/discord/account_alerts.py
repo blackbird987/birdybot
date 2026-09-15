@@ -24,6 +24,7 @@ from bot.claude.auth_health import (
     REASON_NO_DIR,
     REASON_NO_FILE,
     REASON_NO_TOKEN,
+    REASON_ORG_DISABLED,
     REASON_RUNTIME_401,
     REASON_UNREADABLE,
     account_label,
@@ -73,6 +74,9 @@ def button_id(action: str, account_dir: str, idx: int) -> str:
 # back to the raw string, which is still readable, just less polished.
 _REASON_COPY = {
     REASON_RUNTIME_401: "the login expired and Claude turned it away",
+    REASON_ORG_DISABLED: (
+        "its organization has switched Claude Code off for the whole account"
+    ),
     REASON_NO_TOKEN: "there's no saved login for it",
     REASON_NO_FILE: "it has never been signed in on this machine",
     REASON_NO_DIR: "its config folder is missing",
@@ -126,23 +130,65 @@ def build_alert_embed(
         closer = ("New tasks can't run — they'll auto-retry a few times in "
                   "case you sign in, then give up. ")
 
+    # An org-disabled account is signed in perfectly well, so every sentence
+    # this notice normally ends on is wrong for it: it is not "signed out", a
+    # re-login provably will not fix it, and it cannot "rejoin the moment it's
+    # signed in" because it never left that state. Sending the user to run
+    # /login here is sending them to do something that cannot work.
+    org_disabled = reason == REASON_ORG_DISABLED
+    opener = "is out of rotation" if org_disabled else "is signed out"
+    if org_disabled:
+        remedy = (
+            "Signing in again won't help: it's signed in fine. An admin has "
+            "to re-enable Claude Code for that organization. The bot retries "
+            "the account about once a day and takes it back the moment access "
+            "returns; `/auth` has a **Try now** button if you don't want to "
+            "wait for that."
+        )
+    else:
+        remedy = (
+            "The account rejoins rotation on its own the moment it's signed "
+            "in — no restart needed."
+        )
+
     embed.description = (
-        f"**`{label}`** is signed out — {describe_reason(reason)}.\n\n"
+        f"**`{label}`** {opener} — {describe_reason(reason)}.\n\n"
         f"{impact}\n\n"
         f"{closer}"
-        "The account rejoins rotation on its own the moment it's signed in "
-        "— no restart needed."
+        f"{remedy}"
     )
-    embed.add_field(
-        name=f"Sign in on {config.PC_NAME}",
-        value=f"```\n{relogin_command(account_dir)}\n```\nthen `/login` inside.",
-        inline=False,
-    )
+    if org_disabled:
+        embed.add_field(
+            name="What unblocks it",
+            value=(
+                f"An organization admin re-enabling Claude Code for "
+                f"`{label}`. Nothing on {config.PC_NAME} needs changing, and "
+                f"the account can stay in `CLAUDE_ACCOUNTS` while it's off."
+            ),
+            inline=False,
+        )
+    else:
+        embed.add_field(
+            name=f"Sign in on {config.PC_NAME}",
+            value=(
+                f"```\n{relogin_command(account_dir)}\n```\n"
+                f"then `/login` inside."
+            ),
+            inline=False,
+        )
     return embed
 
 
-def build_alert_view(account_dir: str, can_console: bool) -> discord.ui.View:
-    """Buttons: open the auth panel, pop a login terminal, or snooze."""
+def build_alert_view(
+    account_dir: str, can_console: bool, reason: str = "",
+) -> discord.ui.View:
+    """Buttons: open the auth panel, pop a login terminal, or snooze.
+
+    *reason* swaps the middle button. For an org-disabled account a login
+    terminal is the one thing that cannot help, so it offers **Try now**
+    instead: the only action the user can take from here once an admin has
+    flipped access back on.
+    """
     view = discord.ui.View(timeout=None)
     idx = _account_index(account_dir)
 
@@ -152,7 +198,14 @@ def build_alert_view(account_dir: str, can_console: bool) -> discord.ui.View:
         custom_id="ark:claude_login",
         row=0,
     ))
-    if can_console and idx is not None:
+    if reason == REASON_ORG_DISABLED and idx is not None:
+        view.add_item(discord.ui.Button(
+            label=f"Try {account_label(account_dir)} now"[:80],
+            style=discord.ButtonStyle.secondary,
+            custom_id=button_id("retry", account_dir, idx),
+            row=0,
+        ))
+    elif can_console and idx is not None:
         view.add_item(discord.ui.Button(
             label=f"Log in {account_label(account_dir)} on this PC"[:80],
             style=discord.ButtonStyle.secondary,
@@ -245,7 +298,7 @@ async def _drain_once(bot: ClaudeBot) -> None:
             reason = meta.get("reason") or "not logged in"
             await channel.send(
                 embed=build_alert_embed(account_dir, reason, down),
-                view=build_alert_view(account_dir, can_console),
+                view=build_alert_view(account_dir, can_console, reason),
             )
             store.mark_account_alert_notified(account_dir)
             log.info("Posted account-sidelined notice for %s (%s)",

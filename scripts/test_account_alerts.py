@@ -37,7 +37,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from bot import config
-from bot.claude.auth_health import REASON_NO_TOKEN, REASON_RUNTIME_401, account_label
+from bot.claude.auth_health import (
+    REASON_NO_TOKEN,
+    REASON_ORG_DISABLED,
+    REASON_RUNTIME_401,
+    account_label,
+)
 from bot.claude.auth_health import clear_cache as auth_clear_cache
 from bot.discord import account_alerts as alerts_mod
 from bot.services.auth_sync import collect_account_statuses
@@ -366,6 +371,78 @@ def _test_notice_copy_is_honest() -> list[str]:
     return failures
 
 
+def _test_org_disabled_notice_gives_the_right_advice() -> list[str]:
+    """An org-disabled account is signed in fine, so "sign in again" is wrong.
+
+    Every other sideline is answered by a login, and this notice was hardwired
+    for that: it opened "is signed out", handed over a CLAUDE_CONFIG_DIR
+    command, and promised the account would rejoin "the moment it's signed in"
+    for an account that never stopped being signed in.  Only an
+    organization admin can undo this one, so the copy has to say so and the
+    button has to offer the one thing the user can actually do from here.
+    """
+    failures: list[str] = []
+    saved = list(config.CLAUDE_ACCOUNTS)
+    config.CLAUDE_ACCOUNTS[:] = [OTHER, ACCT]
+    try:
+        embed = alerts_mod.build_alert_embed(ACCT, REASON_ORG_DISABLED)
+        body = (embed.description or "") + "".join(
+            f.value or "" for f in embed.fields
+        )
+        if "CLAUDE_CONFIG_DIR" in body or "/login" in body:
+            failures.append(
+                "org-disabled: told the user to sign in again, which provably "
+                "cannot fix an account an admin switched off"
+            )
+        if "signed out" in body:
+            failures.append(
+                "org-disabled: called the account signed out, but it is signed "
+                "in perfectly well, which is why a login does nothing"
+            )
+        if "admin" not in body.lower():
+            failures.append(
+                "org-disabled: never names the one person who can undo it"
+            )
+        if "klerk" not in body:
+            failures.append("org-disabled: the notice never names the account")
+
+        ids = [
+            getattr(i, "custom_id", None)
+            for i in alerts_mod.build_alert_view(
+                ACCT, can_console=True, reason=REASON_ORG_DISABLED,
+            ).children
+        ]
+        if any((i or "").startswith("auth:login:") for i in ids):
+            failures.append(
+                "org-disabled: offered a login terminal, the one button that "
+                "cannot help here"
+            )
+        if not any((i or "").startswith("auth:retry:") for i in ids):
+            failures.append(
+                "org-disabled: no 'Try now' button, so the user's only option "
+                "is to wait out the day-long retry after access comes back"
+            )
+        if not any((i or "").startswith("auth:snooze:") for i in ids):
+            failures.append("org-disabled: no way to dismiss the notice")
+
+        # The old notice must be untouched: a signed-out account really does
+        # need a login, and losing that button is the opposite failure.
+        ids_401 = [
+            getattr(i, "custom_id", None)
+            for i in alerts_mod.build_alert_view(
+                ACCT, can_console=True, reason=REASON_RUNTIME_401,
+            ).children
+        ]
+        if not any((i or "").startswith("auth:login:") for i in ids_401):
+            failures.append(
+                "org-disabled: the new branch swallowed the login button for "
+                "an account that genuinely is signed out"
+            )
+    finally:
+        config.CLAUDE_ACCOUNTS[:] = saved
+    return failures
+
+
 async def _test_unconfigured_account_is_dropped(store: StateStore) -> list[str]:
     """Removing an account from .env must not leave it nagging from The Ark.
 
@@ -468,6 +545,46 @@ async def _test_auth_panel_agrees_with_the_ark() -> list[str]:
                 "panel: marked a healthy account signed out — the sideline "
                 "leaked across accounts"
             )
+
+        # The "Try now" button, and the one thing that can silently break it:
+        # its custom_id carries a *position*, which the handler resolves back
+        # through CLAUDE_ACCOUNTS. A view built from a differently ordered or
+        # filtered list would point the button at the wrong account.
+        from bot.discord.wizard import (
+            _build_auth_panel_view, _resolve_auth_target,
+        )
+
+        saved_accounts = list(config.CLAUDE_ACCOUNTS)
+        config.CLAUDE_ACCOUNTS[:] = dirs
+        try:
+            ids = [
+                getattr(i, "custom_id", None)
+                for i in _build_auth_panel_view(statuses, True).children
+            ]
+            retries = [i for i in ids if (i or "").startswith("auth:retry:")]
+            if retries != ["auth:retry:1"]:
+                failures.append(
+                    "panel: expected one 'Try now' button, on the sidelined "
+                    f"account at position 1, got {retries}; a healthy "
+                    "account has no cooldown to clear"
+                )
+            else:
+                target, problem = _resolve_auth_target(retries[0].split(":"))
+                if problem or target != str(rejected):
+                    failures.append(
+                        "panel: the 'Try now' button resolves to "
+                        f"{target or problem!r}, not the account it names"
+                    )
+            rows: dict[int, int] = {}
+            for item in _build_auth_panel_view(statuses, True).children:
+                r = getattr(item, "row", 0)
+                rows[r] = rows.get(r, 0) + 1
+            if len(rows) > 5 or any(n > 5 for n in rows.values()):
+                failures.append(
+                    f"panel: breaks Discord's 5-rows-of-5 limit: {rows}"
+                )
+        finally:
+            config.CLAUDE_ACCOUNTS[:] = saved_accounts
     finally:
         auth_clear_cache()
         shutil.rmtree(tmp, ignore_errors=True)
@@ -483,6 +600,8 @@ async def _amain() -> int:
             ("drain", await _test_drain(store)),
             ("rendering", _test_rendering()),
             ("notice-copy", _test_notice_copy_is_honest()),
+            ("org-disabled-advice",
+             _test_org_disabled_notice_gives_the_right_advice()),
             ("unconfigured-dropped", await _test_unconfigured_account_is_dropped(store)),
             ("auth-panel-agrees", await _test_auth_panel_agrees_with_the_ark()),
         ]

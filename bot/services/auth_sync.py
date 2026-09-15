@@ -281,6 +281,11 @@ class AccountStatus:
     account_uuid: str | None = None    # accountUuid
     cooldown_until: datetime | None = None  # tz-aware UTC
     error: str | None = None           # any read error to surface
+    # The server rejected this account at runtime even though its credentials
+    # file parses. Kept apart from ``logged_in`` (which it also clears)
+    # because the two need different advice: a missing token is fixed by
+    # signing in, a server-side rejection may not be.
+    sidelined: bool = False
 
 
 def _read_account_identity(account_dir: Path) -> tuple[str | None, str | None, str | None]:
@@ -337,14 +342,14 @@ async def collect_account_statuses(
             # the same account, on the screen where they're least sure.
             label = account_label(p)
             try:
-                logged_in = _check_credentials_file(p) and not (
-                    raw in sidelined or str(p) in sidelined
-                )
+                is_sidelined = raw in sidelined or str(p) in sidelined
+                logged_in = _check_credentials_file(p) and not is_sidelined
                 email, org, uuid_ = _read_account_identity(p)
                 out.append(AccountStatus(
                     path=str(p),
                     label=label,
                     logged_in=logged_in,
+                    sidelined=is_sidelined,
                     email=email,
                     org=org,
                     account_uuid=uuid_,

@@ -245,6 +245,20 @@ async def _handle_claude_login(
         )
         return
 
+    embed, view = await _render_auth_panel(bot)
+    await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+
+async def _render_auth_panel(
+    bot: ClaudeBot,
+) -> tuple[discord.Embed, discord.ui.View]:
+    """Build the auth panel from live state.
+
+    One implementation for both the ``/auth`` open and the Refresh button.
+    They were near-copies and had already drifted: Refresh left out the
+    sideline table, so refreshing a panel turned a server-rejected account
+    back into a green tick, and, now, dropped its **Try now** button.
+    """
     from bot.services.auth_sync import (
         collect_account_statuses,
         host_can_show_console,
@@ -265,10 +279,10 @@ async def _handle_claude_login(
     )
 
     can_console = host_can_show_console()
-    embed = _build_auth_panel_embed(statuses, can_console)
-    view = _build_auth_panel_view(statuses, can_console)
-
-    await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+    return (
+        _build_auth_panel_embed(statuses, can_console),
+        _build_auth_panel_view(statuses, can_console),
+    )
 
 
 def _build_auth_panel_embed(statuses: list, can_console: bool) -> discord.Embed:
@@ -365,6 +379,22 @@ def _build_auth_panel_view(statuses: list, can_console: bool) -> discord.ui.View
         custom_id="auth:refresh",
         row=1,
     ))
+
+    # An account the server turned away sits out for ACCOUNT_AUTH_COOLDOWN_SECS
+    # (a day), which is the right default for an account that is simply gone
+    # and the wrong wait for one whose access was just switched back on. This
+    # is the "don't make me wait for the daily retry" button, and it only
+    # appears for accounts that are actually sitting out: a healthy account
+    # has nothing to clear.
+    for i, st in enumerate(statuses[:4]):
+        if not st.sidelined:
+            continue
+        view.add_item(discord.ui.Button(
+            label=f"Try {st.label} now"[:80],
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"auth:retry:{i}",
+            row=2,
+        ))
     return view
 
 
@@ -455,6 +485,41 @@ async def handle_auth_button(
             )
         return
 
+    if action == "retry" and len(parts) >= 3:
+        await interaction.response.defer(ephemeral=True)
+        target, problem = _resolve_auth_target(parts)
+        if problem:
+            await interaction.followup.send(problem, ephemeral=True)
+            return
+
+        from bot.claude.auth_health import account_label
+
+        label = account_label(target)
+        # Called on the loop, like the snooze handler next door: it mutates the
+        # runner's own cooldown maps, and handing those to a worker thread to
+        # edit under the picker is a worse trade than the one state.json write.
+        outcome = bot._runner.retry_account_now(target)
+        if outcome == "cleared":
+            await interaction.followup.send(
+                f"`{label}` is back in rotation, so the next task will try it. "
+                f"If it's still blocked it drops straight back out, and "
+                f"nothing else is affected.",
+                ephemeral=True,
+            )
+        elif outcome == "usage":
+            await interaction.followup.send(
+                f"`{label}` isn't sidelined: it's waiting out a real usage "
+                f"limit with a real reset time. Clearing that would only send "
+                f"the next task into the limit it's waiting for.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.followup.send(
+                f"Nothing to clear: `{label}` is already in rotation.",
+                ephemeral=True,
+            )
+        return
+
     if action == "snooze" and len(parts) >= 3:
         await interaction.response.defer(ephemeral=True)
         target, problem = _resolve_auth_target(parts)
@@ -486,17 +551,7 @@ async def handle_auth_button(
 
     if action == "refresh":
         await interaction.response.defer(ephemeral=True)
-        from bot.services.auth_sync import (
-            collect_account_statuses, host_can_show_console,
-        )
-        account_dirs = list(config.CLAUDE_ACCOUNTS) or [
-            str(Path.home() / config.PROVIDER_DIR_NAME)
-        ]
-        cooldowns = getattr(bot._runner, "_account_cooldowns", {}) or {}
-        statuses = await collect_account_statuses(account_dirs, cooldowns)
-        can_console = host_can_show_console()
-        embed = _build_auth_panel_embed(statuses, can_console)
-        view = _build_auth_panel_view(statuses, can_console)
+        embed, view = await _render_auth_panel(bot)
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
         return
 

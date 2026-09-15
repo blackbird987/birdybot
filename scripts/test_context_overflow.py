@@ -40,6 +40,8 @@ Asserted here:
   * CONTEXT_OVERFLOW_FRESH=0 restores the old surface-the-failure behaviour
   * the one-shot note never leaks into a later attempt
   * a plain build failure never enters any of this
+  * the same wording carrying an account-level refusal is NOT ours: it belongs
+    to the account branch, and answering it here amputates a healthy session
 
 Strategy follows scripts/test_context_thrash.py: stub the subprocess boundary
 only, so the real recovery cascade in _run_impl executes.
@@ -89,6 +91,16 @@ OVERFLOW_FLAGGED = (
     "5's safeguards flagged this message "
     "(https://www.anthropic.com/legal/aup). This sometimes happens with safe, "
     "normal conversations."
+)
+
+# Not a context problem at all, despite the wording.  Compaction is an ordinary
+# API call, so an account-level refusal surfaces *through* the summariser and
+# arrives spelled as a compaction failure.  Verbatim from data/logs/bot.log,
+# 2026-09-15 04:13, which cost q-17514 and q-17515 their sessions.
+OVERFLOW_ORG_DISABLED = (
+    "Prompt is too long · automatic compaction failed: Your organization has "
+    "disabled Claude subscription access for Claude Code · Use an Anthropic "
+    "API key instead, or ask your admin to enable access"
 )
 
 INSTANCE_ID = "t-overflow"
@@ -727,6 +739,49 @@ async def _amain() -> int:
             failures.append(
                 "the reuse path did not complete the handover to the fresh "
                 f"session ({result6.session_id!r})"
+            )
+
+        # --- Case 7: the wording is right, the diagnosis is wrong ------------
+        # "Prompt is too long · automatic compaction failed: Your organization
+        # has disabled Claude subscription access". The transcript is innocent;
+        # the account underneath is dead. Spending both rungs here abandons a
+        # perfectly good session to work around an auth fault, which is what
+        # happened to q-17514 and q-17515 on 2026-09-15.
+        h7 = _Harness(tmp, [
+            RunResult(
+                is_error=True,
+                error_message=OVERFLOW_ORG_DISABLED,
+                session_id=DEAD_SESSION,
+                result_text=OVERFLOW_ORG_DISABLED,
+                num_turns=1,
+            ),
+        ])
+        result7, instance7 = await h7.run()
+
+        if len(h7.spawn_argvs) != 1:
+            failures.append(
+                f"an account refusal was retried as a context problem "
+                f"({len(h7.spawn_argvs)} spawns); the transcript was never the "
+                "problem and the retry cannot fix an org-disabled account"
+            )
+        if h7.reset_calls:
+            failures.append(
+                "the thread history was rebuilt to work around a dead account"
+            )
+        if result7.session_recovery_exhausted:
+            failures.append(
+                "the session was abandoned over an account fault: the thread "
+                "loses its history and the account is still dead"
+            )
+        if instance7.session_id != DEAD_SESSION:
+            failures.append(
+                "the instance was unbound from a session that compacts fine "
+                f"({instance7.session_id!r})"
+            )
+        if h7.recoveries:
+            failures.append(
+                "the user was told their context was lost, when what actually "
+                f"happened was an account-level refusal: {h7.recoveries}"
             )
 
     finally:

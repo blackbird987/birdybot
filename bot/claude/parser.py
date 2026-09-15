@@ -685,6 +685,22 @@ def is_account_unusable_error(error_text: str) -> bool:
         "no active subscription", "subscription has expired",
         "subscription expired", "credit balance is too low",
         "log in again", "re-authenticate", "please sign in",
+        # An org admin revoked Claude Code for the whole organization.
+        # Verbatim, seen 26 times against the klerk account from
+        # 2026-09-14 12:06: "Your organization has disabled Claude
+        # subscription access for Claude Code · Use an Anthropic API key
+        # instead, or ask your admin to enable access".
+        #
+        # This is the case the no-turns heuristic structurally cannot cover,
+        # which is why the wording has to be here.  The CLI does not abort
+        # before turn 1 the way a 401 does: it reports the rejection as a
+        # completed turn (num_turns=1) whose result text IS the error, so
+        # both halves of "produced nothing and took no turns" are false and
+        # the account was never sidelined.  The "graduate the wording once
+        # the real cancellation error surfaces" note below never fired
+        # either, for the same reason.
+        "disabled claude subscription access",
+        "ask your admin to enable access",
     ]
     if not any(p in lower for p in patterns):
         return False
@@ -699,6 +715,27 @@ def is_account_unusable_error(error_text: str) -> bool:
 # is a work product that merely mentions auth, which matters here because this
 # bot's own sessions discuss OAuth and 401s constantly.
 FATAL_ERROR_MAX_CHARS = 400
+
+
+def is_org_disabled_error(text: str | None) -> bool:
+    """An admin switched Claude Code off for the whole organization.
+
+    A subset of ``looks_like_fatal_auth_error`` that exists only to pick the
+    right *advice*.  Every other account-unusable verdict is answered by
+    signing in again; this one is answered by an admin re-enabling access, and
+    the account is signed in fine the whole time.  Length-guarded like its
+    parent, and for the same reason: this file's own comments say the phrase.
+    """
+    if not text:
+        return False
+    stripped = text.strip()
+    if len(stripped) > FATAL_ERROR_MAX_CHARS:
+        return False
+    lower = stripped.lower()
+    return (
+        "disabled claude subscription access" in lower
+        or "ask your admin to enable access" in lower
+    )
 
 
 def looks_like_fatal_auth_error(text: str | None) -> bool:

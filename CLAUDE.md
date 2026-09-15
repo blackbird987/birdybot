@@ -913,6 +913,58 @@ credentials per `CLAUDE_CONFIG_DIR`, so two accounts cannot share `~/.claude`.
 - Invalid entries are pruned at startup — `_pick_account()` only rotates among
   validated dirs, so a typo can't cause silent runtime failover failures.
 
+### An account that comes and goes is parked, not removed
+
+An organization admin can switch Claude Code off for a whole account and
+switch it back on later. Nothing about that is an `.env` edit: the account
+stays in `CLAUDE_ACCOUNTS` the entire time and the existing sideline
+machinery carries it (park, one Ark notice, roughly daily retry, rejoin on
+the first successful run). It was inert until 2026-09-15 for one reason,
+and that reason is the thing to keep true:
+
+- **The wording has to be matched by name.** "Your organization has disabled
+  Claude subscription access for Claude Code · Use an Anthropic API key
+  instead, or ask your admin to enable access" hit the klerk account 26 times
+  from 12:06 on 2026-09-14 and matched none of `is_account_unusable_error`'s
+  patterns, so `_pick_account` kept picking a dead subscription. The no-turns
+  fallback that exists for unmatched wording structurally cannot cover this
+  one: the CLI does not abort before turn 1 the way a 401 does, it reports the
+  refusal as a *completed* turn (`num_turns=1`) whose result text **is** the
+  error, so both halves of "produced nothing and took no turns" are false and
+  nothing is even logged as unmatched.
+- **A runtime rejection spelled as a compaction failure belongs to the account
+  branch.** Compaction is an ordinary API call, so the refusal surfaces
+  through the summariser as "Prompt is too long · automatic compaction failed:
+  Your organization has disabled ...". That reads as a context problem, and
+  the context-overflow branch sits *above* the account branch, so it spent
+  both recovery rungs and then abandoned a transcript that compacts perfectly
+  well. q-17514 and q-17515 were amputated that way at 04:13 on 2026-09-15.
+  The overflow branch now stands down on `looks_like_fatal_auth_error`.
+- **`REASON_ORG_DISABLED` exists to pick the right advice, not to add text.**
+  Every other sideline is answered by signing in again; this one cannot be,
+  because the account is signed in fine throughout. The Ark notice drops the
+  "is signed out" opener, the `CLAUDE_CONFIG_DIR` command and the login
+  button, says an admin has to re-enable access, and offers **Try now**
+  instead. `RUNTIME_REJECTION_REASONS` is what keeps both runtime verdicts
+  out of the reach of the on-disk probe, which can never retire either: the
+  rejected credentials file parses exactly like a working one.
+- **"Try now" clears an auth cooldown and nothing else.**
+  `runner.retry_account_now` drops the day-long `ACCOUNT_AUTH_COOLDOWN_SECS`
+  sideline so the next task tries the account; if it is still blocked it is
+  re-sidelined exactly as before. It refuses a *usage* cooldown, which ends on
+  a real clock, and it reads the persisted alert table as well as the
+  in-memory auth/usage split, because a reboot loses that split and would
+  otherwise make a restarted auth sideline look like a usage limit for the
+  rest of the day.
+- **One panel renderer.** `/auth` and its Refresh button both go through
+  `wizard._render_auth_panel`. They were near-copies and had already drifted:
+  Refresh left out the sideline table, so refreshing turned a server-rejected
+  account back into a green tick.
+
+Harnesses: the org-disable cases live in `scripts/test_account_failover.py`
+and `scripts/test_account_alerts.py`; the compaction-wrapped one lives in
+`scripts/test_context_overflow.py`, next to the recovery it must not trigger.
+
 ## Versioning
 
 See `~/.claude/CLAUDE.md` for universal versioning conventions.
