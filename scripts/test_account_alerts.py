@@ -350,7 +350,7 @@ def _test_notice_copy_is_honest() -> list[str]:
                 "copy: told the user nothing needs attention while no account "
                 "could take a task"
             )
-        if "Every configured account is signed out" not in both:
+        if "Every configured account is sidelined" not in both:
             failures.append("copy: never says that everything is down")
 
         # A sidelined account that isn't ours doesn't change our story...
@@ -522,8 +522,11 @@ async def _test_auth_panel_agrees_with_the_ark() -> list[str]:
                 "signed in — this test no longer proves anything"
             )
 
+        # The reasons ride along with the names: which button the panel may
+        # offer depends on *why* an account is out, and passing a bare name
+        # set (still supported) leaves every reason empty.
         statuses = await collect_account_statuses(
-            dirs, None, {str(rejected)},
+            dirs, None, {str(rejected): REASON_RUNTIME_401},
         )
         by_label = {s.label: s for s in statuses}
         expected = {account_label(d) for d in dirs}
@@ -575,6 +578,53 @@ async def _test_auth_panel_agrees_with_the_ark() -> list[str]:
                         "panel: the 'Try now' button resolves to "
                         f"{target or problem!r}, not the account it names"
                     )
+            # A sideline the on-disk probe opened has no cooldown behind it,
+            # so "Try now" would clear nothing and answer "already in
+            # rotation" about an account the same panel draws with a cross.
+            # Log in is the button that fixes that one, and it must survive.
+            probe_out = await collect_account_statuses(
+                dirs, None, {str(rejected): REASON_NO_TOKEN},
+            )
+            probe_ids = [
+                getattr(i, "custom_id", None)
+                for i in _build_auth_panel_view(probe_out, True).children
+            ]
+            if any((i or "").startswith("auth:retry:") for i in probe_ids):
+                failures.append(
+                    "panel: offered 'Try now' for an account with no saved "
+                    "login, where it clears nothing"
+                )
+            if "auth:login:1" not in probe_ids:
+                failures.append(
+                    "panel: dropped the Log in button for an account whose "
+                    "only fix is logging in"
+                )
+
+            # An org-disabled account is signed in fine, so a login terminal
+            # is the one thing that cannot help it. Same rule as the Ark
+            # notice, which links here.
+            org_out = await collect_account_statuses(
+                dirs, None, {str(rejected): REASON_ORG_DISABLED},
+            )
+            org_ids = [
+                getattr(i, "custom_id", None)
+                for i in _build_auth_panel_view(org_out, True).children
+            ]
+            if "auth:login:1" in org_ids:
+                failures.append(
+                    "panel: offered Log in for an org-disabled account, the "
+                    "advice the Ark notice was fixed to stop giving"
+                )
+            if "auth:retry:1" not in org_ids:
+                failures.append(
+                    "panel: dropped 'Try now' for an org-disabled account, "
+                    "the only action that helps once access returns"
+                )
+            if "auth:login:0" not in org_ids:
+                failures.append(
+                    "panel: the healthy account lost its own Log in button"
+                )
+
             rows: dict[int, int] = {}
             for item in _build_auth_panel_view(statuses, True).children:
                 r = getattr(item, "row", 0)

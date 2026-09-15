@@ -945,7 +945,12 @@ and that reason is the thing to keep true:
   because the account is signed in fine throughout. The Ark notice drops the
   "is signed out" opener, the `CLAUDE_CONFIG_DIR` command and the login
   button, says an admin has to re-enable access, and offers **Try now**
-  instead. `RUNTIME_REJECTION_REASONS` is what keeps both runtime verdicts
+  instead. Three surfaces carry that advice and all three branch on the
+  reason: the notice, the `/auth` panel (which reads the table through
+  `StateStore.sidelined_account_reasons`, so a button it offers cannot
+  contradict the notice that linked to it) and the failure card
+  `runner._soften_auth_dead_end` writes when there is nowhere left to fail
+  over to. `RUNTIME_REJECTION_REASONS` is what keeps both runtime verdicts
   out of the reach of the on-disk probe, which can never retire either: the
   rejected credentials file parses exactly like a working one.
 - **"Try now" clears an auth cooldown and nothing else.**
@@ -955,7 +960,13 @@ and that reason is the thing to keep true:
   a real clock, and it reads the persisted alert table as well as the
   in-memory auth/usage split, because a reboot loses that split and would
   otherwise make a restarted auth sideline look like a usage limit for the
-  rest of the day.
+  rest of the day. Only a `RUNTIME_REJECTION_REASONS` alert counts as that
+  durable evidence, and the button is only drawn for one: the probe reasons
+  open an alert without ever arming a cooldown, so reading one as an auth
+  sideline would force-clear a real usage limit that happened to be sitting
+  behind it. The sole-account case arms no cooldown either (parking the only
+  account we have would stop everything), so there the in-memory dead mark is
+  the whole sideline and dropping it is the whole retry.
 - **One panel renderer.** `/auth` and its Refresh button both go through
   `wizard._render_auth_panel`. They were near-copies and had already drifted:
   Refresh left out the sideline table, so refreshing turned a server-rejected

@@ -668,6 +668,21 @@ def is_context_overflow_error(error_text: str) -> bool:
     )
 
 
+# An org admin revoked Claude Code for the whole organization.  Verbatim, seen
+# 26 times against the klerk account from 2026-09-14 12:06: "Your organization
+# has disabled Claude subscription access for Claude Code · Use an Anthropic
+# API key instead, or ask your admin to enable access".
+#
+# Written once because two predicates below read it: the broad "does this
+# mention an auth fault?" list, and `is_org_disabled_error`, which picks the
+# advice the user is given.  Two copies of the same wording is how the notice
+# ends up telling someone to sign in to an account that is signed in fine.
+ORG_DISABLED_PHRASES = (
+    "disabled claude subscription access",
+    "ask your admin to enable access",
+)
+
+
 def is_account_unusable_error(error_text: str) -> bool:
     """Account-level auth/subscription failure (cancelled sub, logged out).
 
@@ -685,22 +700,16 @@ def is_account_unusable_error(error_text: str) -> bool:
         "no active subscription", "subscription has expired",
         "subscription expired", "credit balance is too low",
         "log in again", "re-authenticate", "please sign in",
-        # An org admin revoked Claude Code for the whole organization.
-        # Verbatim, seen 26 times against the klerk account from
-        # 2026-09-14 12:06: "Your organization has disabled Claude
-        # subscription access for Claude Code · Use an Anthropic API key
-        # instead, or ask your admin to enable access".
-        #
-        # This is the case the no-turns heuristic structurally cannot cover,
-        # which is why the wording has to be here.  The CLI does not abort
-        # before turn 1 the way a 401 does: it reports the rejection as a
-        # completed turn (num_turns=1) whose result text IS the error, so
-        # both halves of "produced nothing and took no turns" are false and
-        # the account was never sidelined.  The "graduate the wording once
-        # the real cancellation error surfaces" note below never fired
-        # either, for the same reason.
-        "disabled claude subscription access",
-        "ask your admin to enable access",
+        # The org-disable wording (ORG_DISABLED_PHRASES, above) is the case
+        # the no-turns heuristic structurally cannot cover, which is why it
+        # has to be matched here by name.  The CLI does not abort before turn
+        # 1 the way a 401 does: it reports the rejection as a completed turn
+        # (num_turns=1) whose result text IS the error, so both halves of
+        # "produced nothing and took no turns" are false and the account was
+        # never sidelined.  The "graduate the wording once the real
+        # cancellation error surfaces" note below never fired either, for the
+        # same reason.
+        *ORG_DISABLED_PHRASES,
     ]
     if not any(p in lower for p in patterns):
         return False
@@ -732,10 +741,7 @@ def is_org_disabled_error(text: str | None) -> bool:
     if len(stripped) > FATAL_ERROR_MAX_CHARS:
         return False
     lower = stripped.lower()
-    return (
-        "disabled claude subscription access" in lower
-        or "ask your admin to enable access" in lower
-    )
+    return any(p in lower for p in ORG_DISABLED_PHRASES)
 
 
 def looks_like_fatal_auth_error(text: str | None) -> bool:

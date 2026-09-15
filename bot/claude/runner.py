@@ -1481,6 +1481,13 @@ class ClaudeRunner:
         same asymmetry ``_clear_auth_cooldown(force=True)`` exists to paper
         over.  Either one is enough; they can only disagree by being stale in
         the safe direction.
+
+        Only a *runtime* rejection counts as durable evidence, because only
+        those are written by the path that also arms the cooldown.  The probe
+        reasons (no token, no file, unreadable) open an alert without ever
+        arming one, so an account holding a real usage limit while its
+        credentials went missing would otherwise read as auth-sidelined here
+        and have that limit force-cleared out from under it.
         """
         if account_dir in self._auth_cooldowns or account_dir in self._auth_dead:
             return True
@@ -1491,7 +1498,9 @@ class ClaudeRunner:
         except Exception:
             log.debug("Failed to read account alerts", exc_info=True)
             return False
-        return bool(record) and not record.get("resolved")
+        if not record or record.get("resolved"):
+            return False
+        return record.get("reason") in RUNTIME_REJECTION_REASONS
 
     def retry_account_now(self, account_dir: str) -> str:
         """Put an auth-sidelined account back in rotation immediately.
@@ -1506,18 +1515,35 @@ class ClaudeRunner:
 
         Returns ``"cleared"``, ``"usage"`` (the cooldown is a real usage limit
         with a real reset time, so clearing it would only send the next task
-        into the limit it is waiting out), or ``"not_cooled"``.
+        into the limit it is waiting out), or ``"not_cooled"`` when the
+        account was not sitting out in the first place.
         """
         from bot.claude.auth_health import clear_cache as _clear_auth_cache
 
         # Re-probe the credentials file too: "try now" means "look again at
         # everything about this account", and the on-disk probe is cached.
+        # Every account is re-probed, not just this one: the probe is a small
+        # cached file read, and a picker that disagrees with the panel the
+        # user is looking at costs more than re-reading two files.
         _clear_auth_cache()
+        was_sidelined = self._auth_sideline_is_open(account_dir)
         if account_dir not in self._account_cooldowns:
+            # Nothing to un-cool.  That is the *sole account* case rather than
+            # a healthy one: sidelining the only account we have would stop
+            # everything, so that path records the alert and skips the
+            # cooldown.  The in-memory dead mark is then the only thing
+            # holding it out of rotation (_known_dead_accounts), so dropping
+            # it is the whole retry.
             self._auth_dead.discard(account_dir)
             self._auth_cooldowns.discard(account_dir)
+            if was_sidelined:
+                log.info(
+                    "Account %s put back in rotation by hand (no cooldown to "
+                    "clear)", account_label(account_dir),
+                )
+                return "cleared"
             return "not_cooled"
-        if not self._auth_sideline_is_open(account_dir):
+        if not was_sidelined:
             return "usage"
         self._clear_auth_cooldown(account_dir, force=True)
         log.info(
@@ -1584,6 +1610,7 @@ class ClaudeRunner:
 
     def _soften_auth_dead_end(
         self, result: RunResult, instance: Instance, dead_account: str,
+        *, org_disabled: bool = False,
     ) -> None:
         """Turn a nowhere-to-go auth failure into a retry or a useful message.
 
@@ -1595,6 +1622,11 @@ class ClaudeRunner:
           back when the earliest one frees up (a real wall-clock moment), and
         * genuinely nothing left -> say which accounts are logged out and how
           to fix them, instead of echoing the CLI.
+
+        *org_disabled* swaps that last message, for the same reason The Ark
+        notice branches on it: an org-disabled account is signed in fine, so
+        "logged out (OAuth expired), re-auth with ..." names the wrong fault
+        and prescribes the one fix that provably cannot work.
 
         Accounts that are themselves logged out are excluded from the first
         branch even though they hold a cooldown entry.  Waiting on one is not a
@@ -1626,16 +1658,29 @@ class ClaudeRunner:
         ordered = [a for a in config.CLAUDE_ACCOUNTS if a in dead] or [dead_account]
         labels = ", ".join(f"'{account_label(a)}'" for a in ordered)
         verb = "is" if len(ordered) == 1 else "are"
-        result.error_message = (
-            f"Account {labels} {verb} logged out (OAuth expired) and there is "
-            f"no other account to fall back to.\n"
-            f"Re-auth with: {relogin_command(ordered[0])}  then /login "
-            f"inside the CLI — or drop it from CLAUDE_ACCOUNTS."
-        )
+        if org_disabled:
+            result.error_message = (
+                f"Account '{account_label(dead_account)}' can't run: its "
+                f"organization has Claude Code switched off, and there is no "
+                f"other account to fall back to.\n"
+                f"Signing in again won't fix this one, it is signed in fine. "
+                f"An admin has to re-enable access; the bot retries the "
+                f"account about once a day and takes it back by itself, or "
+                f"use Try now in /auth."
+            )
+        else:
+            result.error_message = (
+                f"Account {labels} {verb} logged out (OAuth expired) and there "
+                f"is no other account to fall back to.\n"
+                f"Re-auth with: {relogin_command(ordered[0])}  then /login "
+                f"inside the CLI, or drop it from CLAUDE_ACCOUNTS."
+            )
         result.result_text = ""
         log.error(
-            "Accounts %s logged out and nothing is left to fall back to (%s)",
-            labels, instance.id,
+            "Accounts %s unusable (%s) and nothing is left to fall back to (%s)",
+            labels,
+            "org-disabled" if org_disabled else "logged out",
+            instance.id,
         )
 
     def _set_account_cooldown(self, account_dir: str, reset_at: datetime) -> None:
@@ -3054,6 +3099,10 @@ class ClaudeRunner:
                 # account for 24h because a session happened to WRITE about
                 # expired tokens. A CLI auth error is one line.
                 confident = looks_like_fatal_auth_error(error_text)
+                # Which kind of confident rejection: it decides the reason on
+                # the alert and the wording of the dead-end message, and both
+                # must read it the same way.
+                org_disabled = confident and is_org_disabled_error(error_text)
                 no_turns = (not (result.result_text or "").strip()
                             and not result.num_turns
                             and not is_account_agnostic_error(error_text))
@@ -3073,8 +3122,7 @@ class ClaudeRunner:
                         # which is precisely when the user most needs telling.
                         self._record_auth_alert(
                             account_dir,
-                            REASON_ORG_DISABLED
-                            if is_org_disabled_error(error_text)
+                            REASON_ORG_DISABLED if org_disabled
                             else REASON_RUNTIME_401,
                         )
                         if len(config.CLAUDE_ACCOUNTS) > 1:
@@ -3122,6 +3170,7 @@ class ClaudeRunner:
                         # merely cooling down, come back when it frees up.
                         self._soften_auth_dead_end(
                             result, instance, account_dir,
+                            org_disabled=org_disabled,
                         )
 
             return result

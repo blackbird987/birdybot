@@ -1517,6 +1517,48 @@ def _test_retry_account_now() -> list[str]:
                 "try-now: after a restart the button refuses to clear an auth "
                 "sideline it can still read from the alert table"
             )
+
+        # ...but only a *runtime* rejection counts as that durable evidence.
+        # The probe reasons open an alert without ever arming a cooldown, so
+        # an account holding a real usage limit while its credentials went
+        # missing must not have that limit force-cleared out from under it.
+        rebooted._set_account_cooldown(limited, later)
+        rebooted._store.set_account_alert(
+            limited, REASON_NO_TOKEN,
+            datetime.now(timezone.utc).isoformat(),
+        )
+        if rebooted.retry_account_now(limited) != "usage":
+            failures.append(
+                "try-now: read a signed-out probe alert as an auth sideline "
+                "and cleared the usage limit hiding behind it"
+            )
+        if limited not in rebooted._account_cooldowns:
+            failures.append(
+                "try-now: dropped a usage cooldown on the strength of a probe "
+                "alert that never armed one"
+            )
+
+        # The sole-account shape: sidelining the only account we have would
+        # stop everything, so that path records the alert and skips the
+        # cooldown.  The in-memory dead mark is then the only thing holding
+        # the account out, and the button has to drop it and say so.
+        alone = ClaudeRunner(store=_FakeStore())
+        alone._record_auth_alert(parked, REASON_ORG_DISABLED)
+        if parked not in alone._known_dead_accounts():
+            failures.append(
+                "try-now: the sole-account sideline isn't holding the account "
+                "out at all, so this case proves nothing"
+            )
+        if alone.retry_account_now(parked) != "cleared":
+            failures.append(
+                "try-now: told the user there was nothing to clear while the "
+                "account was sitting out with no cooldown to point at"
+            )
+        if parked in alone._known_dead_accounts():
+            failures.append(
+                "try-now: said cleared but the account is still marked dead, "
+                "so the next task skips it anyway"
+            )
     finally:
         config.CLAUDE_ACCOUNTS[:] = saved
         clear_auth_cache()

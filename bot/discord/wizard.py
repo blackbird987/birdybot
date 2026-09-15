@@ -269,11 +269,12 @@ async def _render_auth_panel(
     ]
     cooldowns = getattr(bot._runner, "_account_cooldowns", {}) or {}
     # Same sideline table The Ark reads, so tapping "Auth panel" on an outage
-    # notice can't land on a green tick for the account it just named.
+    # notice can't land on a green tick for the account it just named. With
+    # the reasons, so the panel can offer the same button the notice did.
     try:
-        sidelined = bot._store.sidelined_accounts()
+        sidelined = bot._store.sidelined_account_reasons()
     except Exception:
-        sidelined = set()
+        sidelined = {}
     statuses = await collect_account_statuses(
         account_dirs, cooldowns, sidelined,
     )
@@ -288,6 +289,8 @@ async def _render_auth_panel(
 def _build_auth_panel_embed(statuses: list, can_console: bool) -> discord.Embed:
     """Render account statuses + hint lines as an ephemeral embed."""
     from datetime import datetime as _dt, timezone as _tz
+
+    from bot.discord.account_alerts import describe_reason
 
     title = f"Claude Auth — {config.PC_NAME}"
     embed = discord.Embed(title=title, color=discord.Color.blurple())
@@ -305,6 +308,11 @@ def _build_auth_panel_embed(statuses: list, can_console: bool) -> discord.Embed:
         )
         org = f" · _{st.org}_" if st.org else ""
         line = f"{mark} **`{st.label}`** — {ident}{org}"
+        if getattr(st, "sidelined", False):
+            # Without this an org-disabled account reads as a bare ✗ next to
+            # its own email address, which looks like a bug in the panel
+            # rather than a fact about the account.
+            line += f"  · sidelined: {describe_reason(st.sideline_reason)}"
         if st.cooldown_until and st.cooldown_until > now:
             mins = max(1, int((st.cooldown_until - now).total_seconds() // 60))
             line += f"  · cooldown {mins}m (UTC)"
@@ -348,9 +356,20 @@ def _build_auth_panel_embed(statuses: list, can_console: bool) -> discord.Embed:
 
 def _build_auth_panel_view(statuses: list, can_console: bool) -> discord.ui.View:
     """Build per-account Login buttons + Sync/Refresh row."""
+    from bot.claude.auth_health import (
+        REASON_ORG_DISABLED, RUNTIME_REJECTION_REASONS,
+    )
+
     view = discord.ui.View(timeout=300)
 
     for i, st in enumerate(statuses[:4]):
+        # An org-disabled account is signed in perfectly well and a login
+        # terminal is the one thing that cannot help it, the same reason The
+        # Ark notice drops its login button. Offering both here would put the
+        # advice the notice was fixed to stop giving back on screen, one tap
+        # from the notice itself.
+        if getattr(st, "sideline_reason", "") == REASON_ORG_DISABLED:
+            continue
         label = (
             f"Log in {st.label}" if not st.logged_in
             else f"Re-login {st.label}"
@@ -383,11 +402,16 @@ def _build_auth_panel_view(statuses: list, can_console: bool) -> discord.ui.View
     # An account the server turned away sits out for ACCOUNT_AUTH_COOLDOWN_SECS
     # (a day), which is the right default for an account that is simply gone
     # and the wrong wait for one whose access was just switched back on. This
-    # is the "don't make me wait for the daily retry" button, and it only
-    # appears for accounts that are actually sitting out: a healthy account
-    # has nothing to clear.
+    # is the "don't make me wait for the daily retry" button.
+    #
+    # Only for the two *runtime* rejections, which is exactly what the day-long
+    # cooldown is armed for. A sideline the on-disk probe opened (no saved
+    # login, missing folder) has no cooldown behind it, so the button would
+    # clear nothing and answer "already in rotation" about an account the same
+    # panel is drawing with a ✗ - and the thing that does fix it, Log in, is
+    # already sitting one row above.
     for i, st in enumerate(statuses[:4]):
-        if not st.sidelined:
+        if getattr(st, "sideline_reason", "") not in RUNTIME_REJECTION_REASONS:
             continue
         view.add_item(discord.ui.Button(
             label=f"Try {st.label} now"[:80],
@@ -534,8 +558,8 @@ async def handle_auth_button(
         if bot._store.snooze_account_alert(target, snooze_deadline()):
             await interaction.followup.send(
                 f"Muted for {SNOOZE_DAYS} days. `{label}` stays out of "
-                f"rotation until it's signed in — the bot keeps working on "
-                f"the accounts that are.",
+                f"rotation until it works again, and the bot keeps working "
+                f"on the accounts that do.",
                 ephemeral=True,
             )
         else:

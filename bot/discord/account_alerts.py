@@ -105,6 +105,16 @@ def build_alert_embed(
         color=discord.Color.orange(),
     )
 
+    # An org-disabled account is signed in perfectly well, so every sentence
+    # this notice normally ends on is wrong for it: it is not "signed out", a
+    # re-login provably will not fix it, and it cannot "rejoin the moment it's
+    # signed in" because it never left that state. Sending the user to run
+    # /login here is sending them to do something that cannot work.
+    org_disabled = reason == REASON_ORG_DISABLED
+    # What the account is waiting for, which is the one word the "nothing can
+    # run until ..." sentences below differ by.
+    recovery = "access is restored" if org_disabled else "it's signed in again"
+
     down = set(also_down or ())
     others = [a for a in config.CLAUDE_ACCOUNTS if a != account_dir]
     healthy = [a for a in others if a not in down]
@@ -121,21 +131,15 @@ def build_alert_embed(
         closer = "Nothing has failed and nothing needs your attention right now. "
     else:
         impact = (
-            "Every configured account is signed out, so nothing can run until "
-            "one of them is signed in again."
+            "Every configured account is sidelined, so nothing can run until "
+            "one of them is usable again."
             if others else
-            "This is the only account configured, so nothing can run until "
-            "it's signed in again."
+            f"This is the only account configured, so nothing can run until "
+            f"{recovery}."
         )
-        closer = ("New tasks can't run — they'll auto-retry a few times in "
-                  "case you sign in, then give up. ")
+        closer = ("New tasks can't run: they'll auto-retry a few times in "
+                  "case it recovers, then give up. ")
 
-    # An org-disabled account is signed in perfectly well, so every sentence
-    # this notice normally ends on is wrong for it: it is not "signed out", a
-    # re-login provably will not fix it, and it cannot "rejoin the moment it's
-    # signed in" because it never left that state. Sending the user to run
-    # /login here is sending them to do something that cannot work.
-    org_disabled = reason == REASON_ORG_DISABLED
     opener = "is out of rotation" if org_disabled else "is signed out"
     if org_disabled:
         remedy = (

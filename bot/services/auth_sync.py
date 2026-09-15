@@ -27,7 +27,7 @@ import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Container
+from collections.abc import Container, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -281,11 +281,14 @@ class AccountStatus:
     account_uuid: str | None = None    # accountUuid
     cooldown_until: datetime | None = None  # tz-aware UTC
     error: str | None = None           # any read error to surface
-    # The server rejected this account at runtime even though its credentials
-    # file parses. Kept apart from ``logged_in`` (which it also clears)
-    # because the two need different advice: a missing token is fixed by
-    # signing in, a server-side rejection may not be.
+    # This account is sitting out with an open alert. Kept apart from
+    # ``logged_in`` (which it also clears) because the two need different
+    # advice: a missing token is fixed by signing in, a server-side rejection
+    # may not be. ``sideline_reason`` is the ``REASON_*`` string behind it,
+    # empty when the account is fine, and is what lets a surface offer the
+    # action that can actually help.
     sidelined: bool = False
+    sideline_reason: str = ""
 
 
 def _read_account_identity(account_dir: Path) -> tuple[str | None, str | None, str | None]:
@@ -319,17 +322,24 @@ def _check_credentials_file(account_dir: Path) -> bool:
 async def collect_account_statuses(
     account_dirs: list[str],
     cooldowns: dict[str, datetime] | None = None,
-    sidelined: Container[str] = (),
+    sidelined: Container[str] | Mapping[str, str] = (),
 ) -> list[AccountStatus]:
     """Build AccountStatus list for the given dirs (off the event loop).
 
-    ``sidelined`` names accounts the *server* rejected at runtime. Their
-    credentials file still parses, so the on-disk check says "signed in" — and
-    this is the panel the outage notice links to, so without this it would
-    cheerfully show a green tick for the very account The Ark just reported as
-    signed out, offering "Re-login" where the user needs "Log in".
+    ``sidelined`` names accounts sitting out with an open alert. A
+    server-rejected one's credentials file still parses, so the on-disk check
+    says "signed in", and this is the panel the outage notice links to, so
+    without this it would cheerfully show a green tick for the very account
+    The Ark just reported as signed out, offering "Re-login" where the user
+    needs "Log in".
+
+    Pass ``StateStore.sidelined_account_reasons()`` (a mapping) rather than
+    the bare name set to have each status carry *why*, which is what a caller
+    needs to offer the right button. Any container still works and simply
+    leaves the reason empty.
     """
     cooldowns = cooldowns or {}
+    reasons = sidelined if isinstance(sidelined, Mapping) else {}
 
     def _build() -> list[AccountStatus]:
         out: list[AccountStatus] = []
@@ -343,6 +353,7 @@ async def collect_account_statuses(
             label = account_label(p)
             try:
                 is_sidelined = raw in sidelined or str(p) in sidelined
+                reason = reasons.get(raw) or reasons.get(str(p)) or ""
                 logged_in = _check_credentials_file(p) and not is_sidelined
                 email, org, uuid_ = _read_account_identity(p)
                 out.append(AccountStatus(
@@ -350,6 +361,7 @@ async def collect_account_statuses(
                     label=label,
                     logged_in=logged_in,
                     sidelined=is_sidelined,
+                    sideline_reason=reason,
                     email=email,
                     org=org,
                     account_uuid=uuid_,
