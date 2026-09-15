@@ -883,16 +883,27 @@ class StateStore:
         """
         return {k: dict(v) for k, v in self._account_alerts.items()}
 
-    def sidelined_accounts(self) -> set[str]:
-        """Accounts with an open (unresolved) auth alert.
+    def sidelined_account_reasons(self) -> dict[str, str]:
+        """{account_dir -> reason} for every open (unresolved) auth alert.
 
         The only record of an account the *server* rejected — its credentials
         file still parses fine, so no on-disk check can see it.  Read by the
         "how healthy is the fleet?" surfaces so they agree with The Ark.
+
+        The reason rides along because the advice differs by it: an account
+        with no saved login is answered by signing in, an org-disabled one
+        provably is not.  A surface that only needs the names uses
+        ``sidelined_accounts``, which is this with the reasons dropped.
         """
         return {
-            k for k, v in self._account_alerts.items() if not v.get("resolved")
+            k: (v.get("reason") or "")
+            for k, v in self._account_alerts.items()
+            if not v.get("resolved")
         }
+
+    def sidelined_accounts(self) -> set[str]:
+        """The names of the accounts with an open auth alert."""
+        return set(self.sidelined_account_reasons())
 
     def set_account_alert(
         self,

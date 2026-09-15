@@ -36,6 +36,15 @@ Two layers:
    - that sideline still retires on a login after a bot restart, when the
      in-memory record of why it was applied is gone.
 
+4. An org-wide disable is an account fault too (2026-09-15):
+   - the wording is matched by name, because the no-turns escape hatch
+     structurally cannot see it: the CLI reports the refusal as a completed
+     turn whose result text IS the error.
+   - it sidelines and fails over, and is filed under its own reason so the
+     notice can stop telling the user to sign in again.
+   - the /auth "Try now" button clears an auth sideline (including after a
+     restart) and refuses to touch a genuine usage limit.
+
 Run: ``python scripts/test_account_failover.py``  (exit 0 on pass).
 """
 
@@ -57,6 +66,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bot import config
 from bot.claude.auth_health import (
     REASON_NO_TOKEN,
+    REASON_ORG_DISABLED,
     REASON_RUNTIME_401,
     account_label,
     clear_cache as clear_auth_cache,
@@ -66,10 +76,28 @@ from bot.claude.auth_health import (
 from bot.claude.parser import (
     is_account_agnostic_error,
     is_account_unusable_error,
+    is_org_disabled_error,
+    looks_like_fatal_auth_error,
 )
 from bot.claude.runner import ClaudeRunner, _no_productive_work
 from bot.claude.types import Instance, InstanceStatus, InstanceType, RunResult
 
+
+# Verbatim from data/logs/bot.log, 2026-09-14 12:06 onwards, 26 times against
+# the klerk account.  The "·" is the CLI's own separator.  An admin had
+# switched Claude Code off for the whole organization; the account itself was
+# signed in perfectly well the entire time.
+ORG_DISABLED = (
+    "Your organization has disabled Claude subscription access for Claude "
+    "Code · Use an Anthropic API key instead, or ask your admin to enable "
+    "access"
+)
+# How the same rejection arrives when it surfaces through the summariser:
+# compaction is an ordinary API call, so the account-level refusal comes back
+# wearing a context-overflow error's clothes.
+ORG_DISABLED_VIA_COMPACTION = (
+    f"Prompt is too long · automatic compaction failed: {ORG_DISABLED}"
+)
 
 # ---------------------------------------------------------------------------
 # Layer 1: pure classifier unit tests
@@ -121,6 +149,65 @@ def _test_classifiers() -> list[str]:
             failures.append(f"is_account_agnostic_error should NOT match: {s!r}")
 
     return failures
+
+
+def _test_org_disabled_classifier() -> list[str]:
+    """An org-wide disable is an account fault, and a *distinct* one.
+
+    It matched nothing until 2026-09-15, so the account was never sidelined
+    and every failover kept picking it.  The escape hatch could not cover it
+    either: the CLI does not abort before turn 1 the way a 401 does, it
+    reports the refusal as a completed turn whose result text IS the error,
+    so both halves of the no-turns heuristic are false.  The wording has to
+    be matched by name.
+    """
+    failures: list[str] = []
+
+    if not is_account_unusable_error(ORG_DISABLED):
+        failures.append("org-disable not recognised as an account fault")
+    if not looks_like_fatal_auth_error(ORG_DISABLED):
+        failures.append(
+            "org-disable not confident enough to sideline the account; the "
+            "no-turns fallback cannot cover it, so nothing would fire"
+        )
+    if not looks_like_fatal_auth_error(ORG_DISABLED_VIA_COMPACTION):
+        failures.append(
+            "the compaction-wrapped form is not recognised, so it would be "
+            "answered as a context problem and cost the thread its session"
+        )
+    if not is_org_disabled_error(ORG_DISABLED):
+        failures.append("is_org_disabled_error missed the real wording")
+    if not is_org_disabled_error(ORG_DISABLED_VIA_COMPACTION):
+        failures.append(
+            "is_org_disabled_error missed the compaction-wrapped form, so "
+            "the notice would tell the user to sign in again"
+        )
+
+    # A signed-out account is a different fix and must not borrow this copy.
+    for other in (
+        "",
+        "Invalid API key · Please run /login",
+        "OAuth token has expired",
+        "You've hit your usage limit · resets 5pm",
+    ):
+        if is_org_disabled_error(other):
+            failures.append(f"is_org_disabled_error false positive: {other!r}")
+
+    # Length guard, for the same reason its parent has one: this repo's own
+    # sessions write about the failure, and error_text falls back to the whole
+    # result_text.  A work product must not sideline an account for a day.
+    prose = (
+        "I traced the failover bug. The CLI reports 'Your organization has "
+        "disabled Claude subscription access for Claude Code' and the parser "
+        "did not match it, so the runner kept picking the dead account. "
+    ) * 3
+    if is_org_disabled_error(prose):
+        failures.append("prose describing the failure reads as the failure")
+    if looks_like_fatal_auth_error(prose):
+        failures.append("prose describing the failure would sideline an account")
+
+    return failures
+
 
 
 # ---------------------------------------------------------------------------
@@ -1320,6 +1407,165 @@ def _test_success_still_retires_an_auth_sideline() -> list[str]:
     return failures
 
 
+async def _test_org_disabled_sidelines_and_fails_over() -> list[str]:
+    """The reported bug, end to end: park the account and use the other one.
+
+    The account is not signed out, so the notice must not say it is.  The
+    alert is recorded under its own reason precisely so The Ark can give the
+    one piece of advice that works (an admin re-enabling access) instead of a
+    re-login that provably cannot.
+    """
+    failures: list[str] = []
+    results = [
+        # num_turns=1 with the error as the result text: the real shape, and
+        # the reason the no-turns fallback never fired.
+        RunResult(is_error=True, error_message=ORG_DISABLED,
+                  result_text=ORG_DISABLED, num_turns=1),
+        RunResult(is_error=False, result_text="ok"),
+    ]
+    result, instance, runner, accts, spawns = await _run_with_streams(
+        results, accounts=["klerk", "backup"]
+    )
+    dead, backup = accts
+    if spawns < 2:
+        failures.append(
+            f"org-disabled: {spawns} spawn(s); the bot kept the dead account "
+            "instead of failing over, which is the reported bug"
+        )
+    if dead not in runner._account_cooldowns:
+        failures.append("org-disabled: the account was not put on cooldown")
+    if dead not in runner._auth_cooldowns:
+        failures.append(
+            "org-disabled: cooled as a usage limit, so a login or a successful "
+            "run would never retire it"
+        )
+    if result.is_error:
+        failures.append(f"org-disabled: final result errored: {result.error_message!r}")
+
+    record = runner._store.alerts.get(dead)
+    if not record:
+        failures.append("org-disabled: nothing recorded for The Ark to post")
+    elif record.get("reason") != REASON_ORG_DISABLED:
+        failures.append(
+            "org-disabled: filed as "
+            f"{record.get('reason')!r}, so the notice tells the user to sign "
+            "in again, the one thing that cannot fix it"
+        )
+    return failures
+
+
+def _test_retry_account_now() -> list[str]:
+    """The /auth 'Try now' button: skip the day-long wait, don't break a limit.
+
+    The auth cooldown is a day so a dead account costs one wasted run per day.
+    That is the right default and the wrong wait when access has *just* been
+    switched back on.  A usage cooldown must survive the same button: it ends
+    on a real clock, and clearing it only sends the next task into the limit.
+    """
+    failures: list[str] = []
+    tmp = tempfile.mkdtemp(prefix="acct_retrynow_")
+    parked = os.path.join(tmp, "parked")
+    limited = os.path.join(tmp, "limited")
+    healthy = os.path.join(tmp, "healthy")
+    for d in (parked, limited, healthy):
+        os.makedirs(d, exist_ok=True)
+        _write_credentials(d, logged_in=True)
+    clear_auth_cache()
+    saved = list(config.CLAUDE_ACCOUNTS)
+    config.CLAUDE_ACCOUNTS[:] = [parked, limited, healthy]
+    try:
+        runner = ClaudeRunner(store=_FakeStore())
+        later = datetime.now(timezone.utc) + timedelta(hours=24)
+        runner._set_account_cooldown(parked, later)
+        runner._record_auth_alert(parked, REASON_ORG_DISABLED)
+        runner._auth_cooldowns.add(parked)
+        runner._set_account_cooldown(limited, later)  # a real usage limit
+
+        if runner.retry_account_now(parked) != "cleared":
+            failures.append("try-now: the parked account was not put back")
+        if parked in runner._account_cooldowns:
+            failures.append(
+                "try-now: said cleared but the cooldown is still there, so "
+                "the next task still skips the account"
+            )
+        if parked in runner._store.cooldowns:
+            failures.append(
+                "try-now: the persisted cooldown survived, so a reboot would "
+                "park the account again"
+            )
+
+        if runner.retry_account_now(limited) != "usage":
+            failures.append(
+                "try-now: cleared a genuine usage limit, so the next task walks "
+                "straight back into it"
+            )
+        if limited not in runner._account_cooldowns:
+            failures.append("try-now: the usage cooldown was dropped anyway")
+
+        if runner.retry_account_now(healthy) != "not_cooled":
+            failures.append("try-now: invented a cooldown on a healthy account")
+
+        # A reboot loses the in-memory auth/usage split; the open alert record
+        # is the durable second source, and without it the button would read a
+        # rebooted auth sideline as a usage limit and refuse to clear it.
+        rebooted = ClaudeRunner(store=runner._store)
+        rebooted._set_account_cooldown(parked, later)
+        rebooted._auth_cooldowns.clear()
+        rebooted._auth_dead.clear()
+        if rebooted.retry_account_now(parked) != "cleared":
+            failures.append(
+                "try-now: after a restart the button refuses to clear an auth "
+                "sideline it can still read from the alert table"
+            )
+
+        # ...but only a *runtime* rejection counts as that durable evidence.
+        # The probe reasons open an alert without ever arming a cooldown, so
+        # an account holding a real usage limit while its credentials went
+        # missing must not have that limit force-cleared out from under it.
+        rebooted._set_account_cooldown(limited, later)
+        rebooted._store.set_account_alert(
+            limited, REASON_NO_TOKEN,
+            datetime.now(timezone.utc).isoformat(),
+        )
+        if rebooted.retry_account_now(limited) != "usage":
+            failures.append(
+                "try-now: read a signed-out probe alert as an auth sideline "
+                "and cleared the usage limit hiding behind it"
+            )
+        if limited not in rebooted._account_cooldowns:
+            failures.append(
+                "try-now: dropped a usage cooldown on the strength of a probe "
+                "alert that never armed one"
+            )
+
+        # The sole-account shape: sidelining the only account we have would
+        # stop everything, so that path records the alert and skips the
+        # cooldown.  The in-memory dead mark is then the only thing holding
+        # the account out, and the button has to drop it and say so.
+        alone = ClaudeRunner(store=_FakeStore())
+        alone._record_auth_alert(parked, REASON_ORG_DISABLED)
+        if parked not in alone._known_dead_accounts():
+            failures.append(
+                "try-now: the sole-account sideline isn't holding the account "
+                "out at all, so this case proves nothing"
+            )
+        if alone.retry_account_now(parked) != "cleared":
+            failures.append(
+                "try-now: told the user there was nothing to clear while the "
+                "account was sitting out with no cooldown to point at"
+            )
+        if parked in alone._known_dead_accounts():
+            failures.append(
+                "try-now: said cleared but the account is still marked dead, "
+                "so the next task skips it anyway"
+            )
+    finally:
+        config.CLAUDE_ACCOUNTS[:] = saved
+        clear_auth_cache()
+        shutil.rmtree(tmp, ignore_errors=True)
+    return failures
+
+
 async def _amain() -> int:
     all_failures: list[tuple[str, list[str]]] = []
 
@@ -1364,6 +1610,12 @@ async def _amain() -> int:
                          await _test_success_keeps_a_siblings_usage_cooldown()))
     all_failures.append(("success-retires-auth-sideline",
                          _test_success_still_retires_an_auth_sideline()))
+    all_failures.append(("org-disabled-classifier",
+                         _test_org_disabled_classifier()))
+    all_failures.append(("org-disabled-sidelines-and-fails-over",
+                         await _test_org_disabled_sidelines_and_fails_over()))
+    all_failures.append(("try-now-clears-auth-not-usage",
+                         _test_retry_account_now()))
 
     total = sum(len(f) for _, f in all_failures)
     if total:
