@@ -52,7 +52,9 @@ from bot.platform.formatting import (
 )
 from bot.textutil import clip
 
-from bot.claude.runner import ClaudeRunner, MERGE_FAIL_DIVERGED, git_fail_reason
+from bot.claude.runner import (
+    ClaudeRunner, MERGE_FAIL_DIVERGED, git_fail_reason, orphaned_releases,
+)
 
 log = logging.getLogger(__name__)
 
@@ -2085,7 +2087,17 @@ async def on_branches(ctx: RequestContext) -> None:
         orphan_branches = ClaudeRunner.scan_orphan_branches(repo_path, active_branches)
         # Orphan worktrees
         orphan_wts = ClaudeRunner.scan_orphan_worktrees(repo_path, active_worktrees)
-        repo_orphans = len(orphan_branches) + len(orphan_wts)
+        # Release tags stranded outside the checked-out line. Same category
+        # of leak as an orphaned branch (something the repo still lists as
+        # existing that nothing can reach), but far quieter, because a tag
+        # keeps its commits alive and `git tag` keeps printing the version
+        # as though it shipped. Reported as a backlog here rather than on
+        # every merge, where only the newest one is worth interrupting for.
+        orphan_tags = (
+            await asyncio.to_thread(orphaned_releases, repo_path)
+            if config.RELEASE_ANCESTRY_CHECK else []
+        )
+        repo_orphans = len(orphan_branches) + len(orphan_wts) + len(orphan_tags)
         if repo_orphans:
             total_orphans += repo_orphans
             lines.append(f"**{repo_name}** ({repo_orphans} orphaned)")
@@ -2093,9 +2105,16 @@ async def on_branches(ctx: RequestContext) -> None:
                 lines.append(f"  `{b}` (branch)")
             for w in orphan_wts[:10]:
                 lines.append(f"  `{w}` (worktree)")
+            for t in orphan_tags[:10]:
+                lines.append(f"  `{t}` (release not in HEAD)")
+            if len(orphan_tags) > 10:
+                lines.append(f"  …and {len(orphan_tags) - 10} more release tags")
 
     if not lines:
-        await ctx.messenger.send_text(ctx.channel_id, "No orphaned branches or worktrees found.")
+        await ctx.messenger.send_text(
+            ctx.channel_id,
+            "No orphaned branches, worktrees or release tags found.",
+        )
         return
 
     header = f"**Orphaned** ({total_orphans} total)\n\n"

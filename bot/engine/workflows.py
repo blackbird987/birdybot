@@ -18,7 +18,7 @@ from bot.claude.gitpaths import git_dir_stat
 from bot.claude.types import (
     BUILD_ORIGINS, CODE_CHANGE_TOOLS, ChainPhaseState, Instance, InstanceOrigin,
     InstanceStatus, InstanceType, PHASE_GATES, Phase, merge_msg_is_failure,
-    merge_msg_repo_unusable,
+    merge_msg_release_orphaned, merge_msg_repo_unusable,
 )
 from bot.engine import ai_project, lifecycle, sessions as sessions_mod
 from bot.platform.base import ButtonSpec, RequestContext
@@ -2093,6 +2093,24 @@ async def _finalize_merge(
             ctx.channel_id,
             f"⛔ **The merge landed, but the repo is now broken — "
             f"do not restart the bot until it is repaired.**\n{merge_msg}",
+        )
+        return True
+
+    if merge_msg_release_orphaned(merge_msg):
+        # The branch landed, but the target it landed on is missing an
+        # earlier release. Deploying from here would un-ship that release
+        # while the version number climbs, which is precisely the failure
+        # nobody notices. So: no deploy, no close, and a loud ping, the
+        # same shape as the repo-unusable branch above, for the same reason
+        # (a warning posted into a thread that archives seconds later is a
+        # warning nobody reads).
+        log.error("Auto-merge landed on a tree missing a release: %s", merge_msg)
+        if ctx.on_merged:
+            await ctx.on_merged()
+        await ctx.messenger.send_text(
+            ctx.channel_id,
+            f"⛔ **The merge landed, but an earlier release is missing from "
+            f"it. Do not deploy until it is merged in.**\n{merge_msg}",
         )
         return True
 

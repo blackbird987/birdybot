@@ -138,6 +138,14 @@ _PROVIDER_CFG = _get_provider(PROVIDER)
 CLAUDE_BINARY: str = os.getenv("CLAUDE_BINARY") or _PROVIDER_CFG.binary
 BRANCH_PREFIX: str = os.getenv("BRANCH_PREFIX") or _PROVIDER_CFG.branch_prefix
 
+# Release containment: refuse to ship a tree that does not contain the
+# previous release. Parallel builds each branch from their own snapshot of
+# master, so a build cut from a stale base ships a higher version number over
+# older content and silently un-ships whatever landed in between. Governs the
+# post-merge warning, the chain's refusal to close on it, and the deploy gate.
+# Set to 0 only if a repo legitimately keeps version tags off its main line.
+RELEASE_ANCESTRY_CHECK: bool = os.getenv("RELEASE_ANCESTRY_CHECK", "1") != "0"
+
 # Cursor-specific: default model (free tier = "auto", paid = specific model)
 CURSOR_MODEL: str = os.getenv("CURSOR_MODEL", "auto")
 MAX_CONCURRENT: int = int(os.getenv("MAX_CONCURRENT", "5"))

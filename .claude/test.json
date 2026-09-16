@@ -111,6 +111,7 @@
     "runner_watchdog": "python scripts/test_runner_watchdog.py",
     "spawn_depth_gate": "python scripts/test_spawn_depth_gate.py",
     "tag_release": "python scripts/test_tag_release.py",
+    "release_ancestry": "python scripts/test_release_ancestry.py",
     "worktree_recovery_dedupe": "python scripts/test_worktree_recovery_dedupe.py",
     "fleet_sim": "python scripts/verify_fleet_sim.py",
     "hydrate_same_account": "python scripts/verify_hydrate_same_account.py",

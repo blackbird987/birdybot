@@ -10,7 +10,10 @@ from typing import TYPE_CHECKING
 
 import discord
 
-from bot.claude.runner import RebootResult, git_fail_reason
+from bot import config as bot_config
+from bot.claude.runner import (
+    RebootResult, git_fail_reason, missing_predecessor_release,
+)
 from bot.discord import access as access_mod
 from bot.discord import channels
 from bot.discord.access import AccessResult, load_access_config, effective_mode as access_effective_mode
@@ -1271,6 +1274,27 @@ async def execute_deploy(
     async def _status(msg: str) -> None:
         if status_callback:
             await status_callback(msg)
+
+    # Release containment gate. This runs before the push, not after: the
+    # push is what publishes the revert, and a deploy that has already gone
+    # out cannot be warned about usefully. A tree that does not contain its
+    # own newest release ships older code under a newer version. Refusing
+    # is recoverable (merge the tag in and press Deploy again), shipping it
+    # is not.
+    if bot_config.RELEASE_ANCESTRY_CHECK:
+        missing = await asyncio.to_thread(
+            missing_predecessor_release, repo_path, "HEAD",
+        )
+        if missing:
+            log.error(
+                "Deploy of %s blocked: HEAD does not contain release %s",
+                repo_name, missing,
+            )
+            return False, "", (
+                f"Release `{missing}` is not in `HEAD`, so deploying would revert it. "
+                f"Merge that tag into the branch first, or delete it if it was "
+                f"never meant to ship."
+            )
 
     # Push to origin before deploying (safety net)
     await _status("\U0001f680 Pushing to origin...")
