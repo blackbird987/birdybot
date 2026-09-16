@@ -20,9 +20,15 @@
       "thread_id": "1545730176598413342",
       "at": "17:30",
       "tz": "Europe/Amsterdam",
-      "days": ["mon", "tue", "wed", "thu", "fri"],
+      "days": [
+        "mon",
+        "tue",
+        "wed",
+        "thu",
+        "fri"
+      ],
       "every_days": 1,
-      "prompt": "End-of-day nudge. Vin has not written; you are starting this. Send ONE short question asking what he worked on today, phrased so it can be answered one-handed on a phone. If the workspace is missing something specific and more valuable than the generic question, ask for that instead, using the priority order in CLAUDE.md: a feedback-round count on any closed or closing edit first, then the ritual live on the edit in play. Do not send a list, do not recap, do not explain that this is an automated message. One question, then end the turn."
+      "prompt": "End-of-day nudge. Vin has not written; you are starting this. First check whether he posted a task list this morning. If he did, ask about THAT list and name one or two items off it, because a plan written at 08:00 against an outcome at 17:30 is the cheapest dated evidence in the workspace. If he did not, send ONE short question asking what he worked on today. Either way it is one question, phrased so it can be answered one-handed on a phone. If the workspace is missing something more valuable than that, ask for it instead, using the priority order in CLAUDE.md: a feedback-round count on any closed or closing edit first, then the ritual live on the edit in play. Do not send a list, do not recap, do not explain that this is an automated message. One question, then end the turn."
     },
     {
       "label": "vin-thursday-claudio",
@@ -30,7 +36,9 @@
       "thread_id": "1545730176598413342",
       "at": "16:00",
       "tz": "Europe/Amsterdam",
-      "days": ["thu"],
+      "days": [
+        "thu"
+      ],
       "every_days": 7,
       "prompt": "Thursday chase, for Friday's half-day with Claudio. Vin has not written; you are starting this. Ask ONE question aimed at getting two or three specific things he can bring tomorrow: what did he second-guess this week, a shot, a cut, a choice he was not sure about. 'Nothing to ask' is the failure mode, so make the question concrete enough that a real answer is easier than a shrug. If no word came in about what got assigned at Monday's meeting, fold that into this same message rather than sending a second one. One question, then end the turn."
     },
@@ -40,9 +48,23 @@
       "thread_id": "1545730176598413342",
       "at": "16:00",
       "tz": "Europe/Amsterdam",
-      "days": ["tue"],
+      "days": [
+        "tue"
+      ],
       "every_days": 7,
       "prompt": "Weekly chase for the feedback-round count, the one number that becomes a trend line at the October check-in. Read projects/ and find every edit that has closed or shipped with its round count still blank. Ask about the OLDEST one only, however many are blank, however long ago it shipped. Offer the shortcut: a screenshot of the review comments and you will count the rounds yourself. If nothing is blank, send nothing at all and end the turn silently rather than inventing a question. One message, then end the turn."
+    },
+    {
+      "label": "vin-friday-summary",
+      "repo": "vin-coach",
+      "thread_id": "1545730176598413342",
+      "at": "16:00",
+      "tz": "Europe/Amsterdam",
+      "days": [
+        "fri"
+      ],
+      "every_days": 7,
+      "prompt": "Friday weekly summary. Vin has not written; you are starting this. This is a SUMMARY, not a question, and it does not spend either weekly chase. Build it only from log/ and projects/ for Monday to Friday of this week, never from memory, and leave out anything you cannot source. Write the same content to reports/weekly/YYYY-Www.md (ISO week) and commit it BEFORE sending, because the file is what survives to the October check-in. Follow the section order and the phone formatting rules in CLAUDE.md under 'Friday, 16:00: the weekly summary'. If a week really has nothing in it, say that in two lines rather than padding it. End with one line inviting a correction, not an answer."
     }
   ]
 }
