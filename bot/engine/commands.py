@@ -2088,12 +2088,15 @@ async def on_branches(ctx: RequestContext) -> None:
         # Orphan worktrees
         orphan_wts = ClaudeRunner.scan_orphan_worktrees(repo_path, active_worktrees)
         # Release tags stranded outside the checked-out line. Same category
-        # of leak as an orphaned branch — something the repo still lists as
-        # existing that nothing can reach — but far quieter, because a tag
+        # of leak as an orphaned branch (something the repo still lists as
+        # existing that nothing can reach), but far quieter, because a tag
         # keeps its commits alive and `git tag` keeps printing the version
         # as though it shipped. Reported as a backlog here rather than on
         # every merge, where only the newest one is worth interrupting for.
-        orphan_tags = await asyncio.to_thread(orphaned_releases, repo_path)
+        orphan_tags = (
+            await asyncio.to_thread(orphaned_releases, repo_path)
+            if config.RELEASE_ANCESTRY_CHECK else []
+        )
         repo_orphans = len(orphan_branches) + len(orphan_wts) + len(orphan_tags)
         if repo_orphans:
             total_orphans += repo_orphans

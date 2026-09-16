@@ -231,6 +231,26 @@ def test_g_unreadable_never_blocks() -> None:
                "missing repo reports nothing rather than blocking")
 
 
+def test_g2_an_empty_ref_filters_nothing_open() -> None:
+    """A ref the caller could not resolve must return nothing, not everything.
+
+    ``git tag -l`` with no ``--merged`` lists every release in the repo. If a
+    blank ref silently dropped the filter, the discard scan would report the
+    whole tag history as stranded by one branch deletion, and the audit would
+    call every release orphaned. Both fail closed instead.
+    """
+    print("\n[g2] a ref that resolves to nothing reports nothing")
+    with tempfile.TemporaryDirectory() as tmp:
+        _crossed_repo(tmp)
+        _check(len(version_tags(tmp)) >= 3, True, "the repo does have releases")
+        _check(version_tags(tmp, merged=""), [],
+               "an empty merged filter returns nothing, not everything")
+        _check(version_tags(tmp, no_merged=""), [],
+               "an empty no_merged filter returns nothing, not everything")
+        _check(orphaned_releases(tmp, ""), [],
+               "the audit calls nothing orphaned on an unresolvable ref")
+
+
 def test_h_marker_means_do_not_ship_not_merge_failed() -> None:
     print("\n[h] the marker gates shipping, not cleanup")
     runner = ClaudeRunner()
@@ -253,6 +273,9 @@ def test_h_marker_means_do_not_ship_not_merge_failed() -> None:
 
 def test_i_knob_disables_every_surface() -> None:
     print("\n[i] RELEASE_ANCESTRY_CHECK=0 stands the check down")
+    from bot.discord import interactions
+    from bot.engine import commands as bot_commands
+
     runner = ClaudeRunner()
     original = config.RELEASE_ANCESTRY_CHECK
     try:
@@ -262,12 +285,22 @@ def test_i_knob_disables_every_surface() -> None:
             _git(tmp, "checkout", "-q", "ship")
             _check(runner._release_containment_warning(tmp, "v1.0.2"), "",
                    "no warning when switched off")
+            # The deploy gate and the /branches audit read the same flag, and
+            # both are asserted here rather than only in prose: a knob that
+            # silences two surfaces out of three is worse than no knob, since
+            # the repo it was set for still cannot deploy.
+            deploy_src = inspect.getsource(interactions.execute_deploy)
+            _check("RELEASE_ANCESTRY_CHECK" in deploy_src, True,
+                   "deploy gate reads the flag")
+            audit_src = inspect.getsource(bot_commands.on_branches)
+            _check("RELEASE_ANCESTRY_CHECK" in audit_src, True,
+                   "/branches audit reads the flag")
     finally:
         config.RELEASE_ANCESTRY_CHECK = original
 
 
 def test_j_discard_reports_what_it_strands() -> None:
-    """Deleting a branch does not delete its tags — it strands them.
+    """Deleting a branch does not delete its tags, it strands them.
 
     The version keeps showing up in ``git tag`` as though it shipped while
     its content is reachable from nothing, which is the likeliest way the
@@ -306,7 +339,7 @@ def test_k_gates_run_before_the_irreversible_step() -> None:
 
     A deploy warned about after ``git push`` has already published the
     revert, and a chain that deploys and then closes the thread buries the
-    only notice the user gets — the same failure the repo-unusable branch
+    only notice the user gets, the same failure the repo-unusable branch
     next door exists to prevent.
     """
     print("\n[k] both gates precede the step they guard")
@@ -328,6 +361,19 @@ def test_k_gates_run_before_the_irreversible_step() -> None:
     _check(close != -1 and check < close, True,
            "chain checks containment before closing the thread")
 
+    # Discard has two orderings to keep, in opposite directions: the scan has
+    # to read the branch while it still exists, and the note has to be worded
+    # only once the delete succeeded, or it describes a stranding that did
+    # not happen.
+    discard_src = inspect.getsource(ClaudeRunner._discard_branch_sync)
+    scan = discard_src.find("version_tags(")
+    delete = discard_src.find('"branch", "-D"')
+    note = discard_src.find("stranded_note = (")
+    _check(scan != -1 and delete != -1 and scan < delete, True,
+           "stranded scan reads the branch before it is deleted")
+    _check(note != -1 and delete < note, True,
+           "the stranded note is worded after the delete, not before")
+
 
 def main() -> int:
     test_a_version_tags_parse_and_order()
@@ -338,6 +384,7 @@ def main() -> int:
     test_e2_old_orphans_do_not_block_forever()
     test_f_nothing_to_compare_against()
     test_g_unreadable_never_blocks()
+    test_g2_an_empty_ref_filters_nothing_open()
     test_h_marker_means_do_not_ship_not_merge_failed()
     test_i_knob_disables_every_surface()
     test_j_discard_reports_what_it_strands()

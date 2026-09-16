@@ -323,8 +323,8 @@ Three things that must not drift:
   deploy in that repo and be switched off within a day, which is why
   `orphaned_releases` exists separately and is reported by `/branches` rather
   than at merge time. Verified against live repos: the deploy gate is quiet in
-  all six registered ones today, while the audit shows 18 orphans in aiagent
-  and 3 in this repo.
+  all nineteen registered ones whose directory still exists, while the audit
+  shows 18 orphans in aiagent (of 991 tags) and 3 in this repo.
 - **A git read that cannot answer is `None`, not `False`.** `_is_ancestor`
   returns `None` for any exit code other than 0 or 1, and every caller treats
   that as "no finding". A missing repo, a timeout or a corrupt object store

@@ -373,7 +373,7 @@ def _parse_version_tag(name: str) -> tuple[int, int, int, int] | None:
 # A version *number* going up proves nothing about the *content* shipping.
 # Parallel builds each branch from their own snapshot of master, and a build
 # that ships from a base predating the last release reverts it while carrying
-# a higher version — which is why `_stale_version_warning`, which compares
+# a higher version. That is why `_stale_version_warning`, which compares
 # numbers, cannot see this class of failure at all.  The invariant these
 # helpers check is containment: the previous release's commits must be
 # reachable from whatever is about to ship.
@@ -388,13 +388,18 @@ def version_tags(
     live only on this branch".  Git resolves annotated tags to their commit
     for both filters, so no dereferencing is needed here.
 
-    Returns an empty list on any git failure — every caller treats "cannot
-    tell" as "nothing to report" rather than blocking on a broken read.
+    Only ``None`` means "do not filter".  An empty string is passed straight
+    to git, which rejects it, so a caller handing over a ref it failed to
+    resolve gets nothing back rather than the *unfiltered* list, which means
+    the exact opposite of what it asked for.
+
+    Returns an empty list on any git failure, because every caller treats
+    "cannot tell" as "nothing to report" rather than blocking on a broken read.
     """
     cmd = ["git", "tag", "-l", "v*"]
-    if merged:
+    if merged is not None:
         cmd += ["--merged", merged]
-    if no_merged:
+    if no_merged is not None:
         cmd += ["--no-merged", no_merged]
     try:
         r = run_capture(cmd, cwd=repo, timeout=15)
@@ -451,14 +456,14 @@ def missing_predecessor_release(
     Answers one question: **is the release before this one still in here?**
     ``below`` is the release just cut, supplied by the merge path so a
     release is never compared against itself. With no ``below``, the ceiling
-    is derived as the newest release ``ref`` *does* contain — for a deploy
+    is derived as the newest release ``ref`` *does* contain: for a deploy
     there is no "just cut", and the tree's own newest release is the right
     place to start counting back from.
 
     Deliberately the immediate predecessor, not every unreachable tag. A
     repo accumulates stranded tags over years (discarded branches, old
     experiments, hand-tagged spikes) and re-reporting those on every merge
-    and every deploy is how a real signal gets tuned out — AIAgent carries
+    and every deploy is how a real signal gets tuned out, and AIAgent carries
     18 of them. ``orphaned_releases`` is the on-demand audit for the rest.
 
     The one case with no ceiling to derive is a ``ref`` that contains no
@@ -6737,7 +6742,7 @@ class ClaudeRunner:
         """Warn when the merged target no longer contains the last release.
 
         The sibling check above compares version *numbers*, and a build that
-        ships from a stale base has a perfectly good number — it is the
+        ships from a stale base has a perfectly good number. It is the
         previous release's *commits* that are missing. That is how releases
         get silently reverted when parallel builds cross over, and the
         version bump is what hides it.
@@ -6762,7 +6767,7 @@ class ClaudeRunner:
         )
         return (
             f"\n⛔ {RELEASE_ORPHANED_MARKER}: `{missing}` is not an ancestor of "
-            f"what just landed — shipping this would revert that release. "
+            f"what just landed, so shipping this would revert that release. "
             f"Merge `{missing}` in before deploying."
         )
 
@@ -7689,14 +7694,22 @@ class ClaudeRunner:
                     )
 
         # Release tags that live only on this branch, read BEFORE the branch
-        # ref is deleted — afterwards the tag is the sole thing keeping those
-        # commits alive and there is no cheap way back to "which branch was
-        # that". Deleting the branch does not delete the tag, it strands it:
-        # the version stays in `git tag` and looks shipped while its content
-        # is reachable from nothing. Naming it here is the only chance the
-        # user gets to notice.
-        stranded_note = ""
-        if config.RELEASE_ANCESTRY_CHECK and not preserved_branch:
+        # ref is deleted. Deleting a branch does not delete its tags, it
+        # strands them: the version keeps printing in `git tag` and looks
+        # shipped while its content is reachable from nothing, and after the
+        # delete there is no cheap way back to "which branch was that".
+        # Naming it here is the only chance the user gets to notice.
+        #
+        # Both refs must be resolvable or the filters mean the opposite of
+        # what is being asked: `version_tags` with no `merged=` lists every
+        # release in the repo, and blaming one discard for all of them is
+        # worse than saying nothing. The public `discard_branch` already
+        # refuses an instance missing either, so this only costs a comparison.
+        stranded: list[tuple[str, tuple[int, int, int, int]]] = []
+        if (
+            config.RELEASE_ANCESTRY_CHECK and not preserved_branch
+            and instance.branch and instance.original_branch
+        ):
             try:
                 stranded = version_tags(
                     repo, merged=instance.branch, no_merged=instance.original_branch,
@@ -7704,18 +7717,6 @@ class ClaudeRunner:
             except Exception:
                 log.exception("Stranded-release scan raised in %s", repo)
                 stranded = []
-            if stranded:
-                names = ", ".join(f"`{n}`" for n, _ in stranded[:5])
-                more = f" (+{len(stranded) - 5} more)" if len(stranded) > 5 else ""
-                log.warning(
-                    "Discarding %s strands release tag(s) %s in %s",
-                    instance.branch, [n for n, _ in stranded], repo,
-                )
-                stranded_note = (
-                    f"\n⚠️ Release tag(s) {names}{more} existed only on this branch "
-                    f"and are now unreachable from {instance.original_branch}. "
-                    f"Delete them (`git tag -d <name>`) or the version looks shipped."
-                )
 
         # Each cleanup step is independent — continue on failure
         if wt_exists:
@@ -7726,11 +7727,32 @@ class ClaudeRunner:
 
         # Skip branch deletion when we just preserved a WIP commit on it —
         # that's the whole point of preservation.
+        branch_deleted = False
         if not preserved_branch:
             r = run_capture(["git", "branch", "-D", instance.branch], cwd=repo)
             if r.returncode != 0:
                 log.warning("Failed to delete branch %s: %s", instance.branch, r.stderr.strip())
                 errors.append(f"branch delete: {r.stderr.strip()}")
+            else:
+                branch_deleted = True
+
+        # Worded only once the ref is actually gone. A failed `branch -D`
+        # leaves those commits perfectly reachable, and telling the user a
+        # release was stranded when it was not sends them hunting for a
+        # problem they do not have.
+        stranded_note = ""
+        if stranded and branch_deleted:
+            names = ", ".join(f"`{n}`" for n, _ in stranded[:5])
+            more = f" (+{len(stranded) - 5} more)" if len(stranded) > 5 else ""
+            log.warning(
+                "Discarding %s stranded release tag(s) %s in %s",
+                instance.branch, [n for n, _ in stranded], repo,
+            )
+            stranded_note = (
+                f"\n⚠️ Release tag(s) {names}{more} existed only on this branch "
+                f"and are now unreachable from {instance.original_branch}. "
+                f"Delete them (`git tag -d <name>`) or the version looks shipped."
+            )
 
         self._cleanup_worktree_session_dir(instance)
 
