@@ -58,7 +58,7 @@ from bot.claude.parser import (
 from bot.claude.provider import ProviderConfig, get_provider
 from bot.claude.types import (
     Instance, InstanceOrigin, InstanceStatus, KillOutcome,
-    REPO_UNUSABLE_MARKER, merge_msg_is_failure,
+    RELEASE_ORPHANED_MARKER, REPO_UNUSABLE_MARKER, merge_msg_is_failure,
 )
 from bot.store import history as history_mod
 
@@ -366,6 +366,132 @@ def _parse_version_tag(name: str) -> tuple[int, int, int, int] | None:
     if not m:
         return None
     return tuple(int(g) if g else 0 for g in m.groups())  # type: ignore[return-value]
+
+
+# --- Release containment -------------------------------------------------
+#
+# A version *number* going up proves nothing about the *content* shipping.
+# Parallel builds each branch from their own snapshot of master, and a build
+# that ships from a base predating the last release reverts it while carrying
+# a higher version — which is why `_stale_version_warning`, which compares
+# numbers, cannot see this class of failure at all.  The invariant these
+# helpers check is containment: the previous release's commits must be
+# reachable from whatever is about to ship.
+
+def version_tags(
+    repo: str, *, merged: str | None = None, no_merged: str | None = None,
+) -> list[tuple[str, tuple[int, int, int, int]]]:
+    """``(name, parsed_version)`` for every ``vX.Y.Z[.W]`` tag, newest first.
+
+    ``merged`` / ``no_merged`` map to git's own ref filters and combine with
+    AND, so ``merged=branch, no_merged="master"`` answers "which releases
+    live only on this branch".  Git resolves annotated tags to their commit
+    for both filters, so no dereferencing is needed here.
+
+    Returns an empty list on any git failure — every caller treats "cannot
+    tell" as "nothing to report" rather than blocking on a broken read.
+    """
+    cmd = ["git", "tag", "-l", "v*"]
+    if merged:
+        cmd += ["--merged", merged]
+    if no_merged:
+        cmd += ["--no-merged", no_merged]
+    try:
+        r = run_capture(cmd, cwd=repo, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        log.warning("Listing version tags failed in %s", repo, exc_info=True)
+        return []
+    if r.returncode != 0:
+        log.debug(
+            "git tag -l failed in %s (rc=%d): %s",
+            repo, r.returncode, (r.stderr or "").strip(),
+        )
+        return []
+    found: list[tuple[str, tuple[int, int, int, int]]] = []
+    for line in (r.stdout or "").splitlines():
+        name = line.strip()
+        ver = _parse_version_tag(name)
+        if ver is not None:
+            found.append((name, ver))
+    found.sort(key=lambda t: t[1], reverse=True)
+    return found
+
+
+def _is_ancestor(repo: str, rev: str, of: str) -> bool | None:
+    """Is ``rev`` reachable from ``of``?  None when git could not answer.
+
+    ``merge-base --is-ancestor`` uses the exit code as its answer: 0 yes,
+    1 no, anything else an error.  Collapsing that third case into False is
+    what would turn an unreadable repo into a blocked deploy, so it stays
+    distinct all the way up to the callers.
+    """
+    try:
+        r = run_capture(
+            ["git", "merge-base", "--is-ancestor", rev, of], cwd=repo, timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        log.warning("merge-base --is-ancestor failed in %s", repo, exc_info=True)
+        return None
+    if r.returncode == 0:
+        return True
+    if r.returncode == 1:
+        return False
+    log.debug(
+        "merge-base --is-ancestor %s %s in %s: rc=%d %s",
+        rev, of, repo, r.returncode, (r.stderr or "").strip(),
+    )
+    return None
+
+
+def missing_predecessor_release(
+    repo: str, ref: str = "HEAD", *, below: str | None = None,
+) -> str | None:
+    """Name the release ``ref`` should contain but does not.
+
+    Answers one question: **is the release before this one still in here?**
+    ``below`` is the release just cut, supplied by the merge path so a
+    release is never compared against itself. With no ``below``, the ceiling
+    is derived as the newest release ``ref`` *does* contain — for a deploy
+    there is no "just cut", and the tree's own newest release is the right
+    place to start counting back from.
+
+    Deliberately the immediate predecessor, not every unreachable tag. A
+    repo accumulates stranded tags over years (discarded branches, old
+    experiments, hand-tagged spikes) and re-reporting those on every merge
+    and every deploy is how a real signal gets tuned out — AIAgent carries
+    18 of them. ``orphaned_releases`` is the on-demand audit for the rest.
+
+    The one case with no ceiling to derive is a ``ref`` that contains no
+    release at all, and there the newest release anywhere is exactly what
+    is missing, so it is reported.
+    """
+    tags = version_tags(repo)
+    if not tags:
+        return None
+    if below is not None:
+        ceiling = _parse_version_tag(below)
+    else:
+        reachable = {name for name, _ in version_tags(repo, merged=ref)}
+        ceiling = next(
+            (ver for name, ver in tags if name in reachable), None,
+        )
+        if ceiling is None:
+            newest, _ = tags[0]
+            return newest if _is_ancestor(repo, newest, ref) is False else None
+    for name, ver in tags:
+        if ceiling is not None and ver >= ceiling:
+            continue
+        return name if _is_ancestor(repo, name, ref) is False else None
+    return None
+
+
+def orphaned_releases(repo: str, ref: str = "HEAD") -> list[str]:
+    """Every version tag whose commits are not contained in ``ref``.
+
+    The backlog view behind ``/branches``.  One git call, regardless of how
+    many tags the repo carries.
+    """
+    return [name for name, _ in version_tags(repo, no_merged=ref)]
 
 
 # Git's transfer statistics, which the server echoes back prefixed "remote:".
@@ -6607,6 +6733,40 @@ class ClaudeRunner:
         return ""
 
     @staticmethod
+    def _release_containment_warning(repo: str, tag_name: str | None) -> str:
+        """Warn when the merged target no longer contains the last release.
+
+        The sibling check above compares version *numbers*, and a build that
+        ships from a stale base has a perfectly good number — it is the
+        previous release's *commits* that are missing. That is how releases
+        get silently reverted when parallel builds cross over, and the
+        version bump is what hides it.
+
+        ``tag_name`` is the release this merge just cut, used only as the
+        ceiling so a release is never compared against itself. Carries
+        ``RELEASE_ORPHANED_MARKER`` so the chain can refuse to ship on it.
+        """
+        if not config.RELEASE_ANCESTRY_CHECK:
+            return ""
+        try:
+            missing = missing_predecessor_release(repo, "HEAD", below=tag_name)
+        except Exception:
+            log.exception("Release containment check raised in %s", repo)
+            return ""
+        if not missing:
+            return ""
+        log.error(
+            "Merge target in %s does not contain release %s%s",
+            repo, missing,
+            f" (just cut {tag_name})" if tag_name else "",
+        )
+        return (
+            f"\n⛔ {RELEASE_ORPHANED_MARKER}: `{missing}` is not an ancestor of "
+            f"what just landed — shipping this would revert that release. "
+            f"Merge `{missing}` in before deploying."
+        )
+
+    @staticmethod
     def _classify_post_abort_state(repo: str) -> str:
         """Classify a merge failure AFTER ``git merge --abort`` has run.
 
@@ -6884,12 +7044,19 @@ class ClaudeRunner:
             # in the helper can't poison the merge push path.
             candidate_shas: list[str] = []
             tag_warning = ""
+            tag_name: str | None = None
             try:
                 tag_name, candidate_shas = self._tag_release_at(repo, "HEAD^2")
                 tag_warning = self._stale_version_warning(repo, tag_name, "HEAD^2")
             except Exception:
                 log.exception("Tag-release step raised in %s", repo)
                 candidate_shas = []
+
+            # Containment, which the version-number check above cannot see:
+            # `target` is now the tree that ships, so the release before this
+            # one has to be reachable from it. Checked *after* tagging so the
+            # release we just cut is the ceiling rather than its own subject.
+            tag_warning += self._release_containment_warning(repo, tag_name)
 
             # Push merged result to origin.  `has_remote` was probed by the
             # pre-merge sync block above.
@@ -7521,6 +7688,35 @@ class ClaudeRunner:
                         worktree_path, add_r.stderr.strip(),
                     )
 
+        # Release tags that live only on this branch, read BEFORE the branch
+        # ref is deleted — afterwards the tag is the sole thing keeping those
+        # commits alive and there is no cheap way back to "which branch was
+        # that". Deleting the branch does not delete the tag, it strands it:
+        # the version stays in `git tag` and looks shipped while its content
+        # is reachable from nothing. Naming it here is the only chance the
+        # user gets to notice.
+        stranded_note = ""
+        if config.RELEASE_ANCESTRY_CHECK and not preserved_branch:
+            try:
+                stranded = version_tags(
+                    repo, merged=instance.branch, no_merged=instance.original_branch,
+                )
+            except Exception:
+                log.exception("Stranded-release scan raised in %s", repo)
+                stranded = []
+            if stranded:
+                names = ", ".join(f"`{n}`" for n, _ in stranded[:5])
+                more = f" (+{len(stranded) - 5} more)" if len(stranded) > 5 else ""
+                log.warning(
+                    "Discarding %s strands release tag(s) %s in %s",
+                    instance.branch, [n for n, _ in stranded], repo,
+                )
+                stranded_note = (
+                    f"\n⚠️ Release tag(s) {names}{more} existed only on this branch "
+                    f"and are now unreachable from {instance.original_branch}. "
+                    f"Delete them (`git tag -d <name>`) or the version looks shipped."
+                )
+
         # Each cleanup step is independent — continue on failure
         if wt_exists:
             r = run_capture(["git", "worktree", "remove", worktree_path, "--force"], cwd=repo)
@@ -7556,10 +7752,12 @@ class ClaudeRunner:
             )
         if errors:
             return DiscardOutcome(
-                f"Discarded (with warnings: {'; '.join(errors)}){recovery_suffix}",
+                f"Discarded (with warnings: {'; '.join(errors)})"
+                f"{recovery_suffix}{stranded_note}",
             )
         return DiscardOutcome(
-            f"Discarded branch, back on {instance.original_branch}{recovery_suffix}",
+            f"Discarded branch, back on {instance.original_branch}"
+            f"{recovery_suffix}{stranded_note}",
         )
 
     def _cleanup_worktree_session_dir(self, instance: Instance) -> None:

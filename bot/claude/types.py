@@ -98,6 +98,12 @@ def _parse_origin(value) -> InstanceOrigin:
 # is not, and the two need opposite responses from the caller.
 REPO_UNUSABLE_MARKER = "REPO LEFT BROKEN"
 
+# Marker embedded in a merge-result string when the merge landed on a target
+# that does not contain the previous release. Nothing about the merge failed
+# — the *content* of the last release is missing from what would now ship,
+# which is invisible to every version-number check because the number went up.
+RELEASE_ORPHANED_MARKER = "RELEASE NOT CONTAINED"
+
 
 def merge_msg_repo_unusable(msg: str) -> bool:
     """Did the merge land but leave the working tree unusable?
@@ -109,6 +115,18 @@ def merge_msg_repo_unusable(msg: str) -> bool:
     ``merge_msg_is_failure``, which gates branch-cleanup and retry flows.
     """
     return REPO_UNUSABLE_MARKER in msg
+
+
+def merge_msg_release_orphaned(msg: str) -> bool:
+    """Did the merge land on a target missing the previous release?
+
+    Like ``merge_msg_repo_unusable`` this is *not* a merge failure — the
+    branch landed exactly as asked — so it must not be routed through
+    ``merge_msg_is_failure``, which gates cleanup and retry flows. What it
+    gates instead is everything downstream of the merge: shipping this tree
+    would un-ship the release it does not contain.
+    """
+    return RELEASE_ORPHANED_MARKER in msg
 
 
 def merge_msg_is_failure(msg: str) -> bool:
