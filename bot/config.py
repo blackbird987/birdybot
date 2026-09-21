@@ -315,6 +315,143 @@ MEM_ADMISSION_MAX_WAIT_SECS: int = int(
     os.getenv("MEM_ADMISSION_MAX_WAIT_SECS", "300")
 )
 MEM_ADMISSION_POLL_SECS: int = int(os.getenv("MEM_ADMISSION_POLL_SECS", "15"))
+# MB that must be left in the session slice before one more session starts.
+# MAX_CONCURRENT is a count and a count cannot know how big the running five
+# are; this is the same admission gate asking the budget rather than the
+# machine. Sized as one starting CLI plus room to get going, not as a full
+# session: the soft ceiling is what absorbs a session that then grows, and a
+# bar set at a whole session's worth would hold most of the time. Ignored
+# entirely when the slice has no memory.max to measure against.
+MEM_ADMISSION_MIN_SLICE_HEADROOM_MB: int = int(
+    os.getenv("MEM_ADMISSION_MIN_SLICE_HEADROOM_MB", "1536")
+)
+
+# --- systemd-oomd: the criterion that actually kills this unit ---
+#
+# Everything above measures the machine. systemd-oomd does not: it watches the
+# *cgroup* pressure of app.slice and SIGKILLs a unit inside it when that slice
+# stalls past a limit for long enough. On 2026-09-21 at 14:42:18 it killed the
+# whole of claude-bot.service and six live sessions with it:
+#
+#   Killed .../app.slice/claude-bot.service due to memory pressure for
+#   .../app.slice being 90.79% > 80.00% for > 20s with reclaim activity
+#   Pressure: Avg10: 94.76 ... Current Memory Usage: 10.1G
+#
+# Same shape on Sep 14 20:34:46 and Sep 20 10:39:47. Every guard above read
+# healthy throughout, and correctly so: machine-wide available memory never
+# dropped under about 9 GB. The bot was measuring the machine while oomd was
+# judging the slice, so the guard structurally could not see the number that
+# was about to kill it.
+#
+# So the bot now reads oomd's own criterion and backs off first. The limit is
+# not hardcoded: it is read from ManagedOOMMemoryPressureLimit on the parent
+# slice, which systemd reports as a fraction scaled by 2^32 (3435973836 is
+# 80.0%). The fractions below are how much of that budget the bot is willing
+# to spend before it stops adding work -- 0.6 of an 80% limit is 48% stall,
+# which on the incident timeline is minutes of warning rather than seconds.
+#
+# Entirely inert when the oomd config cannot be read: no limit means no
+# derived thresholds, and the classifier falls back to the machine-wide rules
+# above. A guard that guessed a limit would be worse than one that stood down.
+OOMD_AWARE_ENABLED: bool = os.getenv(
+    "OOMD_AWARE_ENABLED", "1"
+).lower() in ("1", "true", "yes")
+OOMD_TIGHT_FRACTION: float = float(os.getenv("OOMD_TIGHT_FRACTION", "0.6"))
+OOMD_CRITICAL_FRACTION: float = float(os.getenv("OOMD_CRITICAL_FRACTION", "0.8"))
+
+# --- The resource weights, and proof that they are actually on ---
+#
+# scripts/claude-bot.service declares CPUWeight=20 / IOWeight=20 so the bot
+# loses a fight with the desktop. On 2026-09-21 the live cgroup read 100 for
+# both while both unit-file copies said 20, because the 2026-09-08 fix had
+# been applied with `systemctl --user set-property --runtime`, and a --runtime
+# drop-in is reset when the unit stops -- which is precisely what an oomd kill
+# does. The protection uninstalled itself on the exact event it exists for,
+# and nothing noticed for a week.
+#
+# These are the values the startup self-check compares the *live cgroup files*
+# against. Reading ground truth from cpu.weight and io.weight is the whole
+# point: a check that read the unit file would have passed happily all week.
+# Keep them in step with scripts/claude-bot.service. 0 disables the check.
+RESOURCE_CPU_WEIGHT_EXPECTED: int = int(
+    os.getenv("RESOURCE_CPU_WEIGHT_EXPECTED", "20")
+)
+RESOURCE_IO_WEIGHT_EXPECTED: int = int(
+    os.getenv("RESOURCE_IO_WEIGHT_EXPECTED", "20")
+)
+
+# --- Per-session cgroups: the supervisor must outlive the workload ---
+#
+# Sessions spawn inside a transient systemd scope in their own slice instead
+# of directly inside the bot's cgroup. Three things follow from that, and all
+# three were missing when oomd shot the unit four times:
+#
+#   * oomd picks a victim per cgroup. With every session inside the service
+#     cgroup, the only victim available was the whole unit. With a scope per
+#     session, the victim is one session and the supervisor survives.
+#   * memory.high gives a session a soft ceiling: crossing it forces reclaim
+#     and throttles that session, instead of killing anything. The incident's
+#     6.6 GB dotnet build would have been slowed, not fatal.
+#   * memory.current is exact. The tree walker cannot see a reparented Roslyn
+#     server; the cgroup it was charged to always can.
+#
+# The slice name has to be `app-<something>.slice` for systemd to nest it
+# under app.slice, which is where oomd's configuration already lives -- so
+# this reuses an armed, working oomd setup rather than shipping a second one.
+#
+# Every part of this is optional at runtime. If systemd-run is missing or the
+# scope will not start, sessions spawn exactly as they did before and the bot
+# says so once. A resource refinement must never stop work from starting.
+SESSION_SCOPES_ENABLED: bool = os.getenv(
+    "SESSION_SCOPES_ENABLED", "1"
+).lower() in ("1", "true", "yes")
+SESSION_SLICE: str = os.getenv("SESSION_SLICE", "app-claudesessions.slice")
+
+# How long to wait for a spawned session to actually land in its scope, and
+# how often to look. `systemd-run --scope` talks to the service manager and
+# only then execs, so the pid is still in the bot's own cgroup at the instant
+# the spawn call returns.
+#
+# How long that takes is a property of how busy the user service manager is,
+# not a constant: 50ms on an idle one, but 1.1s, 1.8s and 4.8s across three
+# consecutive trials on this machine while it was loaded and `degraded`. A
+# 5s budget was inside that noise and a real run missed it. Overrunning is
+# silent and costs the session every ceiling it was meant to get, so the
+# budget is deliberately far above the worst measurement, and can be that
+# generous because the wait runs as its own task in
+# `runner._adopt_session_scope` and so can never stall a spawn.
+SESSION_SCOPE_ADOPT_SECS: float = float(
+    os.getenv("SESSION_SCOPE_ADOPT_SECS", "60")
+)
+SESSION_SCOPE_ADOPT_POLL_SECS: float = float(
+    os.getenv("SESSION_SCOPE_ADOPT_POLL_SECS", "0.05")
+)
+
+# How long the "can this machine do scopes" answer is trusted before it is
+# established again. Not once per bot lifetime: the answer is a property of
+# the user service manager, which can wedge under a process that lives for
+# weeks (twice on 2026-09-21, every job `waiting` behind a crash-looping
+# unit), and a wedged manager makes `systemd-run` block forever. A stale yes
+# hangs every spawn until this expires; a stale no leaves the protection off
+# until the next reboot. 0 disables re-checking.
+SESSION_SCOPE_PROBE_TTL_SECS: int = int(
+    os.getenv("SESSION_SCOPE_PROBE_TTL_SECS", "600")
+)
+
+# The per-session memory ladder, in the order a growing session meets it:
+#
+#   SESSION_MEM_HIGH_MB   soft. Kernel throttles and reclaims. Nothing dies.
+#   SESSION_MEM_WARN_MB   the bot logs it.
+#   SESSION_MEM_KILL_MB   the bot reaps the session and explains why.
+#   SESSION_MEM_HARD_MB   cgroup memory.max. A backstop for a spike too fast
+#                         for the 30s sampler, and deliberately the last rung:
+#                         a kernel kill here is silent, so the bot's own
+#                         explained kill should always get there first.
+#
+# 0 on either cgroup rung leaves that limit unset. Both are ignored entirely
+# when a session did not get its own cgroup.
+SESSION_MEM_HIGH_MB: int = int(os.getenv("SESSION_MEM_HIGH_MB", "6144"))
+SESSION_MEM_HARD_MB: int = int(os.getenv("SESSION_MEM_HARD_MB", "10240"))
 
 # --- Reclaiming memory nobody owns ---
 #

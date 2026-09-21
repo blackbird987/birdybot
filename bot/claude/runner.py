@@ -34,7 +34,7 @@ from bot.claude.auth_health import (
     relogin_command,
     unusable_reason,
 )
-from bot.claude import memory
+from bot.claude import cgroups, memory
 from bot.claude.branch_utils import canonical_branch, clear_stale_branches
 from bot.claude.gitpaths import git_common_dir, git_dir, git_toplevel
 from bot.claude.parser import (
@@ -1141,6 +1141,10 @@ class ClaudeRunner:
         # question a machine-wide crunch asks. Entries are dropped alongside
         # _processes so a finished session can never be picked as a victim.
         self._tree_samples: dict[str, memory.TreeMemory] = {}
+        # Per-session cgroups, for the sessions that got one. Keyed the same
+        # way as _processes and cleaned up in the same place, so a session can
+        # never leave a stale path behind for a scope systemd has collected.
+        self._session_cgroups: dict[str, cgroups.SessionCgroup] = {}
         # Serialises the reclaim sweep and rate-limits it: every session's
         # watchdog can reach it, and N sessions each walking the cgroup and
         # sampling CPU on a machine that is already thrashing would be its own
@@ -2016,6 +2020,15 @@ class ClaudeRunner:
                     config.MEM_ORPHAN_MIN_MB,
                     config.MEM_ORPHAN_MIN_AGE_SECS,
                     config.MEM_ORPHAN_CPU_IDLE_PCT,
+                    memory.RECLAIMABLE_DAEMONS,
+                    # Sessions no longer live in the bot's own cgroup, so
+                    # "our cgroup minus our process tree" stopped covering
+                    # the case this whole path exists for: a Roslyn server a
+                    # session detached stays in that session's scope after
+                    # the session ends, where the bot's cgroup.procs will
+                    # never list it. Empty tuple when scopes are not in use,
+                    # which restores the previous behaviour exactly.
+                    cgroups.session_slice_roots(),
                 )
             except Exception:
                 log.debug("Orphan scan failed", exc_info=True)
@@ -2138,18 +2151,64 @@ class ClaudeRunner:
         return pressure
 
     def _read_pressure(self) -> memory.MemoryPressure:
-        """Machine pressure at the configured thresholds. Never raises."""
+        """Machine pressure at the configured thresholds. Never raises.
+
+        The oomd limit is read from systemd rather than configured, because it
+        is systemd's number and can be changed in a drop-in without touching
+        this repo. It is cached after the first call: it cannot move without a
+        daemon-reload, and this function runs on every admission check and
+        every fleet-arbitration tick. Passing None keeps the whole oomd rule
+        out of the classifier, which is what happens off Linux and on a
+        machine where oomd is not managing our slice.
+        """
         try:
+            limit: float | None = None
+            if config.OOMD_AWARE_ENABLED:
+                policy = memory.oomd_policy()
+                if policy.active():
+                    limit = policy.limit_pct
             return memory.read_pressure(
                 critical_avail_mb=config.MEM_PRESSURE_CRITICAL_AVAIL_MB,
                 tight_avail_mb=config.MEM_PRESSURE_TIGHT_AVAIL_MB,
                 critical_swap_pct=config.MEM_PRESSURE_CRITICAL_SWAP_PCT,
                 critical_psi_pct=config.MEM_PRESSURE_CRITICAL_PSI_PCT,
                 tight_psi_pct=config.MEM_PRESSURE_TIGHT_PSI_PCT,
+                oomd_limit_pct=limit,
+                oomd_tight_fraction=config.OOMD_TIGHT_FRACTION,
+                oomd_critical_fraction=config.OOMD_CRITICAL_FRACTION,
             )
         except Exception:
             log.debug("Pressure read failed", exc_info=True)
             return memory.MemoryPressure()
+
+    def _admission_blocked(
+        self, pressure: memory.MemoryPressure,
+    ) -> str | None:
+        """Why a starting session should wait, or None to let it through.
+
+        One function so that the three places the hold loop asks the question
+        cannot answer it differently, which is how a hold that never releases
+        or one that never engages gets written.
+        """
+        if pressure.is_critical():
+            return pressure.human() or "the machine is out of memory"
+        if pressure.oomd_at_least(memory.PRESSURE_TIGHT):
+            return pressure.human() or "this unit is close to being killed"
+        floor = config.MEM_ADMISSION_MIN_SLICE_HEADROOM_MB
+        if floor > 0:
+            try:
+                headroom = cgroups.slice_headroom_mb()
+            except Exception:
+                headroom = None
+            # None means the slice has no limit, or the files would not read.
+            # Treated as no finding, the same rule every pressure reader here
+            # follows: a budget check that cannot measure must not refuse work.
+            if headroom is not None and headroom < floor:
+                return (
+                    f"the session budget has {headroom / 1024:.1f} GB left, "
+                    f"under the {floor / 1024:.1f} GB needed to start one more"
+                )
+        return None
 
     async def _await_memory_headroom(
         self,
@@ -2172,14 +2231,19 @@ class ClaudeRunner:
           the bot did not create would otherwise block work forever, and
           refusing all work because a browser is fat is a worse failure than
           starting one more CLI.
-        * It only ever holds on CRITICAL. Holding on TIGHT would mean holding
-          most of the time on this machine, which trains the user to ignore the
-          message and delays work that would have been fine.
+        * It holds on CRITICAL, and on TIGHT from the oomd rule alone. Not on
+          TIGHT machine-wide: this desktop reads tight most of the day and
+          holding on it would train the user to ignore the message. The oomd
+          reading is different in kind. TIGHT there means the slice is at 60%
+          of the stall percentage that gets the whole unit SIGKILLed, which on
+          the 2026-09-21 timeline is minutes of warning before every live
+          session dies at once. See MemoryPressure.oomd_level.
         """
         if not config.MEM_ADMISSION_ENABLED:
             return
         pressure = await asyncio.to_thread(self._read_pressure)
-        if not pressure.is_critical():
+        blocked = self._admission_blocked(pressure)
+        if not blocked:
             return
         # A hold is one more window with no process to signal, and this file
         # already carries the scar tissue for those: see
@@ -2192,7 +2256,8 @@ class ClaudeRunner:
 
         await self._reclaim_idle_daemons(f"{instance.id} waiting to start")
         pressure = await asyncio.to_thread(self._read_pressure)
-        if not pressure.is_critical():
+        blocked = self._admission_blocked(pressure)
+        if not blocked:
             log.info(
                 "%s released immediately — reclaim cleared the pressure (%s)",
                 instance.id, pressure.summary(),
@@ -2217,10 +2282,10 @@ class ClaudeRunner:
                 try:
                     await on_progress(
                         "Waiting for memory before starting",
-                        f"This machine is out of memory right now — "
-                        f"{pressure.human()}. Starting another session would "
-                        f"make that worse, so this one is held until there is "
-                        f"room (up to {budget}, then it starts anyway).",
+                        f"There is no room to start this yet: {blocked}. "
+                        f"Starting another session now would make that worse, "
+                        f"so this one waits for room (up to {budget}, then it "
+                        f"starts anyway).",
                     )
                 except Exception:
                     log.exception("Progress callback error on memory hold")
@@ -2231,7 +2296,8 @@ class ClaudeRunner:
                 )
                 return
             pressure = await asyncio.to_thread(self._read_pressure)
-            if not pressure.is_critical():
+            blocked = self._admission_blocked(pressure)
+            if not blocked:
                 waited = int(asyncio.get_event_loop().time() - started)
                 log.info(
                     "Starting %s after %ds of memory hold (%s)",
@@ -2492,11 +2558,21 @@ class ClaudeRunner:
                 account_dir, working_dir, instance.session_id, instance,
             )
 
+        # Put the session in its own systemd scope, so that when oomd comes
+        # looking for something to kill it finds this session and not the
+        # supervisor holding twelve conversations open. Returns `cmd`
+        # unchanged wherever that is not possible -- a probed, cached answer,
+        # so a machine without systemd-run pays for the discovery once and
+        # then spawns exactly as it always did.
+        await cgroups.ensure_scope_support()
+        cmd = cgroups.wrap_command(cmd, instance.id)
+
         acct_tag = f" [acct={account_dir[-20:]}]" if account_dir else ""
         log.info("Running %s%s (prompt: %d chars via stdin): %s",
                  instance.id, acct_tag, len(prompt_text), " ".join(cmd)[:500])
 
         proc = None
+        adopt_task: asyncio.Task | None = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -2540,6 +2616,24 @@ class ClaudeRunner:
                 except ProcessLookupError:
                     pass
                 return RunResult(is_error=True, error_message=f"Failed to send prompt: {exc}")
+
+            # In the background, and deliberately not awaited here.
+            # `--scope` execs in place, so proc.pid is the CLI's own pid and
+            # the cgroup it reports is the scope's -- but only once
+            # systemd-run's round trip to the service manager has finished,
+            # and that round trip is not quick when the manager is busy:
+            # measured on this machine at 1.1s, 1.8s and 4.8s across three
+            # consecutive trials, against ~50ms on an idle one. So the budget
+            # has to be sized for the bad case, and a budget sized for the bad
+            # case must not be able to stall a spawn. It buys insurance rather
+            # than latency -- systemd-run registers before it execs, so the
+            # CLI has nothing to say until the scope exists either way -- but
+            # nothing downstream needs adoption to have finished, and every
+            # reader of _session_cgroups already treats a missing entry as
+            # "walk the process tree instead".
+            adopt_task = asyncio.create_task(
+                self._adopt_session_scope(instance.id, proc)
+            )
 
             result = await self._stream_output(
                 proc, instance, on_progress, on_stall,
@@ -3340,8 +3434,14 @@ class ClaudeRunner:
                     os.unlink(rules_file)
                 except OSError:
                     pass
+            # Cancelled before the pops, so a still-waiting adoption cannot
+            # write an entry back in behind them and leak it for the life of
+            # the process.
+            if adopt_task is not None and not adopt_task.done():
+                adopt_task.cancel()
             self._processes.pop(instance.id, None)
             self._tree_samples.pop(instance.id, None)
+            self._session_cgroups.pop(instance.id, None)
             # Kill process on cancellation/unexpected error to avoid orphans
             if proc is not None and proc.returncode is None:
                 try:
@@ -3350,6 +3450,38 @@ class ClaudeRunner:
                     pass
             if not self._active_tasks and not self._processes:
                 self._idle_event.set()
+
+    async def _adopt_session_scope(
+        self, instance_id: str, proc: asyncio.subprocess.Process,
+    ) -> None:
+        """Apply a session's memory ceilings once systemd has registered it.
+
+        Runs as its own task so the wait never delays reading the CLI's
+        output. Nothing downstream requires it to have finished: the kill
+        path and the memory guard both fall back to walking the process
+        tree when there is no entry, which is what they did before scopes
+        existed.
+        """
+        try:
+            session_cg = await cgroups.adopt_session(proc.pid, instance_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # A resource refinement must never cost a session its run.
+            log.debug("scope adoption failed for %s: %s", instance_id, exc)
+            return
+        if session_cg is None:
+            return
+        # The run can finish while we wait, and its cleanup has then already
+        # been past the pop. Storing now would leak the entry.
+        if self._processes.get(instance_id) is not proc:
+            return
+        self._session_cgroups[instance_id] = session_cg
+        if session_cg.applied:
+            log.debug(
+                "%s in scope %s (%s)", instance_id, session_cg.unit,
+                ", ".join(session_cg.applied),
+            )
 
     async def _stream_output(
         self,
@@ -3457,6 +3589,26 @@ class ClaudeRunner:
                     except Exception:
                         log.exception("Progress callback error on memory kill")
                 signalled: list[str] = []
+                # cgroup.kill first where the session has its own cgroup: it
+                # is atomic where kill_tree is a walk, so nothing can fork out
+                # from under it, and it reaches a process that reparented away
+                # and left the tree entirely. kill_tree still runs afterwards
+                # -- it is what produces the list of what was signalled for
+                # the log, and it is the whole mechanism on a kernel with no
+                # cgroup.kill (pre-5.14) or when the scope never happened.
+                session_cg = self._session_cgroups.get(instance.id)
+                if session_cg is not None:
+                    try:
+                        if await asyncio.to_thread(session_cg.kill):
+                            log.warning(
+                                "Killed cgroup %s for %s",
+                                session_cg.unit, instance.id,
+                            )
+                    except Exception:
+                        log.debug(
+                            "cgroup.kill failed for %s", instance.id,
+                            exc_info=True,
+                        )
                 try:
                     signalled = await asyncio.to_thread(
                         memory.kill_tree, proc.pid,
@@ -3588,6 +3740,38 @@ class ClaudeRunner:
                         # sampler. Skip this tick and try again on the next.
                         log.debug("Memory sample failed for %s", instance.id)
                         tree = None
+
+                    # The cgroup is the honest number when there is one. The
+                    # tree walk can only see what is still a descendant, and
+                    # `dotnet build` deliberately leaves its Roslyn server
+                    # detached and parented to PID 1 so the next build is
+                    # faster -- 4.10 GB of it was invisible to this sampler
+                    # during the 2026-08-21 OOM. A scope keeps charging it.
+                    #
+                    # Taken as a maximum rather than a replacement: RSS
+                    # double-counts pages shared between forks, so on a busy
+                    # tree the walk can read higher than the cgroup's own
+                    # accounting, and this is a safety ceiling where the
+                    # larger of two honest numbers is the safe one. Also
+                    # keeps the offender label, which memory.current has no
+                    # way to produce.
+                    session_cg = self._session_cgroups.get(instance.id)
+                    if tree is not None and session_cg is not None:
+                        try:
+                            charged = await asyncio.to_thread(
+                                session_cg.current_mb,
+                            )
+                        except Exception:
+                            charged = None
+                        if charged is not None and charged > tree.total_mb:
+                            tree.total_mb = charged
+                            if not tree.proc_count:
+                                # Nothing left in the process tree but memory
+                                # still charged to the cgroup is exactly the
+                                # reparented-daemon case, and the ceiling
+                                # checks below are gated on proc_count.
+                                tree.proc_count = 1
+                                tree.biggest_name = "detached (cgroup)"
 
                     if tree is not None and tree.proc_count:
                         kill_mb = config.SESSION_MEM_KILL_MB

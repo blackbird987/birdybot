@@ -96,6 +96,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 from bot import config
+from bot.claude import cgroups
 from bot.claude import memory
 from bot.claude import runner as runner_mod
 from bot.claude.runner import ClaudeRunner
@@ -2374,6 +2375,527 @@ def _check_thresholds_fit_the_machine(failures: list[str]) -> None:
             "fire on sessions the per-session guard already killed"
         )
 
+
+# --- The criterion that actually kills us (2026-09-21) -----------------------
+#
+# Every check above this line measures the machine: available memory, swap,
+# machine-wide PSI. On 2026-09-21 at 14:42:20 systemd-oomd SIGKILLed the whole
+# unit while available memory had never dropped below about 9 GB and every one
+# of those rules scored OK. oomd does not read any of them. It reads the *
+# slice's* memory.pressure and kills when it passes ManagedOOMMemoryPressureLimit
+# -- 94.76% against a limit of 80% that day. The guard structurally could not
+# see the number that killed it.
+#
+# What follows pins the readers for that number, the parse of the limit, and
+# the escalation points derived from it.
+
+
+def _write_pressure_file(dirpath: Path, avg10: float) -> None:
+    (dirpath / "memory.pressure").write_text(
+        f"some avg10={avg10:.2f} avg60=0.00 avg300=0.00 total=1\n"
+        f"full avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+        encoding="utf-8",
+    )
+
+
+def _check_cgroup_psi_readers(failures: list[str]) -> None:
+    """Reading the stall figure of a specific cgroup, and failing to."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        good = root / "good"
+        good.mkdir()
+        _write_pressure_file(good, 94.76)
+        if memory._cgroup_psi_some_avg10(good) != 94.76:
+            failures.append(
+                "the cgroup PSI reader did not parse a real memory.pressure "
+                f"file: got {memory._cgroup_psi_some_avg10(good)!r} for 94.76"
+            )
+
+        # Every way of failing has to answer None. A 0.0 here reads as "this
+        # slice is perfectly calm" and would stand the whole oomd rule down on
+        # exactly the machines where it cannot measure -- the same rule
+        # _is_ancestor follows in the release-ancestry code.
+        empty = root / "empty"
+        empty.mkdir()
+        cases = [
+            (None, "a None cgroup path"),
+            (empty, "a cgroup with no memory.pressure file"),
+        ]
+        garbage = root / "garbage"
+        garbage.mkdir()
+        (garbage / "memory.pressure").write_text("nonsense\n", encoding="utf-8")
+        cases.append((garbage, "a memory.pressure file with no 'some' line"))
+        unparseable = root / "unparseable"
+        unparseable.mkdir()
+        (unparseable / "memory.pressure").write_text(
+            "some avg10=NaNish avg60=0.00\n", encoding="utf-8",
+        )
+        cases.append((unparseable, "a memory.pressure file with a bad number"))
+        for path, what in cases:
+            got = memory._cgroup_psi_some_avg10(path)
+            if got is not None:
+                failures.append(
+                    f"{what} read as {got!r} instead of None; a guard that "
+                    "cannot measure must not vote"
+                )
+
+    # Seam independence. CLAUDE.md's memory-guard section requires each PSI
+    # signal to keep its own reader, because the harness stubs one of them and
+    # a shared entry point lets that stub silently decide the others' answers
+    # too. Assert it structurally rather than trusting the current wiring.
+    saved = memory.psi_some_avg10
+    memory.psi_some_avg10 = lambda: 7.0    # type: ignore[assignment]
+    try:
+        for name in ("own_cgroup_psi_avg10", "slice_cgroup_psi_avg10",
+                     "cpu_psi_avg10", "io_psi_avg10"):
+            if getattr(memory, name)() == 7.0:
+                failures.append(
+                    f"{name}() returned the stubbed machine-wide memory PSI; "
+                    "the readers share a seam, so a test can describe the "
+                    "machine two contradictory ways at once"
+                )
+    finally:
+        memory.psi_some_avg10 = saved      # type: ignore[assignment]
+
+    # The live machine: not asserting a value, only that the readers produce a
+    # percentage or an honest None, and that the parent slice resolves.
+    for name in ("own_cgroup_psi_avg10", "slice_cgroup_psi_avg10"):
+        val = getattr(memory, name)()
+        if val is not None and not (0.0 <= val <= 100.0):
+            failures.append(f"{name}() reported {val}%")
+    if sys.platform == "linux" and memory._own_cgroup_path() is not None:
+        if memory.parent_slice_path() is None:
+            failures.append(
+                "this process has a cgroup but no parent slice was resolved, "
+                "so the oomd rule can never measure the cgroup oomd judges"
+            )
+        if memory._slice_unit_name() is None:
+            failures.append(
+                "the parent slice did not resolve to a .slice unit name, so "
+                "oomd's configuration can never be looked up"
+            )
+
+
+def _fake_systemctl(payload: str, rc: int = 0):
+    """Stand in for `systemctl --user show`, returning fixed property lines."""
+    class _Res:
+        returncode = rc
+        stdout = payload
+        stderr = ""
+
+    def _run(cmd, **kwargs):
+        return _Res()
+
+    return _run
+
+
+def _check_oomd_policy_parse(failures: list[str]) -> None:
+    """systemd reports the limit as a fraction of UINT32_MAX, not as a percent."""
+    import subprocess as _sp
+
+    saved = _sp.run
+    try:
+        # The two real values on this machine: app.slice as Fedora ships it,
+        # and the sessions slice this work installs one rung tighter.
+        for raw, want, what in (
+            (3435973836, 80.0, "app.slice as Fedora arms it"),
+            (3006477107, 70.0, "the sessions slice at 70%"),
+        ):
+            _sp.run = _fake_systemctl(
+                f"ManagedOOMMemoryPressure=kill\n"
+                f"ManagedOOMMemoryPressureLimit={raw}\n"
+            )
+            pol = memory.read_oomd_policy("app.slice")
+            if pol.limit_pct is None or abs(pol.limit_pct - want) > 0.01:
+                failures.append(
+                    f"{what}: {raw} parsed as {pol.limit_pct!r}, expected "
+                    f"{want} -- the limit is a fraction of 2^32 and hardcoding "
+                    "a percentage would put the bot's back-off point somewhere "
+                    "oomd is not"
+                )
+            if not pol.armed or not pol.active():
+                failures.append(f"{what}: parsed as not armed ({pol.summary()})")
+
+        # Not armed: no limit to measure against, so the whole rule stands down
+        # rather than guessing oomd's built-in default.
+        _sp.run = _fake_systemctl(
+            "ManagedOOMMemoryPressure=auto\nManagedOOMMemoryPressureLimit=0\n"
+        )
+        pol = memory.read_oomd_policy("app.slice")
+        if pol.active():
+            failures.append(
+                "an unarmed slice read as an active oomd policy, so the bot "
+                "would back off against a limit nothing enforces"
+            )
+
+        # Armed but with no limit set is equally inert.
+        _sp.run = _fake_systemctl(
+            "ManagedOOMMemoryPressure=kill\nManagedOOMMemoryPressureLimit=0\n"
+        )
+        if memory.read_oomd_policy("app.slice").active():
+            failures.append("an armed slice with no limit read as active")
+
+        # A failing systemctl must be an error, never a silent zero.
+        _sp.run = _fake_systemctl("", rc=1)
+        pol = memory.read_oomd_policy("app.slice")
+        if pol.active() or not pol.error:
+            failures.append(
+                "a failed systemctl call did not record an error; an "
+                "unreadable policy has to stand the rule down, not arm it at 0"
+            )
+
+        # Never raises, whatever systemctl does.
+        def _boom(cmd, **kwargs):
+            raise OSError("no such thing")
+        _sp.run = _boom
+        pol = memory.read_oomd_policy("app.slice")
+        if pol.active() or not pol.error:
+            failures.append("read_oomd_policy() swallowed an exception badly")
+    finally:
+        _sp.run = saved
+
+    # The cache exists so admission does not shell out per session start.
+    memory._oomd_cache = None
+    first = memory.oomd_policy()
+    import subprocess as _sp2
+    saved2 = _sp2.run
+
+    def _explode(cmd, **kwargs):
+        raise AssertionError("oomd policy was re-read instead of cached")
+
+    _sp2.run = _explode
+    try:
+        second = memory.oomd_policy()
+    except AssertionError as exc:
+        failures.append(str(exc))
+        second = first
+    finally:
+        _sp2.run = saved2
+    if second.slice_unit != first.slice_unit:
+        failures.append("the cached oomd policy did not match the first read")
+
+    # On this machine, with oomd running, the real read has to come back armed.
+    # Skipped where it cannot apply rather than asserted blindly.
+    if sys.platform == "linux" and shutil.which("systemctl") is not None:
+        live = memory.read_oomd_policy()
+        if live.error and live.slice_unit:
+            failures.append(
+                f"reading the real oomd policy for {live.slice_unit} failed: "
+                f"{live.error}"
+            )
+
+
+def _oomd_pressure(
+    slice_psi: float | None,
+    own_psi: float | None,
+    limit: float | None,
+    avail: float | None = 8000.0,
+    swap: float | None = 10.0,
+    psi: float | None = 0.0,
+) -> memory.MemoryPressure:
+    """Drive the real classifier with only the oomd rule able to fire."""
+    saved = (
+        memory.available_mb, memory.swap_used_pct, memory.psi_some_avg10,
+        memory.cgroup_memory, memory.slice_cgroup_psi_avg10,
+        memory.own_cgroup_psi_avg10,
+    )
+    memory.available_mb = lambda: avail                      # type: ignore[assignment]
+    memory.swap_used_pct = lambda: swap                      # type: ignore[assignment]
+    memory.psi_some_avg10 = lambda: psi                      # type: ignore[assignment]
+    memory.cgroup_memory = lambda: memory.CgroupMemory()     # type: ignore[assignment]
+    memory.slice_cgroup_psi_avg10 = lambda: slice_psi        # type: ignore[assignment]
+    memory.own_cgroup_psi_avg10 = lambda: own_psi            # type: ignore[assignment]
+    try:
+        return memory.read_pressure(
+            critical_avail_mb=1024.0, tight_avail_mb=2560.0,
+            critical_swap_pct=90.0, critical_psi_pct=40.0, tight_psi_pct=10.0,
+            oomd_limit_pct=limit,
+            oomd_tight_fraction=0.6, oomd_critical_fraction=0.8,
+        )
+    finally:
+        (memory.available_mb, memory.swap_used_pct, memory.psi_some_avg10,
+         memory.cgroup_memory, memory.slice_cgroup_psi_avg10,
+         memory.own_cgroup_psi_avg10) = saved                # type: ignore[assignment]
+
+
+def _check_oomd_escalation(failures: list[str]) -> None:
+    """The verdict points derived from oomd's own limit."""
+    # Against an 80% limit: tight from 48%, critical from 64%.
+    cases = [
+        ((30.0, 5.0, 80.0), memory.PRESSURE_OK,
+         "a calm slice well under the back-off point"),
+        ((47.0, 5.0, 80.0), memory.PRESSURE_OK,
+         "just under the tight fraction"),
+        ((50.0, 40.0, 80.0), memory.PRESSURE_TIGHT,
+         "past 60% of the kill limit"),
+        ((66.0, 60.0, 80.0), memory.PRESSURE_CRITICAL,
+         "past 80% of the kill limit"),
+        ((94.76, 80.0, 80.0), memory.PRESSURE_CRITICAL,
+         "the reading taken during the 2026-09-21 kill"),
+    ]
+    for (slice_psi, own_psi, limit), want, what in cases:
+        got = _oomd_pressure(slice_psi, own_psi, limit)
+        if got.level != want:
+            failures.append(
+                f"{what}: slice at {slice_psi}% against a {limit}% oomd limit "
+                f"read as {got.level!r}, expected {want!r} ({got.summary()})"
+            )
+        if want != memory.PRESSURE_OK:
+            if got.oomd_level != want:
+                failures.append(
+                    f"{what}: the oomd verdict was recorded as "
+                    f"{got.oomd_level!r} rather than {want!r}; admission reads "
+                    "that field on its own and would not hold"
+                )
+            if not any("oomd" in r or "slice" in r for r in got.reasons):
+                failures.append(
+                    f"{what}: escalated with no reason mentioning the slice or "
+                    f"oomd ({got.reasons!r})"
+                )
+
+    # The 2026-09-21 reading against the rules that existed that day: nothing
+    # fires. This is the regression, stated as a test.
+    old = _pressure(9000.0, 62.0, 3.0)
+    if old.level != memory.PRESSURE_OK:
+        failures.append(
+            "the machine-wide readings from the 2026-09-21 kill no longer read "
+            "as OK, so this case no longer demonstrates the blind spot"
+        )
+
+    # Whose fault it is, said out loud. The hold message is the only place the
+    # user learns whether to close Chrome or wait for a build.
+    ours = _oomd_pressure(66.0, 60.0, 80.0)
+    if not any("our own sessions" in r for r in ours.reasons):
+        failures.append(
+            "a slice stalling mostly from our own sessions did not say so: "
+            f"{ours.reasons!r}"
+        )
+    theirs = _oomd_pressure(50.0, 2.0, 80.0)
+    if not any("not us" in r for r in theirs.reasons):
+        failures.append(
+            f"a slice stalling from something else did not say so: {theirs.reasons!r}"
+        )
+    blind = _oomd_pressure(66.0, None, 80.0)
+    if any("not us" in r or "our own" in r for r in blind.reasons):
+        failures.append(
+            "blame was assigned without an own-cgroup reading to assign it "
+            f"from: {blind.reasons!r}"
+        )
+
+    # Stand-downs. No limit, no reading, no rule: a machine without oomd, or
+    # one whose configuration could not be read, must behave exactly as before.
+    for slice_psi, limit, what in (
+        (94.76, None, "no oomd limit known"),
+        (None, 80.0, "no slice PSI reading"),
+        (None, None, "neither"),
+    ):
+        got = _oomd_pressure(slice_psi, 90.0, limit)
+        if got.level != memory.PRESSURE_OK or got.oomd_level != memory.PRESSURE_OK:
+            failures.append(
+                f"{what}: read as {got.level!r}/{got.oomd_level!r} instead of "
+                "standing the oomd rule down"
+            )
+
+    # oomd_at_least() is what admission gates on.
+    if not _oomd_pressure(66.0, 60.0, 80.0).oomd_at_least(memory.PRESSURE_TIGHT):
+        failures.append("a critical oomd verdict did not satisfy at-least-tight")
+    if _oomd_pressure(30.0, 5.0, 80.0).oomd_at_least(memory.PRESSURE_TIGHT):
+        failures.append("a calm slice satisfied an at-least-tight oomd test")
+
+    # summary() still refuses to look healthy on no readings. CLAUDE.md pins
+    # this for cpu/io; the slice figure joins the same rule, since a summary
+    # built only from context bits describes a machine nothing was measured on.
+    nothing = _oomd_pressure(None, None, None, avail=None, swap=None, psi=None)
+    if "no readings" not in nothing.summary():
+        failures.append(
+            "a pressure read with nothing measurable summarised as though it "
+            "had data"
+        )
+    with_slice = _oomd_pressure(50.0, 40.0, 80.0)
+    if "slice-psi" not in with_slice.summary():
+        failures.append(
+            f"the slice stall figure is not in the summary: {with_slice.summary()!r}"
+        )
+
+    # The fractions have to be ordered and inside the limit, or the two rungs
+    # collapse into one and the bot backs off only once oomd is already firing.
+    if not 0 < config.OOMD_TIGHT_FRACTION < config.OOMD_CRITICAL_FRACTION <= 1.0:
+        failures.append(
+            f"the oomd fractions are not ordered inside (0, 1]: tight="
+            f"{config.OOMD_TIGHT_FRACTION}, critical={config.OOMD_CRITICAL_FRACTION}"
+        )
+
+
+def _check_weight_selfcheck(failures: list[str]) -> None:
+    """Layer 1: the live cgroup, not the unit file, is the source of truth.
+
+    The 2026-09-08 CPUWeight/IOWeight fix was installed with `systemctl --user
+    set-property --runtime`, and systemd drops a --runtime drop-in when the
+    unit stops -- which is what an oomd kill does. The protection uninstalled
+    itself on the one event it exists for. Both the unit file and `systemctl
+    show` read 20 throughout. Only the cgroup read 100.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        saved = memory._own_cgroup_path
+        try:
+            # io.weight really is spelled "default N"; cpu.weight is bare.
+            (root / "cpu.weight").write_text("20\n", encoding="utf-8")
+            (root / "io.weight").write_text("default 20\n", encoding="utf-8")
+            memory._own_cgroup_path = lambda: root   # type: ignore[assignment]
+            good = cgroups.check_weights()
+            if good.cpu_live != 20 or good.io_live != 20:
+                failures.append(
+                    f"live weights parsed as cpu={good.cpu_live!r} "
+                    f"io={good.io_live!r}; io.weight's 'default N' spelling is "
+                    "the one that has to survive"
+                )
+            if not good.ok() or good.warning_text():
+                failures.append(
+                    f"matching weights were reported as wrong: {good.summary()}"
+                )
+
+            # The regression itself.
+            (root / "cpu.weight").write_text("100\n", encoding="utf-8")
+            (root / "io.weight").write_text("default 100\n", encoding="utf-8")
+            bad = cgroups.check_weights()
+            if bad.ok():
+                failures.append(
+                    "weights of 100 against an expected 20 were reported as "
+                    "fine; this is the exact state the machine was in for a "
+                    "week and nothing noticed"
+                )
+            text = bad.warning_text()
+            for needed in ("100", "20", "cpu.weight", "io.weight", "drop-in"):
+                if needed not in text:
+                    failures.append(
+                        f"the weight warning does not name {needed!r}, so it "
+                        f"cannot be acted on: {text!r}"
+                    )
+
+            # Unreadable is not wrong. A machine without cgroup v2 must not
+            # produce a warning nobody can act on.
+            (root / "cpu.weight").unlink()
+            (root / "io.weight").unlink()
+            blank = cgroups.check_weights()
+            if not blank.ok() or blank.warning_text():
+                failures.append(
+                    "unreadable weights were reported as a mismatch: "
+                    f"{blank.summary()}"
+                )
+            if not blank.error:
+                failures.append(
+                    "unreadable weights recorded no error, so the summary "
+                    "cannot say why it has nothing"
+                )
+        finally:
+            memory._own_cgroup_path = saved          # type: ignore[assignment]
+
+    # The live machine, reported and deliberately NOT asserted. A wrong live
+    # weight is a fact about the machine right now, not a defect in this code,
+    # and it is precisely the fact the startup check exists to surface. Failing
+    # the suite on it would make the harness unusable as a gate on exactly the
+    # days the feature is earning its keep, and the pressure to "fix the test"
+    # would be pressure to delete the check.
+    live = cgroups.check_weights()
+    if not live.ok():
+        print(f"NOTE: {live.summary()} -- {live.warning_text()}")
+
+
+def _check_session_slice_units(failures: list[str]) -> None:
+    """Layer 3's unit files, and the precedence trap that bit twice."""
+    slice_file = REPO_ROOT / "scripts" / f"{config.SESSION_SLICE}"
+    dropin = (
+        REPO_ROOT / "scripts" / f"{config.SESSION_SLICE}.d" / "50-oomd.conf"
+    )
+    if not slice_file.exists():
+        failures.append(f"{slice_file.name} is missing from scripts/")
+        return
+    if not dropin.exists():
+        failures.append(
+            "the sessions slice ships no 50-oomd.conf drop-in. Fedora arms "
+            "every user slice from a type-wide drop-in "
+            "(/usr/lib/systemd/user/slice.d/10-oomd-per-slice-defaults.conf), "
+            "and a drop-in beats a unit fragment, so an oomd limit written "
+            "into the fragment is silently ignored"
+        )
+        return
+
+    frag = slice_file.read_text(encoding="utf-8")
+    drop = dropin.read_text(encoding="utf-8")
+    if "ManagedOOMMemoryPressureLimit" in frag:
+        failures.append(
+            "the sessions slice fragment sets ManagedOOMMemoryPressureLimit; "
+            "Fedora's type-wide drop-in overrides it and the setting never "
+            "takes. It belongs in the unit's own drop-in"
+        )
+    if "ManagedOOMMemoryPressure=kill" not in drop:
+        failures.append("the sessions drop-in does not arm oomd on the slice")
+
+    limit = re.search(r"ManagedOOMMemoryPressureLimit=(\d+)%", drop)
+    if not limit:
+        failures.append("the sessions drop-in sets no oomd limit percentage")
+    else:
+        inner = int(limit.group(1))
+        if inner >= 80:
+            failures.append(
+                f"the sessions slice is armed at {inner}%, at or above "
+                "app.slice's 80%. The inner limit has to be reached FIRST, "
+                "or app.slice fires and picks this whole slice -- every "
+                "session at once, which is the outcome the split exists to "
+                "prevent"
+            )
+
+    for knob in ("MemoryHigh", "MemoryMax"):
+        if knob not in frag:
+            failures.append(f"the sessions slice has no {knob}")
+    high = _as_mb(_ini_value(frag, "MemoryHigh") or "")
+    hard = _as_mb(_ini_value(frag, "MemoryMax") or "")
+    if high is not None and hard is not None and not high < hard:
+        failures.append(
+            f"the sessions slice MemoryHigh ({high:.0f}MB) is not below its "
+            f"MemoryMax ({hard:.0f}MB)"
+        )
+    for knob in ("CPUWeight", "IOWeight"):
+        if knob not in frag:
+            failures.append(
+                f"the sessions slice has no {knob}. A scope in this slice is "
+                "no longer inside the service's cgroup and would inherit the "
+                "default weight of 100, which is the regression that made the "
+                "desktop unusable"
+            )
+
+    # The supervisor must be the last thing oomd considers, not the first
+    # thing it finds. This is the half of Layer 3 that does not depend on
+    # scopes working at all.
+    unit = (REPO_ROOT / "scripts" / "claude-bot.service").read_text(encoding="utf-8")
+    if "ManagedOOMPreference=avoid" not in unit:
+        failures.append(
+            "claude-bot.service does not carry ManagedOOMPreference=avoid, so "
+            "oomd may pick the supervisor and every live session with it"
+        )
+
+    # The per-session ladder: throttle, warn, the bot reaps and explains, and
+    # only then a silent kernel kill.
+    if not config.SESSION_MEM_HIGH_MB < config.SESSION_MEM_HARD_MB:
+        failures.append(
+            f"the per-session soft ceiling ({config.SESSION_MEM_HIGH_MB}MB) is "
+            f"not below the hard one ({config.SESSION_MEM_HARD_MB}MB), so the "
+            "throttle never applies before the kernel kill"
+        )
+    if not config.SESSION_MEM_KILL_MB < config.SESSION_MEM_HARD_MB:
+        failures.append(
+            f"the bot's own reap ({config.SESSION_MEM_KILL_MB}MB) is not below "
+            f"the cgroup hard ceiling ({config.SESSION_MEM_HARD_MB}MB); the "
+            "kernel would kill first and the session would never be told why"
+        )
+
+
+def _ini_value(text: str, key: str) -> str | None:
+    match = re.search(rf"^{re.escape(key)}=(.+)$", text, re.MULTILINE)
+    return match.group(1).strip() if match else None
+
+
 async def _amain() -> int:
     failures: list[str] = []
 
@@ -2389,6 +2911,11 @@ async def _amain() -> int:
     _check_kill_result_keeps_the_work_record(failures)
     _check_nudge_text(failures)
     _check_pressure_classifier(failures)
+    _check_cgroup_psi_readers(failures)
+    _check_oomd_policy_parse(failures)
+    _check_oomd_escalation(failures)
+    _check_weight_selfcheck(failures)
+    _check_session_slice_units(failures)
     _check_over_own_high(failures)
     _check_orphan_detection(failures)
     _check_fleet_kill_wording(failures)
