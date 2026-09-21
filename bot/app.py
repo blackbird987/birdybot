@@ -837,6 +837,7 @@ async def run() -> None:
 
     async def cooldown_loop():
         from datetime import datetime as dt, timezone as tz_mod
+        from bot.engine import lifecycle
         while True:
             await asyncio.sleep(60)
             try:
@@ -855,16 +856,28 @@ async def run() -> None:
                 for sids in completed_by_session.values():
                     sids.sort(key=lambda x: x.created_at or "", reverse=True)
 
+                # Asked once per pass, not per instance: it purges expired
+                # cooldowns and re-probes credentials, and eighteen parked
+                # instances asking the same question eighteen times is the
+                # same answer at eighteen times the cost.
+                accounts_free = runner.has_spawnable_account()
+
                 for inst in all_instances:
                     if not inst.cooldown_retry_at or not inst.cooldown_channel_id:
                         continue
                     if inst.id in _cooldown_retrying:
                         continue
-                    try:
-                        retry_at = dt.fromisoformat(inst.cooldown_retry_at)
-                    except (ValueError, TypeError):
-                        continue
-                    if now >= retry_at:
+                    if lifecycle.cooldown_retry_is_due(
+                        inst.cooldown_retry_at, now, accounts_free,
+                    ):
+                        if not lifecycle.cooldown_retry_is_due(
+                            inst.cooldown_retry_at, now, accounts_free=False,
+                        ):
+                            log.info(
+                                "Pulling cooldown retry for %s forward from %s "
+                                "(an account is available again)",
+                                inst.id, inst.cooldown_retry_at,
+                            )
                         # Skip if session already has completed work after this instance
                         # (e.g. user switched accounts and finished the task manually)
                         # O(1) lookup via pre-built dict instead of O(n) scan per instance

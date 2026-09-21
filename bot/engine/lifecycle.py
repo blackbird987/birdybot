@@ -201,6 +201,40 @@ async def schedule_cooldown_retry(
     return True
 
 
+def cooldown_retry_is_due(
+    retry_at: str | None,
+    now: datetime,
+    accounts_free: bool,
+) -> bool:
+    """Should a parked cooldown retry fire on this pass?
+
+    ``cooldown_retry_at`` is a *prediction* of when an account will be free
+    again, never a deadline anyone agreed to: the refuse-to-spawn branch
+    stamps it with the earliest live cooldown, and one weekly limit puts that
+    days out.  An account signed back in, re-enabled by an org admin, or
+    cleared by /auth's "Try now" makes it stale instantly, and nothing
+    re-armed it.  On 2026-09-17 eighteen sessions sat parked on a reset four
+    days away while a second account had been usable again for minutes, and
+    the only way out was retrying each one by hand.
+
+    So availability is the trigger and the timestamp is the fallback, for the
+    case where nothing frees up on its own.  It cannot thrash: the account
+    that hit the limit stays in ``_account_cooldowns`` until its real reset,
+    so a single-account fleet answers ``accounts_free=False`` throughout and
+    waits exactly as before.  An unparseable stamp fires only on
+    availability: an unreadable prediction is not a reason to keep waiting,
+    but it is also not a clock.
+    """
+    if not retry_at:
+        return False
+    if accounts_free:
+        return True
+    try:
+        return now >= datetime.fromisoformat(retry_at)
+    except (ValueError, TypeError):
+        return False
+
+
 # Labels that don't auto-derive well from InstanceOrigin.value
 _ORIGIN_LABEL_OVERRIDES: dict[InstanceOrigin, str] = {
     InstanceOrigin.DIRECT: "",

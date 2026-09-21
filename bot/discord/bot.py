@@ -2417,7 +2417,21 @@ class ClaudeBot(discord.Client):
                             self._save_pending_refs()
 
                         self._cancel_sleep(channel_id)
-                        await self._clear_thread_sleeping(message.channel)
+                        # Backgrounded, never awaited: dropping the 💤 is a
+                        # thread *name* edit, and thread names carry a
+                        # 2-per-10-min limit.  discord.py answers a 429 by
+                        # sleeping the caller for the full Retry-After — seen
+                        # at 127s on 2026-09-14 — so awaiting it parked the
+                        # whole message before `on_text` ever dispatched the
+                        # query: no reply, no typing, nothing.  The user
+                        # re-sends, that second task skips the edit (the
+                        # `_name_editing` guard is already held) and answers
+                        # immediately, and then the first task wakes up and
+                        # answers too.  That is the double reply.  Every other
+                        # caller of this already backgrounds it; this was the
+                        # one that did not.  Cosmetic work must never gate the
+                        # turn.
+                        asyncio.create_task(self._clear_thread_sleeping(message.channel))
                         asyncio.create_task(self._set_thread_active_tag(message.channel, True))
                         asyncio.create_task(self._refresh_dashboard())
                         ctx = self._ctx(channel_id, session_id=session_id,

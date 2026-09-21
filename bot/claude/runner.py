@@ -1633,6 +1633,23 @@ class ClaudeRunner:
             return False
         return record.get("reason") in RUNTIME_REJECTION_REASONS
 
+    def has_spawnable_account(self) -> bool:
+        """Would a spawn find an account to run on, right now?
+
+        Asked by the cooldown-retry loop, which parks an instance on a
+        *predicted* reset time and otherwise has no way to learn that the
+        prediction went stale.  It is the same `_pick_account()` call the
+        refusal branch in `_run_impl` makes, deliberately: a predicate that
+        could disagree with the spawn would either fire retries into a refusal
+        or leave them parked while the fleet ran.
+
+        Non-failover setups (no CLAUDE_ACCOUNTS) never refuse a spawn for want
+        of an account, so there is nothing for them to wait on.
+        """
+        if not config.CLAUDE_ACCOUNTS:
+            return True
+        return self._pick_account() is not None
+
     def retry_account_now(self, account_dir: str) -> str:
         """Put an auth-sidelined account back in rotation immediately.
 
