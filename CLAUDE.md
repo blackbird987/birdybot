@@ -1080,8 +1080,35 @@ behaviour if the machine will not support it.
   at 273 MB with 10,607 `high` events and `oom_kill 0`, alive and crawling,
   while `smoke_test.py` reported the bot HEALTHY.
 
-Four things that must not drift:
+Six things that must not drift:
 
+- **A scope does not exist yet when the spawn call returns.** `systemd-run
+  --scope` registers the transient unit over D-Bus and only *then* execs, so
+  at the instant `create_subprocess_exec` hands back a pid, that pid is still
+  charged to the bot's own cgroup. Measured here, three trials of three: in
+  `claude-bot.service` at t=0, in its own scope by t=50ms. `adopt_session`
+  therefore **polls** (`SESSION_SCOPE_ADOPT_SECS`) instead of reading once,
+  and the read it replaced failed *silently*: a single look at t=0 fails the
+  identity check exactly the way a session that never got a scope does, so
+  every session ran with no soft ceiling, no `memory.current` accounting and
+  no atomic kill on a machine where all three worked. The harness had the
+  same blind spot for the same reason: it adopted after reading the child's
+  first line of output, by which point the scope has existed for a
+  comfortable margin. It now adopts at the moment the runner does.
+- **Whether scopes work is re-established, not learned once.** It is a
+  property of the *user service manager*, and that can wedge under a process
+  that lives for weeks: every job `waiting`, none `running`, behind one
+  crash-looping unit, seen twice on 2026-09-21. There `systemd-run` blocks
+  forever, so a cached "yes" turns every later spawn into a session that
+  never starts at all and is only reaped by the 4h silence watchdog. Two
+  guards, both cheap: the probe answer carries a TTL
+  (`SESSION_SCOPE_PROBE_TTL_SECS`), and a wrapped session that never reaches
+  its scope calls `invalidate_scope_probe`, so the next spawn pays one
+  bounded probe and then runs unwrapped exactly as a machine with no systemd
+  does. The same rule covers `oomd_policy`: a cached *error* is a failure to
+  ask and is retried, while `armed=False` with no error is a real answer and
+  is kept, because caching one slow `systemctl` call at boot would otherwise
+  switch the whole oomd rule off for the life of the process.
 - **The supervisor's `MemoryMax` stays large, deliberately.** A machine
   without a usable `systemd-run` falls back to running sessions inside the
   service cgroup exactly as before, and a supervisor cap sized for a
@@ -1130,7 +1157,8 @@ OOM-killed at a 13.5 GB peak livelocked the manager at 95% CPU for seven
 minutes, which among other things stopped the browser opening tabs.
 
 Knobs: `SESSION_SCOPES_ENABLED`, `SESSION_SLICE`, `SESSION_MEM_HIGH_MB`,
-`SESSION_MEM_HARD_MB`, `OOMD_TIGHT_FRACTION`, `OOMD_CRITICAL_FRACTION`,
+`SESSION_MEM_HARD_MB`, `SESSION_SCOPE_ADOPT_SECS`,
+`SESSION_SCOPE_PROBE_TTL_SECS`, `OOMD_TIGHT_FRACTION`, `OOMD_CRITICAL_FRACTION`,
 `RESOURCE_CPU_WEIGHT_EXPECTED`, `RESOURCE_IO_WEIGHT_EXPECTED` in
 `bot/config.py`.
 

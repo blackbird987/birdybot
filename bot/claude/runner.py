@@ -2590,19 +2590,6 @@ class ClaudeRunner:
             # child can be reniced from the parent. See _lower_priority for
             # why it is not done in a preexec_fn.
             _lower_priority(proc.pid)
-            # Same window, same reason: this is the earliest the scope exists
-            # to be found. `--scope` execs in place, so proc.pid is the CLI's
-            # own pid and the cgroup it reports is the scope's. None whenever
-            # the session did not get one, which every reader below treats as
-            # "fall back to walking the process tree".
-            session_cg = cgroups.adopt_session(proc.pid, instance.id)
-            if session_cg is not None:
-                self._session_cgroups[instance.id] = session_cg
-                if session_cg.applied:
-                    log.debug(
-                        "%s in scope %s (%s)", instance.id, session_cg.unit,
-                        ", ".join(session_cg.applied),
-                    )
 
             # Closes the last of the no-process windows: spawning is itself an
             # await, so a kill can land after the checks above and still find
@@ -2628,6 +2615,25 @@ class ClaudeRunner:
                 except ProcessLookupError:
                     pass
                 return RunResult(is_error=True, error_message=f"Failed to send prompt: {exc}")
+
+            # Now, and not next to the spawn. `--scope` execs in place, so
+            # proc.pid is the CLI's own pid and the cgroup it reports is the
+            # scope's -- but only once systemd-run's round trip to the service
+            # manager has finished, which has not happened at the instant the
+            # spawn call returns. adopt_session waits for it; doing that here
+            # rather than four lines earlier keeps the wait off the path that
+            # delivers the prompt, and off the kill check that closes the
+            # no-process window. None whenever the session did not get a
+            # scope, which every reader below treats as "fall back to walking
+            # the process tree".
+            session_cg = await cgroups.adopt_session(proc.pid, instance.id)
+            if session_cg is not None:
+                self._session_cgroups[instance.id] = session_cg
+                if session_cg.applied:
+                    log.debug(
+                        "%s in scope %s (%s)", instance.id, session_cg.unit,
+                        ", ".join(session_cg.applied),
+                    )
 
             result = await self._stream_output(
                 proc, instance, on_progress, on_stall,

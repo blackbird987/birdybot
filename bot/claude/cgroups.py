@@ -36,6 +36,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -173,7 +174,11 @@ def check_weights() -> WeightCheck:
 # log line about the session, which makes `systemd-cgls` readable next to
 # `bot.log` with no translation step.
 _SCOPE_PREFIX = "claude-session-"
-_SCOPE_SAFE = re.compile(r"[^A-Za-z0-9_.\\-]")
+# The hyphen is last so it is a literal, not a range. It was once spelled
+# `\\-` inside a raw string, which is a literal backslash followed by a
+# literal hyphen -- so the class allowed a backslash through into a
+# systemd unit name, where it is an escape character.
+_SCOPE_SAFE = re.compile(r"[^A-Za-z0-9_.-]")
 
 # Three-state, deliberately: None means "not probed yet". Probing is a real
 # subprocess, so it happens once per bot lifetime rather than once per spawn,
@@ -181,6 +186,8 @@ _SCOPE_SAFE = re.compile(r"[^A-Za-z0-9_.\\-]")
 _scope_supported: bool | None = None
 _scope_probe_lock: asyncio.Lock | None = None
 _scope_reason: str = ""
+_scope_probed_at: float = 0.0
+_scope_stale: bool = False
 
 
 def scope_unit_name(instance_id: str) -> str:
@@ -194,31 +201,73 @@ def scope_status() -> tuple[bool, str]:
     return bool(_scope_supported), _scope_reason
 
 
+def _probe_is_stale() -> bool:
+    """Whether the cached probe answer has to be re-established before use."""
+    if _scope_stale:
+        return True
+    ttl = config.SESSION_SCOPE_PROBE_TTL_SECS
+    if ttl <= 0:
+        return False
+    return (time.monotonic() - _scope_probed_at) >= ttl
+
+
+def invalidate_scope_probe() -> None:
+    """Force the next ``ensure_scope_support`` to establish the answer again.
+
+    Called when a session that *was* wrapped never reached a scope. That is
+    the signature of a user service manager that has stopped running jobs,
+    seen twice on 2026-09-21 (every job ``waiting``, none ``running``, behind
+    a crash-looping unit), where ``systemd-run`` blocks on its D-Bus call
+    forever and the wrapped session never execs at all. Without this, one
+    cached "yes" keeps wrapping every later spawn into the same hang; with
+    it, the next spawn pays one bounded probe and then runs unwrapped,
+    exactly as a machine with no systemd at all does.
+    """
+    global _scope_stale
+    _scope_stale = True
+
+
 async def ensure_scope_support() -> bool:
-    """One-time probe: can we actually put a process in a scope? Never raises.
+    """Can we actually put a process in a scope? Cached, re-checked. Never raises.
 
     A probe rather than a try/except around the real spawn, because the real
     spawn is the one thing that must not be retried. By the time a session's
     `systemd-run` fails, the runner has already registered the process, told
     the thread it started, and armed the watchdog; unwinding all of that to
     try again is a far larger blast radius than running `true` once at boot.
+
+    Cached with a TTL rather than answered once per bot lifetime, because the
+    answer is a property of the *service manager*, which can change under a
+    process that lives for weeks: a wedged manager makes a working machine
+    stop working, and clearing the wedge makes it work again. A stale cache
+    in the first direction hangs every spawn; in the second it leaves the
+    protection off until the next reboot. The probe itself is a ``true``, and
+    a cache miss costs one of those per TTL.
     """
     global _scope_supported, _scope_probe_lock, _scope_reason
-    if _scope_supported is not None:
+    global _scope_probed_at, _scope_stale
+    if _scope_supported is not None and not _probe_is_stale():
         return _scope_supported
     if _scope_probe_lock is None:
         _scope_probe_lock = asyncio.Lock()
     async with _scope_probe_lock:
-        if _scope_supported is not None:
+        if _scope_supported is not None and not _probe_is_stale():
             return _scope_supported
+        previous = _scope_supported
         _scope_supported, _scope_reason = await _probe_scope()
+        _scope_probed_at = time.monotonic()
+        _scope_stale = False
+        changed = previous != _scope_supported
+    # Only on a change of answer. Every TTL it would be a line that never
+    # says anything, which is the same mistake the preflight valve flag
+    # exists to avoid.
+    if not changed:
+        return _scope_supported
     if _scope_supported:
         log.info(
             "Session scopes enabled, sessions run in %s", config.SESSION_SLICE,
         )
     else:
-        # Once, at WARNING. Per spawn it would be a line that never changes,
-        # which is the same mistake the preflight valve flag exists to avoid.
         log.warning(
             "Session scopes unavailable (%s), sessions will run inside the "
             "bot's own cgroup, as they did before. An oomd kill will take the "
@@ -356,21 +405,11 @@ def _write_limit(path: Path, name: str, mb: int) -> bool:
         return False
 
 
-def adopt_session(pid: int, instance_id: str) -> SessionCgroup | None:
-    """Find a freshly spawned session's scope and apply its memory ceilings.
+def _pid_alive(pid: int) -> bool:
+    return Path(f"/proc/{pid}").exists()
 
-    Returns None whenever the session did not land in a scope of its own,
-    which the caller treats as "carry on exactly as before". The identity
-    check matters: without it, a failed scope would leave the session in the
-    bot's own cgroup, and this function would cheerfully write a 6 GB
-    ``memory.high`` onto the supervisor.
-    """
-    path = cgroup_of_pid(pid)
-    if path is None:
-        return None
-    unit = scope_unit_name(instance_id)
-    if path.name != unit:
-        return None
+
+def _apply_ceilings(path: Path, unit: str) -> SessionCgroup:
     cg = SessionCgroup(path=path, unit=unit)
     applied: list[str] = []
     # high before max. If both are going to be written, the moment between
@@ -382,6 +421,59 @@ def adopt_session(pid: int, instance_id: str) -> SessionCgroup | None:
         applied.append(f"max={config.SESSION_MEM_HARD_MB / 1024:.1f}GB")
     cg.applied = tuple(applied)
     return cg
+
+
+async def adopt_session(
+    pid: int, instance_id: str, timeout_s: float | None = None,
+) -> SessionCgroup | None:
+    """Wait for a freshly spawned session's scope, then apply its ceilings.
+
+    **Polled, not read once, and that is the whole correctness of it.**
+    ``systemd-run --scope`` registers the transient unit over D-Bus and only
+    execs the payload once the manager has answered, so at the instant
+    ``create_subprocess_exec`` returns, the pid is still charged to the bot's
+    own cgroup. Measured on this machine, three trials out of three: still in
+    ``claude-bot.service`` at t=0, in its own scope by t=50ms. A single read
+    at t=0 therefore fails the identity check every single time, and fails it
+    *silently* -- it is indistinguishable from "this session got no scope", so
+    no ceiling is written, no cgroup accounting replaces the tree walk, and no
+    atomic kill is available, on a machine where all three were working.
+
+    Returns None when the process never lands in a scope of its own, which the
+    caller treats as "carry on exactly as before". The identity check stays:
+    without it a failed scope would leave the session in the bot's own cgroup
+    and this would cheerfully write a 6 GB ``memory.high`` onto the
+    supervisor. Waiting is skipped entirely when scopes are not in use, so the
+    machines that never had one do not pay the budget on every spawn.
+    """
+    if not _scope_supported:
+        return None
+    unit = scope_unit_name(instance_id)
+    budget = (
+        config.SESSION_SCOPE_ADOPT_SECS if timeout_s is None else timeout_s
+    )
+    deadline = time.monotonic() + max(0.0, budget)
+    while True:
+        path = cgroup_of_pid(pid)
+        if path is not None and path.name == unit:
+            return _apply_ceilings(path, unit)
+        # A process that is already gone is not late, it is finished, and
+        # there is nothing to adopt or to conclude about the machine.
+        if not _pid_alive(pid):
+            return None
+        if time.monotonic() >= deadline:
+            # It was wrapped and it never arrived. Distrust the cached probe:
+            # on a wedged service manager systemd-run blocks forever and the
+            # session has not even execed yet, so every later spawn would
+            # hang the same way. See invalidate_scope_probe.
+            log.warning(
+                "%s did not reach its own scope within %.1fs (cgroup is %s); "
+                "re-checking whether scopes work before the next spawn",
+                instance_id, budget, path.name if path else "unreadable",
+            )
+            invalidate_scope_probe()
+            return None
+        await asyncio.sleep(config.SESSION_SCOPE_ADOPT_POLL_SECS)
 
 
 def session_slice_path() -> Path | None:

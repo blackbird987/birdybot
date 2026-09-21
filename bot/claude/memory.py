@@ -659,13 +659,28 @@ def read_oomd_policy(slice_unit: str | None = None) -> OomdPolicy:
 # are measured against, and shelling out to systemctl on every admission check
 # would be a subprocess per session start for an answer that never moves.
 _oomd_cache: OomdPolicy | None = None
+_oomd_cache_at: float = 0.0
+
+# A *failure to ask* is retried; an answer of "no" is not. `error` is only
+# ever set when the question could not be put to systemd -- the manager timed
+# out, or wedged, or was not up yet when the bot started. Caching that for the
+# process lifetime would leave the whole oomd rule switched off for weeks
+# because of one slow call at boot, which is the same trap the scope probe's
+# TTL exists for. An armed=False with no error is a real answer and is kept.
+_OOMD_ERROR_RETRY_SECS = 300.0
 
 
 def oomd_policy(refresh: bool = False) -> OomdPolicy:
     """Cached oomd configuration for our slice."""
-    global _oomd_cache
-    if _oomd_cache is None or refresh:
+    global _oomd_cache, _oomd_cache_at
+    stale = (
+        _oomd_cache is not None
+        and _oomd_cache.error is not None
+        and (time.monotonic() - _oomd_cache_at) >= _OOMD_ERROR_RETRY_SECS
+    )
+    if _oomd_cache is None or refresh or stale:
         _oomd_cache = read_oomd_policy()
+        _oomd_cache_at = time.monotonic()
     return _oomd_cache
 
 

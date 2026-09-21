@@ -407,6 +407,31 @@ SESSION_SCOPES_ENABLED: bool = os.getenv(
 ).lower() in ("1", "true", "yes")
 SESSION_SLICE: str = os.getenv("SESSION_SLICE", "app-claudesessions.slice")
 
+# How long to wait for a spawned session to actually land in its scope, and
+# how often to look. `systemd-run --scope` talks to the service manager and
+# only then execs, so the pid is still in the bot's own cgroup at the instant
+# the spawn call returns: measured here as "arrives by 50ms", every time. The
+# budget is generous next to that because the cost of overrunning it is only
+# a session that runs without its own ceilings, while the cost of giving up
+# too early is exactly that, on every session, silently.
+SESSION_SCOPE_ADOPT_SECS: float = float(
+    os.getenv("SESSION_SCOPE_ADOPT_SECS", "5")
+)
+SESSION_SCOPE_ADOPT_POLL_SECS: float = float(
+    os.getenv("SESSION_SCOPE_ADOPT_POLL_SECS", "0.05")
+)
+
+# How long the "can this machine do scopes" answer is trusted before it is
+# established again. Not once per bot lifetime: the answer is a property of
+# the user service manager, which can wedge under a process that lives for
+# weeks (twice on 2026-09-21, every job `waiting` behind a crash-looping
+# unit), and a wedged manager makes `systemd-run` block forever. A stale yes
+# hangs every spawn until this expires; a stale no leaves the protection off
+# until the next reboot. 0 disables re-checking.
+SESSION_SCOPE_PROBE_TTL_SECS: int = int(
+    os.getenv("SESSION_SCOPE_PROBE_TTL_SECS", "600")
+)
+
 # The per-session memory ladder, in the order a growing session meets it:
 #
 #   SESSION_MEM_HIGH_MB   soft. Kernel throttles and reclaims. Nothing dies.

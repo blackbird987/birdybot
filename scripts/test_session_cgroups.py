@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
 
+import ast
 import asyncio
 import os
 import shutil
@@ -122,12 +123,18 @@ def _check_probe_seam(failures: list[str]) -> None:
     turned into a phantom third attempt in the memory-guard suite.
     """
     src = (Path(__file__).resolve().parents[1] / "bot" / "claude" / "cgroups.py")
-    text = src.read_text(encoding="utf-8")
-    # Comments stripped first. The reason the probe does not use this API is
-    # written down next to the probe, naming the API, so a raw substring
-    # search finds the explanation and reports it as the offence.
-    code = "\n".join(line.split("#", 1)[0] for line in text.splitlines())
-    if "create_subprocess_exec" in code:
+    tree = ast.parse(src.read_text(encoding="utf-8"))
+    # The name is searched for in the *syntax*, not in the file's characters.
+    # The reason this module avoids the API is written down beside the code
+    # that avoids it, naming it, so a substring search over the source reports
+    # the explanation as the offence -- it did, twice, once from a comment and
+    # once from a docstring, which is what a `#`-stripping pass cannot catch.
+    called = {
+        node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
+    } | {
+        node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
+    }
+    if "create_subprocess_exec" in called:
         failures.append(
             "cgroups.py spawns through asyncio.create_subprocess_exec, the "
             "same seam the runner uses for sessions; a diagnostic sharing it "
@@ -166,7 +173,7 @@ async def _check_scope_disabled_path(failures: list[str]) -> None:
         cgroups._scope_supported, cgroups._scope_reason = saved_state
 
 
-def _check_adoption_identity(failures: list[str]) -> None:
+async def _check_adoption_identity(failures: list[str]) -> None:
     """Ceilings are written into the session's scope, or into nothing at all."""
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
@@ -175,9 +182,11 @@ def _check_adoption_identity(failures: list[str]) -> None:
         wrong = root / "claude-bot.service"
         wrong.mkdir()
         saved = cgroups.cgroup_of_pid
+        saved_state = (cgroups._scope_supported, cgroups._scope_stale)
+        cgroups._scope_supported = True
         try:
             cgroups.cgroup_of_pid = lambda pid: wrong   # type: ignore[assignment]
-            got = cgroups.adopt_session(1234, "t-99")
+            got = await cgroups.adopt_session(1234, "t-99", timeout_s=0.0)
             if got is not None:
                 failures.append(
                     "a session that did not land in its own scope was adopted "
@@ -195,7 +204,7 @@ def _check_adoption_identity(failures: list[str]) -> None:
             (right / "memory.high").write_text("max", encoding="utf-8")
             (right / "memory.max").write_text("max", encoding="utf-8")
             cgroups.cgroup_of_pid = lambda pid: right   # type: ignore[assignment]
-            cg = cgroups.adopt_session(1234, "t-99")
+            cg = await cgroups.adopt_session(1234, "t-99")
             if cg is None:
                 failures.append("a session in its own scope was not adopted")
             else:
@@ -240,8 +249,53 @@ def _check_adoption_identity(failures: list[str]) -> None:
                 (right / "cgroup.kill").write_text("", encoding="utf-8")
                 if not cg.kill():
                     failures.append("kill() failed against a writable cgroup.kill")
+
+            # The scope does not exist yet at the instant the spawn returns.
+            # systemd-run registers the transient unit over D-Bus and only
+            # then execs, so a single read at t=0 sees the bot's own cgroup
+            # and rejects it on identity -- indistinguishable from "no scope",
+            # which silently costs every session its ceilings, its cgroup
+            # accounting and its atomic kill. Measured on this machine as
+            # "arrives by 50ms"; adoption has to wait for it.
+            cgroups._scope_stale = False
+            seen = {"n": 0}
+
+            def _late(pid: int) -> Path:
+                seen["n"] += 1
+                return right if seen["n"] > 3 else wrong
+
+            cgroups.cgroup_of_pid = _late               # type: ignore[assignment]
+            # A live pid, because adoption stops early for a process that has
+            # already exited: one that is gone is finished, not late, and
+            # there is nothing to conclude about the machine from it.
+            cg = await cgroups.adopt_session(os.getpid(), "t-99", timeout_s=5.0)
+            if cg is None:
+                failures.append(
+                    "a scope that formed a few milliseconds after the spawn "
+                    "was never adopted; this is what systemd-run actually "
+                    "does, so no session would ever get its ceilings"
+                )
+            if cgroups._scope_stale:
+                failures.append(
+                    "a successful late adoption invalidated the scope probe"
+                )
+
+            # Giving up has to distrust the cached probe: a wrapped session
+            # that never reaches a scope is the shape of a wedged service
+            # manager, where systemd-run blocks forever and every later spawn
+            # would hang the same way.
+            cgroups.cgroup_of_pid = lambda pid: wrong   # type: ignore[assignment]
+            cgroups._scope_stale = False
+            await cgroups.adopt_session(os.getpid(), "t-99", timeout_s=0.0)
+            if not cgroups._scope_stale:
+                failures.append(
+                    "a session that never reached its scope left the cached "
+                    "probe answer trusted; a wedged service manager would "
+                    "hang every later spawn in systemd-run"
+                )
         finally:
             cgroups.cgroup_of_pid = saved               # type: ignore[assignment]
+            cgroups._scope_supported, cgroups._scope_stale = saved_state
 
 
 def _check_orphan_roots(failures: list[str]) -> None:
@@ -308,6 +362,19 @@ async def _check_live_scope(failures: list[str]) -> None:
         *cmd, stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
+    # Adopted here, before a single byte has been read back, because that is
+    # where the runner does it. Waiting for the child's first line first is
+    # what hid the adoption race: by then the scope has existed for a
+    # comfortable margin, and a single read at t=0 passes a test it fails in
+    # production every time.
+    live_cg = await cgroups.adopt_session(proc.pid, "t-livescope")
+    if live_cg is None:
+        failures.append(
+            "a real scoped session was not adopted at the moment the spawn "
+            "returned, which is the moment the runner adopts it: systemd-run "
+            "has not finished registering the scope yet, so the session runs "
+            "with no ceilings, no cgroup accounting and no atomic kill"
+        )
     try:
         line = await asyncio.wait_for(proc.stdout.readline(), timeout=20)
     except asyncio.TimeoutError:
@@ -330,7 +397,9 @@ async def _check_live_scope(failures: list[str]) -> None:
             f"the child did not land in its own scope: {path}"
         )
     else:
-        cg = cgroups.adopt_session(proc.pid, "t-livescope")
+        cg = live_cg if live_cg is not None else await cgroups.adopt_session(
+            proc.pid, "t-livescope",
+        )
         if cg is None:
             failures.append("a real scoped session was not adopted")
         else:
@@ -395,7 +464,7 @@ async def _amain() -> int:
     _check_wrapper_shape(failures)
     _check_probe_seam(failures)
     await _check_scope_disabled_path(failures)
-    _check_adoption_identity(failures)
+    await _check_adoption_identity(failures)
     _check_orphan_roots(failures)
     await _check_live_scope(failures)
 
