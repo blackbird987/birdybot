@@ -474,6 +474,201 @@ def io_psi_avg10() -> float | None:
     return _psi_some_avg10("io")
 
 
+# --- The criterion that actually kills this unit ------------------------------
+#
+# Everything above reads /proc/pressure, which is the whole machine. That is
+# not what systemd-oomd judges us on. oomd watches the *cgroup* pressure of a
+# monitored slice and SIGKILLs a unit inside it when the slice stalls past a
+# configured limit for long enough. On 2026-09-21 at 14:42:18 it killed the
+# entire unit and six live sessions:
+#
+#   Killed .../app.slice/claude-bot.service due to memory pressure for
+#   .../app.slice being 90.79% > 80.00% for > 20s with reclaim activity
+#   Pressure: Avg10: 94.76, Avg60: 75.53 ... Current Memory Usage: 10.1G
+#
+# Machine-wide available memory never fell under about 9 GB during that, so
+# every reading above scored the machine as healthy and was right to. The bot
+# was measuring the machine while oomd was judging the slice. Nothing in the
+# codebase had ever opened a cgroup memory.pressure file.
+#
+# Two readings, because on their own neither answers the question that matters.
+# The slice's stall is what oomd acts on; the bot's own cgroup stall is what
+# says whether the bot caused it. "app.slice is at 70% and we are 2% of it"
+# and "app.slice is at 70% and it is all us" call for different messages and,
+# eventually, different actions.
+#
+# Each gets its own public reader for the reason the three /proc readers above
+# do: a harness that stubs the slice reading must not thereby decide what the
+# bot's own cgroup says, or it can describe a machine in a state that cannot
+# physically occur.
+
+
+def _cgroup_psi_some_avg10(cgroup: Path | None) -> float | None:
+    """`some avg10` from ``<cgroup>/memory.pressure``, or None.
+
+    None on every failure and never 0.0: "this cgroup is not thrashing" and
+    "the pressure file is not there" are opposite facts, and a guard that
+    collapses them reports a healthy slice whenever cgroup v2 is absent,
+    PSI is compiled out, or the path moved. Same rule as ``_is_ancestor`` in
+    the release-ancestry code, for the same reason -- a check that cannot
+    measure must not vote.
+    """
+    if cgroup is None or sys.platform != "linux":
+        return None
+    try:
+        raw = (cgroup / "memory.pressure").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in raw.splitlines():
+        if not line.startswith("some "):
+            continue
+        for field in line.split():
+            key, _, val = field.partition("=")
+            if key == "avg10":
+                try:
+                    return float(val)
+                except ValueError:
+                    return None
+    return None
+
+
+def parent_slice_path() -> Path | None:
+    """Directory of the slice our unit sits in, e.g. .../app.slice, or None.
+
+    This is the cgroup oomd is configured on, so it is the one whose stall
+    percentage decides whether we get killed. Derived from the bot's own
+    cgroup rather than spelled out, because the path differs per uid and per
+    machine and a hardcoded one would silently read nothing.
+    """
+    cg = _own_cgroup_path()
+    if cg is None:
+        return None
+    parent = cg.parent
+    return parent if parent.is_dir() and parent != cg else None
+
+
+def own_cgroup_psi_avg10() -> float | None:
+    """Memory stall inside the bot's own cgroup: are we the cause?"""
+    return _cgroup_psi_some_avg10(_own_cgroup_path())
+
+
+def slice_cgroup_psi_avg10() -> float | None:
+    """Memory stall across the slice oomd is watching: are we the victim?"""
+    return _cgroup_psi_some_avg10(parent_slice_path())
+
+
+# systemd reports ManagedOOMMemoryPressureLimit as a fraction of UINT32_MAX,
+# so the 80% configured on this machine comes back as 3435973836. Parsed
+# rather than assumed: the limit is a local policy decision that can be
+# changed in a drop-in without touching this repo, and a bot that hardcoded
+# 80 would keep backing off at the wrong point forever after.
+_OOMD_LIMIT_SCALE = 2 ** 32
+
+
+@dataclass
+class OomdPolicy:
+    """What systemd-oomd is configured to do to the slice we live in."""
+
+    slice_unit: str | None = None
+    armed: bool = False          # ManagedOOMMemoryPressure=kill
+    limit_pct: float | None = None
+    error: str | None = None
+
+    def active(self) -> bool:
+        """True only when there is a real limit to measure ourselves against.
+
+        An unarmed slice, an unreadable one, or one with no limit set all read
+        as inactive, and every threshold derived from this stands down. The
+        alternative is guessing oomd's built-in default, which would put the
+        bot's back-off point somewhere oomd is not.
+        """
+        return bool(self.armed and self.limit_pct and self.limit_pct > 0)
+
+    def summary(self) -> str:
+        if self.error:
+            return f"oomd: {self.error}"
+        if not self.armed:
+            return f"oomd: not armed on {self.slice_unit or '?'}"
+        if not self.limit_pct:
+            return f"oomd: armed on {self.slice_unit or '?'}, no limit set"
+        return f"oomd: kills {self.slice_unit} past {self.limit_pct:.0f}% stall"
+
+
+def _slice_unit_name() -> str | None:
+    """systemd unit name of our parent slice, e.g. ``app.slice``."""
+    parent = parent_slice_path()
+    if parent is None:
+        return None
+    name = parent.name
+    return name if name.endswith(".slice") else None
+
+
+def read_oomd_policy(slice_unit: str | None = None) -> OomdPolicy:
+    """Ask systemd what oomd will do to our slice. Never raises.
+
+    Read through ``systemctl --user show`` rather than from a config file
+    because the effective value is the product of the unit, its drop-ins and
+    the defaults, and only the manager knows the answer.
+    """
+    out = OomdPolicy()
+    if sys.platform != "linux":
+        out.error = "not linux"
+        return out
+    out.slice_unit = slice_unit or _slice_unit_name()
+    if not out.slice_unit:
+        out.error = "no parent slice"
+        return out
+    import shutil
+    import subprocess
+
+    if shutil.which("systemctl") is None:
+        out.error = "no systemctl"
+        return out
+    try:
+        res = subprocess.run(
+            [
+                "systemctl", "--user", "show", out.slice_unit,
+                "-p", "ManagedOOMMemoryPressure",
+                "-p", "ManagedOOMMemoryPressureLimit",
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception as exc:
+        out.error = type(exc).__name__
+        return out
+    if res.returncode != 0:
+        out.error = f"systemctl rc={res.returncode}"
+        return out
+    for line in res.stdout.splitlines():
+        key, _, val = line.partition("=")
+        if key == "ManagedOOMMemoryPressure":
+            out.armed = val.strip() == "kill"
+        elif key == "ManagedOOMMemoryPressureLimit":
+            try:
+                raw = int(val.strip())
+            except ValueError:
+                continue
+            if raw > 0:
+                out.limit_pct = raw / _OOMD_LIMIT_SCALE * 100.0
+    return out
+
+
+# Read once and kept: oomd's configuration is a property of the unit, not of
+# the moment, and it cannot change without a daemon-reload. The pressure
+# readings above are taken fresh every time; this is only the yardstick they
+# are measured against, and shelling out to systemctl on every admission check
+# would be a subprocess per session start for an answer that never moves.
+_oomd_cache: OomdPolicy | None = None
+
+
+def oomd_policy(refresh: bool = False) -> OomdPolicy:
+    """Cached oomd configuration for our slice."""
+    global _oomd_cache
+    if _oomd_cache is None or refresh:
+        _oomd_cache = read_oomd_policy()
+    return _oomd_cache
+
+
 @dataclass
 class MemoryPressure:
     """How close the whole machine is to being out, and why.
@@ -503,6 +698,20 @@ class MemoryPressure:
     io_psi_pct: float | None = None
     cgroup_anon_mb: float | None = None
     cgroup_high_mb: float | None = None
+    # The oomd-relative readings. `slice_psi_pct` is the number oomd acts on;
+    # `own_psi_pct` is our share of causing it; `oomd_limit_pct` is the stall
+    # percentage at which oomd starts killing. All None when the oomd path
+    # stood down, which is what keeps the whole feature inert off Linux and on
+    # a machine where oomd is not managing our slice.
+    slice_psi_pct: float | None = None
+    own_psi_pct: float | None = None
+    oomd_limit_pct: float | None = None
+    # The verdict the oomd rule reached *on its own*, kept apart from `level`.
+    # Admission holds on TIGHT here but not on TIGHT machine-wide: a desktop
+    # with 2.4 GB free is tight most of the day and holding on it would train
+    # the user to ignore the message, whereas a slice at 60% of its kill
+    # threshold is minutes from losing every session.
+    oomd_level: str = PRESSURE_OK
     level: str = PRESSURE_OK
     reasons: tuple[str, ...] = ()
 
@@ -524,6 +733,10 @@ class MemoryPressure:
             return False
         return self.cgroup_anon_mb >= self.cgroup_high_mb
 
+    def oomd_at_least(self, floor: str) -> bool:
+        """True when the oomd-relative rule alone reached ``floor`` or worse."""
+        return pressure_at_least(self.oomd_level, floor)
+
     def summary(self) -> str:
         """One line for the log, e.g. ``critical: 0.6GB free, swap 99%, psi 61%``."""
         bits: list[str] = []
@@ -533,13 +746,21 @@ class MemoryPressure:
             bits.append(f"swap {self.swap_pct:.0f}%")
         if self.psi_pct is not None:
             bits.append(f"psi {self.psi_pct:.0f}%")
+        if self.slice_psi_pct is not None:
+            slice_bit = f"slice-psi {self.slice_psi_pct:.0f}%"
+            if self.oomd_limit_pct:
+                slice_bit += f"/{self.oomd_limit_pct:.0f}%"
+            bits.append(slice_bit)
         # Did any reading the verdict is actually made from land? Asked
         # explicitly rather than by testing whether `bits` is still empty,
         # which is true here today only because of the order of the appends
         # above it — moving the cgroup block up would silently start printing
         # CPU numbers on a read that measured nothing.
         measured = any(
-            v is not None for v in (self.avail_mb, self.swap_pct, self.psi_pct)
+            v is not None
+            for v in (
+                self.avail_mb, self.swap_pct, self.psi_pct, self.slice_psi_pct,
+            )
         )
         # CPU and IO are context for a memory verdict, not verdicts of their
         # own, so they appear only next to one. A read that could measure
@@ -576,6 +797,9 @@ def read_pressure(
     critical_swap_pct: float = 90.0,
     critical_psi_pct: float = 40.0,
     tight_psi_pct: float = 10.0,
+    oomd_limit_pct: float | None = None,
+    oomd_tight_fraction: float = 0.6,
+    oomd_critical_fraction: float = 0.8,
 ) -> MemoryPressure:
     """Take every reading available and reduce them to one verdict.
 
@@ -598,6 +822,13 @@ def read_pressure(
     * Full swap alone is only TIGHT. On zram a high figure is normal on a busy
       machine and says nothing about whether allocation will succeed — it takes
       a second signal (low available) to make it a crisis.
+    * The slice's stall measured against ``oomd_limit_pct`` is the only rule
+      here that is about *this unit being killed* rather than about the
+      machine running out. It fires where none of the others can: on
+      2026-09-21 the slice stalled at 94.76% against an 80% kill limit while
+      available memory read about 9 GB and every rule above scored OK. It is
+      skipped entirely when no limit was passed in, so a machine without oomd
+      keeps exactly the classifier it had before.
     """
     out = MemoryPressure()
     out.avail_mb = available_mb()
@@ -605,6 +836,10 @@ def read_pressure(
     out.psi_pct = psi_some_avg10()
     out.cpu_psi_pct = cpu_psi_avg10()
     out.io_psi_pct = io_psi_avg10()
+    if oomd_limit_pct and oomd_limit_pct > 0:
+        out.oomd_limit_pct = oomd_limit_pct
+        out.slice_psi_pct = slice_cgroup_psi_avg10()
+        out.own_psi_pct = own_cgroup_psi_avg10()
     cg = cgroup_memory()
     out.cgroup_anon_mb = cg.anon_mb
     out.cgroup_high_mb = cg.high_mb
@@ -648,6 +883,41 @@ def read_pressure(
             escalate(PRESSURE_CRITICAL, f"swap is {out.swap_pct:.0f}% full")
         else:
             escalate(PRESSURE_TIGHT, f"swap is {out.swap_pct:.0f}% full")
+
+    # The oomd rule, last so that its reason reads as the specific cause after
+    # the general ones. Its verdict is recorded twice: into `level` like every
+    # other rule, and into `oomd_level` on its own, because admission control
+    # holds on a TIGHT from this rule and not on a TIGHT from the rules above.
+    if out.slice_psi_pct is not None and out.oomd_limit_pct:
+        crit_at = out.oomd_limit_pct * oomd_critical_fraction
+        tight_at = out.oomd_limit_pct * oomd_tight_fraction
+        # Which of us is doing the stalling. The slice holds the bot plus
+        # every other app the user is running, so the same slice figure means
+        # "stop starting sessions" or "there is nothing we can do about this"
+        # depending on the answer, and the hold message quotes it either way.
+        # Half is a deliberately loose bar: our cgroup is one member of the
+        # slice, so carrying half of its stall already makes us the largest
+        # single contributor by a wide margin.
+        if out.own_psi_pct is None:
+            blame = ""
+        elif out.own_psi_pct >= out.slice_psi_pct * 0.5:
+            blame = " and it is mostly our own sessions"
+        else:
+            blame = " and it is mostly not us"
+        if out.slice_psi_pct >= crit_at:
+            out.oomd_level = PRESSURE_CRITICAL
+            escalate(
+                PRESSURE_CRITICAL,
+                f"systemd-oomd kills this unit when {out.slice_psi_pct:.0f}% "
+                f"passes {out.oomd_limit_pct:.0f}%{blame}",
+            )
+        elif out.slice_psi_pct >= tight_at:
+            out.oomd_level = PRESSURE_TIGHT
+            escalate(
+                PRESSURE_TIGHT,
+                f"the slice is stalling at {out.slice_psi_pct:.0f}% of an "
+                f"{out.oomd_limit_pct:.0f}% oomd kill limit{blame}",
+            )
 
     out.level = level
     out.reasons = tuple(reasons)
@@ -720,21 +990,49 @@ class OrphanProcess:
         return f"{self.name or '?'} (pid {self.pid}, {self.rss_mb / 1024:.1f}GB)"
 
 
-def cgroup_pids() -> set[int]:
-    """Every pid charged to the bot's own cgroup. Empty set when unreadable."""
-    cg = _own_cgroup_path()
-    if cg is None:
-        return set()
-    try:
-        raw = (cg / "cgroup.procs").read_text(encoding="utf-8")
-    except OSError:
-        return set()
+def _pids_in_tree(root: Path) -> set[int]:
+    """Every pid in ``root`` and, recursively, in its child cgroups."""
     pids: set[int] = set()
+    try:
+        raw = (root / "cgroup.procs").read_text(encoding="utf-8")
+    except OSError:
+        raw = ""
     for line in raw.split():
         try:
             pids.add(int(line))
         except ValueError:
             continue
+    try:
+        children = [d for d in root.iterdir() if d.is_dir()]
+    except OSError:
+        return pids
+    for child in children:
+        pids |= _pids_in_tree(child)
+    return pids
+
+
+def cgroup_pids(extra_roots: tuple[Path, ...] = ()) -> set[int]:
+    """Every pid charged to the bot's own cgroup. Empty set when unreadable.
+
+    ``extra_roots`` are additional cgroup trees to fold in. It exists because
+    sessions moved out: each one now runs in its own scope under a sessions
+    slice, so a build daemon that a session detached is charged to that scope
+    and not to this unit.
+
+    Both the own cgroup and the extra roots are walked recursively, by the
+    same function. A flat read of ``cgroup.procs`` returns only the processes
+    charged to that exact directory, so anything in a nested cgroup is
+    invisible to it, and the reclaim path reads "not in our cgroup" as "not
+    ours to reclaim". On a cgroup with no children the two are identical, so
+    the pre-scope behaviour is unchanged where it was already right and fixed
+    where it was not.
+    """
+    pids: set[int] = set()
+    cg = _own_cgroup_path()
+    if cg is not None:
+        pids |= _pids_in_tree(cg)
+    for root in extra_roots:
+        pids |= _pids_in_tree(root)
     return pids
 
 
@@ -767,6 +1065,7 @@ def find_orphans(
     min_age_secs: float = 60.0,
     cpu_idle_pct: float = 5.0,
     daemon_patterns: tuple[str, ...] = RECLAIMABLE_DAEMONS,
+    extra_cgroup_roots: tuple[Path, ...] = (),
 ) -> list[OrphanProcess]:
     """Processes in our cgroup that no live session owns, biggest first.
 
@@ -783,7 +1082,7 @@ def find_orphans(
         root_pid = os.getpid()
     protected = protected_pids or set()
 
-    in_cgroup = cgroup_pids()
+    in_cgroup = cgroup_pids(extra_cgroup_roots)
     if not in_cgroup:
         return []
     owned = _owned_pids(root_pid)

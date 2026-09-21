@@ -1,0 +1,74 @@
+# The slice every Claude session runs in.
+#
+# Install (user unit, no root needed):
+#
+#   cp scripts/app-claudesessions.slice ~/.config/systemd/user/
+#   mkdir -p ~/.config/systemd/user/app-claudesessions.slice.d
+#   cp scripts/app-claudesessions.slice.d/50-oomd.conf \
+#      ~/.config/systemd/user/app-claudesessions.slice.d/
+#   systemctl --user daemon-reload
+#
+# Both parts are needed. The oomd limit lives in the drop-in because Fedora
+# arms every user slice from a type-wide drop-in, and a drop-in beats a unit
+# fragment. See the comment in 50-oomd.conf.
+#
+# Nothing has to be restarted: the slice is created on demand the first time a
+# session spawns into it, and the settings below apply from that moment.
+#
+# --- Why the name is ugly ---
+#
+# systemd derives a slice's position in the tree from its name, splitting on
+# dashes: app-claudesessions.slice lands at app.slice/app-claudesessions.slice.
+# That placement is the entire point. systemd-oomd is already configured and
+# armed on app.slice (ManagedOOMMemoryPressure=kill, limit 80%), so nesting
+# underneath it reuses a working setup rather than shipping a second one that
+# would need its own arming, its own limit and its own way of going silently
+# wrong. A prettier "claude-sessions.slice" would sit at
+# claude.slice/claude-sessions.slice, outside app.slice, where the existing
+# oomd policy does not reach it.
+#
+# --- What this buys ---
+#
+# Before this, every session ran inside claude-bot.service's own cgroup, so
+# the smallest thing oomd could kill was the supervisor and all twelve live
+# conversations with it. That happened on Sep 14, Sep 20 and Sep 21 2026. With
+# a scope per session inside this slice, oomd has a session-sized victim to
+# choose, and claude-bot.service carries ManagedOOMPreference=avoid so the
+# supervisor is the last thing considered rather than the first thing found.
+
+[Unit]
+Description=Claude Code session workloads
+# Deliberately no ordering. A user manager cannot order itself against system
+# units, and the conventions copied from system slices (Before=slices.target
+# and friends) buy nothing here: the slice is created on demand when the first
+# scope asks for it, so there is no boot ordering to express. An ordering
+# dependency that cannot be resolved makes every job for this slice wait
+# forever, which reads as "scopes do not work on this machine".
+
+[Slice]
+# The fleet's memory budget, separate from the supervisor's.
+#
+# MemoryHigh throttles and reclaims; it kills nothing. Crossing it is the
+# intended first response to a fleet that is growing: sessions get slower and
+# the kernel evicts page cache, which on this machine is several gigabytes of
+# repo reads that cost nothing to lose.
+#
+# MemoryMax is the hard stop. Reaching it makes the kernel OOM-kill inside
+# this slice, which means one session dies and the supervisor does not. That
+# is the whole structural change: the failure is scoped to the workload.
+#
+# Sized against 31 GB total with 8-10 GB normally held by the desktop. The
+# supervisor's own unit keeps a larger MemoryMax deliberately, because a
+# machine without systemd-run falls back to running sessions inside it.
+MemoryHigh=11G
+MemoryMax=14G
+
+# Same reasoning as claude-bot.service: proportional shares that bind only
+# under contention, so an unattended machine still builds at full speed while
+# a machine you are sitting at keeps roughly five sixths of the CPU. Set here
+# as well as on the service because a scope in this slice is no longer inside
+# the service's cgroup and would otherwise inherit the default weight of 100,
+# which is exactly the regression that made the desktop unusable when a stale
+# drop-in reset the service's own weights.
+CPUWeight=20
+IOWeight=20

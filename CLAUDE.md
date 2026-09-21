@@ -951,9 +951,15 @@ settle them:
   still runs builds across all 12 cores at full speed, while a machine you are
   sitting at keeps roughly five sixths of the CPU. A quota would buy the
   desktop's responsiveness with permanently slower builds — the wrong trade for
-  a box that is usually unattended. Applied to a *running* unit with
-  `systemctl --user set-property --runtime`, which is how it landed without
-  restarting six live sessions.
+  a box that is usually unattended. It landed on the *running* unit with
+  `systemctl --user set-property --runtime`, so six live sessions did not have
+  to be restarted for it, and **that is the sentence that cost a week**: a
+  `--runtime` drop-in lives in `/run` and systemd discards it when the unit
+  stops. An oomd kill stops the unit. The protection therefore uninstalled
+  itself on the exact event it exists for, and on 2026-09-21 the live cgroup
+  read `cpu.weight=100` while both unit files said 20 and `systemctl show`
+  agreed with them. Use `--runtime` to try a value; the unit file is what
+  makes it survive, and `cgroups.check_weights` is what proves it did.
 
   The durable copy is `scripts/claude-bot.service`, which is the one that
   matters: `~/.config/systemd/user/claude-bot.service` is an install-time copy
@@ -1004,6 +1010,132 @@ Two things that must not drift:
   non-empty; `test_memory_guard.py` asserts it.
 
 Harness: `python scripts/test_memory_guard.py`
+
+## The killer reads a number the guard could not see
+
+Every rule in the memory guard measures how much memory is *free*. The thing
+that actually kills this bot measures something else entirely, and on
+2026-09-21 it killed the whole unit while every one of those rules scored OK:
+
+```
+Killed /user.slice/.../claude-bot.service due to memory pressure for
+/user.slice/.../app.slice being 90.79% > 80.00% for > 20s with reclaim activity
+  Pressure: Avg10: 94.76, Avg60: 75.53, Avg300: 36.01
+  Current Memory Usage: 10.1G
+claude-bot.service: Main process exited, code=killed, status=9/KILL
+```
+
+Same shape on Sep 14 20:34:46 and Sep 20 10:39:47. Six live sessions each
+time. Available memory never dropped below about 9 GB throughout, because
+systemd-oomd does not look at available memory: it reads the **cgroup's own
+PSI**, and it reads it on `app.slice`, a cgroup the bot had no reader for.
+`/proc/pressure/memory` is machine-wide and was reporting single digits. The
+guard was not wrong, it was structurally unable to see the number that kills
+it.
+
+Four things now exist because of that, and each one fails toward yesterday's
+behaviour if the machine will not support it.
+
+- **The guard reads oomd's own criterion.** `own_cgroup_psi_avg10` and
+  `slice_cgroup_psi_avg10` read `memory.pressure` in this cgroup and in the
+  parent slice; `read_oomd_policy` asks `systemctl --user show` what limit oomd
+  is actually armed at, and `oomd_policy()` caches it. `read_pressure` escalates to TIGHT at
+  `OOMD_TIGHT_FRACTION` (0.6) of that limit and CRITICAL at
+  `OOMD_CRITICAL_FRACTION` (0.8), so 94.76% against an 80% limit is CRITICAL
+  where it used to be OK. The own-cgroup reading is the discriminator between
+  "our sessions are doing this" and "something else on the box is", which is
+  the difference between holding a session back and holding one back for
+  nothing. Every one of these readers returns `None` when it cannot measure,
+  never `0`, and an unreadable oomd config stands the whole escalation down:
+  the same rule the existing PSI readers follow, for the same reason.
+- **The supervisor is no longer the only victim available.** oomd picks one
+  cgroup, and with every session running inside `claude-bot.service` the
+  smallest thing it could choose was the supervisor and all twelve
+  conversations. Sessions now spawn into a transient scope of their own
+  (`bot/claude/cgroups.py`, `systemd-run --user --scope --slice=...`) under
+  `app-claudesessions.slice`, and the service carries
+  `ManagedOOMPreference=avoid`. **`--scope` and not `--unit`**: a scope execs
+  the payload in the caller's own process context, so the asyncio pipes, the
+  parent/child relationship and `proc.pid` all survive, where `--unit` would
+  hand the command to the service manager and return a pid that is nobody's
+  child, breaking the stream-json reader, the kill path and the watchdog at
+  once.
+- **The slice name is ugly on purpose.** systemd derives tree position from
+  the dashes in a slice name, so `app-claudesessions.slice` lands inside
+  `app.slice`, which is where oomd is already armed. A prettier
+  `claude-sessions.slice` would sit at `claude.slice/claude-sessions.slice`,
+  outside it, with no policy reaching it at all. Its oomd limit lives in
+  `scripts/app-claudesessions.slice.d/50-oomd.conf` and **not** in the
+  fragment, because Fedora arms every user slice from a type-wide drop-in and
+  a drop-in beats a fragment: a limit written in the fragment is silently
+  overridden by the distribution's 80%. The slice is armed at 70%, below
+  `app.slice`, so the fleet is chosen before the box.
+- **Crossing a ceiling throttles before anything dies.** A scope gets
+  `memory.high` (soft: forced reclaim, kills nothing) and `memory.max` (hard
+  backstop) from `SESSION_MEM_HIGH_MB` / `SESSION_MEM_HARD_MB`, and
+  `SessionCgroup.current_mb()` reads `memory.current`, which counts the
+  reparented Roslyn server that no process-tree walk can see. `cgroup.kill`
+  ends a subtree atomically where `kill_tree` is a walk nothing can fork out
+  from under. Verified live: a child allocating past a 256 MB soft ceiling sat
+  at 273 MB with 10,607 `high` events and `oom_kill 0`, alive and crawling,
+  while `smoke_test.py` reported the bot HEALTHY.
+
+Four things that must not drift:
+
+- **The supervisor's `MemoryMax` stays large, deliberately.** A machine
+  without a usable `systemd-run` falls back to running sessions inside the
+  service cgroup exactly as before, and a supervisor cap sized for a
+  supervisor would kill them instantly there. The fallback guarantee outranks
+  the tighter number.
+- **A diagnostic gets its own subprocess seam.** `_probe_scope` uses
+  `subprocess.run` on a worker thread and **not**
+  `asyncio.create_subprocess_exec`, because the runner spawns sessions through
+  that API and every harness counting spawns patches it. It shared the seam
+  for exactly one afternoon, during which a one-shot `true` was recorded as a
+  phantom extra session attempt in the memory-guard suite. Same rule as the
+  PSI readers, one layer down.
+- **The probe's unit name is unique per probe.** A fixed name survives as a
+  loaded unit after the scope exits, so every later probe fails with "already
+  loaded" and the bot concludes that scopes do not work on a machine where
+  they do.
+- **`check_weights` reads the cgroup, never `systemctl show`.** During the
+  week the protection was off, `systemctl show` reported 20 and the unit files
+  reported 20; `cpu.weight` was the one source telling the truth. The startup
+  check (`bot/discord/resource_alerts.py`) is a one-shot, not a loop, because
+  the weights can only move when the unit restarts or someone runs
+  `set-property`, and the first of those brings the check with it.
+
+Install, once, no root:
+
+```bash
+cp scripts/app-claudesessions.slice ~/.config/systemd/user/
+mkdir -p ~/.config/systemd/user/app-claudesessions.slice.d
+cp scripts/app-claudesessions.slice.d/50-oomd.conf \
+   ~/.config/systemd/user/app-claudesessions.slice.d/
+cp scripts/claude-bot.service ~/.config/systemd/user/   # paths may need rewriting
+systemctl --user daemon-reload && systemctl --user restart claude-bot.service
+```
+
+`oomctl` is how you confirm it took: the sessions slice should appear with
+"Memory Pressure Limit: 70.00%".
+
+One live-machine trap worth writing down, found while verifying this. If
+`systemd-run --user` hangs, `systemctl --user show` disagrees with
+`systemctl --user cat`, and a direct write into `cpu.weight` reads back
+unchanged, the user service manager is wedged, not the code. Check
+`systemctl --user is-system-running` (degraded), `list-jobs` (jobs all
+`waiting`, none running) and the manager's own CPU. `systemctl --user
+daemon-reexec` clears it. On 2026-09-21 an unrelated service being kernel
+OOM-killed at a 13.5 GB peak livelocked the manager at 95% CPU for seven
+minutes, which among other things stopped the browser opening tabs.
+
+Knobs: `SESSION_SCOPES_ENABLED`, `SESSION_SLICE`, `SESSION_MEM_HIGH_MB`,
+`SESSION_MEM_HARD_MB`, `OOMD_TIGHT_FRACTION`, `OOMD_CRITICAL_FRACTION`,
+`RESOURCE_CPU_WEIGHT_EXPECTED`, `RESOURCE_IO_WEIGHT_EXPECTED` in
+`bot/config.py`.
+
+Harnesses: `python scripts/test_session_cgroups.py` and the oomd, weight-check
+and slice-unit cases in `python scripts/test_memory_guard.py`.
 
 ## Multi-Account Setup
 

@@ -146,6 +146,30 @@ MemoryMax=13G
 # the bot gets about a sixth and the desktop keeps the rest. That is the right
 # ratio for this box: bot work is nearly always something you started and then
 # walked away from, so it is the side that can afford to wait.
+# --- Who oomd is allowed to kill ---
+#
+# systemd-oomd kills one cgroup at a time. Until 2026-09-21 every session ran
+# directly inside this unit's cgroup, so the only cgroup it could pick was
+# this whole unit, and it did, three times, taking six live sessions with it
+# each time (Sep 14 20:34:46, Sep 20 10:39:47, Sep 21 14:42:18). The last one
+# reads:
+#
+#   Killed .../app.slice/claude-bot.service due to memory pressure for
+#   .../app.slice being 90.79% > 80.00% for > 20s with reclaim activity
+#   Pressure: Avg10: 94.76 ... Current Memory Usage: 10.1G
+#
+# Two halves fix that and both are needed. This line tells oomd to skip the
+# supervisor when it chooses a victim. The other half is in the bot: sessions
+# now spawn into transient scopes in app-claudesessions.slice (see
+# scripts/app-claudesessions.slice and bot/claude/cgroups.py), which gives
+# oomd a session-sized victim to pick instead of a 300 MB asyncio loop that
+# is holding twelve conversations open.
+#
+# `avoid` and not `omit`: omit would take this unit out of oomd's accounting
+# entirely, including the pressure it genuinely contributes. avoid keeps it
+# counted and merely puts it last in line, which is the accurate statement.
+ManagedOOMPreference=avoid
+
 CPUWeight=20
 IOWeight=20
 
