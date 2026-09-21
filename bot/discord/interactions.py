@@ -32,7 +32,7 @@ _QUERY_ACTIONS: frozenset[str] = frozenset({
     "retry", "plan", "build", "review_plan", "apply_revisions",
     "review_code", "commit", "done", "autopilot", "autopilot_hold",
     "build_and_ship", "continue_autopilot", "continue_ppu",
-    "amend", "continue_anyway", "resolve_merge",
+    "amend", "continue_anyway", "resolve_merge", "tldr",
 })
 
 # Human-readable labels for the usage-limit gate UI.  Falls back to a
@@ -55,6 +55,7 @@ _ACTION_LABELS: dict[str, str] = {
     "continue_anyway": "Continue anyway",
     "resolve_merge": "Resolve merge",
     "resolve_cancel": "Cancel resolver",
+    "tldr": "TL;DR",
 }
 
 

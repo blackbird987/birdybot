@@ -251,8 +251,19 @@ _ORIGIN_LABEL_OVERRIDES: dict[InstanceOrigin, str] = {
 # the normal thing for it to do, and every directive parser would then arm it
 # for real. The quoted-prefix guards in those parsers do not save us: an
 # example indented inside a fence starts with whitespace, not a backtick.
+#
+# TL;DR is here for the weaker version of the same reason, and for a stronger
+# one of its own. The weaker: a recap of the work that just built the /watch or
+# /spawn handling is a turn with those literal examples fresh in its context,
+# being asked to restate them. The stronger: this is the one origin whose whole
+# contract is "explain, do no work, ask nothing, change nothing", so a directive
+# from it is incoherent no matter how it got there, and there is nothing to lose
+# by refusing to honour one. The prompt forbids it too, but a brief is a soft
+# guard and this is the hard one, the same split the prompt review draws between
+# its brief and EDITABLE_CLASSES.
 _NO_DIRECTIVE_ORIGINS: frozenset[InstanceOrigin] = frozenset({
     InstanceOrigin.PROMPT_REVIEW,
+    InstanceOrigin.TLDR,
 })
 
 

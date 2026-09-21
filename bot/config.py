@@ -1870,6 +1870,62 @@ TRIAGE_DEFERRED_PROMPT = (
     '```'
 )
 
+# The [TL;DR] button and /tldr. Re-explains whatever is currently on the
+# table, in the one shape that is actually readable on a phone.
+#
+# Two shapes, not one: work that already exists ends with the caveat, and a
+# plan or a problem ends with the decision the user has to make. A single
+# shape forces one of those two into the wrong ending, which is what makes a
+# "summarise this simply" answer read as either a changelog or a pitch.
+#
+# It resumes the session rather than starting fresh: the context it explains
+# is the conversation itself, and a fresh session would have to re-derive it
+# from the code and would get the "why" wrong.
+TLDR_PROMPT = (
+    'Explain what we have just covered, in plain language, to the user. '
+    'They are reading on a phone and do NOT have the code open.\n\n'
+
+    'First decide which situation you are in:\n\n'
+    'A) The thing already exists: work is built, a bug is diagnosed, an '
+    'investigation concluded.\n'
+    'B) The thing does not exist yet: a plan, a proposal, a problem you '
+    'described, options being weighed.\n\n'
+
+    'If A, answer in exactly this shape:\n'
+    "**What's different now**: one line.\n"
+    '**What it does for you**: 3 to 5 bullets.\n'
+    '**Example**: one concrete before/after from the user\'s own workflow.\n'
+    '**The catch**: the one caveat, or "none".\n\n'
+
+    'If B, answer in exactly this shape:\n'
+    '**The situation**: one line, what is broken or missing today.\n'
+    '**Why it bites you**: the concrete thing that goes wrong in the '
+    "user's workflow, not in the abstract.\n"
+    "**What I'd do**: 3 to 5 plain steps, or the 2 real options if there is "
+    'a genuine fork.\n'
+    '**What I need from you**: the actual question, with your recommendation '
+    'named as the default, so "yes" is a complete answer.\n\n'
+
+    'Rules, all of them hard:\n'
+    '- No file paths, no function names, no variable names, no class names, '
+    'no command names. If a bullet cannot be written without one, the bullet '
+    'is wrong: rewrite it around what the thing does.\n'
+    '- Never describe your own actions ("I edited...", "I added a check '
+    'to..."). Describe what the system does differently.\n'
+    '- The Example line does the real work. "The bot will not ship a build '
+    'missing the last release" is abstract and useless. "You tap Merge on '
+    'two parallel builds and the second one no longer silently reverts the '
+    'first" is the thing they understand. Write the second kind.\n'
+    '- Under 900 characters total. Short sentences.\n'
+    '- No preamble, no "here is the TL;DR", no closing summary. Start with '
+    'the first heading.\n'
+    '- Do NOT do new work, do not read files you do not need, do not change '
+    'anything. This is an explanation of what is already on the table.\n'
+    '- If nothing substantive is on the table yet, say that in one line and '
+    'stop.\n'
+    '- Do not ask whether to continue. End after the last section.'
+)
+
 CODE_REVIEW_PROMPT = (
     'Now carefully read over all of the new code you just wrote and other '
     'existing code you just modified with "fresh eyes" looking super '

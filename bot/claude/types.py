@@ -35,6 +35,7 @@ class InstanceOrigin(str, Enum):
     REVIEW_PLAN = "review_plan" # [Review Plan] button
     APPLY_REVISIONS = "apply_revisions"  # [Apply Revisions] button
     REVIEW_CODE = "review_code" # [Review Code] button
+    TLDR = "tldr"               # [TL;DR] button and /tldr: plain-language recap
     COMMIT = "commit"           # [Commit] button
     DONE = "done"               # [Done] button — commit + close thread
     RELEASE = "release"         # /release command
@@ -54,9 +55,11 @@ PLAN_ORIGINS = frozenset({InstanceOrigin.PLAN, InstanceOrigin.REVIEW_PLAN, Insta
 
 # Origins that run on the strong build model (config.BUILD_MODEL, default
 # opus). Everything NOT listed — direct chat, plan, review_plan,
-# apply_revisions — falls through to DEFAULT_SESSION_MODEL (the lighter
+# apply_revisions, tldr — falls through to DEFAULT_SESSION_MODEL (the lighter
 # "thinking" model, e.g. fable). The line: Fable owns everything that is
 # still just words; the strong model owns everything that touches real code.
+# TLDR is deliberately absent: it restates work that already happened and
+# writes no code, so it is words by definition.
 #
 # Every member here is an origin that a *spawned instance* actually carries.
 # BUILD_AND_SHIP and RETRY are deliberately absent: they are button/preset
