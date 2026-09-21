@@ -52,6 +52,7 @@ from types import SimpleNamespace
 from bot import config
 from bot.claude.types import Instance, InstanceStatus, InstanceType
 from bot.discord import orchestrator as orch
+from bot.store.state import StateStore
 from bot.engine.commands import (
     _MAX_REPLIES_PER_RESPONSE,
     _handle_reply_directives,
@@ -107,6 +108,16 @@ class FakeStore:
 
     def list_instances(self, all_=False):
         return list(self._instances)
+
+    def latest_instance_for_session(self, session_id):
+        # Borrowed from the real store rather than reimplemented. A double
+        # that carries its own copy of "newest wins" is how the fake and the
+        # thing it stands in for drift apart; the real scan only iterates
+        # _instances.values(), so a dict view of this list satisfies it.
+        return StateStore.latest_instance_for_session(
+            SimpleNamespace(_instances={i.id: i for i in self._instances}),
+            session_id,
+        )
 
     def update_instance(self, inst, critical=False):
         self.saved += 1

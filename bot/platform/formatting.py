@@ -540,7 +540,11 @@ VALID_MODES = frozenset(MODE_DISPLAY)
 # Mode cycle order for the toggle button
 _NEXT_MODE: dict[str, str] = {"explore": "plan", "plan": "build", "build": "explore"}
 
-# Origins where mode toggle button should NOT appear (user is in a workflow)
+# Origins where mode toggle button should NOT appear (user is in a workflow).
+# TLDR is here for a different reason than the rest: its instance is always
+# clamped to explore, so the toggle would read "Mode: Plan" on every recap
+# regardless of the mode the user was actually working in, and tapping it
+# would set the thread's mode off the back of a read-only turn.
 _WORKFLOW_ORIGINS = frozenset({
     InstanceOrigin.PLAN, InstanceOrigin.BUILD,
     InstanceOrigin.REVIEW_PLAN, InstanceOrigin.REVIEW_CODE,
@@ -548,6 +552,7 @@ _WORKFLOW_ORIGINS = frozenset({
     InstanceOrigin.APPLY_REVISIONS, InstanceOrigin.RELEASE,
     InstanceOrigin.VERIFY, InstanceOrigin.VERIFY_RELEASE,
     InstanceOrigin.BUILD_AND_SHIP, InstanceOrigin.SENSOR_FIX,
+    InstanceOrigin.TLDR,
 })
 
 
@@ -945,15 +950,18 @@ def action_button_specs(
     # Expand row below to avoid showing two Share buttons on the same message.
     branch_cap = 4 if show_expand else 5
     share_added = False
+    branch_row: list[ButtonSpec] | None = None
     if (instance.status == InstanceStatus.COMPLETED
             and instance.session_id
             and len(rows) < branch_cap):
-        rows.append([
+        branch_row = [
             ButtonSpec("Branch", f"branch:{iid}"),
             ButtonSpec("Share", f"share:{iid}"),
-        ])
+        ]
+        rows.append(branch_row)
         share_added = True
 
+    expand_row: list[ButtonSpec] | None = None
     if show_expand:
         expand_row = [
             ButtonSpec("Expand \u25bc", f"expand:{iid}"),
@@ -962,6 +970,24 @@ def action_button_specs(
         if instance.session_id and not share_added:
             expand_row.append(ButtonSpec("Share", f"share:{iid}"))
         rows.append(expand_row)
+
+    # TL;DR \u2014 plain-language recap of whatever this turn was about.
+    #
+    # It rides an existing row instead of claiming one of the five Discord
+    # allows: the Expand row when a long result built one, otherwise the
+    # Branch/Share row. Both are gated on session_id, which TL;DR needs
+    # anyway (it resumes the session). When neither row exists the button is
+    # dropped rather than displacing a Merge or plan row \u2014 /tldr covers the
+    # same ground from the keyboard.
+    #
+    # Never on a TL;DR's own card: re-summarising a summary says nothing, and
+    # the recursion has no natural floor.
+    if (instance.status == InstanceStatus.COMPLETED
+            and instance.session_id
+            and instance.origin != InstanceOrigin.TLDR):
+        host = expand_row if expand_row is not None else branch_row
+        if host is not None:
+            host.append(ButtonSpec("TL;DR", f"tldr:{iid}"))
 
     return rows
 

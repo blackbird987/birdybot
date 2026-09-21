@@ -184,15 +184,10 @@ def _parent_is_alive(bot: ClaudeBot, parent_thread_id: str) -> bool:
 def _latest_instance_for_session(bot: ClaudeBot, session_id: str) -> Instance | None:
     """Newest instance belonging to a session, or None.
 
-    Scanning by session_id is how the rest of the codebase resolves
-    thread → instance (tags.py, forums.py, eval.py) — there is no index.
+    Thin bot-shaped wrapper; the scan itself lives on the store so /tldr and
+    the wave join cannot drift apart on what "latest" means.
     """
-    best: Instance | None = None
-    for inst in bot._store.list_instances(all_=True):
-        if inst.session_id and inst.session_id == session_id:
-            if best is None or (inst.created_at or "") > (best.created_at or ""):
-                best = inst
-    return best
+    return bot._store.latest_instance_for_session(session_id)
 
 
 def _child_state(bot: ClaudeBot, child_thread_id: str) -> ChildState:

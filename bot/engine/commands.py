@@ -3979,6 +3979,8 @@ async def handle_callback(
         await workflows.on_apply_revisions(ctx, instance_id, source_msg_id)
     elif action == "review_code":
         await workflows.on_review_code(ctx, instance_id, source_msg_id)
+    elif action == "tldr":
+        await workflows.on_tldr(ctx, instance_id, source_msg_id)
     elif action == "commit":
         await workflows.on_commit(ctx, instance_id, source_msg_id)
     elif action == "done":

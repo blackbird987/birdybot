@@ -402,6 +402,45 @@ def setup(bot: ClaudeBot) -> None:
             return
         await bot._run_slash(interaction, lambda ctx: commands.on_schedule(ctx, args))
 
+    @bot.tree.command(
+        name="tldr",
+        description="Explain this thread's last turn in plain language",
+        guild=guild_obj,
+    )
+    async def cmd_tldr(interaction: discord.Interaction):
+        """Typed twin of the [TL;DR] button.
+
+        Both land on workflows.on_tldr with the same source instance, so the
+        two surfaces cannot drift on prompt, mode or permission floor. The
+        only extra work here is resolving what the button already knows: the
+        instance whose card it was sitting on.
+        """
+        if not bot._is_owner(interaction.user.id) and not bot._check_access(
+                interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
+            await interaction.response.send_message("Unauthorized", ephemeral=True)
+            return
+
+        lookup = bot._forums.thread_to_project(str(interaction.channel_id))
+        if lookup is None:
+            await interaction.response.send_message(
+                "This isn't a session thread — /tldr recaps the work in one.",
+                ephemeral=True,
+            )
+            return
+        info = lookup[1]
+        inst = bot._store.latest_instance_for_session(info.session_id)
+        if inst is None:
+            await interaction.response.send_message(
+                "Nothing has run in this thread yet — nothing to recap.",
+                ephemeral=True,
+            )
+            return
+
+        from bot.engine import workflows
+        await bot._run_slash(
+            interaction, lambda ctx: workflows.on_tldr(ctx, inst.id),
+        )
+
     @bot.tree.command(name="alias", description="Command shortcuts", guild=guild_obj)
     @app_commands.describe(args="set|delete|list ...")
     async def cmd_alias(interaction: discord.Interaction, args: str = ""):

@@ -527,6 +527,23 @@ class StateStore:
         result.sort(key=lambda i: i.created_at, reverse=True)
         return result
 
+    def latest_instance_for_session(self, session_id: str | None) -> Instance | None:
+        """Newest instance belonging to a session, or None.
+
+        Scanning by session_id is how the codebase resolves thread -> instance
+        (tags.py, forums.py, eval.py, the spawn-wave join): there is no index,
+        and this is the one implementation of that scan so a caller cannot
+        drift onto "first match" and pick a stale turn.
+        """
+        if not session_id:
+            return None
+        best: Instance | None = None
+        for inst in self._instances.values():
+            if inst.session_id and inst.session_id == session_id:
+                if best is None or (inst.created_at or "") > (best.created_at or ""):
+                    best = inst
+        return best
+
     def instance_count(self) -> int:
         """Total number of instances (all time)."""
         return len(self._instances)
