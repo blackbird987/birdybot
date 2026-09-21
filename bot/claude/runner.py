@@ -2572,6 +2572,7 @@ class ClaudeRunner:
                  instance.id, acct_tag, len(prompt_text), " ".join(cmd)[:500])
 
         proc = None
+        adopt_task: asyncio.Task | None = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -2616,24 +2617,23 @@ class ClaudeRunner:
                     pass
                 return RunResult(is_error=True, error_message=f"Failed to send prompt: {exc}")
 
-            # Now, and not next to the spawn. `--scope` execs in place, so
-            # proc.pid is the CLI's own pid and the cgroup it reports is the
-            # scope's -- but only once systemd-run's round trip to the service
-            # manager has finished, which has not happened at the instant the
-            # spawn call returns. adopt_session waits for it; doing that here
-            # rather than four lines earlier keeps the wait off the path that
-            # delivers the prompt, and off the kill check that closes the
-            # no-process window. None whenever the session did not get a
-            # scope, which every reader below treats as "fall back to walking
-            # the process tree".
-            session_cg = await cgroups.adopt_session(proc.pid, instance.id)
-            if session_cg is not None:
-                self._session_cgroups[instance.id] = session_cg
-                if session_cg.applied:
-                    log.debug(
-                        "%s in scope %s (%s)", instance.id, session_cg.unit,
-                        ", ".join(session_cg.applied),
-                    )
+            # In the background, and deliberately not awaited here.
+            # `--scope` execs in place, so proc.pid is the CLI's own pid and
+            # the cgroup it reports is the scope's -- but only once
+            # systemd-run's round trip to the service manager has finished,
+            # and that round trip is not quick when the manager is busy:
+            # measured on this machine at 1.1s, 1.8s and 4.8s across three
+            # consecutive trials, against ~50ms on an idle one. So the budget
+            # has to be sized for the bad case, and a budget sized for the bad
+            # case must not be able to stall a spawn. It buys insurance rather
+            # than latency -- systemd-run registers before it execs, so the
+            # CLI has nothing to say until the scope exists either way -- but
+            # nothing downstream needs adoption to have finished, and every
+            # reader of _session_cgroups already treats a missing entry as
+            # "walk the process tree instead".
+            adopt_task = asyncio.create_task(
+                self._adopt_session_scope(instance.id, proc)
+            )
 
             result = await self._stream_output(
                 proc, instance, on_progress, on_stall,
@@ -3434,6 +3434,11 @@ class ClaudeRunner:
                     os.unlink(rules_file)
                 except OSError:
                     pass
+            # Cancelled before the pops, so a still-waiting adoption cannot
+            # write an entry back in behind them and leak it for the life of
+            # the process.
+            if adopt_task is not None and not adopt_task.done():
+                adopt_task.cancel()
             self._processes.pop(instance.id, None)
             self._tree_samples.pop(instance.id, None)
             self._session_cgroups.pop(instance.id, None)
@@ -3445,6 +3450,38 @@ class ClaudeRunner:
                     pass
             if not self._active_tasks and not self._processes:
                 self._idle_event.set()
+
+    async def _adopt_session_scope(
+        self, instance_id: str, proc: asyncio.subprocess.Process,
+    ) -> None:
+        """Apply a session's memory ceilings once systemd has registered it.
+
+        Runs as its own task so the wait never delays reading the CLI's
+        output. Nothing downstream requires it to have finished: the kill
+        path and the memory guard both fall back to walking the process
+        tree when there is no entry, which is what they did before scopes
+        existed.
+        """
+        try:
+            session_cg = await cgroups.adopt_session(proc.pid, instance_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # A resource refinement must never cost a session its run.
+            log.debug("scope adoption failed for %s: %s", instance_id, exc)
+            return
+        if session_cg is None:
+            return
+        # The run can finish while we wait, and its cleanup has then already
+        # been past the pop. Storing now would leak the entry.
+        if self._processes.get(instance_id) is not proc:
+            return
+        self._session_cgroups[instance_id] = session_cg
+        if session_cg.applied:
+            log.debug(
+                "%s in scope %s (%s)", instance_id, session_cg.unit,
+                ", ".join(session_cg.applied),
+            )
 
     async def _stream_output(
         self,

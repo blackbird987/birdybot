@@ -410,12 +410,18 @@ SESSION_SLICE: str = os.getenv("SESSION_SLICE", "app-claudesessions.slice")
 # How long to wait for a spawned session to actually land in its scope, and
 # how often to look. `systemd-run --scope` talks to the service manager and
 # only then execs, so the pid is still in the bot's own cgroup at the instant
-# the spawn call returns: measured here as "arrives by 50ms", every time. The
-# budget is generous next to that because the cost of overrunning it is only
-# a session that runs without its own ceilings, while the cost of giving up
-# too early is exactly that, on every session, silently.
+# the spawn call returns.
+#
+# How long that takes is a property of how busy the user service manager is,
+# not a constant: 50ms on an idle one, but 1.1s, 1.8s and 4.8s across three
+# consecutive trials on this machine while it was loaded and `degraded`. A
+# 5s budget was inside that noise and a real run missed it. Overrunning is
+# silent and costs the session every ceiling it was meant to get, so the
+# budget is deliberately far above the worst measurement, and can be that
+# generous because the wait runs as its own task in
+# `runner._adopt_session_scope` and so can never stall a spawn.
 SESSION_SCOPE_ADOPT_SECS: float = float(
-    os.getenv("SESSION_SCOPE_ADOPT_SECS", "5")
+    os.getenv("SESSION_SCOPE_ADOPT_SECS", "60")
 )
 SESSION_SCOPE_ADOPT_POLL_SECS: float = float(
     os.getenv("SESSION_SCOPE_ADOPT_POLL_SECS", "0.05")

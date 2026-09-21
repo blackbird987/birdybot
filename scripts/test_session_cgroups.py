@@ -142,6 +142,38 @@ def _check_probe_seam(failures: list[str]) -> None:
         )
 
 
+def _check_adoption_offpath(failures: list[str]) -> None:
+    """Adoption must not be awaited in front of reading the CLI's output.
+
+    The wait is bounded by SESSION_SCOPE_ADOPT_SECS, and that budget is
+    sized for a *loaded* service manager (measured at 4.8s on this box,
+    against 50ms on an idle one), so it is far longer than any spawn should
+    stall for. It is affordable only because it runs as its own task. An
+    inline `await cgroups.adopt_session(...)` in the spawn path puts the
+    whole budget in front of every session's first byte, which is the
+    tempting shape: it is four lines shorter and passes every test.
+    """
+    src = Path(__file__).resolve().parents[1] / "bot" / "claude" / "runner.py"
+    tree = ast.parse(src.read_text(encoding="utf-8"))
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if fn.name == "_adopt_session_scope":
+            continue
+        for node in ast.walk(fn):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "adopt_session"
+            ):
+                failures.append(
+                    f"runner.{fn.name} calls adopt_session directly; the "
+                    "wait belongs in _adopt_session_scope, off the path "
+                    "that reads the session's output"
+                )
+                break
+
+
 async def _check_scope_disabled_path(failures: list[str]) -> None:
     """Switching scopes off has to be a complete, quiet fallback."""
     saved_flag = config.SESSION_SCOPES_ENABLED
@@ -463,6 +495,7 @@ async def _amain() -> int:
 
     _check_wrapper_shape(failures)
     _check_probe_seam(failures)
+    _check_adoption_offpath(failures)
     await _check_scope_disabled_path(failures)
     await _check_adoption_identity(failures)
     _check_orphan_roots(failures)

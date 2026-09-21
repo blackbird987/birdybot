@@ -1095,6 +1095,24 @@ Six things that must not drift:
   same blind spot for the same reason: it adopted after reading the child's
   first line of output, by which point the scope has existed for a
   comfortable margin. It now adopts at the moment the runner does.
+
+  **50ms is the idle number, and sizing the budget to it is the same bug
+  again.** Registration is a D-Bus round trip to the user service manager,
+  so how long it takes is a property of how busy that manager is: on a
+  loaded, `degraded` one the same three trials read 1.1s, 1.8s and 4.8s, and
+  a 5-second budget lost a real run to it. The default is 60s, which is
+  affordable only because the wait is *not* awaited in the spawn path:
+  `runner._adopt_session_scope` runs it as its own task, so a budget sized
+  for a pathological manager can never stall a spawn. Nothing downstream
+  needs it to have finished, because every reader of `_session_cgroups`
+  already treats a missing entry as "walk the process tree instead", which
+  is exactly right for the window before adoption lands. The task is
+  cancelled *before* the cleanup's `pop`, or a late adoption writes the
+  entry back in behind it and leaks it for the life of the process, and it
+  re-checks that the run it adopted is still the one in `_processes`.
+  `test_session_cgroups._check_adoption_offpath` fails the suite if
+  `adopt_session` is ever awaited anywhere but there: inlining it is four
+  lines shorter and passes every other test.
 - **Whether scopes work is re-established, not learned once.** It is a
   property of the *user service manager*, and that can wedge under a process
   that lives for weeks: every job `waiting`, none `running`, behind one
