@@ -1277,20 +1277,28 @@ async def on_tldr(ctx: RequestContext, source_id: str, source_msg_id: str | None
 
     Resumes the session rather than starting fresh: what it explains is the
     conversation, not the code, and a fresh session would have to re-derive
-    the "why" from a diff. It never branches and never copies a branch —
+    the "why" from a diff. It never branches and never copies a branch:
     nothing here writes, so there is nothing to isolate.
 
     The explore floor is the point, not a precaution: an explanation that
     goes and does more work is not an explanation. `permission_mode="explore"`
     also clamps bash_policy to "none", closing the sed/echo write backdoor
     the same way the plan-review steps do.
+
+    `strip_source_buttons=False` is the one place this differs from every
+    other button, and it is the difference between a recap and a workflow
+    step. The others advance the work, so clearing the card they were tapped
+    on is correct. This one does not: the card it sits on is the one carrying
+    Merge, Discard, Commit and Done, and asking for a summary must not cost
+    the user the buttons they were about to press. Nothing is spawned into
+    that card's place, so leaving it intact strands nothing.
     """
     return await spawn_from(ctx, source_id, SpawnConfig(
         instance_type=InstanceType.QUERY, prompt=config.TLDR_PROMPT,
         mode="explore", origin=InstanceOrigin.TLDR,
         status_text="Writing the short version...", resume_session=True,
         permission_mode="explore",
-    ), source_msg_id=source_msg_id)
+    ), strip_source_buttons=False, source_msg_id=source_msg_id)
 
 
 async def on_review_code(ctx: RequestContext, source_id: str, source_msg_id: str | None = None) -> Instance | None:

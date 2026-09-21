@@ -206,7 +206,7 @@ two parallel builds and the second one no longer silently reverts the first" is
 the sentence the user can act on. The prompt carries both versions so the rule
 cannot be read as a style note.
 
-Four things that must not drift:
+Six things that must not drift:
 
 - **It resumes the session; it never starts fresh.** What it explains is the
   conversation, not the diff. A fresh session would re-derive the *what* from
@@ -229,6 +229,21 @@ Four things that must not drift:
   off the back of a read-only turn. It is deliberately **not** in
   `BUILD_ORIGINS`: it writes no code, so it is words, and words run on the light
   model.
+- **It leaves the card it was tapped on alone.** Every other button in
+  `spawn_from` advances the work, so clearing the source card's buttons is
+  right for them. This one does not advance anything, and that card is the one
+  holding Merge, Discard, Commit and Done: asking for a summary must not cost
+  the user the buttons they were about to press. `strip_source_buttons=False`
+  is the only place TL;DR differs from its neighbours, and the harness pins
+  both halves so a copy-paste of the next button cannot quietly flip it back.
+- **Nothing it writes is dispatched as a directive.** It is in
+  `lifecycle._NO_DIRECTIVE_ORIGINS` next to the prompt review, for the weaker
+  version of the same reason and a stronger one of its own: a recap of the work
+  that just built the `/watch` or `/spawn` handling has those literal examples
+  fresh in its context, and this is the one origin whose whole contract is
+  "explain, do no work, change nothing", so a directive out of it is incoherent
+  however it got there. The prompt forbids it too, but a brief is the soft guard
+  and this is the hard one.
 - **`/tldr` and the button land on one handler.** The typed form only resolves
   what the button already knew, the thread's newest turn, and that resolution
   lives on the store (`StateStore.latest_instance_for_session`) because the

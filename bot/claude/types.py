@@ -35,7 +35,7 @@ class InstanceOrigin(str, Enum):
     REVIEW_PLAN = "review_plan" # [Review Plan] button
     APPLY_REVISIONS = "apply_revisions"  # [Apply Revisions] button
     REVIEW_CODE = "review_code" # [Review Code] button
-    TLDR = "tldr"               # [TL;DR] button / /tldr — plain-language recap
+    TLDR = "tldr"               # [TL;DR] button and /tldr: plain-language recap
     COMMIT = "commit"           # [Commit] button
     DONE = "done"               # [Done] button — commit + close thread
     RELEASE = "release"         # /release command

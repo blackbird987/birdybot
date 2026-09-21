@@ -125,6 +125,23 @@ check("the floor really does clamp bash to none",
 check("a TL;DR turn does not run on the expensive build model",
       InstanceOrigin.TLDR not in BUILD_ORIGINS)
 
+# Every other button advances the work, so clearing the card it was tapped on
+# is right. This one does not, and that card is the one holding Merge,
+# Discard, Commit and Done: asking for a summary must not cost the user the
+# buttons they were about to press.
+# A recap of the work that just built the /watch handling has those literal
+# directive examples in its context. Nothing it writes may arm one.
+from bot.engine import lifecycle  # noqa: E402
+check("nothing a recap writes is dispatched as a directive",
+      InstanceOrigin.TLDR in lifecycle._NO_DIRECTIVE_ORIGINS)
+
+check("asking for a recap leaves the tapped card's buttons alone",
+      "strip_source_buttons=False" in _src)
+check("...unlike the workflow steps next door, which still clear theirs",
+      all("strip_source_buttons" not in inspect.getsource(fn)
+          for fn in (workflows.on_review_code, workflows.on_commit,
+                     workflows.on_review_plan)))
+
 
 # ------------------------------- 3. the button is wired end to end
 

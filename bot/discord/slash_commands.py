@@ -423,7 +423,7 @@ def setup(bot: ClaudeBot) -> None:
         lookup = bot._forums.thread_to_project(str(interaction.channel_id))
         if lookup is None:
             await interaction.response.send_message(
-                "This isn't a session thread — /tldr recaps the work in one.",
+                "This isn't a session thread, so there is nothing for /tldr to recap.",
                 ephemeral=True,
             )
             return
@@ -431,7 +431,7 @@ def setup(bot: ClaudeBot) -> None:
         inst = bot._store.latest_instance_for_session(info.session_id)
         if inst is None:
             await interaction.response.send_message(
-                "Nothing has run in this thread yet — nothing to recap.",
+                "Nothing has run in this thread yet, so there is nothing to recap.",
                 ephemeral=True,
             )
             return

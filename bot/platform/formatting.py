@@ -971,14 +971,14 @@ def action_button_specs(
             expand_row.append(ButtonSpec("Share", f"share:{iid}"))
         rows.append(expand_row)
 
-    # TL;DR \u2014 plain-language recap of whatever this turn was about.
+    # TL;DR: a plain-language recap of whatever this turn was about.
     #
     # It rides an existing row instead of claiming one of the five Discord
     # allows: the Expand row when a long result built one, otherwise the
     # Branch/Share row. Both are gated on session_id, which TL;DR needs
     # anyway (it resumes the session). When neither row exists the button is
-    # dropped rather than displacing a Merge or plan row \u2014 /tldr covers the
-    # same ground from the keyboard.
+    # dropped rather than displacing a Merge or plan row, since /tldr covers
+    # the same ground from the keyboard.
     #
     # Never on a TL;DR's own card: re-summarising a summary says nothing, and
     # the recursion has no natural floor.
