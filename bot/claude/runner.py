@@ -1073,6 +1073,20 @@ def _memory_kill_result(
     return result
 
 
+class AdmissionBlock(NamedTuple):
+    """Why a starting session is being held, and whose fault the shortage is.
+
+    ``ours`` is the load-bearing half. Pressure the bot created clears on its
+    own as soon as a running session finishes, so waiting for it is waiting
+    for something that reliably happens; pressure it did not create may never
+    clear, so a hold on that one has to give up quickly and start anyway. The
+    two get very different deadlines in _await_memory_headroom.
+    """
+
+    reason: str
+    ours: bool
+
+
 class WorktreeRecoveryEvent(NamedTuple):
     """Result of a single worktree-recovery decision at startup.
 
@@ -2183,17 +2197,36 @@ class ClaudeRunner:
 
     def _admission_blocked(
         self, pressure: memory.MemoryPressure,
-    ) -> str | None:
+    ) -> AdmissionBlock | None:
         """Why a starting session should wait, or None to let it through.
 
         One function so that the three places the hold loop asks the question
         cannot answer it differently, which is how a hold that never releases
-        or one that never engages gets written.
+        or one that never engages gets written. The classification lives here
+        for the same reason: the hold loop needs to know whose pressure it is
+        waiting on, and a second copy of that judgement in the loop is how the
+        two start disagreeing.
+
+        ``ours`` means the bot's own sessions are what is filling the machine:
+        the session slice is out of budget, the slice is approaching the stall
+        percentage oomd kills it on, or our own cgroup is past its MemoryHigh
+        watermark. That distinction decides how long the hold is willing to
+        wait, because only one of the two clears by itself: a running session
+        finishes, a browser holding 6 GB does not.
         """
         if pressure.is_critical():
-            return pressure.human() or "the machine is out of memory"
+            return AdmissionBlock(
+                pressure.human() or "the machine is out of memory",
+                ours=(
+                    pressure.oomd_at_least(memory.PRESSURE_TIGHT)
+                    or pressure.over_own_high()
+                ),
+            )
         if pressure.oomd_at_least(memory.PRESSURE_TIGHT):
-            return pressure.human() or "this unit is close to being killed"
+            return AdmissionBlock(
+                pressure.human() or "this unit is close to being killed",
+                ours=True,
+            )
         floor = config.MEM_ADMISSION_MIN_SLICE_HEADROOM_MB
         if floor > 0:
             try:
@@ -2204,9 +2237,10 @@ class ClaudeRunner:
             # Treated as no finding, the same rule every pressure reader here
             # follows: a budget check that cannot measure must not refuse work.
             if headroom is not None and headroom < floor:
-                return (
+                return AdmissionBlock(
                     f"the session budget has {headroom / 1024:.1f} GB left, "
-                    f"under the {floor / 1024:.1f} GB needed to start one more"
+                    f"under the {floor / 1024:.1f} GB needed to start one more",
+                    ours=True,
                 )
         return None
 
@@ -2265,27 +2299,66 @@ class ClaudeRunner:
             return
 
         log.warning(
-            "Holding %s before spawn — %s", instance.id, pressure.summary(),
+            "Holding %s before spawn: %s (%s pressure)",
+            instance.id, pressure.summary(), "own" if blocked.ours else "foreign",
         )
         # The same formatter the /wake confirmation uses, so "up to 5 min" and
         # "waited 45s" read the same way everywhere and a sub-minute admission
         # wait cannot render as "0 min".
         from bot.platform.formatting import format_delay_secs
 
-        budget = format_delay_secs(max(0, config.MEM_ADMISSION_MAX_WAIT_SECS))
+        def _budget_secs(block: AdmissionBlock) -> int:
+            # Recomputed every pass rather than fixed at the start, because
+            # which kind of shortage this is can change while we wait: a
+            # session finishing turns our own slice pressure into a browser's,
+            # and the deadline has to follow the shortage rather than the one
+            # it happened to open on.
+            secs = (
+                config.MEM_ADMISSION_OWN_MAX_WAIT_SECS if block.ours
+                else config.MEM_ADMISSION_MAX_WAIT_SECS
+            )
+            return max(0, secs)
+
         told = False
+        last_told = 0.0
         started = asyncio.get_event_loop().time()
-        deadline = started + max(0, config.MEM_ADMISSION_MAX_WAIT_SECS)
-        while asyncio.get_event_loop().time() < deadline:
-            if not told and on_progress:
+        while True:
+            now = asyncio.get_event_loop().time()
+            if now >= started + _budget_secs(blocked):
+                break
+            # One message when the hold opens, then a refresh every
+            # MEM_ADMISSION_NOTIFY_SECS. An own-pressure hold can legitimately
+            # run half an hour, and a thread that says "waiting for memory"
+            # once and then goes silent for thirty minutes is indistinguishable
+            # from a thread that died.
+            # Never more often than we poll: a refresh between two polls would
+            # repeat a reading nothing has re-read.
+            refresh = max(
+                config.MEM_ADMISSION_POLL_SECS, config.MEM_ADMISSION_NOTIFY_SECS,
+            )
+            due = not told or now - last_told >= refresh
+            if due and on_progress:
+                budget = format_delay_secs(_budget_secs(blocked))
+                waited = int(now - started)
+                body = (
+                    f"There is no room to start this yet: {blocked.reason}. "
+                    f"Starting another session now would make that worse, "
+                    f"so this one waits for room (up to {budget}, then it "
+                    f"starts anyway)."
+                )
+                if told:
+                    body = (
+                        f"Still waiting for memory after "
+                        f"{format_delay_secs(waited)}: {blocked.reason}. "
+                        f"Holding this session rather than making it worse "
+                        f"(up to {budget} from the start, then it starts "
+                        f"anyway)."
+                    )
                 told = True
+                last_told = now
                 try:
                     await on_progress(
-                        "Waiting for memory before starting",
-                        f"There is no room to start this yet: {blocked}. "
-                        f"Starting another session now would make that worse, "
-                        f"so this one waits for room (up to {budget}, then it "
-                        f"starts anyway).",
+                        "Waiting for memory before starting", body,
                     )
                 except Exception:
                     log.exception("Progress callback error on memory hold")
@@ -2315,9 +2388,10 @@ class ClaudeRunner:
 
         # Bounded, so this is a normal outcome and not a failure. Say plainly
         # that the wait was given up on rather than implying it succeeded.
+        budget = format_delay_secs(_budget_secs(blocked))
         log.warning(
-            "Starting %s anyway — still short after %ds (%s)",
-            instance.id, config.MEM_ADMISSION_MAX_WAIT_SECS, pressure.summary(),
+            "Starting %s anyway, still short after %s (%s)",
+            instance.id, budget, pressure.summary(),
         )
         if told and on_progress:
             try:

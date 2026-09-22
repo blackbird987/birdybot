@@ -65,6 +65,14 @@ class WeightCheck:
     cpu_expected: int = 0
     io_expected: int = 0
     error: str | None = None
+    # Which cgroup was measured. Two are checked now: the supervisor's own
+    # unit, which must run at the default 100, and the slice the sessions run
+    # in, which carries the 20. They are separate checks rather than one
+    # because a mismatch on each means a different thing and needs different
+    # advice, and because either can be unreadable without invalidating the
+    # other.
+    label: str = "claude-bot.service"
+    session_slice: bool = False
 
     def mismatches(self) -> list[tuple[str, int, int]]:
         """``(knob, live, expected)`` for each weight that is demonstrably wrong."""
@@ -89,7 +97,10 @@ class WeightCheck:
             f"io.weight={self.io_live if self.io_live is not None else '?'}"
             f"/{self.io_expected or '-'}",
         ]
-        return ("weights ok: " if self.ok() else "weights WRONG: ") + ", ".join(bits)
+        head = f"{self.label} weights ok: " if self.ok() else (
+            f"{self.label} weights WRONG: "
+        )
+        return head + ", ".join(bits)
 
     def warning_text(self) -> str:
         """Plain sentence for a log line and for The Ark. Empty when fine."""
@@ -99,14 +110,28 @@ class WeightCheck:
         parts = [
             f"{knob} is {live} but should be {want}" for knob, live, want in bad
         ]
+        if self.session_slice:
+            return (
+                "The sessions' CPU/IO priority protection is not applied: "
+                + ", ".join(parts)
+                + f" on {self.label}. That slice is where every CLI, shell, "
+                "dotnet and Roslyn process runs, so until it is fixed a build "
+                "competes with the desktop on equal terms, which is how a "
+                "build can freeze the machine. Check that "
+                "scripts/app-claudesessions.slice is installed under "
+                "~/.config/systemd/user/ and that `systemctl --user "
+                "daemon-reload` has run since."
+            )
         return (
-            "The bot's CPU/IO priority protection is not applied: "
-            + ", ".join(parts)
-            + ". Until it is fixed the bot competes with the desktop on equal "
-            "terms, which is how a build can freeze the machine. This usually "
-            "means a stale systemd drop-in is overriding the unit file: check "
-            "`systemctl --user show claude-bot.service -p DropInPaths` and "
-            "delete anything under /run/user/*/systemd/user.control/."
+            "The bot supervisor's CPU/IO shares are not what the unit file "
+            "asks for: " + ", ".join(parts) + f" on {self.label}. The "
+            "supervisor has to answer Discord inside three seconds and keep a "
+            "gateway heartbeat alive, so running it below the desktop's "
+            "default costs the bot its connection while buying the desktop "
+            "nothing (the CPU-hungry work is in the sessions slice). This "
+            "usually means a systemd drop-in is overriding the unit file: "
+            "check `systemctl --user show claude-bot.service -p DropInPaths` "
+            "and look under /run/user/*/systemd/user.control/."
         )
 
 
@@ -150,6 +175,41 @@ def check_weights() -> WeightCheck:
         return out
     out.cpu_live = _read_weight(cg / "cpu.weight")
     out.io_live = _read_weight(cg / "io.weight")
+    if out.cpu_live is None and out.io_live is None:
+        out.error = "weights unreadable"
+    return out
+
+
+def check_session_slice_weights() -> WeightCheck:
+    """The same check, for the cgroup the protection actually lives in now.
+
+    Since v0.101.27 the workload runs in app-claudesessions.slice and the 20
+    moved there with it, which left nothing checking the number that matters:
+    the startup check was still proving a value on the supervisor, where a
+    wrong reading now costs almost nothing, and saying nothing about the slice
+    where a wrong reading is the 2026-09-08 incident all over again.
+
+    Same rules as check_weights. Reads the live cgroup files, never a unit
+    file. Never raises, and an unmeasurable machine is a pass: sessions that
+    did not get a slice at all (no systemd-run, probe failed) run exactly as
+    they did before scopes existed, and warning about a slice that is not in
+    use would be noise.
+    """
+    out = WeightCheck(
+        cpu_expected=max(0, config.SESSION_SLICE_CPU_WEIGHT_EXPECTED),
+        io_expected=max(0, config.SESSION_SLICE_IO_WEIGHT_EXPECTED),
+        label=config.SESSION_SLICE,
+        session_slice=True,
+    )
+    if sys.platform != "linux":
+        out.error = "not linux"
+        return out
+    path = session_slice_path()
+    if path is None:
+        out.error = "no session slice"
+        return out
+    out.cpu_live = _read_weight(path / "cpu.weight")
+    out.io_live = _read_weight(path / "io.weight")
     if out.cpu_live is None and out.io_live is None:
         out.error = "weights unreadable"
     return out
@@ -477,9 +537,26 @@ async def adopt_session(
 
 
 def session_slice_path() -> Path | None:
-    """Directory of the slice sessions run in, or None when there isn't one."""
+    """Directory of the slice sessions run in, or None when there isn't one.
+
+    Normally resolved as "my parent slice, plus the sessions slice under it",
+    which is right for the supervisor: it lives in claude-bot.service under
+    app.slice, and the sessions slice is app.slice's child. That derivation
+    answers None for anything already running *inside* a session, though,
+    because it goes looking for app-claudesessions.slice underneath
+    app-claudesessions.slice. Every build session is such a caller now, so the
+    harness could no longer resolve the slice it was written to check. Walking
+    the caller's own path first costs one list scan and makes the answer the
+    same wherever it is asked from.
+    """
     if not _scope_supported:
         return None
+    own = memory._own_cgroup_path()
+    if own is not None and config.SESSION_SLICE in own.parts:
+        idx = own.parts.index(config.SESSION_SLICE)
+        inside = Path(*own.parts[: idx + 1])
+        if inside.is_dir():
+            return inside
     parent = memory.parent_slice_path()
     if parent is None:
         return None
@@ -501,17 +578,31 @@ def session_slice_roots() -> tuple[Path, ...]:
 
 
 def slice_headroom_mb() -> float | None:
-    """MB left before the session slice's own ``memory.max``, or None.
+    """MB left before the session slice's throttle line, or None.
 
-    None when sessions are not in a slice, when the slice carries no limit, or
-    when the files will not read. Admission treats None as "no finding", the
-    same rule the pressure readers follow: a budget check that cannot measure
-    must not refuse work.
+    The line measured is ``memory.high`` when the slice carries one, falling
+    back to ``memory.max`` when it does not. That preference is the whole
+    point of the function and it was the other way round until 2026-09-22:
+    measuring against the hard cap meant admission only engaged once the slice
+    was already thousands of MB *above* its throttle line, where every cgroup
+    in it is being reclaimed continuously and oomd is reading exactly that as
+    stall pressure. By the time the old check fired, the kill it exists to
+    prevent was already being decided. ``memory.high`` is where the kernel
+    starts pushing back, so it is the budget a new session has to fit inside.
+
+    None when sessions are not in a slice, when the slice carries neither
+    limit, or when the files will not read. Admission treats None as "no
+    finding", the same rule the pressure readers follow: a budget check that
+    cannot measure must not refuse work. ``_read_int`` already maps the
+    literal ``max`` that an unset limit reads as onto None, so an unset
+    ``memory.high`` falls through to ``memory.max`` on its own.
     """
     path = session_slice_path()
     if path is None:
         return None
-    limit = memory._read_int(path / "memory.max")
+    limit = memory._read_int(path / "memory.high")
+    if limit is None:
+        limit = memory._read_int(path / "memory.max")
     current = memory._read_int(path / "memory.current")
     if limit is None or current is None:
         return None

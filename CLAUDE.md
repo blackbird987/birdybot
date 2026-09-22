@@ -945,8 +945,9 @@ compile farm always wins a fair fight against a desktop.
 Three layers, because there are three distinct contests and one knob cannot
 settle them:
 
-- **Bot versus you** — `CPUWeight=20`, `IOWeight=20` in
-  `claude-bot.service`. Weight, **not `CPUQuota`**, and that distinction is the
+- **Bot versus you**: `CPUWeight=20`, `IOWeight=20`, on
+  **`app-claudesessions.slice`**, not on `claude-bot.service`. Weight,
+  **not `CPUQuota`**, and that distinction is the
   whole design: weights bind only under contention, so an unattended machine
   still runs builds across all 12 cores at full speed, while a machine you are
   sitting at keeps roughly five sixths of the CPU. A quota would buy the
@@ -966,6 +967,32 @@ settle them:
   with the paths rewritten, and `migrate-off-windows-disk.sh` regenerates it.
   A resource setting added only to the deployed copy survives until the next
   migration and then silently disappears. Both carry it.
+
+  **The 20 moved off the service on 2026-09-22, and where it sits is now the
+  whole point.** Since v0.101.27 every CLI, shell, dotnet and Roslyn process
+  runs in a transient scope under `app-claudesessions.slice`, which carries
+  its own `CPUWeight=20` / `IOWeight=20`. The compile farm this paragraph is
+  about is therefore already held to a sixth, on the cgroup that actually
+  contains it. What is left inside `claude-bot.service` is the supervisor: a
+  ~250 MB asyncio loop that has to answer a Discord interaction within three
+  seconds and keep a gateway heartbeat alive. Starving *that* buys the desktop
+  nothing, because the CPU was never the supervisor's to give, and costs the
+  bot its connection, since a missed heartbeat disconnects it. So the service
+  runs at the default 100 and the slice keeps the 20, and both halves are
+  checked at startup against the live cgroup files
+  (`cgroups.check_weights` for the service, `check_session_slice_weights` for
+  the slice, expectations in `RESOURCE_*_WEIGHT_EXPECTED` and
+  `SESSION_SLICE_*_WEIGHT_EXPECTED`). Checking only the service was checking
+  the half that no longer matters.
+
+  One live-machine fact that makes this easier to accept than to fight: on
+  this box `uresourced --user` (Fedora's user resource daemon, PID confirmed
+  through its D-Bus name on 2026-09-22) calls `SetUnitProperties` on
+  `claude-bot.service` **many times a second**, rewriting
+  `/run/user/1000/systemd/user.control/claude-bot.service.d/50-CPUWeight.conf`
+  with `CPUWeight=100` continuously and burning about 14% of a core doing it.
+  That, and not a stale drop-in, is why the 20 never held there. It does not
+  touch `app-claudesessions.slice`, which reads 20 live.
 - **Bot versus its own sessions** — `config.SESSION_CPU_NICE` (10), applied by
   `runner._lower_priority` immediately after the spawn. `CPUWeight` settles the
   cgroup's share against the desktop and says nothing about how that share is
@@ -1174,10 +1201,63 @@ daemon-reexec` clears it. On 2026-09-21 an unrelated service being kernel
 OOM-killed at a 13.5 GB peak livelocked the manager at 95% CPU for seven
 minutes, which among other things stopped the browser opening tabs.
 
+### The rungs have to add up, or the ceiling becomes the killer
+
+Giving oomd a session-sized victim worked: on 2026-09-22 at 11:29 it shot one
+session scope instead of the whole unit, the desktop survived and the session
+retried on the same id. It still should not have fired, and why it did is
+arithmetic rather than a bug in any one place.
+
+`SESSION_MEM_HIGH_MB` was 6144 and `MAX_CONCURRENT` was 5. That is 30 GB of
+per-session soft ceiling against a slice budget of `MemoryHigh=11G` /
+`MemoryMax=14G`: **two** sessions at their own ceiling already exceed the
+fleet throttle line. Worse, 6 GB is where a dotnet/Roslyn build session
+naturally sits. The peaks that day read 5.8G, 5.8G, 5.9G and then six sessions
+at *exactly* 6.0G, which is not six coincidences, it is six sessions pinned on
+their ceiling.
+
+`memory.high` does not stop a cgroup there. It makes the kernel reclaim
+continuously to hold it there, and continuous reclaim is precisely the stall
+pressure oomd kills on. t-8711 died with `Pgscan: 141565` and the slice at
+93.14% against its 70% limit. **A soft ceiling set at the working set
+manufactures the condition it exists to prevent.**
+
+Four numbers now have to stay consistent, and the next person to move one
+should check the others:
+
+- `SESSION_MEM_HIGH_MB` (8192) sits **above** the measured working set, where
+  it catches a session that is genuinely running away and is invisible to one
+  that is merely large. It is not the fleet's limiter and never was.
+- `MAX_CONCURRENT` (4) is a backstop, not the limiter.
+- The fleet is bounded by the slice's own `MemoryHigh` and by admission.
+  `cgroups.slice_headroom_mb` measures against **`memory.high`**, falling back
+  to `memory.max` only when there is no soft limit. Measuring the hard cap
+  meant the gate engaged at 12800 MB of slice usage on this machine, thousands
+  of MB above the throttle line where the kill is already being decided; it
+  now engages at 8192 MB.
+- `MEM_ADMISSION_MIN_SLICE_HEADROOM_MB` (3072) reserves room for what a
+  session *becomes*, not what it starts as. The old 1536 was sized on the
+  stated assumption that the soft ceiling absorbs later growth. It does not
+  absorb, it reclaims.
+
+And the hold learned whose shortage it is waiting on. `_admission_blocked`
+returns an `AdmissionBlock` carrying `ours`, and the hold loop gives our own
+pressure `MEM_ADMISSION_OWN_MAX_WAIT_SECS` (30 min) against the old 5 minutes
+for foreign pressure. Waiting on our own slice is waiting for a running
+session to finish, which reliably happens; proceeding anyway there is the move
+that manufactures the next kill. Waiting on a browser holding 6 GB is waiting
+for nothing, so that one still gives up quickly and starts regardless. Both
+still proceed in the end, neither blocks forever, and a Kill ends either
+immediately. A long hold re-posts every `MEM_ADMISSION_NOTIFY_SECS`, because a
+thread that said "waiting for memory" once and then went quiet for half an
+hour is indistinguishable from a thread that died.
+
 Knobs: `SESSION_SCOPES_ENABLED`, `SESSION_SLICE`, `SESSION_MEM_HIGH_MB`,
 `SESSION_MEM_HARD_MB`, `SESSION_SCOPE_ADOPT_SECS`,
 `SESSION_SCOPE_PROBE_TTL_SECS`, `OOMD_TIGHT_FRACTION`, `OOMD_CRITICAL_FRACTION`,
-`RESOURCE_CPU_WEIGHT_EXPECTED`, `RESOURCE_IO_WEIGHT_EXPECTED` in
+`RESOURCE_CPU_WEIGHT_EXPECTED`, `RESOURCE_IO_WEIGHT_EXPECTED`,
+`SESSION_SLICE_CPU_WEIGHT_EXPECTED`, `SESSION_SLICE_IO_WEIGHT_EXPECTED`,
+`MEM_ADMISSION_OWN_MAX_WAIT_SECS`, `MEM_ADMISSION_NOTIFY_SECS` in
 `bot/config.py`.
 
 Harnesses: `python scripts/test_session_cgroups.py` and the oomd, weight-check

@@ -146,6 +146,24 @@ MemoryMax=13G
 # the bot gets about a sixth and the desktop keeps the rest. That is the right
 # ratio for this box: bot work is nearly always something you started and then
 # walked away from, so it is the side that can afford to wait.
+#
+# THAT 20 NOW LIVES ON THE SESSIONS SLICE, NOT HERE, and the move is
+# deliberate (2026-09-22). Since v0.101.27 the CLIs, their shells, dotnet and
+# Roslyn all run in transient scopes under app-claudesessions.slice, which
+# carries CPUWeight=20 / IOWeight=20 of its own. The compile farm the
+# paragraph above is about is therefore already held at a sixth, on the cgroup
+# that actually contains it. What is left inside this unit is the supervisor:
+# a ~250 MB asyncio loop that has to answer a Discord interaction inside three
+# seconds and keep a gateway heartbeat alive. Starving that buys the desktop
+# nothing, because the CPU was never the supervisor's to give, and costs the
+# bot its connection, since a missed heartbeat disconnects it. So the
+# supervisor runs at the default 100 and the workload keeps the 20.
+#
+# Both halves are checked at startup against the live cgroup files
+# (bot/discord/resource_alerts.py): this unit must read 100, the sessions
+# slice must read 20. Keep the numbers here in step with
+# RESOURCE_*_WEIGHT_EXPECTED and SESSION_SLICE_*_WEIGHT_EXPECTED in
+# bot/config.py.
 # --- Who oomd is allowed to kill ---
 #
 # systemd-oomd kills one cgroup at a time. Until 2026-09-21 every session ran
@@ -170,8 +188,8 @@ MemoryMax=13G
 # counted and merely puts it last in line, which is the accurate statement.
 ManagedOOMPreference=avoid
 
-CPUWeight=20
-IOWeight=20
+CPUWeight=100
+IOWeight=100
 
 [Install]
 WantedBy=default.target

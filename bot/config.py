@@ -148,7 +148,14 @@ RELEASE_ANCESTRY_CHECK: bool = os.getenv("RELEASE_ANCESTRY_CHECK", "1") != "0"
 
 # Cursor-specific: default model (free tier = "auto", paid = specific model)
 CURSOR_MODEL: str = os.getenv("CURSOR_MODEL", "auto")
-MAX_CONCURRENT: int = int(os.getenv("MAX_CONCURRENT", "5"))
+# How many sessions may run at once. This is a BACKSTOP, not the limiter.
+# What actually bounds the fleet is memory admission (see the admission block
+# below): it asks the session slice how much budget is left before starting
+# one more, which is a question a count structurally cannot answer. A default
+# the machine cannot afford even in the best case is a bad default, so this
+# sits at a number whose worst case fits the slice budget, and admission
+# decides whether the 2nd, 3rd or 4th actually starts right now.
+MAX_CONCURRENT: int = int(os.getenv("MAX_CONCURRENT", "4"))
 DAILY_BUDGET_USD: float = float(os.getenv("DAILY_BUDGET_USD", "20.0"))
 PC_NAME: str = os.getenv("PC_NAME", "") or __import__("platform").node()
 STALL_TIMEOUT_SECS: int = int(os.getenv("STALL_TIMEOUT_SECS", "60"))
@@ -314,16 +321,45 @@ MEM_ADMISSION_ENABLED: bool = os.getenv(
 MEM_ADMISSION_MAX_WAIT_SECS: int = int(
     os.getenv("MEM_ADMISSION_MAX_WAIT_SECS", "300")
 )
+# The same bound, for pressure the bot created itself: the session slice is
+# out of budget, or this unit is near the limit oomd kills it on. That wait is
+# not open-ended hope, it is waiting for a running session to finish, which is
+# a thing that reliably happens. Proceeding anyway there is the move that
+# manufactures the next oomd kill, so it gets a much longer rope. Foreign
+# pressure (a browser holding 6 GB) keeps the short bound above, because
+# nothing the bot does will clear it and refusing all work forever is worse
+# than starting one more CLI. Both still proceed in the end; neither blocks
+# forever.
+MEM_ADMISSION_OWN_MAX_WAIT_SECS: int = int(
+    os.getenv("MEM_ADMISSION_OWN_MAX_WAIT_SECS", "1800")
+)
 MEM_ADMISSION_POLL_SECS: int = int(os.getenv("MEM_ADMISSION_POLL_SECS", "15"))
+# How often the thread is told the hold is still in effect. One message
+# and then silence is fine for a five-minute wait and wrong for a thirty-
+# minute one: a thread that said "waiting for memory" half an hour ago and
+# has said nothing since is indistinguishable from a thread that died.
+# Floored at MEM_ADMISSION_POLL_SECS in the loop: a refresh landing between
+# two polls would only repeat a reading nothing has re-read.
+MEM_ADMISSION_NOTIFY_SECS: int = int(
+    os.getenv("MEM_ADMISSION_NOTIFY_SECS", "300")
+)
 # MB that must be left in the session slice before one more session starts.
-# MAX_CONCURRENT is a count and a count cannot know how big the running five
+# MAX_CONCURRENT is a count and a count cannot know how big the running ones
 # are; this is the same admission gate asking the budget rather than the
-# machine. Sized as one starting CLI plus room to get going, not as a full
-# session: the soft ceiling is what absorbs a session that then grows, and a
-# bar set at a whole session's worth would hold most of the time. Ignored
-# entirely when the slice has no memory.max to measure against.
+# machine.
+#
+# It was 1536 until 2026-09-22, sized as one starting CLI plus room to get
+# going, on the stated assumption that the per-session soft ceiling absorbs a
+# session that then grows. It does not absorb, it *reclaims*, and sustained
+# reclaim is exactly the stall pressure systemd-oomd kills on. So the bar has
+# to reserve room for what a session becomes, not for what it starts as: a
+# build session's measured working set on this machine is 5.8-6.0 GB, and
+# admitting one against 1.5 GB of remaining budget guarantees the slice spends
+# the next hour over its throttle line. Ignored entirely when the slice has no
+# limit to measure against (see cgroups.slice_headroom_mb, which measures the
+# throttle line, memory.high, in preference to the hard cap).
 MEM_ADMISSION_MIN_SLICE_HEADROOM_MB: int = int(
-    os.getenv("MEM_ADMISSION_MIN_SLICE_HEADROOM_MB", "1536")
+    os.getenv("MEM_ADMISSION_MIN_SLICE_HEADROOM_MB", "3072")
 )
 
 # --- systemd-oomd: the criterion that actually kills this unit ---
@@ -361,23 +397,43 @@ OOMD_CRITICAL_FRACTION: float = float(os.getenv("OOMD_CRITICAL_FRACTION", "0.8")
 
 # --- The resource weights, and proof that they are actually on ---
 #
-# scripts/claude-bot.service declares CPUWeight=20 / IOWeight=20 so the bot
-# loses a fight with the desktop. On 2026-09-21 the live cgroup read 100 for
-# both while both unit-file copies said 20, because the 2026-09-08 fix had
-# been applied with `systemctl --user set-property --runtime`, and a --runtime
-# drop-in is reset when the unit stops -- which is precisely what an oomd kill
-# does. The protection uninstalled itself on the exact event it exists for,
-# and nothing noticed for a week.
+# The 20 used to live on claude-bot.service, from the 2026-09-08 incident
+# where a compile farm inside it made the desktop unusable. It does not live
+# there any more, and moving it is deliberate: since v0.101.27 the *workload*
+# runs in app-claudesessions.slice, which carries CPUWeight=20 / IOWeight=20
+# of its own. What is left inside claude-bot.service is the supervisor, a
+# ~250 MB asyncio loop that has to answer a Discord interaction within three
+# seconds and keep a gateway heartbeat alive. Deprioritising that buys the
+# desktop nothing (the CPU was never the supervisor's) and costs the bot its
+# connection, which is what a missed heartbeat does. So the supervisor now
+# runs at the default 100 and the sessions keep the 20.
+#
+# The history is worth keeping, because it is what the check exists for: on
+# 2026-09-21 the live cgroup read 100 while both unit-file copies said 20,
+# because the 2026-09-08 fix had been applied with `systemctl --user
+# set-property --runtime`, and a --runtime drop-in is reset when the unit
+# stops -- which is precisely what an oomd kill does. The protection
+# uninstalled itself on the exact event it exists for, and nothing noticed
+# for a week.
 #
 # These are the values the startup self-check compares the *live cgroup files*
 # against. Reading ground truth from cpu.weight and io.weight is the whole
 # point: a check that read the unit file would have passed happily all week.
-# Keep them in step with scripts/claude-bot.service. 0 disables the check.
+# The check covers both cgroups, since the protection now lives on the slice:
+# the service must read these, the slice must read SESSION_SLICE_*_EXPECTED.
+# Keep them in step with scripts/claude-bot.service and
+# scripts/app-claudesessions.slice. 0 disables that half of the check.
 RESOURCE_CPU_WEIGHT_EXPECTED: int = int(
-    os.getenv("RESOURCE_CPU_WEIGHT_EXPECTED", "20")
+    os.getenv("RESOURCE_CPU_WEIGHT_EXPECTED", "100")
 )
 RESOURCE_IO_WEIGHT_EXPECTED: int = int(
-    os.getenv("RESOURCE_IO_WEIGHT_EXPECTED", "20")
+    os.getenv("RESOURCE_IO_WEIGHT_EXPECTED", "100")
+)
+SESSION_SLICE_CPU_WEIGHT_EXPECTED: int = int(
+    os.getenv("SESSION_SLICE_CPU_WEIGHT_EXPECTED", "20")
+)
+SESSION_SLICE_IO_WEIGHT_EXPECTED: int = int(
+    os.getenv("SESSION_SLICE_IO_WEIGHT_EXPECTED", "20")
 )
 
 # --- Per-session cgroups: the supervisor must outlive the workload ---
@@ -450,7 +506,26 @@ SESSION_SCOPE_PROBE_TTL_SECS: int = int(
 #
 # 0 on either cgroup rung leaves that limit unset. Both are ignored entirely
 # when a session did not get its own cgroup.
-SESSION_MEM_HIGH_MB: int = int(os.getenv("SESSION_MEM_HIGH_MB", "6144"))
+#
+# --- A soft ceiling set at the working set is worse than no ceiling ---
+#
+# SESSION_MEM_HIGH_MB was 6144 until 2026-09-22, and that is the number that
+# killed t-8711. A dotnet/Roslyn build session's natural working set on this
+# machine is 5.8-6.0 GB: the peaks recorded that day read 5.8G, 5.8G, 5.9G and
+# then six sessions at *exactly* 6.0G, which is not six coincidences but six
+# sessions pinned on their own ceiling. memory.high does not stop a session
+# there, it makes the kernel reclaim continuously to hold it there, and
+# continuous reclaim is precisely the stall pressure systemd-oomd kills on.
+# The slice reached 93.14% against its 70% limit and oomd shot the session.
+#
+# So the ceiling has to sit ABOVE the working set, where it catches a session
+# that is genuinely running away and is invisible to one that is merely large.
+# The fleet total is not this knob's job and never was: it is bounded by the
+# slice's own MemoryHigh and by admission control, which is where a number
+# that has to know about *other* sessions belongs. See the ladder arithmetic
+# note in CLAUDE.md -- per-session ceiling times MAX_CONCURRENT must not
+# exceed the slice budget, or the fleet lives permanently in reclaim.
+SESSION_MEM_HIGH_MB: int = int(os.getenv("SESSION_MEM_HIGH_MB", "8192"))
 SESSION_MEM_HARD_MB: int = int(os.getenv("SESSION_MEM_HARD_MB", "10240"))
 
 # --- Reclaiming memory nobody owns ---
