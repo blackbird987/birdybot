@@ -1,12 +1,21 @@
 """Startup check: are the machine's resource protections actually applied?
 
-scripts/claude-bot.service declares CPUWeight=20 and IOWeight=20 so that the
-bot loses a fight with the desktop. On 2026-09-21 the live cgroup read 100 for
-both. The 2026-09-08 fix had been installed with `systemctl --user
+The CPU/IO shares that stop a build freezing the desktop are declared in unit
+files and enforced by the kernel from the cgroup, and those two have been out
+of step before. On 2026-09-21 the live cgroup read 100 where both unit-file
+copies said 20: the 2026-09-08 fix had been installed with `systemctl --user
 set-property --runtime`, and systemd resets a --runtime drop-in when the unit
 stops, which is exactly what an oomd kill does. The protection uninstalled
 itself on the one event it exists for, and for a week the only evidence was a
 desktop that kept freezing.
+
+Two cgroups are checked, because since v0.101.27 they carry different halves
+of the answer. app-claudesessions.slice holds every CLI, shell, dotnet and
+Roslyn process and must read 20, which is the number that keeps a compile farm
+off the desktop. claude-bot.service holds only the supervisor and must read
+the default 100: a ~250 MB asyncio loop that has to answer Discord inside
+three seconds gains the desktop nothing by being starved and loses the bot its
+gateway connection.
 
 Nothing would have caught that. `systemctl show` reported 20, because by then
 the drop-in agreed again; the unit files said 20 throughout, because they
@@ -39,24 +48,35 @@ async def check_and_report(bot: ClaudeBot) -> bool:
     nothing could be measured: an unmeasurable machine is not a broken one,
     and a warning nobody can act on is worse than silence.
     """
-    try:
-        check = cgroups.check_weights()
-    except Exception:
-        log.exception("Resource weight check failed")
+    checks = []
+    for read in (cgroups.check_weights, cgroups.check_session_slice_weights):
+        try:
+            checks.append(read())
+        except Exception:
+            # One unreadable cgroup must not cost the other its check. Same
+            # rule as everywhere else here: what cannot be measured is not a
+            # finding.
+            log.exception("Resource weight check failed")
+
+    bad = [c for c in checks if not c.ok()]
+    for check in checks:
+        if check.ok():
+            log.info("Resource protection check: %s", check.summary())
+    if not bad:
         return True
 
-    if check.ok():
-        log.info("Resource protection check: %s", check.summary())
-        return True
-
-    text = check.warning_text()
-    log.warning("Resource protection check: %s. %s", check.summary(), text)
+    for check in bad:
+        log.warning(
+            "Resource protection check: %s. %s",
+            check.summary(), check.warning_text(),
+        )
 
     if not bot._lobby_channel_id:
         return False
     channel = bot.get_channel(int(bot._lobby_channel_id))
     if channel is None or not hasattr(channel, "send"):
         return False
+    text = "\n\n".join(c.warning_text() for c in bad)
     try:
         await channel.send(f"⚠️ {text}")
     except Exception:

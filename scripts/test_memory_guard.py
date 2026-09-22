@@ -76,6 +76,7 @@ from __future__ import annotations
 import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
 
 import asyncio
+import contextlib
 import copy
 import os
 import re
@@ -1415,7 +1416,7 @@ def _pressure(
     memory.available_mb = lambda: avail            # type: ignore[assignment]
     memory.swap_used_pct = lambda: swap            # type: ignore[assignment]
     memory.psi_some_avg10 = lambda: psi            # type: ignore[assignment]
-    memory.cgroup_memory = lambda: memory.CgroupMemory(  # type: ignore[assignment]
+    memory.cgroup_memory = lambda cgroup=None: memory.CgroupMemory(  # type: ignore[assignment]
         anon_mb=anon, high_mb=high,
     )
     try:
@@ -2021,6 +2022,23 @@ async def _check_fleet_arbitration(failures: list[str]) -> None:
         config.SESSION_MEM_FLEET_ARBITRATION = saved
 
 
+@contextlib.contextmanager
+def _pinned_headroom(mb: float | None):
+    """Pin what the session slice's headroom reads for the duration.
+
+    The admission gate reads it live, so without this every case below would
+    depend on what the machine running the suite happens to be doing, and a
+    loaded laptop would turn "a healthy machine starts immediately" into a
+    failure that says nothing about the code.
+    """
+    saved = cgroups.slice_headroom_mb
+    cgroups.slice_headroom_mb = lambda: mb   # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        cgroups.slice_headroom_mb = saved   # type: ignore[assignment]
+
+
 async def _check_admission_gate(failures: list[str]) -> None:
     """A starving machine's answer to 'start another session' is not 'yes'."""
     instance = Instance(
@@ -2038,7 +2056,11 @@ async def _check_admission_gate(failures: list[str]) -> None:
         avail_mb=2000.0, level=memory.PRESSURE_TIGHT, reasons=("2.0 GB free",),
     )
 
-    async def drive(readings: list[memory.MemoryPressure], wait_secs: int, poll: int):
+    async def drive(
+        readings: list[memory.MemoryPressure], wait_secs: int, poll: int,
+        own_wait: int | None = None, notify: int | None = None,
+        headroom: float | None = 9000.0,
+    ):
         posts: list[tuple[str, str]] = []
         runner = ClaudeRunner()
         seq = list(readings)
@@ -2052,15 +2074,28 @@ async def _check_admission_gate(failures: list[str]) -> None:
         async def on_progress(headline, detail=""):
             posts.append((headline, detail))
 
-        saved = (config.MEM_ADMISSION_MAX_WAIT_SECS, config.MEM_ADMISSION_POLL_SECS)
+        saved = (
+            config.MEM_ADMISSION_MAX_WAIT_SECS,
+            config.MEM_ADMISSION_POLL_SECS,
+            config.MEM_ADMISSION_OWN_MAX_WAIT_SECS,
+            config.MEM_ADMISSION_NOTIFY_SECS,
+        )
         config.MEM_ADMISSION_MAX_WAIT_SECS = wait_secs
         config.MEM_ADMISSION_POLL_SECS = poll
+        config.MEM_ADMISSION_OWN_MAX_WAIT_SECS = (
+            wait_secs if own_wait is None else own_wait
+        )
+        if notify is not None:
+            config.MEM_ADMISSION_NOTIFY_SECS = notify
         started = time.monotonic()
         try:
-            await runner._await_memory_headroom(instance, on_progress)
+            with _pinned_headroom(headroom):
+                await runner._await_memory_headroom(instance, on_progress)
         finally:
             (config.MEM_ADMISSION_MAX_WAIT_SECS,
-             config.MEM_ADMISSION_POLL_SECS) = saved
+             config.MEM_ADMISSION_POLL_SECS,
+             config.MEM_ADMISSION_OWN_MAX_WAIT_SECS,
+             config.MEM_ADMISSION_NOTIFY_SECS) = saved
         return posts, time.monotonic() - started
 
     # A machine with room starts the session immediately and says nothing.
@@ -2128,9 +2163,10 @@ async def _check_admission_gate(failures: list[str]) -> None:
     config.MEM_ADMISSION_POLL_SECS = 1
     try:
         started = time.monotonic()
-        await asyncio.wait_for(
-            runner._await_memory_headroom(instance, None), timeout=10,
-        )
+        with _pinned_headroom(9000.0):
+            await asyncio.wait_for(
+                runner._await_memory_headroom(instance, None), timeout=10,
+            )
         held = time.monotonic() - started
     except asyncio.TimeoutError:
         held = 999.0
@@ -2151,6 +2187,151 @@ async def _check_admission_gate(failures: list[str]) -> None:
     if "0 min" in joined:
         failures.append(
             f"a short admission wait was described as '0 min': {joined!r}"
+        )
+
+    # --- Whose shortage is it? -----------------------------------------
+    #
+    # Pressure the bot created clears when a running session finishes, so
+    # waiting for it is waiting for something that reliably happens. Pressure
+    # it did not create may never clear. Proceeding anyway under our own
+    # pressure is what manufactured the 2026-09-22 oomd kill, so the two get
+    # very different deadlines.
+    # Our sessions carry 45 of the slice's 50% stall, so this one is ours.
+    ours = memory.MemoryPressure(
+        avail_mb=9000.0, slice_psi_pct=50.0, own_psi_pct=45.0,
+        oomd_limit_pct=70.0,
+        oomd_level=memory.PRESSURE_TIGHT, level=memory.PRESSURE_TIGHT,
+        reasons=("the session slice is at 50% of the stall limit oomd kills on",),
+    )
+    with _pinned_headroom(9000.0):
+        block = ClaudeRunner()._admission_blocked(ours)
+    if block is None or not block.ours:
+        failures.append(
+            "a slice stall our own sessions are carrying was not classified "
+            f"as the bot's own doing: {block!r}"
+        )
+    with _pinned_headroom(9000.0):
+        block = ClaudeRunner()._admission_blocked(crisis)
+    if block is None or block.ours:
+        failures.append(
+            "a machine-wide shortage with our cgroup well under its watermark "
+            f"was blamed on the bot: {block!r}"
+        )
+
+    # The trap this classification has to avoid. The oomd verdict is the stall
+    # in the *parent* slice, which holds the browser and the desktop too, so
+    # reading `ours` off it hands a foreign shortage our own long deadline and
+    # blocks work for half an hour on something that will never clear. Same
+    # numbers as `ours` above, except our own cgroup is barely stalling.
+    foreign = memory.MemoryPressure(
+        avail_mb=9000.0, slice_psi_pct=50.0, own_psi_pct=2.0,
+        oomd_limit_pct=70.0,
+        oomd_level=memory.PRESSURE_TIGHT, level=memory.PRESSURE_TIGHT,
+        reasons=("the slice is stalling at 50% of a 70% oomd kill limit",),
+    )
+    with _pinned_headroom(9000.0):
+        block = ClaudeRunner()._admission_blocked(foreign)
+    if block is None:
+        failures.append("oomd-tight pressure did not hold a session start")
+    elif block.ours:
+        failures.append(
+            "a slice stall our own sessions are not causing was blamed on the "
+            f"bot; a browser's shortage now blocks work for half an hour: {block!r}"
+        )
+
+    # Out of session budget is ours by definition, whatever the stall says.
+    with _pinned_headroom(100.0):
+        block = ClaudeRunner()._admission_blocked(foreign)
+    if block is None or not block.ours:
+        failures.append(
+            "the session slice being out of budget was not the bot's own "
+            f"doing: {block!r}"
+        )
+    # And it holds even when no pressure rule fired at all.
+    with _pinned_headroom(100.0):
+        block = ClaudeRunner()._admission_blocked(calm)
+    if block is None or not block.ours:
+        failures.append(
+            f"a session started with the slice budget nearly spent: {block!r}"
+        )
+    # A slice that cannot be measured must not refuse work.
+    with _pinned_headroom(None):
+        block = ClaudeRunner()._admission_blocked(calm)
+    if block is not None:
+        failures.append(
+            f"an unreadable slice budget blocked a healthy machine: {block!r}"
+        )
+
+    # Our own pressure outlasts the short bound and still releases.
+    posts, elapsed = await drive([ours, ours, ours, calm], 1, 1, own_wait=30)
+    joined = " ".join(" ".join(p) for p in posts)
+    if "never freed up" in joined:
+        failures.append(
+            "a hold on the bot's own memory pressure gave up after the "
+            "foreign-pressure bound and started anyway; starting one more "
+            "session into our own slice pressure is what gets it oomd-killed"
+        )
+    if "freed up" not in joined:
+        failures.append(
+            f"an own-pressure hold never reported that it released: {posts!r}"
+        )
+    if elapsed > 20.0:
+        failures.append(f"an own-pressure hold that should clear took {elapsed:.1f}s")
+
+    # Foreign pressure keeps the short bound, even with a long own-budget set.
+    posts, elapsed = await drive([crisis], 2, 1, own_wait=60)
+    if elapsed > 12.0:
+        failures.append(
+            f"a foreign-pressure hold ran {elapsed:.1f}s against a 2s bound; "
+            "a browser eating the machine must not block work for the "
+            "own-pressure budget"
+        )
+
+    # A Kill during the long own-pressure hold still ends it immediately.
+    runner = ClaudeRunner()
+    runner._read_pressure = lambda: ours   # type: ignore[assignment]
+    runner._reclaim_idle_daemons = no_reclaim   # type: ignore[assignment]
+    runner._intentional_kills.add(instance.id)
+    saved_wait = (
+        config.MEM_ADMISSION_MAX_WAIT_SECS,
+        config.MEM_ADMISSION_POLL_SECS,
+        config.MEM_ADMISSION_OWN_MAX_WAIT_SECS,
+    )
+    config.MEM_ADMISSION_MAX_WAIT_SECS = 60
+    config.MEM_ADMISSION_POLL_SECS = 1
+    config.MEM_ADMISSION_OWN_MAX_WAIT_SECS = 600
+    try:
+        started = time.monotonic()
+        with _pinned_headroom(9000.0):
+            await asyncio.wait_for(
+                runner._await_memory_headroom(instance, None), timeout=10,
+            )
+        held = time.monotonic() - started
+    except asyncio.TimeoutError:
+        held = 999.0
+    finally:
+        (config.MEM_ADMISSION_MAX_WAIT_SECS,
+         config.MEM_ADMISSION_POLL_SECS,
+         config.MEM_ADMISSION_OWN_MAX_WAIT_SECS) = saved_wait
+        runner._intentional_kills.discard(instance.id)
+    if held > 2.0:
+        failures.append(
+            f"a Kill during a long own-pressure hold was ignored for "
+            f"{held:.0f}s; the longer wait must not cost the Kill button"
+        )
+
+    # A long hold keeps talking. One message and then half an hour of silence
+    # is indistinguishable from a thread that died.
+    posts, _ = await drive([ours] * 6 + [calm], 1, 1, own_wait=30, notify=1)
+    if len(posts) < 3:
+        failures.append(
+            f"a multi-poll hold posted {len(posts)} messages; a thirty-minute "
+            "wait that says nothing after the first line reads as a dead thread"
+        )
+    joined = " ".join(" ".join(p) for p in posts)
+    if "Still waiting" not in joined:
+        failures.append(
+            f"the hold refresh does not say it is still waiting: {posts!r}"
         )
 
     # Switched off means off.
@@ -2602,9 +2783,9 @@ def _oomd_pressure(
     memory.available_mb = lambda: avail                      # type: ignore[assignment]
     memory.swap_used_pct = lambda: swap                      # type: ignore[assignment]
     memory.psi_some_avg10 = lambda: psi                      # type: ignore[assignment]
-    memory.cgroup_memory = lambda: memory.CgroupMemory()     # type: ignore[assignment]
+    memory.cgroup_memory = lambda cgroup=None: memory.CgroupMemory()   # type: ignore[assignment]
     memory.slice_cgroup_psi_avg10 = lambda: slice_psi        # type: ignore[assignment]
-    memory.own_cgroup_psi_avg10 = lambda: own_psi            # type: ignore[assignment]
+    memory.own_cgroup_psi_avg10 = lambda cgroup=None: own_psi          # type: ignore[assignment]
     try:
         return memory.read_pressure(
             critical_avail_mb=1024.0, tight_avail_mb=2560.0,
@@ -2738,13 +2919,18 @@ def _check_weight_selfcheck(failures: list[str]) -> None:
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         saved = memory._own_cgroup_path
+        want_cpu = config.RESOURCE_CPU_WEIGHT_EXPECTED
+        want_io = config.RESOURCE_IO_WEIGHT_EXPECTED
+        wrong = 20 if want_cpu != 20 else 100
         try:
             # io.weight really is spelled "default N"; cpu.weight is bare.
-            (root / "cpu.weight").write_text("20\n", encoding="utf-8")
-            (root / "io.weight").write_text("default 20\n", encoding="utf-8")
+            (root / "cpu.weight").write_text(f"{want_cpu}\n", encoding="utf-8")
+            (root / "io.weight").write_text(
+                f"default {want_io}\n", encoding="utf-8",
+            )
             memory._own_cgroup_path = lambda: root   # type: ignore[assignment]
             good = cgroups.check_weights()
-            if good.cpu_live != 20 or good.io_live != 20:
+            if good.cpu_live != want_cpu or good.io_live != want_io:
                 failures.append(
                     f"live weights parsed as cpu={good.cpu_live!r} "
                     f"io={good.io_live!r}; io.weight's 'default N' spelling is "
@@ -2755,18 +2941,27 @@ def _check_weight_selfcheck(failures: list[str]) -> None:
                     f"matching weights were reported as wrong: {good.summary()}"
                 )
 
-            # The regression itself.
-            (root / "cpu.weight").write_text("100\n", encoding="utf-8")
-            (root / "io.weight").write_text("default 100\n", encoding="utf-8")
+            # The regression itself: the cgroup disagreeing with the unit file.
+            # The numbers swapped places on 2026-09-22 (the supervisor now runs
+            # at the default and the sessions slice carries the 20), so the
+            # case is written against the configured value rather than against
+            # a literal, which is what let it keep testing the same property.
+            (root / "cpu.weight").write_text(f"{wrong}\n", encoding="utf-8")
+            (root / "io.weight").write_text(
+                f"default {wrong}\n", encoding="utf-8",
+            )
             bad = cgroups.check_weights()
             if bad.ok():
                 failures.append(
-                    "weights of 100 against an expected 20 were reported as "
-                    "fine; this is the exact state the machine was in for a "
-                    "week and nothing noticed"
+                    f"a live weight of {wrong} against an expected {want_cpu} "
+                    "was reported as fine; a cgroup disagreeing with the unit "
+                    "file is the exact state the machine was in for a week "
+                    "with nothing noticing"
                 )
             text = bad.warning_text()
-            for needed in ("100", "20", "cpu.weight", "io.weight", "drop-in"):
+            for needed in (
+                str(wrong), str(want_cpu), "cpu.weight", "io.weight", "drop-in",
+            ):
                 if needed not in text:
                     failures.append(
                         f"the weight warning does not name {needed!r}, so it "
@@ -2800,6 +2995,128 @@ def _check_weight_selfcheck(failures: list[str]) -> None:
     live = cgroups.check_weights()
     if not live.ok():
         print(f"NOTE: {live.summary()} -- {live.warning_text()}")
+
+
+def _check_slice_weight_selfcheck(failures: list[str]) -> None:
+    """The 20 moved to the sessions slice, so the check has to follow it.
+
+    Until 2026-09-22 the only weight anything verified was the supervisor's,
+    which is now the one where a wrong reading costs the least. The number
+    that keeps a compile farm off the desktop lives on
+    app-claudesessions.slice and had nothing looking at it at all.
+    """
+    want_cpu = config.SESSION_SLICE_CPU_WEIGHT_EXPECTED
+    want_io = config.SESSION_SLICE_IO_WEIGHT_EXPECTED
+    wrong = 100 if want_cpu != 100 else 20
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        saved = cgroups.session_slice_path
+        try:
+            cgroups.session_slice_path = lambda: root   # type: ignore[assignment]
+            (root / "cpu.weight").write_text(f"{want_cpu}\n", encoding="utf-8")
+            (root / "io.weight").write_text(
+                f"default {want_io}\n", encoding="utf-8",
+            )
+            good = cgroups.check_session_slice_weights()
+            if not good.ok() or good.warning_text():
+                failures.append(
+                    f"a correctly weighted sessions slice was reported as "
+                    f"wrong: {good.summary()}"
+                )
+
+            (root / "cpu.weight").write_text(f"{wrong}\n", encoding="utf-8")
+            bad = cgroups.check_session_slice_weights()
+            if bad.ok():
+                failures.append(
+                    f"the sessions slice at cpu.weight={wrong} against an "
+                    f"expected {want_cpu} was reported as fine; that is the "
+                    "2026-09-08 incident with nothing watching for it"
+                )
+            text = bad.warning_text()
+            if config.SESSION_SLICE not in text:
+                failures.append(
+                    "the slice weight warning does not name the slice, so it "
+                    f"reads as the supervisor's: {text!r}"
+                )
+            if "claude-bot.service" in text:
+                failures.append(
+                    "the slice weight warning sends the reader to the "
+                    f"supervisor's drop-ins, which are not the fault: {text!r}"
+                )
+
+            # Unreadable is not wrong, same rule as the supervisor's check.
+            (root / "cpu.weight").unlink()
+            (root / "io.weight").unlink()
+            blank = cgroups.check_session_slice_weights()
+            if not blank.ok() or blank.warning_text():
+                failures.append(
+                    "an unreadable sessions slice was reported as a mismatch: "
+                    f"{blank.summary()}"
+                )
+        finally:
+            cgroups.session_slice_path = saved         # type: ignore[assignment]
+
+    # A machine with no sessions slice at all is a pass: it runs sessions the
+    # way it did before scopes existed, and a warning about a slice nothing
+    # uses is noise.
+    saved = cgroups.session_slice_path
+    try:
+        cgroups.session_slice_path = lambda: None      # type: ignore[assignment]
+        none = cgroups.check_session_slice_weights()
+        if not none.ok() or none.warning_text():
+            failures.append(
+                "a machine with no sessions slice was warned about its "
+                f"weights: {none.summary()}"
+            )
+    finally:
+        cgroups.session_slice_path = saved             # type: ignore[assignment]
+
+
+def _check_slice_headroom_line(failures: list[str]) -> None:
+    """Admission must measure the throttle line, not the hard cap.
+
+    memory.high is where the kernel starts reclaiming, and sustained reclaim
+    IS the stall pressure oomd kills on. Measuring against memory.max meant
+    the gate only engaged thousands of MB above the line, by which point the
+    kill it exists to prevent was already being decided. t-8711 died that way
+    on 2026-09-22.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        saved = cgroups.session_slice_path
+        try:
+            cgroups.session_slice_path = lambda: root   # type: ignore[assignment]
+            mb = 1024 * 1024
+            (root / "memory.high").write_text(str(11 * 1024 * mb), encoding="utf-8")
+            (root / "memory.max").write_text(str(14 * 1024 * mb), encoding="utf-8")
+            (root / "memory.current").write_text(str(10 * 1024 * mb), encoding="utf-8")
+            got = cgroups.slice_headroom_mb()
+            if got is None or abs(got - 1024) > 1:
+                failures.append(
+                    f"slice headroom read {got!r} against memory.high=11G, "
+                    "current=10G; anything near 4096 means it is still "
+                    "measuring the hard cap and the gate engages too late"
+                )
+
+            # No memory.high: fall back to the hard cap rather than going
+            # blind, which would switch the budget check off entirely.
+            (root / "memory.high").write_text("max\n", encoding="utf-8")
+            got = cgroups.slice_headroom_mb()
+            if got is None or abs(got - 4096) > 1:
+                failures.append(
+                    f"with memory.high unset the headroom read {got!r}; an "
+                    "unset soft limit must fall back to memory.max, not "
+                    "disable the check"
+                )
+
+            # Neither limit is no finding, never a refusal to work.
+            (root / "memory.max").write_text("max\n", encoding="utf-8")
+            if cgroups.slice_headroom_mb() is not None:
+                failures.append(
+                    "a slice with no limit at all reported a headroom figure"
+                )
+        finally:
+            cgroups.session_slice_path = saved         # type: ignore[assignment]
 
 
 def _check_session_slice_units(failures: list[str]) -> None:
@@ -2915,6 +3232,8 @@ async def _amain() -> int:
     _check_oomd_policy_parse(failures)
     _check_oomd_escalation(failures)
     _check_weight_selfcheck(failures)
+    _check_slice_weight_selfcheck(failures)
+    _check_slice_headroom_line(failures)
     _check_session_slice_units(failures)
     _check_over_own_high(failures)
     _check_orphan_detection(failures)
