@@ -335,10 +335,17 @@ class CgroupMemory:
         return max(0.0, self.max_mb - self.anon_mb)
 
 
-def cgroup_memory() -> CgroupMemory:
-    """Read the bot's own cgroup memory accounting. All fields None off Linux."""
+def cgroup_memory(cgroup: Path | None = None) -> CgroupMemory:
+    """Read a cgroup's memory accounting. All fields None off Linux.
+
+    ``cgroup`` defaults to the calling process's own. The caller passes one in
+    when the processes it is asking about do not live here: since v0.101.27 the
+    sessions run in scopes under their own slice, so the supervisor's cgroup
+    holds the asyncio loop and nothing else, and reading it to answer "are our
+    sessions filling this" measures the wrong process set.
+    """
     out = CgroupMemory()
-    cg = _own_cgroup_path()
+    cg = cgroup or _own_cgroup_path()
     if cg is None:
         return out
     max_bytes = _read_int(cg / "memory.max")
@@ -547,9 +554,14 @@ def parent_slice_path() -> Path | None:
     return parent if parent.is_dir() and parent != cg else None
 
 
-def own_cgroup_psi_avg10() -> float | None:
-    """Memory stall inside the bot's own cgroup: are we the cause?"""
-    return _cgroup_psi_some_avg10(_own_cgroup_path())
+def own_cgroup_psi_avg10(cgroup: Path | None = None) -> float | None:
+    """Memory stall inside the cgroup our work runs in: are we the cause?
+
+    Defaults to the calling process's own cgroup, and takes an override for
+    the same reason ``cgroup_memory`` does: the workload moved out from under
+    the supervisor when sessions got their own scopes.
+    """
+    return _cgroup_psi_some_avg10(cgroup or _own_cgroup_path())
 
 
 def slice_cgroup_psi_avg10() -> float | None:
@@ -714,7 +726,8 @@ class MemoryPressure:
     cgroup_anon_mb: float | None = None
     cgroup_high_mb: float | None = None
     # The oomd-relative readings. `slice_psi_pct` is the number oomd acts on;
-    # `own_psi_pct` is our share of causing it; `oomd_limit_pct` is the stall
+    # `own_psi_pct` is the same reading taken on the cgroup our sessions run
+    # in, which is our share of causing it; `oomd_limit_pct` is the stall
     # percentage at which oomd starts killing. All None when the oomd path
     # stood down, which is what keeps the whole feature inert off Linux and on
     # a machine where oomd is not managing our slice.
@@ -737,12 +750,15 @@ class MemoryPressure:
         return pressure_at_least(self.level, floor)
 
     def over_own_high(self) -> bool:
-        """True when the bot's own cgroup is past its MemoryHigh watermark.
+        """True when the cgroup our work runs in is past its MemoryHigh watermark.
 
         This is the "are we the problem" bit. Crossing MemoryHigh does not kill
-        anything — the kernel throttles and reclaims — so on its own it is not a
+        anything: the kernel throttles and reclaims. So on its own it is not a
         crisis. Combined with machine-wide pressure it is the difference between
         "our sessions did this" and "a browser did this to our sessions".
+
+        Which cgroup that is depends on the machine, and getting it wrong makes
+        this answer no forever: see ``read_pressure``'s ``own_cgroup``.
         """
         if self.cgroup_anon_mb is None or self.cgroup_high_mb is None:
             return False
@@ -751,6 +767,25 @@ class MemoryPressure:
     def oomd_at_least(self, floor: str) -> bool:
         """True when the oomd-relative rule alone reached ``floor`` or worse."""
         return pressure_at_least(self.oomd_level, floor)
+
+    def stall_is_ours(self) -> bool | None:
+        """Is our own workload carrying most of the slice's stall? None if unknown.
+
+        The slice holds the bot plus every other app the user is running, so
+        the same slice figure means "stop starting sessions" or "there is
+        nothing we can do about this" depending on the answer. Half is a
+        deliberately loose bar: our cgroup is one member of the slice, so
+        carrying half of its stall already makes us the largest single
+        contributor by a wide margin.
+
+        None, never False, when either reading is missing or the slice is not
+        stalling at all: "we are not the cause" and "it cannot be told" are
+        opposite facts, and the admission gate treats only the first as
+        evidence that waiting is pointless.
+        """
+        if self.own_psi_pct is None or not self.slice_psi_pct:
+            return None
+        return self.own_psi_pct >= self.slice_psi_pct * 0.5
 
     def summary(self) -> str:
         """One line for the log, e.g. ``critical: 0.6GB free, swap 99%, psi 61%``."""
@@ -815,12 +850,20 @@ def read_pressure(
     oomd_limit_pct: float | None = None,
     oomd_tight_fraction: float = 0.6,
     oomd_critical_fraction: float = 0.8,
+    own_cgroup: Path | None = None,
 ) -> MemoryPressure:
     """Take every reading available and reduce them to one verdict.
 
     Thresholds are arguments rather than config reads so the harness can drive
     the classifier at fixed numbers instead of through the environment; the
     runner passes the configured values in.
+
+    ``own_cgroup`` is where the bot's *work* runs, which is not where the bot
+    itself runs: the two "are we the ones filling this" readings
+    (``own_psi_pct``, and the cgroup accounting behind ``over_own_high``) are
+    taken there. The runner passes the sessions slice; None falls back to this
+    process's own cgroup, which is where the sessions run on a machine that
+    cannot make scopes.
 
     The rules, and why each one is where it is:
 
@@ -854,8 +897,8 @@ def read_pressure(
     if oomd_limit_pct and oomd_limit_pct > 0:
         out.oomd_limit_pct = oomd_limit_pct
         out.slice_psi_pct = slice_cgroup_psi_avg10()
-        out.own_psi_pct = own_cgroup_psi_avg10()
-    cg = cgroup_memory()
+        out.own_psi_pct = own_cgroup_psi_avg10(own_cgroup)
+    cg = cgroup_memory(own_cgroup)
     out.cgroup_anon_mb = cg.anon_mb
     out.cgroup_high_mb = cg.high_mb
 
@@ -906,16 +949,14 @@ def read_pressure(
     if out.slice_psi_pct is not None and out.oomd_limit_pct:
         crit_at = out.oomd_limit_pct * oomd_critical_fraction
         tight_at = out.oomd_limit_pct * oomd_tight_fraction
-        # Which of us is doing the stalling. The slice holds the bot plus
-        # every other app the user is running, so the same slice figure means
-        # "stop starting sessions" or "there is nothing we can do about this"
-        # depending on the answer, and the hold message quotes it either way.
-        # Half is a deliberately loose bar: our cgroup is one member of the
-        # slice, so carrying half of its stall already makes us the largest
-        # single contributor by a wide margin.
-        if out.own_psi_pct is None:
+        # Which of us is doing the stalling. The hold message quotes this
+        # either way, and the admission gate reads the same predicate to
+        # decide how long it is worth waiting, so there is one implementation
+        # of it on MemoryPressure rather than a copy here.
+        ours = out.stall_is_ours()
+        if ours is None:
             blame = ""
-        elif out.own_psi_pct >= out.slice_psi_pct * 0.5:
+        elif ours:
             blame = " and it is mostly our own sessions"
         else:
             blame = " and it is mostly not us"

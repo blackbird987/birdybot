@@ -76,6 +76,7 @@ from __future__ import annotations
 import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
 
 import asyncio
+import contextlib
 import copy
 import os
 import re
@@ -1415,7 +1416,7 @@ def _pressure(
     memory.available_mb = lambda: avail            # type: ignore[assignment]
     memory.swap_used_pct = lambda: swap            # type: ignore[assignment]
     memory.psi_some_avg10 = lambda: psi            # type: ignore[assignment]
-    memory.cgroup_memory = lambda: memory.CgroupMemory(  # type: ignore[assignment]
+    memory.cgroup_memory = lambda cgroup=None: memory.CgroupMemory(  # type: ignore[assignment]
         anon_mb=anon, high_mb=high,
     )
     try:
@@ -2021,6 +2022,23 @@ async def _check_fleet_arbitration(failures: list[str]) -> None:
         config.SESSION_MEM_FLEET_ARBITRATION = saved
 
 
+@contextlib.contextmanager
+def _pinned_headroom(mb: float | None):
+    """Pin what the session slice's headroom reads for the duration.
+
+    The admission gate reads it live, so without this every case below would
+    depend on what the machine running the suite happens to be doing, and a
+    loaded laptop would turn "a healthy machine starts immediately" into a
+    failure that says nothing about the code.
+    """
+    saved = cgroups.slice_headroom_mb
+    cgroups.slice_headroom_mb = lambda: mb   # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        cgroups.slice_headroom_mb = saved   # type: ignore[assignment]
+
+
 async def _check_admission_gate(failures: list[str]) -> None:
     """A starving machine's answer to 'start another session' is not 'yes'."""
     instance = Instance(
@@ -2041,6 +2059,7 @@ async def _check_admission_gate(failures: list[str]) -> None:
     async def drive(
         readings: list[memory.MemoryPressure], wait_secs: int, poll: int,
         own_wait: int | None = None, notify: int | None = None,
+        headroom: float | None = 9000.0,
     ):
         posts: list[tuple[str, str]] = []
         runner = ClaudeRunner()
@@ -2070,7 +2089,8 @@ async def _check_admission_gate(failures: list[str]) -> None:
             config.MEM_ADMISSION_NOTIFY_SECS = notify
         started = time.monotonic()
         try:
-            await runner._await_memory_headroom(instance, on_progress)
+            with _pinned_headroom(headroom):
+                await runner._await_memory_headroom(instance, on_progress)
         finally:
             (config.MEM_ADMISSION_MAX_WAIT_SECS,
              config.MEM_ADMISSION_POLL_SECS,
@@ -2143,9 +2163,10 @@ async def _check_admission_gate(failures: list[str]) -> None:
     config.MEM_ADMISSION_POLL_SECS = 1
     try:
         started = time.monotonic()
-        await asyncio.wait_for(
-            runner._await_memory_headroom(instance, None), timeout=10,
-        )
+        with _pinned_headroom(9000.0):
+            await asyncio.wait_for(
+                runner._await_memory_headroom(instance, None), timeout=10,
+            )
         held = time.monotonic() - started
     except asyncio.TimeoutError:
         held = 999.0
@@ -2175,22 +2196,70 @@ async def _check_admission_gate(failures: list[str]) -> None:
     # it did not create may never clear. Proceeding anyway under our own
     # pressure is what manufactured the 2026-09-22 oomd kill, so the two get
     # very different deadlines.
+    # Our sessions carry 45 of the slice's 50% stall, so this one is ours.
     ours = memory.MemoryPressure(
-        avail_mb=9000.0, slice_psi_pct=50.0, oomd_limit_pct=70.0,
+        avail_mb=9000.0, slice_psi_pct=50.0, own_psi_pct=45.0,
+        oomd_limit_pct=70.0,
         oomd_level=memory.PRESSURE_TIGHT, level=memory.PRESSURE_TIGHT,
         reasons=("the session slice is at 50% of the stall limit oomd kills on",),
     )
-    block = ClaudeRunner()._admission_blocked(ours)
+    with _pinned_headroom(9000.0):
+        block = ClaudeRunner()._admission_blocked(ours)
     if block is None or not block.ours:
         failures.append(
-            "slice pressure at 50% of the oomd kill limit was not classified "
+            "a slice stall our own sessions are carrying was not classified "
             f"as the bot's own doing: {block!r}"
         )
-    block = ClaudeRunner()._admission_blocked(crisis)
+    with _pinned_headroom(9000.0):
+        block = ClaudeRunner()._admission_blocked(crisis)
     if block is None or block.ours:
         failures.append(
             "a machine-wide shortage with our cgroup well under its watermark "
             f"was blamed on the bot: {block!r}"
+        )
+
+    # The trap this classification has to avoid. The oomd verdict is the stall
+    # in the *parent* slice, which holds the browser and the desktop too, so
+    # reading `ours` off it hands a foreign shortage our own long deadline and
+    # blocks work for half an hour on something that will never clear. Same
+    # numbers as `ours` above, except our own cgroup is barely stalling.
+    foreign = memory.MemoryPressure(
+        avail_mb=9000.0, slice_psi_pct=50.0, own_psi_pct=2.0,
+        oomd_limit_pct=70.0,
+        oomd_level=memory.PRESSURE_TIGHT, level=memory.PRESSURE_TIGHT,
+        reasons=("the slice is stalling at 50% of a 70% oomd kill limit",),
+    )
+    with _pinned_headroom(9000.0):
+        block = ClaudeRunner()._admission_blocked(foreign)
+    if block is None:
+        failures.append("oomd-tight pressure did not hold a session start")
+    elif block.ours:
+        failures.append(
+            "a slice stall our own sessions are not causing was blamed on the "
+            f"bot; a browser's shortage now blocks work for half an hour: {block!r}"
+        )
+
+    # Out of session budget is ours by definition, whatever the stall says.
+    with _pinned_headroom(100.0):
+        block = ClaudeRunner()._admission_blocked(foreign)
+    if block is None or not block.ours:
+        failures.append(
+            "the session slice being out of budget was not the bot's own "
+            f"doing: {block!r}"
+        )
+    # And it holds even when no pressure rule fired at all.
+    with _pinned_headroom(100.0):
+        block = ClaudeRunner()._admission_blocked(calm)
+    if block is None or not block.ours:
+        failures.append(
+            f"a session started with the slice budget nearly spent: {block!r}"
+        )
+    # A slice that cannot be measured must not refuse work.
+    with _pinned_headroom(None):
+        block = ClaudeRunner()._admission_blocked(calm)
+    if block is not None:
+        failures.append(
+            f"an unreadable slice budget blocked a healthy machine: {block!r}"
         )
 
     # Our own pressure outlasts the short bound and still releases.
@@ -2233,9 +2302,10 @@ async def _check_admission_gate(failures: list[str]) -> None:
     config.MEM_ADMISSION_OWN_MAX_WAIT_SECS = 600
     try:
         started = time.monotonic()
-        await asyncio.wait_for(
-            runner._await_memory_headroom(instance, None), timeout=10,
-        )
+        with _pinned_headroom(9000.0):
+            await asyncio.wait_for(
+                runner._await_memory_headroom(instance, None), timeout=10,
+            )
         held = time.monotonic() - started
     except asyncio.TimeoutError:
         held = 999.0
@@ -2713,9 +2783,9 @@ def _oomd_pressure(
     memory.available_mb = lambda: avail                      # type: ignore[assignment]
     memory.swap_used_pct = lambda: swap                      # type: ignore[assignment]
     memory.psi_some_avg10 = lambda: psi                      # type: ignore[assignment]
-    memory.cgroup_memory = lambda: memory.CgroupMemory()     # type: ignore[assignment]
+    memory.cgroup_memory = lambda cgroup=None: memory.CgroupMemory()   # type: ignore[assignment]
     memory.slice_cgroup_psi_avg10 = lambda: slice_psi        # type: ignore[assignment]
-    memory.own_cgroup_psi_avg10 = lambda: own_psi            # type: ignore[assignment]
+    memory.own_cgroup_psi_avg10 = lambda cgroup=None: own_psi          # type: ignore[assignment]
     try:
         return memory.read_pressure(
             critical_avail_mb=1024.0, tight_avail_mb=2560.0,

@@ -2190,10 +2190,35 @@ class ClaudeRunner:
                 oomd_limit_pct=limit,
                 oomd_tight_fraction=config.OOMD_TIGHT_FRACTION,
                 oomd_critical_fraction=config.OOMD_CRITICAL_FRACTION,
+                own_cgroup=self._workload_cgroup(),
             )
         except Exception:
             log.debug("Pressure read failed", exc_info=True)
             return memory.MemoryPressure()
+
+    @staticmethod
+    def _workload_cgroup() -> Path | None:
+        """The cgroup our sessions run in, or None to fall back to our own.
+
+        Every "are we the ones filling this" reading has to be taken where the
+        work is, and since v0.101.27 that is no longer where the bot is: the
+        sessions moved into scopes under their own slice, leaving the
+        supervisor's cgroup holding a ~250 MB asyncio loop. Both readings that
+        answer that question (``over_own_high`` and ``own_psi_pct``) would
+        otherwise measure the supervisor and answer no however much the fleet
+        was thrashing, switching off fleet arbitration and telling the user
+        "it is mostly not us" during a kill our own sessions caused.
+
+        None when there is no sessions slice, which covers both the machine
+        that cannot make scopes and the moment before the probe has run. In
+        both cases the sessions are inside the bot's own cgroup anyway, and
+        that is what ``read_pressure`` falls back to.
+        """
+        try:
+            return cgroups.session_slice_path()
+        except Exception:
+            log.debug("Sessions slice lookup failed", exc_info=True)
+            return None
 
     def _admission_blocked(
         self, pressure: memory.MemoryPressure,
@@ -2207,42 +2232,68 @@ class ClaudeRunner:
         waiting on, and a second copy of that judgement in the loop is how the
         two start disagreeing.
 
-        ``ours`` means the bot's own sessions are what is filling the machine:
-        the session slice is out of budget, the slice is approaching the stall
-        percentage oomd kills it on, or our own cgroup is past its MemoryHigh
-        watermark. That distinction decides how long the hold is willing to
-        wait, because only one of the two clears by itself: a running session
-        finishes, a browser holding 6 GB does not.
+        ``ours`` means the bot's own sessions are what is filling the machine.
+        That distinction decides how long the hold is willing to wait, because
+        only one of the two clears by itself: a running session finishes, a
+        browser holding 6 GB does not. It is deliberately **not** read off the
+        oomd verdict, which is the tempting shortcut and the wrong one: that
+        number is the stall in the parent slice, which holds the browser, the
+        desktop and everything else the user is running, so blaming ourselves
+        for it would give a foreign shortage our own long deadline. Readings
+        taken on cgroups we actually own answer it instead, any one of which
+        is enough, and they cover each other's blind spots:
+
+        * The session slice is out of budget. Measured directly, and the
+          sharpest signal there is, but it exists only on a machine that can
+          make scopes.
+        * Our workload cgroup is over its MemoryHigh watermark, or is carrying
+          at least half the parent slice's stall. These come from the pressure
+          read, which takes them on the sessions slice where there is one and
+          on the bot's own cgroup where there is not, so they still answer on
+          the fallback path that has no slice to measure.
+
+        Neither can see a shortage, so a machine where nothing is readable
+        classifies as not-ours and gets the short deadline. That is the right
+        way round: proceeding is the safe default when there is no evidence to
+        wait on.
         """
+        floor = config.MEM_ADMISSION_MIN_SLICE_HEADROOM_MB
+        headroom = self._slice_headroom_mb() if floor > 0 else None
+        # None means the slice has no limit, or the files would not read.
+        # Treated as no finding, the same rule every pressure reader here
+        # follows: a budget check that cannot measure must not refuse work.
+        out_of_budget = headroom is not None and headroom < floor
+        ours = (
+            out_of_budget
+            or pressure.over_own_high()
+            or bool(pressure.stall_is_ours())
+        )
         if pressure.is_critical():
             return AdmissionBlock(
-                pressure.human() or "the machine is out of memory",
-                ours=(
-                    pressure.oomd_at_least(memory.PRESSURE_TIGHT)
-                    or pressure.over_own_high()
-                ),
+                pressure.human() or "the machine is out of memory", ours,
             )
         if pressure.oomd_at_least(memory.PRESSURE_TIGHT):
             return AdmissionBlock(
-                pressure.human() or "this unit is close to being killed",
+                pressure.human() or "this unit is close to being killed", ours,
+            )
+        # The `headroom is not None` half is implied by out_of_budget and is
+        # repeated so the formatting below cannot be read as dividing a None.
+        if out_of_budget and headroom is not None:
+            return AdmissionBlock(
+                f"the session budget has {headroom / 1024:.1f} GB left, "
+                f"under the {floor / 1024:.1f} GB needed to start one more",
                 ours=True,
             )
-        floor = config.MEM_ADMISSION_MIN_SLICE_HEADROOM_MB
-        if floor > 0:
-            try:
-                headroom = cgroups.slice_headroom_mb()
-            except Exception:
-                headroom = None
-            # None means the slice has no limit, or the files would not read.
-            # Treated as no finding, the same rule every pressure reader here
-            # follows: a budget check that cannot measure must not refuse work.
-            if headroom is not None and headroom < floor:
-                return AdmissionBlock(
-                    f"the session budget has {headroom / 1024:.1f} GB left, "
-                    f"under the {floor / 1024:.1f} GB needed to start one more",
-                    ours=True,
-                )
         return None
+
+    @staticmethod
+    def _slice_headroom_mb() -> float | None:
+        """Megabytes left under the session slice's soft ceiling, or None."""
+        try:
+            return cgroups.slice_headroom_mb()
+        except Exception:
+            log.debug("Slice headroom read failed", exc_info=True)
+            return None
 
     async def _await_memory_headroom(
         self,
@@ -2388,16 +2439,20 @@ class ClaudeRunner:
 
         # Bounded, so this is a normal outcome and not a failure. Say plainly
         # that the wait was given up on rather than implying it succeeded.
-        budget = format_delay_secs(_budget_secs(blocked))
+        # Elapsed, not the budget. The budget is recomputed from the *current*
+        # shortage and a hold that opened on our own pressure can end on a
+        # browser's, so quoting it would report a half-hour wait as five
+        # minutes (or the reverse) on exactly the runs worth understanding.
+        waited = format_delay_secs(int(asyncio.get_event_loop().time() - started))
         log.warning(
             "Starting %s anyway, still short after %s (%s)",
-            instance.id, budget, pressure.summary(),
+            instance.id, waited, pressure.summary(),
         )
         if told and on_progress:
             try:
                 await on_progress(
                     "Starting anyway — memory never freed up",
-                    f"Waited {budget} and "
+                    f"Waited {waited} and "
                     f"the machine is still short ({pressure.human()}). Starting "
                     f"regardless rather than blocking your work indefinitely — "
                     f"but expect this session to be slow, and consider closing "
@@ -3861,7 +3916,14 @@ class ClaudeRunner:
                             memory_kill_avail_mb = await asyncio.to_thread(
                                 memory.available_mb,
                             )
-                            cg = await asyncio.to_thread(memory.cgroup_memory)
+                            # The sessions slice where there is one, so the
+                            # line reports what the fleet is holding rather
+                            # than the supervisor's own ~250 MB.
+                            cg = await asyncio.to_thread(
+                                lambda: memory.cgroup_memory(
+                                    self._workload_cgroup(),
+                                ),
+                            )
                             log.error(
                                 "Memory limit for %s — %s over the %.1fGB "
                                 "ceiling; machine has %s free, cgroup anon "

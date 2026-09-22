@@ -1064,8 +1064,8 @@ Four things now exist because of that, and each one fails toward yesterday's
 behaviour if the machine will not support it.
 
 - **The guard reads oomd's own criterion.** `own_cgroup_psi_avg10` and
-  `slice_cgroup_psi_avg10` read `memory.pressure` in this cgroup and in the
-  parent slice; `read_oomd_policy` asks `systemctl --user show` what limit oomd
+  `slice_cgroup_psi_avg10` read `memory.pressure` in the cgroup our sessions
+  run in (see "Which cgroup is 'ours' moved" below) and in the parent slice; `read_oomd_policy` asks `systemctl --user show` what limit oomd
   is actually armed at, and `oomd_policy()` caches it. `read_pressure` escalates to TIGHT at
   `OOMD_TIGHT_FRACTION` (0.6) of that limit and CRITICAL at
   `OOMD_CRITICAL_FRACTION` (0.8), so 94.76% against an 80% limit is CRITICAL
@@ -1250,7 +1250,56 @@ for nothing, so that one still gives up quickly and starts regardless. Both
 still proceed in the end, neither blocks forever, and a Kill ends either
 immediately. A long hold re-posts every `MEM_ADMISSION_NOTIFY_SECS`, because a
 thread that said "waiting for memory" once and then went quiet for half an
-hour is indistinguishable from a thread that died.
+hour is indistinguishable from a thread that died. The message that gives up
+quotes **elapsed** time, not the deadline: the deadline is recomputed from the
+current shortage every pass, so a hold that opened on our own pressure and
+ended on a browser's would otherwise report half an hour as five minutes.
+
+**`ours` is never read off the oomd verdict**, which is the tempting shortcut
+and would invert the feature. That number is the stall in `app.slice`, which
+holds the browser, Plasma and Steam as well as us, so blaming ourselves for it
+hands every foreign shortage the 30-minute deadline and blocks work on
+something that will never clear. Three readings taken on cgroups we actually
+own answer it instead, any one of which is enough: the session slice being
+under `MEM_ADMISSION_MIN_SLICE_HEADROOM_MB`, our workload cgroup being over its
+`MemoryHigh`, and our workload cgroup carrying at least half the parent slice's
+stall (`MemoryPressure.stall_is_ours`, which is also where the "mostly our own
+sessions" half of the hold message comes from, so the sentence the user reads
+and the deadline they wait out cannot disagree). Nothing readable means
+not-ours and the short deadline, which is the right way round: proceeding is
+the safe default when there is no evidence worth waiting on.
+
+### Which cgroup is "ours" moved, and three readings did not follow it
+
+Every "are our own sessions doing this" reading was taken on the bot's own
+cgroup, and that was correct until v0.101.27 moved the sessions into scopes of
+their own. After it, `claude-bot.service` holds a ~250 MB asyncio loop, so
+`over_own_high()` and `own_psi_pct` measured the supervisor and answered **no**
+however hard the fleet was thrashing. Measured live on 2026-09-22: the
+supervisor's cgroup read 234 MB while the sessions slice read 3788 MB of an
+11 GB soft ceiling. Two things were silently dead as a result, and both are
+exactly what the incident needed:
+
+- **Cross-session arbitration.** `_fleet_arbitration` gates on
+  `is_critical() and over_own_high()`, so the rule that picks one session to
+  stop when the fleet together is filling the machine could not fire at all.
+- **The blame sentence.** `read_pressure` told the user "it is mostly not us"
+  during a shortage our own sessions had caused, and the admission hold quotes
+  that sentence verbatim.
+
+The fix is one parameter rather than a second set of readers:
+`memory.read_pressure(own_cgroup=...)` names the cgroup the *work* runs in, and
+passes it to `cgroup_memory` and `own_cgroup_psi_avg10`. `runner._workload_cgroup`
+supplies it from `cgroups.session_slice_path()`, and **None is the fallback, not
+an error**: a machine that cannot make scopes, or one where the probe has not
+run yet, runs its sessions inside the bot's own cgroup, which is precisely what
+the default reads. `parent_slice_path()` is deliberately untouched, so the pair
+stays "our fleet's stall against the stall of the slice oomd is armed on".
+
+The direction of the dependency is why this is a parameter at all:
+`bot/claude/cgroups.py` imports `memory`, so `memory` cannot ask it where the
+sessions slice is without closing a cycle. The runner already imports both and
+is the layer that knows whether scopes are in use, so the decision lives there.
 
 Knobs: `SESSION_SCOPES_ENABLED`, `SESSION_SLICE`, `SESSION_MEM_HIGH_MB`,
 `SESSION_MEM_HARD_MB`, `SESSION_SCOPE_ADOPT_SECS`,
