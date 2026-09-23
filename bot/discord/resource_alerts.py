@@ -17,6 +17,15 @@ the default 100: a ~250 MB asyncio loop that has to answer Discord inside
 three seconds gains the desktop nothing by being starved and loses the bot its
 gateway connection.
 
+A third check answers a different question, added after 2026-09-23. The two
+above ask whether the bot's own protections are applied. This one asks whether
+there is a ceiling on the *application tree* at all, because twice -- Sep 21
+and Sep 23 2026 -- the machine was killed by a leak that had nothing to do
+with the bot, and it took the whole box rather than one service for the same
+reason both times: app.slice read MemoryMax=infinity, so the kernel's global
+OOM killer chose from the entire task table. A missing ceiling is invisible
+until the machine dies, which is exactly the shape the checks here exist for.
+
 Nothing would have caught that. `systemctl show` reported 20, because by then
 the drop-in agreed again; the unit files said 20 throughout, because they
 always had. The one source that was wrong is the cgroup itself, which is what
@@ -42,21 +51,25 @@ log = logging.getLogger(__name__)
 
 
 async def check_and_report(bot: ClaudeBot) -> bool:
-    """Run the weight check, log it, and post to The Ark on a mismatch.
+    """Run the resource checks, log them, and post to The Ark on a mismatch.
 
     Returns True when everything is as intended, including the case where
     nothing could be measured: an unmeasurable machine is not a broken one,
     and a warning nobody can act on is worse than silence.
     """
     checks = []
-    for read in (cgroups.check_weights, cgroups.check_session_slice_weights):
+    for read in (
+        cgroups.check_weights,
+        cgroups.check_session_slice_weights,
+        cgroups.check_app_slice_ceiling,
+    ):
         try:
             checks.append(read())
         except Exception:
             # One unreadable cgroup must not cost the other its check. Same
             # rule as everywhere else here: what cannot be measured is not a
             # finding.
-            log.exception("Resource weight check failed")
+            log.exception("Resource protection check failed")
 
     bad = [c for c in checks if not c.ok()]
     for check in checks:

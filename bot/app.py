@@ -954,6 +954,28 @@ async def run() -> None:
                         asyncio.create_task(maybe_run_weekly(discord_bot))
                     except Exception:
                         log.exception("Prompt review scheduling failed")
+                # The supervisor's own footprint. Recorded, never acted on:
+                # see the note on SUPERVISOR_MEM_WARN_MB. Its own tick gate
+                # rather than the 5-minute one, because this is a log line
+                # for a curve read over days and a 5-minute cadence would
+                # bury the thing it is meant to make visible.
+                _sup_every = config.SUPERVISOR_MEM_LOG_MINS
+                if _sup_every > 0 and ticks % _sup_every == 0:
+                    try:
+                        from bot.claude import memory as _mem
+                        foot = _mem.supervisor_footprint()
+                        warn_at = config.SUPERVISOR_MEM_WARN_MB
+                        if warn_at > 0 and foot.rss_mb > warn_at and not foot.error:
+                            log.warning(
+                                "Supervisor footprint: %s (above the %.0fMB "
+                                "this is expected to stay under; nothing is "
+                                "being reaped, this is a note to look)",
+                                foot.summary(), warn_at,
+                            )
+                        else:
+                            log.info("Supervisor footprint: %s", foot.summary())
+                    except Exception:
+                        log.exception("Supervisor footprint read failed")
                 # Ship sweep every ~5 min, guarded against overlap (a fleet
                 # ship can run for minutes and may self-deploy/reboot).
                 if ticks % 5 == 0 and not sweep_running["v"]:

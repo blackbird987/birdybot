@@ -436,6 +436,58 @@ SESSION_SLICE_IO_WEIGHT_EXPECTED: int = int(
     os.getenv("SESSION_SLICE_IO_WEIGHT_EXPECTED", "20")
 )
 
+# --- The ceiling on the whole application tree ---
+#
+# Two ceilings below this one already exist: a per-session one and a per-slice
+# one for the fleet. Both bound what the bot does. Nothing bounded what the
+# rest of the machine does, and twice -- 2026-09-21 16:32 and 2026-09-23 02:07
+# -- a leaking service outside the bot entirely (smartmoney-api, at 13.2 GB
+# and then 10.6 GB) took the whole box down with a *global* kernel OOM. Global,
+# because app.slice and user@1000.service both read MemoryMax=infinity: there
+# was no cgroup limit to hit, so the kernel chose its victim from the entire
+# task table with the desktop in scope.
+#
+# scripts/app.slice.d/50-memory.conf installs the ceiling; these are the
+# numbers the startup self-check compares the *live cgroup files* against,
+# for exactly the reason the weight check reads cgroups and not unit files.
+# The failure this guards is not someone typing the wrong number, it is the
+# drop-in quietly not being there -- the shape of the 2026-09-21 incident,
+# where the protection uninstalled itself and nothing noticed for a week.
+#
+# A ceiling much larger than expected is a finding; a ceiling *smaller* than
+# expected is not, because a tighter limit is still a limit and someone may
+# have deliberately set one for a smaller machine. Only "no ceiling at all, or
+# one so high it cannot bind" is reported. 0 disables that half of the check.
+#
+# Sized for the 31.2 GiB this runs on, measured with ~3.1 GB living outside
+# app.slice (session.slice, system.slice, kernel slab, page tables). Keep in
+# step with scripts/app.slice.d/50-memory.conf.
+APP_SLICE_MEM_HIGH_GB_EXPECTED: float = float(
+    os.getenv("APP_SLICE_MEM_HIGH_GB_EXPECTED", "25")
+)
+APP_SLICE_MEM_MAX_GB_EXPECTED: float = float(
+    os.getenv("APP_SLICE_MEM_MAX_GB_EXPECTED", "27")
+)
+
+# --- Watching the watcher ---
+#
+# The supervisor is described throughout this repo as a ~250 MB asyncio loop,
+# and that number is load-bearing: it is the argument for why claude-bot.service
+# keeps the default CPU weight while the sessions slice carries 20, and for why
+# the supervisor's MemoryMax stays large rather than being sized to fit it. On
+# 2026-09-23 it was measured at 1.07 GB after 24 hours of uptime. Nobody could
+# say whether that was a working set or a leak, because nothing had ever
+# recorded the shape over time.
+#
+# So: one INFO line every SUPERVISOR_MEM_LOG_MINS minutes, giving `grep
+# 'Supervisor footprint' data/logs/bot.log` a growth curve, and a WARNING past
+# SUPERVISOR_MEM_WARN_MB. Nothing is reaped, restarted or capped on the back of
+# it -- killing the supervisor is the outcome the whole memory guard exists to
+# avoid, and a guard armed on a number we do not yet understand trades a slow
+# leak for an outage. 0 for either disables that half.
+SUPERVISOR_MEM_LOG_MINS: int = int(os.getenv("SUPERVISOR_MEM_LOG_MINS", "30"))
+SUPERVISOR_MEM_WARN_MB: float = float(os.getenv("SUPERVISOR_MEM_WARN_MB", "1536"))
+
 # --- Per-session cgroups: the supervisor must outlive the workload ---
 #
 # Sessions spawn inside a transient systemd scope in their own slice instead

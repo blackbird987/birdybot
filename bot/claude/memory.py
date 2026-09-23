@@ -1424,3 +1424,105 @@ def clear_oom_marker(data_dir: Path) -> None:
         os.unlink(data_dir / "last_oom.txt")
     except OSError:
         pass
+
+
+# --- The supervisor's own footprint ------------------------------------------
+#
+# Everything above measures the workload. Nothing measured the thing doing the
+# measuring, and on 2026-09-23, while diagnosing a machine-wide OOM, the
+# supervisor was found holding 1.07 GB of anonymous memory after 24 hours of
+# uptime -- against the ~250 MB this repo describes it as, in several places,
+# as the reason it is not worth deprioritising.
+#
+# That 4x is not by itself proof of a leak. A long-lived asyncio process with a
+# Discord cache, a megabyte-scale state file and hundreds of instance records
+# has a real working set, and a single reading cannot tell a large working set
+# from a slow leak. What settles it is the *shape over time*, which nothing was
+# recording -- so the answer to "is the supervisor leaking" was, and would have
+# stayed, "nobody can say".
+#
+# So this records rather than acts. It is deliberately not a guard: there is no
+# reap, no restart and no ceiling here, because killing the supervisor is the
+# outcome every other mechanism in this file exists to avoid, and arming one on
+# a number we do not yet understand is how you trade a slow leak for an outage.
+# One INFO line on a slow cadence gives `grep 'Supervisor footprint' bot.log`
+# a growth curve; the WARNING is a threshold on a number, not a verdict.
+
+
+@dataclass
+class SupervisorFootprint:
+    """The bot process's own resident memory, and how it has moved.
+
+    ``rss_mb`` is the supervisor *process*, deliberately, and not its cgroup.
+    The cgroup is the wrong subject twice over: it carries several gigabytes of
+    reclaimable page cache that is not a footprint at all, and on a machine
+    where session scopes are unavailable it also carries every session, which
+    is exactly the quantity this is trying to exclude.
+    """
+
+    rss_mb: float = 0.0
+    baseline_mb: float = 0.0
+    elapsed_hours: float = 0.0
+    error: str | None = None
+
+    @property
+    def growth_mb(self) -> float:
+        return self.rss_mb - self.baseline_mb
+
+    @property
+    def growth_mb_per_hour(self) -> float | None:
+        """``None`` until enough time has passed for a rate to mean anything.
+
+        A rate computed over the first few minutes of uptime measures start-up,
+        not a leak: caches fill, the Discord gateway backfills, the state file
+        loads. Reporting that as GB/hour would make every restart look like a
+        catastrophic leak.
+        """
+        if self.elapsed_hours < 0.5:
+            return None
+        return self.growth_mb / self.elapsed_hours
+
+    def summary(self) -> str:
+        if self.error:
+            return f"supervisor footprint: {self.error}"
+        bits = [f"{self.rss_mb:.0f}MB RSS"]
+        if self.baseline_mb:
+            bits.append(
+                f"{self.growth_mb:+.0f}MB since start "
+                f"({self.elapsed_hours:.1f}h)"
+            )
+        rate = self.growth_mb_per_hour
+        if rate is not None:
+            bits.append(f"{rate:+.0f}MB/h")
+        return ", ".join(bits)
+
+
+# Captured on the first reading rather than at import, so the baseline is a
+# started bot and not a half-built one. A module-level pair and not a class,
+# for the same reason the probe cache next door is: there is exactly one
+# supervisor per process and an instance to hold its history would only ever
+# have one.
+_sup_baseline: tuple[float, float] | None = None   # (mb, monotonic secs)
+
+
+def supervisor_footprint() -> SupervisorFootprint:
+    """Read the supervisor's own RSS and its drift since the first reading.
+
+    Never raises. An unreadable footprint is not a finding -- it is the same
+    rule every reader in this module follows, and there is nothing to act on
+    here even when the number *is* readable.
+    """
+    global _sup_baseline
+    out = SupervisorFootprint()
+    try:
+        import psutil
+        out.rss_mb = psutil.Process(os.getpid()).memory_info().rss / _MB
+    except Exception as exc:
+        out.error = f"unreadable ({type(exc).__name__})"
+        return out
+    now = time.monotonic()
+    if _sup_baseline is None:
+        _sup_baseline = (out.rss_mb, now)
+    out.baseline_mb, started = _sup_baseline
+    out.elapsed_hours = max(0.0, now - started) / 3600.0
+    return out

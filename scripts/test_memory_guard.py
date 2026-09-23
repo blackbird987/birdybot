@@ -3119,6 +3119,165 @@ def _check_slice_headroom_line(failures: list[str]) -> None:
             cgroups.session_slice_path = saved         # type: ignore[assignment]
 
 
+def _check_app_slice_ceiling(failures: list[str]) -> None:
+    """Layer 2: the ceiling on the whole application tree, and its self-check.
+
+    Added after 2026-09-21 and 2026-09-23, when a leak *outside the bot*
+    (smartmoney-api, 13.2 GB then 10.6 GB) killed the machine twice with a
+    global kernel OOM. Global because app.slice read MemoryMax=infinity: there
+    was no cgroup limit to reach, so the victim was chosen from the whole task
+    table with the desktop in scope.
+    """
+    dropin = REPO_ROOT / "scripts" / "app.slice.d" / "50-memory.conf"
+    if not dropin.exists():
+        failures.append(
+            "scripts/app.slice.d/50-memory.conf is missing. Without a ceiling "
+            "on app.slice, a leak anywhere under it takes the whole machine "
+            "rather than one service"
+        )
+        return
+    drop = dropin.read_text(encoding="utf-8")
+    high = _as_mb(_ini_value(drop, "MemoryHigh") or "")
+    hard = _as_mb(_ini_value(drop, "MemoryMax") or "")
+    if high is None or hard is None:
+        failures.append(
+            "the app.slice drop-in does not set both MemoryHigh and "
+            "MemoryMax. MemoryHigh only throttles; MemoryMax is the one that "
+            "makes the kill scoped instead of global"
+        )
+        return
+    if not high < hard:
+        failures.append(
+            f"the app.slice MemoryHigh ({high:.0f}MB) is not below its "
+            f"MemoryMax ({hard:.0f}MB)"
+        )
+
+    # The ladder has to nest: the fleet's own hard cap must sit below the
+    # tree's, or the tree's ceiling is reached first and oomd picks a victim
+    # from all of app.slice -- the browser, the desktop apps -- when the thing
+    # actually filling it was our sessions. Same arithmetic rule as the
+    # per-session ceiling against the slice budget.
+    sess = REPO_ROOT / "scripts" / f"{config.SESSION_SLICE}"
+    if sess.exists():
+        fleet_hard = _as_mb(_ini_value(sess.read_text(encoding="utf-8"), "MemoryMax") or "")
+        if fleet_hard is not None and fleet_hard >= hard:
+            failures.append(
+                f"the sessions slice MemoryMax ({fleet_hard:.0f}MB) is not "
+                f"below app.slice's ({hard:.0f}MB), so the tree's ceiling can "
+                "be reached before the fleet's and the victim is chosen from "
+                "every application on the machine"
+            )
+
+    # config and the shipped file must agree, for the same reason the weight
+    # expectations must match the unit files: the startup check compares the
+    # LIVE cgroup against config, so a config that has drifted from what we
+    # ship reports a correctly installed machine as broken.
+    for knob, want_gb, name in (
+        (high, config.APP_SLICE_MEM_HIGH_GB_EXPECTED, "MemoryHigh"),
+        (hard, config.APP_SLICE_MEM_MAX_GB_EXPECTED, "MemoryMax"),
+    ):
+        if want_gb and abs(knob / 1024.0 - want_gb) > 0.01:
+            failures.append(
+                f"scripts/app.slice.d/50-memory.conf sets {name}="
+                f"{knob / 1024.0:g}G but config expects {want_gb:g}G; the "
+                "startup check would report a correctly installed machine "
+                "as unprotected"
+            )
+
+    # The check itself. A tighter-than-asked ceiling is fine (still bounded);
+    # "max" is the finding, because that is the state both OOMs happened in.
+    from bot.claude.cgroups import CeilingCheck
+    gb = 1024 ** 3
+    absent = CeilingCheck(
+        high_live=-1, max_live=-1,
+        high_expected_gb=config.APP_SLICE_MEM_HIGH_GB_EXPECTED or 25,
+        max_expected_gb=config.APP_SLICE_MEM_MAX_GB_EXPECTED or 27,
+    )
+    if absent.ok():
+        failures.append(
+            "an app.slice with no ceiling at all passed the ceiling check"
+        )
+    elif "global OOM" not in absent.warning_text():
+        failures.append(
+            "the missing-ceiling warning does not explain that the kill "
+            "becomes global; the operator has to know why it matters"
+        )
+    tighter = CeilingCheck(
+        high_live=int(8 * gb), max_live=int(10 * gb),
+        high_expected_gb=25, max_expected_gb=27,
+    )
+    if not tighter.ok():
+        failures.append(
+            "a ceiling TIGHTER than expected was reported as a problem. "
+            "Tighter is still bounded, and a smaller machine may set one "
+            "deliberately"
+        )
+    unreadable = CeilingCheck(
+        error="ceilings unreadable",
+        high_expected_gb=25, max_expected_gb=27,
+    )
+    if not unreadable.ok():
+        failures.append(
+            "an unreadable cgroup was reported as a finding. What cannot be "
+            "measured is never a finding, here as everywhere else"
+        )
+
+    # Resolving the tree by NAME, not by depth. The first live run of this
+    # check reported app-claudesessions.slice, because it had asked for "the
+    # slice one level up" and was running inside a session scope.
+    src = (REPO_ROOT / "bot" / "claude" / "cgroups.py").read_text(encoding="utf-8")
+    if "def app_slice_path" not in src:
+        failures.append(
+            "cgroups has no app_slice_path(); resolving the tree as the "
+            "parent of our own cgroup reads the sessions slice when called "
+            "from inside a session scope"
+        )
+
+    # It has to actually run at startup, or it is a function nobody calls.
+    alerts = (REPO_ROOT / "bot" / "discord" / "resource_alerts.py").read_text(
+        encoding="utf-8"
+    )
+    if "check_app_slice_ceiling" not in alerts:
+        failures.append(
+            "the app.slice ceiling check is never run at startup"
+        )
+
+
+def _check_supervisor_footprint(failures: list[str]) -> None:
+    """The supervisor records its own size, and does not act on it."""
+    from bot.claude import memory as mem
+
+    foot = mem.supervisor_footprint()
+    if foot.error is None and foot.rss_mb <= 0:
+        failures.append(
+            f"the supervisor footprint read no memory at all: {foot.summary()}"
+        )
+    # A rate over the first seconds of life measures start-up, not a leak.
+    if foot.growth_mb_per_hour is not None and foot.elapsed_hours < 0.5:
+        failures.append(
+            "a growth rate was reported before enough time had passed for it "
+            "to mean anything; every restart would look like a huge leak"
+        )
+
+    # Recorded, never acted on. The guard this file is mostly about kills
+    # things; arming one on the supervisor would trade a slow leak for an
+    # outage, and the supervisor is what every other mechanism here protects.
+    src = (REPO_ROOT / "bot" / "claude" / "memory.py").read_text(encoding="utf-8")
+    body = src[src.index("def supervisor_footprint"):]
+    for forbidden in ("kill_tree(", "terminate(", ".kill()"):
+        if forbidden in body:
+            failures.append(
+                f"supervisor_footprint reaches for {forbidden} — it is a "
+                "recorder, not a guard"
+            )
+    app = (REPO_ROOT / "bot" / "app.py").read_text(encoding="utf-8")
+    if "supervisor_footprint" not in app:
+        failures.append(
+            "nothing ever calls supervisor_footprint, so no growth curve is "
+            "recorded and the question it exists to answer stays unanswerable"
+        )
+
+
 def _check_session_slice_units(failures: list[str]) -> None:
     """Layer 3's unit files, and the precedence trap that bit twice."""
     slice_file = REPO_ROOT / "scripts" / f"{config.SESSION_SLICE}"
@@ -3235,6 +3394,8 @@ async def _amain() -> int:
     _check_slice_weight_selfcheck(failures)
     _check_slice_headroom_line(failures)
     _check_session_slice_units(failures)
+    _check_app_slice_ceiling(failures)
+    _check_supervisor_footprint(failures)
     _check_over_own_high(failures)
     _check_orphan_detection(failures)
     _check_fleet_kill_wording(failures)

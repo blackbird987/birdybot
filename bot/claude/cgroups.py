@@ -47,6 +47,10 @@ log = logging.getLogger(__name__)
 
 _MB = 1024 * 1024
 
+# The tree every user application lives under, and the cgroup systemd-oomd
+# is already armed on. Resolved by name; see app_slice_path().
+_APP_SLICE = "app.slice"
+
 
 # --- Layer 1: is the CPU/IO protection actually applied right now? ------------
 
@@ -212,6 +216,177 @@ def check_session_slice_weights() -> WeightCheck:
     out.io_live = _read_weight(path / "io.weight")
     if out.cpu_live is None and out.io_live is None:
         out.error = "weights unreadable"
+    return out
+
+
+# --- Layer 2: is there a ceiling on the application tree at all? -------------
+
+
+@dataclass
+class CeilingCheck:
+    """Live memory ceilings on app.slice against the ones we mean to have.
+
+    Same contract as WeightCheck and for the same reason: the reading comes
+    from the cgroup files, never from a unit file or ``systemctl show``, both
+    of which reported the intended value throughout the week the CPU/IO
+    protection was actually off.
+
+    ``None`` for a live reading means unreadable, which is neither a pass nor
+    a fail. ``max`` (the kernel's own spelling) means no limit is set, which
+    *is* a fail: that is the exact state in which two global OOMs killed this
+    machine.
+    """
+
+    high_live: int | None = None   # bytes, or None unreadable; -1 = "max"
+    max_live: int | None = None
+    high_expected_gb: float = 0.0
+    max_expected_gb: float = 0.0
+    error: str | None = None
+    label: str = "app.slice"
+
+    # A ceiling is allowed to be tighter than we asked for -- someone may have
+    # sized one for a smaller machine, and tighter is still bounded. It is only
+    # a finding when there is no ceiling, or when the ceiling is so far above
+    # the intended one that it could never bind before the machine died. The
+    # slack is generous on purpose: this check exists to catch "absent", not to
+    # police a number.
+    SLACK = 1.5
+
+    def _verdict(self, live: int | None, want_gb: float) -> str | None:
+        """``None`` = fine. Otherwise a phrase naming what is wrong."""
+        if not want_gb or live is None:
+            return None
+        if live < 0:
+            return "not set at all (reads 'max')"
+        want = want_gb * 1024 ** 3
+        if live > want * self.SLACK:
+            return f"{live / 1024 ** 3:.0f}G, far above the intended {want_gb:g}G"
+        return None
+
+    def mismatches(self) -> list[tuple[str, str]]:
+        out: list[tuple[str, str]] = []
+        for knob, live, want in (
+            ("memory.high", self.high_live, self.high_expected_gb),
+            ("memory.max", self.max_live, self.max_expected_gb),
+        ):
+            bad = self._verdict(live, want)
+            if bad:
+                out.append((knob, bad))
+        return out
+
+    def ok(self) -> bool:
+        return not self.mismatches()
+
+    @staticmethod
+    def _render(live: int | None) -> str:
+        if live is None:
+            return "?"
+        if live < 0:
+            return "max"
+        return f"{live / 1024 ** 3:.0f}G"
+
+    def summary(self) -> str:
+        if self.error:
+            return f"{self.label} ceilings: {self.error}"
+        bits = [
+            f"memory.high={self._render(self.high_live)}"
+            f"/{self.high_expected_gb:g}G" if self.high_expected_gb
+            else f"memory.high={self._render(self.high_live)}",
+            f"memory.max={self._render(self.max_live)}"
+            f"/{self.max_expected_gb:g}G" if self.max_expected_gb
+            else f"memory.max={self._render(self.max_live)}",
+        ]
+        head = (
+            f"{self.label} ceilings ok: " if self.ok()
+            else f"{self.label} ceilings MISSING: "
+        )
+        return head + ", ".join(bits)
+
+    def warning_text(self) -> str:
+        bad = self.mismatches()
+        if not bad:
+            return ""
+        parts = [f"{knob} is {why}" for knob, why in bad]
+        return (
+            "The application tree has no memory ceiling: "
+            + ", ".join(parts)
+            + f" on {self.label}. Without one, a leak anywhere under it -- any "
+            "desktop app, any other user service, not just the bot -- runs "
+            "until the machine is out of physical memory and the kernel's "
+            "global OOM killer chooses a victim from the whole task table. "
+            "That is what happened on 2026-09-21 and 2026-09-23. With the "
+            "ceiling, the kill is scoped inside app.slice and the desktop "
+            "(which lives in session.slice) survives it. Install "
+            "scripts/app.slice.d/50-memory.conf under "
+            "~/.config/systemd/user/app.slice.d/ and run `systemctl --user "
+            "daemon-reload`."
+        )
+
+
+def _read_limit(path: Path) -> int | None:
+    """Parse a cgroup memory limit file. ``max`` comes back as -1.
+
+    -1 rather than None, because the two mean opposite things here: None is
+    "this machine could not tell us", which is never a finding, and -1 is the
+    kernel telling us plainly that no limit is set, which is the finding.
+    """
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if text == "max":
+        return -1
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
+def app_slice_path() -> Path | None:
+    """The application tree our cgroup sits somewhere under, or None.
+
+    Deliberately *named*, and not ``memory.parent_slice_path()``. That helper
+    answers "the slice one level up", which is the right question for the oomd
+    verdict and the wrong one here: it resolves to app.slice only when read
+    from the supervisor, and to app-claudesessions.slice when read from inside
+    a session scope, so the check would silently measure the fleet's ceiling
+    and report it as the tree's. Caught by the first live run of this check,
+    which named app-claudesessions.slice in its own summary line.
+
+    Walking up by name is correct from either place, and from a scope nested
+    any deeper. The path is still never hardcoded -- it differs per uid and
+    per machine, and a hardcoded one would read nothing and pass.
+    """
+    cg = memory._own_cgroup_path()
+    if cg is None:
+        return None
+    for node in (cg, *cg.parents):
+        if node.name == _APP_SLICE and node.is_dir():
+            return node
+    # No app.slice above us: a machine that arranges its units differently, or
+    # cgroup v1. Fall back to the slice we are directly in, which is at least
+    # a real ceiling over this process, and let the label say which it was.
+    return memory.parent_slice_path()
+
+
+def check_app_slice_ceiling() -> CeilingCheck:
+    """Is the application tree actually bounded? Never raises."""
+    out = CeilingCheck(
+        high_expected_gb=max(0.0, config.APP_SLICE_MEM_HIGH_GB_EXPECTED),
+        max_expected_gb=max(0.0, config.APP_SLICE_MEM_MAX_GB_EXPECTED),
+    )
+    if sys.platform != "linux":
+        out.error = "not linux"
+        return out
+    path = app_slice_path()
+    if path is None:
+        out.error = "no application slice"
+        return out
+    out.label = path.name
+    out.high_live = _read_limit(path / "memory.high")
+    out.max_live = _read_limit(path / "memory.max")
+    if out.high_live is None and out.max_live is None:
+        out.error = "ceilings unreadable"
     return out
 
 
