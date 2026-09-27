@@ -231,6 +231,10 @@ shown = collapse_bot_directives(INCIDENT)
 _check("collapse swallows the whole spawn, nested block included",
        "Run the monthly consolidation" not in shown and "~~~" not in shown, repr(shown))
 _check("collapse keeps the sign-off", shown.rstrip().endswith("[TURN_COMPLETE]"))
+_example = "Arm it like this:\n\n\n\n~~~text\n[BOT_CMD: /wake delay=5m]\n~~~\n"
+_check("a directive inside an unowned tilde block is left visible, not chipped",
+       "[BOT_CMD: /wake delay=5m]" in collapse_bot_directives(_example),
+       repr(collapse_bot_directives(_example)))
 
 
 def _incident_path() -> str | None:

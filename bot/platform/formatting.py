@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from bot import config
 from bot.claude.types import CODE_CHANGE_TOOLS, PLAN_ORIGINS, Instance, InstanceOrigin, InstanceStatus, Schedule
 from bot.platform.base import ButtonSpec
-from bot.textutil import find_tilde_block, parse_duration
+from bot.textutil import find_tilde_block, mask_tilde_bodies, parse_duration
 
 if TYPE_CHECKING:
     from bot.store.state import StateStore
@@ -182,7 +182,10 @@ def collapse_bot_directives(text: str) -> str:
         return text
     out: list[str] = []
     pos = 0
-    for m in _BOT_CMD_DIRECTIVE_RE.finditer(text):
+    # Found on the masked text, like the dispatchers: a directive inside some
+    # tilde block is never acted on, so it stays visible rather than becoming
+    # a chip claiming it was. Offsets are shared; bodies are read raw.
+    for m in _BOT_CMD_DIRECTIVE_RE.finditer(mask_tilde_bodies(text)):
         if m.start() < pos:
             continue  # already swallowed as a previous directive's body
         out.append(text[pos:m.start()])
