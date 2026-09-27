@@ -33,7 +33,7 @@ from bot import config
 from bot.claude.types import Watch
 from bot.platform.base import ButtonSpec
 from bot.platform.formatting import format_delay_secs
-from bot.textutil import parse_duration
+from bot.textutil import find_tilde_block, mask_tilde_bodies, parse_duration
 
 if TYPE_CHECKING:
     from bot.platform.base import Messenger
@@ -48,7 +48,6 @@ log = logging.getLogger(__name__)
 # fields, defaults and failure modes are different enough that sharing would
 # mean a parameterised parser nobody can read.
 _WATCH_DIRECTIVE_RE = re.compile(r"\[BOT_CMD:\s*/watch(?:\s+(.+?))?\s*\]")
-_WATCH_BODY_RE = re.compile(r"~~~watch\s*\n(.*?)\n~~~", re.DOTALL)
 _WATCH_KV_RE = re.compile(r'''(\w+)=(?:"([^"]*)"|'([^']*)'|(\S+))''')
 _WATCH_QUOTED_PREFIX = re.compile(r"^\s*(?:>|`|```|#{1,3}\s)")
 # `parse_duration` now lives in `bot.textutil` and is re-exported here: /wake's
@@ -63,10 +62,14 @@ def _unquoted_directives(text: str):
     Skips EXAMPLES, not requests — the same three ways a directive can be a
     quoted demo that ``lifecycle._parse_wake_directive`` guards against: a
     quoted/code/heading line, a position inside an open ``` fence, or inline
-    backticks in prose. Discussing this feature must not arm it.
+    backticks in prose. Discussing this feature must not arm it. Runs on the
+    tilde-masked text, so a /watch written into another directive's body (a
+    /spawn brief) is that session's, not this one's; offsets still index the
+    original text.
     """
     if not text:
         return
+    text = mask_tilde_bodies(text)
     for m in _WATCH_DIRECTIVE_RE.finditer(text):
         line_start = text.rfind("\n", 0, m.start()) + 1
         if _WATCH_QUOTED_PREFIX.match(text[line_start:m.start()]):
@@ -107,8 +110,8 @@ def parse_watch_directive(text: str) -> dict | None:
                 kvm.group(3) if kvm.group(3) is not None else kvm.group(4)
             )
             kv[kvm.group(1)] = val or ""
-        body = _WATCH_BODY_RE.search(text, m.end())
-        prompt = (body.group(1).strip() if body
+        span = find_tilde_block(text, "watch", m.end())
+        prompt = (text[span[0]:span[1]].strip() if span
                   else (kv.get("prompt") or "").strip())
         if not prompt:
             continue

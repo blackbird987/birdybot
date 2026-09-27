@@ -40,7 +40,7 @@ from bot.platform.formatting import (
 )
 from bot.engine import watches
 from bot.store import history as history_mod
-from bot.textutil import parse_duration
+from bot.textutil import find_tilde_block, mask_tilde_bodies, parse_duration
 
 log = logging.getLogger(__name__)
 
@@ -1581,7 +1581,7 @@ def claims_self_wake(text: str) -> bool:
     merely discussed the feature). Verify blocks, code spans, and quoted
     phrases are stripped first so meta-discussion can't false-trigger.
     """
-    cleaned = strip_verify_blocks(text or "")
+    cleaned = strip_verify_blocks(mask_tilde_bodies(text or ""))
     cleaned = _CLAIM_META_RE.sub(" ", cleaned)
     return bool(config.WAKE_CLAIM_RE.search(cleaned))
 
@@ -1610,7 +1610,9 @@ def promises_continuation(text: str) -> bool:
 
 def _promise_match(text: str) -> re.Match | None:
     """The one place the promise scan is defined; see the two callers below."""
-    cleaned = strip_verify_blocks(text or "")
+    # Tilde bodies first: "I'll report back" inside a /spawn brief is the
+    # child's promise to keep, not this turn's.
+    cleaned = strip_verify_blocks(mask_tilde_bodies(text or ""))
     cleaned = _CLAIM_META_RE.sub(" ", cleaned)
     return config.WAKE_PROMISE_RE.search(cleaned)
 
@@ -1639,7 +1641,7 @@ def has_turn_complete_marker(text: str) -> bool:
     """
     if not text:
         return False
-    cleaned = _CLAIM_META_RE.sub(" ", text)
+    cleaned = _CLAIM_META_RE.sub(" ", mask_tilde_bodies(text))
     return config.TURN_COMPLETE_SENTINEL in cleaned
 
 
@@ -1696,9 +1698,9 @@ _PROMISE_NUDGE_PROMPT = (
 # directive IS the action (text in the response), so the model can't narrate
 # "self-wake queued" while skipping a separate file-write tool call.
 _WAKE_DIRECTIVE_RE = re.compile(r"\[BOT_CMD:\s*/wake(?:\s+(.+?))?\s*\]")
-# Tilde-fenced body carries the (possibly multiline) resume prompt. Tildes
-# avoid colliding with the ``` code fences a prompt body may itself contain.
-_WAKE_BODY_RE = re.compile(r"~~~wake\s*\n(.*?)\n~~~", re.DOTALL)
+# Tilde-fenced ~~~wake body carries the (possibly multiline) resume prompt,
+# located by textutil.find_tilde_block. Tildes avoid colliding with the ```
+# code fences a prompt body may itself contain.
 _WAKE_KV_RE = re.compile(r'''(\w+)=(?:"([^"]*)"|'([^']*)'|(\S+))''')
 # A directive on a quoted/code/heading line is an EXAMPLE (this guidance quoted
 # back, or a fenced snippet), not a real request — skip it. Mirrors the guard in
@@ -1721,6 +1723,12 @@ def _parse_wake_directive(text: str) -> dict | None:
     """
     if not text:
         return None
+    # Every guard below reads the MASKED text: a /wake written inside another
+    # directive's tilde body (a parent's /spawn brief telling the child how to
+    # wake itself) belongs to that session, never to this one. Offsets are
+    # shared, so the body is still read from the original.
+    raw = text
+    text = mask_tilde_bodies(raw)
     for m in _WAKE_DIRECTIVE_RE.finditer(text):
         line_start = text.rfind("\n", 0, m.start()) + 1
         # Skip EXAMPLES, not real requests. Three ways a directive can be a
@@ -1744,8 +1752,8 @@ def _parse_wake_directive(text: str) -> dict | None:
                 kvm.group(3) if kvm.group(3) is not None else kvm.group(4)
             )
             kv[kvm.group(1)] = val or ""
-        body_match = _WAKE_BODY_RE.search(text, m.end())
-        prompt = (body_match.group(1).strip() if body_match
+        span = find_tilde_block(raw, "wake", m.end())
+        prompt = (raw[span[0]:span[1]].strip() if span
                   else (kv.get("prompt") or "").strip())
         if not prompt:
             # No resume prompt (no ~~~wake body, no prompt= kv) — not a usable

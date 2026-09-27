@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from bot import config
 from bot.claude.types import CODE_CHANGE_TOOLS, PLAN_ORIGINS, Instance, InstanceOrigin, InstanceStatus, Schedule
 from bot.platform.base import ButtonSpec
-from bot.textutil import parse_duration
+from bot.textutil import find_tilde_block, parse_duration
 
 if TYPE_CHECKING:
     from bot.store.state import StateStore
@@ -84,9 +84,11 @@ _BOT_CMD_DIRECTIVE_RE = re.compile(
 # The tilde-fenced payload (~~~wake / ~~~spawn / ~~~plan). Matched from the end
 # of the directive line, tolerating a blank line or two in between; a body
 # further away than that belongs to prose, not this directive.
-_BOT_CMD_BODY_RE = re.compile(
-    r"\n(?:[ \t]*\n){0,2}[ \t]*~~~[a-zA-Z]*[ \t]*\n.*?\n[ \t]*~~~[ \t]*(?=\n|\Z)",
-    re.DOTALL,
+# Only the OPENER is matched here; where the block ends is decided by
+# textutil.find_tilde_block, so a /spawn brief carrying a nested ~~~wake block
+# collapses whole instead of leaking its second half and a stray closer.
+_BOT_CMD_BODY_OPEN_RE = re.compile(
+    r"\n(?:[ \t]*\n){0,2}([ \t]*)~~~([a-zA-Z][\w-]*)[ \t]*(?=\n)",
 )
 # kv pair: key=value, bare or quoted — mirrors commands._SPAWN_KV_RE.
 _BOT_CMD_KV_RE = re.compile(r'''(\w+)=(?:"([^"]*)"|'([^']*)'|(\S+))''')
@@ -187,8 +189,14 @@ def collapse_bot_directives(text: str) -> str:
         chip = _render_directive_chip(m.group(1), m.group(2))
         if chip is not None:
             out.append(chip)
-        body = _BOT_CMD_BODY_RE.match(text, m.end())
-        pos = body.end() if body else m.end()
+        pos = m.end()
+        opener = _BOT_CMD_BODY_OPEN_RE.match(text, m.end())
+        if opener:
+            span = find_tilde_block(
+                text, opener.group(2), opener.start(1), opener.start(1) + 1,
+            )
+            if span is not None:
+                pos = span[2]
         if chip is None:
             # Nothing rendered in its place — swallow the now-orphaned newline
             # so the directive leaves no gap where its line used to be.

@@ -804,6 +804,36 @@ attributes them to `WAKE_GUIDANCE`, so `/evals` names the block that was
 supposed to prevent it.
 Harness: `python scripts/test_wake_promise_nudge.py`
 
+### A directive inside another session's block belongs to that session
+
+A body routinely contains a directive meant for its reader: a /spawn brief
+telling the child to end with a /wake, a ~~~plan saying what the build should
+arm, a ~~~reply handing a child the /watch it should use. On 2026-09-27
+(q-18729) exactly that armed a 30-day wake on the *parent*, and cut the
+child's brief off at the nested ~~~wake's closer, because every body parser
+was a flat `~~~tag\n(.*?)\n~~~` and every directive scan read the text flat.
+
+`bot/textutil.py` owns the fix, and every parser goes through it:
+
+- **`find_tilde_block` finds a body by depth.** An opener is a line of `~~~`
+  plus a tag, a closer is a line of exactly `~~~`; a nested block neither ends
+  the outer one nor is found as a top-level block. An unclosed block has no
+  body, so its directive reports "no body" instead of guessing an end.
+- **`mask_tilde_bodies` hides bodies from directive scans.** Scans run on a
+  copy with every top-level body blanked to spaces, newlines kept, so offsets
+  index the original and the line-based quoted-example guards see the same
+  lines. An unclosed block is masked to the end of the text, as an unclosed
+  Markdown fence renders.
+- **Mask before you scan, read the body from the original.** Wake, watch,
+  spawn, chain, reply, /repo and /image all do this, and so do the promise,
+  claim and `[TURN_COMPLETE]` scans: "I'll report back" in a child's brief is
+  the child's promise, not this turn's. `eval._check_unarmed_promise` inherits
+  it by calling the runtime predicates rather than re-parsing. A new directive
+  parser that scans the raw text reintroduces the bug.
+
+Harness: `python scripts/test_nested_directives.py` (replays the real
+q-18729 result file when the installed bot still has it).
+
 ## The prompt reviews itself once a week (`bot/engine/prompt_review.py`)
 
 Every session is scored, every recurring flag is attributed to the prompt
