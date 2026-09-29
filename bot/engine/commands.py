@@ -18,6 +18,7 @@ from pathlib import Path
 
 from bot import config
 from bot.procutil import run_capture
+from bot.textutil import find_tilde_block, mask_tilde_bodies
 from bot.claude.gitpaths import git_toplevel
 from bot.claude.types import Instance, InstanceOrigin, InstanceStatus, InstanceType, KillOutcome, merge_msg_is_failure
 from bot.engine import (
@@ -190,10 +191,13 @@ async def _execute_bot_commands(
     """
     if not result_text:
         return
-    for m in _BOT_CMD_RE.finditer(result_text):
+    # Scan with every tilde body blanked: a /repo directive written into a
+    # /spawn brief or a ~~~plan is the other session's to run, not ours.
+    scan = mask_tilde_bodies(result_text)
+    for m in _BOT_CMD_RE.finditer(scan):
         # Skip matches inside quoted/code content
-        line_start = result_text.rfind('\n', 0, m.start()) + 1
-        line_prefix = result_text[line_start:m.start()]
+        line_start = scan.rfind('\n', 0, m.start()) + 1
+        line_prefix = scan[line_start:m.start()]
         if _QUOTED_LINE_PREFIX.match(line_prefix):
             log.debug("BOT_CMD skipped — inside quoted content")
             continue
@@ -310,7 +314,6 @@ async def _execute_bot_commands(
 # preset= is optional; body is a ~~~plan ... ~~~ fenced block (tilde fences,
 # same rationale as /spawn). One chain per response.
 _CHAIN_DIRECTIVE_RE = re.compile(r'\[BOT_CMD:\s*/chain(?:\s+(.+?))?\]')
-_CHAIN_BODY_RE = re.compile(r'~~~plan\s*\n(.*?)\n~~~', re.DOTALL)
 _CHAIN_ALLOWED_PRESETS = {"ship", "hold", "verify"}
 # Plan body cap — same 32 KiB ceiling as /spawn bodies.
 _CHAIN_PLAN_MAX_BYTES = 32 * 1024
@@ -348,14 +351,15 @@ def _extract_chain_directive(result_text: str) -> tuple[str | None, str] | None:
     ``preset`` may be None (→ policy default). Directives on quoted/code/heading
     lines are skipped (same guard as /spawn and /wake).
     """
-    for m in _CHAIN_DIRECTIVE_RE.finditer(result_text):
-        line_start = result_text.rfind('\n', 0, m.start()) + 1
-        if _QUOTED_LINE_PREFIX.match(result_text[line_start:m.start()]):
+    scan = mask_tilde_bodies(result_text)
+    for m in _CHAIN_DIRECTIVE_RE.finditer(scan):
+        line_start = scan.rfind('\n', 0, m.start()) + 1
+        if _QUOTED_LINE_PREFIX.match(scan[line_start:m.start()]):
             log.debug("BOT_CMD /chain skipped — inside quoted content")
             continue
         preset = _parse_chain_preset(m.group(1) or "")
-        body_m = _CHAIN_BODY_RE.search(result_text, m.end())
-        body = body_m.group(1).strip() if body_m else ""
+        span = find_tilde_block(result_text, "plan", m.end())
+        body = result_text[span[0]:span[1]].strip() if span else ""
         if len(body.encode("utf-8", "ignore")) > _CHAIN_PLAN_MAX_BYTES:
             body = body.encode("utf-8", "ignore")[:_CHAIN_PLAN_MAX_BYTES].decode(
                 "utf-8", "ignore",
@@ -444,9 +448,10 @@ async def _handle_chain_directive(
 # --- /spawn directive (Tier-2 BOT_CMD — assistant-issued session handoff) ---
 
 _SPAWN_DIRECTIVE_RE = re.compile(r'\[BOT_CMD:\s*/spawn\s+(.+?)\]')
-# Match a tilde-fenced ~~~spawn ... ~~~ block. Tildes avoid colliding with the
-# triple-backtick code fences the model uses inside the prompt body.
-_SPAWN_BODY_RE = re.compile(r'~~~spawn\s*\n(.*?)\n~~~', re.DOTALL)
+# The body is a tilde-fenced ~~~spawn ... ~~~ block, located by
+# textutil.find_tilde_block so a brief that itself contains a ~~~wake or
+# ~~~plan block for the child is not cut off at that block's closer. Tildes
+# avoid colliding with the triple-backtick code fences inside the prompt body.
 # kv pair: key=value where value is bare or quoted (single or double).
 _SPAWN_KV_RE = re.compile(
     r'''(\w+)=(?:"([^"]*)"|'([^']*)'|(\S+))'''
@@ -483,13 +488,17 @@ def _pair_spawn_directives(
     _MAX_SPAWNS_PER_RESPONSE), ``no_body`` counts directives that lacked
     their own body block, ``over_cap`` counts directives dropped by the cap.
     """
-    matches = list(_SPAWN_DIRECTIVE_RE.finditer(result_text))
+    # Directives are found on the masked text, so one written inside another
+    # block (a /spawn inside a child's brief) is neither dispatched here nor
+    # counted as the next directive that ends this one's region.
+    scan = mask_tilde_bodies(result_text)
+    matches = list(_SPAWN_DIRECTIVE_RE.finditer(scan))
     pairs: list[tuple[str, str]] = []
     no_body = 0
     over_cap = 0
     for i, m in enumerate(matches):
-        line_start = result_text.rfind('\n', 0, m.start()) + 1
-        if _QUOTED_LINE_PREFIX.match(result_text[line_start:m.start()]):
+        line_start = scan.rfind('\n', 0, m.start()) + 1
+        if _QUOTED_LINE_PREFIX.match(scan[line_start:m.start()]):
             log.debug("BOT_CMD /spawn skipped — inside quoted content")
             continue
         if len(pairs) >= _MAX_SPAWNS_PER_RESPONSE:
@@ -498,11 +507,11 @@ def _pair_spawn_directives(
         region_end = (
             matches[i + 1].start() if i + 1 < len(matches) else len(result_text)
         )
-        body_match = _SPAWN_BODY_RE.search(result_text, m.end(), region_end)
-        if not body_match:
+        span = find_tilde_block(result_text, "spawn", m.end(), region_end)
+        if span is None:
             no_body += 1
             continue
-        pairs.append((m.group(1).strip(), body_match.group(1).strip()))
+        pairs.append((m.group(1).strip(), result_text[span[0]:span[1]].strip()))
     return pairs, no_body, over_cap
 
 
@@ -800,7 +809,6 @@ async def _handle_spawn_directive(
 # into an arbitrary thread by naming an id.
 
 _REPLY_DIRECTIVE_RE = re.compile(r'\[BOT_CMD:\s*/reply\s+(.+?)\]')
-_REPLY_BODY_RE = re.compile(r'~~~reply\s*\n(.*?)\n~~~', re.DOTALL)
 _REPLY_ALLOWED_KEYS = {"thread"}
 _REPLY_BODY_MAX_BYTES = 32 * 1024
 # Bounds one confused turn without blocking a parent answering a whole wave of
@@ -836,13 +844,17 @@ def _pair_reply_directives(
     directive and the next one, so two directives can never share a body,
     and directives on quoted/code lines are skipped.
     """
-    matches = list(_REPLY_DIRECTIVE_RE.finditer(result_text))
+    # Directives are found on the masked text, so one written inside another
+    # block (a /spawn inside a child's brief) is neither dispatched here nor
+    # counted as the next directive that ends this one's region.
+    scan = mask_tilde_bodies(result_text)
+    matches = list(_REPLY_DIRECTIVE_RE.finditer(scan))
     pairs: list[tuple[str, str]] = []
     no_body = 0
     over_cap = 0
     for i, m in enumerate(matches):
-        line_start = result_text.rfind('\n', 0, m.start()) + 1
-        if _QUOTED_LINE_PREFIX.match(result_text[line_start:m.start()]):
+        line_start = scan.rfind('\n', 0, m.start()) + 1
+        if _QUOTED_LINE_PREFIX.match(scan[line_start:m.start()]):
             log.debug("BOT_CMD /reply skipped — inside quoted content")
             continue
         if len(pairs) >= _MAX_REPLIES_PER_RESPONSE:
@@ -851,11 +863,11 @@ def _pair_reply_directives(
         region_end = (
             matches[i + 1].start() if i + 1 < len(matches) else len(result_text)
         )
-        body_match = _REPLY_BODY_RE.search(result_text, m.end(), region_end)
-        if not body_match:
+        span = find_tilde_block(result_text, "reply", m.end(), region_end)
+        if span is None:
             no_body += 1
             continue
-        pairs.append((m.group(1).strip(), body_match.group(1).strip()))
+        pairs.append((m.group(1).strip(), result_text[span[0]:span[1]].strip()))
     return pairs, no_body, over_cap
 
 

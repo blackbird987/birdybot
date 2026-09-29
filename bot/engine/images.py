@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from bot import config
+from bot.textutil import mask_tilde_bodies
 
 if TYPE_CHECKING:
     from bot.claude.types import Instance
@@ -68,6 +69,9 @@ def parse_image_directives(text: str) -> list[tuple[str, str | None]]:
     if not text or "[BOT_CMD:" not in text:
         return []
     out: list[tuple[str, str | None]] = []
+    # A /image written into another directive's tilde body (a /spawn brief)
+    # is the other session's to post.
+    text = mask_tilde_bodies(text)
     for m in _IMAGE_DIRECTIVE_RE.finditer(text):
         line_start = text.rfind("\n", 0, m.start()) + 1
         if _QUOTED_LINE_PREFIX.match(text[line_start:m.start()]):
