@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.101.30, A plan is checked against what was already tried (2026-09-29)
+
 ### Added
 - **A plan is checked against what was already tried** (`bot/engine/prior_art.py`, `bot/engine/workflows.py`, `bot/engine/commands.py`, `bot/engine/prompt_review.py`, `bot/engine/eval.py`, `bot/config.py`, `CLAUDE.md`, `scripts/test_prior_art.py`). Ideas that were built and removed on purpose kept coming back as new proposals, because the session judging a plan only saw its own context: the auto-armed wake was added in cdc54c8, removed in d5f8aa8, and proposed again weeks later while the removal sat in `git log` of the file being changed. The bot now reads git for the files and code names a plan mentions (the newest removal commits across each file's whole history, its latest few commits, and commit messages naming the identifiers) and hands the result to whichever step judges the plan: both plan-review paths, the build a `/chain` launches (with an instruction to ask before re-adding something removed), and the weekly prompt review (each owning block's own edit history). The bot does the reading because the plan reviewer runs behind the read-only floor and cannot run git, and that floor is not loosened for this. Path-limited queries only, about 0.6s for a large plan on a 6,100-commit repo, and it fails open: a git read that cannot answer adds nothing and blocks nothing. The review now reports a `PRIOR_ATTEMPTS:` line and a `History` revision tag, `/chain` plans carry a `Prior attempts:` line, and two new evals flag a judge that skipped either. Switch: `PRIOR_ART_ENABLED`.
 
