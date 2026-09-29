@@ -31,8 +31,10 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from bot import config
+from bot.engine import prior_art
 
 log = logging.getLogger(__name__)
 
@@ -113,7 +115,36 @@ def build_review_input(days: int | None = None) -> str:
         # treats the truncated remainder as the message.
         text = text[:_MAX_INPUT_CHARS].rsplit("\n- ", 1)[0]
         text += "\n- (…truncated: the table exceeded the input budget)"
+
+    # How each owning block got to its current wording, so a proposal to put
+    # back something a commit took out has to face that commit. Its own cap,
+    # outside the table's: the table is the evidence and must not lose rows
+    # to context about it.
+    history = _owner_history(digest.rows[:_MAX_ROWS])
+    if history:
+        text += "\n\n" + history
     return text
+
+
+# Owners named as prose ("prompt assembly order (harness)") are code, not a
+# block in bot/config.py, and have no line range to follow.
+_BLOCK_OWNER_RE = re.compile(r"^[A-Z][A-Z0-9_]+$")
+_MAX_HISTORY_CHARS = 1500
+
+
+def _owner_history(rows) -> str:
+    names: list[str] = []
+    for row in rows:
+        if _BLOCK_OWNER_RE.match(row.owner or "") and row.owner not in names:
+            names.append(row.owner)
+    if not names:
+        return ""
+    # The running code's own checkout: the blocks under review are the ones
+    # this process loaded, and every worktree shares the one history.
+    repo_root = str(Path(__file__).resolve().parents[2])
+    return prior_art.block_history(
+        repo_root, names, max_chars=_MAX_HISTORY_CHARS,
+    )
 
 
 # --- The agent brief ----------------------------------------------------------
@@ -150,6 +181,14 @@ not paying for itself. EDIT CANDIDATE, and the proposal must SHRINK the block, \
 not rewrite it.
 
 Only `contradicted` and `obsolete` rows may become proposed edits.
+
+## Check the block's history
+
+When an edit history of the owning blocks follows the table, a proposal \
+that puts back wording one of those commits removed must name that commit \
+and say what is different now. Otherwise it is dropped: the removal was a \
+decision, and undoing it without answering it is how the same edit gets \
+made and unmade every few weeks.
 
 ## Prefer deletion
 

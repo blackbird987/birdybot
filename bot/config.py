@@ -1050,6 +1050,15 @@ PROMPT_REVIEW_WINDOW_DAYS: int = int(os.getenv("PROMPT_REVIEW_WINDOW_DAYS", "7")
 PROMPT_REVIEW_INTERVAL_DAYS: int = int(os.getenv("PROMPT_REVIEW_INTERVAL_DAYS", "7"))
 PROMPT_REVIEW_MAX_PROPOSALS: int = int(os.getenv("PROMPT_REVIEW_MAX_PROPOSALS", "3"))
 
+# Prior history: before a plan is judged, the bot reads git for the files it
+# touches (removal commits across all history, plus the latest few) and hands
+# the result to the judging step, so an idea that was built and removed on
+# purpose does not come back looking new. See bot/engine/prior_art.py.
+# Fails open: a git read that cannot answer adds nothing and blocks nothing.
+PRIOR_ART_ENABLED: bool = os.getenv(
+    "PRIOR_ART_ENABLED", "1").lower() in ("1", "true", "yes")
+PRIOR_ART_MAX_CHARS: int = int(os.getenv("PRIOR_ART_MAX_CHARS", "2500"))
+
 # Recent-session history injected into every system prompt.
 # SESSION_HISTORY_RANKING="relevance" keeps the entries most related to the
 # current prompt; "recency" selects newest-first instead, and exists as a
@@ -1615,6 +1624,7 @@ Rules:
 - Tilde fences (`~~~plan` / `~~~`), never backticks — same reason as /spawn.
 - One /chain per response. It's refused if a chain is already running on this thread.
 - Only emit it once the user has actually approved. While still planning or asking questions, just talk — no directive.
+- Check what was already tried before you emit it. Run `git log` on the files the plan changes, plus `git log -i --grep=<term>` for the idea's key terms. The ~~~plan body must contain a line starting `Prior attempts:` naming what you found and why this plan differs, or saying "none found". If the history shows this approach was removed before for a reason that still applies, tell the user instead of emitting /chain.
 - One short sentence telling the user you're kicking off the chain is enough; the plan lives in the ~~~plan block, not in prose.
 """
 
@@ -2078,7 +2088,14 @@ PLAN_REVIEW_PROMPT = (
     'Available tags (text only, no emoji): '
     'Architecture, Performance, Reliability, DRY/Cleanup, Scalability, '
     'Security, UX/UI, Accessibility, Integration, Dependencies, Modularity, '
-    'Bug Risk\n\n'
+    'Bug Risk, History\n\n'
+    'Check the plan against what was already tried. If a "Prior history" '
+    'block is present above, look for a [reversal] commit that removed '
+    'what this plan adds, or a recorded decision it reverses. The idea may '
+    'have lived under another name, so also Grep CHANGELOG.md and '
+    'CLAUDE.md for the plan\'s core idea. If the plan re-adds something '
+    'that was removed and does not name that earlier attempt and say why '
+    'this time is different, raise a High revision tagged History.\n\n'
     'IMPORTANT formatting rules:\n'
     '- Each revision must be SHORT. No field labels like Change/Pros/Cons. '
     'Just a concise paragraph.\n'
@@ -2087,11 +2104,14 @@ PLAN_REVIEW_PROMPT = (
     'At the very end, append a structured block:\n'
     '```review-status\n'
     'NEEDS_REVISION: yes or no\n'
+    'PRIOR_ATTEMPTS: none\n'
     'DEFERRED:\n'
     '- [TAG] Title (Priority)\n'
     '```\n'
     'NEEDS_REVISION is "yes" if any Critical or High revisions exist, '
-    '"no" if only Medium/Low or none.'
+    '"no" if only Medium/Low or none. '
+    'PRIOR_ATTEMPTS is required: "none", or "<sha> <short reason>" for each '
+    'earlier attempt at this idea you found, separated by ";".'
 )
 
 APPLY_REVISIONS_PROMPT = (
