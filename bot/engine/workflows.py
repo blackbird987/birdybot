@@ -431,6 +431,10 @@ _REVIEW_LOOP_MAX_ROUNDS = 5
 # carry the full plans we've seen in practice (largest observed ~5500).
 _BUILD_PLAN_INJECT_MAX = 8000
 
+# Room for the prior-history block a /chain plan carries, on top of the plan's
+# own cap: the block's own cap plus its closing instruction and some slack.
+_PRIOR_ART_INJECT_MAX = config.PRIOR_ART_MAX_CHARS + 600
+
 # Headings that mark trailing review-metadata sections in APPLY_REVISIONS /
 # TRIAGE result text. Stripped before injection so the build agent doesn't
 # treat "applied/skipped" log lines as plan items to implement.
@@ -492,11 +496,21 @@ def _extract_latest_plan_text(
     if override_source and override_source.session_id:
         override = ctx.store.get_chain_plan_override(override_source.session_id)
         if override:
+            # The /chain handler may have attached the plan's git history
+            # after it. Split it off first: the plan half is the only part
+            # the metadata strip and the cap are about, and a long plan must
+            # not truncate the history (and its "ask before re-adding"
+            # instruction) off the end of the brief.
+            from bot.engine import prior_art
+            override, attached = prior_art.split_attached(override)
             for marker in _PLAN_METADATA_MARKERS:
                 idx = override.rfind(marker)
                 if idx != -1:
                     override = override[:idx].rstrip()
-            return override[:_BUILD_PLAN_INJECT_MAX]
+            override = override[:_BUILD_PLAN_INJECT_MAX]
+            if attached:
+                override += "\n\n" + attached[:_PRIOR_ART_INJECT_MAX]
+            return override
     raw = ""
     for inst in reversed(chain_instances):
         if inst.origin == InstanceOrigin.APPLY_REVISIONS:
@@ -1250,9 +1264,29 @@ async def _attempt_inline_worktree_recovery(
         log.debug("Failed to send recovery notice", exc_info=True)
 
 
+async def _prior_art_prefix(source: Instance | None) -> str:
+    """The git history of what `source`'s plan touches, ready to prepend, or "".
+
+    The reviewer runs behind the read-only floor and cannot run git itself,
+    so the bot reads it and hands it over, the same way prior deferred items
+    are. A worktree shares the main repo's history, so whichever of the two
+    still exists gives the same answer. See bot/engine/prior_art.py.
+    """
+    if not source:
+        return ""
+    repo_path = _resolve_chain_repo_path(source)
+    plan_text = source.read_result_text()
+    if not repo_path or not plan_text:
+        return ""
+    from bot.engine import prior_art
+    block = await asyncio.to_thread(prior_art.collect, repo_path, plan_text)
+    return f"{block}\n\n" if block else ""
+
+
 async def on_review_plan(ctx: RequestContext, source_id: str, source_msg_id: str | None = None) -> Instance | None:
+    prefix = await _prior_art_prefix(ctx.store.get_instance(source_id))
     return await spawn_from(ctx, source_id, SpawnConfig(
-        instance_type=InstanceType.QUERY, prompt=config.PLAN_REVIEW_PROMPT,
+        instance_type=InstanceType.QUERY, prompt=prefix + config.PLAN_REVIEW_PROMPT,
         mode="explore", origin=InstanceOrigin.REVIEW_PLAN,
         status_text="Reviewing plan...", resume_session=True,
         # Hard floor: review-plan rewrites plan TEXT only — never source files.
@@ -1961,6 +1995,10 @@ async def _review_plan_loop(
             "(address if relevant to this plan):\n"
             f"{items_text}\n\n{review_prompt}"
         )
+    # Read once from the plan as first written, and reused every round: the
+    # revised plans touch the same files, and re-reading git per round would
+    # only spend time to hand the reviewer the same block again.
+    review_prompt = await _prior_art_prefix(source) + review_prompt
 
     for round_num in range(_REVIEW_LOOP_MAX_ROUNDS):
         status = "Reviewing plan..." if round_num == 0 else f"Re-reviewing plan (round {round_num + 1})..."

@@ -229,6 +229,8 @@ def evaluate_instance(inst: Instance) -> SessionEval:
         ev.flags.extend(_check_claim_grounding(inst, text))
         ev.flags.extend(_check_copy_block_wrapping(inst, text))
         ev.flags.extend(_check_unarmed_promise(inst, text))
+        ev.flags.extend(_check_review_prior_attempts(inst, text))
+        ev.flags.extend(_check_chain_prior_attempts(inst, text))
     ev.flags.extend(_check_efficiency(inst))
 
     _save_eval(ev)
@@ -489,6 +491,68 @@ def _check_unarmed_promise(inst: Instance, text: str) -> list[EvalFlag]:
     )]
 
 
+def _check_review_prior_attempts(inst: Instance, text: str) -> list[EvalFlag]:
+    """Was a plan review handed git history and silent about what it found?
+
+    `PRIOR_ATTEMPTS:` is the one place a review has to commit to an answer
+    about earlier attempts, "none" included, so its absence means the history
+    block was not read rather than read and found empty. Only judged when the
+    block was actually in the prompt and the review produced its status block
+    at all: a review that stopped to ask a question has no status block, and
+    that is a different failure with its own handling.
+    """
+    from bot.engine import prior_art
+    from bot.engine.workflows import _REVIEW_STATUS_RE
+
+    if inst.origin != InstanceOrigin.REVIEW_PLAN:
+        return []
+    if prior_art.PRIOR_ART_MARKER not in (inst.prompt or ""):
+        return []
+    m = _REVIEW_STATUS_RE.search(text)
+    if not m or _PRIOR_ATTEMPTS_RE.search(m.group(1)):
+        return []
+    return [EvalFlag(
+        category="constraint_violation", severity="issue",
+        message=(
+            "Plan review got prior history but reported no PRIOR_ATTEMPTS line"
+        ),
+        evidence=m.group(1).strip()[:120],
+    )]
+
+
+_PRIOR_ATTEMPTS_RE = re.compile(r"^\s*PRIOR_ATTEMPTS\s*:", re.MULTILINE)
+# Tolerates the list and bold wrappers a plan body is often written in.
+_PLAN_PRIOR_ATTEMPTS_RE = re.compile(
+    r"^\s*(?:[-*]\s+)?(?:\*\*)?prior attempts(?:\*\*)?\s*:",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _check_chain_prior_attempts(inst: Instance, text: str) -> list[EvalFlag]:
+    """Did a real /chain go out with a plan that never says what was tried?
+
+    Parsed with the dispatcher's own `_extract_chain_directive`, so a quoted
+    example, or a /chain inside another block's body, is exactly as invisible
+    here as it is to the bot. An origin whose directives are never dispatched
+    is skipped for the same reason: its /chain launched nothing.
+    """
+    from bot.engine.commands import _extract_chain_directive
+    from bot.engine.lifecycle import _NO_DIRECTIVE_ORIGINS
+
+    if inst.origin in _NO_DIRECTIVE_ORIGINS:
+        return []
+    parsed = _extract_chain_directive(text)
+    if not parsed or not parsed[1]:
+        return []
+    if _PLAN_PRIOR_ATTEMPTS_RE.search(parsed[1]):
+        return []
+    return [EvalFlag(
+        category="constraint_violation", severity="issue",
+        message="Emitted /chain with a plan that has no 'Prior attempts:' line",
+        evidence=parsed[1].strip().splitlines()[0][:120],
+    )]
+
+
 def _check_claim_grounding(inst: Instance, text: str) -> list[EvalFlag]:
     """Did Claude make claims it couldn't verify? (HONESTY_CONSTRAINT)"""
     flags: list[EvalFlag] = []
@@ -735,6 +799,11 @@ _ATTRIBUTION: tuple[tuple[str, str, str], ...] = (
     # A promise with nothing armed is WAKE_GUIDANCE failing to land, not a
     # length or formatting problem — matched before the generic rules below.
     ("constraint_violation", "armed no self-wake", "WAKE_GUIDANCE"),
+    # Each names the block that asked for the line it is missing. Neither
+    # message carries "over-long" or "mobile", but both sit up here with the
+    # other owned rules so a later wording change cannot fall through to them.
+    ("constraint_violation", "no prior_attempts line", "PLAN_REVIEW_PROMPT"),
+    ("constraint_violation", "no 'prior attempts:' line", "CHAIN_CONTEXT"),
     ("constraint_violation", "over-long", "CHAT_APP_CONSTRAINT"),
     ("constraint_violation", "mobile", "MOBILE_HINT"),
     ("efficiency", "prompt-cache", "prompt assembly order (harness)"),

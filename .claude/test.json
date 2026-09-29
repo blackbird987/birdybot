@@ -107,6 +107,7 @@
     "mutex_drill": "python scripts/test_mutex_drill.py",
     "nudges": "python scripts/test_nudges.py",
     "prompt_review": "python scripts/test_prompt_review.py",
+    "prior_art": "python scripts/test_prior_art.py",
     "repo_hide": "python scripts/test_repo_hide.py",
     "runner_dementia": "python scripts/test_runner_dementia.py",
     "runner_watchdog": "python scripts/test_runner_watchdog.py",

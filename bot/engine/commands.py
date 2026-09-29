@@ -410,7 +410,17 @@ async def _handle_chain_directive(
         preset = "ship" if policy["autonomy"] in ("merge", "ship") else "hold"
 
     if plan_body:
-        ctx.store.set_chain_plan_override(session_id, plan_body)
+        # What was already tried in the files this plan changes rides into
+        # the build with it. The chat session was told to check before
+        # emitting (CHAIN_CONTEXT); this is the deterministic half, for the
+        # turn that did not. Fails open: no history, the plan goes alone.
+        from bot.engine import prior_art
+        block = await asyncio.to_thread(
+            prior_art.collect, source_inst.repo_path, plan_body,
+        )
+        ctx.store.set_chain_plan_override(
+            session_id, prior_art.attach(plan_body, block),
+        )
 
     log.info(
         "BOT_CMD /chain — launching preset=%s session=%s (plan %d chars)",
