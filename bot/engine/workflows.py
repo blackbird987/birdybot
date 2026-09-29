@@ -20,7 +20,7 @@ from bot.claude.types import (
     InstanceStatus, InstanceType, PHASE_GATES, Phase, merge_msg_is_failure,
     merge_msg_release_orphaned, merge_msg_repo_unusable,
 )
-from bot.engine import ai_project, lifecycle, sessions as sessions_mod
+from bot.engine import ai_project, lifecycle, prior_art, sessions as sessions_mod
 from bot.platform.base import ButtonSpec, RequestContext
 from bot.platform.formatting import (
     action_button_specs,
@@ -501,7 +501,6 @@ def _extract_latest_plan_text(
             # the metadata strip and the cap are about, and a long plan must
             # not truncate the history (and its "ask before re-adding"
             # instruction) off the end of the brief.
-            from bot.engine import prior_art
             override, attached = prior_art.split_attached(override)
             for marker in _PLAN_METADATA_MARKERS:
                 idx = override.rfind(marker)
@@ -1278,7 +1277,6 @@ async def _prior_art_prefix(source: Instance | None) -> str:
     plan_text = source.read_result_text()
     if not repo_path or not plan_text:
         return ""
-    from bot.engine import prior_art
     block = await asyncio.to_thread(prior_art.collect, repo_path, plan_text)
     return f"{block}\n\n" if block else ""
 

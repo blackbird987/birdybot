@@ -491,6 +491,16 @@ def _check_unarmed_promise(inst: Instance, text: str) -> list[EvalFlag]:
     )]
 
 
+_PRIOR_ATTEMPTS_RE = re.compile(r"^\s*PRIOR_ATTEMPTS\s*:", re.MULTILINE)
+# Tolerates the heading, list and bold wrappers a plan body is often written
+# in. A heading may drop the colon; a plain line may not.
+_PLAN_PRIOR_ATTEMPTS_RE = re.compile(
+    r"^\s*(?:#{1,6}\s*(?:\*\*)?prior attempts\b"
+    r"|(?:[-*]\s+)?(?:\*\*)?prior attempts(?:\*\*)?\s*:)",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
 def _check_review_prior_attempts(inst: Instance, text: str) -> list[EvalFlag]:
     """Was a plan review handed git history and silent about what it found?
 
@@ -518,14 +528,6 @@ def _check_review_prior_attempts(inst: Instance, text: str) -> list[EvalFlag]:
         ),
         evidence=m.group(1).strip()[:120],
     )]
-
-
-_PRIOR_ATTEMPTS_RE = re.compile(r"^\s*PRIOR_ATTEMPTS\s*:", re.MULTILINE)
-# Tolerates the list and bold wrappers a plan body is often written in.
-_PLAN_PRIOR_ATTEMPTS_RE = re.compile(
-    r"^\s*(?:[-*]\s+)?(?:\*\*)?prior attempts(?:\*\*)?\s*:",
-    re.IGNORECASE | re.MULTILINE,
-)
 
 
 def _check_chain_prior_attempts(inst: Instance, text: str) -> list[EvalFlag]:

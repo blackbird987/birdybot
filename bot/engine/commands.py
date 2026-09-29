@@ -24,6 +24,7 @@ from bot.claude.types import Instance, InstanceOrigin, InstanceStatus, InstanceT
 from bot.engine import (
     lifecycle,
     pending as pending_mod,
+    prior_art,
     repo_desc,
     sessions as sessions_mod,
     workflows,
@@ -414,7 +415,6 @@ async def _handle_chain_directive(
         # the build with it. The chat session was told to check before
         # emitting (CHAIN_CONTEXT); this is the deterministic half, for the
         # turn that did not. Fails open: no history, the plan goes alone.
-        from bot.engine import prior_art
         block = await asyncio.to_thread(
             prior_art.collect, source_inst.repo_path, plan_body,
         )

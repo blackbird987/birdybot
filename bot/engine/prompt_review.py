@@ -31,8 +31,10 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from bot import config
+from bot.engine import prior_art
 
 log = logging.getLogger(__name__)
 
@@ -131,10 +133,6 @@ _MAX_HISTORY_CHARS = 1500
 
 
 def _owner_history(rows) -> str:
-    from pathlib import Path
-
-    from bot.engine import prior_art
-
     names: list[str] = []
     for row in rows:
         if _BLOCK_OWNER_RE.match(row.owner or "") and row.owner not in names:
@@ -186,7 +184,7 @@ Only `contradicted` and `obsolete` rows may become proposed edits.
 
 ## Check the block's history
 
-Below the table, each owning block's recent commits are listed. A proposal \
+When an edit history of the owning blocks follows the table, a proposal \
 that puts back wording one of those commits removed must name that commit \
 and say what is different now. Otherwise it is dropped: the removal was a \
 decision, and undoing it without answering it is how the same edit gets \

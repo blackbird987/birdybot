@@ -944,9 +944,11 @@ whole time; nothing asked anyone to look.
 So the bot looks. `prior_art.collect(repo_path, plan_text)` takes the files a
 plan names that exist in the repo (a bare filename only when exactly one
 tracked file has it) and the backticked names that look like code, and reads
-three things from git: every commit in each file's whole history whose
-subject opens with a removal verb (tagged `[reversal]`), the last five
-commits per file, and commit messages mentioning each name. Reversals are
+three things from git: the newest eight commits in each file's whole
+history whose subject opens with a removal verb (tagged `[reversal]`), the
+last five commits per file, and commit messages mentioning each name. git
+greps every line of a message, so a match on a body line only is kept
+untagged and is the first thing a tight cap drops. Reversals are
 listed first and are the last thing a tight cap drops. The result is prepended
 to the judging step's prompt the same way prior deferred items already are.
 
@@ -980,8 +982,8 @@ Three consumers:
 - **The weekly prompt review.** `build_review_input` appends each owning
   block's own edit history (`prior_art.block_history`, following the block's
   line range in `bot/config.py` with `git log -L`), under its own 1500-char cap
-  outside the table's, and the brief drops a proposal that puts back removed
-  wording without naming the commit.
+  outside the table's, and the brief tells the reviewer to drop a proposal
+  that puts back removed wording without naming the commit.
 
 Two evals measure whether any of it is read: a review handed the block whose
 status block has no `PRIOR_ATTEMPTS:` line (owner `PLAN_REVIEW_PROMPT`), and a

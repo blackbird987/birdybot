@@ -27,7 +27,7 @@ never a blocked step: a history check that can stop work is a history check
 that gets switched off.
 
 What is deliberately NOT used: pickaxe (`-S`/`-G`) across the whole history.
-Measured on AIAgent (6,087 commits) it costs about 3.8s per term, against
+Measured on AIAgent (about 6,100 commits) it costs about 3.8s per term, against
 about 30ms for a path-limited `git log`. Paths and commit messages carry the
 signal for a fraction of the price; a rename is caught because the removal
 commit touched the file the plan names.
@@ -61,7 +61,7 @@ CHAIN_INSTRUCTION = (
 
 _HEADER = (
     "Collected by the bot from git. [reversal] marks a commit that removed or "
-    "undid something in these files. `git show <sha>` has the full reasoning."
+    "undid something. `git show <sha>` has the full reasoning."
 )
 
 # A subject opening with one of these words is a commit that took something
@@ -93,6 +93,12 @@ _PATH_TOKEN_RE = re.compile(r"[A-Za-z0-9_./\\-]+")
 _EXT_RE = re.compile(r"\.[A-Za-z0-9]{1,5}$")
 _BACKTICK_RE = re.compile(r"`([^`\n]+)`")
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]{5,}")
+# A dotted token ending in one of these is a filename, not a code name.
+_FILE_EXTS = frozenset({
+    "py", "md", "json", "toml", "yml", "yaml", "txt", "cfg", "ini", "js",
+    "ts", "tsx", "jsx", "cs", "csproj", "sh", "ps1", "bat", "rs", "go", "html",
+    "css", "sql", "log", "lock", "env",
+})
 
 
 # --- Extraction from the plan text ---------------------------------------------
@@ -182,12 +188,6 @@ def _identifiers(text: str) -> list[str]:
     return out
 
 
-_FILE_EXTS = frozenset({
-    "py", "md", "json", "toml", "yml", "yaml", "txt", "cfg", "ini", "js",
-    "ts", "tsx", "jsx", "cs", "csproj", "sh", "ps1", "bat", "rs", "go", "html",
-    "css", "sql", "log", "lock", "env",
-})
-
 
 # --- Git -------------------------------------------------------------------------
 
@@ -243,8 +243,19 @@ def _line(sha: str, date: str, subject: str, reversal: bool) -> str:
 
 # --- Rendering -------------------------------------------------------------------
 
-# Priorities: what is worth the budget when the budget runs out.
-_P_REVERSAL, _P_IDENT, _P_RECENT = 0, 1, 2
+# Priorities: what is worth the budget when the budget runs out. _P_CONTEXT
+# is a commit the reversal grep matched on a body line only: not a removal
+# by its subject and not recent either, so it is the first thing dropped.
+_P_REVERSAL, _P_IDENT, _P_RECENT, _P_CONTEXT = 0, 1, 2, 3
+
+
+def _entry(sha: str, date: str, subject: str, untagged_prio: int) -> tuple[int, str]:
+    """(priority, line) for one commit: a reversal by its subject outranks all."""
+    tagged = bool(_REVERSAL_SUBJECT_RE.match(subject.strip()))
+    return (
+        _P_REVERSAL if tagged else untagged_prio,
+        _line(sha, date, subject, tagged),
+    )
 
 
 def _render(
@@ -289,30 +300,33 @@ def _render(
 def _path_entries(
     repo_path: str, path: str, deadline: float,
 ) -> list[tuple[int, str, str]]:
-    """(priority, sha, line) for one file: every reversal ever, then recent."""
+    """(priority, sha, line) for one file: its newest removals from the whole
+    history, then its most recent commits."""
     got: list[tuple[int, str, str]] = []
+    # git greps every line of the message and has no subject-only mode, so
+    # body-line matches share the -n window. Fetch twice the quota and keep
+    # the quota of real subject matches. A body line starting "Stop" is as
+    # often prose as a removal, so such a commit rides along untagged, at the
+    # lowest priority.
     rev = _git(repo_path, [
         "log", "--no-merges", "-i", "-E", f"--grep={_REVERSAL_GREP}",
-        "-n", str(_REVERSALS_PER_PATH), _FMT, "--date=short", "--", path,
+        "-n", str(_REVERSALS_PER_PATH * 2), _FMT, "--date=short", "--", path,
     ], deadline)
+    reversals = 0
     for sha, date, subj in _parse_log(rev):
-        # The grep matched some line of the message. Only a subject that
-        # opens with the verb is tagged: a body line starting "Stop" is as
-        # often prose as it is a removal, so it rides along as plain context.
-        if _REVERSAL_SUBJECT_RE.match(subj.strip()):
-            got.append((_P_REVERSAL, sha, _line(sha, date, subj, True)))
-        else:
-            got.append((_P_RECENT, sha, _line(sha, date, subj, False)))
+        prio, line = _entry(sha, date, subj, _P_CONTEXT)
+        if prio == _P_REVERSAL:
+            if reversals >= _REVERSALS_PER_PATH:
+                continue
+            reversals += 1
+        got.append((prio, sha, line))
     recent = _git(repo_path, [
         "log", "--no-merges", "-n", str(_RECENT_PER_PATH), _FMT,
         "--date=short", "--", path,
     ], deadline)
     for sha, date, subj in _parse_log(recent):
-        tagged = bool(_REVERSAL_SUBJECT_RE.match(subj.strip()))
-        got.append((
-            _P_REVERSAL if tagged else _P_RECENT, sha,
-            _line(sha, date, subj, tagged),
-        ))
+        prio, line = _entry(sha, date, subj, _P_RECENT)
+        got.append((prio, sha, line))
     return got
 
 
@@ -358,11 +372,8 @@ def _collect(repo_path: str, plan_text: str, max_chars: int | None) -> str:
             "-n", str(_HITS_PER_IDENTIFIER), _FMT, "--date=short",
         ], deadline)
         for sha, date, subj in _parse_log(out):
-            tagged = bool(_REVERSAL_SUBJECT_RE.match(subj.strip()))
-            entries.append((
-                _P_REVERSAL if tagged else _P_IDENT, section, sha,
-                _line(sha, date, subj, tagged),
-            ))
+            prio, line = _entry(sha, date, subj, _P_IDENT)
+            entries.append((prio, section, sha, line))
     return _render(sections, entries, max_chars, [PRIOR_ART_MARKER, _HEADER])
 
 
@@ -404,16 +415,14 @@ def block_history(
                     "--date=short", f"-G\\b{name}\\b", "--", path,
                 ], deadline)
             for sha, date, subj in _parse_log(out):
-                tagged = bool(_REVERSAL_SUBJECT_RE.match(subj.strip()))
+                prio, line = _entry(sha, date, subj, _P_RECENT)
                 # Keyed per section, not per sha: one commit that edited two
                 # blocks belongs under both, since each block is judged alone.
-                entries.append((
-                    _P_REVERSAL if tagged else _P_RECENT, section,
-                    f"{section}:{sha}", _line(sha, date, subj, tagged),
-                ))
+                entries.append((prio, section, f"{section}:{sha}", line))
         head = [
-            f"EDIT HISTORY OF THE OWNING BLOCKS (git log of {path}, newest "
-            f"first; [reversal] marks a commit that removed or undid something)",
+            f"EDIT HISTORY OF THE OWNING BLOCKS (git log of {path}; [reversal] "
+            f"marks a commit that removed or undid something and is listed "
+            f"first, the rest newest first)",
         ]
         return _render(sections, entries, max_chars, head)
     except Exception:

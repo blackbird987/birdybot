@@ -132,6 +132,30 @@ check("the char cap holds", 0 < len(small) <= 330, f"{len(small)} chars")
 check("under a tight cap the reversal is what survives",
       "[reversal] Remove the auto-arm" in small, small)
 
+# The reversal grep matches body lines too. Such a commit is kept, untagged,
+# at the lowest priority, so it is the first thing a tight cap drops.
+tidy_sha = git(REPO, "log", "-n1", "--format=%h", "--grep=Tidy a.py").strip()
+by_sha = {sha: prio for prio, sha, _ in
+          prior_art._path_entries(str(REPO), "a.py", time.monotonic() + 5)
+          if prio == prior_art._P_CONTEXT}
+check("a body-only match from the reversal grep ranks below a recent commit",
+      tidy_sha in by_sha, by_sha)
+
+# The per-file reversal quota counts subject matches, not body-line noise.
+NOISY = TMP / "noisy"
+NOISY.mkdir()
+git(NOISY, "init", "-q")
+commit(NOISY, {"n.py": "0\n"}, "Initial import")
+for i in range(12):
+    commit(NOISY, {"n.py": f"{i}a\n"}, f"Tweak n.py {i}\n\nStop doing thing {i}.")
+    commit(NOISY, {"n.py": f"{i}b\n"}, f"Remove thing {i}")
+# By sha: the recent-commits pass repeats a few, and rendering shows each once.
+rev_tagged = {sha for prio, sha, _ in
+              prior_art._path_entries(str(NOISY), "n.py", time.monotonic() + 5)
+              if prio == prior_art._P_REVERSAL}
+check("body-line matches do not eat the per-file reversal quota",
+      len(rev_tagged) == prior_art._REVERSALS_PER_PATH, len(rev_tagged))
+
 check("a plan naming no file and no identifier gives nothing",
       prior_art.collect(str(REPO), "Make the bot nicer to use.") == "")
 check("an empty plan gives nothing", prior_art.collect(str(REPO), "") == "")
@@ -242,7 +266,7 @@ if has_commit(ROOT, "d5f8aa8"):
 else:
     print("  SKIP  d5f8aa8 is not reachable from this checkout")
 
-# A large real history to time against (6,087 commits when this was written).
+# A large real history to time against (about 6,100 commits when this was written).
 AIAGENT = Path(os.environ.get(
     "PRIOR_ART_BENCH_REPO", str(Path.home() / "Programming/DegenAI/AIAgent/AIAgent")))
 if AIAGENT.is_dir() and has_commit(AIAGENT, "HEAD"):
@@ -484,6 +508,7 @@ check("...and the flag is owned by CHAIN_CONTEXT",
 for label, body in (
     ("plain", "Prior attempts: none found"),
     ("bulleted and bold", "- **Prior attempts:** d5f8aa8 removed it; this differs"),
+    ("as a heading", "## Prior attempts\nd5f8aa8 removed it; this differs"),
 ):
     ok_chain = f"Go.\n\n[BOT_CMD: /chain preset=ship]\n~~~plan\nEdit a.py.\n{body}\n~~~\n"
     check(f"a /chain with the line ({label}) is not flagged",
@@ -494,6 +519,10 @@ nested = ("[BOT_CMD: /spawn repo=bot title=\"x\"]\n~~~spawn\nEnd with:\n"
           "[BOT_CMD: /chain preset=ship]\n~~~plan\nEdit a.py.\n~~~\n~~~\n")
 check("a /chain inside another block's body is not flagged",
       c(fake(InstanceOrigin.DIRECT), nested) == [])
+prose = ("Go.\n\n[BOT_CMD: /chain preset=ship]\n~~~plan\nEdit a.py.\n"
+         "We looked at prior attempts and found little.\n~~~\n")
+check("prose mentioning prior attempts is not the line",
+      len(c(fake(InstanceOrigin.DIRECT), prose)) == 1)
 check("an origin whose directives are never dispatched is not flagged",
       c(fake(InstanceOrigin.TLDR), bare_chain) == [])
 
