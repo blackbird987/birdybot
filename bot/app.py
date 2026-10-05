@@ -826,6 +826,22 @@ async def run() -> None:
                 for sids in completed_by_session.values():
                     sids.sort(key=lambda x: x.created_at or "", reverse=True)
 
+                # Is there an account that could run something right now?  A
+                # retry time is a promise about when capacity returns, and it
+                # is recorded from the limit response — so it long outlives the
+                # limit if the account situation changes underneath it (a
+                # cooldown cleared because `/login` swapped which account lives
+                # in that directory, a second subscription added).  When a spawn
+                # is possible, waiting is waiting for nothing.
+                #
+                # Only meaningful with CLAUDE_ACCOUNTS configured: in
+                # single-account mode no cooldown is ever recorded (there is no
+                # account_dir to key it by), so retry_at is the ONLY record that
+                # a limit was hit and pulling it forward would break a real wait.
+                spawnable = bool(config.CLAUDE_ACCOUNTS) and (
+                    runner._pick_account() is not None
+                )
+
                 for inst in all_instances:
                     if not inst.cooldown_retry_at or not inst.cooldown_channel_id:
                         continue
@@ -835,6 +851,15 @@ async def run() -> None:
                         retry_at = dt.fromisoformat(inst.cooldown_retry_at)
                     except (ValueError, TypeError):
                         continue
+                    if spawnable and now < retry_at:
+                        log.info(
+                            "Pulling %s's retry forward from %s — an account is "
+                            "available now, so there is no limit left to wait for",
+                            inst.id, inst.cooldown_retry_at,
+                        )
+                        inst.cooldown_retry_at = now.isoformat()
+                        store.update_instance(inst)
+                        retry_at = now
                     if now >= retry_at:
                         # Skip if session already has completed work after this instance
                         # (e.g. user switched accounts and finished the task manually)

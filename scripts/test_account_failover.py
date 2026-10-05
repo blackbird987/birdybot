@@ -165,22 +165,36 @@ class _FakeStore:
     def __init__(self):
         self.alerts: dict[str, dict] = {}
         self.cooldowns: dict[str, str] = {}
+        self.cooldown_fps: dict[str, str] = {}
 
     # --- cooldown persistence (runner reads at init, writes on sideline) ---
     def get_account_cooldowns(self):
         return dict(self.cooldowns)
 
+    def get_account_cooldown_fps(self):
+        return dict(self.cooldown_fps)
+
     def get_model_cooldowns(self):
         return {}
 
-    def set_account_cooldown(self, account_dir, reset_iso):
+    def set_account_cooldown(self, account_dir, reset_iso, cred_fp=None):
         # None means "clear" in the real store — mirroring that matters, or a
         # test asserting on the persisted table would see a cleared cooldown
         # still sitting there as a None value.
+        #
+        # cred_fp stamps which credential hit the limit. Mirrored here because
+        # a runner built on this store drops any cooldown it can't tie to the
+        # credential currently on disk — a fake that forgot the stamp would
+        # make every reboot test look like a lost cooldown.
         if reset_iso is None:
             self.cooldowns.pop(account_dir, None)
+            self.cooldown_fps.pop(account_dir, None)
         else:
             self.cooldowns[account_dir] = reset_iso
+            if cred_fp is None:
+                self.cooldown_fps.pop(account_dir, None)
+            else:
+                self.cooldown_fps[account_dir] = cred_fp
 
     def set_model_cooldown(self, account_dir, reset_iso):
         pass

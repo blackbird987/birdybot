@@ -559,6 +559,11 @@ class ClaudeRunner:
             except Exception:
                 log.exception("Failed to load persisted account cooldowns")
                 persisted = {}
+            try:
+                persisted_fps = store.get_account_cooldown_fps()
+            except Exception:
+                log.exception("Failed to load persisted cooldown fingerprints")
+                persisted_fps = {}
             now = datetime.now(timezone.utc)
             for acct, iso in persisted.items():
                 try:
@@ -567,6 +572,11 @@ class ClaudeRunner:
                     continue
                 if reset > now:
                     self._account_cooldowns[acct] = reset
+            # Then retire whichever of those no longer belong to the credential
+            # sitting in that directory — see _drop_relogged_cooldowns.  Doing
+            # it here covers a login that happened while the bot was down; the
+            # call in _pick_account covers one that happens while it is up.
+            self._drop_relogged_cooldowns(persisted_fps)
 
         # Model-specific cooldowns (account_dir -> reset): tracks when each
         # account's PRIMARY_MODEL quota (e.g. Fable 5) resets.  Separate from
@@ -657,6 +667,70 @@ class ClaudeRunner:
         except asyncio.TimeoutError:
             raise RuntimeError(f"{self.provider.name} CLI --version timed out")
 
+    def _drop_relogged_cooldowns(
+        self, stamped_fps: dict[str, str] | None = None,
+    ) -> None:
+        """Retire usage cooldowns that belong to a credential no longer in place.
+
+        A usage limit belongs to an *account*, but the cooldown is keyed by
+        *directory* — and `/login` can put a DIFFERENT account in the same
+        directory.  When that happens the new subscription inherits the old
+        one's exhausted quota and every spawn is refused until a reset it never
+        hit (2026-08-14).
+
+        A rewritten credentials file is the evidence.  Dropping the cooldown on
+        that signal costs at most one spawn — the limit response re-arms it
+        immediately if it was still real — while keeping it strands a paid
+        account for days.  Same trade ``_clear_auth_cooldown(force=True)``
+        already makes for auth sidelines.
+
+        An unstamped entry is treated the same as a mismatched one: it predates
+        fingerprinting, so it cannot be shown to still apply, and
+        "unverifiable" must not outrank a paid account sitting idle.  Every
+        cooldown written from here on carries a stamp, so that branch only
+        fires once per upgrade.
+
+        No credentials file at all is the opposite case and must NOT drop: a
+        login is what *creates* that file, so its absence is positive evidence
+        that nothing was signed in — and the t-3452 guarantee (a reboot must not
+        forget a live cooldown) is real.
+
+        Called on every ``_pick_account``, not just at construction: the login
+        that rescues a stranded account overwhelmingly happens while the bot is
+        *running*, and checking only at startup meant the fix didn't land until
+        someone thought to reboot (2026-08-28 — a fresh subscription sat idle
+        behind the previous account's limit, "Refusing spawn ... all 1
+        account(s) on cooldown", with nothing left to wait for).
+        """
+        if not self._account_cooldowns:
+            return
+        if stamped_fps is None:
+            if self._store is None:
+                return
+            try:
+                stamped_fps = self._store.get_account_cooldown_fps()
+            except Exception:
+                log.debug("Failed to read cooldown fingerprints", exc_info=True)
+                return
+        for acct in list(self._account_cooldowns):
+            current = credentials_fingerprint(acct)
+            if current is None:
+                continue
+            stamped = stamped_fps.get(acct)
+            if stamped == current:
+                continue
+            log.info(
+                "Dropping usage cooldown for %s — cannot confirm it belongs to "
+                "the credential in place now (recorded=%s, current=%s)",
+                account_label(acct), stamped or "unstamped", current,
+            )
+            self._account_cooldowns.pop(acct, None)
+            if self._store is not None:
+                try:
+                    self._store.set_account_cooldown(acct, None)
+                except Exception:
+                    log.debug("Failed to clear stale cooldown", exc_info=True)
+
     def _pick_account(
         self,
         exclude: set[str] | None = None,
@@ -685,6 +759,9 @@ class ClaudeRunner:
         self._account_cooldowns = {
             k: v for k, v in self._account_cooldowns.items() if v > now
         }
+        # ...and any left holding a limit that a since-replaced credential hit,
+        # so a `/login` takes effect on the next spawn instead of the next boot.
+        self._drop_relogged_cooldowns()
         exclude = exclude or set()
 
         # Credential preflight: an account with no usable refresh token can
@@ -1054,7 +1131,14 @@ class ClaudeRunner:
         self._auth_cooldowns.discard(account_dir)
         if self._store is not None:
             try:
-                self._store.set_account_cooldown(account_dir, reset_at.isoformat())
+                self._store.set_account_cooldown(
+                    account_dir,
+                    reset_at.isoformat(),
+                    # Which credential hit the limit. Lets a later login into
+                    # this same directory retire the cooldown instead of
+                    # inheriting it (see __init__).
+                    credentials_fingerprint(account_dir),
+                )
             except Exception:
                 log.exception(
                     "Failed to persist account cooldown for %s",

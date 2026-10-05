@@ -69,6 +69,7 @@
     "unattended_nudge": "python scripts/test_unattended_nudge.py",
     "account_failover": "python scripts/test_account_failover.py",
     "account_alerts": "python scripts/test_account_alerts.py",
+    "cooldown_credential_swap": "python scripts/test_cooldown_credential_swap.py",
     "paths": "python scripts/verify_paths.py",
     "dead_session_recovery": "python scripts/test_dead_session_recovery.py",
     "git_prompt_hardening": "python scripts/test_git_prompt_hardening.py",

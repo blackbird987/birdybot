@@ -31,7 +31,9 @@ _INSTANCE_PATH_FIELDS = (
     "repo_path", "worktree_path", "session_account", "result_file", "diff_file",
 )
 # Maps whose KEYS are account directories.
-_ACCOUNT_KEYED = ("account_cooldowns", "model_cooldowns", "account_alerts")
+_ACCOUNT_KEYED = (
+    "account_cooldowns", "account_cooldown_fps", "model_cooldowns", "account_alerts",
+)
 
 
 def _localise_paths(data: dict) -> None:
@@ -151,6 +153,14 @@ class StateStore:
         # reboots so a build triggered immediately after restart doesn't waste
         # a CLI invocation on a known-cooldown account (the t-3452 dementia).
         self._account_cooldowns: dict[str, str] = {}
+        # account_dir -> credentials fingerprint captured when that cooldown was
+        # recorded.  A usage limit belongs to the *account*, but the cooldown is
+        # keyed by *directory* — and a `/login` can swap which account lives in a
+        # directory (2026-08-14: a new subscription was signed into ~/.claude,
+        # inheriting the old account's weekly-limit cooldown and refusing every
+        # spawn on a subscription with full quota).  Comparing fingerprints at
+        # load makes that recoverable without an .env edit.
+        self._account_cooldown_fps: dict[str, str] = {}
         # account_dir -> ISO timestamp of the PRIMARY model's own limit reset
         # (e.g. Fable 5 quota).  Separate from _account_cooldowns: the account
         # stays usable for other models, so this only downgrades — never
@@ -244,6 +254,7 @@ class StateStore:
             self._fallback_cost = data.get("fallback_cost", 0.0)
             self._fallback_cost_date = data.get("fallback_cost_date", "")
             self._account_cooldowns = data.get("account_cooldowns", {})
+            self._account_cooldown_fps = data.get("account_cooldown_fps", {})
             self._model_cooldowns = data.get("model_cooldowns", {})
             self._account_alerts = data.get("account_alerts", {})
             for d in data.get("schedules", []):
@@ -321,6 +332,7 @@ class StateStore:
             "fallback_cost": self._fallback_cost,
             "fallback_cost_date": self._fallback_cost_date,
             "account_cooldowns": self._account_cooldowns,
+            "account_cooldown_fps": self._account_cooldown_fps,
             "model_cooldowns": self._model_cooldowns,
             "account_alerts": self._account_alerts,
             "schedules": [s.to_dict() for s in self._schedules.values()],
@@ -689,7 +701,19 @@ class StateStore:
         """
         return dict(self._account_cooldowns)
 
-    def set_account_cooldown(self, account_dir: str, reset_iso: str | None) -> None:
+    def get_account_cooldown_fps(self) -> dict[str, str]:
+        """Return {account_dir -> credentials fingerprint at cooldown time}.
+
+        Pairs with :meth:`get_account_cooldowns`.  An entry missing here for a
+        live cooldown means "recorded before fingerprints were tracked" — the
+        caller decides what to do with that, since only it knows how expensive
+        being wrong is.
+        """
+        return dict(self._account_cooldown_fps)
+
+    def set_account_cooldown(
+        self, account_dir: str, reset_iso: str | None, cred_fp: str | None = None,
+    ) -> None:
         """Record (or clear with None) a usage-limit reset for an account.
 
         Persists immediately so a reboot between cooldown-set and the next
@@ -697,11 +721,19 @@ class StateStore:
         t-3452 dementia (fresh runner had empty cooldowns, picked the
         already-exhausted primary, hit "No conversation found", fell through
         to Layer 3 which dropped the session).
+
+        ``cred_fp`` stamps which credential the limit was hit on, so a later
+        login into the same directory can be told apart from a restart.
         """
         if reset_iso is None:
             self._account_cooldowns.pop(account_dir, None)
+            self._account_cooldown_fps.pop(account_dir, None)
         else:
             self._account_cooldowns[account_dir] = reset_iso
+            if cred_fp is None:
+                self._account_cooldown_fps.pop(account_dir, None)
+            else:
+                self._account_cooldown_fps[account_dir] = cred_fp
         self.save()
 
     def get_model_cooldowns(self) -> dict[str, str]:
