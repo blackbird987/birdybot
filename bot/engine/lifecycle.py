@@ -7,12 +7,12 @@ import json
 import logging
 import os
 import re
-import subprocess
 from datetime import datetime, timedelta, timezone
 
 from bot import config
+from bot.procutil import run_capture
 from bot.claude.models import context_tokens_from_usage
-from bot.claude.parser import looks_like_fatal_auth_error
+from bot.claude.parser import is_context_overflow_error, looks_like_fatal_auth_error
 from bot.claude.provider import get_provider
 from bot.claude.runner import RebootResult
 from bot.claude.types import (
@@ -26,6 +26,7 @@ from bot.platform.formatting import (
     format_context_footer,
     format_delay_secs,
     format_duration,
+    format_inline_meta_line,
     format_tokens,
     format_result_md,
     mode_name,
@@ -37,10 +38,11 @@ from bot.platform.formatting import (
     strip_summary_block,
     strip_verify_blocks,
 )
+from bot.engine import watches
 from bot.store import history as history_mod
+from bot.textutil import find_tilde_block, mask_tilde_bodies, parse_duration
 
 log = logging.getLogger(__name__)
-_NOWND: dict = config.NOWND
 
 MAX_COOLDOWN_RETRIES = 3
 
@@ -199,11 +201,70 @@ async def schedule_cooldown_retry(
     return True
 
 
+def cooldown_retry_is_due(
+    retry_at: str | None,
+    now: datetime,
+    accounts_free: bool,
+) -> bool:
+    """Should a parked cooldown retry fire on this pass?
+
+    ``cooldown_retry_at`` is a *prediction* of when an account will be free
+    again, never a deadline anyone agreed to: the refuse-to-spawn branch
+    stamps it with the earliest live cooldown, and one weekly limit puts that
+    days out.  An account signed back in, re-enabled by an org admin, or
+    cleared by /auth's "Try now" makes it stale instantly, and nothing
+    re-armed it.  On 2026-09-17 eighteen sessions sat parked on a reset four
+    days away while a second account had been usable again for minutes, and
+    the only way out was retrying each one by hand.
+
+    So availability is the trigger and the timestamp is the fallback, for the
+    case where nothing frees up on its own.  It cannot thrash: the account
+    that hit the limit stays in ``_account_cooldowns`` until its real reset,
+    so a single-account fleet answers ``accounts_free=False`` throughout and
+    waits exactly as before.  An unparseable stamp fires only on
+    availability: an unreadable prediction is not a reason to keep waiting,
+    but it is also not a clock.
+    """
+    if not retry_at:
+        return False
+    if accounts_free:
+        return True
+    try:
+        return now >= datetime.fromisoformat(retry_at)
+    except (ValueError, TypeError):
+        return False
+
+
 # Labels that don't auto-derive well from InstanceOrigin.value
 _ORIGIN_LABEL_OVERRIDES: dict[InstanceOrigin, str] = {
     InstanceOrigin.DIRECT: "",
     InstanceOrigin.DONE: "wrap-up ",
 }
+
+
+# Origins whose output is a REPORT, not a turn in a conversation. Nothing they
+# emit is dispatched as a [BOT_CMD:] directive.
+#
+# The prompt review is pointed straight at the documents that carry literal
+# directive examples: the /watch block in CLAUDE.md, the /spawn, /reply, /image
+# and /repo lines in WORKING_CONTEXT. Quoting one of those inside a proposal is
+# the normal thing for it to do, and every directive parser would then arm it
+# for real. The quoted-prefix guards in those parsers do not save us: an
+# example indented inside a fence starts with whitespace, not a backtick.
+#
+# TL;DR is here for the weaker version of the same reason, and for a stronger
+# one of its own. The weaker: a recap of the work that just built the /watch or
+# /spawn handling is a turn with those literal examples fresh in its context,
+# being asked to restate them. The stronger: this is the one origin whose whole
+# contract is "explain, do no work, ask nothing, change nothing", so a directive
+# from it is incoherent no matter how it got there, and there is nothing to lose
+# by refusing to honour one. The prompt forbids it too, but a brief is a soft
+# guard and this is the hard one, the same split the prompt review draws between
+# its brief and EDITABLE_CLASSES.
+_NO_DIRECTIVE_ORIGINS: frozenset[InstanceOrigin] = frozenset({
+    InstanceOrigin.PROMPT_REVIEW,
+    InstanceOrigin.TLDR,
+})
 
 
 def _origin_label(origin: InstanceOrigin) -> str:
@@ -288,9 +349,12 @@ async def run_instance(
     on_progress = None
     on_stall = None
     on_recovery = None
+    on_context_reset = None
     heartbeat_task = None
     if handle:
-        on_progress, on_stall, heartbeat, on_recovery = make_progress_callbacks(
+        (
+            on_progress, on_stall, heartbeat, on_recovery, on_context_reset,
+        ) = make_progress_callbacks(
             ctx, inst, handle, ctx.effective_verbose,
         )
         heartbeat_task = asyncio.create_task(heartbeat())
@@ -308,16 +372,20 @@ async def run_instance(
                 context=ctx.effective_context,
                 sibling_context=sibling_ctx,
                 on_recovery=on_recovery,
+                on_context_reset=on_context_reset,
             )
         finally:
             if heartbeat_task:
                 heartbeat_task.cancel()
 
         # Update thinking message to show completion.
-        # Skip entirely when kill_reason == "kill" — the Kill button handler
-        # in commands.py edits the same message id to "Killed <id>" with
-        # action buttons (Retry/Log), and we don't want to race that edit.
-        if handle and result.kill_reason != "kill":
+        # Skipped only when the killer will rewrite this very message — the
+        # Kill button turns the card it sits on into "Killed <id>" with
+        # Retry/Log attached, and a slow finalize must not overwrite that.
+        # Typed /kill posts a separate message and leaves the flag False, so
+        # we still resolve the card here rather than stranding it on
+        # "thinking...".
+        if handle and not result.kill_owns_card:
             elapsed = asyncio.get_event_loop().time() - start_time
             if elapsed >= 60:
                 elapsed_str = f"{elapsed / 60:.1f}m"
@@ -325,7 +393,12 @@ async def run_instance(
                 elapsed_str = f"{elapsed:.0f}s"
             escaped = ctx.messenger.escape(inst.display_id())
             if result.killed_intentionally:
-                icon, status = "", "steered"
+                # "steered" only when a replacement run is already starting;
+                # a plain stop is a stop.
+                if result.kill_reason == "steer":
+                    icon, status = "", "steered"
+                else:
+                    icon, status = "⏹", "stopped"
             elif result.needs_input:
                 icon, status = "❓", "asking a question"
             elif result.is_error:
@@ -369,7 +442,8 @@ async def run_instance(
         # [BOT_CMD: /image] — post pictures BEFORE the result embed so the
         # workflow buttons stay the last thing in the thread. Raw text: the
         # collapsed copy above has already had the directives stripped out.
-        if result.result_text and not result.is_error:
+        dispatch_directives = inst.origin not in _NO_DIRECTIVE_ORIGINS
+        if result.result_text and not result.is_error and dispatch_directives:
             from bot.engine.images import deliver_images
             await deliver_images(ctx, result.result_text, inst)
         await send_result(
@@ -387,24 +461,35 @@ async def run_instance(
         except Exception:
             log.debug("auto-merge veto scheduling failed for %s", inst.id, exc_info=True)
 
-        # Orchestrator: if this thread was spawned by /spawn, post a
-        # COMPLETED/FAILED callback back into the parent thread with a
-        # Resume button. Only fires on terminal-success/failure states —
-        # KILLED (user-cancelled) does NOT callback. needs_input also
-        # suppresses: `finalize_run` flips status to COMPLETED whenever
-        # the model paused with a question (lifecycle.py:480-484), so a
-        # status-only check would falsely tell the parent "child done"
-        # while the child is actually waiting on a human reply. Wrapped
-        # so a post failure (parent archived/deleted, Discord error)
-        # never aborts child finalize.
-        if (ctx.notify_parent_on_finalize is not None
-                and not result.needs_input
-                and inst.status in (InstanceStatus.COMPLETED, InstanceStatus.FAILED)):
-            try:
-                status_label = "COMPLETED" if inst.status == InstanceStatus.COMPLETED else "FAILED"
-                await ctx.notify_parent_on_finalize(status_label, display_text)
-            except Exception:
-                log.exception("notify_parent_on_finalize failed for inst %s", inst.id)
+        # Orchestrator: if this thread was spawned by /spawn, tell the parent
+        # this child just landed so it can re-evaluate its wave.
+        #
+        # needs_input gets its OWN label rather than being suppressed. It is
+        # not a completion — `finalize_run` flips status to COMPLETED whenever
+        # the model paused with a question (lifecycle.py:480-484), so calling
+        # it done would tell the parent the child finished when it is actually
+        # parked. But staying silent (the old behaviour) meant a child could
+        # sit on a question indefinitely with nobody told: the parent's wave
+        # stalled until its timeout, and the user only found out by noticing.
+        # BLOCKED lets the parent — which wrote this child's brief — answer it.
+        #
+        # KILLED still doesn't call back: an intentional kill already returned
+        # above, and a user-cancelled child is reported by the wave join as a
+        # settled non-result. Wrapped so a post failure (parent archived or
+        # deleted, Discord error) never aborts child finalize.
+        if ctx.notify_parent_on_finalize is not None:
+            status_label = None
+            if result.needs_input:
+                status_label = "BLOCKED"
+            elif inst.status == InstanceStatus.COMPLETED:
+                status_label = "COMPLETED"
+            elif inst.status == InstanceStatus.FAILED:
+                status_label = "FAILED"
+            if status_label is not None:
+                try:
+                    await ctx.notify_parent_on_finalize(status_label, display_text)
+                except Exception:
+                    log.exception("notify_parent_on_finalize failed for inst %s", inst.id)
 
         # Track API fallback spending for daily budget cap
         if result.api_fallback_used and result.cost_usd:
@@ -417,7 +502,7 @@ async def run_instance(
         # silently instead of dispatched or explicitly refused by the
         # handler's gates (autopilot, depth, wave cap, budget). Local import:
         # commands imports lifecycle at module level.
-        if result.result_text and not result.is_error:
+        if result.result_text and not result.is_error and dispatch_directives:
             from bot.engine.commands import _execute_bot_commands
             await _execute_bot_commands(ctx, result.result_text, source_inst=inst)
 
@@ -430,7 +515,8 @@ async def run_instance(
         # reset the runaway counter. Pass the raw result text so the directive
         # can be parsed and a turn that CLAIMED a self-wake but scheduled
         # nothing gets a notice-only heads-up instead of a silent dead-end.
-        await check_wake_request(ctx, inst, final_text=result.result_text)
+        if dispatch_directives:
+            await check_wake_request(ctx, inst, final_text=result.result_text)
 
     except asyncio.CancelledError:
         # Shutdown cancelled this task. The 30s drain in app.py keeps the
@@ -476,13 +562,109 @@ async def run_instance(
 def _repo_has_changes(repo_path: str) -> bool:
     """Check if a repo has uncommitted changes (staged or unstaged)."""
     try:
-        r = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=repo_path, capture_output=True, timeout=5, text=True, **_NOWND,
-        )
+        r = run_capture(["git", "status", "--porcelain"], cwd=repo_path, timeout=5)
         return bool(r.stdout.strip())
     except Exception:
         log.warning("Failed to check repo changes in %s", repo_path, exc_info=True)
+        return False
+
+
+def should_bind_session(result: RunResult) -> bool:
+    """Is this turn's session_id safe to register onto the thread?
+
+    Success always is.  A usage-limit failure also is, and must be: it is a
+    pause, not an ending — _do_cooldown_retry_locked resumes that exact
+    session_id, so a thread that doesn't learn it can never continue the work.
+
+    A run whose session recovery was exhausted binds too, and for the same
+    shape of reason: that flag is only ever set by a path that first PROVED
+    the old id unusable — the conversation is filed on no account under any
+    spelling, or its transcript will not compact — and then deliberately
+    started a fresh session in its place.  Refusing here leaves the thread
+    bound to an id that can never run again, so the next message resumes it,
+    dies the same way, and the thread is wedged for good.  That is the
+    2026-09-03 "prompt too long" failure: five consecutive runs against one
+    un-compactable session, each starting from the same dead binding.
+
+    Every other error is refused.  A crashed run can emit a FRESH session_id
+    carrying none of the thread's history with nothing proven about the old
+    one, and adopting that would silently amputate the conversation.
+
+    A run that recovered onto a fresh session AND then hit the limit still
+    binds — deliberately.  The old id is already unreachable at that point
+    (that is what recovery exhaustion means) and the retry resumes the new
+    one, so refusing here would strand the thread for a second time.
+    """
+    if not result.session_id:
+        return False
+    return (
+        (not result.is_error)
+        or bool(result.usage_limit_reset)
+        or result.session_recovery_exhausted
+    )
+
+
+async def bind_thread_session(
+    ctx: RequestContext, inst: Instance, session_id: str | None,
+) -> None:
+    """Register *session_id* as the thread's session.
+
+    The one place that writes a finished turn's session back onto the thread.
+    Every later resume path — the next user message, a self-wake, a fired
+    /watch — reads ThreadInfo.session_id, so a turn that doesn't land here is
+    a turn the thread can never continue.
+
+    Callers decide eligibility; this only mutates.  The repo_name is passed so
+    the platform wrapper can refuse a rebind that crosses the thread's bound
+    repo (see bot.discord.forums.set_thread_session — RebindResult).
+    """
+    if not session_id:
+        return
+    # Non-Discord platforms track one global active session; Discord threads
+    # are isolated and carry their own via ctx.session_id.
+    if not ctx.session_id:
+        ctx.store.active_session_id = session_id
+    if ctx.on_session_resolved:
+        await ctx.on_session_resolved(session_id, inst.repo_name or None)
+
+
+async def backfill_thread_session(ctx: RequestContext, inst: Instance) -> bool:
+    """Give a sessionless thread the session this run just used.  Never rebinds.
+
+    For the four paths that call run_instance directly instead of going through
+    commands._execute_query: the cooldown auto-retry, /retry, the Retry button
+    and "continue on pay-per-use".  run_instance deliberately does not bind — a
+    workflow step's session belongs to the step, not the conversation — so
+    without this a thread that is already sessionless stays that way, and every
+    later resume path (the next message, a self-wake, a fired /watch) has
+    nothing to resume.  The pay-per-use button is the sharpest case: it is the
+    manual twin of the cooldown retry, fired from the very usage-limit card
+    whose lost binding this whole change exists to fix.
+
+    FILL A GAP, NEVER REBIND.  Each of those callers can also be pointed at a
+    workflow step or at an instance that belongs to another thread, and
+    rebinding from here would let one of those amputate a thread's chat
+    history.  Writing only into an EMPTY binding cannot lose anything.
+    Worktree builds are excluded on top of that: a build runs its own session
+    inside an isolated checkout and must not become a thread's chat session
+    even when the slot is free.
+
+    Returns True iff it wrote.  Never raises — a failed state write must not be
+    able to cost the caller its run or its answer.
+    """
+    if not inst.session_id or inst.worktree_path:
+        return False
+    # resolve_session_id is wired only by attach_session_callbacks, so its
+    # absence is a faithful "this context isn't thread-bound" — nothing to
+    # fill.  Its value is read live off ThreadInfo, so this is the current
+    # binding, not a stale copy taken before the run.
+    if ctx.resolve_session_id is None or ctx.resolve_session_id():
+        return False
+    try:
+        await bind_thread_session(ctx, inst, inst.session_id)
+        return True
+    except Exception:
+        log.exception("Failed to backfill thread session from %s", inst.id)
         return False
 
 
@@ -646,7 +828,8 @@ def make_progress_callbacks(
     handle: MessageHandle,
     verbose: int = 1,
 ):
-    """Create on_progress, on_stall, and heartbeat closures.
+    """Create the on_progress, on_stall, heartbeat, on_recovery and
+    on_context_reset closures.
 
     The latest ``message.usage`` is cached at closure scope so the context
     footer persists across the 5s throttle on_progress and the 10s heartbeat
@@ -883,6 +1066,23 @@ def make_progress_callbacks(
         reason_line = (reason or "session not found").splitlines()[0][:200]
         reason_line = reason_line.replace("`", "'")
         path_safe = path.replace("`", "'")
+        # Two callers, two different endings. Layer 3 hands the user a thread
+        # that will start fresh on their NEXT message; the context-overflow
+        # recovery has already started the replacement run and is carrying on
+        # with this turn. Telling an overflow user to re-state their request
+        # would have them repeat work that is running in front of them.
+        if is_context_overflow_error(reason or ""):
+            tail = (
+                "The work is continuing now in a fresh session, primed with "
+                "this thread's recent messages — but it no longer has the "
+                "earlier conversation verbatim, so re-state anything that "
+                "matters if it looks like it lost the thread."
+            )
+        else:
+            tail = (
+                "Your next message will start with fresh context — "
+                "re-state what you want it to do."
+            )
         try:
             await ctx.messenger.send_text(
                 ctx.channel_id,
@@ -893,8 +1093,7 @@ def make_progress_callbacks(
                     f"• Worktree:   `{path_safe}`\n"
                     f"• Reason:     `{reason_line}`\n"
                     f"\n"
-                    f"Your next message will start with fresh context — "
-                    f"re-state what you want it to do."
+                    f"{tail}"
                 ),
             )
         except Exception:
@@ -904,7 +1103,43 @@ def make_progress_callbacks(
                 exc_info=True,
             )
 
-    return on_progress, on_stall, heartbeat, on_recovery
+    # Context-overflow recovery: the runner is about to abandon a session whose
+    # transcript will not compact and start a fresh one in its place.  It asks
+    # here for something to hand the replacement, because the thread's history
+    # lives in the platform layer, not in the runner.
+    #
+    # mode="resume" rather than "cold" — the ~12K-token budget exists for
+    # exactly this shape of loss (the verbatim exchange is gone but the thread
+    # is mid-task), where the ~500-token cold brief is meant for a thread that
+    # has barely started.  It bypasses the cache by construction, so a briefing
+    # built here reflects the messages that landed while the dead session was
+    # still being retried.
+    #
+    # What comes back is a ready-to-prepend BLOCK, not the bare digest: the
+    # same preamble + "---" separator that commands._execute_query wraps a
+    # briefing in (config.prime_preamble).  That wrapper is not decoration.
+    # The quoted blocks are the user's own earlier messages, and a session
+    # handed them unframed reads them as live instructions and re-runs work
+    # nobody asked for -- the worst possible answer for a recovery whose whole
+    # premise is "your predecessor's edits are already on disk".  The runner
+    # glues this in front of the prompt verbatim, so the separator the
+    # preamble promises has to be part of it.
+    async def on_context_reset() -> str | None:
+        if ctx.maybe_prime_briefing is None:
+            return None
+        try:
+            briefing = await ctx.maybe_prime_briefing("resume")
+        except Exception:
+            log.exception(
+                "Context-reset briefing failed for %s", inst.id,
+            )
+            return None
+        if not briefing:
+            return None
+        preamble = config.prime_preamble(config.PRIME_SITUATION_LOST)
+        return f"{preamble}\n\n{briefing}\n\n---"
+
+    return on_progress, on_stall, heartbeat, on_recovery, on_context_reset
 
 
 async def _try_apply_near_limit(
@@ -1055,6 +1290,7 @@ async def send_result(
     try:
         if inst.status == InstanceStatus.FAILED or not result_text or finalize_info:
             # Failed/empty results use summary embed; finalize results use rich embed
+            inst.result_collapsed = False   # no Expand button on this shape
             formatted = format_result_md(inst)
             markup = ctx.messenger.markdown_to_markup(formatted)
             msg_id = await ctx.messenger.send_result(
@@ -1064,8 +1300,11 @@ async def send_result(
             )
             _record_msg(msg_id)
 
-        elif len(result_text) < 2000:
-            result_text = result_text + f"\n-# {session_loc}"
+        elif len(result_text) <= config.RESULT_INLINE_MAX:
+            inst.result_collapsed = False
+            result_text = result_text + "\n" + format_inline_meta_line(
+                inst, session_loc,
+            )
             markup = ctx.messenger.markdown_to_markup(result_text)
             chunks = ctx.messenger.chunk_message(markup)
             # Prepend mention to first chunk so user gets pinged.
@@ -1075,8 +1314,15 @@ async def send_result(
                 is_last = i == len(chunks) - 1
                 text = chunk
                 chunk_silent = silent
-                if mention and i == 0:
-                    combined = f"{mention}\n{chunk}"
+                # First choice is the top of the answer; failing that, the end
+                # of the last chunk. A chunk that filled to the 2000-char cap
+                # has no room for the mention, and that got likelier the moment
+                # the inline ceiling went up -- without the second try, a full
+                # first chunk means a message containing nothing but "@user".
+                if mention and (i == 0 or is_last):
+                    combined = (
+                        f"{mention}\n{chunk}" if i == 0 else f"{chunk}\n{mention}"
+                    )
                     if len(combined) <= 2000:
                         text = combined
                         mention = None  # consumed
@@ -1086,15 +1332,16 @@ async def send_result(
                     buttons if is_last else None, chunk_silent,
                 )
                 _record_msg(msg_id)
-            # Mention didn't fit in chunk — send separately
+            # Mention fit in neither end — send separately
             if mention:
                 await ctx.messenger.send_text(
                     ctx.channel_id, mention, silent=False,
                 )
 
         else:
+            inst.result_collapsed = True
             expand_buttons = action_button_specs(inst, show_expand=True)
-            formatted = format_result_md(inst)
+            formatted = format_result_md(inst, preview=result_text)
             markup = ctx.messenger.markdown_to_markup(formatted)
             msg_id = await ctx.messenger.send_result(
                 ctx.channel_id, markup, metadata=meta,
@@ -1334,9 +1581,52 @@ def claims_self_wake(text: str) -> bool:
     merely discussed the feature). Verify blocks, code spans, and quoted
     phrases are stripped first so meta-discussion can't false-trigger.
     """
-    cleaned = strip_verify_blocks(text or "")
+    cleaned = strip_verify_blocks(mask_tilde_bodies(text or ""))
     cleaned = _CLAIM_META_RE.sub(" ", cleaned)
     return bool(config.WAKE_CLAIM_RE.search(cleaned))
+
+
+def promises_continuation(text: str) -> bool:
+    """True if the final text PROMISES to continue after this turn ends.
+
+    "I'll report back when the tests finish", "I'm polling in the background".
+    The process exits when the turn does, so unless the same turn armed a
+    ``[BOT_CMD: /wake]`` or ``/watch``, that sentence describes something that
+    will never happen and the thread is left with nothing to resume it.
+
+    Notice/nudge-only, exactly like ``claims_self_wake``: this NEVER schedules
+    a poll. ``check_wake_request`` re-invokes the session with
+    ``_PROMISE_NUDGE_PROMPT`` and only a directive the session then emits arms
+    anything — the distinction that keeps the deleted auto-arming heuristic
+    (phantom 3-minute wakes off prose that merely discussed a build) dead.
+
+    Same camouflage guards in the same order as the claim scan: verify blocks,
+    then fenced/inline code and quoted phrases (``_CLAIM_META_RE``), so a
+    report quoting one of these phrases — including this feature's own
+    documentation — can't trip it.
+    """
+    return _promise_match(text) is not None
+
+
+def _promise_match(text: str) -> re.Match | None:
+    """The one place the promise scan is defined; see the two callers below."""
+    # Tilde bodies first: "I'll report back" inside a /spawn brief is the
+    # child's promise to keep, not this turn's.
+    cleaned = strip_verify_blocks(mask_tilde_bodies(text or ""))
+    cleaned = _CLAIM_META_RE.sub(" ", cleaned)
+    return config.WAKE_PROMISE_RE.search(cleaned)
+
+
+def promise_evidence(text: str) -> str:
+    """The promising phrase itself, for a report. "" when there is none.
+
+    Deliberately scans the same CLEANED text as ``promises_continuation``
+    rather than the raw text: quoting the phrase out of a fence would
+    otherwise let a report show evidence for a promise the decision function
+    never saw.
+    """
+    match = _promise_match(text)
+    return match.group(0).strip()[:100] if match else ""
 
 
 def has_turn_complete_marker(text: str) -> bool:
@@ -1351,7 +1641,7 @@ def has_turn_complete_marker(text: str) -> bool:
     """
     if not text:
         return False
-    cleaned = _CLAIM_META_RE.sub(" ", text)
+    cleaned = _CLAIM_META_RE.sub(" ", mask_tilde_bodies(text))
     return config.TURN_COMPLETE_SENTINEL in cleaned
 
 
@@ -1372,6 +1662,34 @@ _NUDGE_PROMPT = (
 )
 
 
+# Injected when a turn PROMISED to continue ("I'll report back when the tests
+# finish") but armed no [BOT_CMD: /wake] and no /watch — see
+# promises_continuation. Delivered through the same wake path as _NUDGE_PROMPT,
+# so the re-invoked turn is unattended and is itself held to the
+# end-of-turn protocol; a second dead-end there is caught by _nudge_or_stop
+# under the shared nudge cap. The session — not this code — decides what to
+# arm, because it is the only party that knows the pid, the log path and how
+# long the job takes.
+_PROMISE_NUDGE_PROMPT = (
+    "SYSTEM NUDGE: your previous turn told the user you would report back / "
+    "keep watching / continue once something finishes, but it armed nothing — "
+    "no [BOT_CMD: /watch], no [BOT_CMD: /wake]. Your process exits when a turn "
+    "ends, so nothing would ever have resumed this thread and the user would "
+    "have waited forever. Do NOT merely restate the promise. Pick ONE and act "
+    "on it THIS turn: (a) the job is still running locally — find it (`pgrep "
+    "-af <name>`, or the log file you already wrote to) and end with a "
+    "[BOT_CMD: /watch pid=<pid> log=\"<path>\" label=\"<what>\"] directive plus "
+    "its ~~~watch body, so you are woken the moment it finishes; (b) there is "
+    "no local process to point at (a remote deploy, CI, someone else's job) — "
+    "end with a [BOT_CMD: /wake delay=<secs> reason=\"<why>\"] directive plus "
+    "its ~~~wake body, choosing a delay that matches how fast that state "
+    "actually changes; (c) the job has already finished — read the result now, "
+    "report it, and end with [TURN_COMPLETE]; (d) there was never anything "
+    "pending and the promise was loose talk — say so plainly in one line and "
+    "end with [TURN_COMPLETE]."
+)
+
+
 # --- [BOT_CMD: /wake] directive (primary self-wake channel) ----------------
 # A finished turn schedules a self-wake by emitting this directive in its
 # output, parsed here post-turn — the same proven mechanism as [BOT_CMD: /spawn]
@@ -1380,9 +1698,9 @@ _NUDGE_PROMPT = (
 # directive IS the action (text in the response), so the model can't narrate
 # "self-wake queued" while skipping a separate file-write tool call.
 _WAKE_DIRECTIVE_RE = re.compile(r"\[BOT_CMD:\s*/wake(?:\s+(.+?))?\s*\]")
-# Tilde-fenced body carries the (possibly multiline) resume prompt. Tildes
-# avoid colliding with the ``` code fences a prompt body may itself contain.
-_WAKE_BODY_RE = re.compile(r"~~~wake\s*\n(.*?)\n~~~", re.DOTALL)
+# Tilde-fenced ~~~wake body carries the (possibly multiline) resume prompt,
+# located by textutil.find_tilde_block. Tildes avoid colliding with the ```
+# code fences a prompt body may itself contain.
 _WAKE_KV_RE = re.compile(r'''(\w+)=(?:"([^"]*)"|'([^']*)'|(\S+))''')
 # A directive on a quoted/code/heading line is an EXAMPLE (this guidance quoted
 # back, or a fenced snippet), not a real request — skip it. Mirrors the guard in
@@ -1405,6 +1723,12 @@ def _parse_wake_directive(text: str) -> dict | None:
     """
     if not text:
         return None
+    # Every guard below reads the MASKED text: a /wake written inside another
+    # directive's tilde body (a parent's /spawn brief telling the child how to
+    # wake itself) belongs to that session, never to this one. Offsets are
+    # shared, so the body is still read from the original.
+    raw = text
+    text = mask_tilde_bodies(raw)
     for m in _WAKE_DIRECTIVE_RE.finditer(text):
         line_start = text.rfind("\n", 0, m.start()) + 1
         # Skip EXAMPLES, not real requests. Three ways a directive can be a
@@ -1428,8 +1752,8 @@ def _parse_wake_directive(text: str) -> dict | None:
                 kvm.group(3) if kvm.group(3) is not None else kvm.group(4)
             )
             kv[kvm.group(1)] = val or ""
-        body_match = _WAKE_BODY_RE.search(text, m.end())
-        prompt = (body_match.group(1).strip() if body_match
+        span = find_tilde_block(raw, "wake", m.end())
+        prompt = (raw[span[0]:span[1]].strip() if span
                   else (kv.get("prompt") or "").strip())
         if not prompt:
             # No resume prompt (no ~~~wake body, no prompt= kv) — not a usable
@@ -1438,18 +1762,29 @@ def _parse_wake_directive(text: str) -> dict | None:
             continue
         # Coerce delay to a sane int here (default on absent/garbage) so a
         # typo'd delay can't silently drop a directive that carries a prompt.
+        # Unit suffixes go through the SAME grammar as /watch's timeout=
+        # ("3d", "90m", bare seconds): once the ceiling moved past 24h a
+        # session writing delay=3d was the obvious spelling, and the old
+        # int(float(...)) turned it into the 180s fallback without a word.
         raw_delay = kv.get("delay") or kv.get("delay_secs")
-        try:
-            delay_secs = (int(float(raw_delay)) if raw_delay is not None
-                          else config.WAKE_FALLBACK_DELAY_SECS)
-        except (TypeError, ValueError):
-            delay_secs = config.WAKE_FALLBACK_DELAY_SECS
+        delay_secs = parse_duration(raw_delay, config.WAKE_FALLBACK_DELAY_SECS)
         return {
             "prompt": prompt,
             "delay_secs": delay_secs,
             "reason": kv.get("reason", ""),
         }
     return None
+
+
+def armed_a_directive(text: str) -> bool:
+    """True if this turn's text carries a usable ``/wake`` or ``/watch``.
+
+    The public form of the pair ``check_wake_request`` branches on, so a
+    caller that only has the text (``eval``) asks the same question the
+    runtime did instead of re-implementing the parse.
+    """
+    return (_parse_wake_directive(text) is not None
+            or watches.parse_watch_directive(text) is not None)
 
 
 async def check_wake_request(
@@ -1469,9 +1804,11 @@ async def check_wake_request(
     function schedules anything: heuristic auto-arming (off watch-promise or
     wake-claim phrases in ``final_text``) was removed after it repeatedly
     armed phantom re-checks on prose that merely discussed jobs or this very
-    feature. The one heuristic left is notice-only: a turn that asserts it
-    armed a self-wake while nothing parsed gets a visible heads-up so the
-    dead-end isn't silent — but no wake. Worktree builds can't safely
+    feature. Two heuristics survive and NEITHER schedules a poll: a turn that
+    asserts it armed a self-wake while nothing parsed gets a notice-only
+    heads-up, and a turn that PROMISED to report back later with nothing armed
+    is re-invoked once (``_promise_nudge``) so it can arm a real directive
+    itself — the session, not this function, decides. Worktree builds can't safely
     self-wake — their dir may be merged/discarded by fire time — so they're
     refused with a note (parity with the runner gate).
     """
@@ -1497,50 +1834,116 @@ async def check_wake_request(
             except Exception:
                 log.debug("reset_nudge_count raised", exc_info=True)
 
-    async def _nudge_or_stop() -> None:
-        # An unattended turn (cooldown retry / self-wake fire) dead-ended: no
-        # wake scheduled AND no [TURN_COMPLETE] marker. Left alone the thread
-        # silently dies (the q-12314 dead-end). Re-invoke it once (capped) with
-        # an explicit instruction to finish, wake, or signal completion.
+    async def _nudge_once(
+        *, prompt: str, log_msg: str, exhausted: str, capped: str, nudged: str,
+    ) -> None:
+        """Re-invoke this thread once with ``prompt``, under the shared cap.
+
+        One body for both dead-end nudges — the unattended turn that ended
+        mid-plan and the turn that promised to report back with nothing armed.
+        They differ only in wording, and letting them drift is how one gets
+        fixed while the other keeps failing (same lesson as ``perform_kill``).
+
+        The policy is the shared part: a context-exhausted session is handed to
+        the user instead of re-invoked, ``MAX_CONSEC_NUDGES`` consecutive
+        nudges stop with a notice, and otherwise the thread is resumed after
+        ``WAKE_MIN_DELAY_SECS``. Both counters are cleared on every terminal
+        branch so a thread that stops nudging starts clean.
+        """
         if instance.warning_pinned:
             # Context-exhausted: re-invoking only degrades it. Hand to the user.
             _reset()
             _reset_nudge()
-            await _notice(
-                "⚠️ This unattended turn stopped mid-plan without finishing or "
-                "scheduling a follow-up, and the session is out of context — "
-                "start a fresh thread to carry it on."
-            )
+            await _notice(exhausted)
             return
         count = ctx.bump_nudge_count() if ctx.bump_nudge_count is not None else 1
         if count > config.MAX_CONSEC_NUDGES:
             _reset()
             _reset_nudge()
-            await _notice(
-                f"⏸ Stopped after {config.MAX_CONSEC_NUDGES} nudges — this "
-                "unattended turn kept ending mid-plan without finishing or "
-                "scheduling a follow-up. Reply or tap a button to continue."
-            )
+            await _notice(capped)
             return
         next_run_at = (
             datetime.now(timezone.utc)
             + timedelta(seconds=config.WAKE_MIN_DELAY_SECS)
         ).isoformat()
         ctx.store.add_wake(
-            prompt=_NUDGE_PROMPT,
+            prompt=prompt,
             channel_id=ctx.channel_id,
             next_run_at=next_run_at,
             repo_name=instance.repo_name or "",
             repo_path=instance.repo_path or "",
         )
-        log.info(
-            "Auto-nudge scheduled for unattended dead-end in thread %s "
-            "(nudge=%d)", ctx.channel_id, count,
+        log.info(log_msg, ctx.channel_id, count)
+        await _notice(nudged)
+
+    async def _nudge_or_stop() -> None:
+        # An unattended turn (cooldown retry / self-wake fire) dead-ended: no
+        # wake scheduled AND no [TURN_COMPLETE] marker. Left alone the thread
+        # silently dies (the q-12314 dead-end). Re-invoke it once (capped) with
+        # an explicit instruction to finish, wake, or signal completion.
+        await _nudge_once(
+            prompt=_NUDGE_PROMPT,
+            log_msg=("Auto-nudge scheduled for unattended dead-end in thread "
+                     "%s (nudge=%d)"),
+            exhausted=(
+                "⚠️ This unattended turn stopped mid-plan without finishing or "
+                "scheduling a follow-up, and the session is out of context — "
+                "start a fresh thread to carry it on."
+            ),
+            capped=(
+                f"⏸ Stopped after {config.MAX_CONSEC_NUDGES} nudges — this "
+                "unattended turn kept ending mid-plan without finishing or "
+                "scheduling a follow-up. Reply or tap a button to continue."
+            ),
+            nudged=(
+                "↻ That turn ended mid-plan with nothing to resume it — nudging "
+                "myself to finish it or hand off cleanly."
+            ),
         )
-        await _notice(
-            "↻ That turn ended mid-plan with nothing to resume it — nudging "
-            "myself to finish it or hand off cleanly."
+
+    async def _promise_nudge() -> None:
+        # The turn ended cleanly by its own account — attended, or unattended
+        # with [TURN_COMPLETE] — but it promised to come back ("I'll report
+        # back when the tests finish") and armed nothing. The user has been
+        # told to expect a message that can never arrive, so this is a dead-end
+        # too, just a quieter one. Re-invoke once and let the SESSION arm a
+        # real directive; this path never schedules a poll of its own.
+        await _nudge_once(
+            prompt=_PROMISE_NUDGE_PROMPT,
+            log_msg=("Promise nudge scheduled for thread %s — turn promised to "
+                     "report back with nothing armed (nudge=%d)"),
+            exhausted=(
+                "⚠️ This turn said it would report back later, but nothing is "
+                "armed to resume the thread and the session is out of context "
+                "— start a fresh thread to carry it on."
+            ),
+            capped=(
+                f"⏸ Stopped after {config.MAX_CONSEC_NUDGES} nudges — this "
+                "session kept promising to report back without arming a watch "
+                "or a self-wake. Reply or tap a button to continue."
+            ),
+            nudged=(
+                "↻ That turn said it would report back but armed nothing to "
+                "resume the thread — asking it to watch the job properly."
+            ),
         )
+
+    def _thread_has_pending_wake() -> bool:
+        """Is a self-wake armed for LATER — i.e. is the promise already backed?
+
+        Not the same question as "does a wake row exist". A firing wake resumes
+        the thread and is only deleted once that turn RETURNS (the try/finally
+        in ``Scheduler._execute_wake``, which awaits ``_replay_to_thread``), so
+        on a wake-sourced turn the row still in the store is the one being
+        consumed right now — it backs nothing, and counting it would suppress
+        the nudge for exactly the turns most likely to need it: "still running,
+        I'll report back", said by a turn a watch or a wake just resumed.
+        ``add_wake`` allows one wake per thread, so on such a turn the visible
+        row is always that one.
+        """
+        if ctx.source == "wake":
+            return False
+        return ctx.store.pending_wake_for_channel(ctx.channel_id) is not None
 
     async def _stop_capped() -> None:
         # Runaway cap hit: reset and tell the user we stopped (never a silent
@@ -1549,6 +1952,84 @@ async def check_wake_request(
         await _notice(
             f"⏸ Stopped auto-checking after {config.MAX_CONSEC_WAKES} rounds — "
             "reply when you want me to keep going."
+        )
+
+    # A [BOT_CMD: /watch] directive outranks /wake in the same turn: it names
+    # the actual job rather than guessing how long it will take, so it is
+    # strictly better information. Handled here (not in a separate post-turn
+    # hook) so a watch shares the wake path's worktree gate, runaway budget and
+    # nudge accounting instead of quietly bypassing all three.
+    watch_data = watches.parse_watch_directive(final_text)
+    if watch_data is not None:
+        _reset_nudge()
+        if instance.branch:
+            _reset()
+            await _notice(
+                "(Can't watch a job from a build/worktree session — the "
+                "directory may be merged or discarded before it finishes. "
+                "Reply or tap a button when you want me to continue.)"
+            )
+            return
+        count = ctx.bump_wake_count() if ctx.bump_wake_count is not None else 1
+        if count > config.MAX_CONSEC_WAKES:
+            await _stop_capped()
+            return
+        existing = ctx.store.watch_for_channel(ctx.channel_id)
+        if (existing is None
+                and len(ctx.store.list_watches()) >= config.WATCH_MAX_ACTIVE):
+            _reset()
+            await _notice(
+                f"(Can't watch that — {config.WATCH_MAX_ACTIVE} jobs are "
+                "already being watched across all threads. Reply when you "
+                "want me to check on it.)"
+            )
+            return
+        watch = watches.build_watch(
+            watch_data,
+            channel_id=ctx.channel_id,
+            repo_name=instance.repo_name or "",
+            repo_path=instance.repo_path or "",
+        )
+        # Already gone before we even armed? Record it. The poller will fire on
+        # its next tick either way, but the resume prompt has to distinguish a
+        # job that finished during the turn from a captured WRAPPER pid — they
+        # look identical here, and only one of them means the work is done.
+        watch.pid_dead_at_arm = bool(
+            watch.pid and not watches.process_alive(watch.pid, watch.pid_start)
+        )
+        # Arming a watch retires whatever this thread was waiting on before —
+        # a leftover timer would otherwise fire mid-job and resume the session
+        # against a half-finished run.
+        ctx.store.cancel_wakes(ctx.channel_id)
+        ctx.store.add_watch(watch)
+        path.unlink(missing_ok=True)   # a stale legacy wake file is superseded too
+        label = watch.label or (f"pid {watch.pid}" if watch.pid else "that job")
+        if watch.pid_dead_at_arm:
+            msg = (f"⏳ Watching **{label}** — heads up, pid {watch.pid} is "
+                   "already gone, so either it just finished or that pid was a "
+                   "wrapper. Picking it up now.")
+        else:
+            msg = f"⏳ Watching **{label}** — I'll pick this up the moment it finishes."
+        await _notice(msg)
+        log.info(
+            "Armed watch %s for thread %s (pid=%s done=%r timeout=%s)",
+            watch.id, ctx.channel_id, watch.pid, watch.done_re, watch.timeout_at,
+        )
+        return
+    if watches.has_watch_directive(final_text):
+        # A /watch was WRITTEN but couldn't be armed. Staying silent here is
+        # the exact dead-end this feature removes — the turn believes it is
+        # being watched and nothing is. Say what was missing, then fall
+        # through: a /wake in the same turn is still a valid fallback.
+        log.info(
+            "Unarmable /watch directive in thread %s — nothing watched",
+            ctx.channel_id,
+        )
+        await _notice(
+            "(I couldn't arm that watch — a [BOT_CMD: /watch] needs a `pid=`, "
+            "or a `done=` marker together with the `log=` to find it in, plus "
+            "a `~~~watch` body holding the prompt to resume with. Nothing is "
+            "being watched.)"
         )
 
     # Resolve the wake request: a [BOT_CMD: /wake] directive (primary) takes
@@ -1589,16 +2070,20 @@ async def check_wake_request(
             return
         # Ended cleanly — an attended turn (real completion or a plain human
         # reply), or an unattended turn that signalled [TURN_COMPLETE]. Reset
-        # both runaway counters and hand back to the user. One contradiction is
-        # still worth SURFACING: the final message asserts it armed a self-wake
-        # (e.g. a malformed directive the parser rejected) yet nothing was
-        # scheduled. We only notify — this path NEVER schedules a wake.
-        # Heuristic auto-arming (first off watch-promises, then off wake-claims)
-        # kept firing on prose that merely discussed the feature; an explicit
-        # parsed directive is the sole scheduling channel now.
+        # the runaway counter and hand back to the user, unless the final
+        # message contradicts "ended cleanly" in one of two ways.
+        #
+        # Neither branch below EVER schedules a poll of its own: heuristic
+        # auto-arming (first off watch-promises, then off wake-claims) kept
+        # firing on prose that merely discussed the feature, and an explicit
+        # parsed directive remains the sole scheduling channel.
         _reset()
-        _reset_nudge()
         if claims_self_wake(final_text):
+            # (1) The turn ASSERTS it armed a self-wake (e.g. a malformed
+            # directive the parser rejected) yet nothing was scheduled. Notify
+            # only — a specific diagnosis, so it wins over the looser promise
+            # check below and the two never double-report.
+            _reset_nudge()
             log.info(
                 "Wake claim without a parsed directive in thread %s — "
                 "notice only, nothing scheduled", ctx.channel_id,
@@ -1608,6 +2093,22 @@ async def check_wake_request(
                 "[BOT_CMD: /wake] directive was found — nothing is "
                 "scheduled. Reply or tap a button to continue.)"
             )
+            return
+        # (2) The turn PROMISED to continue later with nothing armed. Unlike a
+        # claim, this is recoverable: re-invoke the session and let it arm a
+        # real directive. Gated on there being genuinely nothing to resume the
+        # thread — an armed watch (from this turn or an earlier one) or a
+        # pending wake means the promise is already backed, and a watch that
+        # tripped into add_wake(next_run_at=now) shows up as the latter.
+        # Worktree builds are excluded for the same reason the wake path
+        # refuses them: the directory may be merged or discarded by fire time.
+        if (promises_continuation(final_text)
+                and not instance.branch
+                and ctx.store.watch_for_channel(ctx.channel_id) is None
+                and not _thread_has_pending_wake()):
+            await _promise_nudge()
+            return
+        _reset_nudge()
         return
 
     # A real wake was requested — the turn made a genuine continue decision, so
@@ -1636,6 +2137,12 @@ async def check_wake_request(
     if count > config.MAX_CONSEC_WAKES:
         await _stop_capped()
         return
+
+    # Same one-thing-per-thread invariant as the watch path: a turn that arms a
+    # timer has stopped waiting on whatever job it was watching.
+    armed_watch = ctx.store.watch_for_channel(ctx.channel_id)
+    if armed_watch is not None:
+        ctx.store.delete_watch(armed_watch.id)
 
     ctx.store.add_wake(
         prompt=prompt,

@@ -12,6 +12,8 @@ touched. Exit 0 on success, 1 on assertion failure.
 
 from __future__ import annotations
 
+import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
+
 import json
 import sys
 import tempfile

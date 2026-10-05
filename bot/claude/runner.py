@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -23,14 +24,18 @@ if TYPE_CHECKING:
     from bot.store.state import StateStore
 
 from bot import config, paths
+from bot.procutil import run_capture
 from bot.claude.auth_health import (
+    REASON_ORG_DISABLED,
     REASON_RUNTIME_401,
+    RUNTIME_REJECTION_REASONS,
     account_label,
     credentials_fingerprint,
     relogin_command,
     unusable_reason,
 )
-from bot.claude.branch_utils import canonical_branch
+from bot.claude import cgroups, memory
+from bot.claude.branch_utils import canonical_branch, clear_stale_branches
 from bot.claude.gitpaths import git_common_dir, git_dir, git_toplevel
 from bot.claude.parser import (
     RunResult,
@@ -41,6 +46,9 @@ from bot.claude.parser import (
     extract_usage,
     format_ask_question,
     is_account_agnostic_error,
+    is_context_overflow_error,
+    is_context_thrash_error,
+    is_org_disabled_error,
     is_transient_error,
     iter_tool_blocks,
     last_assistant_text,
@@ -49,8 +57,8 @@ from bot.claude.parser import (
 )
 from bot.claude.provider import ProviderConfig, get_provider
 from bot.claude.types import (
-    Instance, InstanceOrigin, InstanceStatus, InstanceType, KillOutcome,
-    REPO_UNUSABLE_MARKER, merge_msg_is_failure,
+    Instance, InstanceOrigin, InstanceStatus, KillOutcome,
+    RELEASE_ORPHANED_MARKER, REPO_UNUSABLE_MARKER, merge_msg_is_failure,
 )
 from bot.store import history as history_mod
 
@@ -58,6 +66,120 @@ log = logging.getLogger(__name__)
 
 # On Windows, prevent subprocess console windows from popping up
 _NOWND: dict = config.NOWND
+
+
+def _lower_priority(pid: int) -> None:
+    """Renice a freshly spawned session CLI below the bot's own priority.
+
+    Applied from the parent *after* the spawn, deliberately, and NOT as a
+    ``preexec_fn``. preexec_fn is the obvious way to do this and it is the
+    wrong one here: CPython runs it in the child between fork and exec, where
+    only async-signal-safe work is legal, and this bot forks from a process
+    with well over a hundred threading callsites. A child that lands on a
+    lock some other thread held at fork time — the allocator's, logging's —
+    deadlocks before exec, which would hang a session spawn permanently while
+    holding the runner's slot. The documented failure mode is far worse than
+    the problem being solved.
+
+    The cost of doing it here instead is a window of a few microseconds in
+    which the CLI runs at the bot's own priority. That is safe in a way the
+    deadlock is not: the CLI is node and spends hundreds of milliseconds
+    starting up before it forks anything, so nothing real is created inside
+    the window, and the worst case is a session that runs at normal priority
+    rather than one that never runs at all.
+
+    Niceness survives exec and is inherited by children, so this single call
+    covers the whole tree the session goes on to build — its shells, dotnet,
+    Roslyn, npm — without the runner having to find them.
+
+    The target is computed from the supervisor's *own* nice rather than set
+    absolutely, because SESSION_CPU_NICE is documented as a distance below the
+    supervisor: a unit that later grows a ``Nice=`` would otherwise silently
+    close that gap. Clamped to 19, the floor the scheduler accepts. Only ever
+    an increase, which needs no privileges — a decrease would, and config
+    clamps negatives away so one is never attempted.
+    """
+    nice = config.SESSION_CPU_NICE
+    # setpriority is POSIX-only; on Windows there is no nice(2) ladder to walk.
+    if not nice or not hasattr(os, "setpriority"):
+        return
+    try:
+        own = os.getpriority(os.PRIO_PROCESS, 0)
+        os.setpriority(os.PRIO_PROCESS, pid, min(19, own + nice))
+    except (OSError, ValueError):
+        # Includes the process already having exited. Best-effort by design:
+        # a session running at full priority is a slower machine, not a fault.
+        log.debug("Could not renice session pid %s", pid, exc_info=True)
+
+
+# Exit codes that mean "this process died from the signal we sent it".
+#
+# There are two shapes and we have to accept both.  When a process does NOT
+# handle the signal, the kernel kills it and Python reports a NEGATIVE
+# returncode (-15 for SIGTERM).  When a process DOES handle it — installs a
+# handler, shuts down cleanly, then exits — it exits normally with the shell's
+# 128+N convention, which is a POSITIVE returncode (143 for SIGTERM).
+#
+# Only the negative shape used to be accepted, and that quietly stopped
+# matching: the Claude CLI is now a compiled binary that traps SIGTERM and
+# exits 143.  Every Kill / Steer therefore failed the kill-shape filter, was
+# classified as a crash, and rendered as a red "Failed: Exit code 143" card —
+# and worse, reached the account-failover branch, where "no output, no turns"
+# reads as "this account fell over instantly".
+#
+# SIGINT is included because a Ctrl-C-style interrupt is the same intent, and
+# SIGKILL because ``kill()`` escalates to it after a 5s grace period.
+_KILL_SIGNALS = tuple(
+    sig for sig in (
+        signal.SIGTERM,
+        getattr(signal, "SIGKILL", None),  # POSIX only
+        signal.SIGINT,
+    ) if sig is not None
+)
+_SIGNAL_EXIT_CODES: frozenset[int] = frozenset(128 + int(s) for s in _KILL_SIGNALS)
+
+
+def is_kill_shape(returncode: int | None) -> bool:
+    """True when *returncode* is consistent with a signal we sent.
+
+    Only consulted after we already know we fired ``proc.terminate()`` on this
+    instance, so it is a corroboration test, not a detection test — its job is
+    to stop a process that genuinely crashed in the same second we asked it to
+    stop from being reported as a clean cancellation.
+
+    Windows is a blanket True: ``proc.terminate()`` there calls
+    ``TerminateProcess(handle, 1)``, which always yields returncode 1, and real
+    CLI failures exit 1 too — so there is no returncode that distinguishes
+    them and the test degenerates to "we called terminate".
+    """
+    if os.name == "nt":
+        return True
+    if returncode is None:
+        return False
+    return returncode < 0 or returncode in _SIGNAL_EXIT_CODES
+
+
+# Environment variables removed before spawning any Claude CLI subprocess.
+# These four are the bot's own Discord identity -- the token it logs in with,
+# and the test webhooks that on_message historically treated as the owner.
+# Nothing a session does needs them, so inheriting them only creates a way to
+# leak them by accident.
+#
+# The Anthropic key is popped separately (it depends on the API-fallback path)
+# and OPENAI_API_KEY / TWITTER_BEARER_TOKEN are deliberately NOT here: other
+# repos may legitimately read those from the inherited environment.
+#
+# Public because the log-triage subprocess (bot/discord/log_triage.py) spawns
+# a CLI too and has exactly the same reason to strip these. Kept separate from
+# `_ENV_SECRET_NAMES` in bot/platform/formatting.py on purpose -- that list
+# answers "what must never be PRINTED", this one answers "what must never be
+# INHERITED", and they genuinely differ at both ends.
+SESSION_STRIPPED_ENV_VARS: tuple[str, ...] = (
+    "DISCORD_BOT_TOKEN",
+    "TEST_WEBHOOK_URL",
+    "TEST_LOBBY_WEBHOOK_URL",
+    "TEST_WEBHOOK_IDS",
+)
 
 
 def _is_primary_model(model: str | None) -> bool:
@@ -85,7 +207,7 @@ REFUSAL_GRACE_MINUTES = 15
 
 
 def _no_productive_work(res: RunResult) -> bool:
-    """True when a run died before producing any real work product.
+    """True when a run died on its own before producing any real work product.
 
     Used by the failover paths to decide whether a backup account "took" the
     turn or fell over instantly.  The obvious test — "did it emit any output
@@ -100,7 +222,15 @@ def _no_productive_work(res: RunResult) -> bool:
     the auth check is the strict ``looks_like_fatal_auth_error`` (short output
     only), so a one-turn session that merely *writes about* 401s isn't
     swallowed as "the backup never ran".
+
+    An intentional kill is excluded outright: a Steer or a Kill button press
+    also lands here with one turn and no text, but the account did nothing
+    wrong.  Treating it as "the backup fell over" made the failover paths
+    stamp a usage-limit reset onto it, so the caller would schedule an
+    auto-retry countdown for a run the user had just asked to stop.
     """
+    if res.killed_intentionally:
+        return False
     if res.num_turns and res.num_turns > 1:
         return False
     text = (res.result_text or "").strip()
@@ -108,6 +238,58 @@ def _no_productive_work(res: RunResult) -> bool:
         return True
     return (looks_like_fatal_auth_error(text)
             or looks_like_fatal_auth_error(res.error_message))
+
+
+def _carry_forward_work_record(aborted: RunResult, resumed: RunResult) -> RunResult:
+    """Fold a discarded attempt's record of work into the attempt that replaced it.
+
+    ``finalize_run`` *assigns* the winning RunResult's fields onto the Instance,
+    so anything the aborted attempt recorded is simply dropped.  Which tools ran
+    is the field with teeth: a build that made every one of its edits before
+    being killed, then resumed only to confirm the work was already on disk,
+    would report an empty tool list — and the chain reads that list to decide
+    whether a build changed code at all (``CODE_CHANGE_TOOLS``), so a real build
+    would render as "no changes made".  The bash log feeds the eval surface and
+    the main-repo-path hits feed the poisoning warning; both are equally gone.
+
+    Deliberately NOT merged:
+      * ``num_turns`` — the failover heuristic above treats >1 turn as proof the
+        account took the turn, so inflating it could hide a dead backup account.
+      * ``context_tokens`` / ``model`` — a snapshot of the final call (it drives
+        the "context nearly full" warning), not a running total.
+      * ``session_id`` / ``result_text`` / status flags — the resumed attempt is
+        the authoritative one.
+
+    A killed CLI usually emits no ``result`` event, so the cost/duration/token
+    counters below are typically zero on the aborted side; they are summed
+    anyway because they are cumulative totals whenever they are present.
+    """
+    for numeric in (
+        "cost_usd", "duration_ms", "duration_api_ms",
+        "input_tokens", "output_tokens",
+        "cache_read_tokens", "cache_creation_tokens",
+    ):
+        setattr(resumed, numeric,
+                getattr(aborted, numeric) + getattr(resumed, numeric))
+
+    # tools_used and path_poisoning are sets wearing a list's clothes and must
+    # not gain duplicates; bash_commands is a chronological log where the same
+    # command run twice is two real events.
+    for listed, dedupe in (
+        ("tools_used", True),
+        ("bash_commands", False),
+        ("path_poisoning", True),
+    ):
+        merged = list(getattr(aborted, listed) or [])
+        seen = set(merged)
+        for item in getattr(resumed, listed) or []:
+            if dedupe and item in seen:
+                continue
+            seen.add(item)
+            merged.append(item)
+        setattr(resumed, listed, merged)
+
+    return resumed
 
 # Tunable knobs for the cross-account session-recovery path (step 3 of the
 # dementia fix).  60s cache window dedupes rebuild_project_index calls when a
@@ -184,6 +366,137 @@ def _parse_version_tag(name: str) -> tuple[int, int, int, int] | None:
     if not m:
         return None
     return tuple(int(g) if g else 0 for g in m.groups())  # type: ignore[return-value]
+
+
+# --- Release containment -------------------------------------------------
+#
+# A version *number* going up proves nothing about the *content* shipping.
+# Parallel builds each branch from their own snapshot of master, and a build
+# that ships from a base predating the last release reverts it while carrying
+# a higher version. That is why `_stale_version_warning`, which compares
+# numbers, cannot see this class of failure at all.  The invariant these
+# helpers check is containment: the previous release's commits must be
+# reachable from whatever is about to ship.
+
+def version_tags(
+    repo: str, *, merged: str | None = None, no_merged: str | None = None,
+) -> list[tuple[str, tuple[int, int, int, int]]]:
+    """``(name, parsed_version)`` for every ``vX.Y.Z[.W]`` tag, newest first.
+
+    ``merged`` / ``no_merged`` map to git's own ref filters and combine with
+    AND, so ``merged=branch, no_merged="master"`` answers "which releases
+    live only on this branch".  Git resolves annotated tags to their commit
+    for both filters, so no dereferencing is needed here.
+
+    Only ``None`` means "do not filter".  An empty string is passed straight
+    to git, which rejects it, so a caller handing over a ref it failed to
+    resolve gets nothing back rather than the *unfiltered* list, which means
+    the exact opposite of what it asked for.
+
+    Returns an empty list on any git failure, because every caller treats
+    "cannot tell" as "nothing to report" rather than blocking on a broken read.
+    """
+    cmd = ["git", "tag", "-l", "v*"]
+    if merged is not None:
+        cmd += ["--merged", merged]
+    if no_merged is not None:
+        cmd += ["--no-merged", no_merged]
+    try:
+        r = run_capture(cmd, cwd=repo, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        log.warning("Listing version tags failed in %s", repo, exc_info=True)
+        return []
+    if r.returncode != 0:
+        log.debug(
+            "git tag -l failed in %s (rc=%d): %s",
+            repo, r.returncode, (r.stderr or "").strip(),
+        )
+        return []
+    found: list[tuple[str, tuple[int, int, int, int]]] = []
+    for line in (r.stdout or "").splitlines():
+        name = line.strip()
+        ver = _parse_version_tag(name)
+        if ver is not None:
+            found.append((name, ver))
+    found.sort(key=lambda t: t[1], reverse=True)
+    return found
+
+
+def _is_ancestor(repo: str, rev: str, of: str) -> bool | None:
+    """Is ``rev`` reachable from ``of``?  None when git could not answer.
+
+    ``merge-base --is-ancestor`` uses the exit code as its answer: 0 yes,
+    1 no, anything else an error.  Collapsing that third case into False is
+    what would turn an unreadable repo into a blocked deploy, so it stays
+    distinct all the way up to the callers.
+    """
+    try:
+        r = run_capture(
+            ["git", "merge-base", "--is-ancestor", rev, of], cwd=repo, timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        log.warning("merge-base --is-ancestor failed in %s", repo, exc_info=True)
+        return None
+    if r.returncode == 0:
+        return True
+    if r.returncode == 1:
+        return False
+    log.debug(
+        "merge-base --is-ancestor %s %s in %s: rc=%d %s",
+        rev, of, repo, r.returncode, (r.stderr or "").strip(),
+    )
+    return None
+
+
+def missing_predecessor_release(
+    repo: str, ref: str = "HEAD", *, below: str | None = None,
+) -> str | None:
+    """Name the release ``ref`` should contain but does not.
+
+    Answers one question: **is the release before this one still in here?**
+    ``below`` is the release just cut, supplied by the merge path so a
+    release is never compared against itself. With no ``below``, the ceiling
+    is derived as the newest release ``ref`` *does* contain: for a deploy
+    there is no "just cut", and the tree's own newest release is the right
+    place to start counting back from.
+
+    Deliberately the immediate predecessor, not every unreachable tag. A
+    repo accumulates stranded tags over years (discarded branches, old
+    experiments, hand-tagged spikes) and re-reporting those on every merge
+    and every deploy is how a real signal gets tuned out, and AIAgent carries
+    18 of them. ``orphaned_releases`` is the on-demand audit for the rest.
+
+    The one case with no ceiling to derive is a ``ref`` that contains no
+    release at all, and there the newest release anywhere is exactly what
+    is missing, so it is reported.
+    """
+    tags = version_tags(repo)
+    if not tags:
+        return None
+    if below is not None:
+        ceiling = _parse_version_tag(below)
+    else:
+        reachable = {name for name, _ in version_tags(repo, merged=ref)}
+        ceiling = next(
+            (ver for name, ver in tags if name in reachable), None,
+        )
+        if ceiling is None:
+            newest, _ = tags[0]
+            return newest if _is_ancestor(repo, newest, ref) is False else None
+    for name, ver in tags:
+        if ceiling is not None and ver >= ceiling:
+            continue
+        return name if _is_ancestor(repo, name, ref) is False else None
+    return None
+
+
+def orphaned_releases(repo: str, ref: str = "HEAD") -> list[str]:
+    """Every version tag whose commits are not contained in ``ref``.
+
+    The backlog view behind ``/branches``.  One git call, regardless of how
+    many tags the repo carries.
+    """
+    return [name for name, _ in version_tags(repo, no_merged=ref)]
 
 
 # Git's transfer statistics, which the server echoes back prefixed "remote:".
@@ -288,6 +601,16 @@ StallCallback = Callable     # async callback(instance_id: str, snapshot: StallS
 # Signature: async callback(reason: str, lost_session_id: str | None,
 #                            worktree_path: str | None)
 RecoveryCallback = Callable
+# Context-reset callback: asked for a briefing to hand the FRESH session that
+# replaces one whose transcript could not be compacted (see
+# parser.is_context_overflow_error). Returns a ready-to-prepend BLOCK -- the
+# quoted recent thread history already wrapped in the preamble that frames it
+# as data and the "---" separator that closes it -- or None when the platform
+# has no history to offer. The runner cannot build any of that itself: the
+# history and the wrapper both live in the platform layer, which owns the
+# thread, so what comes back is glued in front of the prompt verbatim.
+# Signature: async callback() -> str | None
+ContextResetCallback = Callable
 
 
 @dataclass
@@ -302,6 +625,17 @@ class StallSnapshot:
 
     cpu_percent: float | None = None
     rss_mb: float | None = None
+    # Memory of the whole process tree, not just the CLI. rss_mb above measures
+    # the supervisor, which is nearly always a few hundred MB no matter what is
+    # happening underneath it — during the 2026-08-17 OOM incident it read
+    # "336MB" while a grandchild sat at 13.7 GB. This is the field that tells
+    # you whether a session is in trouble.
+    tree_rss_mb: float | None = None
+    tree_proc_count: int | None = None
+    # The fattest process in the tree, as "name (pid N) X MB". The pid is part
+    # of it on purpose: this field exists to be read after the fact, and a name
+    # and a size alone cannot be looked up in `ps` an hour later.
+    tree_biggest: str | None = None
     conn_count: int | None = None
     https_conn_count: int | None = None
     children_count: int | None = None
@@ -317,6 +651,13 @@ class StallSnapshot:
             parts.append(f"CPU {self.cpu_percent:.0f}%")
         if self.rss_mb is not None:
             parts.append(f"{self.rss_mb:.0f}MB")
+        if self.tree_rss_mb is not None:
+            tree = f"tree {self.tree_rss_mb / 1024:.1f}GB"
+            if self.tree_proc_count:
+                tree += f"/{self.tree_proc_count}p"
+            if self.tree_biggest:
+                tree += f" top={self.tree_biggest}"
+            parts.append(tree)
         if self.conn_count is not None:
             parts.append(f"{self.conn_count} conns ({self.https_conn_count or 0}×:443)")
         if self.children_count is not None:
@@ -386,6 +727,25 @@ async def _capture_process_snapshot(
         snapshot.error = "psutil not installed"
         return snapshot
 
+    # Tree memory first, and in a call of its own, so that nothing below can
+    # cost us it. Everything in the CPU/connection block shares a single try and
+    # a single early return: one unexpected psutil error down there and the
+    # snapshot comes back with no fields at all — and the tree figure is the one
+    # that mattered during the 2026-08-17 incident, when the CLI's own RSS read
+    # a reassuring 336MB. It is also the cheap half (a readdir plus a small read
+    # per process, against a deliberate 2-second CPU sample), so measuring it
+    # first costs the rest of the snapshot nothing.
+    try:
+        tree = await asyncio.to_thread(memory.sample_tree, pid)
+    except Exception as exc:
+        tree = None
+        log.debug("Tree memory sample failed: %s", type(exc).__name__)
+    if tree is not None and tree.proc_count:
+        snapshot.tree_rss_mb = tree.total_mb
+        snapshot.tree_proc_count = tree.proc_count
+        if tree.biggest_name:
+            snapshot.tree_biggest = f"{tree.offender()} {tree.biggest_mb:.0f}MB"
+
     def _sample() -> tuple[float | None, float | None, int | None, int | None, int | None, str | None]:
         try:
             proc = psutil.Process(pid)
@@ -431,6 +791,300 @@ async def _capture_process_snapshot(
     if err:
         snapshot.error = err
     return snapshot
+
+
+# --- Memory guard: what the user is told, and when a reap is moot -------------
+#
+# Pulled out of the watchdog loop rather than written inline. Both messages are
+# pure functions of a tree measurement and the configured ceiling, they are the
+# only part of the guard the user ever reads, and inline they sat six levels of
+# indentation deep inside a 400-line method where nothing could reach them.
+
+
+def _turn_completed_successfully(events: list[dict]) -> bool:
+    """True if the stream's ``result`` event reports success.
+
+    Used to decide that a memory reap is moot, which means it has to agree with
+    ``extract_result`` about what success is — otherwise a run reported as
+    failed loses the memory explanation that would have gone with it. So this
+    reads the LAST ``result`` event, exactly as ``extract_result`` does, rather
+    than asking whether *any* of them looks successful. And it reads the same
+    default: a ``result`` event that omits ``is_error`` is a completed turn.
+    """
+    verdict: dict | None = None
+    for ev in events:
+        if ev.get("type") == "result":
+            verdict = ev
+    return verdict is not None and not verdict.get("is_error", False)
+
+
+def _memory_kill_detail(tree: memory.TreeMemory, kill_mb: int) -> str:
+    """The in-thread notice for a session the guard has decided to reap.
+
+    Says "largest single process", never "most of it": the headline figure is a
+    sum across the tree, so on a session running many processes at once the
+    biggest one can be a small share of the total. Saying otherwise would
+    misdirect the reader in exactly the case that is hardest to diagnose.
+    """
+    return (
+        f"Its {tree.proc_count} processes reached "
+        f"{tree.total_mb / 1024:.1f} GB between them "
+        f"(ceiling {kill_mb / 1024:.1f} GB); the largest single one was "
+        f"{tree.offender()} at {tree.biggest_mb / 1024:.1f} GB. "
+        f"Killing it here keeps the other sessions alive."
+    )
+
+
+def _fleet_kill_detail(
+    tree: memory.TreeMemory, pressure: memory.MemoryPressure,
+) -> str:
+    """The in-thread notice for a session reaped because the MACHINE ran out.
+
+    Deliberately does not lead with this session's number. It was not over its
+    ceiling and saying "reached 3.1 GB" first invites the reader to conclude it
+    misbehaved, when the true statement is that several well-behaved sessions
+    plus the desktop added up to more than the machine has. The order is:
+    the machine ran out, we were the ones filling our own limit, this was the
+    biggest tree, so this is the one that went.
+    """
+    return (
+        f"The machine ran out of memory — {pressure.human()} — and the bot's "
+        f"sessions together are over their shared limit. This session was not "
+        f"over its own ceiling; it was simply the largest tree running "
+        f"({tree.total_mb / 1024:.1f} GB across {tree.proc_count} processes, "
+        f"biggest {tree.offender()}), so it is the one being stopped rather "
+        f"than leaving the kernel to pick. Its work is on disk and it will "
+        f"pick up from there."
+    )
+
+
+def _memory_warning_detail(tree: memory.TreeMemory, kill_mb: int) -> str:
+    """The in-thread warning for a session that is heading for the ceiling.
+
+    Sent whether or not the kill is armed. ``SESSION_MEM_KILL_MB=0`` is
+    documented as "warnings only", and a warning nobody outside bot.log can see
+    is not that — so what varies with the setting is the sentence about being
+    stopped, not whether the session hears about it at all.
+    """
+    ceiling = (
+        f" It will be stopped at {kill_mb / 1024:.1f} GB."
+        if kill_mb > 0 else
+        " Nothing will stop it automatically — the per-session kill is "
+        "switched off here."
+    )
+    return (
+        f"Its {tree.proc_count} processes are at "
+        f"{tree.total_mb / 1024:.1f} GB between them; the largest single one "
+        f"is {tree.offender()} at {tree.biggest_mb / 1024:.1f} GB."
+        + ceiling
+        + " If that's a job you started, make it smaller now."
+    )
+
+
+def _fmt_duration(secs: float) -> str:
+    """Hours-and-minutes for a number the reader has to reason about.
+
+    "14407s" is what the log said about the run that should not have been
+    killed, and nobody reading it converts that to four hours in their head.
+    """
+    total = int(secs)
+    hours, rem = divmod(total, 3600)
+    minutes = rem // 60
+    if hours and minutes:
+        return f"{hours}h {minutes}m"
+    if hours:
+        return f"{hours}h"
+    if total < 60:
+        # Only the harness runs the watchdog at these speeds, but "past the 0m
+        # hard lifetime limit" is a sentence no one should have to read.
+        return f"{total}s"
+    return f"{minutes}m"
+
+
+def _lifetime_kill_detail(
+    elapsed_secs: float, silence_secs: float, hard_cap: bool,
+) -> str:
+    """The in-thread notice for a session the orphan safety-net is stopping.
+
+    Leads with the silence, not the age, because the silence is the actual
+    reason — the age only decided that we were allowed to look.
+    """
+    if hard_cap:
+        return (
+            f"It has been running for {_fmt_duration(elapsed_secs)}, past the "
+            f"{_fmt_duration(config.MAX_PROCESS_HARD_LIFETIME_SECS)} hard "
+            f"ceiling that applies however busy a run looks. Whatever it "
+            f"managed to say is kept, and the session can be resumed from "
+            f"where it got to."
+        )
+    return (
+        f"It produced nothing for {_fmt_duration(silence_secs)} after running "
+        f"for {_fmt_duration(elapsed_secs)}, which is the shape of a hung "
+        f"process rather than a slow one. Whatever it managed to say is kept, "
+        f"and the session can be resumed from where it got to."
+    )
+
+
+def _reaped_result_base(
+    events: list[dict],
+    session_id: str | None,
+    poisoning: list[str] | None,
+) -> RunResult:
+    """What a watchdog reap must preserve, whichever watchdog fired.
+
+    Both reaps — the memory guard and the orphan safety-net — kill a run that
+    has usually done real work, and both used to be written from scratch. The
+    lifetime cap returned a bare ``RunResult``, so four hours of work rendered
+    as an empty red FAILED card. Naming the salvage once is what stops the two
+    paths drifting apart again.
+
+    ``extract_result`` is the whole point: it carries the tool record (which
+    the chain reads via ``CODE_CHANGE_TOOLS`` to decide whether a build changed
+    code at all, so an empty list reads as "no changes made"), the bash log the
+    eval surface feeds on, the cost/duration/token counters — which is the only
+    place a reaped attempt will ever report them from — and ``result_text``,
+    which its own no-``result``-event fallback fills from the last substantial
+    assistant turn.
+
+    Deliberately NOT synthesised: ``num_turns``. The account-failover heuristic
+    reads ``>1 turn`` as proof the account took the turn, so inventing turns
+    here could hide a dead backup account. ``_carry_forward_work_record``
+    refuses to merge it for exactly the same reason.
+
+    ``error_message`` is left to the caller — it is what ``finalize_run``
+    actually shows the user, and it is the only part that differs between the
+    two reaps.
+    """
+    result = extract_result(events)
+    result.is_error = True
+    # A reap lands mid-turn, long before the CLI emits a `result` event, so the
+    # id stamped from the init event on turn one is usually the only one there
+    # is — and it is what makes Retry a resume rather than a fresh start.
+    if not result.session_id:
+        result.session_id = session_id
+    if poisoning:
+        result.path_poisoning = list(poisoning)
+    return result
+
+
+def _lifetime_kill_result(
+    events: list[dict],
+    session_id: str | None,
+    poisoning: list[str] | None,
+    elapsed_secs: float,
+    silence_secs: float,
+    hard_cap: bool,
+) -> RunResult:
+    """The failure an orphan-reaped run reports, built from what it did.
+
+    The wording MUST keep the substring "lifetime limit".
+    ``parser.is_account_agnostic_error`` matches on it to suppress the no-turns
+    account-failover heuristic. The salvaged ``result_text`` alone defeats that
+    heuristic in the common case, but a run reaped before it ever said anything
+    still has the exact "this account fell over instantly" shape, and that is
+    the case the phrase covers.
+    """
+    result = _reaped_result_base(events, session_id, poisoning)
+    if hard_cap:
+        result.error_message = (
+            f"Stopped after {_fmt_duration(elapsed_secs)}: past the "
+            f"{_fmt_duration(config.MAX_PROCESS_HARD_LIFETIME_SECS)} hard "
+            f"lifetime limit, which applies however busy a run looks."
+        )
+    else:
+        result.error_message = (
+            f"Stopped: no output for {_fmt_duration(silence_secs)} after "
+            f"{_fmt_duration(elapsed_secs)} of running — past the "
+            f"{_fmt_duration(config.MAX_PROCESS_LIFETIME_SECS)} lifetime "
+            f"limit, and silent long enough to look hung rather than slow."
+        )
+    return result
+
+
+def _memory_kill_result(
+    events: list[dict],
+    tree: memory.TreeMemory,
+    avail_mb: float | None,
+    session_id: str | None,
+    poisoning: list[str] | None = None,
+    pressure: memory.MemoryPressure | None = None,
+) -> RunResult:
+    """The failure a reaped run reports, built from what that run actually did.
+
+    Built on top of ``extract_result`` rather than from scratch, and that is the
+    whole reason it is a function. A reaped attempt has usually done real work,
+    and ``_carry_forward_work_record`` can only forward what this result
+    carries: hand it a bare ``RunResult`` and the attempt that resumes inherits
+    an empty ``tools_used`` — which the chain reads to decide whether a build
+    changed code at all, so a build that made every one of its edits before
+    being reaped comes back as "no changes made" and its diff is treated as
+    nothing. The cost, duration and token counters are the same story: this is
+    the only place the reaped attempt will ever report them from.
+
+    ``result_text`` is kept for the same reason the ordinary non-zero-exit path
+    keeps it — whatever the session managed to say before it died is still the
+    best account of what it was doing — while ``error_message`` below is what
+    the user is actually shown, because ``finalize_run`` prefers it.
+
+    The salvage itself lives in ``_reaped_result_base``, shared with the orphan
+    safety-net's reap; the session id it carries is worthless unless it reaches
+    a RESUMED attempt, which is what the note below is for.
+    """
+    result = _reaped_result_base(events, session_id, poisoning)
+    # "?" rather than a phrase, in both templates below: they read "About
+    # {avail_gb} GB was free", so anything but a number-shaped value produces a
+    # broken sentence in the one message whose entire job is to be read
+    # carefully.
+    avail_gb = f"{avail_mb / 1024:.1f}" if avail_mb is not None else "?"
+    if pressure is not None:
+        # Reaped for the machine, not for its own ceiling. Both the failure the
+        # user reads and the note the resumed attempt gets have to say that, or
+        # the agent spends its next run shrinking a job that was never too big.
+        result.error_message = (
+            f"Stopped to keep the machine alive: memory ran out "
+            f"machine-wide ({pressure.human()}) and this session's "
+            f"{tree.total_mb / 1024:.1f} GB was the largest of those running. "
+            f"It was under its own "
+            f"{config.SESSION_MEM_KILL_MB / 1024:.1f} GB ceiling."
+        )
+        result.memory_kill_note = config.MEMORY_FLEET_KILL_NUDGE_TEMPLATE.format(
+            peak_gb=f"{tree.total_mb / 1024:.1f}",
+            limit_gb=f"{config.SESSION_MEM_KILL_MB / 1024:.1f}",
+            avail_gb=avail_gb,
+            pressure=pressure.human(),
+        )
+        return result
+    result.error_message = (
+        f"Stopped: this session's processes reached "
+        f"{tree.total_mb / 1024:.1f} GB of memory, over the "
+        f"{config.SESSION_MEM_KILL_MB / 1024:.1f} GB ceiling for a single "
+        f"session. Largest was {tree.offender()}"
+        + (
+            f"; {avail_mb / 1024:.1f} GB was free machine-wide."
+            if avail_mb is not None else "."
+        )
+    )
+    result.memory_kill_note = config.MEMORY_KILL_NUDGE_TEMPLATE.format(
+        peak_gb=f"{tree.total_mb / 1024:.1f}",
+        limit_gb=f"{config.SESSION_MEM_KILL_MB / 1024:.1f}",
+        offender=tree.offender(),
+        avail_gb=avail_gb,
+    )
+    return result
+
+
+class AdmissionBlock(NamedTuple):
+    """Why a starting session is being held, and whose fault the shortage is.
+
+    ``ours`` is the load-bearing half. Pressure the bot created clears on its
+    own as soon as a running session finishes, so waiting for it is waiting
+    for something that reliably happens; pressure it did not create may never
+    clear, so a hold on that one has to give up quickly and start anyway. The
+    two get very different deadlines in _await_memory_headroom.
+    """
+
+    reason: str
+    ours: bool
 
 
 class WorktreeRecoveryEvent(NamedTuple):
@@ -494,6 +1148,29 @@ class ClaudeRunner:
         self._store = store
         self._semaphore = asyncio.Semaphore(config.MAX_CONCURRENT)
         self._processes: dict[str, asyncio.subprocess.Process] = {}
+        # Latest memory reading for each LIVE session, written by that session's
+        # own watchdog every SESSION_MEM_CHECK_SECS. Shared state because the
+        # question "which of the running sessions is the largest" cannot be
+        # answered from inside any one of them, and that is precisely the
+        # question a machine-wide crunch asks. Entries are dropped alongside
+        # _processes so a finished session can never be picked as a victim.
+        self._tree_samples: dict[str, memory.TreeMemory] = {}
+        # Per-session cgroups, for the sessions that got one. Keyed the same
+        # way as _processes and cleaned up in the same place, so a session can
+        # never leave a stale path behind for a scope systemd has collected.
+        self._session_cgroups: dict[str, cgroups.SessionCgroup] = {}
+        # Serialises the reclaim sweep and rate-limits it: every session's
+        # watchdog can reach it, and N sessions each walking the cgroup and
+        # sampling CPU on a machine that is already thrashing would be its own
+        # small denial of service.
+        self._reclaim_lock = asyncio.Lock()
+        self._reclaim_last = 0.0
+        # When the last cross-session reap happened. A crunch does not clear
+        # the instant a victim dies — the kernel takes time to reclaim, and the
+        # next session's watchdog would read the same critical pressure and
+        # reap itself too. Without this the whole fleet unwinds in one minute
+        # over a spike that one kill already fixed.
+        self._fleet_last_reap = 0.0
         # Task-level tracking: covers the full lifecycle of a query/workflow,
         # not just the subprocess.  Prevents reboot from slipping through
         # gaps between autopilot chain steps.
@@ -518,6 +1195,14 @@ class ClaudeRunner:
         # without conflating "kill button → no replacement coming" with
         # "steer → replacement run is already starting."
         self._kill_reasons: dict[str, str] = {}
+        # Second parallel map, cleared at the same three points: the subset of
+        # killed instances whose caller will rewrite the live progress message
+        # itself (the Kill button edits the message it was attached to).  Kept
+        # separate from _kill_reasons because it answers a different question
+        # — "why did this stop" vs "who renders the card" — and folding the
+        # two into one magic string is what let /kill and the Kill button
+        # drift apart in the first place.
+        self._kill_card_owners: set[str] = set()
 
         # Reboot draining: set when a reboot is queued to block new spawns
         self._draining = False
@@ -911,7 +1596,10 @@ class ClaudeRunner:
                 if existing and not existing.get("resolved"):
                     fp = existing.get("cred_fp")
                     same_file = bool(fp) and fp == credentials_fingerprint(acct)
-                    if same_file and existing.get("reason") == REASON_RUNTIME_401:
+                    if (
+                        same_file
+                        and existing.get("reason") in RUNTIME_REJECTION_REASONS
+                    ):
                         # Same file the server rejected. Only a successful run
                         # clears this one (see _stream_output).
                         continue
@@ -963,18 +1651,24 @@ class ClaudeRunner:
         """
         return self._unusable_accounts()
 
-    def _record_auth_alert(self, account_dir: str) -> None:
+    def _record_auth_alert(
+        self, account_dir: str, reason: str = REASON_RUNTIME_401,
+    ) -> None:
         """Persist that an account was sidelined for auth at runtime.
 
         Only writes state — the engine layer drains it and posts to Discord,
         so the runner keeps no platform dependency.
+
+        *reason* carries which runtime rejection it was, because the notice
+        The Ark posts has to tell the user what to actually do about it, and
+        "sign in again" is the wrong answer for an org-disabled account.
         """
         self._auth_dead.add(account_dir)
         if not self._store:
             return
         try:
             self._store.set_account_alert(
-                account_dir, REASON_RUNTIME_401,
+                account_dir, reason,
                 datetime.now(timezone.utc).isoformat(),
                 # Which file the server rejected: the only way to recognise a
                 # `/login` later, since the rejected file parses fine too.
@@ -1004,6 +1698,102 @@ class ClaudeRunner:
                 self._store.set_account_cooldown(account_dir, None)
             except Exception:
                 log.debug("Failed to clear auth cooldown", exc_info=True)
+
+    def _auth_sideline_is_open(self, account_dir: str) -> bool:
+        """Is this account sitting out because auth failed (not a usage cap)?
+
+        ``_auth_cooldowns`` is the in-memory answer and a reboot loses it, so
+        an open alert record is consulted as the durable second source, the
+        same asymmetry ``_clear_auth_cooldown(force=True)`` exists to paper
+        over.  Either one is enough; they can only disagree by being stale in
+        the safe direction.
+
+        Only a *runtime* rejection counts as durable evidence, because only
+        those are written by the path that also arms the cooldown.  The probe
+        reasons (no token, no file, unreadable) open an alert without ever
+        arming one, so an account holding a real usage limit while its
+        credentials went missing would otherwise read as auth-sidelined here
+        and have that limit force-cleared out from under it.
+        """
+        if account_dir in self._auth_cooldowns or account_dir in self._auth_dead:
+            return True
+        if self._store is None:
+            return False
+        try:
+            record = self._store.get_account_alerts().get(account_dir)
+        except Exception:
+            log.debug("Failed to read account alerts", exc_info=True)
+            return False
+        if not record or record.get("resolved"):
+            return False
+        return record.get("reason") in RUNTIME_REJECTION_REASONS
+
+    def has_spawnable_account(self) -> bool:
+        """Would a spawn find an account to run on, right now?
+
+        Asked by the cooldown-retry loop, which parks an instance on a
+        *predicted* reset time and otherwise has no way to learn that the
+        prediction went stale.  It is the same `_pick_account()` call the
+        refusal branch in `_run_impl` makes, deliberately: a predicate that
+        could disagree with the spawn would either fire retries into a refusal
+        or leave them parked while the fleet ran.
+
+        Non-failover setups (no CLAUDE_ACCOUNTS) never refuse a spawn for want
+        of an account, so there is nothing for them to wait on.
+        """
+        if not config.CLAUDE_ACCOUNTS:
+            return True
+        return self._pick_account() is not None
+
+    def retry_account_now(self, account_dir: str) -> str:
+        """Put an auth-sidelined account back in rotation immediately.
+
+        The auth cooldown is deliberately a whole day
+        (``ACCOUNT_AUTH_COOLDOWN_SECS``) so a dead account costs one wasted
+        run per day rather than one per limit-hit.  That is the right default
+        and the wrong wait when the user has *just* had access switched back
+        on, which is what this is for: it drops the cooldown so the next task
+        tries the account, and nothing else.  If it is still dead the next run
+        re-sidelines it exactly as before.
+
+        Returns ``"cleared"``, ``"usage"`` (the cooldown is a real usage limit
+        with a real reset time, so clearing it would only send the next task
+        into the limit it is waiting out), or ``"not_cooled"`` when the
+        account was not sitting out in the first place.
+        """
+        from bot.claude.auth_health import clear_cache as _clear_auth_cache
+
+        # Re-probe the credentials file too: "try now" means "look again at
+        # everything about this account", and the on-disk probe is cached.
+        # Every account is re-probed, not just this one: the probe is a small
+        # cached file read, and a picker that disagrees with the panel the
+        # user is looking at costs more than re-reading two files.
+        _clear_auth_cache()
+        was_sidelined = self._auth_sideline_is_open(account_dir)
+        if account_dir not in self._account_cooldowns:
+            # Nothing to un-cool.  That is the *sole account* case rather than
+            # a healthy one: sidelining the only account we have would stop
+            # everything, so that path records the alert and skips the
+            # cooldown.  The in-memory dead mark is then the only thing
+            # holding it out of rotation (_known_dead_accounts), so dropping
+            # it is the whole retry.
+            self._auth_dead.discard(account_dir)
+            self._auth_cooldowns.discard(account_dir)
+            if was_sidelined:
+                log.info(
+                    "Account %s put back in rotation by hand (no cooldown to "
+                    "clear)", account_label(account_dir),
+                )
+                return "cleared"
+            return "not_cooled"
+        if not was_sidelined:
+            return "usage"
+        self._clear_auth_cooldown(account_dir, force=True)
+        log.info(
+            "Account %s put back in rotation by hand (auth cooldown cleared)",
+            account_label(account_dir),
+        )
+        return "cleared"
 
     def _known_dead_accounts(self) -> set[str]:
         """Accounts that certainly cannot authenticate right now.
@@ -1063,6 +1853,7 @@ class ClaudeRunner:
 
     def _soften_auth_dead_end(
         self, result: RunResult, instance: Instance, dead_account: str,
+        *, org_disabled: bool = False,
     ) -> None:
         """Turn a nowhere-to-go auth failure into a retry or a useful message.
 
@@ -1074,6 +1865,11 @@ class ClaudeRunner:
           back when the earliest one frees up (a real wall-clock moment), and
         * genuinely nothing left -> say which accounts are logged out and how
           to fix them, instead of echoing the CLI.
+
+        *org_disabled* swaps that last message, for the same reason The Ark
+        notice branches on it: an org-disabled account is signed in fine, so
+        "logged out (OAuth expired), re-auth with ..." names the wrong fault
+        and prescribes the one fix that provably cannot work.
 
         Accounts that are themselves logged out are excluded from the first
         branch even though they hold a cooldown entry.  Waiting on one is not a
@@ -1105,16 +1901,29 @@ class ClaudeRunner:
         ordered = [a for a in config.CLAUDE_ACCOUNTS if a in dead] or [dead_account]
         labels = ", ".join(f"'{account_label(a)}'" for a in ordered)
         verb = "is" if len(ordered) == 1 else "are"
-        result.error_message = (
-            f"Account {labels} {verb} logged out (OAuth expired) and there is "
-            f"no other account to fall back to.\n"
-            f"Re-auth with: {relogin_command(ordered[0])}  then /login "
-            f"inside the CLI — or drop it from CLAUDE_ACCOUNTS."
-        )
+        if org_disabled:
+            result.error_message = (
+                f"Account '{account_label(dead_account)}' can't run: its "
+                f"organization has Claude Code switched off, and there is no "
+                f"other account to fall back to.\n"
+                f"Signing in again won't fix this one, it is signed in fine. "
+                f"An admin has to re-enable access; the bot retries the "
+                f"account about once a day and takes it back by itself, or "
+                f"use Try now in /auth."
+            )
+        else:
+            result.error_message = (
+                f"Account {labels} {verb} logged out (OAuth expired) and there "
+                f"is no other account to fall back to.\n"
+                f"Re-auth with: {relogin_command(ordered[0])}  then /login "
+                f"inside the CLI, or drop it from CLAUDE_ACCOUNTS."
+            )
         result.result_text = ""
         log.error(
-            "Accounts %s logged out and nothing is left to fall back to (%s)",
-            labels, instance.id,
+            "Accounts %s unusable (%s) and nothing is left to fall back to (%s)",
+            labels,
+            "org-disabled" if org_disabled else "logged out",
+            instance.id,
         )
 
     def _set_account_cooldown(self, account_dir: str, reset_at: datetime) -> None:
@@ -1182,6 +1991,7 @@ class ClaudeRunner:
         context: str | None = None,
         sibling_context: str | None = None,
         on_recovery: RecoveryCallback | None = None,
+        on_context_reset: ContextResetCallback | None = None,
     ) -> RunResult:
         """Run CLI for an instance. Blocks until completion or timeout."""
         # Fresh failover state per top-level run. The set is mutated via .add()
@@ -1193,12 +2003,547 @@ class ClaudeRunner:
         # downgrade, which clears it deliberately so the fallback-model
         # retry may revisit accounts that are only model-limited).
         instance._accounts_tried = set()
+        # A kill mark belongs to the run it was fired at, and a top-level run
+        # is by definition a new one.  The lifecycle layer registers the id in
+        # _active_tasks just before calling this, which is what lets kill()
+        # record intent while there is no live subprocess — so this reset is
+        # what makes the check at the top of _run_impl safe to apply to the
+        # FIRST attempt as well as to retries.  Without it, a mark stranded by
+        # an earlier run (the 4h-lifetime early return skips the usual
+        # discard) would stop a re-queued instance before it ever spawned.
+        self._intentional_kills.discard(instance.id)
+        self._kill_reasons.pop(instance.id, None)
+        self._kill_card_owners.discard(instance.id)
         async with self._semaphore:
+            # Inside the slot, before the spawn. Holding the slot while waiting
+            # is the point: this session has been admitted by concurrency and
+            # is now being admitted by memory, and nothing behind it in the
+            # queue should slip past into a machine that is already out.
+            await self._await_memory_headroom(instance, on_progress)
             return await self._run_impl(
                 instance, on_progress, on_stall, context, sibling_context,
                 api_fallback=instance.api_fallback,
                 on_recovery=on_recovery,
+                on_context_reset=on_context_reset,
             )
+
+    def _stopped_before_spawning(self, instance: Instance) -> RunResult | None:
+        """The run was killed at a moment when there was no process to kill.
+
+        A run is registered as active for its whole lifetime but only *holds a
+        process* for part of it: not while it waits on the concurrency
+        semaphore, not while its worktree is being built or an account picked,
+        and not in the gap between one attempt ending and the next starting —
+        a gap every recovery layer opens, for milliseconds on the recursive
+        ones and a full 30 seconds on the transient-error sleep.  A Kill or
+        Steer landing in any of those found nothing to terminate and simply
+        evaporated, so the run carried on for another twenty minutes while the
+        thread already said it had stopped.  ``kill()`` records the intent
+        instead (see its docstring) and the callers of this honour it at every
+        point a spawn is about to happen.
+
+        Returns the tombstone to hand back, or None to carry on.  The mark is
+        deliberately left set: several recovery layers inspect the result they
+        get back and recurse *again* (account failover, model downgrade), so
+        it has to keep refusing for the rest of this run.  ``run()`` clears it
+        on the way into the next one, which is what makes it safe to check
+        this before the first spawn as well as before a retry.
+        """
+        if instance.id not in self._intentional_kills:
+            return None
+        log.info(
+            "Not spawning for %s — kill requested with no process to signal",
+            instance.id,
+        )
+        return RunResult(
+            is_error=True,
+            error_message="Stopped before the next attempt started",
+            session_id=instance.session_id,
+            killed_intentionally=True,
+            kill_reason=self._kill_reasons.get(instance.id),
+            kill_owns_card=instance.id in self._kill_card_owners,
+        )
+
+    def _watched_pids(self) -> set[int]:
+        """Pids an armed /watch is waiting on — never reclaimable.
+
+        A watch exists precisely because a session launched a long job with
+        ``setsid nohup ... &`` and detached from it, which makes that job
+        reparented, unowned, and indistinguishable by parentage from a leaked
+        build daemon. Killing one would silently destroy the job the thread is
+        visibly sitting and waiting for.
+        """
+        if not self._store:
+            return set()
+        try:
+            return {
+                w.pid for w in self._store.list_watches()
+                if getattr(w, "pid", None)
+            }
+        except Exception:
+            # Never let a bookkeeping failure widen what the reaper considers
+            # fair game. No answer means protect nothing new, which the caller
+            # turns into "reap nothing" only because the pattern list is also
+            # required — but an empty set here is still the cautious direction
+            # relative to raising into a watchdog.
+            log.debug("Could not read watch pids", exc_info=True)
+            return set()
+
+    async def _reclaim_idle_daemons(self, why: str) -> list[str]:
+        """Kill leaked, idle build daemons in our cgroup. Returns what went.
+
+        This is the first thing tried whenever memory is short, and it runs
+        before anything that costs a session its work, because a build server
+        sitting on gigabytes of nothing is free to give up and a session's run
+        is not. In the kernel's task table from the 2026-08-21 OOM a
+        detached `dotnet` at 4.10 GB was the second-largest process on the
+        whole machine, while each session held about 0.3 GB — nothing the
+        per-session guard could see, and nothing killing a session would free.
+
+        Rate-limited and serialised — every session's watchdog can call it.
+        """
+        if not config.MEM_ORPHAN_SWEEP:
+            return []
+        async with self._reclaim_lock:
+            now = asyncio.get_event_loop().time()
+            if now - self._reclaim_last < config.SESSION_MEM_CHECK_SECS:
+                return []
+            self._reclaim_last = now
+            protected = self._watched_pids()
+            try:
+                orphans = await asyncio.to_thread(
+                    memory.find_orphans,
+                    os.getpid(),
+                    protected,
+                    config.MEM_ORPHAN_MIN_MB,
+                    config.MEM_ORPHAN_MIN_AGE_SECS,
+                    config.MEM_ORPHAN_CPU_IDLE_PCT,
+                    memory.RECLAIMABLE_DAEMONS,
+                    # Sessions no longer live in the bot's own cgroup, so
+                    # "our cgroup minus our process tree" stopped covering
+                    # the case this whole path exists for: a Roslyn server a
+                    # session detached stays in that session's scope after
+                    # the session ends, where the bot's cgroup.procs will
+                    # never list it. Empty tuple when scopes are not in use,
+                    # which restores the previous behaviour exactly.
+                    cgroups.session_slice_roots(),
+                )
+            except Exception:
+                log.debug("Orphan scan failed", exc_info=True)
+                return []
+            if not orphans:
+                return []
+            # Logged whether or not anything is reaped. Memory in our cgroup
+            # that belongs to no session is worth seeing every time — it is the
+            # class of problem that is invisible until someone goes looking.
+            log.warning(
+                "Unowned memory in our cgroup (%s): %s",
+                why,
+                ", ".join(
+                    f"{o.label()}{'' if o.reclaimable else ' [keeping]'}"
+                    for o in orphans
+                ),
+            )
+            reclaimable = [o for o in orphans if o.reclaimable]
+            if not reclaimable:
+                return []
+            reaped = await asyncio.to_thread(
+                memory.reap_orphans, reclaimable, 3.0,
+                config.MEM_ORPHAN_CPU_IDLE_PCT,
+            )
+            if reaped:
+                # Summed over what actually went, not over what was offered:
+                # reap_orphans drops candidates whose pid was reused or that
+                # went busy since the scan, and a headline that counted those
+                # would report memory that is still very much allocated.
+                by_label = {o.label(): o.rss_mb for o in reclaimable}
+                freed = sum(by_label.get(label, 0.0) for label in reaped)
+                log.warning(
+                    "Reclaimed %.1fGB of idle build daemons (%s): %s",
+                    freed / 1024, why, ", ".join(reaped),
+                )
+            return reaped
+
+    async def _fleet_arbitration(
+        self, instance_id: str, tree: memory.TreeMemory,
+    ) -> memory.MemoryPressure | None:
+        """Should this session be reaped for the machine? Reading, or None.
+
+        Answers the question the per-session ceiling structurally cannot: five
+        sessions at 2.5 GB never individually breach an 8 GB limit, and together
+        they finish a 32 GB machine that is also running a browser. Before this
+        the outcome of that was the cgroup OOM killer choosing a victim — safe,
+        because OOMPolicy=continue keeps the unit alive, but silent: the session
+        that died was never told why, and the user saw an unexplained failure.
+
+        Every gate here exists to stop a wrong kill, in the order that costs
+        least to evaluate:
+
+        1. Too small to be worth taking. Reaping the largest of five 400 MB
+           sessions frees nothing worth having and destroys real work.
+        2. The machine is not actually in trouble.
+        3. We are not the ones filling it. Machine-critical pressure caused by
+           something outside this cgroup is not ours to solve by killing our
+           own work — the offender would re-take the memory immediately and the
+           session's run would be gone for nothing.
+        4. Reclaim first. An idle build daemon holding gigabytes gives them up
+           for free; a session gives them up at the cost of its work. If that
+           alone clears it, nothing else happens.
+        5. Not the largest. Exactly one session can be the maximum of a shared
+           snapshot, which is what keeps two watchdogs from both volunteering.
+        6. A reap happened recently. The kernel needs time to reclaim, and a
+           second watchdog reading the same not-yet-recovered pressure would
+           take a second session for a spike the first kill already fixed.
+        """
+        if not config.SESSION_MEM_FLEET_ARBITRATION:
+            return None
+        # SESSION_MEM_KILL_MB=0 is documented as "warnings only". Reaping a
+        # session for the machine while the per-session kill is switched off
+        # would break that promise, and every message on this path quotes the
+        # ceiling the session was under — which reads as "under its own 0.0 GB
+        # ceiling" when there is no ceiling at all.
+        if config.SESSION_MEM_KILL_MB <= 0:
+            return None
+        if tree.total_mb < config.SESSION_MEM_FLEET_MIN_VICTIM_MB:
+            return None
+
+        pressure = await asyncio.to_thread(self._read_pressure)
+        if not pressure.is_critical() or not pressure.over_own_high():
+            return None
+
+        await self._reclaim_idle_daemons(f"machine critical, {instance_id} live")
+        pressure = await asyncio.to_thread(self._read_pressure)
+        if not pressure.is_critical() or not pressure.over_own_high():
+            log.info(
+                "Machine recovered without reaping a session (%s)",
+                pressure.summary(),
+            )
+            return None
+
+        # Compare only against sessions that are still running. A finished
+        # session's last sample lingers until its cleanup runs, and a dead
+        # session must never win the "largest" contest and thereby spare a live
+        # one that is genuinely the problem.
+        live = {
+            iid: sample for iid, sample in self._tree_samples.items()
+            if iid in self._processes
+        }
+        if not live:
+            return None
+        # Tie broken on the id so the choice is deterministic: two sessions
+        # reading an identical maximum must not both conclude they are it.
+        largest = max(live.items(), key=lambda kv: (kv[1].total_mb, kv[0]))[0]
+        if largest != instance_id:
+            return None
+
+        now = asyncio.get_event_loop().time()
+        if now - self._fleet_last_reap < config.FLEET_REAP_COOLDOWN_SECS:
+            log.warning(
+                "Machine still critical (%s) and %s is largest, but a session "
+                "was reaped %ds ago — waiting rather than cascading",
+                pressure.summary(), instance_id,
+                int(now - self._fleet_last_reap),
+            )
+            return None
+        self._fleet_last_reap = now
+        return pressure
+
+    def _read_pressure(self) -> memory.MemoryPressure:
+        """Machine pressure at the configured thresholds. Never raises.
+
+        The oomd limit is read from systemd rather than configured, because it
+        is systemd's number and can be changed in a drop-in without touching
+        this repo. It is cached after the first call: it cannot move without a
+        daemon-reload, and this function runs on every admission check and
+        every fleet-arbitration tick. Passing None keeps the whole oomd rule
+        out of the classifier, which is what happens off Linux and on a
+        machine where oomd is not managing our slice.
+        """
+        try:
+            limit: float | None = None
+            if config.OOMD_AWARE_ENABLED:
+                policy = memory.oomd_policy()
+                if policy.active():
+                    limit = policy.limit_pct
+            return memory.read_pressure(
+                critical_avail_mb=config.MEM_PRESSURE_CRITICAL_AVAIL_MB,
+                tight_avail_mb=config.MEM_PRESSURE_TIGHT_AVAIL_MB,
+                critical_swap_pct=config.MEM_PRESSURE_CRITICAL_SWAP_PCT,
+                critical_psi_pct=config.MEM_PRESSURE_CRITICAL_PSI_PCT,
+                tight_psi_pct=config.MEM_PRESSURE_TIGHT_PSI_PCT,
+                oomd_limit_pct=limit,
+                oomd_tight_fraction=config.OOMD_TIGHT_FRACTION,
+                oomd_critical_fraction=config.OOMD_CRITICAL_FRACTION,
+                own_cgroup=self._workload_cgroup(),
+            )
+        except Exception:
+            log.debug("Pressure read failed", exc_info=True)
+            return memory.MemoryPressure()
+
+    @staticmethod
+    def _workload_cgroup() -> Path | None:
+        """The cgroup our sessions run in, or None to fall back to our own.
+
+        Every "are we the ones filling this" reading has to be taken where the
+        work is, and since v0.101.27 that is no longer where the bot is: the
+        sessions moved into scopes under their own slice, leaving the
+        supervisor's cgroup holding a ~250 MB asyncio loop. Both readings that
+        answer that question (``over_own_high`` and ``own_psi_pct``) would
+        otherwise measure the supervisor and answer no however much the fleet
+        was thrashing, switching off fleet arbitration and telling the user
+        "it is mostly not us" during a kill our own sessions caused.
+
+        None when there is no sessions slice, which covers both the machine
+        that cannot make scopes and the moment before the probe has run. In
+        both cases the sessions are inside the bot's own cgroup anyway, and
+        that is what ``read_pressure`` falls back to.
+        """
+        try:
+            return cgroups.session_slice_path()
+        except Exception:
+            log.debug("Sessions slice lookup failed", exc_info=True)
+            return None
+
+    def _admission_blocked(
+        self, pressure: memory.MemoryPressure,
+    ) -> AdmissionBlock | None:
+        """Why a starting session should wait, or None to let it through.
+
+        One function so that the three places the hold loop asks the question
+        cannot answer it differently, which is how a hold that never releases
+        or one that never engages gets written. The classification lives here
+        for the same reason: the hold loop needs to know whose pressure it is
+        waiting on, and a second copy of that judgement in the loop is how the
+        two start disagreeing.
+
+        ``ours`` means the bot's own sessions are what is filling the machine.
+        That distinction decides how long the hold is willing to wait, because
+        only one of the two clears by itself: a running session finishes, a
+        browser holding 6 GB does not. It is deliberately **not** read off the
+        oomd verdict, which is the tempting shortcut and the wrong one: that
+        number is the stall in the parent slice, which holds the browser, the
+        desktop and everything else the user is running, so blaming ourselves
+        for it would give a foreign shortage our own long deadline. Readings
+        taken on cgroups we actually own answer it instead, any one of which
+        is enough, and they cover each other's blind spots:
+
+        * The session slice is out of budget. Measured directly, and the
+          sharpest signal there is, but it exists only on a machine that can
+          make scopes.
+        * Our workload cgroup is over its MemoryHigh watermark, or is carrying
+          at least half the parent slice's stall. These come from the pressure
+          read, which takes them on the sessions slice where there is one and
+          on the bot's own cgroup where there is not, so they still answer on
+          the fallback path that has no slice to measure.
+
+        Neither can see a shortage, so a machine where nothing is readable
+        classifies as not-ours and gets the short deadline. That is the right
+        way round: proceeding is the safe default when there is no evidence to
+        wait on.
+        """
+        floor = config.MEM_ADMISSION_MIN_SLICE_HEADROOM_MB
+        headroom = self._slice_headroom_mb() if floor > 0 else None
+        # None means the slice has no limit, or the files would not read.
+        # Treated as no finding, the same rule every pressure reader here
+        # follows: a budget check that cannot measure must not refuse work.
+        out_of_budget = headroom is not None and headroom < floor
+        ours = (
+            out_of_budget
+            or pressure.over_own_high()
+            or bool(pressure.stall_is_ours())
+        )
+        if pressure.is_critical():
+            return AdmissionBlock(
+                pressure.human() or "the machine is out of memory", ours,
+            )
+        if pressure.oomd_at_least(memory.PRESSURE_TIGHT):
+            return AdmissionBlock(
+                pressure.human() or "this unit is close to being killed", ours,
+            )
+        # The `headroom is not None` half is implied by out_of_budget and is
+        # repeated so the formatting below cannot be read as dividing a None.
+        if out_of_budget and headroom is not None:
+            return AdmissionBlock(
+                f"the session budget has {headroom / 1024:.1f} GB left, "
+                f"under the {floor / 1024:.1f} GB needed to start one more",
+                ours=True,
+            )
+        return None
+
+    @staticmethod
+    def _slice_headroom_mb() -> float | None:
+        """Megabytes left under the session slice's soft ceiling, or None."""
+        try:
+            return cgroups.slice_headroom_mb()
+        except Exception:
+            log.debug("Slice headroom read failed", exc_info=True)
+            return None
+
+    async def _await_memory_headroom(
+        self,
+        instance: Instance,
+        on_progress: ProgressCallback | None,
+    ) -> None:
+        """Hold a starting session while the machine is out of memory.
+
+        MAX_CONCURRENT bounds how many sessions run at once and says nothing
+        about whether the machine can afford the next one. Before this, the
+        bot's only response to a starving machine was to add another process to
+        it — which is how five sessions, a browser and a detached compiler
+        server came to share 32 GB until the kernel picked a victim.
+
+        Three deliberate properties:
+
+        * It reclaims before it waits. An idle build daemon holding gigabytes
+          is usually the whole problem, and giving it up costs nothing.
+        * The wait is bounded, then it proceeds anyway with a warning. Pressure
+          the bot did not create would otherwise block work forever, and
+          refusing all work because a browser is fat is a worse failure than
+          starting one more CLI.
+        * It holds on CRITICAL, and on TIGHT from the oomd rule alone. Not on
+          TIGHT machine-wide: this desktop reads tight most of the day and
+          holding on it would train the user to ignore the message. The oomd
+          reading is different in kind. TIGHT there means the slice is at 60%
+          of the stall percentage that gets the whole unit SIGKILLed, which on
+          the 2026-09-21 timeline is minutes of warning before every live
+          session dies at once. See MemoryPressure.oomd_level.
+        """
+        if not config.MEM_ADMISSION_ENABLED:
+            return
+        pressure = await asyncio.to_thread(self._read_pressure)
+        blocked = self._admission_blocked(pressure)
+        if not blocked:
+            return
+        # A hold is one more window with no process to signal, and this file
+        # already carries the scar tissue for those: see
+        # _stopped_before_spawning. A Kill arriving while a session sits here
+        # would find nothing to terminate, evaporate, and the session would
+        # spawn minutes later into a thread that already said it had stopped.
+        # Returning is enough — _run_impl checks the mark before it spawns.
+        if instance.id in self._intentional_kills:
+            return
+
+        await self._reclaim_idle_daemons(f"{instance.id} waiting to start")
+        pressure = await asyncio.to_thread(self._read_pressure)
+        blocked = self._admission_blocked(pressure)
+        if not blocked:
+            log.info(
+                "%s released immediately — reclaim cleared the pressure (%s)",
+                instance.id, pressure.summary(),
+            )
+            return
+
+        log.warning(
+            "Holding %s before spawn: %s (%s pressure)",
+            instance.id, pressure.summary(), "own" if blocked.ours else "foreign",
+        )
+        # The same formatter the /wake confirmation uses, so "up to 5 min" and
+        # "waited 45s" read the same way everywhere and a sub-minute admission
+        # wait cannot render as "0 min".
+        from bot.platform.formatting import format_delay_secs
+
+        def _budget_secs(block: AdmissionBlock) -> int:
+            # Recomputed every pass rather than fixed at the start, because
+            # which kind of shortage this is can change while we wait: a
+            # session finishing turns our own slice pressure into a browser's,
+            # and the deadline has to follow the shortage rather than the one
+            # it happened to open on.
+            secs = (
+                config.MEM_ADMISSION_OWN_MAX_WAIT_SECS if block.ours
+                else config.MEM_ADMISSION_MAX_WAIT_SECS
+            )
+            return max(0, secs)
+
+        told = False
+        last_told = 0.0
+        started = asyncio.get_event_loop().time()
+        while True:
+            now = asyncio.get_event_loop().time()
+            if now >= started + _budget_secs(blocked):
+                break
+            # One message when the hold opens, then a refresh every
+            # MEM_ADMISSION_NOTIFY_SECS. An own-pressure hold can legitimately
+            # run half an hour, and a thread that says "waiting for memory"
+            # once and then goes silent for thirty minutes is indistinguishable
+            # from a thread that died.
+            # Never more often than we poll: a refresh between two polls would
+            # repeat a reading nothing has re-read.
+            refresh = max(
+                config.MEM_ADMISSION_POLL_SECS, config.MEM_ADMISSION_NOTIFY_SECS,
+            )
+            due = not told or now - last_told >= refresh
+            if due and on_progress:
+                budget = format_delay_secs(_budget_secs(blocked))
+                waited = int(now - started)
+                body = (
+                    f"There is no room to start this yet: {blocked.reason}. "
+                    f"Starting another session now would make that worse, "
+                    f"so this one waits for room (up to {budget}, then it "
+                    f"starts anyway)."
+                )
+                if told:
+                    body = (
+                        f"Still waiting for memory after "
+                        f"{format_delay_secs(waited)}: {blocked.reason}. "
+                        f"Holding this session rather than making it worse "
+                        f"(up to {budget} from the start, then it starts "
+                        f"anyway)."
+                    )
+                told = True
+                last_told = now
+                try:
+                    await on_progress(
+                        "Waiting for memory before starting", body,
+                    )
+                except Exception:
+                    log.exception("Progress callback error on memory hold")
+            await asyncio.sleep(max(1, config.MEM_ADMISSION_POLL_SECS))
+            if instance.id in self._intentional_kills:
+                log.info(
+                    "Memory hold for %s abandoned — stop requested", instance.id,
+                )
+                return
+            pressure = await asyncio.to_thread(self._read_pressure)
+            blocked = self._admission_blocked(pressure)
+            if not blocked:
+                waited = int(asyncio.get_event_loop().time() - started)
+                log.info(
+                    "Starting %s after %ds of memory hold (%s)",
+                    instance.id, waited, pressure.summary(),
+                )
+                if told and on_progress:
+                    try:
+                        await on_progress(
+                            "Starting now — memory freed up",
+                            f"Held for {waited}s. {pressure.summary()}.",
+                        )
+                    except Exception:
+                        log.exception("Progress callback error on memory release")
+                return
+
+        # Bounded, so this is a normal outcome and not a failure. Say plainly
+        # that the wait was given up on rather than implying it succeeded.
+        # Elapsed, not the budget. The budget is recomputed from the *current*
+        # shortage and a hold that opened on our own pressure can end on a
+        # browser's, so quoting it would report a half-hour wait as five
+        # minutes (or the reverse) on exactly the runs worth understanding.
+        waited = format_delay_secs(int(asyncio.get_event_loop().time() - started))
+        log.warning(
+            "Starting %s anyway, still short after %s (%s)",
+            instance.id, waited, pressure.summary(),
+        )
+        if told and on_progress:
+            try:
+                await on_progress(
+                    "Starting anyway — memory never freed up",
+                    f"Waited {waited} and "
+                    f"the machine is still short ({pressure.human()}). Starting "
+                    f"regardless rather than blocking your work indefinitely — "
+                    f"but expect this session to be slow, and consider closing "
+                    f"something.",
+                )
+            except Exception:
+                log.exception("Progress callback error on memory hold timeout")
 
     async def _run_impl(
         self,
@@ -1212,6 +2557,7 @@ class ClaudeRunner:
         _binary: str | None = None,
         _recovery_state: set[str] | None = None,
         on_recovery: RecoveryCallback | None = None,
+        on_context_reset: ContextResetCallback | None = None,
     ) -> RunResult:
         # Snapshot provider + binary at entry — in-flight sessions keep their
         # provider even if a runtime switch happens mid-run.
@@ -1223,6 +2569,33 @@ class ClaudeRunner:
         # fires at most once (bounds recursion depth from the layered
         # No-conversation-found recovery added by the dementia fix).
         recovery_state: set[str] = _recovery_state if _recovery_state is not None else set()
+
+        async def _reenter(**overrides) -> RunResult:
+            """Re-run this turn after a recovery step, forwarding every argument.
+
+            Ten rungs below re-enter _run_impl with the same eleven arguments;
+            only api_fallback ever differs, and the api-fallback rung passes it
+            through `overrides`.  Written out at each rung it was ten copies of
+            one call, which is how a twelfth parameter gets forwarded by nine
+            of them and dropped by the tenth.  The closure reads `provider`,
+            `binary` and `recovery_state` at call time, exactly as the inlined
+            copies did — none of the three is ever rebound.
+            """
+            return await self._run_impl(
+                instance, on_progress, on_stall,
+                context, sibling_context,
+                api_fallback=overrides.get("api_fallback", api_fallback),
+                _provider=provider, _binary=binary,
+                _recovery_state=recovery_state,
+                on_recovery=on_recovery,
+                on_context_reset=on_context_reset,
+            )
+
+        # Waiting on the semaphore, and the gap between one attempt ending and
+        # the next starting, are both windows with no process to signal.
+        stopped = self._stopped_before_spawning(instance)
+        if stopped:
+            return stopped
 
         # Git worktree isolation for build tasks
         if instance.branch:
@@ -1248,6 +2621,15 @@ class ClaudeRunner:
                 avoid_model_cooldown=_is_primary_model(instance.model),
             )
             if not account_dir and config.CLAUDE_ACCOUNTS:
+                # A kill that landed while the worktree was being built (the
+                # longest of the no-process windows — it takes a per-repo git
+                # lock, so it can queue behind a sibling build's merge) would
+                # otherwise come back as the re-queueable result below and run
+                # hours later.  Every other pre-spawn window is caught after
+                # the process exists, but this branch never gets that far.
+                stopped = self._stopped_before_spawning(instance)
+                if stopped:
+                    return stopped
                 # Refuse to spawn when every configured account is on cooldown
                 # or already excluded.  Spawning anyway would invoke the CLI
                 # without CLAUDE_CONFIG_DIR set, which (a) routes the call to
@@ -1357,6 +2739,25 @@ class ClaudeRunner:
             env.pop(var, None)
         if not api_fallback:
             env.pop("ANTHROPIC_API_KEY", None)
+        # The bot's own Discord identity has no business in a session's
+        # environment: nothing a session legitimately does needs it, and `env`
+        # is something a debugging turn prints without thinking. Deliberately a
+        # denylist, not an allowlist -- an allowlist drops whatever per-project
+        # variable we failed to predict (toolchain homes, proxy settings,
+        # SSH_AUTH_SOCK, GH_TOKEN) and fails confusingly mid-chain.
+        #
+        # This is NOT a containment boundary. `.env` is still readable on disk
+        # and config re-reads it with override=True, so the bot's own scripts
+        # keep working. What it removes is the accidental path: an env dump, a
+        # crash trace, a logged subprocess environment.
+        #
+        # That "keep working" depends on config._env_root() finding the main
+        # checkout's `.env` from inside a worktree, since `.env` is gitignored
+        # and worktrees have none. Removing that lookup would break every
+        # harness a build session runs on this repo -- the two changes are one
+        # unit, so keep them together.
+        for var in SESSION_STRIPPED_ENV_VARS:
+            env.pop(var, None)
         if account_dir:
             env[provider.config_dir_env] = account_dir
 
@@ -1370,11 +2771,21 @@ class ClaudeRunner:
                 account_dir, working_dir, instance.session_id, instance,
             )
 
+        # Put the session in its own systemd scope, so that when oomd comes
+        # looking for something to kill it finds this session and not the
+        # supervisor holding twelve conversations open. Returns `cmd`
+        # unchanged wherever that is not possible -- a probed, cached answer,
+        # so a machine without systemd-run pays for the discovery once and
+        # then spawns exactly as it always did.
+        await cgroups.ensure_scope_support()
+        cmd = cgroups.wrap_command(cmd, instance.id)
+
         acct_tag = f" [acct={account_dir[-20:]}]" if account_dir else ""
         log.info("Running %s%s (prompt: %d chars via stdin): %s",
                  instance.id, acct_tag, len(prompt_text), " ".join(cmd)[:500])
 
         proc = None
+        adopt_task: asyncio.Task | None = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -1389,6 +2800,20 @@ class ClaudeRunner:
             # Register immediately so kill/cleanup works even if stdin write fails
             instance.pid = proc.pid
             self._processes[instance.id] = proc
+            # No await between the spawn and here, so this is the earliest the
+            # child can be reniced from the parent. See _lower_priority for
+            # why it is not done in a preexec_fn.
+            _lower_priority(proc.pid)
+
+            # Closes the last of the no-process windows: spawning is itself an
+            # await, so a kill can land after the checks above and still find
+            # nothing to signal.  Checked here rather than before the spawn
+            # because this is the first moment the answer can't change — and
+            # before _stream_output, which clears stale marks on the way in.
+            # The finally below SIGKILLs the process we just started.
+            stopped = self._stopped_before_spawning(instance)
+            if stopped:
+                return stopped
 
             # Pipe user prompt via stdin — avoids Windows command-line length
             # limit (WinError 206) for long prompts / system context.
@@ -1404,6 +2829,24 @@ class ClaudeRunner:
                 except ProcessLookupError:
                     pass
                 return RunResult(is_error=True, error_message=f"Failed to send prompt: {exc}")
+
+            # In the background, and deliberately not awaited here.
+            # `--scope` execs in place, so proc.pid is the CLI's own pid and
+            # the cgroup it reports is the scope's -- but only once
+            # systemd-run's round trip to the service manager has finished,
+            # and that round trip is not quick when the manager is busy:
+            # measured on this machine at 1.1s, 1.8s and 4.8s across three
+            # consecutive trials, against ~50ms on an idle one. So the budget
+            # has to be sized for the bad case, and a budget sized for the bad
+            # case must not be able to stall a spawn. It buys insurance rather
+            # than latency -- systemd-run registers before it execs, so the
+            # CLI has nothing to say until the scope exists either way -- but
+            # nothing downstream needs adoption to have finished, and every
+            # reader of _session_cgroups already treats a missing entry as
+            # "walk the process tree instead".
+            adopt_task = asyncio.create_task(
+                self._adopt_session_scope(instance.id, proc)
+            )
 
             result = await self._stream_output(
                 proc, instance, on_progress, on_stall,
@@ -1448,6 +2891,18 @@ class ClaudeRunner:
                             "Failed to resolve account alert", exc_info=True,
                         )
 
+            # Nothing below this line should fire for a run the user stopped
+            # on purpose.  Every branch that follows exists to rescue a run
+            # that fell over by itself, and each one ends in another spawn —
+            # so a Kill or a Steer would be answered by silently starting the
+            # work again.  The account-failover branch is the sharpest edge:
+            # a terminated process leaves no output and no completed turns,
+            # which is exactly its "this account fell over instantly"
+            # signature, so on a two-account setup killing a build handed it
+            # straight to the backup account.
+            if result.killed_intentionally:
+                return result
+
             # Dead session: layered recovery before silent --resume drop.
             # Layer 1: rebuild the owning account's session-index in-process
             #          and retry once with --resume intact.  Runs FIRST because
@@ -1483,14 +2938,7 @@ class ClaudeRunner:
                         # Clear _accounts_tried so the picker can revisit the
                         # owning account on the retry.
                         instance._accounts_tried.discard(owning_account or "")
-                        return await self._run_impl(
-                            instance, on_progress, on_stall,
-                            context, sibling_context,
-                            api_fallback=api_fallback,
-                            _provider=provider, _binary=binary,
-                            _recovery_state=recovery_state,
-                            on_recovery=on_recovery,
-                        )
+                        return await _reenter()
 
                 # Layer 2: try other account if we haven't yet and one is available.
                 if (
@@ -1507,14 +2955,7 @@ class ClaudeRunner:
                             instance.session_id[:12], account_dir[-20:],
                             next_account[-20:], instance.id,
                         )
-                        return await self._run_impl(
-                            instance, on_progress, on_stall,
-                            context, sibling_context,
-                            api_fallback=api_fallback,
-                            _provider=provider, _binary=binary,
-                            _recovery_state=recovery_state,
-                            on_recovery=on_recovery,
-                        )
+                        return await _reenter()
 
                 # Layer 3 (last resort): drop session and run blank.  Tag the
                 # downstream result so commands.py can surface a "lost prior
@@ -1558,14 +2999,7 @@ class ClaudeRunner:
                 # still apply after this reset.
                 instance._accounts_tried = set()
                 recovery_state.add("exhausted")
-                fresh = await self._run_impl(
-                    instance, on_progress, on_stall,
-                    context, sibling_context,
-                    api_fallback=api_fallback,
-                    _provider=provider, _binary=binary,
-                    _recovery_state=recovery_state,
-                    on_recovery=on_recovery,
-                )
+                fresh = await _reenter()
                 fresh.session_recovery_exhausted = True
                 fresh.recovery_warning_posted = warning_posted
                 # Don't poison the retry path: if the fallback produced no
@@ -1609,6 +3043,315 @@ class ClaudeRunner:
                             instance.id, original_session_id[:12],
                         )
                 return fresh
+
+            # Autocompact thrash: the CLI aborts its own process when the
+            # context refills to the limit within 3 turns of a compact, 3 times
+            # running.  Nothing is broken — that counter is per-process, so a
+            # resume starts from the compact summary with it back at zero,
+            # which is why the manual Retry has always worked on the first
+            # click.  Do it ourselves instead of blocking a chain and paging
+            # the user to press a button whose only job is "run it again".
+            #
+            # Placed here on purpose: after the dead-session cascade (a thrash
+            # is not a missing conversation) and before the model-limit and
+            # account-failure branches, neither of which can match this text
+            # anyway — the no-turns heuristic needs an empty result and zero
+            # turns, and a thrash has ~50 of them.
+            # Both recoveries below are the same move: the BOT ended this run
+            # (not the model, not the API), so pick the same conversation up
+            # again and open it with a note saying what happened. They differ
+            # only in policy — how many times, what the note is, what to call it.
+            #
+            # The mechanism lives in one place because it is eleven steps long
+            # and every way of getting it wrong is silent. Skip the
+            # session_account stamp and --resume lands on an account whose
+            # ~/.claude/projects/ has never seen this session. Skip the unmark
+            # and an unrelated cooldown retry opens hours later with a stale
+            # "your previous attempt was aborted". Skip the carry-forward and
+            # the aborted attempt's record of the files it already changed is
+            # lost. Fixing one copy of that and forgetting the other has
+            # already happened once in this file.
+            async def _resume_same_conversation(
+                kind: str,
+                max_retries: int,
+                subject: str,
+                mark: Callable[[], None],
+                unmark: Callable[[], None],
+                progress: Callable[[int], tuple[str, str]],
+            ) -> RunResult | None:
+                """Resume this run's conversation once more.
+
+                Returns None for "not handled" — out of retries, or no
+                conversation to resume — so the caller falls through to the
+                normal failure and the Retry button is still offered.
+
+                ``mark``/``unmark`` set and clear the ephemeral marker that
+                _build_command consumes to prefix the note onto the next
+                prompt. ``progress`` receives the number of resumes already
+                spent, for messages that count attempts.
+                """
+                attempts = sum(
+                    1 for k in recovery_state if k.startswith(f"{kind}:")
+                )
+                # Prefer the id the run just reported: on a FRESH spawn the
+                # instance has none, and the conversation we need to resume is
+                # the one the dead process created.
+                resume_id = result.session_id or instance.session_id
+                if attempts >= max_retries or not resume_id:
+                    log.warning(
+                        "%s for %s not auto-resumed (resumes=%d/%d, session=%s)",
+                        subject, instance.id, attempts, max_retries,
+                        (resume_id or "none")[:12],
+                    )
+                    return None
+                recovery_state.add(f"{kind}:{attempts + 1}")
+                instance.session_id = resume_id
+                if account_dir:
+                    # Session ownership is normally stamped only on success; do
+                    # it here too, or _pick_account has no `prefer` hint.
+                    instance.session_account = account_dir
+                mark()  # consumed by _build_command on the very next attempt
+                log.warning(
+                    "%s for %s (resume %d/%d) — resuming session %s",
+                    subject, instance.id, attempts + 1, max_retries,
+                    resume_id[:12],
+                )
+                if on_progress:
+                    headline, detail = progress(attempts)
+                    try:
+                        await on_progress(headline, detail)
+                    except Exception:
+                        log.exception(
+                            "Progress callback error during %s resume", kind,
+                        )
+                # _build_command normally consumes the marker, but the resume
+                # can end before it ever gets there — the refuse-to-spawn
+                # short-circuit returns as soon as every account is on
+                # cooldown, and that path re-queues this same Instance object
+                # for a later cooldown retry. A `finally` rather than a plain
+                # statement after the await because raising is one of those
+                # exits too: _run_impl builds worktrees and spawns processes,
+                # and an Instance that survives the exception (a re-queue, or
+                # the user pressing Retry) would open with a recovery note
+                # about a run that ended hours ago.
+                try:
+                    resumed = await _reenter()
+                finally:
+                    unmark()
+                # The aborted attempt did real work — its edits are on disk and
+                # the resumed attempt may never touch a file again.
+                return _carry_forward_work_record(result, resumed)
+
+            if result.is_error and is_context_thrash_error(error_text):
+                def _mark_thrash() -> None:
+                    instance._context_thrash_retry = True
+
+                def _unmark_thrash() -> None:
+                    instance._context_thrash_retry = False
+
+                handled = await _resume_same_conversation(
+                    kind="context_thrash",
+                    max_retries=config.CONTEXT_THRASH_MAX_RETRIES,
+                    subject="Autocompact thrash",
+                    mark=_mark_thrash,
+                    unmark=_unmark_thrash,
+                    progress=lambda spent: (
+                        "Context filled up — resuming automatically",
+                        f"The CLI stopped itself to avoid a compaction loop; "
+                        f"picking the session back up (attempt {spent + 2} of "
+                        f"{config.CONTEXT_THRASH_MAX_RETRIES + 1})",
+                    ),
+                )
+                if handled is not None:
+                    return handled
+
+            # Memory reap: the guard in _stream_output killed this run's process
+            # tree for crossing SESSION_MEM_KILL_MB.  Resumed for the same reason
+            # a thrash is — halting a chain here would page the user at 2 AM over
+            # something the agent can fix itself — but resumed *once*, and only
+            # with the note that says how far over it went.  A silent re-run is
+            # the exact behaviour that turned one OOM into two on 2026-08-17:
+            # nothing told the resumed session what had happened, so it re-ran
+            # the same job and died the same way ninety minutes later.
+            #
+            # Sits after the thrash branch and before the account/model branches
+            # for the same reason that one does: the error text here is ours, so
+            # no other parser can match it, but the ordering keeps every
+            # "resume the same conversation" case in one place.
+            if result.is_error and result.memory_kill_note:
+                note = result.memory_kill_note
+
+                def _mark_memory() -> None:
+                    instance._memory_kill_note = note
+
+                def _unmark_memory() -> None:
+                    instance._memory_kill_note = None
+
+                handled = await _resume_same_conversation(
+                    kind="memory_kill",
+                    max_retries=config.MEMORY_KILL_MAX_RETRIES,
+                    subject="Memory reap",
+                    mark=_mark_memory,
+                    unmark=_unmark_memory,
+                    progress=lambda _spent: (
+                        "Out of memory — resuming with a smaller budget",
+                        "Picking the session back up and telling it what the "
+                        "ceiling is, so it can size the job to fit instead of "
+                        "hitting the same wall.",
+                    ),
+                )
+                if handled is not None:
+                    return handled
+
+            # Context overflow: the conversation no longer fits and the CLI's
+            # automatic compaction failed on it.  Sits after both resume-the-
+            # same-conversation branches because it is the one case where that
+            # move is WRONG past the first attempt: the oversized transcript is
+            # on disk, so every resume feeds it back to the summariser that
+            # just failed.  Left unhandled it wedges the thread rather than the
+            # run -- the next message resumes the same session and dies the
+            # same way, forever, which is exactly what five consecutive runs
+            # did on 2026-09-03.
+            #
+            # Two rungs, in this order:
+            #   1. Resume once.  Both failures seen in the wild came from the
+            #      SUMMARISER, not the transcript ("summarization produced
+            #      empty response", and a safety flag on the summarisation
+            #      call), and those are per-call blips.  Nearly free: the CLI
+            #      aborts in seconds, before the turn does any work.
+            #   2. Abandon the session and run fresh, primed with the thread's
+            #      recent history.  This is the rung that actually unwedges the
+            #      thread, because a successful fresh run rebinds it (see
+            #      lifecycle.should_bind_session, which treats
+            #      session_recovery_exhausted as licence to adopt the new id --
+            #      the old one has been proven unusable by the rung above).
+            #
+            # The two rungs compose through recursion rather than a loop: the
+            # resumed attempt re-enters this branch, finds its retry budget
+            # spent, and falls through to the fresh path itself.
+            #
+            # Not ours when the account underneath is dead.  Compaction is an
+            # ordinary API call, so an account-level rejection surfaces
+            # *through* the summariser and arrives spelled as a compaction
+            # failure: "Prompt is too long · automatic compaction failed: Your
+            # organization has disabled Claude subscription access for Claude
+            # Code".  Answering that as a context problem spends both rungs and
+            # then abandons a perfectly good session -- which is what happened
+            # to q-17514 and q-17515 on 2026-09-15, two threads amputated to
+            # work around an org-disabled subscription.  The transcript is
+            # innocent; fall through to the account branch, which sidelines the
+            # account and fails over instead.
+            if (
+                result.is_error
+                and is_context_overflow_error(error_text)
+                and not looks_like_fatal_auth_error(error_text)
+            ):
+                handled = await _resume_same_conversation(
+                    kind="context_overflow",
+                    max_retries=config.CONTEXT_OVERFLOW_RESUME_RETRIES,
+                    subject="Context overflow",
+                    # No note on this rung on purpose. The agent is about to
+                    # resume a conversation it never lost -- nothing happened
+                    # that it needs telling about, and a "you were aborted"
+                    # preamble on a transcript that is already at the limit
+                    # spends context to say nothing.
+                    mark=lambda: None,
+                    unmark=lambda: None,
+                    progress=lambda _spent: (
+                        "Context filled up — retrying compaction",
+                        "The conversation outgrew the context window and "
+                        "compacting it failed; trying once more before "
+                        "starting a fresh session.",
+                    ),
+                )
+                if handled is not None:
+                    return handled
+
+                original_session_id = instance.session_id
+                if (
+                    config.CONTEXT_OVERFLOW_FRESH
+                    and original_session_id
+                    and "overflow_fresh" not in recovery_state
+                ):
+                    recovery_state.add("overflow_fresh")
+                    log.warning(
+                        "Context overflow for %s: session %s will not compact "
+                        "— abandoning it for a fresh session",
+                        instance.id, original_session_id[:12],
+                    )
+                    # Build the briefing BEFORE the session is cleared and
+                    # before the warning is posted: it reads Discord history,
+                    # which can fail slowly, and a failure here must cost the
+                    # new session its memory of the thread, not its existence.
+                    # Comes back already framed as data and already terminated
+                    # by its own "---" separator (see ContextResetCallback), so
+                    # the prompt _build_command appends lands on the far side
+                    # of it -- concatenating a bare digest here would hand the
+                    # new session the user's old messages as live orders.
+                    # ...unless this turn's prompt already carries one.
+                    # A session only overflows once it is huge, which is
+                    # exactly the shape commands._execute_query primes on the
+                    # compacted-resume path, so the aborted attempt's prompt
+                    # very often already opens with a briefing built minutes
+                    # ago from the same thread. Asking for a second copy would
+                    # put ~12K tokens of the same quoted history twice into
+                    # the one session whose entire problem is size, under two
+                    # preambles that contradict each other about whether it
+                    # was resumed.
+                    briefing: str | None = None
+                    already_primed = config.PRIME_PREAMBLE_MARKER in (
+                        instance.prompt or ""
+                    )
+                    if on_context_reset and not already_primed:
+                        try:
+                            briefing = await on_context_reset()
+                        except Exception:
+                            log.exception(
+                                "Context-reset briefing failed for %s",
+                                instance.id,
+                            )
+                    elif already_primed:
+                        log.info(
+                            "Context-overflow restart for %s reuses the "
+                            "briefing already in its prompt", instance.id,
+                        )
+                    note = config.CONTEXT_OVERFLOW_NUDGE
+                    if briefing:
+                        note = f"{note}\n\n{briefing}"
+                    # Same ordering rule as Layer 3 above: tell the user while
+                    # the id is still known, and record whether it landed so
+                    # commands.py doesn't post its terser duplicate on top.
+                    warning_posted = False
+                    if on_recovery:
+                        try:
+                            await on_recovery(
+                                error_text or "Prompt is too long",
+                                original_session_id,
+                                instance.worktree_path,
+                            )
+                            warning_posted = True
+                        except Exception:
+                            log.exception(
+                                "on_recovery callback failed for %s",
+                                instance.id,
+                            )
+                    instance.session_id = None
+                    instance._context_overflow_note = note
+                    # A `finally` for the same reason the thrash unmark has
+                    # one: _run_impl can raise or return without ever reaching
+                    # _build_command (the refuse-to-spawn short-circuit), and
+                    # an Instance that survives carrying a stale "your previous
+                    # session could not be continued" would open a cooldown
+                    # retry hours later with a lie at the top of its prompt.
+                    try:
+                        fresh = await _reenter()
+                    finally:
+                        instance._context_overflow_note = None
+                    fresh.session_recovery_exhausted = True
+                    fresh.recovery_warning_posted = warning_posted
+                    # The abandoned attempt may have edited files before the
+                    # context blew out; the fresh one may never touch a file.
+                    return _carry_forward_work_record(result, fresh)
 
             # Model-specific limit (e.g. "You've reached your Fable 5
             # limit"): the account is still healthy for every other model,
@@ -1663,14 +3406,7 @@ class ClaudeRunner:
                                 log.exception(
                                     "Progress callback error during failover",
                                 )
-                        return await self._run_impl(
-                            instance, on_progress, on_stall,
-                            context, sibling_context,
-                            api_fallback=api_fallback,
-                            _provider=provider, _binary=binary,
-                            _recovery_state=recovery_state,
-                            on_recovery=on_recovery,
-                        )
+                        return await _reenter()
 
                     next_account = self._pick_account(
                         exclude=instance._accounts_tried,
@@ -1693,14 +3429,7 @@ class ClaudeRunner:
                                 log.exception(
                                     "Progress callback error during failover",
                                 )
-                        inner = await self._run_impl(
-                            instance, on_progress, on_stall,
-                            context, sibling_context,
-                            api_fallback=api_fallback,
-                            _provider=provider, _binary=binary,
-                            _recovery_state=recovery_state,
-                            on_recovery=on_recovery,
-                        )
+                        inner = await _reenter()
                         # Backup died before doing any work (auth-dead, or
                         # its own account-wide cap): this account can still
                         # run the fallback model — keep working instead of
@@ -1761,14 +3490,7 @@ class ClaudeRunner:
                                 )
                             except Exception:
                                 log.exception("Progress callback error during failover")
-                        inner = await self._run_impl(
-                            instance, on_progress, on_stall,
-                            context, sibling_context,
-                            api_fallback=api_fallback,
-                            _provider=provider, _binary=binary,
-                            _recovery_state=recovery_state,
-                            on_recovery=on_recovery,
-                        )
+                        inner = await _reenter()
                         # If the failover target died before doing any work
                         # (e.g. paused/cancelled subscription -> 401), the turn
                         # is still fundamentally usage-limited. Carry the
@@ -1803,12 +3525,7 @@ class ClaudeRunner:
                 log.info("Transient error for %s, retrying in 30s", instance.id)
                 instance.retry_count = 1
                 await asyncio.sleep(30)
-                return await self._run_impl(
-                    instance, on_progress, on_stall, context, sibling_context,
-                    api_fallback=False, _provider=provider, _binary=binary,
-                    _recovery_state=recovery_state,
-                    on_recovery=on_recovery,
-                )
+                return await _reenter(api_fallback=False)
 
             # Account-level failure (auth / cancelled subscription / can't start):
             # no reset time, so fail over to another account.
@@ -1837,6 +3554,10 @@ class ClaudeRunner:
                 # account for 24h because a session happened to WRITE about
                 # expired tokens. A CLI auth error is one line.
                 confident = looks_like_fatal_auth_error(error_text)
+                # Which kind of confident rejection: it decides the reason on
+                # the alert and the wording of the dead-end message, and both
+                # must read it the same way.
+                org_disabled = confident and is_org_disabled_error(error_text)
                 no_turns = (not (result.result_text or "").strip()
                             and not result.num_turns
                             and not is_account_agnostic_error(error_text))
@@ -1854,7 +3575,11 @@ class ClaudeRunner:
                         # >1 guard exists so we don't sideline the only account
                         # we have, not to hide the fact that it's signed out —
                         # which is precisely when the user most needs telling.
-                        self._record_auth_alert(account_dir)
+                        self._record_auth_alert(
+                            account_dir,
+                            REASON_ORG_DISABLED if org_disabled
+                            else REASON_RUNTIME_401,
+                        )
                         if len(config.CLAUDE_ACCOUNTS) > 1:
                             cooldown = datetime.now(timezone.utc) + timedelta(
                                 seconds=config.ACCOUNT_AUTH_COOLDOWN_SECS
@@ -1893,20 +3618,14 @@ class ClaudeRunner:
                                 log.exception(
                                     "Progress callback error during failover"
                                 )
-                        return await self._run_impl(
-                            instance, on_progress, on_stall,
-                            context, sibling_context,
-                            api_fallback=api_fallback,
-                            _provider=provider, _binary=binary,
-                            _recovery_state=recovery_state,
-                            on_recovery=on_recovery,
-                        )
+                        return await _reenter()
                     if confident:
                         # Nowhere to fail over. Don't dead-end the turn on a
                         # raw 401 (the t-6570 symptom): if any other account is
                         # merely cooling down, come back when it frees up.
                         self._soften_auth_dead_end(
                             result, instance, account_dir,
+                            org_disabled=org_disabled,
                         )
 
             return result
@@ -1928,7 +3647,14 @@ class ClaudeRunner:
                     os.unlink(rules_file)
                 except OSError:
                     pass
+            # Cancelled before the pops, so a still-waiting adoption cannot
+            # write an entry back in behind them and leak it for the life of
+            # the process.
+            if adopt_task is not None and not adopt_task.done():
+                adopt_task.cancel()
             self._processes.pop(instance.id, None)
+            self._tree_samples.pop(instance.id, None)
+            self._session_cgroups.pop(instance.id, None)
             # Kill process on cancellation/unexpected error to avoid orphans
             if proc is not None and proc.returncode is None:
                 try:
@@ -1937,6 +3663,38 @@ class ClaudeRunner:
                     pass
             if not self._active_tasks and not self._processes:
                 self._idle_event.set()
+
+    async def _adopt_session_scope(
+        self, instance_id: str, proc: asyncio.subprocess.Process,
+    ) -> None:
+        """Apply a session's memory ceilings once systemd has registered it.
+
+        Runs as its own task so the wait never delays reading the CLI's
+        output. Nothing downstream requires it to have finished: the kill
+        path and the memory guard both fall back to walking the process
+        tree when there is no entry, which is what they did before scopes
+        existed.
+        """
+        try:
+            session_cg = await cgroups.adopt_session(proc.pid, instance_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # A resource refinement must never cost a session its run.
+            log.debug("scope adoption failed for %s: %s", instance_id, exc)
+            return
+        if session_cg is None:
+            return
+        # The run can finish while we wait, and its cleanup has then already
+        # been past the pop. Storing now would leak the entry.
+        if self._processes.get(instance_id) is not proc:
+            return
+        self._session_cgroups[instance_id] = session_cg
+        if session_cg.applied:
+            log.debug(
+                "%s in scope %s (%s)", instance_id, session_cg.unit,
+                ", ".join(session_cg.applied),
+            )
 
     async def _stream_output(
         self,
@@ -1951,8 +3709,11 @@ class ClaudeRunner:
         """Read stdout line-by-line, parse stream-json, detect stalls.
 
         No inactivity timeout — processes run until they finish or the user
-        kills them.  A safety-net lifetime limit (default 4h) catches truly
-        orphaned processes.
+        kills them.  A safety-net catches truly orphaned processes: past
+        MAX_PROCESS_LIFETIME_SECS (default 4h) of age AND
+        MAX_PROCESS_SILENCE_SECS (default 30m) of producing nothing, with
+        MAX_PROCESS_HARD_LIFETIME_SECS (default 24h) as an age-only backstop.
+        Age alone never kills — see the branch in check_stall for why.
         """
         # Defensive: clear any stale intentional-kill marker from a prior
         # run on the same instance id (e.g. a previous lifetime-exceeded
@@ -1962,6 +3723,7 @@ class ClaudeRunner:
         # satisfies the kill-shape filter.
         self._intentional_kills.discard(instance.id)
         self._kill_reasons.pop(instance.id, None)
+        self._kill_card_owners.discard(instance.id)
 
         events: list[dict] = []
         captured_session_id: str | None = None
@@ -1980,6 +3742,24 @@ class ClaudeRunner:
         process_start_time = last_output_time
         stall_warned = False
         lifetime_exceeded = False
+        # Set alongside lifetime_exceeded so the failure the user reads can say
+        # WHICH of the two conditions fired and with what numbers. A message
+        # that only says "4h limit" is what made the 2026-08-27 kill look
+        # reasonable in the log when it was not.
+        lifetime_elapsed_secs = 0.0
+        lifetime_silence_secs = 0.0
+        lifetime_hard_cap = False
+        # Set by the memory guard below when it reaps this session's tree. Holds
+        # the numbers, not a bool, because the numbers ARE the message — both
+        # the failure the user reads and the nudge the resumed attempt gets are
+        # useless without them.
+        memory_kill: memory.TreeMemory | None = None
+        memory_kill_avail_mb: float | None = None
+        # Set only when the reap was a machine-wide arbitration rather than
+        # this session breaching its own ceiling. Its presence is what switches
+        # every downstream message onto the other explanation, so it is a
+        # reading and not a bool: the numbers are the whole content.
+        memory_kill_pressure: memory.MemoryPressure | None = None
         stall_check_task: asyncio.Task | None = None
         # End-of-turn watchdog: set when the LLM signals stop_reason="end_turn"
         # with no tool_use blocks (genuinely done).  If stdout then stays
@@ -1989,26 +3769,320 @@ class ClaudeRunner:
 
         async def check_stall():
             nonlocal stall_warned, lifetime_exceeded
+            nonlocal lifetime_elapsed_secs, lifetime_silence_secs
+            nonlocal lifetime_hard_cap
+            nonlocal memory_kill, memory_kill_avail_mb, memory_kill_pressure
             # Re-log a fresh snapshot every STALL_DIAG_RELOG_SECS while still
             # stalled — gives a paper trail of CPU/conn state over the silent
             # period so we can tell "thinking with API call open" from
             # "actually hung with nothing in flight" after the fact.
             stall_last_logged = 0.0
+            # -inf, not 0: the clock here is monotonic, whose zero is an
+            # arbitrary boot-relative instant, so 0.0 would only happen to
+            # mean "never logged" because the epoch is far in the past.
+            old_but_alive_logged = float("-inf")
+            mem_last_checked = 0.0
+            mem_warned = False
+
+            async def reap_this_session(headline: str, detail: str) -> None:
+                """Tell the session why, then destroy its whole process tree.
+
+                Told BEFORE the reap, not after, and that ordering is
+                load-bearing. Reaping closes the CLI's stdout, which ends the
+                reader loop, whose ``finally`` cancels this watchdog — and it
+                will usually do so while we are still parked inside kill_tree's
+                grace wait for a multi-gigabyte process to actually die.
+                Anything after that call is on a coin flip, so the one message
+                explaining the kill goes out first. The decision is already
+                irrevocable by the time this is called.
+                """
+                if on_progress:
+                    try:
+                        await on_progress(headline, detail)
+                    except Exception:
+                        log.exception("Progress callback error on memory kill")
+                signalled: list[str] = []
+                # cgroup.kill first where the session has its own cgroup: it
+                # is atomic where kill_tree is a walk, so nothing can fork out
+                # from under it, and it reaches a process that reparented away
+                # and left the tree entirely. kill_tree still runs afterwards
+                # -- it is what produces the list of what was signalled for
+                # the log, and it is the whole mechanism on a kernel with no
+                # cgroup.kill (pre-5.14) or when the scope never happened.
+                session_cg = self._session_cgroups.get(instance.id)
+                if session_cg is not None:
+                    try:
+                        if await asyncio.to_thread(session_cg.kill):
+                            log.warning(
+                                "Killed cgroup %s for %s",
+                                session_cg.unit, instance.id,
+                            )
+                    except Exception:
+                        log.debug(
+                            "cgroup.kill failed for %s", instance.id,
+                            exc_info=True,
+                        )
+                try:
+                    signalled = await asyncio.to_thread(
+                        memory.kill_tree, proc.pid,
+                    )
+                    if signalled:
+                        log.warning(
+                            "Reaped for %s: %s",
+                            instance.id, ", ".join(signalled),
+                        )
+                except Exception:
+                    log.exception("Memory reap failed for %s", instance.id)
+                if not signalled:
+                    # kill_tree swallows per-process failures and returns an
+                    # empty list rather than raising, so "nothing was
+                    # signalled" is a silent outcome — and one that must not be
+                    # silent HERE. We have already decided this run is over:
+                    # leaving the process alive would let it stream to
+                    # completion and then be reported as a memory failure it
+                    # recovered from, which is a lie in whichever direction the
+                    # run happened to end. Reached only when the tree is still
+                    # standing, so stdout has not closed, so this watchdog has
+                    # not been cancelled — the one case where code after the
+                    # reap is guaranteed to run is also the one case that needs
+                    # it.
+                    log.warning(
+                        "Memory reap signalled nothing for %s — "
+                        "terminating the CLI directly",
+                        instance.id,
+                    )
+                    proc.terminate()
+
             while True:
-                await asyncio.sleep(10)
+                await asyncio.sleep(config.WATCHDOG_TICK_SECS)
                 now = asyncio.get_event_loop().time()
                 elapsed_since_output = now - last_output_time
                 elapsed_since_start = now - process_start_time
 
-                # Safety-net: kill truly orphaned processes
+                # Safety-net: kill truly orphaned processes.
+                #
+                # "Orphaned" is a claim about SILENCE, not about age, and for a
+                # long time this branch only measured age. On 2026-08-27 that
+                # killed a four-hour benchmark run that had produced output
+                # five minutes earlier and had not gone quiet for a single
+                # minute in its final two hours — it was mid-batch, waiting on
+                # subagents, at 350 MB and with live HTTPS connections open.
+                # Raising the number would only move the guillotine; a bench
+                # that farms work out in serial batches can legitimately run
+                # all day. So age is now the point at which we START asking,
+                # and continued output is the answer that keeps it alive.
+                #
+                # The hard cap is the backstop for the other direction: a
+                # process that heartbeats forever without ever finishing must
+                # not be immortal just because it is noisy.
                 if elapsed_since_start > config.MAX_PROCESS_LIFETIME_SECS:
-                    lifetime_exceeded = True
-                    log.warning(
-                        "Lifetime limit for %s — running for %ds",
-                        instance.id, int(elapsed_since_start),
+                    hard_cap = config.MAX_PROCESS_HARD_LIFETIME_SECS
+                    hit_hard_cap = (
+                        hard_cap > 0 and elapsed_since_start > hard_cap
                     )
-                    proc.terminate()
-                    return
+                    silent_enough = (
+                        elapsed_since_output
+                        >= config.MAX_PROCESS_SILENCE_SECS
+                    )
+                    if not silent_enough and not hit_hard_cap:
+                        # Old is not orphaned. Logged on its own slow cadence
+                        # so a legitimate all-day run still leaves a trail
+                        # without writing a line every ten seconds.
+                        if (
+                            now - old_but_alive_logged
+                            >= config.OLD_BUT_ALIVE_RELOG_SECS
+                        ):
+                            old_but_alive_logged = now
+                            log.info(
+                                "Past lifetime age for %s (%ds) but still "
+                                "producing output %ds ago — letting it work "
+                                "(reap after %ds silent)",
+                                instance.id, int(elapsed_since_start),
+                                int(elapsed_since_output),
+                                config.MAX_PROCESS_SILENCE_SECS,
+                            )
+                    else:
+                        lifetime_exceeded = True
+                        lifetime_elapsed_secs = elapsed_since_start
+                        lifetime_silence_secs = elapsed_since_output
+                        lifetime_hard_cap = hit_hard_cap
+                        log.warning(
+                            "Lifetime limit for %s — running for %ds, "
+                            "silent for %ds%s",
+                            instance.id, int(elapsed_since_start),
+                            int(elapsed_since_output),
+                            " (hard cap)" if hit_hard_cap else "",
+                        )
+                        # Told BEFORE the terminate, for the same reason
+                        # reap_this_session says its piece first: terminating
+                        # closes the CLI's stdout, which ends the reader loop,
+                        # whose ``finally`` cancels this watchdog. Anything
+                        # after that call is on a coin flip.
+                        if on_progress:
+                            try:
+                                await on_progress(
+                                    "Stopped — this session looked hung",
+                                    _lifetime_kill_detail(
+                                        elapsed_since_start,
+                                        elapsed_since_output,
+                                        hit_hard_cap,
+                                    ),
+                                )
+                            except Exception:
+                                log.exception(
+                                    "Progress callback error on lifetime kill",
+                                )
+                        proc.terminate()
+                        return
+
+                # Memory guard. Runs on its own cadence and regardless of
+                # whether the session looks stalled: the 2026-08-17 runaway was
+                # never stalled, it was streaming tool output the whole way up
+                # to 13.7 GB. Checked on every tick that is due, before the
+                # stall branch, because a tree at the ceiling is a decision to
+                # make now while a silent session is only worth a log line.
+                if (
+                    (config.SESSION_MEM_KILL_MB > 0 or config.SESSION_MEM_WARN_MB > 0)
+                    and now - mem_last_checked >= config.SESSION_MEM_CHECK_SECS
+                ):
+                    mem_last_checked = now
+                    try:
+                        tree = await asyncio.to_thread(memory.sample_tree, proc.pid)
+                    except Exception:
+                        # A sampler that can end a session is worse than no
+                        # sampler. Skip this tick and try again on the next.
+                        log.debug("Memory sample failed for %s", instance.id)
+                        tree = None
+
+                    # The cgroup is the honest number when there is one. The
+                    # tree walk can only see what is still a descendant, and
+                    # `dotnet build` deliberately leaves its Roslyn server
+                    # detached and parented to PID 1 so the next build is
+                    # faster -- 4.10 GB of it was invisible to this sampler
+                    # during the 2026-08-21 OOM. A scope keeps charging it.
+                    #
+                    # Taken as a maximum rather than a replacement: RSS
+                    # double-counts pages shared between forks, so on a busy
+                    # tree the walk can read higher than the cgroup's own
+                    # accounting, and this is a safety ceiling where the
+                    # larger of two honest numbers is the safe one. Also
+                    # keeps the offender label, which memory.current has no
+                    # way to produce.
+                    session_cg = self._session_cgroups.get(instance.id)
+                    if tree is not None and session_cg is not None:
+                        try:
+                            charged = await asyncio.to_thread(
+                                session_cg.current_mb,
+                            )
+                        except Exception:
+                            charged = None
+                        if charged is not None and charged > tree.total_mb:
+                            tree.total_mb = charged
+                            if not tree.proc_count:
+                                # Nothing left in the process tree but memory
+                                # still charged to the cgroup is exactly the
+                                # reparented-daemon case, and the ceiling
+                                # checks below are gated on proc_count.
+                                tree.proc_count = 1
+                                tree.biggest_name = "detached (cgroup)"
+
+                    if tree is not None and tree.proc_count:
+                        kill_mb = config.SESSION_MEM_KILL_MB
+                        warn_mb = config.SESSION_MEM_WARN_MB
+                        # Shared so the fleet check below — which runs inside
+                        # a DIFFERENT session's watchdog — can compare trees.
+                        # No one session can answer "am I the largest", and
+                        # that is exactly the question a machine-wide crunch
+                        # asks.
+                        self._tree_samples[instance.id] = tree
+                        if kill_mb > 0 and tree.total_mb >= kill_mb:
+                            memory_kill = tree
+                            memory_kill_avail_mb = await asyncio.to_thread(
+                                memory.available_mb,
+                            )
+                            # The sessions slice where there is one, so the
+                            # line reports what the fleet is holding rather
+                            # than the supervisor's own ~250 MB.
+                            cg = await asyncio.to_thread(
+                                lambda: memory.cgroup_memory(
+                                    self._workload_cgroup(),
+                                ),
+                            )
+                            log.error(
+                                "Memory limit for %s — %s over the %.1fGB "
+                                "ceiling; machine has %s free, cgroup anon "
+                                "%s of %s. Reaping the tree.",
+                                instance.id, tree.summary(), kill_mb / 1024,
+                                f"{memory_kill_avail_mb / 1024:.1f}GB"
+                                if memory_kill_avail_mb is not None else "?",
+                                f"{cg.anon_mb / 1024:.1f}GB"
+                                if cg.anon_mb is not None else "?",
+                                f"{cg.max_mb / 1024:.1f}GB"
+                                if cg.max_mb is not None else "no limit",
+                            )
+                            await reap_this_session(
+                                "Stopped — this session ran out of memory",
+                                _memory_kill_detail(tree, kill_mb),
+                            )
+                            return
+
+                        # Cross-session arbitration: nobody is over their own
+                        # ceiling, but the machine has run out anyway. This is
+                        # the case the per-session guard structurally cannot
+                        # see, and the one that actually happened — five
+                        # reasonable sessions plus a browser, none of them
+                        # individually at fault, and the kernel picking the
+                        # victim in the end.
+                        #
+                        # Both conditions are required before anything dies.
+                        # Machine-critical alone is not enough: under pressure
+                        # the bot did not create, reaping our own sessions
+                        # frees memory the real offender immediately re-takes,
+                        # and charges a session's work for it. Over-our-own-
+                        # MemoryHigh alone is not enough either — that is a
+                        # throttle watermark, crossed routinely, and on its own
+                        # it means the cgroup is working as designed.
+                        fleet_verdict = await self._fleet_arbitration(
+                            instance.id, tree,
+                        )
+                        if fleet_verdict is not None:
+                            memory_kill = tree
+                            memory_kill_pressure = fleet_verdict
+                            memory_kill_avail_mb = fleet_verdict.avail_mb
+                            log.error(
+                                "Machine out of memory (%s) — %s is the "
+                                "largest of %d live sessions at %s. Reaping "
+                                "it rather than leaving the kernel to choose.",
+                                fleet_verdict.summary(), instance.id,
+                                sum(1 for iid in self._tree_samples
+                                    if iid in self._processes),
+                                tree.summary(),
+                            )
+                            await reap_this_session(
+                                "Stopped — the machine ran out of memory",
+                                _fleet_kill_detail(tree, fleet_verdict),
+                            )
+                            return
+
+                        if warn_mb > 0 and tree.total_mb >= warn_mb and not mem_warned:
+                            mem_warned = True
+                            log.warning(
+                                "Memory warning for %s — %s (warn at %.1fGB, "
+                                "kill at %.1fGB)",
+                                instance.id, tree.summary(), warn_mb / 1024,
+                                kill_mb / 1024 if kill_mb > 0 else 0,
+                            )
+                            # Told to the session, not just the log: while it is
+                            # still running it can still choose a smaller batch.
+                            # After the kill that choice is gone.
+                            if on_progress:
+                                try:
+                                    await on_progress(
+                                        "Heads up — this session is using a lot of memory",
+                                        _memory_warning_detail(tree, kill_mb),
+                                    )
+                                except Exception:
+                                    log.exception("Progress callback error on memory warning")
 
                 # Stall warning (no auto-kill)
                 if elapsed_since_output > config.STALL_TIMEOUT_SECS:
@@ -2234,11 +4308,101 @@ class ClaudeRunner:
 
         await proc.wait()
 
+        # Post-exit worktree housekeeping, placed here rather than in the tail
+        # because the tail is not on every path out of this method. Two returns
+        # below leave before it — the lifetime cap and the memory reap — and both
+        # used to skip these entirely. The mutex is the one with teeth: the
+        # release is the backstop for a session killed mid-test-run, and "killed
+        # mid-test-run" is exactly the shape of a watchdog kill, so the case it
+        # exists for was the case it never covered. Siblings on that repo then
+        # wait out the hook's stale TTL, and on the memory path the attempt that
+        # auto-resumes waits on a lock its own predecessor is still holding.
+        #
+        # The AskUserQuestion and end-of-turn returns above still miss it: they
+        # do their own proc.wait() well before this line, and moving cleanup in
+        # front of them is a change to two long-standing success paths that has
+        # nothing to do with the memory guard. Noted, not fixed here.
+        #
+        # Both are idempotent (the release no-ops unless this worktree owns the
+        # lock; the back-copy overwrites), so nothing cares that the tail path
+        # reaches this before doing its own work. It has to happen before the
+        # last-assistant-uuid lookup further down, which reads the JSONL out of
+        # the MAIN repo's project dir — i.e. only ever finds it once the
+        # back-copy has run.
+        if instance.worktree_path:
+            try:
+                await asyncio.to_thread(
+                    self._copy_session_from_worktree, instance, account_dir,
+                )
+            except Exception:
+                log.exception("Session back-copy failed for %s", instance.id)
+            try:
+                await asyncio.to_thread(
+                    self._release_test_mutex,
+                    instance.repo_path, instance.worktree_path,
+                )
+            except Exception:
+                log.exception("Test-mutex release failed for %s", instance.id)
+
+        # Both watchdog reaps stand down for the same two races. Guarded as one
+        # block so the O(n) event walk below stays lazy on the ordinary path,
+        # where neither watchdog fired.
+        if memory_kill is not None or lifetime_exceeded:
+            reap_name = "Memory reap" if memory_kill is not None else "Orphan reap"
+            reap_detail = (
+                memory_kill.summary() if memory_kill is not None
+                else f"silent {int(lifetime_silence_secs)}s"
+            )
+
+            # A reap and a finishing turn can land in the same instant: the
+            # watchdog decides on its own cadence, and while its SIGTERMs go out
+            # the CLI can still flush the `result` event that says the turn
+            # completed. Reporting the reap then would mark a finished run as
+            # failed AND auto-resume it, redoing work whose output is already
+            # captured and whose edits are already on disk. The kill is not lost
+            # information either way — it was logged the moment it fired.
+            if _turn_completed_successfully(events):
+                log.warning(
+                    "%s for %s raced a completed turn — reporting the "
+                    "completion instead (%s)", reap_name, instance.id, reap_detail,
+                )
+                memory_kill = None
+                lifetime_exceeded = False
+
+            # The other race worth standing down for: the user asked this session
+            # to stop (Steer, /kill) inside the same few seconds the watchdog
+            # chose to reap it. Reporting the reap would override an explicit
+            # instruction — the run is marked FAILED, then auto-resumed, so the
+            # session carries on after the person who stopped it has been told it
+            # stopped. Their intent wins, and falling through hands the
+            # classification to the normal path, which renders the quiet KILLED
+            # tombstone it asked for.
+            #
+            # (The bookkeeping half of this is already covered: the defensive
+            # discard at the top of this method clears a marker an early return
+            # skipped, so the concern here is the wrong outcome for THIS run, not
+            # a stale flag poisoning the next one.)
+            elif instance.id in self._intentional_kills:
+                log.warning(
+                    "%s for %s raced a requested stop — honouring the stop (%s)",
+                    reap_name, instance.id, reap_detail,
+                )
+                memory_kill = None
+                lifetime_exceeded = False
+
+        if memory_kill is not None:
+            return _memory_kill_result(
+                events, memory_kill, memory_kill_avail_mb,
+                captured_session_id, poisoning_hits,
+                pressure=memory_kill_pressure,
+            )
+
         if lifetime_exceeded:
-            return RunResult(
-                session_id=captured_session_id,
-                is_error=True,
-                error_message=f"Process exceeded {config.MAX_PROCESS_LIFETIME_SECS // 3600}h lifetime limit",
+            return _lifetime_kill_result(
+                events, captured_session_id, poisoning_hits,
+                elapsed_secs=lifetime_elapsed_secs,
+                silence_secs=lifetime_silence_secs,
+                hard_cap=lifetime_hard_cap,
             )
 
         # Capture stderr for error info
@@ -2265,6 +4429,19 @@ class ClaudeRunner:
             if not result.error_message:
                 result.error_message = stderr_text or f"Exit code {proc.returncode}"
 
+        # Keep the conversation resumable after a failure.  extract_result only
+        # sees a session_id if the CLI got as far as emitting a `result` event
+        # — a process killed mid-run (autocompact thrash, crash, watchdog) often
+        # doesn't, so without this a FRESH spawn that died after 50 turns of
+        # real work reports no session at all, and both the auto-resume below
+        # and the user's Retry button start from scratch instead of resuming.
+        # The init event carries the id from turn 1, so captured_session_id is
+        # the answer; the AskUserQuestion and end-of-turn paths above already
+        # do exactly this.  finalize_run only overwrites instance.session_id
+        # when the result carries one, so this can only ever add information.
+        if not result.session_id:
+            result.session_id = captured_session_id
+
         # Classify intentional kills (Steer / resolve-cancel) so the
         # lifecycle layer can render a quiet KILLED tombstone instead of
         # a red FAILED embed.  Wrapped in try/finally
@@ -2273,29 +4450,23 @@ class ClaudeRunner:
         was_intentional = instance.id in self._intentional_kills
         try:
             if was_intentional and result.is_error:
-                # Require a kill-shape returncode in addition to the flag,
-                # so a process that genuinely crashed in the same window we
-                # asked to terminate doesn't get reclassified as KILLED on
-                # POSIX.  Negative returncode = signal (-15 SIGTERM,
-                # -9 SIGKILL).
-                #
-                # Windows limitation: ``proc.terminate()`` on Windows calls
-                # TerminateProcess(handle, 1), which always yields
-                # returncode 1.  Real CLI failures often also exit with 1,
-                # so this returncode filter degenerates to a no-op on
-                # Windows — there it effectively classifies on "we called
-                # terminate" alone.  The mitigation is that finalize_run
-                # preserves the original error_message on the Instance
-                # even when classified as KILLED, so /log + history still
-                # surface a real crash that coincided with a Steer.
-                rc = proc.returncode
-                kill_shape = (rc is not None and rc < 0) or os.name == "nt"
-                if kill_shape:
+                # Require a kill-shape returncode in addition to the flag, so a
+                # process that genuinely crashed in the same window we asked it
+                # to terminate isn't reclassified as KILLED — see
+                # ``is_kill_shape`` for which shapes count and why Windows
+                # can't be told apart.  The mitigation for that Windows blind
+                # spot is that finalize_run preserves the original
+                # error_message on the Instance even when classified as
+                # KILLED, so /log + history still surface a real crash that
+                # coincided with a Steer.
+                if is_kill_shape(proc.returncode):
                     result.killed_intentionally = True
                     result.kill_reason = self._kill_reasons.get(instance.id)
+                    result.kill_owns_card = instance.id in self._kill_card_owners
         finally:
             self._intentional_kills.discard(instance.id)
             self._kill_reasons.pop(instance.id, None)
+            self._kill_card_owners.discard(instance.id)
 
         if result.is_error:
             # Log raw events for debugging
@@ -2318,19 +4489,6 @@ class ClaudeRunner:
         # Save git diff for build tasks
         if instance.branch and not result.is_error:
             await self._save_diff(instance)
-
-        # Copy session files back from worktree to main repo project dir
-        if instance.worktree_path:
-            await asyncio.to_thread(
-                self._copy_session_from_worktree, instance, account_dir,
-            )
-            # The CLI process has exited, so no test run from this session
-            # can still be in flight — free the per-repo test-suite mutex
-            # if this session was killed/crashed while holding it.
-            await asyncio.to_thread(
-                self._release_test_mutex,
-                instance.repo_path, instance.worktree_path,
-            )
 
         # Mirror the JSONL the CLI just wrote to every other configured
         # account.  Keeps cross-account session storage in lockstep so a
@@ -2436,6 +4594,38 @@ class ClaudeRunner:
             master_block = self._build_master_context_block(instance)
             if master_block:
                 prompt = master_block + "\n\n" + prompt
+
+        # Autocompact-thrash recovery note, on the resumed attempt only.  Goes
+        # in the user-message slot rather than the system prompt for the same
+        # reason as the block above: --resume can replay the original JSONL
+        # system prompt verbatim, so a system-prompt addition may never reach
+        # the resumed agent.  The flag is cleared as it's read — one attempt
+        # gets the note, and a later turn in the same instance doesn't inherit
+        # a stale "you were just aborted".
+        if getattr(instance, "_context_thrash_retry", False):
+            instance._context_thrash_retry = False
+            prompt = config.CONTEXT_THRASH_NUDGE + "\n\n" + prompt
+
+        # Memory-reap recovery note — same slot, same read-and-clear discipline,
+        # and for the same reason: --resume may replay the original JSONL system
+        # prompt verbatim, so the user-message slot is the only delivery that is
+        # guaranteed to reach the resumed agent. The text arrives pre-formatted
+        # from the run that was reaped, because the tree it measured is gone by
+        # the time this runs.
+        mem_note = getattr(instance, "_memory_kill_note", None)
+        if mem_note:
+            instance._memory_kill_note = None
+            prompt = mem_note + "\n\n" + prompt
+
+        # Context-overflow recovery note — the third of the same family, and
+        # the only one that goes to a session with NO history behind it: the
+        # attempt this replaces was abandoned, not resumed, so this note plus
+        # the thread history quoted inside it is everything the new session
+        # knows. Read-and-clear like the two above, for the same reason.
+        overflow_note = getattr(instance, "_context_overflow_note", None)
+        if overflow_note:
+            instance._context_overflow_note = None
+            prompt = overflow_note + "\n\n" + prompt
 
         # API key file (only for providers that support API fallback)
         api_key_file: str | None = None
@@ -2583,9 +4773,8 @@ class ClaudeRunner:
         default_branch = instance.original_branch
         if not default_branch:
             try:
-                r = subprocess.run(
-                    ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-                    cwd=repo, capture_output=True, text=True, **_NOWND,
+                r = run_capture(
+                    ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], cwd=repo,
                 )
                 if r.returncode == 0 and r.stdout.strip():
                     default_branch = r.stdout.strip().split("/", 1)[-1]
@@ -2595,10 +4784,7 @@ class ClaudeRunner:
             default_branch = "master"
 
         try:
-            log_r = subprocess.run(
-                ["git", "log", "-10", "--oneline", default_branch],
-                cwd=repo, capture_output=True, text=True, **_NOWND,
-            )
+            log_r = run_capture(["git", "log", "-10", "--oneline", default_branch], cwd=repo)
         except Exception:
             return ""
         if log_r.returncode != 0:
@@ -2611,10 +4797,7 @@ class ClaudeRunner:
         # so resumed/compacted spawns can compute "since I started" deltas.
         if not instance.master_baseline_head:
             try:
-                head_r = subprocess.run(
-                    ["git", "rev-parse", default_branch],
-                    cwd=repo, capture_output=True, text=True, **_NOWND,
-                )
+                head_r = run_capture(["git", "rev-parse", default_branch], cwd=repo)
                 if head_r.returncode == 0:
                     sha = head_r.stdout.strip()
                     if sha:
@@ -2632,10 +4815,10 @@ class ClaudeRunner:
         # against blind rebuild-after-compaction.
         if instance.master_baseline_head:
             try:
-                since_r = subprocess.run(
+                since_r = run_capture(
                     ["git", "log", "--oneline",
                      f"{instance.master_baseline_head}..{default_branch}"],
-                    cwd=repo, capture_output=True, text=True, **_NOWND,
+                    cwd=repo,
                 )
             except Exception:
                 since_r = None
@@ -2669,10 +4852,10 @@ class ClaudeRunner:
         # Branch-vs-master diff stat — surfaces "branch already merged" cases.
         if instance.branch and instance.branch != default_branch:
             try:
-                diff_r = subprocess.run(
+                diff_r = run_capture(
                     ["git", "diff", "--stat",
                      f"{default_branch}...{instance.branch}"],
-                    cwd=repo, capture_output=True, text=True, **_NOWND,
+                    cwd=repo,
                 )
             except Exception:
                 diff_r = None
@@ -2694,10 +4877,10 @@ class ClaudeRunner:
                     # the warning and a cautious LLM bails before touching
                     # any files. See thread 1506256492884660256.
                     try:
-                        anc_r = subprocess.run(
+                        anc_r = run_capture(
                             ["git", "merge-base", "--is-ancestor",
                              instance.branch, default_branch],
-                            cwd=repo, capture_output=True, text=True, **_NOWND,
+                            cwd=repo,
                         )
                     except Exception:
                         anc_r = None
@@ -2823,6 +5006,24 @@ class ClaudeRunner:
         # Bot capability context so Claude knows what the user can do
         parts.append(config.BOT_CONTEXT)
 
+        # The memory budget, stated before it is enforced. Until now the first
+        # thing an agent ever heard about memory was that its run had just been
+        # destroyed for exceeding a limit nobody had mentioned — advice arriving
+        # strictly after the only moment it could have been acted on. The
+        # numbers are formatted from the live config rather than written into
+        # the prose so a retuned ceiling cannot leave the prompt lying about it.
+        if config.SESSION_MEM_KILL_MB > 0:
+            warn_line = (
+                f" You get one warning in this thread at "
+                f"{config.SESSION_MEM_WARN_MB / 1024:.0f} GB."
+                if 0 < config.SESSION_MEM_WARN_MB < config.SESSION_MEM_KILL_MB
+                else ""
+            )
+            parts.append(config.MEMORY_BUDGET_CONTEXT_TEMPLATE.format(
+                kill_gb=f"{config.SESSION_MEM_KILL_MB / 1024:.0f}",
+                warn_line=warn_line,
+            ))
+
         # Spawn capability is depth-gated: a spawned (depth>=1) thread cannot
         # spawn again (commands.py recursion cap), so telling it the full
         # /spawn instructions just makes it propose directives that get
@@ -2834,6 +5035,10 @@ class ClaudeRunner:
             parts.append(config.SPAWN_CAPPED_NOTICE)
         else:
             parts.append(config.SPAWN_CONTEXT)
+            # How a wave reports back, and how to answer a child that parked
+            # on a question. Depth-0 only: a spawned thread has no children.
+            parts.append(config.SPAWN_JOIN_CONTEXT)
+            parts.append(config.REPLY_CONTEXT)
         # /chain handoff — available at any depth (a spawned thread can still
         # ship its own work), so it's not gated behind the spawn depth check.
         parts.append(config.CHAIN_CONTEXT)
@@ -3099,13 +5304,14 @@ class ClaudeRunner:
             return None
         return self._active_channels.get(str(channel_id))
 
-    def check_spawn_allowed(self, session_id: str | None = None) -> str | None:
+    def check_spawn_allowed(self) -> str | None:
         """Return an error message if spawning is blocked, or None if OK.
 
-        Active-session case is no longer rejected here — the per-channel lock
-        in ``bot.engine.commands._get_channel_lock`` serializes same-channel
-        spawns cleanly and the Queued-embed UX handles it visibly.  We only
-        reject during reboot drain.
+        Took a session_id until the active-session rejection was removed: the
+        per-channel lock in ``bot.engine.commands._get_channel_lock``
+        serializes same-channel spawns cleanly and the Queued-embed UX handles
+        it visibly.  We only reject during reboot drain, which no caller can
+        influence, so the argument had no reader left.
         """
         if self._draining:
             return "Reboot in progress — try again shortly."
@@ -3312,6 +5518,7 @@ class ClaudeRunner:
         self, instance_id: str, *,
         intentional: bool = False,
         reason: str | None = None,
+        owns_card: bool = False,
     ) -> bool:
         """Terminate a running CLI process.
 
@@ -3323,10 +5530,33 @@ class ClaudeRunner:
         already gone) leaves the set untouched.
 
         ``reason`` (when set) is stamped onto ``RunResult.kill_reason`` so
-        the lifecycle layer can distinguish user-Kill from Steer.
+        the lifecycle layer can distinguish user-Kill from Steer, and
+        ``owns_card`` onto ``RunResult.kill_owns_card`` so it knows whether
+        the caller is going to rewrite the live progress message itself.
+
+        The one case where the mark IS recorded without a signal: the run is
+        still live (its lifecycle task is registered) but sits *between*
+        subprocesses — every recovery layer in ``_run_impl`` re-spawns, and
+        during that window there is nothing to terminate.  Without the mark
+        the kill would evaporate and the retry would spawn a brand new
+        attempt seconds after the user asked it to stop.  ``_run_impl``
+        checks the mark on re-entry and bails instead.
         """
         proc = self._processes.get(instance_id)
         if not proc:
+            if instance_id in self._active_tasks and (
+                intentional or reason is not None
+            ):
+                self._intentional_kills.add(instance_id)
+                if reason is not None:
+                    self._kill_reasons[instance_id] = reason
+                if owns_card:
+                    self._kill_card_owners.add(instance_id)
+                log.info(
+                    "Kill for %s arrived between attempts — retries stopped",
+                    instance_id,
+                )
+                return True
             return False
         try:
             proc.terminate()
@@ -3337,6 +5567,8 @@ class ClaudeRunner:
                 self._intentional_kills.add(instance_id)
                 if reason is not None:
                     self._kill_reasons[instance_id] = reason
+                if owns_card:
+                    self._kill_card_owners.add(instance_id)
             try:
                 await asyncio.wait_for(proc.wait(), timeout=5)
             except asyncio.TimeoutError:
@@ -3354,6 +5586,7 @@ class ClaudeRunner:
         self, instance_id: str, timeout: float = 10.0,
         *, intentional: bool = True,
         reason: str | None = None,
+        owns_card: bool = False,
     ) -> KillOutcome:
         """Kill an instance and wait for its lifecycle task to fully finish.
 
@@ -3379,7 +5612,10 @@ class ClaudeRunner:
         """
         if instance_id not in self._active_tasks and instance_id not in self._processes:
             return KillOutcome.NOT_RUNNING
-        await self.kill(instance_id, intentional=intentional, reason=reason)
+        await self.kill(
+            instance_id, intentional=intentional, reason=reason,
+            owns_card=owns_card,
+        )
         # Wait for the lifecycle coroutine to finish its finally block
         # (end_task fires there and removes the instance from _active_tasks).
         loop = asyncio.get_running_loop()
@@ -3410,14 +5646,6 @@ class ClaudeRunner:
             if await self.kill(iid):
                 killed += 1
         return killed
-
-    def queue_position(self, instance_id: str) -> int | None:
-        """Approximate queue position (not exact with asyncio.Semaphore)."""
-        # Semaphore doesn't expose waiter count directly
-        waiters = getattr(self._semaphore, '_waiters', None)
-        if waiters is None:
-            return None
-        return len(waiters)
 
     # --- Per-repo locking ---
 
@@ -3503,16 +5731,10 @@ class ClaudeRunner:
             Path(wt_dir).parent.mkdir(parents=True, exist_ok=True)
 
             # Create worktree with a new branch from current HEAD (master/main)
-            result = subprocess.run(
-                ["git", "worktree", "add", wt_dir, "-b", branch],
-                cwd=repo, capture_output=True, text=True, **_NOWND,
-            )
+            result = run_capture(["git", "worktree", "add", wt_dir, "-b", branch], cwd=repo)
             if result.returncode != 0:
                 # Branch might already exist (retry/resume) — try without -b
-                subprocess.run(
-                    ["git", "worktree", "add", wt_dir, branch],
-                    cwd=repo, capture_output=True, text=True, check=True, **_NOWND,
-                )
+                run_capture(["git", "worktree", "add", wt_dir, branch], cwd=repo, check=True)
 
             instance.worktree_path = wt_dir
             instance.original_branch = default_branch
@@ -3730,11 +5952,7 @@ class ClaudeRunner:
         # `git add -A` in the worktree can't stage it onto the build branch.
         exclude_line = ".claude/settings.local.json"
         try:
-            r = subprocess.run(
-                ["git", "rev-parse", "--git-common-dir"],
-                cwd=repo_path, capture_output=True, text=True,
-                check=True, **_NOWND,
-            )
+            r = run_capture(["git", "rev-parse", "--git-common-dir"], cwd=repo_path, check=True)
             common_dir = r.stdout.strip()
         except subprocess.CalledProcessError:
             log.warning(
@@ -3818,27 +6036,20 @@ class ClaudeRunner:
     def _get_default_branch(repo_path: str) -> str:
         """Determine the default branch (master or main)."""
         for candidate in ("master", "main"):
-            r = subprocess.run(
-                ["git", "rev-parse", "--verify", f"refs/heads/{candidate}"],
-                cwd=repo_path, capture_output=True, text=True, **_NOWND,
+            r = run_capture(
+                ["git", "rev-parse", "--verify", f"refs/heads/{candidate}"], cwd=repo_path,
             )
             if r.returncode == 0:
                 return candidate
         # Fallback: use HEAD if it's not a bot-managed branch
         _prefix = f"{config.BRANCH_PREFIX}/"
-        r = subprocess.run(
-            ["git", "symbolic-ref", "--short", "HEAD"],
-            cwd=repo_path, capture_output=True, text=True, **_NOWND,
-        )
+        r = run_capture(["git", "symbolic-ref", "--short", "HEAD"], cwd=repo_path)
         if r.returncode == 0:
             head = r.stdout.strip()
             if head and not head.startswith(_prefix):
                 return head
         # Last resort: find any non-bot-managed branch
-        r = subprocess.run(
-            ["git", "branch", "--format=%(refname:short)"],
-            cwd=repo_path, capture_output=True, text=True, **_NOWND,
-        )
+        r = run_capture(["git", "branch", "--format=%(refname:short)"], cwd=repo_path)
         if r.returncode == 0:
             for line in r.stdout.strip().splitlines():
                 branch = line.strip()
@@ -4541,10 +6752,7 @@ class ClaudeRunner:
             # Diff runs in worktree (where changes are) against the merge base
             diff_cwd = instance.worktree_path or instance.repo_path
             base = instance.original_branch or "HEAD~1"
-            result = subprocess.run(
-                ["git", "diff", base, "--", "."],
-                cwd=diff_cwd, capture_output=True, text=True, **_NOWND,
-            )
+            result = run_capture(["git", "diff", base, "--", "."], cwd=diff_cwd)
             if (result.stdout or "").strip():
                 diff_path = config.RESULTS_DIR / f"{instance.id}.diff"
                 diff_path.write_text(result.stdout, encoding="utf-8")
@@ -4594,10 +6802,7 @@ class ClaudeRunner:
                 "Main repo %s has leftover MERGE_HEAD — attempting cleanup", repo,
             )
             try:
-                subprocess.run(
-                    ["git", "merge", "--abort"],
-                    cwd=repo, capture_output=True, text=True, **_NOWND,
-                )
+                run_capture(["git", "merge", "--abort"], cwd=repo)
             except Exception:
                 log.warning(
                     "git merge --abort raised in %s", repo, exc_info=True,
@@ -4617,10 +6822,7 @@ class ClaudeRunner:
         # unmerged stages. After Path A's abort succeeds, the index is
         # usually clean — but the abort+stash-pop interaction can leave
         # residue, so always check.
-        unmerged = subprocess.run(
-            ["git", "ls-files", "--unmerged"],
-            cwd=repo, capture_output=True, text=True, **_NOWND,
-        )
+        unmerged = run_capture(["git", "ls-files", "--unmerged"], cwd=repo)
         if unmerged.returncode != 0 or not (unmerged.stdout or "").strip():
             return PrecheckResult()
 
@@ -4637,15 +6839,9 @@ class ClaudeRunner:
 
         # First try the gentle path: `git reset --merge` keeps unrelated
         # working-tree edits intact and just drops merge-only stages.
-        reset_r = subprocess.run(
-            ["git", "reset", "--merge"],
-            cwd=repo, capture_output=True, text=True, **_NOWND,
-        )
+        reset_r = run_capture(["git", "reset", "--merge"], cwd=repo)
         if reset_r.returncode == 0:
-            recheck = subprocess.run(
-                ["git", "ls-files", "--unmerged"],
-                cwd=repo, capture_output=True, text=True, **_NOWND,
-            )
+            recheck = run_capture(["git", "ls-files", "--unmerged"], cwd=repo)
             if not (recheck.stdout or "").strip():
                 log.info(
                     "Cleared orphaned unmerged index in %s via `git reset --merge`",
@@ -4662,10 +6858,7 @@ class ClaudeRunner:
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         label = f"auto-stash poisoned-index-recovery {timestamp}"
 
-        create_r = subprocess.run(
-            ["git", "stash", "create"],
-            cwd=repo, capture_output=True, text=True, **_NOWND,
-        )
+        create_r = run_capture(["git", "stash", "create"], cwd=repo)
         stash_sha = (create_r.stdout or "").strip()
         if create_r.returncode != 0 or not stash_sha:
             log.error(
@@ -4681,10 +6874,7 @@ class ClaudeRunner:
                 ),
             )
 
-        store_r = subprocess.run(
-            ["git", "stash", "store", "-m", label, stash_sha],
-            cwd=repo, capture_output=True, text=True, **_NOWND,
-        )
+        store_r = run_capture(["git", "stash", "store", "-m", label, stash_sha], cwd=repo)
         if store_r.returncode != 0:
             # Stash object exists as a loose commit; user can still recover
             # it via `git stash apply <sha>` even without the ref. Warn but
@@ -4704,10 +6894,7 @@ class ClaudeRunner:
             )
 
         # Now safe to nuke: working tree + index are captured in the stash.
-        hard_r = subprocess.run(
-            ["git", "reset", "--hard", "HEAD"],
-            cwd=repo, capture_output=True, text=True, **_NOWND,
-        )
+        hard_r = run_capture(["git", "reset", "--hard", "HEAD"], cwd=repo)
         if hard_r.returncode != 0:
             log.error(
                 "git reset --hard HEAD failed in %s after stash: rc=%d %s",
@@ -4723,10 +6910,7 @@ class ClaudeRunner:
             )
 
         # Final sanity check.
-        final = subprocess.run(
-            ["git", "ls-files", "--unmerged"],
-            cwd=repo, capture_output=True, text=True, **_NOWND,
-        )
+        final = run_capture(["git", "ls-files", "--unmerged"], cwd=repo)
         if (final.stdout or "").strip():
             log.error(
                 "Orphaned unmerged index survived `git reset --hard HEAD` in %s",
@@ -4766,14 +6950,14 @@ class ClaudeRunner:
         failure — callers treat that as "no candidates" and skip tagging.
         """
         try:
-            r = subprocess.run(
+            r = run_capture(
                 [
                     "git", "log", "--first-parent",
                     f"-{_TAG_WALKBACK_CAP}",
                     "--format=%H%x09%s",
                     f"HEAD^1..{branch_tip}",
                 ],
-                cwd=repo, capture_output=True, text=True, **_NOWND,
+                cwd=repo,
             )
         except Exception:
             log.exception("git log for release-commit window failed in %s", repo)
@@ -4818,10 +7002,10 @@ class ClaudeRunner:
             # the tag-object SHA, which never equals the commit SHA we
             # compare against — falsely tripping the no-clobber branch on
             # an annotated tag that's actually already correct.
-            existing = subprocess.run(
+            existing = run_capture(
                 ["git", "rev-parse", "--verify",
                  f"refs/tags/{tag_name}^{{commit}}"],
-                cwd=repo, capture_output=True, text=True, **_NOWND,
+                cwd=repo,
             )
             if existing.returncode == 0:
                 where = (existing.stdout or "").strip()
@@ -4837,10 +7021,7 @@ class ClaudeRunner:
                     tag_name, where[:7], sha[:7], repo,
                 )
                 return None, candidate_shas
-            create = subprocess.run(
-                ["git", "tag", tag_name, sha],
-                cwd=repo, capture_output=True, text=True, **_NOWND,
-            )
+            create = run_capture(["git", "tag", tag_name, sha], cwd=repo)
             if create.returncode != 0:
                 log.error(
                     "git tag %s %s failed in %s: %s",
@@ -4897,10 +7078,7 @@ class ClaudeRunner:
         like "in sync" rather than block the merge.
         """
         try:
-            r = subprocess.run(
-                ["git", "rev-list", "--count", range_spec],
-                cwd=repo, capture_output=True, text=True, timeout=10, **_NOWND,
-            )
+            r = run_capture(["git", "rev-list", "--count", range_spec], cwd=repo, timeout=10)
         except (OSError, subprocess.TimeoutExpired):
             log.warning("rev-list --count %s failed in %s", range_spec, repo,
                         exc_info=True)
@@ -4945,9 +7123,8 @@ class ClaudeRunner:
                 ver_name = m.group(1)
                 # Untagged for one of two reasons — name taken (no-clobber)
                 # or tag creation failed. Tell the user which.
-                tag_exists = subprocess.run(
-                    ["git", "rev-parse", "--verify", f"refs/tags/{ver_name}"],
-                    cwd=repo, capture_output=True, text=True, **_NOWND,
+                tag_exists = run_capture(
+                    ["git", "rev-parse", "--verify", f"refs/tags/{ver_name}"], cwd=repo,
                 ).returncode == 0
                 if tag_exists:
                     return (
@@ -4964,10 +7141,7 @@ class ClaudeRunner:
         if ver is None:
             return ""
         try:
-            r = subprocess.run(
-                ["git", "tag", "-l", "v*"],
-                cwd=repo, capture_output=True, text=True, timeout=10, **_NOWND,
-            )
+            r = run_capture(["git", "tag", "-l", "v*"], cwd=repo, timeout=10)
         except (OSError, subprocess.TimeoutExpired):
             return ""
         if r.returncode != 0:
@@ -4985,6 +7159,40 @@ class ClaudeRunner:
         return ""
 
     @staticmethod
+    def _release_containment_warning(repo: str, tag_name: str | None) -> str:
+        """Warn when the merged target no longer contains the last release.
+
+        The sibling check above compares version *numbers*, and a build that
+        ships from a stale base has a perfectly good number. It is the
+        previous release's *commits* that are missing. That is how releases
+        get silently reverted when parallel builds cross over, and the
+        version bump is what hides it.
+
+        ``tag_name`` is the release this merge just cut, used only as the
+        ceiling so a release is never compared against itself. Carries
+        ``RELEASE_ORPHANED_MARKER`` so the chain can refuse to ship on it.
+        """
+        if not config.RELEASE_ANCESTRY_CHECK:
+            return ""
+        try:
+            missing = missing_predecessor_release(repo, "HEAD", below=tag_name)
+        except Exception:
+            log.exception("Release containment check raised in %s", repo)
+            return ""
+        if not missing:
+            return ""
+        log.error(
+            "Merge target in %s does not contain release %s%s",
+            repo, missing,
+            f" (just cut {tag_name})" if tag_name else "",
+        )
+        return (
+            f"\n⛔ {RELEASE_ORPHANED_MARKER}: `{missing}` is not an ancestor of "
+            f"what just landed, so shipping this would revert that release. "
+            f"Merge `{missing}` in before deploying."
+        )
+
+    @staticmethod
     def _classify_post_abort_state(repo: str) -> str:
         """Classify a merge failure AFTER ``git merge --abort`` has run.
 
@@ -4999,10 +7207,7 @@ class ClaudeRunner:
         until the abort clears them — don't get misclassified.
         """
         try:
-            r = subprocess.run(
-                ["git", "ls-files", "--unmerged"],
-                cwd=repo, capture_output=True, text=True, **_NOWND,
-            )
+            r = run_capture(["git", "ls-files", "--unmerged"], cwd=repo)
         except Exception:
             log.warning(
                 "ls-files --unmerged raised during classification in %s",
@@ -5040,18 +7245,16 @@ class ClaudeRunner:
         # message.  Manual `git branch -D` outside the bot would also land
         # here, which is acceptable: that workflow isn't supported, and the
         # alternative (failing loudly on the legitimate restart case) is worse.
-        ref_check = subprocess.run(
-            ["git", "rev-parse", "--verify", f"refs/heads/{instance.branch}"],
-            cwd=repo, capture_output=True, text=True, **_NOWND,
+        ref_check = run_capture(
+            ["git", "rev-parse", "--verify", f"refs/heads/{instance.branch}"], cwd=repo,
         )
         if ref_check.returncode != 0:
             # Branch is gone but the worktree dir may linger if the prior run
             # crashed between `git merge` and `git worktree remove`.  Best-
             # effort cleanup so we don't leak it for /branches to find later.
             if instance.worktree_path and Path(instance.worktree_path).exists():
-                subprocess.run(
-                    ["git", "worktree", "remove", instance.worktree_path, "--force"],
-                    cwd=repo, capture_output=True, text=True, **_NOWND,
+                run_capture(
+                    ["git", "worktree", "remove", instance.worktree_path, "--force"], cwd=repo,
                 )
             stale_branch = instance.branch
             instance.branch = None
@@ -5079,10 +7282,7 @@ class ClaudeRunner:
             self._copy_session_from_worktree(instance, None)
 
             # Re-verify original_branch exists; re-detect if stale
-            r = subprocess.run(
-                ["git", "rev-parse", "--verify", f"refs/heads/{target}"],
-                cwd=repo, capture_output=True, text=True, **_NOWND,
-            )
+            r = run_capture(["git", "rev-parse", "--verify", f"refs/heads/{target}"], cwd=repo)
             if r.returncode != 0:
                 target = self._get_default_branch(repo)
                 instance.original_branch = target
@@ -5093,10 +7293,7 @@ class ClaudeRunner:
             # the count behind the cap.
             dirty_files: list[str] = []
             dirty_total = 0
-            status_r = subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=repo, capture_output=True, text=True, **_NOWND,
-            )
+            status_r = run_capture(["git", "status", "--porcelain"], cwd=repo)
             if status_r.stdout.strip():
                 parsed = [
                     line[3:].strip() for line in status_r.stdout.strip().splitlines()
@@ -5105,10 +7302,10 @@ class ClaudeRunner:
                 dirty_files = parsed[:5]  # display cap only — dirty_total carries truth
                 log.info("Stashing dirty working tree in %s before merge (%d files): %s",
                          repo, dirty_total, ", ".join(dirty_files))
-                stash_r = subprocess.run(
+                stash_r = run_capture(
                     ["git", "stash", "push", "-m",
                      f"auto-stash for merge {instance.branch}"],
-                    cwd=repo, capture_output=True, text=True, **_NOWND,
+                    cwd=repo,
                 )
                 if stash_r.returncode == 0:
                     stashed = True
@@ -5118,10 +7315,7 @@ class ClaudeRunner:
             self._ensure_union_merge_driver(repo)
 
             # Ensure main repo is on the correct branch before merging
-            subprocess.run(
-                ["git", "checkout", target],
-                cwd=repo, capture_output=True, text=True, check=True, **_NOWND,
-            )
+            run_capture(["git", "checkout", target], cwd=repo, check=True)
 
             # Sync target with origin before merging: releases can land on
             # origin from another machine first, and merging/tagging against
@@ -5129,17 +7323,14 @@ class ClaudeRunner:
             # Offline-tolerant — a failed fetch degrades to a local merge
             # with a visible note rather than blocking.
             sync_note = ""
-            has_remote = subprocess.run(
-                ["git", "remote", "get-url", "origin"],
-                cwd=repo, capture_output=True, text=True, **_NOWND,
+            has_remote = run_capture(
+                ["git", "remote", "get-url", "origin"], cwd=repo,
             ).returncode == 0
             if has_remote:
                 fetch_err: str | None = None
                 try:
-                    fetch_r = subprocess.run(
-                        ["git", "fetch", "origin", "--tags", "--prune"],
-                        cwd=repo, capture_output=True, text=True,
-                        timeout=30, **_NOWND,
+                    fetch_r = run_capture(
+                        ["git", "fetch", "origin", "--tags", "--prune"], cwd=repo, timeout=30,
                     )
                     if fetch_r.returncode != 0:
                         fetch_err = (fetch_r.stderr or fetch_r.stdout or "").strip()
@@ -5185,9 +7376,8 @@ class ClaudeRunner:
                             f"{stash_status}{recovery_suffix}"
                         )
                     if behind and not ahead:
-                        ff_r = subprocess.run(
-                            ["git", "merge", "--ff-only", f"origin/{target}"],
-                            cwd=repo, capture_output=True, text=True, **_NOWND,
+                        ff_r = run_capture(
+                            ["git", "merge", "--ff-only", f"origin/{target}"], cwd=repo,
                         )
                         if ff_r.returncode != 0:
                             ff_detail = (ff_r.stderr or ff_r.stdout or "").strip()
@@ -5215,10 +7405,10 @@ class ClaudeRunner:
             # -X ours silently kept master's hunk on every conflict, which
             # invisibly clobbered the second of two parallel builds touching
             # the same file.
-            merge_r = subprocess.run(
+            merge_r = run_capture(
                 ["git", "merge", instance.branch, "--no-ff",
                  "-m", f"Merge {instance.branch} ({instance.display_id()})"],
-                cwd=repo, capture_output=True, text=True, **_NOWND,
+                cwd=repo,
             )
 
             auto_resolved = 0
@@ -5235,10 +7425,7 @@ class ClaudeRunner:
                                 instance.branch, exc_info=True)
                     auto_resolved = -1
                 if auto_resolved < 0:
-                    subprocess.run(
-                        ["git", "merge", "--abort"],
-                        cwd=repo, capture_output=True, text=True, **_NOWND,
-                    )
+                    run_capture(["git", "merge", "--abort"], cwd=repo)
                     self._last_merge_failure_kind[instance.id] = (
                         self._classify_post_abort_state(repo)
                     )
@@ -5255,9 +7442,8 @@ class ClaudeRunner:
 
             # Remove worktree (--force handles uncommitted changes)
             if instance.worktree_path and Path(instance.worktree_path).exists():
-                r = subprocess.run(
-                    ["git", "worktree", "remove", instance.worktree_path, "--force"],
-                    cwd=repo, capture_output=True, text=True, **_NOWND,
+                r = run_capture(
+                    ["git", "worktree", "remove", instance.worktree_path, "--force"], cwd=repo,
                 )
                 if r.returncode != 0:
                     log.warning("git worktree remove failed for %s: %s",
@@ -5265,23 +7451,14 @@ class ClaudeRunner:
                     # Fallback: manual removal + prune
                     try:
                         shutil.rmtree(instance.worktree_path, ignore_errors=True)
-                        subprocess.run(
-                            ["git", "worktree", "prune"],
-                            cwd=repo, capture_output=True, text=True, **_NOWND,
-                        )
+                        run_capture(["git", "worktree", "prune"], cwd=repo)
                     except Exception:
                         pass
 
             # Delete branch (-d safe after merge; -D fallback if -d fails)
-            r = subprocess.run(
-                ["git", "branch", "-d", instance.branch],
-                cwd=repo, capture_output=True, text=True, **_NOWND,
-            )
+            r = run_capture(["git", "branch", "-d", instance.branch], cwd=repo)
             if r.returncode != 0:
-                subprocess.run(
-                    ["git", "branch", "-D", instance.branch],
-                    cwd=repo, capture_output=True, text=True, **_NOWND,
-                )
+                run_capture(["git", "branch", "-D", instance.branch], cwd=repo)
 
             # Clean up worktree project dir
             self._cleanup_worktree_session_dir(instance)
@@ -5293,12 +7470,19 @@ class ClaudeRunner:
             # in the helper can't poison the merge push path.
             candidate_shas: list[str] = []
             tag_warning = ""
+            tag_name: str | None = None
             try:
                 tag_name, candidate_shas = self._tag_release_at(repo, "HEAD^2")
                 tag_warning = self._stale_version_warning(repo, tag_name, "HEAD^2")
             except Exception:
                 log.exception("Tag-release step raised in %s", repo)
                 candidate_shas = []
+
+            # Containment, which the version-number check above cannot see:
+            # `target` is now the tree that ships, so the release before this
+            # one has to be reachable from it. Checked *after* tagging so the
+            # release we just cut is the ceiling rather than its own subject.
+            tag_warning += self._release_containment_warning(repo, tag_name)
 
             # Push merged result to origin.  `has_remote` was probed by the
             # pre-merge sync block above.
@@ -5307,10 +7491,8 @@ class ClaudeRunner:
                 if not has_remote:
                     log.info("No remote 'origin' in %s — skipping push", repo)
                     push_note = "\nℹ️ No remote configured — local merge is fine"
-                elif (push_r := subprocess.run(
-                    ["git", "push", "origin", target],
-                    cwd=repo, capture_output=True, text=True,
-                    timeout=30, **_NOWND,
+                elif (push_r := run_capture(
+                    ["git", "push", "origin", target], cwd=repo, timeout=30,
                 )).returncode != 0:
                     push_detail = (push_r.stderr or push_r.stdout or "").strip()
                     log.error("Push to origin after merge in %s: %s",
@@ -5328,10 +7510,7 @@ class ClaudeRunner:
                         tag_names: list[str] = []
                         seen: set[str] = set()
                         for sha in candidate_shas:
-                            tag_r = subprocess.run(
-                                ["git", "tag", "--points-at", sha],
-                                cwd=repo, capture_output=True, text=True, **_NOWND,
-                            )
+                            tag_r = run_capture(["git", "tag", "--points-at", sha], cwd=repo)
                             if tag_r.returncode != 0:
                                 log.debug(
                                     "git tag --points-at %s failed in %s (rc=%d), skipping",
@@ -5344,10 +7523,8 @@ class ClaudeRunner:
                                     seen.add(name)
                                     tag_names.append(name)
                         if tag_names:
-                            tag_push_r = subprocess.run(
-                                ["git", "push", "origin"] + tag_names,
-                                cwd=repo, capture_output=True, text=True,
-                                timeout=30, **_NOWND,
+                            tag_push_r = run_capture(
+                                ["git", "push", "origin"] + tag_names, cwd=repo, timeout=30,
                             )
                             if tag_push_r.returncode != 0:
                                 tag_detail = (tag_push_r.stderr or tag_push_r.stdout or "").strip()
@@ -5401,10 +7578,7 @@ class ClaudeRunner:
             )
         except subprocess.CalledProcessError as e:
             # Abort any in-progress merge to keep main repo clean for other sessions
-            subprocess.run(
-                ["git", "merge", "--abort"],
-                cwd=instance.repo_path, capture_output=True, text=True, **_NOWND,
-            )
+            run_capture(["git", "merge", "--abort"], cwd=instance.repo_path)
             self._last_merge_failure_kind[instance.id] = (
                 self._classify_post_abort_state(repo)
             )
@@ -5431,10 +7605,7 @@ class ClaudeRunner:
             )
             if not merge_succeeded and _merge_head.exists():
                 try:
-                    subprocess.run(
-                        ["git", "merge", "--abort"],
-                        cwd=repo, capture_output=True, text=True, **_NOWND,
-                    )
+                    run_capture(["git", "merge", "--abort"], cwd=repo)
                     log.warning(
                         "Aborted leftover merge in %s during finally cleanup", repo,
                     )
@@ -5450,10 +7621,7 @@ class ClaudeRunner:
         the fallback signal.
         """
         try:
-            r = subprocess.run(
-                ["git", "diff", "--name-only", "--diff-filter=U"],
-                cwd=repo, capture_output=True, text=True, **_NOWND,
-            )
+            r = run_capture(["git", "diff", "--name-only", "--diff-filter=U"], cwd=repo)
             if r.returncode != 0:
                 return []
             return [ln for ln in r.stdout.splitlines() if ln.strip()]
@@ -5485,10 +7653,7 @@ class ClaudeRunner:
         return its merge-result string with stash status appended.
         """
         try:
-            check_r = subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=repo, capture_output=True, text=True, **_NOWND,
-            )
+            check_r = run_capture(["git", "status", "--porcelain"], cwd=repo)
             # Narrow the dirty check to TRACKED changes only. Untracked
             # entries (`??`) don't block a stash pop unless there's an
             # actual filename collision — and if there is, the existing
@@ -5513,10 +7678,7 @@ class ClaudeRunner:
                     "\nℹ️ Stashed changes not auto-restored (tracked changes present after merge). "
                     "Recover with `git stash pop` — list with `git stash list`."
                 )
-            pop_r = subprocess.run(
-                ["git", "stash", "pop"],
-                cwd=repo, capture_output=True, text=True, **_NOWND,
-            )
+            pop_r = run_capture(["git", "stash", "pop"], cwd=repo)
             if pop_r.returncode != 0:
                 # A conflicted pop leaves UNMERGED index entries, and
                 # `git checkout -- .` refuses to touch those ("path ... is
@@ -5531,10 +7693,7 @@ class ClaudeRunner:
                 # the user's work still survives in stash@{0} either way.
                 rollback_ok = False
                 try:
-                    rb_r = subprocess.run(
-                        ["git", "reset", "--hard", "HEAD"],
-                        cwd=repo, capture_output=True, text=True, **_NOWND,
-                    )
+                    rb_r = run_capture(["git", "reset", "--hard", "HEAD"], cwd=repo)
                     rollback_ok = rb_r.returncode == 0
                     if not rollback_ok:
                         log.warning(
@@ -5621,10 +7780,9 @@ class ClaudeRunner:
         # paths with non-ASCII/special chars, which would feed literal
         # quotes into the pathspecs below and miss the file.  utf-8 matches
         # git's on-disk path encoding so the round-trip survives non-ASCII.
-        status_r = subprocess.run(
+        status_r = run_capture(
             ["git", "status", "--porcelain", "-z"],
-            cwd=toplevel, capture_output=True, text=True,
-            encoding="utf-8", errors="replace", **_NOWND,
+            cwd=toplevel, encoding="utf-8", errors="replace",
         )
 
         conflicts: list[tuple[str, str]] = []
@@ -5656,10 +7814,7 @@ class ClaudeRunner:
         for code, filepath in conflicts:
             if code in ("UD", "DD"):
                 # Feature branch deleted — accept deletion
-                r = subprocess.run(
-                    ["git", "rm", "--", filepath],
-                    cwd=toplevel, capture_output=True, text=True, **_NOWND,
-                )
+                r = run_capture(["git", "rm", "--", filepath], cwd=toplevel)
                 if r.returncode != 0:
                     log.warning("git rm failed for %s: %s",
                                 filepath, r.stderr.strip())
@@ -5675,10 +7830,7 @@ class ClaudeRunner:
                 if not self._checkout_theirs(toplevel, filepath):
                     return -1
 
-        commit_r = subprocess.run(
-            ["git", "commit", "--no-edit"],
-            cwd=toplevel, capture_output=True, text=True, **_NOWND,
-        )
+        commit_r = run_capture(["git", "commit", "--no-edit"], cwd=toplevel)
         if commit_r.returncode != 0:
             log.warning("Failed to commit auto-resolved merge for %s: %s",
                         branch, commit_r.stderr.strip())
@@ -5741,10 +7893,7 @@ class ClaudeRunner:
                 # Clean merge — write result back
                 target = Path(toplevel) / filepath
                 target.write_bytes(mf.stdout)
-                subprocess.run(
-                    ["git", "add", "--", filepath],
-                    cwd=toplevel, capture_output=True, text=True, **_NOWND,
-                )
+                run_capture(["git", "add", "--", filepath], cwd=toplevel)
                 log.info("merge-file resolved %s cleanly", filepath)
                 return True
 
@@ -5769,18 +7918,12 @@ class ClaudeRunner:
         ``toplevel`` must be the git working-tree root — ``filepath`` is
         toplevel-relative porcelain output.
         """
-        r1 = subprocess.run(
-            ["git", "checkout", "--theirs", "--", filepath],
-            cwd=toplevel, capture_output=True, text=True, **_NOWND,
-        )
+        r1 = run_capture(["git", "checkout", "--theirs", "--", filepath], cwd=toplevel)
         if r1.returncode != 0:
             log.warning("checkout --theirs failed for %s: %s",
                         filepath, r1.stderr.strip())
             return False
-        r2 = subprocess.run(
-            ["git", "add", "--", filepath],
-            cwd=toplevel, capture_output=True, text=True, **_NOWND,
-        )
+        r2 = run_capture(["git", "add", "--", filepath], cwd=toplevel)
         if r2.returncode != 0:
             log.warning("git add failed for %s: %s",
                         filepath, r2.stderr.strip())
@@ -5842,10 +7985,7 @@ class ClaudeRunner:
         # dirty seconds later.
         status = None
         for attempt in (1, 2):
-            status = subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=wt, capture_output=True, text=True, **_NOWND,
-            )
+            status = run_capture(["git", "status", "--porcelain"], cwd=wt)
             if status.returncode == 0 and status.stdout.strip():
                 break
             log.warning(
@@ -5863,10 +8003,7 @@ class ClaudeRunner:
                 "clean or status failing after retry", instance.id,
             )
             return None
-        add_r = subprocess.run(
-            ["git", "add", "-A"],
-            cwd=wt, capture_output=True, text=True, **_NOWND,
-        )
+        add_r = run_capture(["git", "add", "-A"], cwd=wt)
         if add_r.returncode != 0:
             log.warning(
                 "auto_commit_dirty_worktree: git add failed for %s: %s",
@@ -5879,20 +8016,14 @@ class ClaudeRunner:
             f"finishing. The autopilot guard committed the changes so the "
             f"chain could continue."
         )
-        commit_r = subprocess.run(
-            ["git", "commit", "-m", commit_msg, "--no-verify"],
-            cwd=wt, capture_output=True, text=True, **_NOWND,
-        )
+        commit_r = run_capture(["git", "commit", "-m", commit_msg, "--no-verify"], cwd=wt)
         if commit_r.returncode != 0:
             log.warning(
                 "auto_commit_dirty_worktree: git commit failed for %s: %s",
                 wt, commit_r.stderr.strip(),
             )
             return None
-        sha_r = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=wt, capture_output=True, text=True, **_NOWND,
-        )
+        sha_r = run_capture(["git", "rev-parse", "HEAD"], cwd=wt)
         sha = sha_r.stdout.strip() if sha_r.returncode == 0 else "(unknown)"
         log.info(
             "auto_commit_dirty_worktree: rescued %s with commit %s on %s",
@@ -5953,23 +8084,16 @@ class ClaudeRunner:
         # (orphaned, only fsck-recoverable) or destroys the changes
         # outright depending on git's mood.
         if preserve_if_dirty and wt_exists:
-            status = subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=worktree_path, capture_output=True, text=True, **_NOWND,
-            )
+            status = run_capture(["git", "status", "--porcelain"], cwd=worktree_path)
             if status.returncode == 0 and status.stdout.strip():
-                add_r = subprocess.run(
-                    ["git", "add", "-A"],
-                    cwd=worktree_path, capture_output=True, text=True, **_NOWND,
-                )
+                add_r = run_capture(["git", "add", "-A"], cwd=worktree_path)
                 if add_r.returncode == 0:
                     commit_msg = (
                         f"WIP: build halted with uncommitted changes "
                         f"({instance.id})"
                     )
-                    commit_r = subprocess.run(
-                        ["git", "commit", "-m", commit_msg, "--no-verify"],
-                        cwd=worktree_path, capture_output=True, text=True, **_NOWND,
+                    commit_r = run_capture(
+                        ["git", "commit", "-m", commit_msg, "--no-verify"], cwd=worktree_path,
                     )
                     if commit_r.returncode == 0:
                         preserved_branch = instance.branch
@@ -5990,26 +8114,66 @@ class ClaudeRunner:
                         worktree_path, add_r.stderr.strip(),
                     )
 
+        # Release tags that live only on this branch, read BEFORE the branch
+        # ref is deleted. Deleting a branch does not delete its tags, it
+        # strands them: the version keeps printing in `git tag` and looks
+        # shipped while its content is reachable from nothing, and after the
+        # delete there is no cheap way back to "which branch was that".
+        # Naming it here is the only chance the user gets to notice.
+        #
+        # Both refs must be resolvable or the filters mean the opposite of
+        # what is being asked: `version_tags` with no `merged=` lists every
+        # release in the repo, and blaming one discard for all of them is
+        # worse than saying nothing. The public `discard_branch` already
+        # refuses an instance missing either, so this only costs a comparison.
+        stranded: list[tuple[str, tuple[int, int, int, int]]] = []
+        if (
+            config.RELEASE_ANCESTRY_CHECK and not preserved_branch
+            and instance.branch and instance.original_branch
+        ):
+            try:
+                stranded = version_tags(
+                    repo, merged=instance.branch, no_merged=instance.original_branch,
+                )
+            except Exception:
+                log.exception("Stranded-release scan raised in %s", repo)
+                stranded = []
+
         # Each cleanup step is independent — continue on failure
         if wt_exists:
-            r = subprocess.run(
-                ["git", "worktree", "remove", worktree_path, "--force"],
-                cwd=repo, capture_output=True, text=True, **_NOWND,
-            )
+            r = run_capture(["git", "worktree", "remove", worktree_path, "--force"], cwd=repo)
             if r.returncode != 0:
                 log.warning("Failed to remove worktree %s: %s", worktree_path, r.stderr.strip())
                 errors.append(f"worktree remove: {r.stderr.strip()}")
 
         # Skip branch deletion when we just preserved a WIP commit on it —
         # that's the whole point of preservation.
+        branch_deleted = False
         if not preserved_branch:
-            r = subprocess.run(
-                ["git", "branch", "-D", instance.branch],
-                cwd=repo, capture_output=True, text=True, **_NOWND,
-            )
+            r = run_capture(["git", "branch", "-D", instance.branch], cwd=repo)
             if r.returncode != 0:
                 log.warning("Failed to delete branch %s: %s", instance.branch, r.stderr.strip())
                 errors.append(f"branch delete: {r.stderr.strip()}")
+            else:
+                branch_deleted = True
+
+        # Worded only once the ref is actually gone. A failed `branch -D`
+        # leaves those commits perfectly reachable, and telling the user a
+        # release was stranded when it was not sends them hunting for a
+        # problem they do not have.
+        stranded_note = ""
+        if stranded and branch_deleted:
+            names = ", ".join(f"`{n}`" for n, _ in stranded[:5])
+            more = f" (+{len(stranded) - 5} more)" if len(stranded) > 5 else ""
+            log.warning(
+                "Discarding %s stranded release tag(s) %s in %s",
+                instance.branch, [n for n, _ in stranded], repo,
+            )
+            stranded_note = (
+                f"\n⚠️ Release tag(s) {names}{more} existed only on this branch "
+                f"and are now unreachable from {instance.original_branch}. "
+                f"Delete them (`git tag -d <name>`) or the version looks shipped."
+            )
 
         self._cleanup_worktree_session_dir(instance)
 
@@ -6031,10 +8195,12 @@ class ClaudeRunner:
             )
         if errors:
             return DiscardOutcome(
-                f"Discarded (with warnings: {'; '.join(errors)}){recovery_suffix}",
+                f"Discarded (with warnings: {'; '.join(errors)})"
+                f"{recovery_suffix}{stranded_note}",
             )
         return DiscardOutcome(
-            f"Discarded branch, back on {instance.original_branch}{recovery_suffix}",
+            f"Discarded branch, back on {instance.original_branch}"
+            f"{recovery_suffix}{stranded_note}",
         )
 
     def _cleanup_worktree_session_dir(self, instance: Instance) -> None:
@@ -6073,25 +8239,18 @@ class ClaudeRunner:
           - "skip": unsafe (diverged, missing branches, git error)
         """
         # Verify target branch exists
-        r = subprocess.run(
-            ["git", "rev-parse", "--verify", f"refs/heads/{target}"],
-            cwd=repo, capture_output=True, text=True, **_NOWND,
-        )
+        r = run_capture(["git", "rev-parse", "--verify", f"refs/heads/{target}"], cwd=repo)
         if r.returncode != 0:
             return ("skip", f"target branch '{target}' missing")
 
         # Verify source branch exists
-        r = subprocess.run(
-            ["git", "rev-parse", "--verify", f"refs/heads/{branch}"],
-            cwd=repo, capture_output=True, text=True, **_NOWND,
-        )
+        r = run_capture(["git", "rev-parse", "--verify", f"refs/heads/{branch}"], cwd=repo)
         if r.returncode != 0:
             return ("skip", f"source branch '{branch}' missing")
 
         # Compute ahead/behind: left=target-only, right=branch-only
-        r = subprocess.run(
-            ["git", "rev-list", "--left-right", "--count", f"{target}...{branch}"],
-            cwd=repo, capture_output=True, text=True, **_NOWND,
+        r = run_capture(
+            ["git", "rev-list", "--left-right", "--count", f"{target}...{branch}"], cwd=repo,
         )
         if r.returncode != 0:
             return ("skip", f"rev-list failed: {(r.stderr or '').strip()}")
@@ -6125,12 +8284,11 @@ class ClaudeRunner:
             # Explicit /* glob: ``refs/heads/{prefix}/`` (no glob) is treated as
             # an exact ref name, missing all branches. ``refs/heads/{prefix}/*``
             # matches every direct child.
-            result = subprocess.run(
+            result = run_capture(
                 ["git", "for-each-ref",
                  "--format=%(refname:short)",
                  f"refs/heads/{config.BRANCH_PREFIX}/*"],
-                cwd=repo_path, capture_output=True, text=True,
-                encoding="utf-8", errors="replace", **_NOWND,
+                cwd=repo_path, encoding="utf-8", errors="replace",
             )
             if result.returncode != 0:
                 log.warning(
@@ -6163,10 +8321,9 @@ class ClaudeRunner:
         in by the caller is stale.
         """
         try:
-            r = subprocess.run(
+            r = run_capture(
                 ["git", "worktree", "list", "--porcelain"],
-                cwd=repo_path, capture_output=True, text=True,
-                encoding="utf-8", errors="replace", **_NOWND,
+                cwd=repo_path, encoding="utf-8", errors="replace",
             )
             if r.returncode != 0:
                 return set()
@@ -6208,10 +8365,8 @@ class ClaudeRunner:
         if not wt.is_dir():
             return ("error", f"worktree dir missing: {worktree_path}")
         try:
-            r = subprocess.run(
-                ["git", "ls-tree", "-r", branch],
-                cwd=repo_path, capture_output=True, text=True,
-                encoding="utf-8", errors="replace", **_NOWND,
+            r = run_capture(
+                ["git", "ls-tree", "-r", branch], cwd=repo_path, encoding="utf-8", errors="replace",
             )
             if r.returncode != 0:
                 return ("error", f"ls-tree failed: {(r.stderr or '').strip()[:200]}")
@@ -6240,11 +8395,10 @@ class ClaudeRunner:
                     return ("diverged", f"missing tracked file: {rel}")
                 paths_in_order.append(rel)
                 stdin_lines.append(str(f))
-            r = subprocess.run(
+            r = run_capture(
                 ["git", "hash-object", "--stdin-paths"],
-                cwd=repo_path, capture_output=True, text=True,
-                encoding="utf-8", errors="replace",
-                input="\n".join(stdin_lines) + "\n", **_NOWND,
+                cwd=repo_path, encoding="utf-8", errors="replace",
+                input="\n".join(stdin_lines) + "\n",
             )
             if r.returncode != 0:
                 return ("error", f"hash-object failed: {(r.stderr or '').strip()[:200]}")
@@ -6389,10 +8543,9 @@ class ClaudeRunner:
             repo_name = path_to_name.get(repo_path, repo_path)
             # Ensure the branch still exists at all — if not, this isn't a
             # partial-worktree case, it's a fully-cleaned-up case.
-            r = subprocess.run(
+            r = run_capture(
                 ["git", "rev-parse", "--verify", f"refs/heads/{inst.branch}"],
-                cwd=repo_path, capture_output=True, text=True,
-                encoding="utf-8", errors="replace", **_NOWND,
+                cwd=repo_path, encoding="utf-8", errors="replace",
             )
             if r.returncode != 0:
                 events.append(WorktreeRecoveryEvent(
@@ -6436,11 +8589,10 @@ class ClaudeRunner:
                 repo_lock = self._get_repo_lock(repo_path)
                 async with repo_lock:
                     r = await asyncio.to_thread(
-                        subprocess.run,
+                        _run_capture,
                         ["git", "worktree", "add", "--force",
                          str(wt_dir), inst.branch],
-                        cwd=repo_path, capture_output=True, text=True,
-                        encoding="utf-8", errors="replace", **_NOWND,
+                        cwd=repo_path, encoding="utf-8", errors="replace",
                     )
             except Exception as e:
                 events.append(WorktreeRecoveryEvent(
@@ -6503,10 +8655,8 @@ class ClaudeRunner:
 
             try:
                 subj_proc = await asyncio.to_thread(
-                    subprocess.run,
-                    ["git", "log", "-1", "--pretty=%H%n%s"],
-                    cwd=inst.worktree_path, capture_output=True, text=True,
-                    encoding="utf-8", errors="replace", **_NOWND,
+                    _run_capture, ["git", "log", "-1", "--pretty=%H%n%s"],
+                    cwd=inst.worktree_path, encoding="utf-8", errors="replace",
                 )
             except Exception:
                 continue
@@ -6528,10 +8678,9 @@ class ClaudeRunner:
 
             try:
                 tag_proc = await asyncio.to_thread(
-                    subprocess.run,
+                    _run_capture,
                     ["git", "rev-parse", "--verify", f"refs/tags/{version}"],
-                    cwd=inst.repo_path, capture_output=True, text=True,
-                    encoding="utf-8", errors="replace", **_NOWND,
+                    cwd=inst.repo_path, encoding="utf-8", errors="replace",
                 )
             except Exception:
                 continue
@@ -6665,14 +8814,14 @@ class ClaudeRunner:
                 # Branch already merged; clear stale branch refs on all
                 # instances (including source) so this case doesn't recur
                 # on every startup.
-                self._clear_stale_branches_static(store, branch_name)
+                clear_stale_branches(store, branch_name)
                 continue
 
             try:
                 msg = await self.merge_branch(inst)
                 store.update_instance(inst)
                 if not merge_msg_is_failure(msg):
-                    self._clear_stale_branches_static(store, branch_name)
+                    clear_stale_branches(store, branch_name)
                 messages.append(f"merge {branch_name}: {msg}")
             except Exception as e:
                 log.warning("startup auto-merge: merge %s raised", branch_name, exc_info=True)
@@ -6702,18 +8851,12 @@ class ClaudeRunner:
         precheck = self._check_main_repo_clean(repo_path)
         if precheck.error:
             return precheck.error
-        r = subprocess.run(
-            ["git", "symbolic-ref", "--short", "HEAD"],
-            cwd=repo_path, capture_output=True, text=True, **_NOWND,
-        )
+        r = run_capture(["git", "symbolic-ref", "--short", "HEAD"], cwd=repo_path)
         current = r.stdout.strip() if r.returncode == 0 else ""
         if not current.startswith(f"{config.BRANCH_PREFIX}/"):
             return None
         target = self._get_default_branch(repo_path)
-        r = subprocess.run(
-            ["git", "checkout", target],
-            cwd=repo_path, capture_output=True, text=True, **_NOWND,
-        )
+        r = run_capture(["git", "checkout", target], cwd=repo_path)
         if r.returncode != 0:
             log.warning("Failed to checkout %s in %s: %s",
                         target, repo_path, r.stderr.strip())
@@ -6757,10 +8900,9 @@ class ClaudeRunner:
             wt_name = branch.split("/")[-1] if "/" in branch else branch
             wt_dir = Path(repo_path) / ".worktrees" / wt_name
             if wt_dir.exists():
-                r = subprocess.run(
+                r = run_capture(
                     ["git", "worktree", "remove", str(wt_dir), "--force"],
-                    cwd=repo_path, capture_output=True, text=True,
-                    encoding="utf-8", errors="replace", **_NOWND,
+                    cwd=repo_path, encoding="utf-8", errors="replace",
                 )
                 if r.returncode != 0:
                     cleaned.append(
@@ -6770,10 +8912,8 @@ class ClaudeRunner:
                     # Do NOT fall through to rmtree — silent destruction of
                     # uncommitted work was exactly the bug we are fixing.
                     continue
-            r = subprocess.run(
-                ["git", "branch", "-D", branch],
-                cwd=repo_path, capture_output=True, text=True,
-                encoding="utf-8", errors="replace", **_NOWND,
+            r = run_capture(
+                ["git", "branch", "-D", branch], cwd=repo_path, encoding="utf-8", errors="replace",
             )
             if r.returncode != 0:
                 cleaned.append(
@@ -6784,31 +8924,8 @@ class ClaudeRunner:
             cleaned.append(f"cleaned orphan {branch}")
 
         # Prune any worktree registrations pointing to deleted directories
-        subprocess.run(
-            ["git", "worktree", "prune"],
-            cwd=repo_path, capture_output=True, text=True,
-            encoding="utf-8", errors="replace", **_NOWND,
+        run_capture(
+            ["git", "worktree", "prune"], cwd=repo_path, encoding="utf-8", errors="replace",
         )
 
         return cleaned
-
-    @staticmethod
-    def _clear_stale_branches_static(store, branch_name: str) -> int:
-        """Clear branch/worktree_path on ALL instances sharing a branch name.
-
-        Also nulls the branch field in history.jsonl so resumed sessions don't
-        see stale branch refs in their system prompt.
-        """
-        count = 0
-        for inst in store.list_instances(all_=True):
-            if inst.branch == branch_name:
-                inst.branch = None
-                inst.worktree_path = None
-                store.update_instance(inst)
-                count += 1
-        try:
-            from bot.store import history as history_mod
-            history_mod.clear_branch(branch_name)
-        except Exception:
-            pass
-        return count

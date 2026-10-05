@@ -10,10 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Awaitable
-
-if TYPE_CHECKING:
-    from bot.platform.base import RequestContext
+from typing import Any, Callable, Awaitable
 
 log = logging.getLogger(__name__)
 
@@ -37,8 +34,6 @@ async def spawn_fix_session(
     bot: Any,
     repo_name: str,
     trigger: str,
-    error_summary: str,
-    error_output: str,
     fix_prompt: str,
     *,
     max_retries: int = 1,

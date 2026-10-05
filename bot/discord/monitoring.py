@@ -116,8 +116,6 @@ async def _on_monitor_critical(
     await spawn_fix_session(
         bot, repo_name,
         trigger="monitor",
-        error_summary=f"Critical attention level on {monitor_name}",
-        error_output=snap_text[:1500],
         fix_prompt=prompt,
         max_retries=1,
         max_cost_usd=1.0,

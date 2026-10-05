@@ -67,6 +67,41 @@ async def ensure_category(
     return category
 
 
+# Suffix appended to the bot's own category name to build the parking lot for
+# hidden repos. A separate category (not a permission overwrite) is the only
+# thing that actually shrinks the sidebar: Discord shows the server owner every
+# channel regardless of overwrites, so denying view_channel hides nothing from
+# the person who asked for it.
+ARCHIVE_CATEGORY_SUFFIX = " \u00b7 Archive"
+
+
+async def ensure_archive_category(
+    guild: discord.Guild,
+    base_category: discord.CategoryChannel,
+    bot_member: discord.Member,
+    owner_id: int | None = None,
+) -> discord.CategoryChannel:
+    """Find or create the category that parks hidden repo forums.
+
+    Named after the bot's own category so the pair sorts together, and created
+    with the same private overwrites, positioned directly after it.
+    """
+    name = f"{base_category.name}{ARCHIVE_CATEGORY_SUFFIX}"
+    for cat in guild.categories:
+        if cat.name.lower() == name.lower():
+            return cat
+
+    overwrites = _private_overwrites(guild, bot_member, owner_id)
+    category = await guild.create_category(name, overwrites=overwrites)
+    log.info("Created hidden-repo category %s (%s)", category.id, category.name)
+    try:
+        await category.edit(position=base_category.position + 1)
+    except Exception:
+        # Position is cosmetic; a failure here must not fail the hide.
+        log.debug("Could not position archive category", exc_info=True)
+    return category
+
+
 async def ensure_lobby(
     category: discord.CategoryChannel,
     name: str = "the-ark",
@@ -93,17 +128,18 @@ async def create_archive_post(
     forum: discord.ForumChannel,
     repo_name: str,
 ) -> tuple[discord.Thread, discord.Message]:
-    """Create a pinned archive post inside a repo forum."""
+    """Create the archive post inside a repo forum.
+
+    Deliberately not pinned: a forum has a single pin slot and the Control
+    Room owns it (see reconcile_forum_pins). Pinning here used to race the
+    control room's own pin, and whichever landed last won.
+    """
     thread_with_msg = await forum.create_thread(
         name=ARCHIVE_NAME,
         content=f"**Session archive for {repo_name}**\nCompleted sessions are logged here automatically.",
     )
     thread = thread_with_msg.thread
     msg = thread_with_msg.message
-    try:
-        await thread.edit(pinned=True)
-    except Exception:
-        log.debug("Could not pin archive thread", exc_info=True)
     log.info("Created archive post %s in forum %s", thread.id, forum.name)
     return thread, msg
 
@@ -112,17 +148,16 @@ async def create_monitor_post(
     forum: discord.ForumChannel,
     name: str,
 ) -> tuple[discord.Thread, discord.Message]:
-    """Create a pinned monitor thread in a repo forum."""
+    """Create the monitor thread in a repo forum.
+
+    Not pinned — the Control Room owns the forum's single pin slot.
+    """
     thread_with_msg = await forum.create_thread(
         name=MONITOR_NAME,
         content=f"**Usage monitor: {name}**\nAuto-refreshes periodically.",
     )
     thread = thread_with_msg.thread
     msg = thread_with_msg.message
-    try:
-        await thread.edit(pinned=True)
-    except Exception:
-        log.debug("Could not pin monitor thread", exc_info=True)
     log.info("Created monitor post %s in forum %s", thread.id, forum.name)
     return thread, msg
 
@@ -371,6 +406,63 @@ async def ensure_forum_tags(forum: discord.ForumChannel) -> dict[str, discord.Fo
 # --- Per-user forum helpers ---
 
 
+# What a granted user needs in their own forum. read_message_history is the
+# one that bites: without it Discord shows only messages that arrive while the
+# client is open, so every app restart opens on an empty thread even though
+# nothing was deleted. Attachments, embeds and reactions matter because the
+# coaching flows ask guests to send screenshots rather than retype them.
+GUEST_FORUM_ALLOWS: dict[str, bool] = {
+    "view_channel": True,
+    "send_messages": True,
+    "send_messages_in_threads": True,
+    "create_public_threads": True,
+    "read_message_history": True,
+    "attach_files": True,
+    "embed_links": True,
+    "add_reactions": True,
+}
+
+
+async def _resolve_member(guild: discord.Guild, user_id: int):
+    """Member from cache, falling back to the API. None if they left."""
+    member = guild.get_member(int(user_id))
+    if member:
+        return member
+    try:
+        return await guild.fetch_member(int(user_id))
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        return None
+
+
+async def reconcile_guest_overwrite(
+    forum: discord.ForumChannel, guild: discord.Guild, user_id: int,
+) -> bool:
+    """Make sure a granted user holds every allow in GUEST_FORUM_ALLOWS.
+
+    Forums created before an allow was added never got it, so this runs on
+    every startup, not only at creation. Only missing allows are added; any
+    other setting on the overwrite is kept. Returns True if it changed anything.
+    """
+    member = await _resolve_member(guild, user_id)
+    if not member:
+        log.warning("User %s not in guild; cannot reconcile forum %s",
+                    user_id, forum.id)
+        return False
+    overwrite = forum.overwrites_for(member)
+    missing = [k for k, v in GUEST_FORUM_ALLOWS.items()
+               if getattr(overwrite, k) is not v]
+    if not missing:
+        return False
+    overwrite.update(**{k: GUEST_FORUM_ALLOWS[k] for k in missing})
+    await forum.set_permissions(
+        member, overwrite=overwrite,
+        reason="Granted user forum permissions: " + ", ".join(missing),
+    )
+    log.info("Forum %s: granted %s to user %s", forum.id,
+             ", ".join(missing), user_id)
+    return True
+
+
 async def ensure_user_forum(
     guild: discord.Guild,
     category: discord.CategoryChannel,
@@ -393,20 +485,19 @@ async def ensure_user_forum(
         if isinstance(ch, discord.ForumChannel) and ch.name == forum_name:
             log.info("Found existing user forum %s (%s)", ch.id, ch.name)
             await _reconcile_auto_archive(ch, auto_archive)
+            await reconcile_guest_overwrite(ch, guild, user_id)
             # Sync tags
             await sync_user_forum_tags(ch, repo_names)
             return ch
 
     # Build permissions: deny @everyone, allow bot + owner + user
     overwrites = _private_overwrites(guild, bot_member, owner_id)
-    member = guild.get_member(user_id)
+    member = await _resolve_member(guild, user_id)
     if member:
-        overwrites[member] = discord.PermissionOverwrite(
-            view_channel=True,
-            send_messages=True,
-            send_messages_in_threads=True,
-            create_public_threads=True,
-        )
+        overwrites[member] = discord.PermissionOverwrite(**GUEST_FORUM_ALLOWS)
+    else:
+        log.warning("User %s not found in guild; forum %s created without "
+                    "their overwrite, startup will retry", user_id, forum_name)
 
     forum = await guild.create_forum(
         name=forum_name,
@@ -505,21 +596,32 @@ def build_control_embed(
     deploy_thread_ids: dict[str, str] | None = None,
     usage_bar: str | None = None,
     drain_status: str | None = None,
+    description: str | None = None,
 ) -> discord.Embed:
     """Build the embed for a repo control room post.
 
     Instance lists are optional — when omitted (initial creation),
     the embed shows just branch. When provided (refresh),
     it shows full dashboard data for this repo.
+
+    ``description`` is the derived "what is this repo about" blurb
+    (``bot/engine/repo_desc.py``). When present it leads and the path is
+    demoted to subtext, because a forum of ten repos reads as ten paths
+    otherwise and the user has to remember which is which.
     """
     running_instances = running_instances or []
     attention_instances = attention_instances or []
     completed_instances = completed_instances or []
     active_count = len(running_instances)
 
+    blurb = (description or "").strip()
+    if blurb and repo_path:
+        embed_desc = f"{blurb}\n-# {repo_path}"
+    else:
+        embed_desc = blurb or repo_path or ""
     embed = discord.Embed(
         title=f"{repo_name} \u2014 {CONTROL_ROOM_NAME}",
-        description=repo_path or "",
+        description=embed_desc[:4096],
         color=discord.Color.dark_grey(),
     )
 
@@ -703,16 +805,18 @@ async def create_repo_control_post(
     branch: str | None = None,
     usage_bar: str | None = None,
     has_remote: bool = False,
+    description: str | None = None,
 ) -> tuple[discord.Thread, discord.Message]:
     """Create a control room post in a repo forum with action buttons."""
-    embed = build_control_embed(repo_name, repo_path, branch, usage_bar=usage_bar)
+    embed = build_control_embed(repo_name, repo_path, branch, usage_bar=usage_bar,
+                                description=description)
     view = build_control_view(repo_name, active_count=0, has_remote=has_remote)
 
     result = await forum.create_thread(name=CONTROL_ROOM_NAME, embed=embed, view=view)
     try:
         await result.thread.edit(pinned=True)
     except Exception:
-        log.debug("Could not pin control room thread", exc_info=True)
+        log.warning("Could not pin control room thread in forum %s", forum.name, exc_info=True)
 
     log.info("Created control room post %s in forum %s", result.thread.id, forum.name)
     return result.thread, result.message
@@ -773,7 +877,7 @@ async def create_user_control_post(
     try:
         await result.thread.edit(pinned=True)
     except Exception:
-        log.debug("Could not pin user control room", exc_info=True)
+        log.warning("Could not pin user control room in forum %s", forum.name, exc_info=True)
 
     log.info("Created control room post %s in user forum %s", result.thread.id, forum.name)
     return result.thread, result.message
@@ -811,40 +915,3 @@ async def create_user_welcome_post(
     result = await forum.create_thread(name="Welcome", embed=embed, view=view)
     log.info("Created welcome post %s in user forum %s", result.thread.id, forum.name)
     return result.thread, result.message
-
-
-# --- Channel helpers ---
-
-
-async def create_thread(
-    channel: discord.TextChannel,
-    name: str,
-    auto_archive_duration: int = 60,
-) -> discord.Thread:
-    """Create a thread in the lobby channel for a query."""
-    # Truncate name to Discord's 100 char limit
-    name = name[:100]
-    thread = await channel.create_thread(
-        name=name,
-        auto_archive_duration=auto_archive_duration,
-        type=discord.ChannelType.public_thread,
-    )
-    log.info("Created thread %s (%s)", thread.id, name)
-    return thread
-
-
-async def create_task_channel(
-    guild: discord.Guild,
-    name: str,
-    category: discord.CategoryChannel | None = None,
-) -> discord.TextChannel:
-    """Create a channel for a background task."""
-    name = name[:100].lower().replace(" ", "-")
-    channel = await guild.create_text_channel(
-        name=name,
-        category=category,
-    )
-    log.info("Created task channel %s (%s)", channel.id, name)
-    return channel
-
-

@@ -11,7 +11,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from bot import paths
-from bot.claude.types import ChainPhaseState, Instance, InstanceStatus, InstanceType, Schedule
+from bot.claude.types import (
+    ChainPhaseState,
+    Instance,
+    InstanceStatus,
+    InstanceType,
+    Schedule,
+    Watch,
+)
 from bot.engine.auto_fix import AutoFixState
 from bot.engine.deploy import DeployState
 
@@ -54,6 +61,15 @@ def _localise_paths(data: dict) -> None:
         for name, path in list(repos.items()):
             if isinstance(path, str):
                 repos[name] = paths.translate(path)
+
+    # The blurb cache records the path it was derived from and re-derives when
+    # it differs. Untranslated, the other machine's spelling never matches and
+    # every refresh on this machine re-reads the files the cache exists to skip.
+    descs = data.get("repo_descriptions")
+    if isinstance(descs, dict):
+        for entry in descs.values():
+            if isinstance(entry, dict) and isinstance(entry.get("path"), str):
+                entry["path"] = paths.translate(entry["path"])
 
     for inst in data.get("instances") or []:
         if not isinstance(inst, dict):
@@ -107,6 +123,14 @@ class StateStore:
 
         self._instances: dict[str, Instance] = {}
         self._repos: dict[str, str] = {}       # name -> path
+        # name -> {"text", "source", "sig", "mtime", "path"} — the derived
+        # Control Room blurb, cached so a refresh is stat-only.
+        # See bot/engine/repo_desc.py.
+        self._repo_descriptions: dict[str, dict] = {}
+        # Repos hidden from Discord's sidebar and every picker. Display-only:
+        # a dormant repo stays registered and its path stays resolvable, so
+        # old threads still resume. See list_active_repos().
+        self._dormant_repos: set[str] = set()
         self._active_repo: str | None = None
         self._task_counter: int = 0
         self._query_counter: int = 0
@@ -118,6 +142,11 @@ class StateStore:
         self._context: str | None = None
         self._aliases: dict[str, str] = {}      # name -> prompt
         self._schedules: dict[str, Schedule] = {}
+        # Event-triggered self-wakes (see bot/engine/watches.py). Kept apart
+        # from _schedules because they are polled on a condition, not a
+        # clock — a watch only becomes a Schedule at the moment it trips.
+        self._watches: dict[str, Watch] = {}
+        self._watch_counter: int = 0
         self._active_session_id: str | None = None  # Current conversation session
         self._verbose_level: int = 1  # 0=silent, 1=normal, 2=detailed
         self._effort: str = "high"  # reasoning effort: low/medium/high/max
@@ -203,6 +232,8 @@ class StateStore:
                 inst = Instance.from_dict(d)
                 self._instances[inst.id] = inst
             self._repos = data.get("repos", {})
+            self._repo_descriptions = data.get("repo_descriptions", {})
+            self._dormant_repos = set(data.get("dormant_repos", []) or [])
             self._active_repo = data.get("active_repo")
             self._task_counter = data.get("task_counter", 0)
             self._query_counter = data.get("query_counter", 0)
@@ -260,6 +291,14 @@ class StateStore:
             for d in data.get("schedules", []):
                 sched = Schedule.from_dict(d)
                 self._schedules[sched.id] = sched
+            self._watch_counter = data.get("watch_counter", 0)
+            for d in data.get("watches", []):
+                try:
+                    w = Watch.from_dict(d)
+                except Exception:
+                    log.warning("Dropping malformed watch record", exc_info=True)
+                    continue
+                self._watches[w.id] = w
             log.info("Loaded state: %d instances, %d repos, %d schedules",
                      len(self._instances), len(self._repos), len(self._schedules))
         except Exception:
@@ -302,6 +341,8 @@ class StateStore:
         data = {
             "instances": [i.to_dict() for i in self._instances.values()],
             "repos": self._repos,
+            "repo_descriptions": self._repo_descriptions,
+            "dormant_repos": sorted(self._dormant_repos),
             "active_repo": self._active_repo,
             "task_counter": self._task_counter,
             "query_counter": self._query_counter,
@@ -336,6 +377,8 @@ class StateStore:
             "model_cooldowns": self._model_cooldowns,
             "account_alerts": self._account_alerts,
             "schedules": [s.to_dict() for s in self._schedules.values()],
+            "watches": [w.to_dict() for w in self._watches.values()],
+            "watch_counter": self._watch_counter,
         }
         return json.dumps(data, separators=(",", ":"))
 
@@ -412,6 +455,50 @@ class StateStore:
         self.save()
         return inst
 
+    def clone_instance_for_rerun(
+        self,
+        inst: Instance,
+        *,
+        name_suffix: str | None = None,
+        origin_platform: str,
+        effort: str,
+        model: str | None,
+    ) -> Instance:
+        """Clone *inst* into a fresh QUEUED instance for a re-run.
+
+        Shared by /retry and the Retry button, the cooldown auto-retry, and
+        continue-on-pay-per-use. Each caller still sets what it alone owns
+        (``api_fallback``, ``cooldown_retries``, a prompt suffix), still calls
+        ``update_instance``, and still backfills the thread's session itself:
+        see "A thread must always know its session".
+
+        ``model`` is a parameter, not a copy. Both retry paths pass
+        ``inst.model`` for faithful replay, so a re-run build stays on
+        BUILD_MODEL. Pay-per-use passes None deliberately: the provider
+        ignores it under ``api_fallback``, and a later plain retry must not
+        inherit a model the pay-per-use turn never ran on.
+        """
+        new_inst = self.create_instance(
+            instance_type=inst.instance_type,
+            prompt=inst.prompt,
+            name=f"{inst.name}-{name_suffix}" if inst.name and name_suffix else None,
+            mode=inst.mode,
+        )
+        new_inst.origin = inst.origin
+        new_inst.model = model
+        new_inst.origin_platform = origin_platform
+        new_inst.effort = effort
+        new_inst.parent_id = inst.id
+        new_inst.repo_name = inst.repo_name
+        new_inst.repo_path = inst.repo_path
+        if inst.session_id:
+            new_inst.session_id = inst.session_id
+        if inst.branch:
+            new_inst.branch = inst.branch
+            new_inst.original_branch = inst.original_branch
+            new_inst.worktree_path = inst.worktree_path
+        return new_inst
+
     def get_instance(self, id_or_name: str) -> Instance | None:
         # Try by ID first
         inst = self._instances.get(id_or_name)
@@ -434,13 +521,6 @@ class StateStore:
                 return inst
         return None
 
-    def find_by_message(self, platform: str, message_id: str) -> Instance | None:
-        """Find instance by platform message ID."""
-        for inst in self._instances.values():
-            if message_id in inst.message_ids.get(platform, []):
-                return inst
-        return None
-
     def list_instances(self, all_: bool = False) -> list[Instance]:
         """Return instances, most recent first. Default: last 24h only."""
         now = datetime.now(timezone.utc)
@@ -458,6 +538,23 @@ class StateStore:
                     result.append(inst)
         result.sort(key=lambda i: i.created_at, reverse=True)
         return result
+
+    def latest_instance_for_session(self, session_id: str | None) -> Instance | None:
+        """Newest instance belonging to a session, or None.
+
+        Scanning by session_id is how the codebase resolves thread -> instance
+        (tags.py, forums.py, eval.py, the spawn-wave join): there is no index,
+        and this is the one implementation of that scan so a caller cannot
+        drift onto "first match" and pick a stale turn.
+        """
+        if not session_id:
+            return None
+        best: Instance | None = None
+        for inst in self._instances.values():
+            if inst.session_id and inst.session_id == session_id:
+                if best is None or (inst.created_at or "") > (best.created_at or ""):
+                    best = inst
+        return best
 
     def instance_count(self) -> int:
         """Total number of instances (all time)."""
@@ -533,9 +630,6 @@ class StateStore:
             return 0.0
         return self._daily_cost
 
-    def get_total_cost(self) -> float:
-        return self._total_cost
-
     def get_repo_daily_cost(self, repo_name: str) -> float:
         """Sum today's costs for instances of a specific repo.
 
@@ -574,20 +668,15 @@ class StateStore:
             return 0.0
         return self._fallback_cost
 
-    def get_top_spenders(self, limit: int = 5) -> list[Instance]:
-        """Return top-spending instances today."""
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        instances = [
-            i for i in self._instances.values()
-            if i.cost_usd and i.created_at.startswith(today)
-        ]
-        instances.sort(key=lambda i: i.cost_usd or 0, reverse=True)
-        return instances[:limit]
-
     # --- Repo Registry ---
 
     def add_repo(self, name: str, path: str) -> None:
         self._repos[name] = path
+        # Registering a repo is the opposite of parking it. remove_repo
+        # already clears the flag, but a hidden repo re-pointed at a new
+        # path with /repo add (no remove first) would otherwise come back
+        # invisible, with nothing on screen to explain why.
+        self._dormant_repos.discard(name)
         if not self._active_repo:
             self._active_repo = name
         self.save()
@@ -596,6 +685,10 @@ class StateStore:
         if name not in self._repos:
             return False
         del self._repos[name]
+        # A name re-registered at a different path must re-derive its blurb,
+        # and must not come back hidden.
+        self._repo_descriptions.pop(name, None)
+        self._dormant_repos.discard(name)
         if self._active_repo == name:
             self._active_repo = next(iter(self._repos), None)
         # Clean up any persisted deploy status msg IDs for this repo
@@ -623,6 +716,72 @@ class StateStore:
 
     def list_repos(self) -> dict[str, str]:
         return dict(self._repos)
+
+    # --- Dormant (hidden) repos ---
+    #
+    # Hiding is a *display* state, never a registration state. `list_repos()`
+    # is deliberately unfiltered: dozens of callers use it to resolve a repo
+    # path for resume, merge, worktree and deploy work, and a hidden repo has
+    # to keep working for all of them. Only the surfaces that draw a list for
+    # a human read `list_active_repos()`.
+
+    def set_repo_dormant(self, name: str, dormant: bool) -> bool:
+        """Hide or unhide a registered repo. False if it is not registered."""
+        if name not in self._repos:
+            return False
+        if dormant:
+            if name in self._dormant_repos:
+                return True
+            self._dormant_repos.add(name)
+        else:
+            if name not in self._dormant_repos:
+                return True
+            self._dormant_repos.discard(name)
+        self.save()
+        return True
+
+    def is_repo_dormant(self, name: str) -> bool:
+        return name in self._dormant_repos
+
+    def list_dormant_repos(self) -> list[str]:
+        """Registered repos that are currently hidden, in registration order."""
+        return [n for n in self._repos if n in self._dormant_repos]
+
+    def list_active_repos(self) -> dict[str, str]:
+        """`list_repos()` minus the hidden ones, for pickers and dashboards."""
+        return {n: p for n, p in self._repos.items()
+                if n not in self._dormant_repos}
+
+    # --- Repo descriptions (Control Room blurb, see bot/engine/repo_desc.py) ---
+
+    def get_repo_description_entry(self, name: str) -> dict | None:
+        entry = self._repo_descriptions.get(name)
+        return entry if isinstance(entry, dict) else None
+
+    def set_repo_description(self, name: str, text: str, source: str,
+                             sig: str, mtime: float, path: str) -> None:
+        """Record a derived blurb. An empty ``text`` is a cached *miss* — a repo
+        that says nothing about itself must not be re-read on every refresh.
+
+        ``sig`` is the freshness key (see ``repo_desc.source_signature``);
+        ``mtime`` is the newest source mtime, carried only so this record is
+        legible when read out of ``data/state.json`` by hand.
+
+        Deferred to the auto-save loop, not written through. Control rooms
+        refresh on every instance start and completion, and a cache miss that
+        forced a full multi-megabyte rewrite of state.json would make the
+        cache cost more on the miss path than the reads it exists to avoid.
+        Losing an entry to a crash costs one re-derivation, nothing more.
+        """
+        self._repo_descriptions[name] = {
+            "text": text, "source": source,
+            "sig": sig, "mtime": mtime, "path": path,
+        }
+        self.mark_dirty()
+
+    def clear_repo_description(self, name: str) -> None:
+        if self._repo_descriptions.pop(name, None) is not None:
+            self.mark_dirty()
 
     # --- Mode ---
 
@@ -773,16 +932,27 @@ class StateStore:
         """
         return {k: dict(v) for k, v in self._account_alerts.items()}
 
-    def sidelined_accounts(self) -> set[str]:
-        """Accounts with an open (unresolved) auth alert.
+    def sidelined_account_reasons(self) -> dict[str, str]:
+        """{account_dir -> reason} for every open (unresolved) auth alert.
 
         The only record of an account the *server* rejected — its credentials
         file still parses fine, so no on-disk check can see it.  Read by the
         "how healthy is the fleet?" surfaces so they agree with The Ark.
+
+        The reason rides along because the advice differs by it: an account
+        with no saved login is answered by signing in, an org-disabled one
+        provably is not.  A surface that only needs the names uses
+        ``sidelined_accounts``, which is this with the reasons dropped.
         """
         return {
-            k for k, v in self._account_alerts.items() if not v.get("resolved")
+            k: (v.get("reason") or "")
+            for k, v in self._account_alerts.items()
+            if not v.get("resolved")
         }
+
+    def sidelined_accounts(self) -> set[str]:
+        """The names of the accounts with an open auth alert."""
+        return set(self.sidelined_account_reasons())
 
     def set_account_alert(
         self,
@@ -984,15 +1154,19 @@ class StateStore:
         thread's session via ``_replay_to_thread`` — see
         ``Scheduler._execute_schedule`` and ``check_wake_request``.
 
-        Invariant: at most one pending wake per thread. Any existing pending wake
-        for this channel is superseded so interleaved turns or a busy re-arm
-        racing an active turn can't accumulate multiple pollers. Superseded wakes
+        Invariant: at most one pending *one-shot* wake per thread. Any existing
+        one for this channel is superseded so interleaved turns or a busy re-arm
+        racing an active turn can't accumulate multiple pollers. Recurring
+        thread-bound rows (nudges, see bot.engine.nudges) are deliberately
+        exempt: they are declared config, not ephemera, and a turn that happens
+        to arm its own wake must not silently delete the thread's nudge. Superseded wakes
         are deleted (not just disabled) — they're machine-generated ephemera with
         no post-supersede value, so lingering disabled rows would bloat state.json
         for a heavily-polling bot.
         """
         stale = [sid for sid, s in self._schedules.items()
-                 if s.resume_thread and s.channel_id == channel_id and s.enabled]
+                 if s.resume_thread and s.channel_id == channel_id and s.enabled
+                 and not s.is_recurring]
         for sid in stale:
             del self._schedules[sid]
         self._schedule_counter += 1
@@ -1011,6 +1185,85 @@ class StateStore:
         self.save()
         return sched
 
+    def upsert_nudge(self, label: str, prompt: str, channel_id: str,
+                     interval_secs: int, next_run_at: str,
+                     repo_name: str = "", repo_path: str = "") -> tuple[Schedule, str]:
+        """Create or update the declared nudge identified by ``label``.
+
+        Idempotent by design: this runs on every startup off
+        ``config/nudges.json``, so it must converge rather than accumulate.
+        Matching is on ``label``, never on the generated id, so editing a
+        nudge's wording updates the existing row instead of leaving an orphan
+        firing the old text.
+
+        ``next_run_at`` is always re-anchored from the caller's freshly computed
+        value (the next wall-clock occurrence of the nudge's time, in its own
+        timezone). Preserving the stored value instead would look safer but
+        drifts: stepping a UTC instant by 86400s crosses a DST boundary an hour
+        wrong, and the check-in this whole workspace targets is the week DST
+        ends. Recomputing is idempotent ("next occurrence strictly in the
+        future" is the same answer however often it is asked), so a restart can
+        neither delay a nudge nor double-fire one.
+
+        Returns ``(schedule, action)`` where action is "created", "updated" or
+        "unchanged", so startup can log what it actually did.
+        """
+        existing = next((sc for sc in self._schedules.values()
+                         if sc.label == label), None)
+        if existing is not None:
+            action = "unchanged"
+            if (existing.prompt != prompt
+                    or existing.channel_id != channel_id
+                    or existing.interval_secs != interval_secs
+                    or not existing.enabled
+                    or not existing.resume_thread
+                    or not existing.is_recurring):
+                action = "updated"
+            existing.prompt = prompt
+            existing.channel_id = channel_id
+            existing.interval_secs = interval_secs
+            existing.repo_name = repo_name
+            existing.repo_path = repo_path
+            existing.resume_thread = True
+            existing.is_recurring = True
+            existing.enabled = True
+            existing.next_run_at = next_run_at
+            self.save()
+            return existing, action
+
+        self._schedule_counter += 1
+        sid = f"sch-{self._schedule_counter:03d}"
+        sched = Schedule(
+            id=sid,
+            prompt=prompt,
+            repo_name=repo_name or "",
+            repo_path=repo_path or "",
+            interval_secs=interval_secs,
+            is_recurring=True,
+            next_run_at=next_run_at,
+            resume_thread=True,
+            channel_id=channel_id,
+            label=label,
+        )
+        self._schedules[sid] = sched
+        self.save()
+        return sched, "created"
+
+    def delete_nudges_except(self, labels: set[str]) -> list[str]:
+        """Drop declared nudges whose label is no longer in config/nudges.json.
+
+        Without this, deleting an entry from the config would leave it firing
+        forever, since nothing else ever touches a labelled row. Only labelled
+        rows are considered, so user cron jobs and one-shot wakes are untouched.
+        """
+        gone = [sid for sid, sc in self._schedules.items()
+                if sc.label and sc.label not in labels]
+        for sid in gone:
+            del self._schedules[sid]
+        if gone:
+            self.save()
+        return gone
+
     def get_schedule(self, sid: str) -> Schedule | None:
         return self._schedules.get(sid)
 
@@ -1027,6 +1280,76 @@ class StateStore:
     def update_schedule(self, sched: Schedule) -> None:
         self._schedules[sched.id] = sched
         self.save()
+
+    # --- Watches (event-triggered self-wakes) -----------------------------
+
+    def add_watch(self, watch: Watch) -> Watch:
+        """Arm an event-triggered self-wake for ``watch.channel_id``.
+
+        Same one-per-thread invariant as ``add_wake``: a thread has a single
+        thing it is waiting on, so a fresh watch supersedes any existing one
+        rather than accumulating pollers that would each fire a resume.
+        """
+        for wid in [w.id for w in self._watches.values()
+                    if w.channel_id == watch.channel_id]:
+            del self._watches[wid]
+        self._watch_counter += 1
+        watch.id = f"w-{self._watch_counter:03d}"
+        self._watches[watch.id] = watch
+        self.save()
+        return watch
+
+    def cancel_wakes(self, channel_id: str) -> int:
+        """Drop any pending self-wake for ``channel_id``. Returns how many.
+
+        A thread waits on ONE thing. ``add_wake`` already supersedes wakes with
+        wakes; this is the cross-mechanism half — arming a watch must retire a
+        clock-based wake left over from an earlier turn, or the timer fires
+        while the job it replaced is still running.
+        """
+        stale = [sid for sid, s in self._schedules.items()
+                 if s.resume_thread and s.channel_id == channel_id]
+        for sid in stale:
+            del self._schedules[sid]
+        if stale:
+            self.save()
+        return len(stale)
+
+    def pending_wake_for_channel(self, channel_id: str) -> Schedule | None:
+        """The pending self-wake bound to ``channel_id``, if any.
+
+        The read half of ``add_wake``'s one-wake-per-thread invariant. Callers
+        that want to know whether a thread already has something to resume it
+        ask here rather than scanning schedules themselves — a wake is a
+        ``resume_thread`` Schedule, which is not obvious from the outside.
+        """
+        for sched in self._schedules.values():
+            if sched.resume_thread and sched.channel_id == channel_id and sched.enabled:
+                return sched
+        return None
+
+    def list_watches(self) -> list[Watch]:
+        return list(self._watches.values())
+
+    def get_watch(self, wid: str) -> Watch | None:
+        return self._watches.get(wid)
+
+    def watch_for_channel(self, channel_id: str) -> Watch | None:
+        for w in self._watches.values():
+            if w.channel_id == channel_id:
+                return w
+        return None
+
+    def update_watch(self, watch: Watch) -> None:
+        self._watches[watch.id] = watch
+        self.save()
+
+    def delete_watch(self, wid: str) -> bool:
+        if wid in self._watches:
+            del self._watches[wid]
+            self.save()
+            return True
+        return False
 
     # --- Stats ---
 
@@ -1382,9 +1705,6 @@ class StateStore:
         }
         self.save()
 
-    def get_scheduled_merge(self, instance_id: str) -> dict | None:
-        return self._scheduled_merges.get(instance_id)
-
     def get_scheduled_merge_by_session(
         self, session_id: str | None,
     ) -> tuple[str, dict] | None:
@@ -1596,10 +1916,7 @@ class StateStore:
             return f"{m.group(1)} {m.group(2)[:40]}"
         return text[:50]
 
-    def append_deferred(
-        self, repo_name: str, items: list[str],
-        thread_id: str = "", topic: str = "",
-    ) -> None:
+    def append_deferred(self, repo_name: str, items: list[str]) -> None:
         """Append deferred revision items to the repo's TODO.md (deduplicated).
 
         Uses normalized key matching to prevent the same item from

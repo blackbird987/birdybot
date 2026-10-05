@@ -6,18 +6,19 @@ import asyncio
 import logging
 import os
 import signal
-import subprocess
 import sys
 import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from bot import config, paths
+from bot.procutil import run_capture
 from bot.claude.auth_health import (
     REASON_NO_DIR,
     relogin_command,
     unusable_reason,
 )
+from bot.claude import memory as claude_memory
 from bot.claude.runner import ClaudeRunner
 from bot.claude.types import InstanceStatus
 from bot.engine import commands as engine_commands
@@ -35,7 +36,6 @@ from bot.scheduler import Scheduler
 from bot.store.state import StateStore
 
 log = logging.getLogger(__name__)
-_NOWND: dict = config.NOWND
 
 
 def setup_logging() -> None:
@@ -135,10 +135,8 @@ def _detect_update_branch() -> str:
     if config.AUTO_UPDATE_BRANCH:
         return config.AUTO_UPDATE_BRANCH
     try:
-        result = subprocess.run(
-            ["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
-            cwd=str(config._PROJECT_ROOT),
-            capture_output=True, text=True, timeout=10, **_NOWND,
+        result = run_capture(["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
+            cwd=str(config._PROJECT_ROOT), timeout=10,
         )
         if result.returncode == 0:
             # "refs/remotes/origin/main" -> "main"
@@ -177,11 +175,8 @@ async def auto_update_loop(
             repo_lock = runner._get_repo_lock(str(config._PROJECT_ROOT))
             async with repo_lock:
                 # 1. Fetch
-                fetch = await asyncio.to_thread(
-                    subprocess.run,
-                    ["git", "fetch", "origin", "--tags", "--force"],
-                    cwd=str(config._PROJECT_ROOT),
-                    capture_output=True, text=True, timeout=30, **_NOWND,
+                fetch = await asyncio.to_thread(run_capture, ["git", "fetch", "origin", "--tags", "--force"],
+                    cwd=str(config._PROJECT_ROOT), timeout=30,
                 )
                 if fetch.returncode != 0:
                     err = fetch.stderr.strip() or "unknown error"
@@ -195,17 +190,11 @@ async def auto_update_loop(
                     continue
 
                 # 2. Compare HEAD vs remote
-                local_head = await asyncio.to_thread(
-                    subprocess.run,
-                    ["git", "rev-parse", "HEAD"],
-                    cwd=str(config._PROJECT_ROOT),
-                    capture_output=True, text=True, timeout=10, **_NOWND,
+                local_head = await asyncio.to_thread(run_capture, 
+                    ["git", "rev-parse", "HEAD"], cwd=str(config._PROJECT_ROOT), timeout=10,
                 )
-                remote_head = await asyncio.to_thread(
-                    subprocess.run,
-                    ["git", "rev-parse", f"origin/{branch}"],
-                    cwd=str(config._PROJECT_ROOT),
-                    capture_output=True, text=True, timeout=10, **_NOWND,
+                remote_head = await asyncio.to_thread(run_capture, ["git", "rev-parse", f"origin/{branch}"],
+                    cwd=str(config._PROJECT_ROOT), timeout=10,
                 )
                 if local_head.returncode != 0 or remote_head.returncode != 0:
                     if not failure_notified:
@@ -225,11 +214,8 @@ async def auto_update_loop(
                     continue
 
                 # 3. Get commit log for notification
-                log_result = await asyncio.to_thread(
-                    subprocess.run,
-                    ["git", "log", "--oneline", f"{local_sha}..{remote_sha}"],
-                    cwd=str(config._PROJECT_ROOT),
-                    capture_output=True, text=True, timeout=10, **_NOWND,
+                log_result = await asyncio.to_thread(run_capture, ["git", "log", "--oneline", f"{local_sha}..{remote_sha}"],
+                    cwd=str(config._PROJECT_ROOT), timeout=10,
                 )
                 if log_result.returncode == 0 and log_result.stdout.strip():
                     commits = log_result.stdout.strip().splitlines()
@@ -255,11 +241,8 @@ async def auto_update_loop(
                          n_commits, branch)
 
                 # 4. Pull (ff-only)
-                pull = await asyncio.to_thread(
-                    subprocess.run,
-                    ["git", "pull", "--ff-only", "origin", branch],
-                    cwd=str(config._PROJECT_ROOT),
-                    capture_output=True, text=True, timeout=30, **_NOWND,
+                pull = await asyncio.to_thread(run_capture, ["git", "pull", "--ff-only", "origin", branch],
+                    cwd=str(config._PROJECT_ROOT), timeout=30,
                 )
                 if pull.returncode != 0:
                     err = pull.stderr.strip() or "unknown error"
@@ -274,11 +257,8 @@ async def auto_update_loop(
 
                 # 4b. Verify HEAD actually moved (defensive — Fix 1 should
                 # catch the no-op case, but guard against edge cases)
-                post_pull = await asyncio.to_thread(
-                    subprocess.run,
-                    ["git", "rev-parse", "HEAD"],
-                    cwd=str(config._PROJECT_ROOT),
-                    capture_output=True, text=True, timeout=10, **_NOWND,
+                post_pull = await asyncio.to_thread(run_capture, 
+                    ["git", "rev-parse", "HEAD"], cwd=str(config._PROJECT_ROOT), timeout=10,
                 )
                 if post_pull.returncode == 0 and post_pull.stdout.strip() == local_sha:
                     log.error(
@@ -289,11 +269,8 @@ async def auto_update_loop(
 
             # 5. pip install (non-fatal)
             try:
-                await asyncio.to_thread(
-                    subprocess.run,
-                    [sys.executable, "-m", "pip", "install", "-e", ".", "--quiet"],
-                    cwd=str(config._PROJECT_ROOT),
-                    capture_output=True, text=True, timeout=120, **_NOWND,
+                await asyncio.to_thread(run_capture, [sys.executable, "-m", "pip", "install", "-e", ".", "--quiet"],
+                    cwd=str(config._PROJECT_ROOT), timeout=120,
                 )
             except Exception:
                 log.warning("Auto-update: pip install failed (non-fatal)", exc_info=True)
@@ -510,8 +487,25 @@ async def run() -> None:
     _audit_repo_portability(store)
 
     orphans = store.mark_orphans()
+    # Stays None on a clean restart and on every non-Linux host — read much
+    # later, when the orphan messages go out, so it must always be bound.
+    oom_reason: str | None = None
     if orphans:
         log.warning("Marked %d orphaned instances as failed", len(orphans))
+        # Ask *why* we restarted, but only when sessions actually died with us —
+        # on a clean restart there is nobody to tell, and the journal read isn't
+        # free. Every interruption used to collapse to "interrupted by bot
+        # restart", which is how the machine running out of memory twice in one
+        # night (2026-08-17, 01:09 and 02:34) presented as a bot bug and took a
+        # full forensic session to pin down. One question at startup replaces
+        # that whole investigation.
+        oom_reason = claude_memory.previous_run_was_oom_killed()
+        if oom_reason:
+            log.error(
+                "Previous run ended in an OOM kill — %s. %d session(s) died "
+                "with it.", oom_reason, len(orphans),
+            )
+            claude_memory.write_oom_marker(config.DATA_DIR, oom_reason)
 
     archive_count = store.archive_old()
     if archive_count:
@@ -742,9 +736,21 @@ async def run() -> None:
         if not discord_bot._ready_event.is_set() or not discord_bot._forums.forum_projects:
             return "busy"
         lookup = discord_bot._forums.thread_to_project(channel_id)
-        if lookup is None or not lookup[1].session_id:
-            log.info("Self-wake: thread %s gone/sessionless, dropping", channel_id)
+        if lookup is None:
+            log.info("Self-wake: thread %s gone, dropping", channel_id)
             return "drop"          # dead/merged/closed thread — don't resurface
+        if not lookup[1].session_id:
+            # Thread is alive but has no session bound. Used to be lumped in
+            # with "gone" and dropped — which is how three overnight runs
+            # finished their work and then vanished in silence (2026-08-27).
+            # A wake body is written to stand on its own ("read the log tail,
+            # report the numbers"), so dispatching cold into the right thread
+            # beats saying nothing: _replay_to_thread starts a fresh session
+            # there. The bind fixes above make this a rare last resort.
+            log.warning(
+                "Self-wake: thread %s is alive but sessionless — dispatching "
+                "cold rather than dropping", channel_id,
+            )
         if runner.active_instance_for_channel(channel_id):
             return "busy"          # mid-turn — scheduler re-arms instead of colliding
         # A fired wake runs unattended. Append the end-of-turn protocol so this
@@ -755,10 +761,33 @@ async def run() -> None:
         ok = await discord_bot._replay_to_thread(channel_id, wake_prompt, source="wake")
         return "done" if ok else "drop"
 
+    def _watch_messenger():
+        # Late-bound like on_self_wake above: discord_bot is assigned further
+        # down this function, and this is only ever called on the 30s tick.
+        if discord_bot is None or not discord_bot._ready_event.is_set():
+            return None
+        return discord_bot.messenger
+
     scheduler = Scheduler(
         store, runner, on_result=on_schedule_result, on_wake=on_self_wake,
+        messenger_getter=_watch_messenger,
     )
     scheduler.recalculate_next_runs()
+
+    # Declared nudges are reconciled after recalculate_next_runs (which skips
+    # labelled rows) so the config, not the generic missed-run recovery, owns
+    # their clock. Reconciling every boot is what makes editing config/nudges.json
+    # the only step needed to change what the bot sends unprompted.
+    from bot.engine import nudges as _nudges
+    try:
+        _nudge_summary = _nudges.reconcile(store, config.NUDGES_FILE)
+        if any(_nudge_summary.get(k) for k in
+               ("created", "updated", "removed", "error")):
+            log.info("Nudges reconciled: %s", _nudge_summary)
+    except Exception:
+        # Never let a nudge config fault stop the bot from booting; reconcile()
+        # already swallows config errors, so reaching here means a real bug.
+        log.exception("Nudge reconciliation failed")
 
     # Background tasks
     async def auto_save_loop():
@@ -808,6 +837,7 @@ async def run() -> None:
 
     async def cooldown_loop():
         from datetime import datetime as dt, timezone as tz_mod
+        from bot.engine import lifecycle
         while True:
             await asyncio.sleep(60)
             try:
@@ -826,41 +856,28 @@ async def run() -> None:
                 for sids in completed_by_session.values():
                     sids.sort(key=lambda x: x.created_at or "", reverse=True)
 
-                # Is there an account that could run something right now?  A
-                # retry time is a promise about when capacity returns, and it
-                # is recorded from the limit response — so it long outlives the
-                # limit if the account situation changes underneath it (a
-                # cooldown cleared because `/login` swapped which account lives
-                # in that directory, a second subscription added).  When a spawn
-                # is possible, waiting is waiting for nothing.
-                #
-                # Only meaningful with CLAUDE_ACCOUNTS configured: in
-                # single-account mode no cooldown is ever recorded (there is no
-                # account_dir to key it by), so retry_at is the ONLY record that
-                # a limit was hit and pulling it forward would break a real wait.
-                spawnable = bool(config.CLAUDE_ACCOUNTS) and (
-                    runner._pick_account() is not None
-                )
+                # Asked once per pass, not per instance: it purges expired
+                # cooldowns and re-probes credentials, and eighteen parked
+                # instances asking the same question eighteen times is the
+                # same answer at eighteen times the cost.
+                accounts_free = runner.has_spawnable_account()
 
                 for inst in all_instances:
                     if not inst.cooldown_retry_at or not inst.cooldown_channel_id:
                         continue
                     if inst.id in _cooldown_retrying:
                         continue
-                    try:
-                        retry_at = dt.fromisoformat(inst.cooldown_retry_at)
-                    except (ValueError, TypeError):
-                        continue
-                    if spawnable and now < retry_at:
-                        log.info(
-                            "Pulling %s's retry forward from %s — an account is "
-                            "available now, so there is no limit left to wait for",
-                            inst.id, inst.cooldown_retry_at,
-                        )
-                        inst.cooldown_retry_at = now.isoformat()
-                        store.update_instance(inst)
-                        retry_at = now
-                    if now >= retry_at:
+                    if lifecycle.cooldown_retry_is_due(
+                        inst.cooldown_retry_at, now, accounts_free,
+                    ):
+                        if not lifecycle.cooldown_retry_is_due(
+                            inst.cooldown_retry_at, now, accounts_free=False,
+                        ):
+                            log.info(
+                                "Pulling cooldown retry for %s forward from %s "
+                                "(an account is available again)",
+                                inst.id, inst.cooldown_retry_at,
+                            )
                         # Skip if session already has completed work after this instance
                         # (e.g. user switched accounts and finished the task manually)
                         # O(1) lookup via pre-built dict instead of O(n) scan per instance
@@ -906,9 +923,61 @@ async def run() -> None:
                         await _fire_scheduled_merge(store, runner, discord_bot, iid, meta)
                     except Exception:
                         log.exception("Scheduled merge fire failed for %s", iid)
+                ticks += 1
+                # Orchestrator: release spawn waves whose children never all
+                # came back — killed during a reboot, or dead before recording
+                # a session. The join is derived per child, so it self-corrects
+                # for everything EXCEPT a child that never reaches a terminal
+                # state at all; without this sweep such a wave would hold its
+                # parent open forever, which is worse than the per-child
+                # callbacks it replaced. Deliberately outside the ship-sweep
+                # overlap guard: this is a cheap scan and must not be starved
+                # by a fleet ship that runs for minutes.
+                if ticks % 5 == 0:
+                    try:
+                        from bot.discord.orchestrator import sweep_stale_waves
+                        n_released = await sweep_stale_waves(discord_bot)
+                        if n_released:
+                            log.info(
+                                "Orchestrator: released %d stale spawn wave(s)",
+                                n_released,
+                            )
+                    except Exception:
+                        log.exception("Stale spawn-wave sweep failed")
+                # Weekly prompt review. Checked on the same 5-minute cadence
+                # as the sweeps, but gated on a PERSISTED timestamp rather
+                # than on `ticks`: a reboot resets the counter, which would
+                # otherwise either fire on every restart or skip the week.
+                if ticks % 5 == 0:
+                    try:
+                        from bot.discord.prompt_review import maybe_run_weekly
+                        asyncio.create_task(maybe_run_weekly(discord_bot))
+                    except Exception:
+                        log.exception("Prompt review scheduling failed")
+                # The supervisor's own footprint. Recorded, never acted on:
+                # see the note on SUPERVISOR_MEM_WARN_MB. Its own tick gate
+                # rather than the 5-minute one, because this is a log line
+                # for a curve read over days and a 5-minute cadence would
+                # bury the thing it is meant to make visible.
+                _sup_every = config.SUPERVISOR_MEM_LOG_MINS
+                if _sup_every > 0 and ticks % _sup_every == 0:
+                    try:
+                        from bot.claude import memory as _mem
+                        foot = _mem.supervisor_footprint()
+                        warn_at = config.SUPERVISOR_MEM_WARN_MB
+                        if warn_at > 0 and foot.rss_mb > warn_at and not foot.error:
+                            log.warning(
+                                "Supervisor footprint: %s (above the %.0fMB "
+                                "this is expected to stay under; nothing is "
+                                "being reaped, this is a note to look)",
+                                foot.summary(), warn_at,
+                            )
+                        else:
+                            log.info("Supervisor footprint: %s", foot.summary())
+                    except Exception:
+                        log.exception("Supervisor footprint read failed")
                 # Ship sweep every ~5 min, guarded against overlap (a fleet
                 # ship can run for minutes and may self-deploy/reboot).
-                ticks += 1
                 if ticks % 5 == 0 and not sweep_running["v"]:
                     sweep_running["v"] = True
 
@@ -938,6 +1007,10 @@ async def run() -> None:
         from bot.discord.account_alerts import run_account_alert_notifier
         _bg_tasks.append(asyncio.create_task(
             run_account_alert_notifier(discord_bot, stop_event),
+        ))
+        from bot.discord.resource_alerts import run_resource_check
+        _bg_tasks.append(asyncio.create_task(
+            run_resource_check(discord_bot),
         ))
     if config.LOG_TRIAGE_ENABLED and discord_bot:
         from bot.discord.log_triage import run_triage_service
@@ -1067,7 +1140,49 @@ async def run() -> None:
     # "interrupted" → immediate restart sequence.
     await _cleanup_orphan_messages(
         notifier, orphans, auto_resuming_sessions, drain_callback_channel_ids,
+        interrupt_reason=oom_reason,
     )
+
+    # One Ark notice for the whole outage, not one per dead session: an OOM kill
+    # takes every running session at once, so per-thread notices would say the
+    # same thing ten times over.
+    #
+    # The reason is taken from the marker as well as from this boot's own
+    # journal read, and that fallback is the marker's entire reason to exist.
+    # The orphans are marked failed by the *first* boot after the kill, so if
+    # that boot dies anywhere between marking them and getting here, the next
+    # one finds nothing orphaned, never asks the journal, and the outage is
+    # never reported at all. Cleared only once the notice has actually landed,
+    # for the same reason — clearing it first would turn one failed send into
+    # silence.
+    notice_reason = oom_reason or claude_memory.read_oom_marker(config.DATA_DIR)
+    if discord_bot and notice_reason:
+        lobby_id = str(getattr(discord_bot, "_lobby_channel_id", "") or "")
+        if lobby_id:
+            # Zero is the normal count on the second-boot path above: the
+            # sessions were already marked failed by the boot that died.
+            took = (
+                f", taking {len(orphans)} running session(s) with it"
+                if orphans else ""
+            )
+            try:
+                await discord_bot.messenger.send_text(
+                    lobby_id,
+                    f"⚠️ **The bot was killed for memory and has restarted.** "
+                    # Not .capitalize() — that lowercases everything after the
+                    # first letter, so the day this reason carries a figure the
+                    # notice would read "13.9g".
+                    f"{notice_reason[:1].upper()}{notice_reason[1:]}{took}.\n"
+                    f"Any work in progress is still on disk — the branches and "
+                    f"worktrees are untouched. Check `/status` and resume "
+                    f"anything that matters.\n"
+                    f"If this repeats, the machine is genuinely short on RAM: "
+                    f"see the memory settings in `scripts/claude-bot.service` "
+                    f"and `SESSION_MEM_KILL_MB`.",
+                )
+                claude_memory.clear_oom_marker(config.DATA_DIR)
+            except Exception:
+                log.exception("Could not post OOM notice to the Ark")
 
     # Restore interactive pending-prompt entries (Steer/Queue embeds) from
     # before the reboot.  Instances they reference are dead — we edit the
@@ -1166,6 +1281,7 @@ async def _cleanup_orphan_messages(
     orphans: list,
     auto_resuming_sessions: set[str] | None = None,
     drain_callback_channel_ids: set[str] | None = None,
+    interrupt_reason: str | None = None,
 ) -> None:
     """Update thinking messages for instances that were interrupted by a restart.
 
@@ -1175,6 +1291,11 @@ async def _cleanup_orphan_messages(
 
     Skips instances that will be auto-resumed (via chain resume or drain queue
     callback) to avoid the confusing "interrupted" → immediate restart sequence.
+
+    ``interrupt_reason`` names the cause when startup managed to establish one
+    (currently: the previous run was OOM-killed). It lands in the thread the
+    user is actually looking at, which is the difference between "something
+    happened at 2 AM" and an answer.
     """
     if not orphans:
         return
@@ -1207,7 +1328,8 @@ async def _cleanup_orphan_messages(
                     try:
                         await messenger.edit_thinking(
                             handle,
-                            f"{inst.display_id()} interrupted by bot restart",
+                            f"{inst.display_id()} interrupted by bot restart"
+                            + (f" — {interrupt_reason}" if interrupt_reason else ""),
                         )
                         log.info("Updated orphan thinking msg for %s in %s:%s",
                                  inst.id, platform, channel_id)
@@ -1559,6 +1681,13 @@ async def _do_cooldown_retry_locked(store, runner, inst, discord_bot, channel_id
     t_info = lookup[1] if lookup else None
     repo_name = lookup[0].repo_name if lookup else inst.repo_name
     ctx = discord_bot._ctx(channel_id, thread_info=t_info, repo_name=repo_name)
+    # Wire the session callbacks so the session this retry produces gets
+    # registered onto the thread.  Without this the retry ran through
+    # lifecycle.run_instance, which never binds — so even a *successful* retry
+    # left the thread sessionless and unable to be resumed by a self-wake.
+    # Same omission that was fixed for post-reboot replays (_replay_to_thread).
+    if t_info is not None:
+        discord_bot._forums.attach_session_callbacks(ctx, t_info, channel_id)
     # Mark this as an unattended turn: nobody typed it, so lifecycle's
     # end-of-turn protocol applies (finish with [TURN_COMPLETE] or schedule a
     # wake, else get auto-nudged rather than silently stranding the thread).
@@ -1575,28 +1704,13 @@ async def _do_cooldown_retry_locked(store, runner, inst, discord_bot, channel_id
         pass
 
     # Create new instance from original
-    new_inst = store.create_instance(
-        instance_type=inst.instance_type,
-        prompt=inst.prompt,
-        mode=inst.mode,
+    new_inst = store.clone_instance_for_rerun(
+        inst,
+        origin_platform=inst.origin_platform,
+        effort=inst.effort,
+        model=inst.model,
     )
-    new_inst.origin = inst.origin
-    # Faithful replay: carry the source instance's model so a cooldown auto-retry
-    # resumes on the model it was running (e.g. a build stays on BUILD_MODEL
-    # instead of dropping to DEFAULT_SESSION_MODEL). Matches the retry paths.
-    new_inst.model = inst.model
-    new_inst.origin_platform = inst.origin_platform
-    new_inst.effort = inst.effort
-    new_inst.parent_id = inst.id
-    new_inst.repo_name = inst.repo_name
-    new_inst.repo_path = inst.repo_path
     new_inst.cooldown_retries = inst.cooldown_retries  # Carry count forward
-    if inst.session_id:
-        new_inst.session_id = inst.session_id
-    if inst.branch:
-        new_inst.branch = inst.branch
-        new_inst.original_branch = inst.original_branch
-        new_inst.worktree_path = inst.worktree_path
     # If the prior turn was running in a worktree (build / build-derived),
     # the cooldown can interrupt mid-edit. The resumed agent often thinks
     # the task is already done — leaving uncommitted edits stranded. Nudge
@@ -1637,6 +1751,14 @@ async def _do_cooldown_retry_locked(store, runner, inst, discord_bot, channel_id
     log.info("Cooldown retry: %s → %s in channel %s", inst.id, new_inst.id, channel_id)
     try:
         await lifecycle.run_instance(ctx, new_inst, handle=handle)
+
+        # Backstop: run_instance never binds, so if the interrupted turn was
+        # cut off before it produced a session_id at all, this retry's session
+        # is the only one the thread will ever see.  finalize_run has already
+        # written the authoritative id onto the instance by now.  Fill-only and
+        # worktree-excluded — the rule lives in backfill_thread_session, shared
+        # with /retry, the Retry button and continue-on-pay-per-use.
+        await lifecycle.backfill_thread_session(ctx, new_inst)
 
         # Resume autopilot chain if this retry was mid-chain
         if (new_inst.status == InstanceStatus.COMPLETED

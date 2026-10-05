@@ -46,6 +46,23 @@ REASON_UNREADABLE = "credentials file unreadable"
 # (see ``credentials_fingerprint``).
 REASON_RUNTIME_401 = "logged out — the CLI rejected its OAuth token (401)"
 
+# The same shape as RUNTIME_401 -- the server rejected a file that parses
+# fine -- but a different *fix*, which is why it is a separate verdict rather
+# than more text on that one.  A 401 is answered by signing in again; this one
+# cannot be, because the account is signed in perfectly well and an admin has
+# switched Claude Code off for the whole organization.  Telling the user to
+# run /login here sends them to do something that provably will not work.
+REASON_ORG_DISABLED = (
+    "the organization disabled Claude Code for this account"
+)
+
+# Verdicts reached from a *runtime* rejection rather than from the on-disk
+# probe.  Re-reading the credentials file can never retire one of these: the
+# rejected file parses exactly like a working one.  Only a successful run
+# clears them, or the file being rewritten by a fresh login
+# (see ``credentials_fingerprint``).
+RUNTIME_REJECTION_REASONS = frozenset({REASON_RUNTIME_401, REASON_ORG_DISABLED})
+
 
 def account_label(account_dir: str | Path) -> str:
     """Short display name for an account dir (``.claude-klerk`` -> ``klerk``).

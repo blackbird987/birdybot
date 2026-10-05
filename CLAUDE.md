@@ -18,6 +18,50 @@ python -m bot          # start the bot
 - **Platform layer**: `bot/platform/base.py` (Messenger protocol), `bot/platform/formatting.py`
 - **Discord**: `bot/discord/bot.py` (orchestrator), `slash_commands.py`, `interactions.py`, `adapter.py`, `channels.py`, `forums.py`, `idle.py`, `tags.py`, `modals.py`, `monitoring.py`, `formatter.py`
 
+## You can read the bot's own instance registry
+
+When you are asked "are the sessions you spawned done?", the bot already knows
+and `scripts/instances.py` reads it. Do not answer "I can't tell, run /list
+yourself" — that happened on 2026-09-08 while `/list` had the full answer.
+`ListAgents` is not the same dataset: it lists peer Claude CLI sessions on the
+machine and knows nothing about bot instances.
+
+```bash
+python scripts/instances.py children q-16871         # did my spawned children finish?
+python scripts/instances.py list --status running    # what is live right now
+python scripts/instances.py show t-8206              # branch + worktree of a build
+python scripts/instances.py log t-8206 --tail 40     # what it reported
+python scripts/instances.py find <thread_id>         # everything that ran in a thread
+```
+
+`tree`, `diff` and `--json` are there too. From another repo, call it by its
+absolute path — it resolves the *installed* bot's `data/` via
+`procutil.install_root`, so it reads the same registry from anywhere, including
+from inside a build worktree.
+
+Four things worth knowing before you quote it:
+
+- **It is read-only by omission**, like the mail and telegram readers in The
+  Citadel: no kill, no retry, no write path exists in the file. It also does
+  not go through `StateStore` (whose `save()` is one typo away) or import
+  `bot.config` (which resolves `DATA_DIR` against the *caller's* cwd and drops
+  a path marker on init).
+- **A spawned child carries no `parent_id`.** Only button/chain steps do. A
+  `/spawn` child is joined back to its parent through the forum thread —
+  `history.jsonl` first, the live session→thread map only as a fallback,
+  because a thread moves on to a newer session and resolving by session alone
+  would report a finished child under whatever is running there now.
+- **An instance that died before the CLI reported a session id and never
+  finalized has neither link**, so it reports as unlinkable rather than being
+  guessed at from timing. That is the shape of a bot restart mid-run.
+- **The view can lag by up to a minute** (the store flushes on a 60s
+  auto-save), and terminal instances are pruned from `state.json` after
+  `INSTANCE_RETENTION_DAYS` / `INSTANCE_MAX_RETAINED` along with their result
+  files. Every command prints the state file's age; `show` falls back to the
+  append-only history for a pruned id.
+
+Harness: `python scripts/test_instances.py`
+
 ## Discord Limits
 
 - Max 5 button rows per View (truncate, don't crash)
@@ -25,6 +69,188 @@ python -m bot          # start the bot
 - Slash commands are guild-synced (instant registration)
 - 3-second interaction timeout — always `defer()` first
 - `intents.members = True` needed for permission overwrites on category creation
+- A forum has exactly **one** pin slot. A second pin is REJECTED (error 30047,
+  "Maximum number pinned threads in this channel reached (1)") — it does not
+  replace the incumbent, so anything already pinned must be unpinned first.
+- Archiving a forum post clears its pin, and an archived thread rejects every
+  field but `archived` (error 50083) — wake it before editing anything else.
+
+## A copy-paste block must paste clean
+
+Discord soft-wraps a long line to the phone's width by itself. A session that
+hard-wraps the line *itself* — to "fit the phone" — bakes real newlines into
+whatever the user pastes into their mail client, and they have to strip every
+one by hand. On 2026-08-30 an email draft came out wrapped at 48 characters
+inside a ``` fence; the newlines were in the message content, not the renderer.
+
+- The rule lives in `WORKING_CONTEXT`'s Discord Formatting block
+  (`bot/config.py`): inside a fence, one paragraph is one line, and a newline
+  only ever appears where it is part of the content.
+- Nothing unwraps fences on the way out, deliberately. A mechanical unwrap
+  cannot tell an email paragraph from real code, an ASCII table or a diff, so
+  it would mangle the cases it did not mean to touch.
+- `eval._check_copy_block_wrapping` reports drift instead: a fence whose prose
+  lines are consistently short and break mid-sentence is flagged, and the
+  flag→owner map points at `WORKING_CONTEXT` so `/evals` names the block that
+  was supposed to prevent it. Fences that look like code, tables or ASCII art
+  are skipped — the check only fires on prose.
+- Harness: `python scripts/test_copy_block_wrapping.py`
+
+## A Control Room says what its repo is about
+
+The repo control room embed used the filesystem path as its whole
+description, so a forum of ten repos read as ten paths and you had to
+remember which was which. It now leads with a one-line blurb and demotes the
+path to `-#` subtext underneath.
+
+The blurb is **derived, not typed in** (`bot/engine/repo_desc.py`). Every repo
+already states its purpose somewhere, so first hit wins:
+
+`.claude/repo.json` → `CLAUDE.md` → `README.md` → `pyproject.toml`
+(`[project]`, then `[tool.poetry]`) → `package.json` → `Cargo.toml`
+
+For markdown that means the first *paragraph* that reads as prose — the title
+is skipped in both its `#` and underlined spellings, as are fenced code,
+bullets, block quotes, HTML comments, rules, table rows and badge rows. A
+wrong blurb is worse than none, and the title is the wrong blurb: the embed
+already shows the repo's name above it. The paragraph, not the line: most
+READMEs here are hard-wrapped, so the first *line* ends mid-sentence ("...take
+a plain-language request like") and reads as truncation with no ellipsis to
+admit it.
+
+The joined paragraph is reduced to one plain line and fitted to 120 chars,
+preferring the longest run of *whole sentences* that fits — "Agentic media
+downloader." beats the first 118 characters of the paragraph it opens. A
+word-boundary cut with `…` is the fallback, used when the leading sentence is
+under 24 chars and too terse to describe anything. Emphasis is unwrapped by
+*paired* regex rather than by stripping the characters — a blunt `_` strip
+turns a sentence about `data/state.json` and `repo_desc` into mush, and
+snake_case is exactly what a developer README's first line contains.
+
+**The cache is the load-bearing part.** `refresh_control_room` runs on every
+instance start and completion, so the hot path is stat-only: six `os.stat`
+calls producing a signature, and the file bodies are re-read only when that
+signature moves. The miss path defers its write (`mark_dirty`, picked up by
+the 60s auto-save) rather than saving through — `state.json` is megabytes, and
+a cache whose miss costs a full rewrite is worse than no cache. A repo that
+says nothing about itself caches the *miss*, so it costs stats rather than six
+failed opens forever. The signature names every
+candidate that exists together with its own mtime *and size*, deliberately not
+just the newest mtime: a source restored from a tarball or read over a mount
+with a skewed clock carries a *future* mtime, and behind it a newly created
+`.claude/repo.json` would never move a maximum, so the manual override would
+silently never apply. Size comes free out of the same `stat` and catches the
+other half — a file restored with its timestamp preserved but its content
+changed. There is no sync twin of the refresh, on purpose: one existed with no
+caller but the harness, and a sync/async pair of the same fifteen lines lets a
+fix land on one half while the tests keep passing against the other. `_localise_paths` translates the recorded path for the
+same reason it translates `repos` — the other machine's spelling never
+matches, and every refresh would re-read the files the cache exists to skip.
+
+`.claude/repo.json` is the manual override, written by `/repo desc <text>`
+(`/repo desc <name> <text>`, `/repo desc clear`, bare `/repo desc` to show it
+and its source). `desc`, `deploy` and `clear` are reserved repo names, so a
+repo cannot shadow either the subcommand or the `clear` argument. With no name it targets the repo of the **channel it was
+typed in**, before the globally active one: the command is typed inside a
+repo's forum, and defaulting to whatever was `/repo switch`ed to last writes
+the sentence into the wrong repo. That needs both halves — the engine prefers
+`ctx.repo_name`, and `cmd_repo` has to fill it in, because `_run_slash` builds
+its ctx with no repo and the engine half alone is inert on the slash path.
+`ForumManager.repo_for_channel` resolves it, falling back to the parent forum
+so the Control Room post itself resolves like any session thread — and it is
+handed the interaction's own channel, not just its id, because a Control Room
+auto-archives like any forum post and discord.py drops an archived thread from
+its cache, so the id-only lookup misses exactly the case the fallback is for.
+It is wired into `/repo` only: setting it in `_run_slash` would also change which repo
+`/bg` runs in. A repo whose directory is gone is refused, not created —
+`mkdir(parents=True)` on a stale registration would conjure an empty tree that
+looks like the real thing. It is written into the *repo*, not into bot state, because
+the sentence describes the repo and should travel with a clone — and it sits
+next to the per-repo config files that already live there (`test.json`,
+`workflow.json`, `sensors.json`, `deploy.json`). Other keys in the file are
+preserved on write, and one that will not parse is refused rather than
+replaced — it is committed alongside them and may hold keys written by hand.
+
+This repo deliberately ships **no** `.claude/repo.json`, so it exercises the
+CLAUDE.md fallback in real use.
+
+Harness: `python scripts/test_repo_desc.py`
+
+## TL;DR has two shapes, and picking the wrong one is the whole failure
+
+"Can you summarise this in simple terms" was retyped by hand in nearly every
+thread, so it came back a different shape each time and usually full of file
+paths and function names, which is unreadable on the phone it is read on. The
+[TL;DR] button and `/tldr` make it one prompt (`config.TLDR_PROMPT`,
+`workflows.on_tldr`).
+
+The load-bearing decision is that there are **two** shapes and the session
+picks between them, rather than one template stretched over both:
+
+- **The thing already exists** (built, diagnosed, concluded) ends with the
+  **caveat**: what is different now, what it does for you, one concrete
+  before/after example, the catch.
+- **The thing does not exist yet** (a plan, a proposal, a problem, options)
+  ends with the **decision**: the situation, why it bites you, what I would do,
+  and the actual question with the recommendation named as the default, so
+  "yes" is a complete answer.
+
+Collapsing them forces one into the wrong ending, which is what makes a
+"summarise this" answer read as either a changelog nobody asked for or a pitch
+with no question in it. No detection heuristic is needed: the prompt states the
+branch and the session already knows which it is in.
+
+The Example line is where these answers live or die. "The bot will not ship a
+build missing the last release" is abstract and says nothing; "you tap Merge on
+two parallel builds and the second one no longer silently reverts the first" is
+the sentence the user can act on. The prompt carries both versions so the rule
+cannot be read as a style note.
+
+Six things that must not drift:
+
+- **It resumes the session; it never starts fresh.** What it explains is the
+  conversation, not the diff. A fresh session would re-derive the *what* from
+  the code and get the *why* wrong, which is the half that was worth asking for.
+- **It is read-only at the floor that also closes Bash.**
+  `permission_mode="explore"` clamps `bash_policy` to `none`
+  (`_enforce_readonly_floor`), so a recap resuming a build-mode session cannot
+  write through `sed` or `echo >`. An explanation that goes off and does more
+  work is not an explanation.
+- **It never claims a button row and never lands on its own card.** Five rows
+  is the Discord ceiling and a crowded build card already uses four or five, so
+  the button appends to the Expand row when one exists and the Branch/Share row
+  otherwise (both are gated on `session_id`, which a resume needs anyway), and
+  is simply dropped when neither does, since `/tldr` covers that from the
+  keyboard. A TL;DR card offers no TL;DR: re-summarising a summary says nothing
+  and the recursion has no floor. `InstanceOrigin.TLDR` is also in
+  `_WORKFLOW_ORIGINS`, for its own reason: the instance is always clamped to
+  explore, so a mode toggle would read "Mode: Plan" on every recap regardless of
+  the mode the user was working in, and tapping it would set the thread's mode
+  off the back of a read-only turn. It is deliberately **not** in
+  `BUILD_ORIGINS`: it writes no code, so it is words, and words run on the light
+  model.
+- **It leaves the card it was tapped on alone.** Every other button in
+  `spawn_from` advances the work, so clearing the source card's buttons is
+  right for them. This one does not advance anything, and that card is the one
+  holding Merge, Discard, Commit and Done: asking for a summary must not cost
+  the user the buttons they were about to press. `strip_source_buttons=False`
+  is the only place TL;DR differs from its neighbours, and the harness pins
+  both halves so a copy-paste of the next button cannot quietly flip it back.
+- **Nothing it writes is dispatched as a directive.** It is in
+  `lifecycle._NO_DIRECTIVE_ORIGINS` next to the prompt review, for the weaker
+  version of the same reason and a stronger one of its own: a recap of the work
+  that just built the `/watch` or `/spawn` handling has those literal examples
+  fresh in its context, and this is the one origin whose whole contract is
+  "explain, do no work, change nothing", so a directive out of it is incoherent
+  however it got there. The prompt forbids it too, but a brief is the soft guard
+  and this is the hard one.
+- **`/tldr` and the button land on one handler.** The typed form only resolves
+  what the button already knew, the thread's newest turn, and that resolution
+  lives on the store (`StateStore.latest_instance_for_session`) because the
+  spawn-wave join needs the same scan. Two copies of "newest wins" is how one of
+  them quietly becomes "first match".
+
+Harness: `python scripts/test_tldr.py`
 
 ## Discord Architecture (v0.3.0)
 
@@ -34,12 +260,84 @@ Forum-based: one ForumChannel per project/repo, one thread per session.
 - Messages in forum thread → session auto-resumed
 - Dashboard embed pinned in The Ark (auto-updates on instance start/complete)
 - Per-repo control rooms live as pinned threads inside each repo's forum
+- **A forum has ONE pin slot and the Control Room owns it.** Archive and
+  monitor posts must never pin themselves — they used to, and racing the
+  control room left 5 of 14 forums with the Archive pinned instead.
+  `ForumManager.reconcile_forum_pins()` repairs this once on ready:
+  unpin everything else, then pin the control room. Either edit wakes a
+  sleeping post first — Discord rejects every field but `archived` on an
+  archived thread (error 50083), so a post that auto-archived while holding
+  the slot would otherwise keep it forever. No edits on correct forums.
+  Harness:
+  `python scripts/test_forum_pins.py` (add `--live` to read real state,
+  `--live --fix` to repair; REST-only, safe against the running bot)
 - Forum tags: active, completed, failed, cli, build
 
 Key data structures in `bot/discord/forums.py`:
 - `ForumProject`: repo_name + forum_channel_id + threads dict
 - `ThreadInfo`: thread_id + session_id + origin + topic
 - Persisted in `data/state.json` under `platform_state.discord.forum_projects`
+
+## A repo you are not using is hidden, not removed
+
+Twenty registered repos are twenty forums in one category, and most of them
+are not being worked on this month. `/repo hide <name...>` parks a repo;
+`/repo unhide <name...>` brings it back. Nothing is unregistered, nothing is
+deleted, and `/repo list` still shows a hidden repo under its own `Hidden:`
+heading; that listing is how you find one again.
+
+Three things that must not drift:
+
+- **Permission overwrites are not the mechanism, and never were.** Discord
+  shows the server owner every channel regardless of overwrites, so denying
+  `view_channel` hides nothing from the one person who asked for it. The
+  forum is *moved*, into a `<bot category> · Archive` category created on
+  demand next to the main one (`channels.ensure_archive_category`,
+  `forums._move_repo_forum`). The channel, its threads and its pinned posts
+  survive the move untouched. The move must **not** pass
+  `sync_permissions=True`: a repo forum can carry its own overwrites, since a
+  per-repo access grant is one extra entry on the forum rather than on the
+  category, and syncing replaces the forum's list with the destination
+  category's -- silently revoking that guest, with an unhide syncing to the
+  main category and still not restoring it. Confirmed against the live API:
+  a synced move took a forum from 4 overwrites to 3 and dropped the grant
+  role; an unsynced one round-tripped all 4. The move alone hides the forum;
+  it keeps the private overwrites it was created with either way.
+- **`list_repos()` stays unfiltered, deliberately.** It has dozens of callers
+  that resolve a repo *path* through it: resume, merge, worktree recovery,
+  deploy, session fork. A hidden repo has to keep working for all of them, so
+  filtering there would turn "hide" into "quietly break". Hiding is display
+  state: only surfaces that draw a list for a human read
+  `list_active_repos()` / `is_repo_dormant()`: the dashboard's Projects
+  field, the `/repo` switch menu, the `/new` repo picker, and the startup
+  reconcile loops that would otherwise redraw control rooms and repair pin
+  slots in a forum nobody is looking at. A hidden repo is still switchable
+  and still startable *by name*; naming one is intent.
+- **Work in a hidden repo un-hides it.** A spawn landing, a self-wake firing
+  or a message in one of its threads would otherwise post into a parked
+  forum and be seen by nobody. `wake_repo_if_dormant` is the one
+  implementation, and it has exactly three callers, one per way something
+  can appear in a forum:
+  `get_or_create_session_thread` (a new session thread; it sits **above**
+  that function's already-has-a-thread early return, because a *resumed*
+  session in a hidden repo is precisely the case that would keep posting
+  into the parked forum), the forum-message route in `bot.py` (the user
+  types in an existing thread), and `_replay_to_thread` (every unattended
+  resume: a fired self-wake, a tripped `/watch`, a `--here` schedule, an
+  orchestrator wave join, a post-reboot replay -- none of which touch
+  `get_or_create_session_thread`, since their thread already exists). A
+  plain schedule deliberately wakes nothing: its result is broadcast to the
+  owner, not posted into the repo forum, so there is nothing parked to
+  miss. The flag is cleared even if the channel move fails, because a repo
+  left flagged dormant while its work runs is the failure this exists to
+  prevent. This is what makes hiding safe enough to do casually.
+
+`add_repo` and `remove_repo` both discard the dormant flag, so a name
+re-registered later cannot come back invisible with nothing on screen to
+explain why. `hide` and `unhide` are reserved repo names, and both take
+several names at once.
+
+Harness: `python scripts/test_repo_hide.py`
 
 ## Build Isolation (Git Worktrees)
 
@@ -52,6 +350,665 @@ Build tasks use git worktrees for parallel isolation:
 - After Done/Commit → Merge/Discard buttons appear in the thread
 - Autopilot auto-merges after a successful chain completes
 - `/branches` scans for orphaned branches and worktree directories
+- `/branches` also lists release tags that are not reachable from `HEAD`, see
+  the next section
+
+## A higher version number is not proof the release is in there
+
+`_stale_version_warning` compares version *numbers*, and a number going up
+proves nothing about the content going out. Two builds running in parallel is
+all it takes: the second is cut from a base that predates the first one's
+release, it lands with a higher number, and the earlier release is reverted in
+silence. `DegenAI/AIAgent` carries **18** version tags whose commits are not
+reachable from master, dated 31 March to 4 August 2026. The v1.3.2.216 ship on
+15 September 2026 was caught only because a session looked at the ancestry by
+hand before pushing.
+
+Containment is read from git, never inferred: `git merge-base --is-ancestor`
+through `runner._is_ancestor`, and `git tag -l 'v*' --merged/--no-merged`
+through `runner.version_tags`. Three surfaces act on it, chosen because each is
+a point where the revert is still undoable:
+
+- **On merge.** `_release_containment_warning` appends to the same
+  `tag_warning` the stale-version check already returns, so the notice rides
+  the existing merge message. It carries `RELEASE_ORPHANED_MARKER`, which
+  `merge_msg_release_orphaned` reads and `merge_msg_is_failure` deliberately
+  does **not**: the branch landed perfectly well, and treating it as a merge
+  failure would hand it to the cleanup and retry path it does not belong in.
+  Same pattern as `REPO_UNUSABLE_MARKER` next door. Under autopilot,
+  `workflows._finalize_merge` stops on the marker **before**
+  `apply_post_merge_deploy` and `close_conversation`, so the chain never ships
+  a tree that reverts a release and never closes the thread on one.
+- **On discard.** A build branch can be the only place a release tag lives,
+  and deleting it strands that tag: the version looks shipped and its commits
+  are gone. The scan sits **above** the `git branch -D` block in
+  `_discard_branch_sync`, because after the delete there is no way back to
+  which branch that was, and it is skipped for a preserved branch (nothing is
+  stranded if the branch survives).
+- **Before deploy.** `execute_deploy` refuses a tree that does not contain the
+  last shipped release, **ahead of** the safety-net `git push origin HEAD`.
+  Ahead of, not after: pushing first is the irreversible half.
+
+Three things that must not drift:
+
+- **The gate walks back exactly one release; the backlog is an audit.**
+  `missing_predecessor_release` names the newest release below the ceiling
+  that `ref` does not contain, and the ceiling is the newest release `ref`
+  *does* contain (falling back to the newest tag overall only when it contains
+  none). A gate that fired on all 18 of AIAgent's orphans would block every
+  deploy in that repo and be switched off within a day, which is why
+  `orphaned_releases` exists separately and is reported by `/branches` rather
+  than at merge time. Verified against live repos: the deploy gate is quiet in
+  all nineteen registered ones whose directory still exists, while the audit
+  shows 18 orphans in aiagent (of 991 tags) and 3 in this repo.
+- **A git read that cannot answer is `None`, not `False`.** `_is_ancestor`
+  returns `None` for any exit code other than 0 or 1, and every caller treats
+  that as "no finding". A missing repo, a timeout or a corrupt object store
+  must cost a warning in the log, never a blocked deploy, because the failure
+  mode of a broken check that blocks is that the check gets removed.
+- **The check never compares a release to itself.** The merge path passes the
+  tag it just cut as `below=`, so the ceiling is that release and the subject
+  is the one under it. Without that, every release fails its own containment
+  test the moment it is tagged.
+
+`RELEASE_ANCESTRY_CHECK` (`bot/config.py`, default on) stands down all three
+surfaces and the audit at once.
+
+Harness: `python scripts/test_release_ancestry.py`
+
+## The orphan safety-net (age + silence)
+
+A run is never killed for being *old*. It is killed for being **silent**, and
+its age only decides when we start asking. Three knobs, all in `bot/config.py`:
+
+- `MAX_PROCESS_LIFETIME_SECS` (4h) — age past which the watchdog begins
+  checking. On its own it kills nothing.
+- `MAX_PROCESS_SILENCE_SECS` (30m) — how long a run past that age must have
+  produced **no output at all** before it is reaped. This is the actual trigger.
+- `MAX_PROCESS_HARD_LIFETIME_SECS` (24h, `0` = off) — age-only backstop, so a
+  process that heartbeats forever without finishing is not immortal.
+
+Why: on 2026-08-27 the age-only cap killed q-15433, a four-hour benchmark that
+had produced output **five minutes earlier**, had not gone quiet for even sixty
+seconds in its final two hours, and was sitting at 350 MB with live HTTPS
+connections open. Raising the number would only have moved the guillotine — a
+bench that farms work out in serial subagent batches can legitimately run all
+day. Only two lifetime kills had ever fired; the other (q-15010) had been
+silent for 43 minutes, which the new rule still catches.
+
+The reap keeps the work. It used to return a bare `RunResult`, so four hours of
+real work rendered as an empty red FAILED card. Both watchdog reaps — this one
+and the memory guard's — now go through `_reaped_result_base`, which is where
+"what a reap must preserve" is written down once: the recovered last assistant
+text, the tools used (the chain reads that list to decide whether a build
+changed code at all), the cost/token counters, and the `session_id` captured
+from the init event, without which Retry starts over instead of resuming. Only
+`error_message` differs between the two. `num_turns` is deliberately **not**
+synthesised; the account-failover heuristic reads `>1 turn` as proof the
+account took the turn.
+
+Three things that must not drift:
+
+- The failure wording **must contain the phrase "lifetime limit"**.
+  `parser.is_account_agnostic_error` matches on it to suppress the no-turns
+  failover heuristic — otherwise a reaped run is handed to the backup
+  subscription to burn the same hours again.
+- The session is told **before** `proc.terminate()`, not after. Terminating
+  closes the CLI's stdout, which ends the reader loop, whose `finally` cancels
+  the watchdog — same ordering rule as `reap_this_session` in the memory guard.
+- The reap's return must stay **below** the two stand-downs, which both reaps
+  share: a `result` event proving the turn finished anyway, and the session
+  being in `_intentional_kills`. A user's Kill landing inside the reap window
+  otherwise renders as a red FAILED card — and a failure with no turns is the
+  account-failover branch's signature, so it can be restarted on the backup
+  subscription. Same bug class as v0.101.11.
+
+`WATCHDOG_TICK_SECS` (10s) is the poll cadence for this, the stall warning and
+the memory guard. It exists so the harness can scale the whole watchdog down
+instead of sleeping through real hours.
+
+Harness: `python scripts/test_lifetime_cap.py`
+
+## A thread must always know its session
+
+Every resume path — the next user message, a fired self-wake, a tripped
+`/watch`, a post-reboot replay — reads `ThreadInfo.session_id`. A turn that
+finishes without writing that back is a turn the thread can never continue,
+and the failure is *silent*: the wake fires, finds nothing, and drops.
+
+Three rules, all pinned by `scripts/test_cooldown_session_bind.py`:
+
+- **The bind happens before the cooldown early-return.** A usage limit is a
+  pause, not an ending: `_do_cooldown_retry_locked` resumes that exact
+  `session_id`. `commands._execute_query` used to return to schedule the retry
+  *first*, so a limited turn never bound at all. On 2026-08-27 that lost three
+  overnight children — limit at 00:38, retried on the backup account at 01:55,
+  work finished by 02:45, wake-ups dropped as "gone/sessionless" while the
+  instances held a perfectly resumable id. The bind is wrapped in a try/except
+  precisely *because* it moved above the retry scheduling and the result
+  delivery: a failing state write must not cost the turn its retry.
+- **`lifecycle.run_instance` does not bind, deliberately.** A workflow step's
+  session belongs to the step, not to the conversation, so the chain runner
+  must not rewrite the thread's binding. Every *other* caller of
+  `run_instance` does own the conversation and has to top the thread up
+  itself. There are four — the cooldown auto-retry (`app`), `/retry`, the
+  Retry button and continue-on-pay-per-use (`commands`) — and none of them
+  did, so re-running the work as many times as you liked never restored a
+  lost binding. Pay-per-use is the sharpest of the four: it is the manual
+  twin of the cooldown retry, offered on the same usage-limit card. The
+  cooldown retry also has to call `attach_session_callbacks` on its ctx, or
+  it has no binding mechanism at all — the same omission already fixed once
+  for post-reboot replays, see the comment on `_replay_to_thread`.
+- **That top-up fills a gap; it never rebinds.** `backfill_thread_session` is
+  the one implementation all four share. Chain steps hit usage limits too and
+  land in the same retry function, and `/retry <id>` can be pointed at an
+  instance belonging to another thread. Rebinding from there would let a plan
+  or review step amputate a thread's chat history on the retry path while
+  never doing so on the normal one, so the write only happens into an empty
+  `session_id`. Worktree builds are refused outright — an isolated build
+  session must not become a thread's chat session even when the slot is free.
+  The harness asserts this structurally: *every* `lifecycle.run_instance`
+  callsite in `app.py` and `commands.py` must be followed by a backfill, so a
+  fifth caller added later fails the suite instead of silently losing threads.
+
+`should_bind_session` is where the eligibility rule lives, and it stays narrow.
+Success binds; a usage limit binds; **no other error does.** A crashed or
+recovery-exhausted run can emit a *fresh* `session_id` carrying none of the
+thread's history, and adopting that amputates the conversation. One deliberate
+seam: a run that recovered onto a fresh session and *then* hit the limit does
+bind, because the old id is already unreachable and the retry resumes the new
+one.
+
+`on_self_wake` distinguishes "thread gone" (drop) from "thread alive but
+sessionless" (dispatch cold, log at WARNING). Lumping them together is what
+made the loss invisible for eight hours.
+
+## A session that will not compact is let go of, not resumed
+
+The CLI aborts with `Prompt is too long · automatic compaction failed: …`
+when the conversation outgrew the context window and it could not summarise
+it down. Nothing recognised that until 2026-09-03, when five consecutive runs
+(t-7998, t-7999, t-8000, q-16143, q-16158) died against the same session,
+`1dbf08aa`, in seconds each. The thread stayed bound to it after every
+failure, so the next message resumed it and died the same way. The bug was
+not the failing run; it was the **wedged thread** behind it.
+
+It is the exact inverse of the autocompact thrash next door, and answering it
+the same way is what makes it permanent:
+
+- A thrash counter lives in the CLI **process** — a resume clears it.
+- This lives in the **session**. The oversized transcript is on disk, so every
+  resume replays it into the summariser that just failed.
+
+`parser.is_context_overflow_error` is the predicate, length-guarded like
+`looks_like_fatal_auth_error` because the callsite falls back to
+`result.result_text` and this repo's own sessions write about the failure
+constantly. Two rungs in `_run_impl`, placed after both resume-the-same-
+conversation branches:
+
+1. **Resume once** (`CONTEXT_OVERFLOW_RESUME_RETRIES`, default 1). Both
+   failures seen in the wild came from the *summariser*, not the transcript
+   ("summarization produced empty response", and a safety flag on the
+   summarisation call), and those are per-call blips. Nearly free — the CLI
+   aborts before the turn does any work. No recovery note on this rung: the
+   agent is resuming a conversation it never lost, and a preamble on a
+   transcript already at the limit spends context to say nothing.
+2. **Abandon the session** (`CONTEXT_OVERFLOW_FRESH`, default on) and run
+   fresh, primed with the thread's recent history. The two rungs compose
+   through recursion, not a loop: the resumed attempt re-enters the branch,
+   finds its budget spent, and falls through itself.
+
+Three things that must not drift:
+
+- **The fresh session has to be adopted by the thread.**
+  `should_bind_session` binds a `session_recovery_exhausted` result *even when
+  it errored*, because that flag is only ever set by a path that first proved
+  the old id unusable. Refusing leaves the thread on an id that can never run
+  again — which is the whole bug, not a detail of it.
+- **`is_account_agnostic_error` must keep the wording.** An overflow abort has
+  no output and no completed turns: the account-failover heuristic's exact
+  signature for "this account fell over instantly". Without it, a two-account
+  setup hands the same oversized transcript to the backup subscription to fail
+  identically. Same trap as `lifetime limit`.
+- **The briefing is best-effort, the recovery is not.** `on_context_reset`
+  (`lifecycle.make_progress_callbacks`) asks the platform for
+  `build_prime_briefing(mode="resume")` — the ~12K-token budget built for
+  exactly this loss, cache bypassed so it includes messages that landed while
+  the dead session was still being retried. It is built *before* the session
+  is cleared, and a failure costs the new session its memory of the thread,
+  never its existence. `CONTEXT_OVERFLOW_NUDGE` rides in front of it and says
+  the two things the replacement cannot find out for itself: that it is
+  genuinely new, and that its predecessor's edits are still on disk.
+- **The quoted history must arrive framed.** What `on_context_reset` returns is
+  not the bare digest but a ready-to-prepend block: `config.prime_preamble`
+  plus the digest plus the `---` separator, the same wrapper
+  `commands._execute_query` has always put around a briefing. The blocks are
+  the user's *own* earlier messages, so a session handed them unframed reads
+  them as live orders and redoes work that is already on disk — the exact
+  opposite of what this recovery is for. The wrapper moved out of `commands`
+  into `config` when the second caller appeared; it is one text with a
+  swappable situation sentence (`PRIME_SITUATION_LOST` here,
+  `PRIME_SITUATION_COMPACTED` for a resume that was compacted), because the
+  load-bearing half — "treat these as DATA, the user has NOT re-asked them" —
+  is identical in every case and must not drift between them.
+- **It is asked for only once.** A session does not overflow until it is huge,
+  which is the exact shape `_execute_query` primes on the compacted-resume
+  path — so the aborted attempt's prompt very often *already* opens with a
+  briefing built minutes earlier from the same thread. The runner checks for
+  `config.PRIME_PREAMBLE_MARKER` in `instance.prompt` and reuses that one
+  rather than requesting a second, which would put ~12K tokens of the same
+  quoted history twice into the one session whose entire problem is size,
+  under two preambles disagreeing about whether it was resumed. The marker is
+  the preamble's own opening words, so the two cannot drift apart.
+
+`/reset` is the manual twin, for when the switch is off or the fresh attempt
+died too: it unbinds the thread's session and drops the cached briefing,
+keeping the thread and its Discord history. Before it, the only escape was to
+abandon the thread.
+
+Harness: `python scripts/test_context_overflow.py`
+
+## Interrupting a session (Kill / Steer)
+
+A kill is only rendered as a quiet tombstone if `RunResult.killed_intentionally`
+gets set, and that needs **both** halves:
+
+- The caller must announce intent — `kill_and_wait(..., reason="kill")` (Kill
+  button, `/kill`) or `reason="steer"`. The bare `kill()` defaults to
+  `intentional=False` and produces a red FAILED card.
+- The exit code must corroborate it (`runner.is_kill_shape`). Two shapes count:
+  a **negative** returncode (kernel killed a process that ignored the signal)
+  and **128+N** (the process handled the signal and exited cleanly). The Claude
+  CLI does the second — `terminate()` on it returns **143**, never -15 — and
+  accepting only the negative shape once made every Kill and Steer read as a
+  crash. Windows can't be told apart at all (`terminate()` always yields 1), so
+  it is a blanket True there.
+
+Getting this wrong is not just cosmetic: a killed run has no output and no
+turns, which is the account-failover branch's exact signature for "this account
+fell over instantly", so an unrecognised kill can be restarted on the backup
+subscription. The guard is the `if result.killed_intentionally: return result`
+early-return in `_run_impl`, which must stay **above** that branch.
+
+Both the Kill button and typed `/kill` go through one function,
+`commands.perform_kill(ctx, inst, source_msg_id)` — they were near-copies, and
+the drift between them is what let the button be fixed while the command kept
+producing red cards. `source_msg_id` is the message the button sat on: present
+means "I will rewrite this card myself", which is passed down as
+`kill_and_wait(..., owns_card=True)` and lands on `RunResult.kill_owns_card`.
+That flag — **not** the reason string — is what makes `lifecycle.run_instance`
+skip its terminal edit of the progress message. `/kill` posts a separate
+message and leaves it False, so lifecycle resolves the card to `⏹ stopped`
+instead of stranding it on "thinking...". `steered` is reserved for
+`reason="steer"`, where a replacement run really is starting.
+
+Harness: `python scripts/test_kill_shape.py` (add `--live` to terminate the real
+CLI and check the returncode it actually produces).
+
+## Spawn-Wave Join (`bot/discord/orchestrator.py`)
+
+When a session fans work out with `/spawn`, the bot joins the whole wave back
+to the parent instead of making the user do it.
+
+- Child state is **derived**, never stored: `ThreadInfo.session_id` -> newest
+  `Instance` for that session -> status + `needs_input`. A child that parked on
+  a question is `blocked`, not `completed` (finalize marks both COMPLETED).
+- The wave roster is `Instance.spawn_dispatched_thread_ids`, sealed with
+  `spawn_wave_sealed` when the dispatch loop ends. **A wave is not joinable
+  before it is sealed** — otherwise a fast-failing first child closes the wave
+  while its siblings are still being created.
+- A child's callback resolves the wave whose roster **contains that child**, not
+  the newest wave — a parent can have two waves open at once (wave 1 resumes it,
+  it dispatches wave 2).
+- On close, the parent's resume prompt carries each child's **full report file
+  path** (`Instance.result_file`), not an excerpt. The human-facing post gets
+  the excerpts.
+- Full wave -> parent auto-resumes (`ORCH_AUTO_RESUME`, default on), bounded by
+  the existing 12-wave cap since `callback_resume` doesn't reset it. Partial or
+  timed-out release -> manual "Resume parent" button.
+- Sweep in `autonomy_loop` (every ~5 min): partial-releases a wave past
+  `ORCH_WAVE_TIMEOUT_MIN` (default 45; `0` = wait forever), closes a
+  fully-settled wave early (a killed child never calls back), and silently
+  *retires* any wave older than `_WAVE_ABANDON_HOURS` (12) — which is what
+  absorbs waves recorded before this feature existed.
+- **The timeout is for a child that is gone, not one that is slow.** It only
+  fires while no outstanding child has a live CLI process (`_child_is_live`,
+  which asks the *runner* — a status field frozen on RUNNING by a crash would
+  otherwise disable the timeout for the exact case it exists for), up to
+  `ORCH_WAVE_MAX_MIN` (default 6h; `0` = no ceiling). Age-only, it guillotined
+  the conductor's 3h bench children at 45 minutes on every wave.
+- **A report that lands after its wave closed is still delivered.** A released
+  wave used to swallow the straggler's finalize on a `debug` line, so a child
+  the partial release had written off finished, wrote a full report, and told
+  nobody — which is what pushed the parent onto its self-wake fallback.
+  `_deliver_late_child` posts it on its own (full report path + "your earlier
+  'missing' conclusion is stale"), auto-resuming only when it was the last one
+  outstanding, and records it in `Instance.spawn_late_reported_thread_ids` so a
+  retry can't post it twice. No deadline is right for every child; this is what
+  makes a wrong release recoverable instead of lossy.
+- **Only a child the release could not account for may be reported late.**
+  `release_wave` snapshots those into `Instance.spawn_wave_unresolved_thread_ids`
+  (same await-free block as the released flag, so the two can't disagree), and
+  `_deliver_late_child` requires membership. Without that gate, every later turn
+  in a child thread — a user follow-up, a re-finalize — reads as a straggler and
+  wakes the parent. Gating on "the release was partial" is the tempting wrong
+  answer: a child paused by a usage limit is recorded FAILED and *settled*, so
+  its wave closes as complete, and the report from its retry is exactly the one
+  that must still arrive. Pre-existing waves carry an empty list and are inert.
+- Blocked-child wake-ups are budgeted at `_MAX_BLOCKED_RESUMES` (4) per wave
+  (`Instance.spawn_blocked_resumes`) — parent answers, child asks again, repeat.
+- `[BOT_CMD: /reply thread=<id>]` + `~~~reply` body lets a parent answer its own
+  blocked child. Target must be in this session's own dispatched ids.
+- Harness: `python scripts/test_orchestrator_join.py`
+
+## Watches — event-triggered self-wake (`bot/engine/watches.py`)
+
+A self-wake is a timer; a **watch** is the same wake with an *event* as its
+trigger. A session that starts a long detached job arms one instead of guessing
+a delay, and the thread stays visibly busy until the job actually ends.
+
+- Directive (parsed post-turn, same rules as `/wake` and `/spawn`):
+  ```
+  [BOT_CMD: /watch pid=959988 log="artifacts/run.log" label="sculpt fit" progress="(\d+)/(\d+) frames" every=120 timeout=6h]
+  ~~~watch
+  The sculpt fit finished. Read the tail of artifacts/run.log, ...
+  ~~~
+  ```
+  Capture the pid when launching: `setsid nohup ./job.sh > run.log 2>&1 < /dev/null & echo $!`
+- Triggers: `pid=` (process gone) or `done=` (regex appears in the log tail).
+  At least one is required, plus a non-empty body — otherwise nothing is armed.
+  `timeout=` is a safety net, never the plan.
+- **A timer may be days long.** Both ceilings — `/wake delay=` and `/watch
+  timeout=` — are 30 days, not the 24h they were until 2026-09-08. Nothing else
+  in the path had to change for that: a wake is an ordinary one-shot schedule,
+  polled on the same 30s tick, persisted and never pruned, so its distance out
+  was only ever the clamp's business. It is still bounded because a wake firing
+  weeks later resumes a session whose CLI transcript may have been cleaned up by
+  then — the runner recovers from "No conversation found" by running fresh, but
+  the thread loses its history.
+  Both directives share **one** duration grammar (`45s`/`90m`/`6h`/`3d`/`2w`, or
+  a bare number of seconds), and so does the chip that renders them back. It
+  lives in `bot/textutil.py` rather than next to `/watch`, because the chip
+  renderer is in `bot.platform`, upstream of `bot.engine`, and a leaf module is
+  the only home all three can import without closing a cycle. It is anchored, so
+  `3days` falls back to the caller's default instead of parsing as its `3d`
+  prefix. Before it was shared, `delay=3d` hit an `int(float(...))` and became
+  the 180-second fallback in silence — the failure any new spelling here must
+  not reintroduce.
+- **Only an explicit directive arms a watch.** Heuristic wake-arming was ripped
+  out twice for firing on prose that merely *discussed* a job — don't reintroduce
+  it here.
+- PID reuse is defended by capturing field 22 of `/proc/<pid>/stat` (start time)
+  at arm time; a mismatched token reads as "gone", not "still running". Zombie
+  (`Z`) also counts as finished.
+- Firing does **not** add a second resume path: the poller calls
+  `store.add_wake(..., next_run_at=now)`, so a tripped watch becomes an ordinary
+  due wake and inherits the runaway cap, busy re-arm and unattended-turn nudge.
+- One thing per thread: `add_watch` supersedes an existing watch, arming a watch
+  calls `cancel_wakes`, and arming a `/wake` deletes an armed watch.
+- Busy indication while it waits: the `active` forum tag is retained
+  (`bot/discord/tags.py`), the 💤 idle prefix is suppressed (`bot/discord/idle.py`),
+  and one heartbeat message **edits itself in place** (never re-posts — thread
+  name edits are rate-limited, message edits are not) with a progress bar,
+  elapsed time, log path, last log line and a "Stop watching" button
+  (`watch_stop` in `bot/discord/interactions.py`).
+- Persisted in `data/state.json` under `watches` / `watch_counter`, so a watch
+  survives a bot restart. Polled by `Scheduler._check_watches` each 30s tick.
+- Knobs: `WATCH_*` in `bot/config.py`. Harness:
+  `python scripts/test_watch.py`
+
+### A promise to report back is nudged, never auto-armed
+
+`lifecycle.check_wake_request` is where a finished turn is judged, and a turn
+that armed nothing has three possible endings:
+
+- **Unattended dead-end** (a cooldown retry or self-wake fire with no
+  `[TURN_COMPLETE]`) → `_nudge_or_stop` re-invokes it.
+- **A false claim** ("Self-wake queued (~4 min)") with no directive parsed →
+  notice only, `claims_self_wake`.
+- **A bare promise** ("I'll report back when the tests finish") → since
+  2026-08-31, `promises_continuation` + `_promise_nudge` re-invoke the session
+  once with `_PROMISE_NUDGE_PROMPT`. Before that it fell through to "ended
+  cleanly" and the thread died holding a promise nothing could keep.
+
+It **nudges rather than arms** on purpose. `WAKE_PROMISE_RE` is the name a
+deleted predecessor held: it *scheduled* a 3-minute wake off this same prose
+and fired phantom re-checks on text that merely discussed a build. Re-invoking
+the session keeps "only an explicit directive arms anything" true, and puts
+the decision where the pid, the log path and the real duration are known. A
+false positive therefore costs one turn that answers `[TURN_COMPLETE]`.
+
+The detector has to survive this repo describing itself. Every guard in
+`WAKE_PROMISE_RE` exists because a sentence in these docs, a review report or
+a result file tripped it: a bare participle needs "in the background", that
+participle needs a first-person subject or a clause start (so "the scheduler
+is polling in the background" is prose, not a promise), a subjectless wait is
+rejected after "is/are/was/were/to", and the first-person contractions require
+their apostrophe — optional, and "id", "ill" and "im" read as "I'd", "I'll"
+and "I'm". Any new alternative must be checked the same way, against the
+archived result files rather than against invented examples.
+
+The nudge stands down whenever the thread already has something to resume it
+(an armed watch, a pending wake — which is how a tripped watch looks —, a
+worktree build, a context-exhausted session), shares `MAX_CONSEC_NUDGES` and
+one body (`_nudge_once`) with the unattended nudge so the two can't ping-pong
+or drift, and loses to the claim notice when both would fire.
+
+"Pending" means armed for *later*. `Scheduler._execute_wake` awaits the
+resumed turn and deletes the row in its `finally`, so during a wake-sourced
+turn the wake still in the store is the one being consumed —
+`_thread_has_pending_wake` discounts it. Counting it would silence the nudge
+for the likeliest case there is: a watch trips, the job is still running, and
+the resumed turn promises to report back again. `eval._check_unarmed_promise` counts recurrences and
+attributes them to `WAKE_GUIDANCE`, so `/evals` names the block that was
+supposed to prevent it.
+Harness: `python scripts/test_wake_promise_nudge.py`
+
+### A directive inside another session's block belongs to that session
+
+A body routinely contains a directive meant for its reader: a /spawn brief
+telling the child to end with a /wake, a ~~~plan saying what the build should
+arm, a ~~~reply handing a child the /watch it should use. On 2026-09-27
+(q-18729) exactly that armed a 30-day wake on the *parent*, and cut the
+child's brief off at the nested ~~~wake's closer, because every body parser
+was a flat `~~~tag\n(.*?)\n~~~` and every directive scan read the text flat.
+
+`bot/textutil.py` owns the fix, and every parser goes through it:
+
+- **`find_tilde_block` finds a body by depth.** An opener is a line of `~~~`
+  plus a tag, a closer is a line of exactly `~~~`; a nested block neither ends
+  the outer one nor is found as a top-level block. An unclosed block has no
+  body, so its directive reports "no body" instead of guessing an end.
+- **`mask_tilde_bodies` hides bodies from directive scans.** Scans run on a
+  copy with every top-level body blanked to spaces, newlines kept, so offsets
+  index the original and the line-based quoted-example guards see the same
+  lines. An unclosed block is masked to the end of the text, as an unclosed
+  Markdown fence renders.
+- **Mask before you scan, read the body from the original.** Wake, watch,
+  spawn, chain, reply, /repo and /image all do this, and so do the promise,
+  claim and `[TURN_COMPLETE]` scans: "I'll report back" in a child's brief is
+  the child's promise, not this turn's. `eval._check_unarmed_promise` inherits
+  it by calling the runtime predicates rather than re-parsing. A new directive
+  parser that scans the raw text reintroduces the bug.
+
+Harness: `python scripts/test_nested_directives.py` (replays the real
+q-18729 result file when the installed bot still has it).
+
+## The prompt reviews itself once a week (`bot/engine/prompt_review.py`)
+
+Every session is scored, every recurring flag is attributed to the prompt
+block that was supposed to prevent it, and until 2026-09-08 nobody read any
+of it in aggregate. The loop was open: findings accumulated on disk and the
+prompts that caused them never changed. `/promptreview [days]` runs it on
+demand, and `autonomy_loop` fires it weekly off a persisted timestamp.
+
+**It proposes; it never applies.** The reviewing agent is created in
+`mode="explore"` with `bash_policy="none"` and `bash_policy_baseline="none"`,
+which is the read-only floor: explore alone leaves Bash as a write backdoor
+through `sed`, `echo >` and `tee`, so an agent reviewing its own constraints
+could edit them. It reads one bounded table (25 rows, 8K chars, built by
+`build_review_input` from `eval.build_digest`), never the eval directory. What
+comes back is parsed into at most `PROMPT_REVIEW_MAX_PROPOSALS` (3) blocks and
+posted to The Ark with Approve and Reject buttons. Approve does not write
+anything either: it opens an ordinary build session in the repo's own forum
+with the proposal as its brief, carrying the usual Review Code / Commit / Done
+buttons, so the edit is made and inspected by the normal path rather than by
+the reviewer. It is not a chain and it does not auto-branch: only `/bg`
+branches, so this edits in place like any other build-mode message. That is the
+whole safety argument, and it is asserted on the created `Instance` rather than
+on the prose of a brief.
+
+**Frequency is not correctness.** The finding that made this necessary is also
+the trap it has to avoid. `tool_hygiene` flagged every Bash `cat`, `head`,
+`sed -n`, `grep` and `find` as "should use the Read/Grep tool", and it was
+wrong unconditionally: `bot/claude/provider.py` passes
+`--permission-mode bypassPermissions` on **every** run, and that mode's own
+system text instructs the session to prefer Bash for exactly those reads. It
+fired 47,319 and 25,754 times in 30 days, about 73,000 of roughly 76,000 total
+flags, and buried every real finding under a rule the harness itself was
+telling sessions to break. Deleting the check because it was loud would have
+been the right call for the wrong reason. So the agent must classify each row
+before it may touch anything:
+
+- `contradicted` (may become an edit) means the rule conflicts with another
+  active instruction or with how the harness actually runs. This is the
+  `tool_hygiene` shape.
+- `disobeyed` (**report only**) means the rule is right and is simply not being
+  followed. Deleting a rule because it is hard to follow is exactly backwards,
+  and a top-of-the-table count is what makes it tempting.
+- `obsolete` (may become an edit) means it fires so rarely that the prompt real
+  estate is not paying for itself.
+
+`EDITABLE_CLASSES` is the gate, enforced in `parse_review` rather than only
+stated in the brief, and a dropped block is recorded in `ReviewReport.ignored`
+instead of vanishing.
+
+Four more things that must not drift:
+
+- **Nothing it writes is dispatched as a directive.** Its whole job is to quote
+  the documents that carry the literal `[BOT_CMD: /watch ...]`, `/spawn`,
+  `/reply`, `/image` and `/repo add` examples, so a proposal that quotes one
+  would otherwise arm it for real: a watch on a pid that does not exist, a
+  spawn into a repo. The quoted-prefix guards in each parser do not help, since
+  an example indented inside a fence starts with whitespace, not a backtick.
+  `lifecycle._NO_DIRECTIVE_ORIGINS` is where that is settled once, for all
+  three dispatchers (`deliver_images`, `_execute_bot_commands`,
+  `check_wake_request`), keyed on origin rather than on the text.
+- **Its result card carries no repo buttons.** The review's thread lives in The
+  Ark, which is not a repo forum, so a Retry, Plan, Build & Ship or Branch
+  button on it resolves against whatever repo happens to be globally active.
+  `action_button_specs` returns early for the origin with only Kill, Log and
+  the Expand row; the Approve and Reject buttons are posted separately, on the
+  proposal embed.
+- **A retired check's flags stop counting, but its files stay readable.**
+  `_RETIRED_CATEGORIES` is skipped inside `build_digest`'s grouping loop and in
+  `report.py`, deliberately **not** in `load_evals`: the per-instance view has
+  to keep showing what was actually recorded, or an old session becomes
+  unexplainable. `attribute_flag` degrades to `"unattributed"` for a retired
+  category rather than naming an owner block that no longer has a check.
+- **The weekly gate is a persisted clock, stamped before the run.**
+  `should_run_now` takes the stored timestamp, not a tick counter: a reboot
+  resets a counter, which would either fire on every restart or skip the week
+  depending on which way the arithmetic fell. No stamp at all seeds rather than
+  fires, so enabling the feature does not immediately spend a run on a window
+  nobody asked about. An unparseable stamp reads as due. The stamp is written
+  **before** `run_review`, so a crash mid-review costs one week, not an
+  infinite retry loop.
+- **A rejection is remembered by target, not by text.** `fingerprint` hashes
+  the sorted `(file, flag)` pairs, so the same idea coming back reworded next
+  week is suppressed by the bot rather than merely discouraged in the brief. A
+  proposal that is genuinely new gets through because its targets differ.
+
+`run_instance` is called directly here and `backfill_thread_session` is
+deliberately **not**, for the same reason the chain runner does not backfill:
+the review's session belongs to the review, not to a conversation. See "A
+thread must always know its session". The harness asserts that absence
+structurally, so a later refactor that adds a backfill fails the suite.
+
+Knobs: `PROMPT_REVIEW_ENABLED`, `PROMPT_REVIEW_WINDOW_DAYS`,
+`PROMPT_REVIEW_INTERVAL_DAYS`, `PROMPT_REVIEW_MAX_PROPOSALS` in
+`bot/config.py`, all inert without `EVAL_ENABLED`.
+
+Harness: `python scripts/test_prompt_review.py`
+
+## A plan is checked against what was already tried (`bot/engine/prior_art.py`)
+
+An idea that was built, shipped and removed on purpose kept coming back as a
+fresh proposal, because the session judging a plan only knows its own
+context. The worked example: cdc54c8 (2026-06-18) auto-armed a wake when a
+reply promised to keep watching, d5f8aa8 (2026-07-02) removed it because it
+fired on prose that merely discussed a job, and it came back as a proposal
+weeks later. The removal sat in `git log` of the very file being changed the
+whole time; nothing asked anyone to look.
+
+So the bot looks. `prior_art.collect(repo_path, plan_text)` takes the files a
+plan names that exist in the repo (a bare filename only when exactly one
+tracked file has it) and the backticked names that look like code, and reads
+three things from git: the newest eight commits in each file's whole
+history whose subject opens with a removal verb (tagged `[reversal]`), the
+last five commits per file, and commit messages mentioning each name. git
+greps every line of a message, so a match on a body line only is kept
+untagged and is the first thing a tight cap drops. Reversals are
+listed first and are the last thing a tight cap drops. The result is prepended
+to the judging step's prompt the same way prior deferred items already are.
+
+Why the bot fetches rather than telling the session to: **the plan reviewer
+cannot run git.** It runs behind the read-only floor, and
+`_enforce_readonly_floor` closes Bash along with the write tools because Bash
+is a write backdoor. It keeps Read and Grep, which is why the review prompt
+also sends it to CHANGELOG.md and CLAUDE.md for the idea under another name.
+An instruction to "check the history" would also be the soft guard, skipped
+exactly when the session is confident.
+
+What it deliberately does not use is pickaxe (`-S`/`-G`) across the whole
+history: on AIAgent (about 6,100 commits) that is about 3.8s per term, against about
+30ms for a path-limited `git log`. The whole collection for 8 files and 6 names
+there takes about 0.6s. Everything fails open: not a repo, a non-zero exit, a
+5s per-call timeout or the 10s overall budget is no finding and a debug line,
+never an exception and never a blocked step.
+
+Three consumers:
+
+- **Plan review**, both the Review Plan button (`on_review_plan`) and the
+  autopilot loop (`_review_plan_loop`, read once before round 0 and reused).
+  `PLAN_REVIEW_PROMPT` asks for a High revision tagged `History` when the plan
+  re-adds something a `[reversal]` removed without naming it and saying what
+  differs, and for a `PRIOR_ATTEMPTS:` line in the review-status block.
+- **`/chain`.** `CHAIN_CONTEXT` asks the chat session to check git itself (it
+  has Bash) and to write a `Prior attempts:` line into the plan.
+  `_handle_chain_directive` then attaches the block to the stored plan with an
+  instruction to ask the user with AskUserQuestion before re-adding a removed
+  thing, which pauses the chain like any other question.
+- **The weekly prompt review.** `build_review_input` appends each owning
+  block's own edit history (`prior_art.block_history`, following the block's
+  line range in `bot/config.py` with `git log -L`), under its own 1500-char cap
+  outside the table's, and the brief tells the reviewer to drop a proposal
+  that puts back removed wording without naming the commit.
+
+Two evals measure whether any of it is read: a review handed the block whose
+status block has no `PRIOR_ATTEMPTS:` line (owner `PLAN_REVIEW_PROMPT`), and a
+dispatched `/chain` whose plan has no `Prior attempts:` line (owner
+`CHAIN_CONTEXT`, parsed with the dispatcher's own `_extract_chain_directive`
+so a quoted or nested /chain is as invisible to it as to the bot).
+
+Three things that must not drift:
+
+- **Never loosen the read-only floor to let the reviewer run git.** The bot
+  reading history for it is the whole reason this is safe.
+- **`PRIOR_ATTEMPTS:` stays above `DEFERRED:`.** `_parse_deferred_block` ends
+  the deferred list at the first non-bullet line, so a status line placed
+  after it would silently cut off every deferred item below it.
+- **The /chain history survives the plan cap.** `_extract_latest_plan_text`
+  splits the attached block off (`prior_art.split_attached`, searching from
+  the end so a plan that quotes the marker is not cut at its quotation), caps
+  and strips metadata from the plan half only, then puts the block back under
+  its own allowance. Capping the joined text would drop the history, and its
+  instruction, off the end of every long plan.
+
+Knobs: `PRIOR_ART_ENABLED`, `PRIOR_ART_MAX_CHARS` in `bot/config.py`.
+
+Harness: `python scripts/test_prior_art.py` (replays this repo's own history,
+so a plan re-proposing the auto-armed wake must surface d5f8aa8).
 
 ## Computational Sensors (`.claude/sensors.json`)
 
@@ -76,6 +1033,494 @@ to the build session for self-fixing (`bot/engine/sensors.py`).
   needs_input, like verify-fail) or `warn` (post failures, advance anyway).
 - Sits alongside the other per-repo config files: `.claude/test.json`
   (verify policy + diagnostics) and `.claude/workflow.json` (merge autonomy).
+
+## The machine has two resources, and only one of them was governed
+
+Everything under the memory guard measures memory. On 2026-09-08 the desktop
+became unusable while the bot sat well inside every one of those limits, and
+the logs from it are almost useless because each line answers the wrong
+question — how much memory was free — during an incident where the answer was
+always "plenty".
+
+The readings that mattered, on a 12-core box: load average **110**, one Roslyn
+`VBCSCompiler` at **605% CPU** with six sessions live, CPU PSI 9-18%, IO PSI
+11-24%. Memory PSI was 3%, available memory never dropped below 11 GB, and the
+100%-full swap belonged to Steam, Telegram and Plasma — the bot's cgroup held
+0.88 GB of it. `read_pressure` returned TIGHT and was **right**; nothing was
+wrong with memory. The unit simply had no `CPUWeight` or `IOWeight` at all, so
+this cgroup fought Plasma and the browser at the default weight of 100, and a
+compile farm always wins a fair fight against a desktop.
+
+Three layers, because there are three distinct contests and one knob cannot
+settle them:
+
+- **Bot versus you**: `CPUWeight=20`, `IOWeight=20`, on
+  **`app-claudesessions.slice`**, not on `claude-bot.service`. Weight,
+  **not `CPUQuota`**, and that distinction is the
+  whole design: weights bind only under contention, so an unattended machine
+  still runs builds across all 12 cores at full speed, while a machine you are
+  sitting at keeps roughly five sixths of the CPU. A quota would buy the
+  desktop's responsiveness with permanently slower builds — the wrong trade for
+  a box that is usually unattended. It landed on the *running* unit with
+  `systemctl --user set-property --runtime`, so six live sessions did not have
+  to be restarted for it, and **that is the sentence that cost a week**: a
+  `--runtime` drop-in lives in `/run` and systemd discards it when the unit
+  stops. An oomd kill stops the unit. The protection therefore uninstalled
+  itself on the exact event it exists for, and on 2026-09-21 the live cgroup
+  read `cpu.weight=100` while both unit files said 20 and `systemctl show`
+  agreed with them. Use `--runtime` to try a value; the unit file is what
+  makes it survive, and `cgroups.check_weights` is what proves it did.
+
+  The durable copy is `scripts/claude-bot.service`, which is the one that
+  matters: `~/.config/systemd/user/claude-bot.service` is an install-time copy
+  with the paths rewritten, and `migrate-off-windows-disk.sh` regenerates it.
+  A resource setting added only to the deployed copy survives until the next
+  migration and then silently disappears. Both carry it.
+
+  **The 20 moved off the service on 2026-09-22, and where it sits is now the
+  whole point.** Since v0.101.27 every CLI, shell, dotnet and Roslyn process
+  runs in a transient scope under `app-claudesessions.slice`, which carries
+  its own `CPUWeight=20` / `IOWeight=20`. The compile farm this paragraph is
+  about is therefore already held to a sixth, on the cgroup that actually
+  contains it. What is left inside `claude-bot.service` is the supervisor: a
+  ~250 MB asyncio loop that has to answer a Discord interaction within three
+  seconds and keep a gateway heartbeat alive. Starving *that* buys the desktop
+  nothing, because the CPU was never the supervisor's to give, and costs the
+  bot its connection, since a missed heartbeat disconnects it. So the service
+  runs at the default 100 and the slice keeps the 20, and both halves are
+  checked at startup against the live cgroup files
+  (`cgroups.check_weights` for the service, `check_session_slice_weights` for
+  the slice, expectations in `RESOURCE_*_WEIGHT_EXPECTED` and
+  `SESSION_SLICE_*_WEIGHT_EXPECTED`). Checking only the service was checking
+  the half that no longer matters.
+
+  One live-machine fact that makes this easier to accept than to fight: on
+  this box `uresourced --user` (Fedora's user resource daemon, PID confirmed
+  through its D-Bus name on 2026-09-22) calls `SetUnitProperties` on
+  `claude-bot.service` **many times a second**, rewriting
+  `/run/user/1000/systemd/user.control/claude-bot.service.d/50-CPUWeight.conf`
+  with `CPUWeight=100` continuously and burning about 14% of a core doing it.
+  That, and not a stale drop-in, is why the 20 never held there. It does not
+  touch `app-claudesessions.slice`, which reads 20 live.
+- **Bot versus its own sessions** — `config.SESSION_CPU_NICE` (10), applied by
+  `runner._lower_priority` immediately after the spawn. `CPUWeight` settles the
+  cgroup's share against the desktop and says nothing about how that share is
+  divided *inside* it, which is why the bot stopped answering Discord: a
+  ~250 MB asyncio loop that must reply within 3 seconds was competing at equal
+  priority with six CLIs and a 605% compiler, and a missed gateway heartbeat
+  disconnects. Niceness survives exec and is inherited by children, so one call
+  covers the CLI, its shells, dotnet and Roslyn without the runner hunting them
+  down.
+
+  **It is deliberately not a `preexec_fn`.** That is the obvious way to do it
+  and the wrong one here: CPython runs `preexec_fn` in the child between fork
+  and exec, where only async-signal-safe work is legal, and this bot forks from
+  a process with well over a hundred threading callsites. A child that lands on
+  a lock another thread held at fork time deadlocks before exec and hangs the
+  spawn forever while holding the runner's slot. Doing it from the parent costs
+  a few microseconds in which the CLI runs at normal priority — harmless, since
+  node spends hundreds of milliseconds starting before it forks anything — and
+  its worst case is a session that runs fast rather than one that never runs.
+  The target is computed from the supervisor's *own* nice, so a unit that later
+  grows a `Nice=` cannot silently close the gap.
+- **Bot versus the machine** — `MemoryPressure.cpu_psi_pct` / `io_psi_pct`,
+  recorded and logged, **deliberately never escalated on.** With the two
+  weights in place, CPU saturation costs throughput and no longer costs anyone
+  their desktop, so a gate here would hold sessions back to fix something that
+  no longer hurts. What was missing was never enforcement; it was that the next
+  incident of this shape be diagnosable from `bot.log` alone.
+
+Two things that must not drift:
+
+- **Each PSI signal keeps its own reader.** `psi_some_avg10` (memory),
+  `cpu_psi_avg10` and `io_psi_avg10` all wrap `_psi_some_avg10` rather than
+  sharing one parameterised entry point. The harness stubs the memory reader;
+  a single shared seam let that stub silently decide the CPU answer too, which
+  is how a test can describe a machine as memory-starved and CPU-idle in the
+  same breath.
+- **CPU and IO print only next to a reading the verdict was made from.** They
+  are context for a memory verdict, not a verdict of their own. A pressure read
+  that could measure nothing must still summarise as having nothing to go on —
+  quoting `/proc/pressure/cpu` at it makes a total failure of the memory
+  readings look like a healthy machine. `summary()` gates both on `bits` being
+  non-empty; `test_memory_guard.py` asserts it.
+
+Harness: `python scripts/test_memory_guard.py`
+
+## The killer reads a number the guard could not see
+
+Every rule in the memory guard measures how much memory is *free*. The thing
+that actually kills this bot measures something else entirely, and on
+2026-09-21 it killed the whole unit while every one of those rules scored OK:
+
+```
+Killed /user.slice/.../claude-bot.service due to memory pressure for
+/user.slice/.../app.slice being 90.79% > 80.00% for > 20s with reclaim activity
+  Pressure: Avg10: 94.76, Avg60: 75.53, Avg300: 36.01
+  Current Memory Usage: 10.1G
+claude-bot.service: Main process exited, code=killed, status=9/KILL
+```
+
+Same shape on Sep 14 20:34:46 and Sep 20 10:39:47. Six live sessions each
+time. Available memory never dropped below about 9 GB throughout, because
+systemd-oomd does not look at available memory: it reads the **cgroup's own
+PSI**, and it reads it on `app.slice`, a cgroup the bot had no reader for.
+`/proc/pressure/memory` is machine-wide and was reporting single digits. The
+guard was not wrong, it was structurally unable to see the number that kills
+it.
+
+Four things now exist because of that, and each one fails toward yesterday's
+behaviour if the machine will not support it.
+
+- **The guard reads oomd's own criterion.** `own_cgroup_psi_avg10` and
+  `slice_cgroup_psi_avg10` read `memory.pressure` in the cgroup our sessions
+  run in (see "Which cgroup is 'ours' moved" below) and in the parent slice; `read_oomd_policy` asks `systemctl --user show` what limit oomd
+  is actually armed at, and `oomd_policy()` caches it. `read_pressure` escalates to TIGHT at
+  `OOMD_TIGHT_FRACTION` (0.6) of that limit and CRITICAL at
+  `OOMD_CRITICAL_FRACTION` (0.8), so 94.76% against an 80% limit is CRITICAL
+  where it used to be OK. The own-cgroup reading is the discriminator between
+  "our sessions are doing this" and "something else on the box is", which is
+  the difference between holding a session back and holding one back for
+  nothing. Every one of these readers returns `None` when it cannot measure,
+  never `0`, and an unreadable oomd config stands the whole escalation down:
+  the same rule the existing PSI readers follow, for the same reason.
+- **The supervisor is no longer the only victim available.** oomd picks one
+  cgroup, and with every session running inside `claude-bot.service` the
+  smallest thing it could choose was the supervisor and all twelve
+  conversations. Sessions now spawn into a transient scope of their own
+  (`bot/claude/cgroups.py`, `systemd-run --user --scope --slice=...`) under
+  `app-claudesessions.slice`, and the service carries
+  `ManagedOOMPreference=avoid`. **`--scope` and not `--unit`**: a scope execs
+  the payload in the caller's own process context, so the asyncio pipes, the
+  parent/child relationship and `proc.pid` all survive, where `--unit` would
+  hand the command to the service manager and return a pid that is nobody's
+  child, breaking the stream-json reader, the kill path and the watchdog at
+  once.
+- **The slice name is ugly on purpose.** systemd derives tree position from
+  the dashes in a slice name, so `app-claudesessions.slice` lands inside
+  `app.slice`, which is where oomd is already armed. A prettier
+  `claude-sessions.slice` would sit at `claude.slice/claude-sessions.slice`,
+  outside it, with no policy reaching it at all. Its oomd limit lives in
+  `scripts/app-claudesessions.slice.d/50-oomd.conf` and **not** in the
+  fragment, because Fedora arms every user slice from a type-wide drop-in and
+  a drop-in beats a fragment: a limit written in the fragment is silently
+  overridden by the distribution's 80%. The slice is armed at 70%, below
+  `app.slice`, so the fleet is chosen before the box.
+- **Crossing a ceiling throttles before anything dies.** A scope gets
+  `memory.high` (soft: forced reclaim, kills nothing) and `memory.max` (hard
+  backstop) from `SESSION_MEM_HIGH_MB` / `SESSION_MEM_HARD_MB`, and
+  `SessionCgroup.current_mb()` reads `memory.current`, which counts the
+  reparented Roslyn server that no process-tree walk can see. `cgroup.kill`
+  ends a subtree atomically where `kill_tree` is a walk nothing can fork out
+  from under. Verified live: a child allocating past a 256 MB soft ceiling sat
+  at 273 MB with 10,607 `high` events and `oom_kill 0`, alive and crawling,
+  while `smoke_test.py` reported the bot HEALTHY.
+
+Six things that must not drift:
+
+- **A scope does not exist yet when the spawn call returns.** `systemd-run
+  --scope` registers the transient unit over D-Bus and only *then* execs, so
+  at the instant `create_subprocess_exec` hands back a pid, that pid is still
+  charged to the bot's own cgroup. Measured here, three trials of three: in
+  `claude-bot.service` at t=0, in its own scope by t=50ms. `adopt_session`
+  therefore **polls** (`SESSION_SCOPE_ADOPT_SECS`) instead of reading once,
+  and the read it replaced failed *silently*: a single look at t=0 fails the
+  identity check exactly the way a session that never got a scope does, so
+  every session ran with no soft ceiling, no `memory.current` accounting and
+  no atomic kill on a machine where all three worked. The harness had the
+  same blind spot for the same reason: it adopted after reading the child's
+  first line of output, by which point the scope has existed for a
+  comfortable margin. It now adopts at the moment the runner does.
+
+  **50ms is the idle number, and sizing the budget to it is the same bug
+  again.** Registration is a D-Bus round trip to the user service manager,
+  so how long it takes is a property of how busy that manager is: on a
+  loaded, `degraded` one the same three trials read 1.1s, 1.8s and 4.8s, and
+  a 5-second budget lost a real run to it. The default is 60s, which is
+  affordable only because the wait is *not* awaited in the spawn path:
+  `runner._adopt_session_scope` runs it as its own task, so a budget sized
+  for a pathological manager can never stall a spawn. Nothing downstream
+  needs it to have finished, because every reader of `_session_cgroups`
+  already treats a missing entry as "walk the process tree instead", which
+  is exactly right for the window before adoption lands. The task is
+  cancelled *before* the cleanup's `pop`, or a late adoption writes the
+  entry back in behind it and leaks it for the life of the process, and it
+  re-checks that the run it adopted is still the one in `_processes`.
+  `test_session_cgroups._check_adoption_offpath` fails the suite if
+  `adopt_session` is ever awaited anywhere but there: inlining it is four
+  lines shorter and passes every other test.
+- **Whether scopes work is re-established, not learned once.** It is a
+  property of the *user service manager*, and that can wedge under a process
+  that lives for weeks: every job `waiting`, none `running`, behind one
+  crash-looping unit, seen twice on 2026-09-21. There `systemd-run` blocks
+  forever, so a cached "yes" turns every later spawn into a session that
+  never starts at all and is only reaped by the 4h silence watchdog. Two
+  guards, both cheap: the probe answer carries a TTL
+  (`SESSION_SCOPE_PROBE_TTL_SECS`), and a wrapped session that never reaches
+  its scope calls `invalidate_scope_probe`, so the next spawn pays one
+  bounded probe and then runs unwrapped exactly as a machine with no systemd
+  does. The same rule covers `oomd_policy`: a cached *error* is a failure to
+  ask and is retried, while `armed=False` with no error is a real answer and
+  is kept, because caching one slow `systemctl` call at boot would otherwise
+  switch the whole oomd rule off for the life of the process.
+- **The supervisor's `MemoryMax` stays large, deliberately.** A machine
+  without a usable `systemd-run` falls back to running sessions inside the
+  service cgroup exactly as before, and a supervisor cap sized for a
+  supervisor would kill them instantly there. The fallback guarantee outranks
+  the tighter number.
+- **A diagnostic gets its own subprocess seam.** `_probe_scope` uses
+  `subprocess.run` on a worker thread and **not**
+  `asyncio.create_subprocess_exec`, because the runner spawns sessions through
+  that API and every harness counting spawns patches it. It shared the seam
+  for exactly one afternoon, during which a one-shot `true` was recorded as a
+  phantom extra session attempt in the memory-guard suite. Same rule as the
+  PSI readers, one layer down.
+- **The probe's unit name is unique per probe.** A fixed name survives as a
+  loaded unit after the scope exits, so every later probe fails with "already
+  loaded" and the bot concludes that scopes do not work on a machine where
+  they do.
+- **`check_weights` reads the cgroup, never `systemctl show`.** During the
+  week the protection was off, `systemctl show` reported 20 and the unit files
+  reported 20; `cpu.weight` was the one source telling the truth. The startup
+  check (`bot/discord/resource_alerts.py`) is a one-shot, not a loop, because
+  the weights can only move when the unit restarts or someone runs
+  `set-property`, and the first of those brings the check with it.
+
+Install, once, no root:
+
+```bash
+cp scripts/app-claudesessions.slice ~/.config/systemd/user/
+mkdir -p ~/.config/systemd/user/app-claudesessions.slice.d
+cp scripts/app-claudesessions.slice.d/50-oomd.conf \
+   ~/.config/systemd/user/app-claudesessions.slice.d/
+cp scripts/claude-bot.service ~/.config/systemd/user/   # paths may need rewriting
+systemctl --user daemon-reload && systemctl --user restart claude-bot.service
+```
+
+`oomctl` is how you confirm it took: the sessions slice should appear with
+"Memory Pressure Limit: 70.00%".
+
+One live-machine trap worth writing down, found while verifying this. If
+`systemd-run --user` hangs, `systemctl --user show` disagrees with
+`systemctl --user cat`, and a direct write into `cpu.weight` reads back
+unchanged, the user service manager is wedged, not the code. Check
+`systemctl --user is-system-running` (degraded), `list-jobs` (jobs all
+`waiting`, none running) and the manager's own CPU. `systemctl --user
+daemon-reexec` clears it. On 2026-09-21 an unrelated service being kernel
+OOM-killed at a 13.5 GB peak livelocked the manager at 95% CPU for seven
+minutes, which among other things stopped the browser opening tabs.
+
+### The rungs have to add up, or the ceiling becomes the killer
+
+Giving oomd a session-sized victim worked: on 2026-09-22 at 11:29 it shot one
+session scope instead of the whole unit, the desktop survived and the session
+retried on the same id. It still should not have fired, and why it did is
+arithmetic rather than a bug in any one place.
+
+`SESSION_MEM_HIGH_MB` was 6144 and `MAX_CONCURRENT` was 5. That is 30 GB of
+per-session soft ceiling against a slice budget of `MemoryHigh=11G` /
+`MemoryMax=14G`: **two** sessions at their own ceiling already exceed the
+fleet throttle line. Worse, 6 GB is where a dotnet/Roslyn build session
+naturally sits. The peaks that day read 5.8G, 5.8G, 5.9G and then six sessions
+at *exactly* 6.0G, which is not six coincidences, it is six sessions pinned on
+their ceiling.
+
+`memory.high` does not stop a cgroup there. It makes the kernel reclaim
+continuously to hold it there, and continuous reclaim is precisely the stall
+pressure oomd kills on. t-8711 died with `Pgscan: 141565` and the slice at
+93.14% against its 70% limit. **A soft ceiling set at the working set
+manufactures the condition it exists to prevent.**
+
+Four numbers now have to stay consistent, and the next person to move one
+should check the others:
+
+- `SESSION_MEM_HIGH_MB` (8192) sits **above** the measured working set, where
+  it catches a session that is genuinely running away and is invisible to one
+  that is merely large. It is not the fleet's limiter and never was.
+- `MAX_CONCURRENT` (4) is a backstop, not the limiter.
+- The fleet is bounded by the slice's own `MemoryHigh` and by admission.
+  `cgroups.slice_headroom_mb` measures against **`memory.high`**, falling back
+  to `memory.max` only when there is no soft limit. Measuring the hard cap
+  meant the gate engaged at 12800 MB of slice usage on this machine, thousands
+  of MB above the throttle line where the kill is already being decided; it
+  now engages at 8192 MB.
+- `MEM_ADMISSION_MIN_SLICE_HEADROOM_MB` (3072) reserves room for what a
+  session *becomes*, not what it starts as. The old 1536 was sized on the
+  stated assumption that the soft ceiling absorbs later growth. It does not
+  absorb, it reclaims.
+
+And the hold learned whose shortage it is waiting on. `_admission_blocked`
+returns an `AdmissionBlock` carrying `ours`, and the hold loop gives our own
+pressure `MEM_ADMISSION_OWN_MAX_WAIT_SECS` (30 min) against the old 5 minutes
+for foreign pressure. Waiting on our own slice is waiting for a running
+session to finish, which reliably happens; proceeding anyway there is the move
+that manufactures the next kill. Waiting on a browser holding 6 GB is waiting
+for nothing, so that one still gives up quickly and starts regardless. Both
+still proceed in the end, neither blocks forever, and a Kill ends either
+immediately. A long hold re-posts every `MEM_ADMISSION_NOTIFY_SECS`, because a
+thread that said "waiting for memory" once and then went quiet for half an
+hour is indistinguishable from a thread that died. The message that gives up
+quotes **elapsed** time, not the deadline: the deadline is recomputed from the
+current shortage every pass, so a hold that opened on our own pressure and
+ended on a browser's would otherwise report half an hour as five minutes.
+
+**`ours` is never read off the oomd verdict**, which is the tempting shortcut
+and would invert the feature. That number is the stall in `app.slice`, which
+holds the browser, Plasma and Steam as well as us, so blaming ourselves for it
+hands every foreign shortage the 30-minute deadline and blocks work on
+something that will never clear. Three readings taken on cgroups we actually
+own answer it instead, any one of which is enough: the session slice being
+under `MEM_ADMISSION_MIN_SLICE_HEADROOM_MB`, our workload cgroup being over its
+`MemoryHigh`, and our workload cgroup carrying at least half the parent slice's
+stall (`MemoryPressure.stall_is_ours`, which is also where the "mostly our own
+sessions" half of the hold message comes from, so the sentence the user reads
+and the deadline they wait out cannot disagree). Nothing readable means
+not-ours and the short deadline, which is the right way round: proceeding is
+the safe default when there is no evidence worth waiting on.
+
+### Which cgroup is "ours" moved, and three readings did not follow it
+
+Every "are our own sessions doing this" reading was taken on the bot's own
+cgroup, and that was correct until v0.101.27 moved the sessions into scopes of
+their own. After it, `claude-bot.service` holds a ~250 MB asyncio loop, so
+`over_own_high()` and `own_psi_pct` measured the supervisor and answered **no**
+however hard the fleet was thrashing. Measured live on 2026-09-22: the
+supervisor's cgroup read 234 MB while the sessions slice read 3788 MB of an
+11 GB soft ceiling. Two things were silently dead as a result, and both are
+exactly what the incident needed:
+
+- **Cross-session arbitration.** `_fleet_arbitration` gates on
+  `is_critical() and over_own_high()`, so the rule that picks one session to
+  stop when the fleet together is filling the machine could not fire at all.
+- **The blame sentence.** `read_pressure` told the user "it is mostly not us"
+  during a shortage our own sessions had caused, and the admission hold quotes
+  that sentence verbatim.
+
+The fix is one parameter rather than a second set of readers:
+`memory.read_pressure(own_cgroup=...)` names the cgroup the *work* runs in, and
+passes it to `cgroup_memory` and `own_cgroup_psi_avg10`. `runner._workload_cgroup`
+supplies it from `cgroups.session_slice_path()`, and **None is the fallback, not
+an error**: a machine that cannot make scopes, or one where the probe has not
+run yet, runs its sessions inside the bot's own cgroup, which is precisely what
+the default reads. `parent_slice_path()` is deliberately untouched, so the pair
+stays "our fleet's stall against the stall of the slice oomd is armed on".
+
+The direction of the dependency is why this is a parameter at all:
+`bot/claude/cgroups.py` imports `memory`, so `memory` cannot ask it where the
+sessions slice is without closing a cycle. The runner already imports both and
+is the layer that knows whether scopes are in use, so the decision lives there.
+
+Knobs: `SESSION_SCOPES_ENABLED`, `SESSION_SLICE`, `SESSION_MEM_HIGH_MB`,
+`SESSION_MEM_HARD_MB`, `SESSION_SCOPE_ADOPT_SECS`,
+`SESSION_SCOPE_PROBE_TTL_SECS`, `OOMD_TIGHT_FRACTION`, `OOMD_CRITICAL_FRACTION`,
+`RESOURCE_CPU_WEIGHT_EXPECTED`, `RESOURCE_IO_WEIGHT_EXPECTED`,
+`SESSION_SLICE_CPU_WEIGHT_EXPECTED`, `SESSION_SLICE_IO_WEIGHT_EXPECTED`,
+`MEM_ADMISSION_OWN_MAX_WAIT_SECS`, `MEM_ADMISSION_NOTIFY_SECS` in
+`bot/config.py`.
+
+Harnesses: `python scripts/test_session_cgroups.py` and the oomd, weight-check
+and slice-unit cases in `python scripts/test_memory_guard.py`.
+
+## The ceiling stopped one level too low
+
+Every memory rule above this one bounds *the bot*: a ceiling per session, a
+ceiling per fleet, an oomd limit on the sessions slice. On 2026-09-21 16:32
+and again on 2026-09-23 02:07 the machine died anyway, and neither time was it
+a session. `smartmoney-api.service` leaked to 13.2 GB and then to 10.6 GB:
+
+```
+oom-kill:constraint=CONSTRAINT_NONE, ..., global_oom,
+  task_memcg=/user.slice/.../app.slice/smartmoney-api.service, task=dotnet
+Out of memory: Killed process 3861530 (dotnet) anon-rss:10655400kB
+```
+
+`CONSTRAINT_NONE` is the finding. Not a cgroup limit -- there was none to
+reach. `app.slice` and `user@1000.service` both read `MemoryMax=infinity`, and
+every desktop application under them ships uncapped, so the kernel ran out of
+physical memory with swap already at 100% and picked its victim from the whole
+task table with the desktop in scope. systemd-oomd was armed on `app.slice` at
+80% throughout and did not save it, which is **not** a misconfiguration: oomd
+requires twenty seconds of sustained stall, and a runtime allocating gigabytes
+in seconds with no swap runway reaches global OOM first. A pressure watchdog is
+a reaction; a ceiling is an invariant, and the tree had none.
+
+`scripts/app.slice.d/50-memory.conf` installs one: `MemoryHigh=25G`,
+`MemoryMax=27G`. Four things that must not drift:
+
+- **`MemoryMax` is the point, `MemoryHigh` is the courtesy.** High throttles
+  and reclaims and kills nothing, which buys oomd the sustained stall it needs
+  to choose deliberately. Max is what makes the kill happen *inside*
+  `app.slice`, so the victim is an application chosen from applications. Same
+  reasoning as `app-claudesessions.slice` one level down: give the killer a
+  correctly sized victim and the failure stops being everybody's.
+- **The desktop is a sibling, not a descendant.** plasmashell, kwin and the
+  rest run in `session.slice`; `app.slice` holds Chrome, Steam, Discord,
+  Telegram, the bot and its sessions. That is what makes a cgroup OOM in here
+  survivable, and it is worth re-checking before tightening anything: if the
+  shell ever moves into `app.slice`, this ceiling starts being able to kill it.
+- **The ladder nests, and the harness asserts it.** The sessions slice's
+  `MemoryMax` (14G) must stay below the tree's (27G), or the tree's ceiling is
+  reached first and oomd picks a victim from every application on the machine
+  when the thing filling it was our own fleet. Same arithmetic rule as the
+  per-session ceiling against the slice budget.
+- **25G is above the working set on purpose.** 18.8 GB anon when this was
+  written. A soft ceiling at the working set does not hold a cgroup there, it
+  makes the kernel reclaim continuously to hold it there, and continuous
+  reclaim is the stall oomd kills on -- the mistake already made once with
+  `SESSION_MEM_HIGH_MB` and documented above. This catches a leak; it must be
+  invisible to a tree that is merely busy.
+
+`cgroups.check_app_slice_ceiling` runs at startup next to the two weight
+checks and reads the **live cgroup files**, never a unit file or `systemctl
+show`: both reported the intended value throughout the week the weight
+protection was actually off. What it guards is not a mistyped number but the
+drop-in quietly not being installed, which is invisible until the machine
+dies. A ceiling *tighter* than expected passes -- tighter is still bounded,
+and a smaller machine may set one on purpose -- while "reads `max`" and "so
+high it could never bind" are findings. `app_slice_path()` resolves the tree
+by **name**, walking up: asking for "the slice one level up" is correct from
+the supervisor and returns `app-claudesessions.slice` from inside a session
+scope, which is exactly what the check's first live run reported about itself.
+
+Chrome carries `MemoryHigh=12G` and deliberately no `MemoryMax`
+(`~/.config/systemd/user/app-google\x2dchrome@.service.d/50-memory.conf`, a
+template drop-in, which does apply to the transient per-launch unit). It is the
+largest uncapped consumer here: 11.0 GB with one renderer growing 1.9 GB to
+5.3 GB in ten minutes while this was being diagnosed. Soft only, because
+reclaim makes Chrome discard background tabs while a hard cap would crash a
+renderer on a page being looked at.
+
+### The supervisor's size is recorded, not guarded
+
+This repo calls the supervisor a ~250 MB asyncio loop in several places, and
+that number is an argument: it is why `claude-bot.service` keeps the default
+CPU weight while the sessions slice carries 20, and why its `MemoryMax` stays
+large. It read 1.07 GB after 24 hours of uptime on 2026-09-23. One reading
+cannot separate a large working set from a slow leak, and nothing had recorded
+the shape over time, so the question was unanswerable rather than answered.
+
+`memory.supervisor_footprint()` logs one line every
+`SUPERVISOR_MEM_LOG_MINS` (30), giving `grep 'Supervisor footprint'
+data/logs/bot.log` a curve, and warns past `SUPERVISOR_MEM_WARN_MB` (1536).
+Three things that must not drift:
+
+- **It is a recorder.** No reap, no restart, no ceiling. Killing the
+  supervisor is the outcome the whole memory guard exists to prevent, and a
+  guard armed on a number nobody understands yet trades a slow leak for an
+  outage. The harness fails the suite if a kill path appears in it.
+- **It measures the process, not the cgroup.** The cgroup is the wrong subject
+  twice: it carries gigabytes of reclaimable page cache that is not a
+  footprint, and on a machine where scopes are unavailable it also carries
+  every session -- the exact quantity being excluded.
+- **No rate for the first half hour.** A rate computed over the first minutes
+  of uptime measures start-up (caches filling, the gateway backfilling, the
+  state file loading), so every restart would read as a catastrophic leak.
+
+Knobs: `APP_SLICE_MEM_HIGH_GB_EXPECTED`, `APP_SLICE_MEM_MAX_GB_EXPECTED`,
+`SUPERVISOR_MEM_LOG_MINS`, `SUPERVISOR_MEM_WARN_MB` in `bot/config.py`.
+
+Harness: the app.slice and supervisor cases in
+`python scripts/test_memory_guard.py`.
 
 ## Multi-Account Setup
 
@@ -125,6 +1570,69 @@ credentials per `CLAUDE_CONFIG_DIR`, so two accounts cannot share `~/.claude`.
   `Instance`), so `--resume` always lands on the right account.
 - Invalid entries are pruned at startup — `_pick_account()` only rotates among
   validated dirs, so a typo can't cause silent runtime failover failures.
+
+### An account that comes and goes is parked, not removed
+
+An organization admin can switch Claude Code off for a whole account and
+switch it back on later. Nothing about that is an `.env` edit: the account
+stays in `CLAUDE_ACCOUNTS` the entire time and the existing sideline
+machinery carries it (park, one Ark notice, roughly daily retry, rejoin on
+the first successful run). It was inert until 2026-09-15 for one reason,
+and that reason is the thing to keep true:
+
+- **The wording has to be matched by name.** "Your organization has disabled
+  Claude subscription access for Claude Code · Use an Anthropic API key
+  instead, or ask your admin to enable access" hit the klerk account 26 times
+  from 12:06 on 2026-09-14 and matched none of `is_account_unusable_error`'s
+  patterns, so `_pick_account` kept picking a dead subscription. The no-turns
+  fallback that exists for unmatched wording structurally cannot cover this
+  one: the CLI does not abort before turn 1 the way a 401 does, it reports the
+  refusal as a *completed* turn (`num_turns=1`) whose result text **is** the
+  error, so both halves of "produced nothing and took no turns" are false and
+  nothing is even logged as unmatched.
+- **A runtime rejection spelled as a compaction failure belongs to the account
+  branch.** Compaction is an ordinary API call, so the refusal surfaces
+  through the summariser as "Prompt is too long · automatic compaction failed:
+  Your organization has disabled ...". That reads as a context problem, and
+  the context-overflow branch sits *above* the account branch, so it spent
+  both recovery rungs and then abandoned a transcript that compacts perfectly
+  well. q-17514 and q-17515 were amputated that way at 04:13 on 2026-09-15.
+  The overflow branch now stands down on `looks_like_fatal_auth_error`.
+- **`REASON_ORG_DISABLED` exists to pick the right advice, not to add text.**
+  Every other sideline is answered by signing in again; this one cannot be,
+  because the account is signed in fine throughout. The Ark notice drops the
+  "is signed out" opener, the `CLAUDE_CONFIG_DIR` command and the login
+  button, says an admin has to re-enable access, and offers **Try now**
+  instead. Three surfaces carry that advice and all three branch on the
+  reason: the notice, the `/auth` panel (which reads the table through
+  `StateStore.sidelined_account_reasons`, so a button it offers cannot
+  contradict the notice that linked to it) and the failure card
+  `runner._soften_auth_dead_end` writes when there is nowhere left to fail
+  over to. `RUNTIME_REJECTION_REASONS` is what keeps both runtime verdicts
+  out of the reach of the on-disk probe, which can never retire either: the
+  rejected credentials file parses exactly like a working one.
+- **"Try now" clears an auth cooldown and nothing else.**
+  `runner.retry_account_now` drops the day-long `ACCOUNT_AUTH_COOLDOWN_SECS`
+  sideline so the next task tries the account; if it is still blocked it is
+  re-sidelined exactly as before. It refuses a *usage* cooldown, which ends on
+  a real clock, and it reads the persisted alert table as well as the
+  in-memory auth/usage split, because a reboot loses that split and would
+  otherwise make a restarted auth sideline look like a usage limit for the
+  rest of the day. Only a `RUNTIME_REJECTION_REASONS` alert counts as that
+  durable evidence, and the button is only drawn for one: the probe reasons
+  open an alert without ever arming a cooldown, so reading one as an auth
+  sideline would force-clear a real usage limit that happened to be sitting
+  behind it. The sole-account case arms no cooldown either (parking the only
+  account we have would stop everything), so there the in-memory dead mark is
+  the whole sideline and dropping it is the whole retry.
+- **One panel renderer.** `/auth` and its Refresh button both go through
+  `wizard._render_auth_panel`. They were near-copies and had already drifted:
+  Refresh left out the sideline table, so refreshing turned a server-rejected
+  account back into a green tick.
+
+Harnesses: the org-disable cases live in `scripts/test_account_failover.py`
+and `scripts/test_account_alerts.py`; the compaction-wrapped one lives in
+`scripts/test_context_overflow.py`, next to the recovery it must not trigger.
 
 ## Versioning
 

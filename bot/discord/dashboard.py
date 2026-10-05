@@ -218,8 +218,15 @@ def build_dashboard_embed(
                 running_by_repo[inst.repo_name] = running_by_repo.get(inst.repo_name, 0) + 1
 
         proj_lines = []
+        hidden_projects = 0
         for name, proj in forum_projects.items():
             if proj.forum_channel_id and name != "_default":
+                # A hidden repo is deliberately absent here: that is what
+                # hiding is for. It is counted, not listed, so it can never
+                # go missing without a trace.
+                if store.is_repo_dormant(name):
+                    hidden_projects += 1
+                    continue
                 threads = len(proj.threads)
                 parts = [f"<#{proj.forum_channel_id}> ({threads} threads)"]
                 running = running_by_repo.get(name, 0)
@@ -228,6 +235,9 @@ def build_dashboard_embed(
                 if name == active_repo:
                     parts.append("*")
                 proj_lines.append(" ".join(parts))
+        if hidden_projects:
+            proj_lines.append(
+                f"-# {hidden_projects} hidden \u00b7 `/repo list`")
         if proj_lines:
             embed.add_field(name="Projects", value="\n".join(proj_lines), inline=False)
 

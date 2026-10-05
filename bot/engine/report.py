@@ -6,8 +6,8 @@ import logging
 from collections import Counter
 
 from bot.engine.eval import (
-    ChainEval, SessionEval, attribute_flag, build_digest, load_chain_evals,
-    load_evals, normalise_flag_message,
+    ChainEval, SessionEval, attribute_flag, build_digest, is_retired_flag,
+    load_chain_evals, load_evals, normalise_flag_message,
 )
 
 log = logging.getLogger(__name__)
@@ -56,7 +56,14 @@ def full_report(days: int = 7) -> str:
             r_evals = repo_evals.get(repo, [])
             r_chains = repo_chains.get(repo, [])
             r_cost = sum(e.metrics.get("cost", 0) or 0 for e in r_evals)
-            r_flags = sum(len(e.flags) for e in r_evals)
+            # Retired checks are excluded here for the same reason
+            # build_digest excludes them: this is a raw count straight off
+            # the eval files, so a withdrawn check would still dominate the
+            # per-repo line long after its code was deleted.
+            r_flags = sum(
+                1 for e in r_evals for f in e.flags
+                if not is_retired_flag(f.category)
+            )
             r_merged = sum(1 for c in r_chains if c.outcome == "merged")
             parts = [f"{len(r_evals)} sessions", f"${r_cost:.2f}"]
             if r_chains:
@@ -92,6 +99,8 @@ def full_report(days: int = 7) -> str:
     chain_flags: Counter[tuple[str, str]] = Counter()
     for c in chains:
         for f in c.flags:
+            if is_retired_flag(f.category):
+                continue
             chain_flags[(f.category, normalise_flag_message(f.message))] += 1
     if chain_flags:
         lines.append("")

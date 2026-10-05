@@ -156,10 +156,21 @@ def apply_discord_safety(text: str, limit: int = 4096) -> str:
     - Rewrites pipe tables into code blocks or bullet lists
     - Truncates to *limit* (4096 for embed, 2000 for content)
     - Keeps ``` fences balanced after truncation
+    - Marks the cut, with the number of characters dropped
+
+    This is the last-resort net under the chunkers upstream, and it used to
+    slice silently: content past the cap simply vanished mid-sentence with no
+    sign anything was missing. A cut that announces itself is recoverable —
+    the user knows to reach for /log.
     """
     if not text:
         return text
-    return _balance_code_fences(convert_pipe_tables(text), limit)
+    converted = convert_pipe_tables(text)
+    if len(converted) <= limit:
+        return _balance_code_fences(converted, limit)
+    marker = f"\n\n-# cut — {len(converted) - limit:,}+ more chars, use /log"
+    body = _balance_code_fences(converted, max(0, limit - len(marker)))
+    return body + marker
 
 
 def chunk_message(text: str, limit: int = 4096) -> list[str]:

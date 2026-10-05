@@ -6,20 +6,21 @@ import asyncio
 import json
 import logging
 import re
-import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
 from bot import config
+from bot.procutil import run_capture
+from bot.claude.branch_utils import clear_stale_branches  # re-exported for callers
 from bot.claude.gitpaths import git_dir_stat
 from bot.claude.types import (
     BUILD_ORIGINS, CODE_CHANGE_TOOLS, ChainPhaseState, Instance, InstanceOrigin,
     InstanceStatus, InstanceType, PHASE_GATES, Phase, merge_msg_is_failure,
-    merge_msg_repo_unusable,
+    merge_msg_release_orphaned, merge_msg_repo_unusable,
 )
-from bot.engine import ai_project, lifecycle, sessions as sessions_mod
+from bot.engine import ai_project, lifecycle, prior_art, sessions as sessions_mod
 from bot.platform.base import ButtonSpec, RequestContext
 from bot.platform.formatting import (
     action_button_specs,
@@ -39,10 +40,15 @@ _EXPLORE_MODEL_ORIGINS = frozenset(
 )
 
 
-def resolve_spawn_model(origin: InstanceOrigin) -> str | None:
+def resolve_spawn_model(
+    origin: InstanceOrigin, override: str | None = None,
+) -> str | None:
     """Pick the ``--model`` a spawned workflow step should carry, or None.
 
     Precedence, highest first:
+      0. *override* — the thread's own ``/model`` pin. An explicit human choice
+         beats configured routing: if the user pinned a model and then tapped
+         Build, silently running something else would be the surprising outcome.
       1. An explicit ``MODEL_ROUTING`` entry pins one specific origin.
       2. ``BUILD_ORIGINS`` (everything that touches real code) → ``BUILD_MODEL``.
       3. Legacy ``EXPLORE_MODEL`` for the mechanical plan-review steps.
@@ -51,8 +57,11 @@ def resolve_spawn_model(origin: InstanceOrigin) -> str | None:
          ``DEFAULT_SESSION_MODEL`` at command-build time.
 
     All of this loses to the model-limit failover downgrade, applied later in
-    the runner (``model_override`` beats ``instance.model``).
+    the runner (``model_override`` beats ``instance.model``) — so a thread
+    pinned to a model whose own quota is exhausted still runs, on the fallback.
     """
+    if override:
+        return override
     routed = config.MODEL_ROUTING.get(origin.value)
     if routed:
         return routed
@@ -422,6 +431,10 @@ _REVIEW_LOOP_MAX_ROUNDS = 5
 # carry the full plans we've seen in practice (largest observed ~5500).
 _BUILD_PLAN_INJECT_MAX = 8000
 
+# Room for the prior-history block a /chain plan carries, on top of the plan's
+# own cap: the block's own cap plus its closing instruction and some slack.
+_PRIOR_ART_INJECT_MAX = config.PRIOR_ART_MAX_CHARS + 600
+
 # Headings that mark trailing review-metadata sections in APPLY_REVISIONS /
 # TRIAGE result text. Stripped before injection so the build agent doesn't
 # treat "applied/skipped" log lines as plan items to implement.
@@ -483,11 +496,20 @@ def _extract_latest_plan_text(
     if override_source and override_source.session_id:
         override = ctx.store.get_chain_plan_override(override_source.session_id)
         if override:
+            # The /chain handler may have attached the plan's git history
+            # after it. Split it off first: the plan half is the only part
+            # the metadata strip and the cap are about, and a long plan must
+            # not truncate the history (and its "ask before re-adding"
+            # instruction) off the end of the brief.
+            override, attached = prior_art.split_attached(override)
             for marker in _PLAN_METADATA_MARKERS:
                 idx = override.rfind(marker)
                 if idx != -1:
                     override = override[:idx].rstrip()
-            return override[:_BUILD_PLAN_INJECT_MAX]
+            override = override[:_BUILD_PLAN_INJECT_MAX]
+            if attached:
+                override += "\n\n" + attached[:_PRIOR_ART_INJECT_MAX]
+            return override
     raw = ""
     for inst in reversed(chain_instances):
         if inst.origin == InstanceOrigin.APPLY_REVISIONS:
@@ -756,8 +778,7 @@ async def spawn_from(
 
     # Block spawns during reboot drain. Same-session overlap is allowed —
     # the channel lock + Queued embed serialize it visibly.
-    check_session = source.session_id if cfg.resume_session else None
-    spawn_err = ctx.runner.check_spawn_allowed(check_session)
+    spawn_err = ctx.runner.check_spawn_allowed()
     if spawn_err:
         if ctx.runner.is_draining:
             # If this session has an active autopilot chain, don't queue the
@@ -835,7 +856,7 @@ async def spawn_from(
     # Per-origin model routing (plan-vs-build split). None leaves instance.model
     # unset so it falls through to DEFAULT_SESSION_MODEL at command-build time —
     # the same last-resort DIRECT sessions get. See resolve_spawn_model.
-    routed_model = resolve_spawn_model(cfg.origin)
+    routed_model = resolve_spawn_model(cfg.origin, ctx.effective_model)
     if routed_model:
         new_inst.model = routed_model
     new_inst.parent_id = source.id
@@ -889,24 +910,24 @@ async def spawn_from(
 
     ctx.store.update_instance(new_inst)
 
-    # Strip workflow buttons from source message, keep expand/log if truncated
+    # Strip workflow buttons from the source message, but keep Expand/log if
+    # that message is a preview card with the rest of the answer behind it.
+    # This used to be inferred from the result FILE being >= 2000 bytes, which
+    # is not the same quantity the delivery path measures (it measures display
+    # text, after directives are folded away) -- so it could hang an Expand
+    # button on a message that already holds the whole answer inline, where
+    # tapping it overwrites that text. The delivery path now records what it
+    # actually did.
     if strip_source_buttons and source_msg_id:
         try:
             preserve = None
-            if source.result_file and Path(source.result_file).exists():
-                try:
-                    size = Path(source.result_file).stat().st_size
-                    if size >= 2000:
-                        full = action_button_specs(source, show_expand=True)
-                        preserve = [
-                            row for row in full
-                            if any(b.callback_data.startswith(("expand:", "log:"))
-                                   for b in row)
-                        ]
-                        if not preserve:
-                            preserve = None
-                except OSError:
-                    pass
+            if source.result_collapsed and source.result_file:
+                full = action_button_specs(source, show_expand=True)
+                preserve = [
+                    row for row in full
+                    if any(b.callback_data.startswith(("expand:", "log:"))
+                           for b in row)
+                ] or None
             await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, None, buttons=preserve)
         except Exception:
             pass
@@ -966,7 +987,7 @@ async def spawn_resolver_detached(
             )
             return None
 
-    spawn_err = ctx.runner.check_spawn_allowed(None)
+    spawn_err = ctx.runner.check_spawn_allowed()
     if spawn_err:
         await ctx.messenger.send_text(ctx.channel_id, spawn_err)
         return None
@@ -990,7 +1011,7 @@ async def spawn_resolver_detached(
     new_inst.origin = InstanceOrigin.RESOLVE_MERGE
     # Manual spawn (bypasses spawn_from) — apply the same plan-vs-build routing
     # so the conflict resolver runs on the strong build model, not the default.
-    new_inst.model = resolve_spawn_model(new_inst.origin)
+    new_inst.model = resolve_spawn_model(new_inst.origin, ctx.effective_model)
     new_inst.origin_platform = ctx.platform
     new_inst.effort = ctx.effective_effort
     new_inst.parent_id = source.id
@@ -1193,12 +1214,9 @@ async def _attempt_inline_worktree_recovery(
     try:
         repo_lock = runner._get_repo_lock(inst.repo_path)
         async with repo_lock:
-            r = await asyncio.to_thread(
-                subprocess.run,
-                ["git", "worktree", "add", "--force",
+            r = await asyncio.to_thread(run_capture, ["git", "worktree", "add", "--force",
                  inst.worktree_path, inst.branch],
-                cwd=inst.repo_path, capture_output=True, text=True,
-                encoding="utf-8", errors="replace", **config.NOWND,
+                cwd=inst.repo_path, encoding='utf-8', errors='replace',
             )
     except Exception as e:
         log.warning(
@@ -1245,9 +1263,28 @@ async def _attempt_inline_worktree_recovery(
         log.debug("Failed to send recovery notice", exc_info=True)
 
 
+async def _prior_art_prefix(source: Instance | None) -> str:
+    """The git history of what `source`'s plan touches, ready to prepend, or "".
+
+    The reviewer runs behind the read-only floor and cannot run git itself,
+    so the bot reads it and hands it over, the same way prior deferred items
+    are. A worktree shares the main repo's history, so whichever of the two
+    still exists gives the same answer. See bot/engine/prior_art.py.
+    """
+    if not source:
+        return ""
+    repo_path = _resolve_chain_repo_path(source)
+    plan_text = source.read_result_text()
+    if not repo_path or not plan_text:
+        return ""
+    block = await asyncio.to_thread(prior_art.collect, repo_path, plan_text)
+    return f"{block}\n\n" if block else ""
+
+
 async def on_review_plan(ctx: RequestContext, source_id: str, source_msg_id: str | None = None) -> Instance | None:
+    prefix = await _prior_art_prefix(ctx.store.get_instance(source_id))
     return await spawn_from(ctx, source_id, SpawnConfig(
-        instance_type=InstanceType.QUERY, prompt=config.PLAN_REVIEW_PROMPT,
+        instance_type=InstanceType.QUERY, prompt=prefix + config.PLAN_REVIEW_PROMPT,
         mode="explore", origin=InstanceOrigin.REVIEW_PLAN,
         status_text="Reviewing plan...", resume_session=True,
         # Hard floor: review-plan rewrites plan TEXT only — never source files.
@@ -1265,6 +1302,35 @@ async def on_apply_revisions(ctx: RequestContext, source_id: str, source_msg_id:
         # Hard floor — see on_review_plan.
         permission_mode="explore",
     ), source_msg_id=source_msg_id)
+
+
+async def on_tldr(ctx: RequestContext, source_id: str, source_msg_id: str | None = None) -> Instance | None:
+    """Re-explain the current work or proposal in plain language.
+
+    Resumes the session rather than starting fresh: what it explains is the
+    conversation, not the code, and a fresh session would have to re-derive
+    the "why" from a diff. It never branches and never copies a branch:
+    nothing here writes, so there is nothing to isolate.
+
+    The explore floor is the point, not a precaution: an explanation that
+    goes and does more work is not an explanation. `permission_mode="explore"`
+    also clamps bash_policy to "none", closing the sed/echo write backdoor
+    the same way the plan-review steps do.
+
+    `strip_source_buttons=False` is the one place this differs from every
+    other button, and it is the difference between a recap and a workflow
+    step. The others advance the work, so clearing the card they were tapped
+    on is correct. This one does not: the card it sits on is the one carrying
+    Merge, Discard, Commit and Done, and asking for a summary must not cost
+    the user the buttons they were about to press. Nothing is spawned into
+    that card's place, so leaving it intact strands nothing.
+    """
+    return await spawn_from(ctx, source_id, SpawnConfig(
+        instance_type=InstanceType.QUERY, prompt=config.TLDR_PROMPT,
+        mode="explore", origin=InstanceOrigin.TLDR,
+        status_text="Writing the short version...", resume_session=True,
+        permission_mode="explore",
+    ), strip_source_buttons=False, source_msg_id=source_msg_id)
 
 
 async def on_review_code(ctx: RequestContext, source_id: str, source_msg_id: str | None = None) -> Instance | None:
@@ -1927,6 +1993,10 @@ async def _review_plan_loop(
             "(address if relevant to this plan):\n"
             f"{items_text}\n\n{review_prompt}"
         )
+    # Read once from the plan as first written, and reused every round: the
+    # revised plans touch the same files, and re-reading git per round would
+    # only spend time to hand the reviewer the same block again.
+    review_prompt = await _prior_art_prefix(source) + review_prompt
 
     for round_num in range(_REVIEW_LOOP_MAX_ROUNDS):
         status = "Reviewing plan..." if round_num == 0 else f"Re-reviewing plan (round {round_num + 1})..."
@@ -2088,6 +2158,24 @@ async def _finalize_merge(
             ctx.channel_id,
             f"⛔ **The merge landed, but the repo is now broken — "
             f"do not restart the bot until it is repaired.**\n{merge_msg}",
+        )
+        return True
+
+    if merge_msg_release_orphaned(merge_msg):
+        # The branch landed, but the target it landed on is missing an
+        # earlier release. Deploying from here would un-ship that release
+        # while the version number climbs, which is precisely the failure
+        # nobody notices. So: no deploy, no close, and a loud ping, the
+        # same shape as the repo-unusable branch above, for the same reason
+        # (a warning posted into a thread that archives seconds later is a
+        # warning nobody reads).
+        log.error("Auto-merge landed on a tree missing a release: %s", merge_msg)
+        if ctx.on_merged:
+            await ctx.on_merged()
+        await ctx.messenger.send_text(
+            ctx.channel_id,
+            f"⛔ **The merge landed, but an earlier release is missing from "
+            f"it. Do not deploy until it is merged in.**\n{merge_msg}",
         )
         return True
 
@@ -2259,7 +2347,6 @@ def _find_prior_build_for_chain(
     )
 
 
-_NOWND: dict = config.NOWND
 _DIFF_PAYLOAD_CAP = 20 * 1024  # 20KB before truncation
 
 # Anchored regex: ## [Unreleased] header, capture until next ## header or EOF.
@@ -2281,10 +2368,8 @@ def _git_head_sha(repo_path: str) -> str | None:
     # and return CompletedProcess(stdout=None, returncode=0). Force utf-8
     # with replace so non-decodable bytes never produce None stdout.
     try:
-        r = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=repo_path, capture_output=True, timeout=5,
-            text=True, encoding="utf-8", errors="replace", **_NOWND,
+        r = run_capture(["git", "rev-parse", "HEAD"],
+            cwd=repo_path, timeout=5, encoding='utf-8', errors='replace',
         )
         if r.returncode != 0:
             return None
@@ -2298,10 +2383,8 @@ def _git_head_sha(repo_path: str) -> str | None:
 def _git_log_messages(repo_path: str, entry_sha: str) -> str:
     """Concatenated commit messages from entry_sha..HEAD (newest first)."""
     try:
-        r = subprocess.run(
-            ["git", "log", f"{entry_sha}..HEAD", "--format=%B%x00"],
-            cwd=repo_path, capture_output=True, timeout=10,
-            text=True, encoding="utf-8", errors="replace", **_NOWND,
+        r = run_capture(["git", "log", f"{entry_sha}..HEAD", "--format=%B%x00"],
+            cwd=repo_path, timeout=10, encoding='utf-8', errors='replace',
         )
         if r.returncode != 0:
             return ""
@@ -2315,10 +2398,8 @@ def _git_log_messages(repo_path: str, entry_sha: str) -> str:
 
 def _git_diff_stat(repo_path: str, entry_sha: str) -> str:
     try:
-        r = subprocess.run(
-            ["git", "diff", "--stat", f"{entry_sha}..HEAD"],
-            cwd=repo_path, capture_output=True, timeout=10,
-            text=True, encoding="utf-8", errors="replace", **_NOWND,
+        r = run_capture(["git", "diff", "--stat", f"{entry_sha}..HEAD"],
+            cwd=repo_path, timeout=10, encoding='utf-8', errors='replace',
         )
         return (r.stdout or "") if r.returncode == 0 else ""
     except Exception:
@@ -2333,10 +2414,8 @@ def _git_diff_payload(repo_path: str, entry_sha: str) -> tuple[str, bool, list[s
     that fell outside the window.
     """
     try:
-        r = subprocess.run(
-            ["git", "diff", f"{entry_sha}..HEAD"],
-            cwd=repo_path, capture_output=True, timeout=15,
-            text=True, encoding="utf-8", errors="replace", **_NOWND,
+        r = run_capture(["git", "diff", f"{entry_sha}..HEAD"],
+            cwd=repo_path, timeout=15, encoding='utf-8', errors='replace',
         )
         diff = (r.stdout or "") if r.returncode == 0 else ""
     except Exception:
@@ -2349,10 +2428,8 @@ def _git_diff_payload(repo_path: str, entry_sha: str) -> tuple[str, bool, list[s
 
     files: list[str] = []
     try:
-        rf = subprocess.run(
-            ["git", "diff", "--name-only", f"{entry_sha}..HEAD"],
-            cwd=repo_path, capture_output=True, timeout=10,
-            text=True, encoding="utf-8", errors="replace", **_NOWND,
+        rf = run_capture(["git", "diff", "--name-only", f"{entry_sha}..HEAD"],
+            cwd=repo_path, timeout=10, encoding='utf-8', errors='replace',
         )
         if rf.returncode == 0:
             files = [ln.strip() for ln in (rf.stdout or "").splitlines() if ln.strip()]
@@ -2762,29 +2839,6 @@ async def on_release_chain(
     return await spawn_from(ctx, source_id, cfg, source_msg_id=source_msg_id)
 
 
-def clear_stale_branches(store, branch_name: str) -> int:
-    """Clear branch/worktree_path on ALL instances sharing a branch name.
-
-    Also nulls the branch field in history.jsonl so resumed sessions don't
-    see stale branch refs in their system prompt.
-
-    Returns the number of instances updated.
-    """
-    count = 0
-    for inst in store.list_instances(all_=True):
-        if inst.branch == branch_name:
-            inst.branch = None
-            inst.worktree_path = None
-            store.update_instance(inst)
-            count += 1
-    try:
-        from bot.store import history as history_mod
-        history_mod.clear_branch(branch_name)
-    except Exception:
-        pass
-    return count
-
-
 def _eval_chain_safe(
     store, root_id: str, steps_expected: list[str],
     steps_completed: list[str], instances: list[Instance],
@@ -2834,8 +2888,10 @@ async def _run_autopilot_chain(
     # not just individual steps (which have gaps between them).
     chain_task_id = f"chain:{source_id}"
     # No session_id here — chain task is for reboot idle tracking only.
-    # Individual steps register their session via lifecycle.run_instance.
-    # Passing session_id would block spawn_from's check_spawn_allowed guard.
+    # Individual steps run through lifecycle.run_instance, which deliberately
+    # does NOT bind their session onto the thread (a step's session belongs to
+    # the step, not the conversation — see "A thread must always know its
+    # session" in CLAUDE.md).
     ctx.runner.begin_task(chain_task_id)
     try:
         for step in steps:
@@ -3521,12 +3577,7 @@ async def _run_autopilot_chain(
 
         # Persist deferred revisions to per-repo backlog
         if chain_deferred and result and result.repo_name:
-            original = ctx.store.get_instance(source_id)
-            topic = original.prompt[:60] if original and original.prompt else ""
-            ctx.store.append_deferred(
-                result.repo_name, chain_deferred,
-                thread_id=result.id, topic=topic,
-            )
+            ctx.store.append_deferred(result.repo_name, chain_deferred)
 
         # Evaluate the completed chain
         outcome = "merged" if "merge" in completed_steps else "completed"

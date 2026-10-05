@@ -35,6 +35,7 @@ class InstanceOrigin(str, Enum):
     REVIEW_PLAN = "review_plan" # [Review Plan] button
     APPLY_REVISIONS = "apply_revisions"  # [Apply Revisions] button
     REVIEW_CODE = "review_code" # [Review Code] button
+    TLDR = "tldr"               # [TL;DR] button and /tldr: plain-language recap
     COMMIT = "commit"           # [Commit] button
     DONE = "done"               # [Done] button — commit + close thread
     RELEASE = "release"         # /release command
@@ -45,6 +46,7 @@ class InstanceOrigin(str, Enum):
     BUILD_AND_SHIP = "build_and_ship"  # [Build & Ship] button
     BG = "bg"                       # /bg command — background task
     RESOLVE_MERGE = "resolve_merge" # [Resolve with Claude] — auto-merge conflict resolver
+    PROMPT_REVIEW = "prompt_review"  # Weekly eval-driven review of the bot's own prompt blocks
 
 
 # Origins that belong to the plan workflow (used in lifecycle + button selection)
@@ -53,9 +55,11 @@ PLAN_ORIGINS = frozenset({InstanceOrigin.PLAN, InstanceOrigin.REVIEW_PLAN, Insta
 
 # Origins that run on the strong build model (config.BUILD_MODEL, default
 # opus). Everything NOT listed — direct chat, plan, review_plan,
-# apply_revisions — falls through to DEFAULT_SESSION_MODEL (the lighter
+# apply_revisions, tldr — falls through to DEFAULT_SESSION_MODEL (the lighter
 # "thinking" model, e.g. fable). The line: Fable owns everything that is
 # still just words; the strong model owns everything that touches real code.
+# TLDR is deliberately absent: it restates work that already happened and
+# writes no code, so it is words by definition.
 #
 # Every member here is an origin that a *spawned instance* actually carries.
 # BUILD_AND_SHIP and RETRY are deliberately absent: they are button/preset
@@ -97,6 +101,12 @@ def _parse_origin(value) -> InstanceOrigin:
 # is not, and the two need opposite responses from the caller.
 REPO_UNUSABLE_MARKER = "REPO LEFT BROKEN"
 
+# Marker embedded in a merge-result string when the merge landed on a target
+# that does not contain the previous release. Nothing about the merge failed.
+# The *content* of the last release is missing from what would now ship,
+# which is invisible to every version-number check because the number went up.
+RELEASE_ORPHANED_MARKER = "RELEASE NOT CONTAINED"
+
 
 def merge_msg_repo_unusable(msg: str) -> bool:
     """Did the merge land but leave the working tree unusable?
@@ -108,6 +118,18 @@ def merge_msg_repo_unusable(msg: str) -> bool:
     ``merge_msg_is_failure``, which gates branch-cleanup and retry flows.
     """
     return REPO_UNUSABLE_MARKER in msg
+
+
+def merge_msg_release_orphaned(msg: str) -> bool:
+    """Did the merge land on a target missing the previous release?
+
+    Like ``merge_msg_repo_unusable`` this is *not* a merge failure (the
+    branch landed exactly as asked), so it must not be routed through
+    ``merge_msg_is_failure``, which gates cleanup and retry flows. What it
+    gates instead is everything downstream of the merge: shipping this tree
+    would un-ship the release it does not contain.
+    """
+    return RELEASE_ORPHANED_MARKER in msg
 
 
 def merge_msg_is_failure(msg: str) -> bool:
@@ -199,6 +221,8 @@ class Instance:
     manual_verify_reason: str | None = None  # WHY: line surfaced in the chain-completion summary
     deferred_revisions: list[str] = field(default_factory=list)  # Medium/Low revisions from plan review
     jsonl_uuid_by_msg_id: dict[str, str] = field(default_factory=dict)  # Discord msg_id -> JSONL assistant uuid (for "Branch from here")
+    expand_msg_ids: list[str] = field(default_factory=list)  # Overflow messages posted by Expand, deleted again by Collapse
+    result_collapsed: bool = False  # Result was too long to post inline -- the message is a preview card with an Expand button
     # Access control fields (non-owner sessions)
     is_owner_session: bool = True     # False for granted user sessions
     bash_policy: str = "full"         # current effective policy: "full"=Bash unrestricted; "allowlist"=non-owner allowlist guard; "none"=Bash disabled (e.g. read-only triage floor)
@@ -243,6 +267,41 @@ class Instance:
     # Persisted alongside the instance so post-hoc inspection of state.json
     # shows which parent instance launched which child threads.
     spawn_dispatched_thread_ids: list[str] = field(default_factory=list)
+    # Orchestrator join: set once this instance's spawn wave has been reported
+    # back to the thread (all children settled, or the wave timed out and was
+    # released partially). The join itself is DERIVED — each child's state is
+    # recomputed from its own thread/instance records, so nothing here can go
+    # stale — but the release is a one-shot side effect (a post + an
+    # auto-resume), and this flag is what makes it idempotent across the
+    # per-child finalize callbacks and the timeout sweep racing each other.
+    spawn_wave_released: bool = False
+    # Orchestrator join: set once the dispatch loop that created this wave has
+    # finished handing out ALL its children. Children are appended to the
+    # roster above one at a time, so a child that fails instantly could
+    # otherwise finalize while later siblings are still being created — the
+    # join would see a roster of one, call it complete, and silently drop the
+    # rest. A wave is not joinable until it is sealed.
+    spawn_wave_sealed: bool = False
+    # Orchestrator join: how many times a child of THIS wave parking on a
+    # question has auto-resumed the parent. A parent answers its child, the
+    # child can ask again, and that exchange has no natural end — so the wave
+    # carries its budget, like every other self-driving loop in the bot.
+    spawn_blocked_resumes: int = 0
+    # Orchestrator join: children whose story this wave could NOT close cleanly
+    # when it was released — anything that was not a plain completion (still
+    # running, never started, parked on a question, failed, killed). Those are
+    # the only children a later terminal outcome may be reported for: a child
+    # the wave already reported as COMPLETED is done, and a subsequent turn in
+    # its thread is ordinary follow-up chat, not a straggler, so it must not
+    # wake the parent. Written once, at release.
+    spawn_wave_unresolved_thread_ids: list[str] = field(default_factory=list)
+    # Orchestrator join: children of this wave whose report arrived AFTER the
+    # wave had already closed, and which have therefore been delivered on their
+    # own. A released wave used to swallow a late child's finalize entirely, so
+    # a straggler that a partial release had written off as "never came back"
+    # finished, wrote a full report, and told nobody. Recorded per child so a
+    # re-finalize (retry, replay) cannot post the same report twice.
+    spawn_late_reported_thread_ids: list[str] = field(default_factory=list)
     _accounts_tried: set[str] = field(default_factory=set)  # Ephemeral: tracks accounts tried this run (not persisted)
     # Ephemeral: True when on_verify_release fail-closed because the verifier
     # output was unparseable (vs real phantom_bullets in the verdict). Read by
@@ -251,6 +310,23 @@ class Instance:
     # chain doesn't re-enter verify_release on resume; the user clicks Amend /
     # Continue instead.
     _verifier_parse_failed: bool = False
+    # Ephemeral: set by the runner's autocompact-thrash recovery just before it
+    # re-spawns, consumed (and cleared) by _build_command so the resumed agent
+    # is told why its predecessor was killed and that its edits are still on
+    # disk. Not persisted — it describes one attempt, not the instance.
+    _context_thrash_retry: bool = False
+    # Ephemeral twin of the above for the memory guard: holds the recovery note
+    # text (not a bool — the numbers are the substance) set just before the
+    # runner re-spawns a session it reaped for memory, consumed and cleared by
+    # _build_command. Not persisted; it describes one attempt.
+    _memory_kill_note: str | None = None
+    # Third of the same family, for the context-overflow recovery: holds the
+    # pre-built note (recovery preamble + the thread's quoted recent history)
+    # handed to the FRESH session that replaces one whose transcript could not
+    # be compacted. Text rather than a bool because the briefing is assembled
+    # by the platform layer, which the runner cannot reach from _build_command.
+    # Not persisted; it describes one attempt.
+    _context_overflow_note: str | None = None
 
     def display_id(self) -> str:
         if self.name:
@@ -320,6 +396,8 @@ class Instance:
             "manual_verify_reason": self.manual_verify_reason,
             "deferred_revisions": self.deferred_revisions,
             "jsonl_uuid_by_msg_id": self.jsonl_uuid_by_msg_id,
+            "expand_msg_ids": self.expand_msg_ids,
+            "result_collapsed": self.result_collapsed,
             "is_owner_session": self.is_owner_session,
             "bash_policy": self.bash_policy,
             "bash_policy_baseline": self.bash_policy_baseline,
@@ -338,6 +416,11 @@ class Instance:
             "finishup_nudges": self.finishup_nudges,
             "spawn_depth": self.spawn_depth,
             "spawn_dispatched_thread_ids": self.spawn_dispatched_thread_ids,
+            "spawn_wave_released": self.spawn_wave_released,
+            "spawn_wave_sealed": self.spawn_wave_sealed,
+            "spawn_blocked_resumes": self.spawn_blocked_resumes,
+            "spawn_late_reported_thread_ids": self.spawn_late_reported_thread_ids,
+            "spawn_wave_unresolved_thread_ids": self.spawn_wave_unresolved_thread_ids,
         }
 
     @classmethod
@@ -390,6 +473,8 @@ class Instance:
             manual_verify_reason=d.get("manual_verify_reason"),
             deferred_revisions=d.get("deferred_revisions", []),
             jsonl_uuid_by_msg_id=d.get("jsonl_uuid_by_msg_id", {}),
+            expand_msg_ids=d.get("expand_msg_ids", []),
+            result_collapsed=d.get("result_collapsed", False),
             is_owner_session=d.get("is_owner_session", True),
             bash_policy=d.get("bash_policy", "full"),
             # Default missing baseline to "full" — NOT to the loaded bash_policy.
@@ -417,6 +502,15 @@ class Instance:
                 d.get("spawn_dispatched_thread_ids")
                 or ([d["spawn_dispatched_thread_id"]]
                     if d.get("spawn_dispatched_thread_id") else [])
+            ),
+            spawn_wave_released=d.get("spawn_wave_released", False),
+            spawn_wave_sealed=d.get("spawn_wave_sealed", False),
+            spawn_blocked_resumes=d.get("spawn_blocked_resumes", 0),
+            spawn_late_reported_thread_ids=(
+                d.get("spawn_late_reported_thread_ids") or []
+            ),
+            spawn_wave_unresolved_thread_ids=(
+                d.get("spawn_wave_unresolved_thread_ids") or []
             ),
         )
 
@@ -475,11 +569,24 @@ class RunResult:
     killed_intentionally: bool = False
     # Kill reason set when an intentional kill fired via kill_and_wait.
     # "steer" — user asked for a replacement run (suppress kill embed entirely)
-    # "kill"  — user asked to terminate, no replacement (suppress lifecycle's
-    #           thinking edit; the button handler renders the visible state
-    #           with action buttons attached)
+    # "kill"  — user asked to terminate, no replacement run coming
     # None    — automatic kill (timeout, watchdog) or no intentional kill
     kill_reason: str | None = None
+    # True when the caller that fired the kill will itself rewrite the live
+    # progress message — the Kill button edits the very message it was
+    # attached to, turning it into "Killed <id>" with Retry/Log buttons.
+    # Lifecycle then skips its own terminal edit so a slow finalize can't
+    # overwrite that card.  Typed /kill has no such message (it posts a fresh
+    # one), so it leaves this False and lifecycle resolves the progress card
+    # itself — otherwise the card is stranded on "thinking..." forever.
+    kill_owns_card: bool = False
+    # Set when the per-session memory guard reaped this run's process tree
+    # (bot.claude.memory). Carries the ready-made recovery note, numbers already
+    # filled in, for the attempt that resumes: a plain bool would force the
+    # resume path to re-measure a tree that no longer exists. Distinct from
+    # ``killed_intentionally`` on purpose — nobody asked for this, it is a real
+    # failure with a specific cause, and the user needs to see it as one.
+    memory_kill_note: str | None = None
 
 
 class KillOutcome(str, Enum):
@@ -565,6 +672,89 @@ class ChainPhaseState:
 
 
 @dataclass
+class Watch:
+    """An event-triggered self-wake: resume a thread when a JOB finishes.
+
+    A ``Schedule`` with ``resume_thread=True`` fires on a clock — the session
+    guesses a delay. A ``Watch`` fires on an EVENT: the watched process exits,
+    or a done-marker appears in its log. When it trips it does not invent a new
+    resume path — it calls ``store.add_wake`` and becomes exactly such a
+    Schedule, so the runaway cap, the busy re-arm, ``_replay_to_thread`` and
+    the unattended-turn protocol are all inherited unchanged.
+
+    ``pid_start`` is field 22 of ``/proc/<pid>/stat`` (process start time in
+    clock ticks) captured at arm time. PIDs are recycled; comparing the start
+    token means a recycled PID reads as "gone" rather than as "still running",
+    which would otherwise hold a thread until the safety timeout.
+    """
+    id: str                      # "w-001"
+    channel_id: str
+    prompt: str                  # resume prompt (the ~~~watch body)
+    label: str = ""
+    pid: int | None = None
+    pid_start: str = ""          # /proc/<pid>/stat field 22 at arm time
+    # True when the pid was ALREADY gone the moment the watch was armed. That
+    # is either an honest "it finished during my turn" or a captured WRAPPER
+    # pid (setsid/nohup forks when the caller is a process-group leader), and
+    # the two are indistinguishable from here — so the resume prompt says so
+    # instead of reporting a job that may never have run as finished.
+    pid_dead_at_arm: bool = False
+    log_path: str = ""
+    progress_re: str = ""        # 1 group -> percent, 2 groups -> cur/total
+    done_re: str = ""            # alternative trigger: marker in the log tail
+    armed_at: str = ""
+    timeout_at: str = ""
+    every_secs: int = 120        # heartbeat refresh cadence
+    heartbeat_msg_id: str | None = None
+    last_beat_at: str = ""
+    repo_name: str = ""
+    repo_path: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "channel_id": self.channel_id,
+            "prompt": self.prompt,
+            "label": self.label,
+            "pid": self.pid,
+            "pid_start": self.pid_start,
+            "pid_dead_at_arm": self.pid_dead_at_arm,
+            "log_path": self.log_path,
+            "progress_re": self.progress_re,
+            "done_re": self.done_re,
+            "armed_at": self.armed_at,
+            "timeout_at": self.timeout_at,
+            "every_secs": self.every_secs,
+            "heartbeat_msg_id": self.heartbeat_msg_id,
+            "last_beat_at": self.last_beat_at,
+            "repo_name": self.repo_name,
+            "repo_path": self.repo_path,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> Watch:
+        return cls(
+            id=d["id"],
+            channel_id=d["channel_id"],
+            prompt=d.get("prompt", ""),
+            label=d.get("label", ""),
+            pid=d.get("pid"),
+            pid_start=d.get("pid_start", ""),
+            pid_dead_at_arm=d.get("pid_dead_at_arm", False),
+            log_path=d.get("log_path", ""),
+            progress_re=d.get("progress_re", ""),
+            done_re=d.get("done_re", ""),
+            armed_at=d.get("armed_at", ""),
+            timeout_at=d.get("timeout_at", ""),
+            every_secs=d.get("every_secs", 120),
+            heartbeat_msg_id=d.get("heartbeat_msg_id"),
+            last_beat_at=d.get("last_beat_at", ""),
+            repo_name=d.get("repo_name", ""),
+            repo_path=d.get("repo_path", ""),
+        )
+
+
+@dataclass
 class Schedule:
     id: str                     # "s-001"
     prompt: str
@@ -580,10 +770,16 @@ class Schedule:
     enabled: bool = True
     # Self-wake (resume_thread=True): instead of spawning a fresh instance and
     # broadcasting to The Ark, fire this schedule by resuming the session in
-    # channel_id via _replay_to_thread. Set by check_wake_request; always a
-    # one-shot (is_recurring=False).
+    # channel_id via _replay_to_thread. Set by check_wake_request, which always
+    # makes a one-shot; a recurring one (is_recurring=True) is a *nudge*,
+    # declared in config/nudges.json and reconciled in by bot.engine.nudges.
     resume_thread: bool = False
     channel_id: str | None = None
+    # Stable identity for a declared nudge, matching the key in
+    # config/nudges.json. Empty for everything else. Reconciliation matches on
+    # this rather than on the generated id, so a nudge survives edits to its
+    # prompt and cannot be duplicated across restarts.
+    label: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -601,6 +797,7 @@ class Schedule:
             "enabled": self.enabled,
             "resume_thread": self.resume_thread,
             "channel_id": self.channel_id,
+            "label": self.label,
         }
 
     @classmethod
@@ -620,4 +817,5 @@ class Schedule:
             enabled=d.get("enabled", True),
             resume_thread=d.get("resume_thread", False),
             channel_id=d.get("channel_id"),
+            label=d.get("label", ""),
         )

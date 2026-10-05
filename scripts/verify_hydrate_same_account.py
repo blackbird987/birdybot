@@ -10,6 +10,8 @@ Runs hydrate with account_dir=protonmail and cwd=worktree path.  Expects
 the target (protonmail/projects/{encoded_worktree}/SID.jsonl) to receive
 the FRESH content from same-account, not the STALE content from klerk.
 """
+import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
+
 import asyncio
 import shutil
 import sys

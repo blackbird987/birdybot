@@ -8,7 +8,7 @@ from pathlib import Path
 
 import discord
 
-from bot.discord import channels, formatter as discord_fmt
+from bot.discord import formatter as discord_fmt
 from bot.discord.formatter import apply_discord_safety
 from bot.platform.base import ButtonSpec, MessageHandle
 from bot.platform.formatting import FinalizeInfo
@@ -73,17 +73,8 @@ def _buttons_to_view(
 class DiscordMessenger:
     """Implements Messenger protocol for Discord."""
 
-    def __init__(
-        self,
-        bot: discord.Client,
-        guild_id: int,
-        lobby_channel_id: int,
-        category_id: int | None = None,
-    ) -> None:
+    def __init__(self, bot: discord.Client) -> None:
         self._bot = bot
-        self._guild_id = guild_id
-        self._lobby_channel_id = lobby_channel_id
-        self._category_id = category_id
 
     def find_channel_for_session(self, session_id: str) -> str | None:
         """Find the Discord channel/thread ID for a session. Returns None if not found."""
@@ -93,9 +84,6 @@ class DiscordMessenger:
     @property
     def platform_name(self) -> str:
         return "discord"
-
-    def _get_guild(self) -> discord.Guild | None:
-        return self._bot.get_guild(self._guild_id)
 
     async def _resolve_channel(self, channel_id: str) -> discord.abc.Messageable | None:
         """Resolve channel/thread ID, fetching from API if not cached (archived threads)."""
@@ -111,31 +99,6 @@ class DiscordMessenger:
         except discord.Forbidden:
             log.warning("No access to channel %s", channel_id)
             return None
-
-    async def create_conversation(
-        self, instance_id: str, summary: str, is_task: bool,
-    ) -> str:
-        """Create thread (query) or channel (task)."""
-        guild = self._get_guild()
-        if not guild:
-            return str(self._lobby_channel_id)
-
-        if is_task:
-            # Create full channel for tasks
-            category = None
-            if self._category_id:
-                category = guild.get_channel(self._category_id)
-            name = f"t-{instance_id}-{summary[:60]}"
-            ch = await channels.create_task_channel(guild, name, category)
-            return str(ch.id)
-        else:
-            # Create thread for queries
-            lobby = await self._resolve_channel(str(self._lobby_channel_id))
-            if isinstance(lobby, discord.TextChannel):
-                name = f"q-{instance_id}-{summary[:60]}"
-                thread = await channels.create_thread(lobby, name)
-                return str(thread.id)
-            return str(self._lobby_channel_id)
 
     async def send_thinking(
         self, channel_id: str, text: str,
@@ -426,8 +389,15 @@ class DiscordMessenger:
         return f"<@{user_id}>"
 
     def chunk_message(self, text: str) -> list[str]:
-        # Discord regular messages: 2000 char limit
-        return discord_fmt.chunk_message(text, limit=2000)
+        """Split into Discord-safe chunks, measured AFTER table conversion.
+
+        apply_discord_safety() rewrites pipe tables into code blocks at send
+        time, which grows the text. Measuring before that meant a chunk could
+        pass the 2000 check here and get cut on the way out.
+        """
+        return discord_fmt.chunk_message(
+            discord_fmt.convert_pipe_tables(text), limit=2000,
+        )
 
     async def on_repo_added(self, repo_name: str) -> None:
         """Create forum channel + control post for newly added repo."""
@@ -443,8 +413,31 @@ class DiscordMessenger:
             if refresh:
                 asyncio.create_task(refresh())
 
+    async def on_repo_visibility_changed(self, repo_name: str, hidden: bool) -> None:
+        """Park a hidden repo's forum in the archive category, or bring it back."""
+        forums = getattr(self._bot, "_forums", None)
+        if not forums:
+            return
+        try:
+            if hidden:
+                await forums.hide_repo_forum(repo_name)
+            else:
+                await forums.unhide_repo_forum(repo_name)
+        except Exception:
+            log.warning("Failed to move forum for %s (hidden=%s)",
+                        repo_name, hidden, exc_info=True)
+        refresh = getattr(self._bot, "_refresh_dashboard", None)
+        if refresh:
+            asyncio.create_task(refresh())
+
     async def on_deploy_state_changed(self, repo_name: str) -> None:
         """Refresh the control room embed for this repo."""
+        forums = getattr(self._bot, "_forums", None)
+        if forums:
+            await forums.refresh_control_room(repo_name)
+
+    async def on_repo_meta_changed(self, repo_name: str) -> None:
+        """Redraw the control room after a repo's blurb changed."""
         forums = getattr(self._bot, "_forums", None)
         if forums:
             await forums.refresh_control_room(repo_name)

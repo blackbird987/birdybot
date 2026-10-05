@@ -159,8 +159,3 @@ def is_llm_project(repo_path: str | None) -> bool:
     if resolved:
         _cache[repo_path] = verdict
     return verdict
-
-
-def reset_cache() -> None:
-    """Clear the memoised verdicts (tests, and after dependency changes)."""
-    _cache.clear()

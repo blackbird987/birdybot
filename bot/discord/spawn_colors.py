@@ -120,10 +120,6 @@ def prefix_for_root(slot: int) -> str:
     return PALETTE[slot][0]
 
 
-def prefix_for_descendant(slot: int) -> str:
-    return PALETTE[slot][1]
-
-
 def find_root(thread_id: str, forum_project: "ForumProject") -> str:
     """Walk ThreadInfo.parent_thread_id to the topmost ancestor.
 

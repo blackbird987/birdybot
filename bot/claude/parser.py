@@ -606,6 +606,83 @@ def is_transient_error(error_text: str) -> bool:
     return any(p in lower for p in transient_patterns)
 
 
+def is_context_thrash_error(error_text: str) -> bool:
+    """The CLI aborted because autocompact couldn't hold the context down.
+
+    Verbatim wording from claude.exe (exit 1): "Autocompact is thrashing: the
+    context refilled to the limit within 3 turns of the previous compact, 3
+    times in a row. A file being read or a tool output is likely too large for
+    the context window."
+
+    That counter lives in the CLI *process*, not in the session — a resumed
+    session starts from the compact summary with the counter back at zero,
+    which is why clicking Retry has always worked.  Deliberately NOT folded
+    into is_transient_error: that path sleeps 30s and re-runs blind, whereas
+    this one has to resume one specific conversation or it throws away every
+    turn of work that led up to the abort.
+    """
+    if not error_text:
+        return False
+    lower = error_text.lower()
+    return (
+        "autocompact is thrashing" in lower
+        or "context refilled to the limit" in lower
+    )
+
+
+def is_context_overflow_error(error_text: str) -> bool:
+    """The conversation no longer fits and the CLI could not compact it down.
+
+    Verbatim wording from claude (exit 1), both halves joined by the CLI's own
+    " \u00b7 ":
+
+        "Prompt is too long \u00b7 automatic compaction failed: summarization
+         produced empty response"
+        "Prompt is too long \u00b7 automatic compaction failed: API Error: ...
+         safeguards flagged this message ..."
+
+    The cousin of ``is_context_thrash_error`` and its exact opposite in what
+    the recovery must do.  A thrash counter lives in the CLI *process*, so
+    resuming the same conversation clears it.  This lives in the **session**:
+    the oversized transcript is on disk, and every resume replays it into the
+    same summariser that just failed.  Answering this one with "resume once
+    more" wedges the whole thread rather than one run -- which is exactly what
+    it did on 2026-09-03, five runs in a row against session 1dbf08aa before
+    the user had to abandon the thread by hand.
+
+    Length-guarded for the same reason as ``looks_like_fatal_auth_error``: the
+    caller falls back to ``result.result_text`` when ``error_message`` is
+    empty, and this repo's own sessions write about this failure constantly.
+    A real CLI abort is one line; a work product that merely mentions the
+    phrase must never cost a thread its session.
+    """
+    if not error_text:
+        return False
+    stripped = error_text.strip()
+    if len(stripped) > FATAL_ERROR_MAX_CHARS:
+        return False
+    lower = stripped.lower()
+    return (
+        "prompt is too long" in lower
+        or "automatic compaction failed" in lower
+    )
+
+
+# An org admin revoked Claude Code for the whole organization.  Verbatim, seen
+# 26 times against the klerk account from 2026-09-14 12:06: "Your organization
+# has disabled Claude subscription access for Claude Code · Use an Anthropic
+# API key instead, or ask your admin to enable access".
+#
+# Written once because two predicates below read it: the broad "does this
+# mention an auth fault?" list, and `is_org_disabled_error`, which picks the
+# advice the user is given.  Two copies of the same wording is how the notice
+# ends up telling someone to sign in to an account that is signed in fine.
+ORG_DISABLED_PHRASES = (
+    "disabled claude subscription access",
+    "ask your admin to enable access",
+)
+
+
 def is_account_unusable_error(error_text: str) -> bool:
     """Account-level auth/subscription failure (cancelled sub, logged out).
 
@@ -623,6 +700,16 @@ def is_account_unusable_error(error_text: str) -> bool:
         "no active subscription", "subscription has expired",
         "subscription expired", "credit balance is too low",
         "log in again", "re-authenticate", "please sign in",
+        # The org-disable wording (ORG_DISABLED_PHRASES, above) is the case
+        # the no-turns heuristic structurally cannot cover, which is why it
+        # has to be matched here by name.  The CLI does not abort before turn
+        # 1 the way a 401 does: it reports the rejection as a completed turn
+        # (num_turns=1) whose result text IS the error, so both halves of
+        # "produced nothing and took no turns" are false and the account was
+        # never sidelined.  The "graduate the wording once the real
+        # cancellation error surfaces" note below never fired either, for the
+        # same reason.
+        *ORG_DISABLED_PHRASES,
     ]
     if not any(p in lower for p in patterns):
         return False
@@ -637,6 +724,24 @@ def is_account_unusable_error(error_text: str) -> bool:
 # is a work product that merely mentions auth, which matters here because this
 # bot's own sessions discuss OAuth and 401s constantly.
 FATAL_ERROR_MAX_CHARS = 400
+
+
+def is_org_disabled_error(text: str | None) -> bool:
+    """An admin switched Claude Code off for the whole organization.
+
+    A subset of ``looks_like_fatal_auth_error`` that exists only to pick the
+    right *advice*.  Every other account-unusable verdict is answered by
+    signing in again; this one is answered by an admin re-enabling access, and
+    the account is signed in fine the whole time.  Length-guarded like its
+    parent, and for the same reason: this file's own comments say the phrase.
+    """
+    if not text:
+        return False
+    stripped = text.strip()
+    if len(stripped) > FATAL_ERROR_MAX_CHARS:
+        return False
+    lower = stripped.lower()
+    return any(p in lower for p in ORG_DISABLED_PHRASES)
 
 
 def looks_like_fatal_auth_error(text: str | None) -> bool:
@@ -670,6 +775,25 @@ def is_account_agnostic_error(error_text: str) -> bool:
         "currently unavailable", "is unavailable", "model not found",
         "unknown model", "unrecognized arguments", "unknown option",
         "invalid argument", "no such option", "usage:",
+        # Our own process-lifetime ceiling.  It used to arrive with no output
+        # and no completed turns — the exact shape of "this account fell over
+        # instantly" — so without it here, a run that hit the safety net would
+        # be handed to the backup account to burn the same hours again. The
+        # reap now salvages the last assistant text, which on its own defeats
+        # the no-turns heuristic; `num_turns` stays 0 by design. This is the
+        # guarantee for the case salvage cannot cover: a run reaped before it
+        # ever said anything still has that exact shape.
+        # runner._lifetime_kill_result is required to keep the phrase.
+        "lifetime limit",
+        # An un-compactable session (see is_context_overflow_error). Same
+        # shape and the same trap: the CLI aborts before the turn does
+        # anything, so no output and no completed turns — "this account fell
+        # over instantly". Handing it to the backup subscription resumes the
+        # same oversized transcript on the same summariser and fails the same
+        # way, having spent a second account's quota to learn nothing. The
+        # transcript is on disk and belongs to no account.
+        "prompt is too long",
+        "automatic compaction failed",
     ]
     return any(p in lower for p in patterns)
 

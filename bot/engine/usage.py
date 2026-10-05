@@ -239,8 +239,6 @@ def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:
 class UsageBlock:
     """Current 5h billing block."""
 
-    start_time: str
-    end_time: str
     is_active: bool
     input_tokens: int
     output_tokens: int
@@ -471,8 +469,6 @@ def _parse_block(data: dict | None) -> UsageBlock | None:
         br = block.get("burnRate") or {}
         proj = block.get("projection") or {}
         return UsageBlock(
-            start_time=block.get("startTime", ""),
-            end_time=block.get("endTime", ""),
             is_active=True,
             input_tokens=tc.get("inputTokens", 0),
             output_tokens=tc.get("outputTokens", 0),
@@ -498,18 +494,6 @@ async def get_current_block(force: bool = False) -> UsageBlock | None:
     today = datetime.now(timezone.utc).strftime("%Y%m%d")
     data = await _run_ccusage(["blocks", "--since", today], force=force)
     return _parse_block(data)
-
-
-async def get_daily_summary(force: bool = False) -> UsageDaily | None:
-    """Get today's usage (thin wrapper over unified 7-day fetch)."""
-    daily, _ = await _fetch_daily_range(force=force)
-    return daily
-
-
-async def get_weekly_summary(force: bool = False) -> UsageWeekly | None:
-    """Get 7-day usage aggregate (thin wrapper over unified fetch)."""
-    _, weekly = await _fetch_daily_range(force=force)
-    return weekly
 
 
 async def get_usage_details(force: bool = False) -> str:

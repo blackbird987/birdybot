@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import os
 import re
 from datetime import timedelta
+from typing import TYPE_CHECKING
 
 from dataclasses import dataclass, field
 
 from bot import config
 from bot.claude.types import CODE_CHANGE_TOOLS, PLAN_ORIGINS, Instance, InstanceOrigin, InstanceStatus, Schedule
 from bot.platform.base import ButtonSpec
+from bot.textutil import find_tilde_block, mask_tilde_bodies, parse_duration
+
+if TYPE_CHECKING:
+    from bot.store.state import StateStore
 
 
 # --- Shared Helpers ---
@@ -78,9 +84,11 @@ _BOT_CMD_DIRECTIVE_RE = re.compile(
 # The tilde-fenced payload (~~~wake / ~~~spawn / ~~~plan). Matched from the end
 # of the directive line, tolerating a blank line or two in between; a body
 # further away than that belongs to prose, not this directive.
-_BOT_CMD_BODY_RE = re.compile(
-    r"\n(?:[ \t]*\n){0,2}[ \t]*~~~[a-zA-Z]*[ \t]*\n.*?\n[ \t]*~~~[ \t]*(?=\n|\Z)",
-    re.DOTALL,
+# Only the OPENER is matched here; where the block ends is decided by
+# textutil.find_tilde_block, so a /spawn brief carrying a nested ~~~wake block
+# collapses whole instead of leaking its second half and a stray closer.
+_BOT_CMD_BODY_OPEN_RE = re.compile(
+    r"\n(?:[ \t]*\n){0,2}([ \t]*)~~~([a-zA-Z][\w-]*)[ \t]*(?=\n)",
 )
 # kv pair: key=value, bare or quoted — mirrors commands._SPAWN_KV_RE.
 _BOT_CMD_KV_RE = re.compile(r'''(\w+)=(?:"([^"]*)"|'([^']*)'|(\S+))''')
@@ -116,18 +124,34 @@ def _render_directive_chip(verb: str, args: str) -> str | None:
     if verb == "image":
         return None
     if verb == "wake":
-        try:
-            parts.append(f"in {format_delay_secs(int(kv.get('delay', '')))}")
-        except ValueError:
-            pass  # missing/garbage delay — the reason still carries the why
+        # Same duration grammar the directive parser applies ("3d", "90m",
+        # bare seconds), so the chip quotes the delay that was actually armed
+        # rather than dropping the unit-suffixed spellings on the floor. A
+        # missing/garbage delay yields the 0 sentinel and is simply omitted —
+        # the reason still carries the why.
+        secs = parse_duration(kv.get("delay") or kv.get("delay_secs"), 0)
+        if secs > 0:
+            parts.append(f"in {format_delay_secs(secs)}")
         if kv.get("reason"):
             parts.append(_chip_value(kv["reason"]))
+    elif verb == "watch":
+        if kv.get("label"):
+            parts.append(_chip_value(kv["label"]))
+        if kv.get("pid"):
+            parts.append(f"pid {_chip_value(kv['pid'])}")
+        elif kv.get("done"):
+            parts.append("until done marker")
+        if kv.get("log"):
+            parts.append(_chip_value(kv["log"]))
     elif verb == "spawn":
         parts += [
             _chip_value(kv[k]) for k in ("repo", "mode", "effort") if kv.get(k)
         ]
         if kv.get("title"):
             parts.append(f'"{_chip_value(kv["title"])}"')
+    elif verb == "reply":
+        if kv.get("thread"):
+            parts.append(f"answering <#{_chip_value(kv['thread'])}>")
     elif verb == "chain":
         # `preset=ship` and a bare `ship` are both accepted by the dispatcher.
         preset = kv.get("preset") or (args or "").strip().split(" ")[0]
@@ -158,15 +182,24 @@ def collapse_bot_directives(text: str) -> str:
         return text
     out: list[str] = []
     pos = 0
-    for m in _BOT_CMD_DIRECTIVE_RE.finditer(text):
+    # Found on the masked text, like the dispatchers: a directive inside some
+    # tilde block is never acted on, so it stays visible rather than becoming
+    # a chip claiming it was. Offsets are shared; bodies are read raw.
+    for m in _BOT_CMD_DIRECTIVE_RE.finditer(mask_tilde_bodies(text)):
         if m.start() < pos:
             continue  # already swallowed as a previous directive's body
         out.append(text[pos:m.start()])
         chip = _render_directive_chip(m.group(1), m.group(2))
         if chip is not None:
             out.append(chip)
-        body = _BOT_CMD_BODY_RE.match(text, m.end())
-        pos = body.end() if body else m.end()
+        pos = m.end()
+        opener = _BOT_CMD_BODY_OPEN_RE.match(text, m.end())
+        if opener:
+            span = find_tilde_block(
+                text, opener.group(2), opener.start(1), opener.start(1) + 1,
+            )
+            if span is not None:
+                pos = span[2]
         if chip is None:
             # Nothing rendered in its place — swallow the now-orphaned newline
             # so the directive leaves no gap where its line used to be.
@@ -199,7 +232,12 @@ def format_delay_secs(secs: int) -> str:
         return f"{secs}s"
     if secs < 5400:
         return f"{round(secs / 60)} min"
-    return f"{round(secs / 3600, 1)} h"
+    # Days above 36h: the wake ceiling is 30d and a watch can run for days, so
+    # without this rung a week-long timer renders as "168.0 h" in both the
+    # "I'll check back in ~X" notice and the watch heartbeat's elapsed line.
+    if secs < 129600:
+        return f"{round(secs / 3600, 1)} h"
+    return f"{round(secs / 86400, 1)} d"
 
 
 def format_tokens(count: int) -> str:
@@ -336,8 +374,67 @@ _MNEMONIC_PATTERN = re.compile(
 _HEX_KEY_PATTERN = re.compile(r'(?<![a-zA-Z0-9])[0-9a-fA-F]{64,}(?![a-zA-Z0-9])')
 
 
+# --- Literal .env secret stripping -------------------------------------------
+#
+# The patterns above recognise secret *shapes*, and an audit showed the two
+# that matter most to this bot have no recognisable shape: a bare Discord bot
+# token and a Discord webhook URL both survived every pattern here, bare and in
+# `NAME=value` form alike. A session that prints `env` while debugging, or a
+# traceback that carries the environment, would publish them into a thread
+# verbatim.
+#
+# So match on the *value* instead of the shape: pull the real secrets out of
+# config once and replace them literally. That has no false positives by
+# construction — it can only ever match the actual secret — and it needs no new
+# regex whenever a credential format changes. This is the pattern log_triage
+# has used all along; it just lived in one module instead of the shared path.
+_ENV_SECRET_NAMES = (
+    "DISCORD_BOT_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
+    "TWITTER_BEARER_TOKEN", "TEST_WEBHOOK_URL", "TEST_LOBBY_WEBHOOK_URL",
+)
+
+# Below this length a "secret" is more likely a placeholder than a credential,
+# and blanket-replacing a 3-character string would gut unrelated text.
+_ENV_SECRET_MIN_LEN = 8
+
+_env_secrets_cache: tuple[str, ...] | None = None
+
+
+def _env_secret_values() -> tuple[str, ...]:
+    """The literal secret strings to strip, collected once.
+
+    redact_secrets sits on the display hot path, so this must not re-read
+    config per call. A failure here degrades to regex-only redaction rather
+    than taking down every message the bot renders.
+    """
+    global _env_secrets_cache
+    if _env_secrets_cache is not None:
+        return _env_secrets_cache
+    values: list[str] = []
+    try:
+        for name in _ENV_SECRET_NAMES:
+            v = getattr(config, name, None) or os.getenv(name, "")
+            if v and isinstance(v, str) and len(v) >= _ENV_SECRET_MIN_LEN:
+                values.append(v)
+    except Exception:  # pragma: no cover - defensive
+        values = []
+    # Longest first: a webhook URL contains its own id/token substrings, and
+    # replacing the whole thing before its parts keeps the output readable.
+    values.sort(key=len, reverse=True)
+    _env_secrets_cache = tuple(dict.fromkeys(values))
+    return _env_secrets_cache
+
+
 def redact_secrets(text: str) -> str:
     """Scrub API keys, tokens, and secrets from text."""
+    # Literal pass FIRST, while every known secret is still verbatim. Running
+    # it last would leave a gap: a pattern below can chew a fragment out of a
+    # secret (``_HEX_KEY_PATTERN`` on a long hex run inside it, say) without
+    # removing the whole thing, and the surviving remainder would then no
+    # longer match the literal we are looking for.
+    for secret in _env_secret_values():
+        if secret in text:
+            text = text.replace(secret, '[REDACTED]')
     for pattern in _TOKEN_PATTERNS:
         text = pattern.sub('[REDACTED]', text)
     text = _CONN_STRING_PATTERN.sub(r'\1[REDACTED]\3', text)
@@ -454,7 +551,11 @@ VALID_MODES = frozenset(MODE_DISPLAY)
 # Mode cycle order for the toggle button
 _NEXT_MODE: dict[str, str] = {"explore": "plan", "plan": "build", "build": "explore"}
 
-# Origins where mode toggle button should NOT appear (user is in a workflow)
+# Origins where mode toggle button should NOT appear (user is in a workflow).
+# TLDR is here for a different reason than the rest: its instance is always
+# clamped to explore, so the toggle would read "Mode: Plan" on every recap
+# regardless of the mode the user was actually working in, and tapping it
+# would set the thread's mode off the back of a read-only turn.
 _WORKFLOW_ORIGINS = frozenset({
     InstanceOrigin.PLAN, InstanceOrigin.BUILD,
     InstanceOrigin.REVIEW_PLAN, InstanceOrigin.REVIEW_CODE,
@@ -462,6 +563,7 @@ _WORKFLOW_ORIGINS = frozenset({
     InstanceOrigin.APPLY_REVISIONS, InstanceOrigin.RELEASE,
     InstanceOrigin.VERIFY, InstanceOrigin.VERIFY_RELEASE,
     InstanceOrigin.BUILD_AND_SHIP, InstanceOrigin.SENSOR_FIX,
+    InstanceOrigin.TLDR,
 })
 
 
@@ -490,6 +592,101 @@ VALID_EFFORTS = frozenset(EFFORT_DISPLAY)
 def effort_name(effort: str) -> str:
     """Human-readable effort name."""
     return EFFORT_DISPLAY.get(effort, effort.capitalize())
+
+
+# --- Model Selection (/model) ---
+#
+# Deliberately NO table of model names here. Model names version-bump and get
+# renamed ("opus 5" -> "opus 6" -> something else entirely), so a hardcoded
+# whitelist would go stale and start rejecting the model the user actually
+# wants. Instead:
+#   * display goes through short_model_label(), which parses arbitrary shapes
+#     generically (vendor prefixes, date stamps, '-latest', numeric tails);
+#   * validation is a SHAPE check, not a membership check;
+#   * the suggestion list is derived at runtime from this deployment's own
+#     config plus the models it has actually run.
+
+# What a model identifier may look like on a command line: CLI aliases
+# ("opus"), full API ids ("claude-opus-4-8-20260101"), Bedrock-style
+# ("us.anthropic.claude-opus-5-v1:0"). Rejects spaces and shell metacharacters
+# so a fat-fingered "/model fable x" can never reach the command line, while
+# staying open to names that do not exist yet.
+_MODEL_SHAPE = re.compile(r"^[a-z0-9][a-z0-9._:-]{0,63}$")
+
+# How many recent instances to mine for model names (see model_suggestions).
+_MODEL_HISTORY_SCAN = 200
+
+# Words meaning "stop pinning a model, go back to normal routing". "auto" is
+# in here on purpose even though Cursor has a real model by that name: clearing
+# the pin there falls through to CURSOR_MODEL, which is "auto" by default, so
+# both readings land on the same model.
+MODEL_CLEAR_WORDS = frozenset({"default", "clear", "reset", "none", "auto"})
+
+
+def normalize_model(raw: str) -> str | None:
+    """Canonicalize a user-typed model name, or None if it cannot be one.
+
+    Not a whitelist -- any plausibly-shaped identifier passes, including models
+    released after this code was written. The CLI stays the real authority on
+    whether the name exists; see on_model's soft warning.
+    """
+    value = raw.strip().lower()
+    if not value or not _MODEL_SHAPE.match(value):
+        return None
+    return value
+
+
+def model_suggestions(store: "StateStore | None" = None) -> list[str]:
+    """Model names to offer in /model autocomplete. Never a closed list.
+
+    Sources, all runtime-derived so the list maintains itself:
+      1. ``MODEL_CHOICES`` env override, when a deployment wants explicit control.
+      2. Model names this deployment's own settings already reference -- short
+         CLI aliases like "opus", listed first because they are what a human
+         types and they do not churn between runs.
+      3. Model names this bot has actually run (recorded per instance), newest
+         first -- usually full API ids, and the best available evidence of what
+         the installed CLI accepts.
+    An empty list is fine -- free text still works.
+    """
+    ordered: list[str] = []
+    seen: set[str] = set()
+
+    def _add(name: object) -> None:
+        if not name:
+            return
+        canon = normalize_model(str(name))
+        if canon and canon not in seen:
+            seen.add(canon)
+            ordered.append(canon)
+
+    if config.MODEL_CHOICES:
+        # Explicit override: still normalized, so a stray "Opus 5 " in .env
+        # becomes a usable value instead of one the CLI would reject.
+        for choice in config.MODEL_CHOICES:
+            _add(choice)
+        return ordered
+
+    _add(config.PRIMARY_MODEL)
+    _add(config.MODEL_FALLBACK)
+    _add(config.BUILD_MODEL)
+    _add(config.EXPLORE_MODEL)
+    _add(config.DEFAULT_SESSION_MODEL)
+    for routed in config.MODEL_ROUTING.values():
+        _add(routed)
+
+    if store is not None:
+        try:
+            # Bounded: this runs per autocomplete keystroke, and the newest
+            # slice already covers every model still in rotation.
+            for inst in store.list_instances(all_=True)[:_MODEL_HISTORY_SCAN]:
+                _add(getattr(inst, "context_model", None))
+                _add(getattr(inst, "model", None))
+        except Exception:
+            pass  # suggestions are a convenience, never a failure path
+
+    return ordered
+
 
 
 # --- Status Icon ---
@@ -576,6 +773,26 @@ def resolver_running_button_specs(instance_id: str) -> list[list[ButtonSpec]]:
     ]]
 
 
+def _plan_action_rows(iid: str, has_autopilot_chain: bool) -> list[list[ButtonSpec]]:
+    """The button rows offered when a plan is on the table.
+
+    Hide the Autopilot starters when a chain is already paused — Continue
+    Autopilot elsewhere on the card is the correct resumption path.
+    """
+    rows: list[list[ButtonSpec]] = []
+    if not has_autopilot_chain:
+        rows.append([
+            ButtonSpec("Autopilot", f"autopilot:{iid}"),
+            ButtonSpec("Autopilot (Hold)", f"autopilot_hold:{iid}"),
+        ])
+    rows.append([
+        ButtonSpec("Review Plan", f"review_plan:{iid}"),
+        ButtonSpec("Build & Ship", f"build_and_ship:{iid}"),
+        ButtonSpec("Done", f"done:{iid}"),
+    ])
+    return rows
+
+
 def action_button_specs(
     instance: Instance, show_expand: bool = False,
     has_autopilot_chain: bool = False,
@@ -592,6 +809,25 @@ def action_button_specs(
     # handler posts a follow-up message with the appropriate Merge/Retry/Discard
     # row once verification + post-merge has run.
     if instance.origin == InstanceOrigin.RESOLVE_MERGE:
+        return rows
+
+    # Prompt review: its result is a report posted in The Ark, not a turn in a
+    # repo conversation. The Ark is not a repo forum, so Retry / Plan / Build &
+    # Ship / Branch would all resolve against whichever repo happens to be
+    # globally active, and the review's own Approve / Reject buttons are posted
+    # separately by bot/discord/prompt_review.py. Keep only the controls that
+    # mean something here: stopping it, reading its log, and expanding a report
+    # too long to render inline.
+    if instance.origin == InstanceOrigin.PROMPT_REVIEW:
+        if instance.status in (InstanceStatus.RUNNING, InstanceStatus.QUEUED):
+            rows.append([ButtonSpec("Kill", f"kill:{iid}")])
+        elif instance.status == InstanceStatus.FAILED:
+            rows.append([ButtonSpec("Log", f"log:{iid}")])
+        if show_expand:
+            rows.append([
+                ButtonSpec("Expand \u25bc", f"expand:{iid}"),
+                ButtonSpec("Full Log", f"log:{iid}"),
+            ])
         return rows
 
     # Done origin: if branch is pending merge and no autopilot, show Merge/Discard
@@ -649,19 +885,8 @@ def action_button_specs(
                     ButtonSpec("Done", f"done:{iid}"),
                 ])
             else:
-                # Plan created or revisions applied. Hide Autopilot starters
-                # when a chain is already paused — Continue Autopilot below
-                # is the correct resumption path.
-                if not has_autopilot_chain:
-                    rows.append([
-                        ButtonSpec("Autopilot", f"autopilot:{iid}"),
-                        ButtonSpec("Autopilot (Hold)", f"autopilot_hold:{iid}"),
-                    ])
-                rows.append([
-                    ButtonSpec("Review Plan", f"review_plan:{iid}"),
-                    ButtonSpec("Build & Ship", f"build_and_ship:{iid}"),
-                    ButtonSpec("Done", f"done:{iid}"),
-                ])
+                # Plan created or revisions applied
+                rows.extend(_plan_action_rows(iid, has_autopilot_chain))
         elif made_code_changes:
             # Edited/wrote files in-place (no branch)
             rows.append([
@@ -679,17 +904,7 @@ def action_button_specs(
         elif session_has_plan:
             # Fallback: session has a plan from a prior instance, and this
             # instance didn't do anything code-related — offer plan actions.
-            # Skip Autopilot starters when a chain is already paused.
-            if not has_autopilot_chain:
-                rows.append([
-                    ButtonSpec("Autopilot", f"autopilot:{iid}"),
-                    ButtonSpec("Autopilot (Hold)", f"autopilot_hold:{iid}"),
-                ])
-            rows.append([
-                ButtonSpec("Review Plan", f"review_plan:{iid}"),
-                ButtonSpec("Build & Ship", f"build_and_ship:{iid}"),
-                ButtonSpec("Done", f"done:{iid}"),
-            ])
+            rows.extend(_plan_action_rows(iid, has_autopilot_chain))
         else:
             # Default buttons + workflow row when session exists
             rows.append([
@@ -746,15 +961,18 @@ def action_button_specs(
     # Expand row below to avoid showing two Share buttons on the same message.
     branch_cap = 4 if show_expand else 5
     share_added = False
+    branch_row: list[ButtonSpec] | None = None
     if (instance.status == InstanceStatus.COMPLETED
             and instance.session_id
             and len(rows) < branch_cap):
-        rows.append([
+        branch_row = [
             ButtonSpec("Branch", f"branch:{iid}"),
             ButtonSpec("Share", f"share:{iid}"),
-        ])
+        ]
+        rows.append(branch_row)
         share_added = True
 
+    expand_row: list[ButtonSpec] | None = None
     if show_expand:
         expand_row = [
             ButtonSpec("Expand \u25bc", f"expand:{iid}"),
@@ -763,6 +981,24 @@ def action_button_specs(
         if instance.session_id and not share_added:
             expand_row.append(ButtonSpec("Share", f"share:{iid}"))
         rows.append(expand_row)
+
+    # TL;DR: a plain-language recap of whatever this turn was about.
+    #
+    # It rides an existing row instead of claiming one of the five Discord
+    # allows: the Expand row when a long result built one, otherwise the
+    # Branch/Share row. Both are gated on session_id, which TL;DR needs
+    # anyway (it resumes the session). When neither row exists the button is
+    # dropped rather than displacing a Merge or plan row, since /tldr covers
+    # the same ground from the keyboard.
+    #
+    # Never on a TL;DR's own card: re-summarising a summary says nothing, and
+    # the recursion has no natural floor.
+    if (instance.status == InstanceStatus.COMPLETED
+            and instance.session_id
+            and instance.origin != InstanceOrigin.TLDR):
+        host = expand_row if expand_row is not None else branch_row
+        if host is not None:
+            host.append(ButtonSpec("TL;DR", f"tldr:{iid}"))
 
     return rows
 
@@ -812,13 +1048,92 @@ def queued_button_specs(
 
 # --- Formatting Functions (markdown — platform adapters convert as needed) ---
 
-def format_result_md(instance: Instance) -> str:
-    """Format completed/failed instance result as markdown."""
+def format_inline_meta_line(instance: Instance, session_loc: str) -> str:
+    """One grey `-#` line of run facts for a result posted as plain messages.
+
+    The embed path renders Duration / Tokens / Cost / Mode as inline fields.
+    A plain message has no fields, so raising the inline ceiling would have
+    quietly dropped all of them for every result between the old 2000-char
+    threshold and the new one. Same facts, one line, no embed.
+    """
+    bits: list[str] = []
+    dur = format_duration(instance.duration_ms)
+    if dur:
+        bits.append(dur)
+    total_tokens = instance.input_tokens + instance.output_tokens
+    if total_tokens:
+        bits.append(format_tokens(total_tokens))
+    if instance.cost_usd:
+        bits.append(f"${instance.cost_usd:.4f}")
+    bits.append(mode_name(instance.mode))
+    if session_loc:
+        bits.append(session_loc)
+    return "-# " + " \u00b7 ".join(bits)
+
+
+def _cut_index(text: str, budget: int) -> int:
+    """Index to split *text* at, preferring a paragraph/line/word boundary.
+
+    Only the back half of the budget is searched: a boundary near the start
+    would technically be "nicer" but yields a near-empty piece and one more
+    message than needed. Falls back to a hard cut at *budget* for text with no
+    break in that window at all (a long token, a base64 blob).
+    """
+    for sep in ("\n\n", "\n", " "):
+        cut = text.rfind(sep, budget // 2, budget)
+        if cut > 0:
+            return cut
+    return budget
+
+
+def _close_open_fence(text: str) -> str:
+    """Append a closing ``` if *text* ends inside a code block.
+
+    Any cut can land mid-fence, and an odd fence count doesn't just look wrong
+    -- everything after it in the message renders as monospace, which for a
+    preview card means the "more characters" line and the duration/cost line
+    get swallowed into the code block.
+    """
+    if text.count("```") % 2:
+        return text + "\n```"
+    return text
+
+
+def _leading_preview(text: str, budget: int) -> tuple[str, int]:
+    """First *budget* chars of *text*, cut on a paragraph/line/word boundary.
+
+    Returns (preview, chars_dropped). Unlike ``extract_summary`` this keeps
+    MULTIPLE paragraphs -- the collapse card has to stand on its own, and one
+    500-char paragraph out of a 4 KB answer does not.
+    """
+    text = text.strip()
+    if len(text) <= budget:
+        return _close_open_fence(text), 0
+    cut = _cut_index(text, budget)
+    return _close_open_fence(text[:cut].rstrip()), len(text) - cut
+
+
+def format_result_md(instance: Instance, preview: str | None = None) -> str:
+    """Format completed/failed instance result as markdown.
+
+    *preview* is the full result text for a result too long to post inline.
+    When given, the card carries its leading paragraphs (up to
+    ``RESULT_PREVIEW_MAX``) plus how much is behind the Expand button,
+    instead of the <=500-char first paragraph in ``instance.summary``.
+    """
     parts = [f"**{instance.display_id()}**"]
 
     if instance.status == InstanceStatus.FAILED:
         error = redact_secrets(instance.error or 'Unknown error')
         parts.append(f"Failed: {error}")
+    elif preview and preview.strip():
+        cleaned = collapse_bot_directives(
+            strip_verify_blocks(redact_secrets(preview)),
+        )
+        body, dropped = _leading_preview(cleaned, config.RESULT_PREVIEW_MAX)
+        parts.append(body)
+        if dropped:
+            parts.append(f"-# +{dropped:,} more characters \u2014 Expand \u25bc")
     elif instance.summary:
         parts.append(redact_secrets(instance.summary))
 
@@ -835,29 +1150,80 @@ def format_result_md(instance: Instance) -> str:
     return "\n".join(parts)
 
 
-def format_expanded_result_md(instance: Instance, result_text: str, budget: int = 3900) -> str:
-    """Format full result text for expanded view, truncated to budget.
+# Room held back on the final chunk for the "+N more characters" marker.
+# Generous on purpose: the count and the instance id both vary in width.
+_CUT_MARKER_ROOM = 96
 
-    Strips leftover ```verify-board``` fences — legacy markers a
-    stale-context session may still emit, not content the user needs — and
+
+def format_expanded_result_chunks(
+    instance: Instance,
+    result_text: str,
+    first_budget: int = 3900,
+    rest_budget: int = 1900,
+    max_chunks: int | None = None,
+) -> list[str]:
+    """Full result text split for Expand: [edited embed, follow-up, ...].
+
+    The old behaviour sliced the result at 3900 chars and appended
+    "... truncated" -- so tapping Expand on a 12 KB answer still showed a
+    third of it. Now the whole thing is posted: chunk 0 goes back into the
+    result embed (4096 cap), the rest go out as plain messages (2000 cap).
+    Only a result past ``max_chunks`` is cut, and then the marker says how
+    much is missing rather than just "truncated".
+
+    Strips leftover ```verify-board``` fences -- legacy markers a
+    stale-context session may still emit, not content the user needs -- and
     collapses [BOT_CMD: ...] directives to one line each. This path reads the
     raw result FILE, so without the collapse a folded ~~~plan body would eat
-    the whole budget and truncate the answer the user tapped Expand to see.
-    (`/log` still ships the file untouched — that's the full-fidelity copy.)
+    the whole budget. (`/log` still ships the file untouched.)
     """
+    max_chunks = max(1, config.RESULT_EXPAND_MAX_CHUNKS
+                     if max_chunks is None else max_chunks)
     header = f"**{instance.display_id()}**\n\n"
-    text = collapse_bot_directives(strip_verify_blocks(redact_secrets(result_text)))
+    text = collapse_bot_directives(strip_verify_blocks(redact_secrets(result_text))).strip()
 
-    if len(text) > budget:
-        cut = text.rfind('\n', 0, budget)
-        if cut <= 0:
-            cut = text.rfind(' ', 0, budget)
-        if cut <= 0:
-            cut = budget
-        text = text[:cut]
-        text += f"\n\n*... truncated — use /log {instance.id} for full output*"
+    chunks: list[str] = []
+    budget = first_budget - len(header)
+    remaining = text
+    while remaining and len(chunks) < max_chunks:
+        if len(remaining) <= budget:
+            chunks.append(remaining)
+            remaining = ""
+            break
+        # On the last chunk we're allowed, hold back room for the marker that
+        # says what's missing -- appending it afterwards would push the chunk
+        # past the budget the caller sized its message for.
+        limit = budget
+        if len(chunks) == max_chunks - 1:
+            limit = max(1, budget - _CUT_MARKER_ROOM)
+        cut = _cut_index(remaining, limit)
+        piece = remaining[:cut]
+        remaining = remaining[cut:].lstrip('\n')
+        # Keep code fences balanced across the split, and reopen on the far
+        # side so the continuation still renders as code.
+        if piece.count('```') % 2:
+            piece += '\n```'
+            remaining = '```\n' + remaining
+        chunks.append(piece)
+        budget = rest_budget
 
-    return header + text
+    if not chunks:
+        chunks = [""]
+    if remaining:
+        chunks[-1] += (
+            f"\n\n-# +{len(remaining):,} more characters \u2014 "
+            f"/log {instance.id} for the full output"
+        )
+
+    chunks[0] = header + chunks[0]
+    return chunks
+
+
+def format_expanded_result_md(instance: Instance, result_text: str, budget: int = 3900) -> str:
+    """First screen of the expanded result (compat wrapper)."""
+    return format_expanded_result_chunks(
+        instance, result_text, first_budget=budget, max_chunks=1,
+    )[0]
 
 
 def format_instance_list_md(instances: list[Instance]) -> str:

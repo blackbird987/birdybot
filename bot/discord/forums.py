@@ -12,7 +12,6 @@ import enum
 import logging
 import re
 import secrets
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -20,20 +19,20 @@ from typing import TYPE_CHECKING
 import discord
 
 from bot import config
+from bot.procutil import run_capture
 from bot.discord import channels
 from bot.discord import spawn_colors
 from bot.discord import access as access_mod
 from bot.discord.access import load_access_config
+from bot.engine import repo_desc
 from bot.engine import sessions as sessions_mod
 from bot.platform.base import RequestContext
-from bot.platform.formatting import MODE_DISPLAY
 
 if TYPE_CHECKING:
     from bot.discord.adapter import DiscordMessenger
     from bot.store.state import StateStore
 
 log = logging.getLogger(__name__)
-_NOWND: dict = config.NOWND
 
 # Thread names a control room may still be carrying from an older version.
 # Includes the current name so a thread that already matches is recognised
@@ -57,6 +56,10 @@ class ThreadInfo:
     context: str | None = None        # None=inherit, ""=cleared, str=set
     verbose_level: int | None = None
     effort: str | None = None         # None=inherit, "low"/"medium"/"high"/"max"
+    # Model pin for this thread (/model). None=never set, ""=explicitly back
+    # to default routing, str=a --model name. Never validated against a list
+    # of known models -- see formatting.normalize_model for why.
+    model: str | None = None
     # User who created this thread (None = owner)
     user_id: str | None = None
     user_name: str | None = None
@@ -110,6 +113,8 @@ class ThreadInfo:
             d["verbose_level"] = self.verbose_level
         if self.effort is not None:
             d["effort"] = self.effort
+        if self.model is not None:
+            d["model"] = self.model
         if self.user_id is not None:
             d["user_id"] = self.user_id
         if self.user_name is not None:
@@ -143,6 +148,7 @@ class ThreadInfo:
             context=data.get("context"),
             verbose_level=data.get("verbose_level"),
             effort=data.get("effort"),
+            model=data.get("model"),
             user_id=data.get("user_id"),
             user_name=data.get("user_name"),
             user_ids=set(data.get("user_ids", [])),
@@ -389,6 +395,39 @@ class ForumManager:
                 return proj
         return None
 
+    def repo_for_channel(self, channel_id: str, channel=None) -> str | None:
+        """Which repo a channel belongs to, for any channel in a repo forum.
+
+        Three inputs resolve, in cost order: a *session* thread we recorded, a
+        repo's forum channel itself, and any other thread whose parent is one
+        of those forums. The third is the one that matters — a command typed
+        in the Control Room, the post that actually displays the blurb, is in
+        a thread `thread_to_project` never recorded.
+
+        Pass `channel` when the caller already holds the object. The Control
+        Room auto-archives like any forum post, and discord.py evicts an
+        archived thread from its cache, so `get_channel` returns None for
+        precisely the case this exists for; an interaction's own `channel` is
+        built from the gateway payload and is there either way.
+        """
+        lookup = self.thread_to_project(channel_id)
+        if lookup:
+            return lookup[0].repo_name
+        proj = self.forum_by_channel_id(channel_id)
+        if proj:
+            return proj.repo_name
+        if channel is None:
+            try:
+                channel = self._client.get_channel(int(channel_id))
+            except (TypeError, ValueError):
+                return None
+        parent_id = getattr(channel, "parent_id", None)
+        if parent_id:
+            proj = self.forum_by_channel_id(str(parent_id))
+            if proj:
+                return proj.repo_name
+        return None
+
     def is_user_forum(self, forum_id: str) -> tuple[str, str] | None:
         """Check if a forum is a user's personal forum. Returns (user_id, user_name) or None."""
         cfg = load_access_config()
@@ -451,6 +490,31 @@ class ForumManager:
 
         return forum
 
+    async def reconcile_user_forum_permissions(self) -> int:
+        """Bring every granted user's forum overwrite up to date.
+
+        Runs on startup so a permission added to GUEST_FORUM_ALLOWS reaches
+        forums that already exist. Idempotent: no API call when nothing is
+        missing. Returns how many forums were changed.
+        """
+        guild = self._client.get_guild(self._guild_id)
+        if not guild:
+            return 0
+        changed = 0
+        for uid, ua in load_access_config().users.items():
+            if not ua.forum_channel_id:
+                continue
+            forum = guild.get_channel(int(ua.forum_channel_id))
+            if not isinstance(forum, discord.ForumChannel):
+                continue
+            try:
+                if await channels.reconcile_guest_overwrite(forum, guild, int(uid)):
+                    changed += 1
+            except Exception:
+                log.warning("Failed to reconcile permissions on forum %s for user %s",
+                            forum.id, uid, exc_info=True)
+        return changed
+
     async def sync_user_forum_tags(self, user_id: str) -> None:
         """Sync a user's forum tags to match their current access grants."""
         cfg = load_access_config()
@@ -502,6 +566,120 @@ class ForumManager:
             self.save_forum_map()
             return forum
 
+    async def _archive_category(self) -> "discord.CategoryChannel | None":
+        """The category that parks hidden repo forums, created on demand."""
+        guild = self._client.get_guild(self._guild_id)
+        if not guild or not guild.me or not self._category_id:
+            return None
+        base = guild.get_channel(self._category_id)
+        if not base or not isinstance(base, discord.CategoryChannel):
+            return None
+        return await channels.ensure_archive_category(
+            guild, base, guild.me, owner_id=self._discord_user_id,
+        )
+
+    async def _move_repo_forum(self, repo_name: str, hidden: bool) -> str:
+        """Move a repo's forum between the main and the archive category.
+
+        Nothing is ever deleted here: the forum, its threads and its pinned
+        posts survive the move untouched. Returns a short human-readable
+        description of what happened, for logging and for the reply.
+        """
+        proj = self._forum_projects.get(repo_name)
+        if proj is None or not proj.forum_channel_id:
+            return "no forum was registered"
+
+        guild = self._client.get_guild(self._guild_id)
+        channel = guild.get_channel(int(proj.forum_channel_id)) if guild else None
+        if channel is None:
+            return "no forum channel found"
+
+        # Resolving the target and moving into it happen under one lock:
+        # hiding several repos at once resolves the archive category several
+        # times, and ensure_archive_category scans-then-creates, so two
+        # concurrent hides would otherwise each create their own category.
+        try:
+            async with self._forum_lock:
+                if hidden:
+                    target = await self._archive_category()
+                else:
+                    target = (guild.get_channel(self._category_id)
+                              if self._category_id else None)
+                    if target is not None and not isinstance(
+                            target, discord.CategoryChannel):
+                        target = None
+                if target is None:
+                    return "could not resolve the target category"
+                if channel.category_id == target.id:
+                    return "forum was already there"
+                # sync_permissions is deliberately NOT set. A repo forum can
+                # carry its own overwrites -- a per-repo access grant is one
+                # extra entry on the forum itself, not on the category -- and
+                # syncing would overwrite the forum's list with the archive
+                # category's, silently revoking that guest. Unhiding would
+                # then sync to the main category and still not restore it.
+                # The move alone is the mechanism; the forum keeps the
+                # private overwrites it was created with either way.
+                await channel.edit(category=target)
+        except discord.HTTPException as exc:
+            log.warning("Could not move forum for %s: %s", repo_name, exc)
+            return f"moving the forum channel failed: {exc}"
+        except Exception as exc:
+            log.warning("Could not move forum for %s", repo_name, exc_info=True)
+            return f"moving the forum channel failed: {exc}"
+
+        log.info("Moved forum %s for repo %s into %s",
+                 proj.forum_channel_id, repo_name, target.name)
+        return f"forum moved to {target.name}"
+
+    async def wake_repo_if_dormant(
+        self, repo_name: str, notify_channel_id: str | None = None,
+    ) -> bool:
+        """Un-hide a repo the moment real work starts in it.
+
+        Hiding parks a forum out of the sidebar, so a self-wake firing (or a
+        spawn landing) inside a hidden repo would post its result somewhere
+        the user has stopped looking. Work is the strongest possible signal
+        that the repo is not dormant after all, so it retrieves itself.
+
+        Called from all three ways something reaches a forum:
+        ``get_or_create_session_thread`` (a new thread), the forum-message
+        route in ``bot.py`` (the user typing in an existing one), and
+        ``_replay_to_thread`` (every unattended resume). Adding a fourth
+        without calling this parks work where nobody will see it.
+
+        Returns True if the repo was hidden and has now been brought back.
+        """
+        if not repo_name or repo_name == "_default":
+            return False
+        if not self._store.is_repo_dormant(repo_name):
+            return False
+        self._store.set_repo_dormant(repo_name, False)
+        try:
+            await self.unhide_repo_forum(repo_name)
+        except Exception:
+            log.warning("Could not un-park forum for woken repo %s",
+                        repo_name, exc_info=True)
+        log.info("Repo %s un-hidden, work started in it", repo_name)
+        if notify_channel_id:
+            try:
+                ch = self._client.get_channel(int(notify_channel_id))
+                if isinstance(ch, (discord.TextChannel, discord.Thread)):
+                    await ch.send(
+                        f"-# `{repo_name}` was hidden; un-hiding it, work "
+                        f"just started here.")
+            except Exception:
+                log.debug("Could not post un-hide notice", exc_info=True)
+        return True
+
+    async def hide_repo_forum(self, repo_name: str) -> str:
+        """Park a repo's forum in the archive category (nothing is deleted)."""
+        return await self._move_repo_forum(repo_name, hidden=True)
+
+    async def unhide_repo_forum(self, repo_name: str) -> str:
+        """Bring a hidden repo's forum back into the main category."""
+        return await self._move_repo_forum(repo_name, hidden=False)
+
     async def get_or_create_session_thread(
         self, repo_name: str, session_id: str | None, topic: str,
         origin: str = "bot",
@@ -517,6 +695,15 @@ class ForumManager:
         given, it replaces the sanitized topic-derived thread name (used by
         /spawn to inject a color prefix at create-time).
         """
+        # A run in a hidden repo un-hides it. This has to sit above the
+        # already-has-a-thread early return below: a resumed session in a
+        # hidden repo is exactly the case that would otherwise keep posting
+        # into a parked forum nobody is looking at.
+        try:
+            await self.wake_repo_if_dormant(repo_name)
+        except Exception:
+            log.debug("Wake-on-work check failed for %s", repo_name, exc_info=True)
+
         # Check if session already has a thread
         if session_id:
             result = self.session_to_thread(session_id)
@@ -774,8 +961,17 @@ class ForumManager:
                     proj.repo_name,
                 )
 
-        # Ensure control room posts exist for all repo forums
+        # Ensure control room posts exist for all repo forums. Hidden repos
+        # are skipped here (and in the archive-thread loop and _pin_scopes
+        # below): those three *create or redraw* something in a forum that
+        # was deliberately parked. The other reconcile passes -- thread-name
+        # normalization, stale-tag clearing, legacy verify cleanup, archive
+        # migration, auto-follow -- deliberately still run on hidden repos:
+        # they repair state that must be correct whenever the forum comes
+        # back, and skipping them would leave a woken repo subtly stale.
         for repo_name, proj in self._forum_projects.items():
+            if self._store.is_repo_dormant(repo_name):
+                continue
             if proj.forum_channel_id and not proj.control_thread_id:
                 try:
                     await self.ensure_control_post(repo_name)
@@ -784,6 +980,8 @@ class ForumManager:
 
         # Ensure archive threads exist for all repo forums
         for repo_name, proj in self._forum_projects.items():
+            if self._store.is_repo_dormant(repo_name):
+                continue
             if proj.forum_channel_id and not proj.archive_thread_id:
                 try:
                     await self.ensure_archive_thread(repo_name)
@@ -892,6 +1090,151 @@ class ForumManager:
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
                 await asyncio.sleep(0.5)
+
+    # --- Forum pins ---
+
+    async def reconcile_forum_pins(self) -> None:
+        """Make the Control Room the one pinned post in every forum.
+
+        A forum channel has a single pin slot. The archive and monitor posts
+        used to pin themselves right after creation, racing the control room
+        for that slot — whichever landed last won, and nothing ever
+        re-checked. This unpins everything else first, then pins the control
+        room, so the outcome is the same whether Discord replaces an existing
+        pin or rejects the second one.
+
+        An already-correct forum issues no edits, so this is cheap to run on
+        every startup.
+        """
+        for forum, control_id, tracked_ids in self._pin_scopes():
+            try:
+                await self._reconcile_forum_pin(forum, control_id, tracked_ids)
+            except Exception:
+                log.warning("Pin reconcile failed for forum %s", forum.id, exc_info=True)
+
+    def _pin_scopes(self) -> list[tuple[discord.ForumChannel, int | None, set[int]]]:
+        """(forum, control thread id, other bot-owned thread ids) per forum."""
+        scopes: list[tuple[discord.ForumChannel, int | None, set[int]]] = []
+
+        # One unparseable id must not cost the whole sweep — this runs as a
+        # fire-and-forget task, where a raised ValueError just disappears.
+        for proj in list(self._forum_projects.values()):
+            # A hidden repo's forum is parked out of sight; repairing its pin
+            # slot is API calls spent on a sidebar nobody is looking at.
+            if self._store.is_repo_dormant(proj.repo_name):
+                continue
+            try:
+                self._add_pin_scope(
+                    scopes, proj.forum_channel_id, proj.control_thread_id,
+                    (proj.archive_thread_id, proj.monitor_thread_id,
+                     proj.legacy_verify_thread_id),
+                )
+            except Exception:
+                log.debug("Skipping pin scope for repo %s", proj.repo_name, exc_info=True)
+
+        try:
+            cfg = load_access_config()
+        except Exception:
+            log.debug("Could not load access config for pin reconcile", exc_info=True)
+            return scopes
+        for ua in cfg.users.values():
+            try:
+                self._add_pin_scope(
+                    scopes, ua.forum_channel_id, ua.control_thread_id,
+                    (ua.archive_thread_id,),
+                )
+            except Exception:
+                log.debug("Skipping pin scope for user forum", exc_info=True)
+
+        return scopes
+
+    def _add_pin_scope(
+        self,
+        scopes: list[tuple[discord.ForumChannel, int | None, set[int]]],
+        forum_id: str | None,
+        control_id: str | None,
+        other_ids: tuple[str | None, ...],
+    ) -> None:
+        """Resolve one forum's ids and append its scope, if it is a live forum."""
+        if not forum_id:
+            return
+        forum = self._client.get_channel(int(forum_id))
+        if not isinstance(forum, discord.ForumChannel):
+            return
+        scopes.append((
+            forum,
+            int(control_id) if control_id else None,
+            {int(t) for t in other_ids if t},
+        ))
+
+    async def _reconcile_forum_pin(
+        self,
+        forum: discord.ForumChannel,
+        control_id: int | None,
+        tracked_ids: set[int],
+    ) -> None:
+        """Unpin every post in *forum* except the control room, then pin it."""
+        candidates: dict[int, discord.Thread] = {
+            t.id: t for t in forum.threads if isinstance(t, discord.Thread)
+        }
+        wanted = set(tracked_ids)
+        if control_id:
+            wanted.add(control_id)
+        for tid in wanted - set(candidates):
+            th = await self._fetch_thread(tid)
+            if th is not None:
+                candidates[th.id] = th
+
+        changed = False
+        for th in list(candidates.values()):
+            if th.id == control_id or not th.flags.pinned:
+                continue
+            try:
+                await self._set_thread_pin(th, False)
+                changed = True
+                log.info("Unpinned %r (%s) in forum %s — Control Room owns the pin",
+                         th.name, th.id, forum.name)
+            except Exception:
+                log.warning("Could not unpin %r in forum %s",
+                            th.name, forum.name, exc_info=True)
+
+        control = candidates.get(control_id) if control_id else None
+        if control is not None and not control.flags.pinned:
+            try:
+                await self._set_thread_pin(control, True)
+                changed = True
+                log.info("Pinned Control Room %s in forum %s", control.id, forum.name)
+            except Exception:
+                log.warning("Could not pin Control Room in forum %s",
+                            forum.name, exc_info=True)
+
+        if changed:
+            # Channel edits are rate-limited — pace the repaired forums.
+            await asyncio.sleep(0.5)
+
+    async def _set_thread_pin(self, thread: discord.Thread, pinned: bool) -> None:
+        """Pin or unpin a forum post, waking it first if it fell asleep.
+
+        Discord rejects every field but `archived` on an archived thread
+        (error 50083), so a post that auto-archived has to be woken in its own
+        request before its pin state can change. That applies to *unpinning*
+        too: a sleeping post that still holds the slot would otherwise keep it
+        forever and the control room could never take it. Waking it is the
+        lesser evil — Discord will auto-archive it again.
+        """
+        if thread.archived:
+            thread = await thread.edit(archived=False)
+        await thread.edit(pinned=pinned)
+
+    async def _fetch_thread(self, thread_id: int) -> discord.Thread | None:
+        """Resolve a thread id from cache, falling back to a REST fetch."""
+        ch = self._client.get_channel(thread_id)
+        if ch is None:
+            try:
+                ch = await self._client.fetch_channel(thread_id)
+            except Exception:
+                return None
+        return ch if isinstance(ch, discord.Thread) else None
 
     # --- Archive Thread ---
 
@@ -1191,10 +1534,8 @@ class ForumManager:
         if not repo_path:
             return None
         try:
-            result = await asyncio.to_thread(
-                subprocess.run,
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                cwd=repo_path, capture_output=True, text=True, **_NOWND,
+            result = await asyncio.to_thread(run_capture, 
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_path,
             )
             return result.stdout.strip() if result.returncode == 0 else None
         except Exception:
@@ -1207,11 +1548,7 @@ class ForumManager:
         if repo_path in self._remote_cache:
             return self._remote_cache[repo_path]
         try:
-            result = await asyncio.to_thread(
-                subprocess.run,
-                ["git", "remote"],
-                cwd=repo_path, capture_output=True, text=True, **_NOWND,
-            )
+            result = await asyncio.to_thread(run_capture, ["git", "remote"], cwd=repo_path)
             has = result.returncode == 0 and bool(result.stdout.strip())
         except Exception:
             has = False
@@ -1236,9 +1573,13 @@ class ForumManager:
         repo_path = repos.get(repo_name, "")
         branch = await self._get_repo_branch(repo_path)
         has_remote = await self._has_git_remote(repo_path)
+        blurb = await repo_desc.refresh_repo_description(
+            self._store, repo_name, repo_path,
+        )
 
         thread, msg = await channels.create_repo_control_post(
             forum, repo_name, repo_path, branch, has_remote=has_remote,
+            description=blurb,
         )
         proj.control_thread_id = str(thread.id)
         proj.control_message_id = str(msg.id)
@@ -1396,6 +1737,9 @@ class ForumManager:
             branch = await self._get_repo_branch(repo_path)
             has_remote = await self._has_git_remote(repo_path)
             today_cost = self._store.get_repo_daily_cost(repo_name)
+            blurb = await repo_desc.refresh_repo_description(
+                self._store, repo_name, repo_path,
+            )
 
             ds = self._store.get_deploy_state(repo_name)
             # Build instance_id -> thread_id map for deploy state session links.
@@ -1427,6 +1771,7 @@ class ForumManager:
                 deploy_thread_ids=deploy_thread_ids,
                 usage_bar=usage_bar,
                 drain_status=drain_status,
+                description=blurb,
             )
             view = channels.build_control_view(
                 repo_name,
@@ -1563,6 +1908,32 @@ class ForumManager:
         self.save_forum_map()
         return RebindResult.ACCEPTED
 
+    def clear_thread_session(self, thread_id: str) -> str | None:
+        """Unbind this thread's CLI session; the next message starts cold.
+
+        The manual twin of the runner's context-overflow recovery, for when
+        that recovery is off or its fresh attempt died too.  A thread bound to
+        a session the CLI can no longer load has no other way out — every
+        message resumes the same dead id — and the only previous escape was to
+        abandon the thread and open a new one, losing the Discord history too.
+
+        Returns the session id that was dropped, or None if there was nothing
+        bound.  The cached priming digest goes with it: the next turn takes the
+        cold path and rebuilds one from the thread's real messages.
+        """
+        lookup = self.thread_to_project(thread_id)
+        if not lookup:
+            return None
+        _, info = lookup
+        old = info.session_id
+        if not old:
+            return None
+        info.session_id = None
+        self.clear_prime_briefing(thread_id)
+        self.save_forum_map()
+        log.info("Thread %s session unbound (was %s)", thread_id, old[:12])
+        return old
+
     def attach_session_callbacks(self, ctx: RequestContext, thread_info: ThreadInfo, thread_id: str) -> None:
         """Wire up session resolution callbacks on a RequestContext.
 
@@ -1676,12 +2047,12 @@ class ForumManager:
                     ln for ln in text.splitlines()
                     if not ln.lstrip().startswith("[BOT_CMD:")
                 ).strip()
-                # Drop ~~~spawn / ~~~wake payload blocks — same threat model as
+                # Drop ~~~spawn / ~~~wake / ~~~watch payload blocks — same threat model as
                 # BOT_CMD lines: a quoted directive body could otherwise re-issue
                 # a spawn/wake by riding the next response back into the
                 # dispatcher, and either way it's stale prose bloating context.
                 text = re.sub(
-                    r"~~~(?:spawn|wake)\s*\n.*?\n~~~", "", text, flags=re.DOTALL,
+                    r"~~~(?:spawn|wake|watch)\s*\n.*?\n~~~", "", text, flags=re.DOTALL,
                 ).strip()
                 if not text:
                     continue
@@ -1773,6 +2144,9 @@ class ForumManager:
             changed = True
         if ctx.effort is not None and ctx.effort != info.effort:
             info.effort = ctx.effort
+            changed = True
+        if ctx.model is not None and ctx.model != info.model:
+            info.model = ctx.model
             changed = True
         if changed:
             self.save_forum_map()

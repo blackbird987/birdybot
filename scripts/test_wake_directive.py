@@ -28,6 +28,7 @@ _ROOT = os.path.dirname(_HERE)
 sys.path.insert(0, _ROOT)
 
 from bot import config
+from bot.engine import lifecycle
 from bot.engine.lifecycle import _parse_wake_directive
 
 _failures: list[str] = []
@@ -62,6 +63,32 @@ _check("missing delay -> fallback int",
 _dg = _parse_wake_directive("[BOT_CMD: /wake delay=soon]\n~~~wake\ngo\n~~~")
 _check("garbage delay -> fallback int (no drop)",
        _dg and _dg["delay_secs"] == config.WAKE_FALLBACK_DELAY_SECS)
+
+# ---- unit-suffixed delays and the 30d ceiling ----
+# The clamp used to stop at 24h, and delay= only accepted a bare number — so
+# "delay=3d" silently became the 180s fallback. Both halves are pinned here.
+print("Unit suffixes and the long-timer ceiling")
+for _raw, _want in (("45s", 45), ("90m", 5400), ("6h", 21600),
+                    ("3d", 259200), ("2w", 1209600)):
+    _du = _parse_wake_directive(
+        f"[BOT_CMD: /wake delay={_raw}]\n~~~wake\ncheck back\n~~~"
+    )
+    _check(f"delay={_raw} -> {_want}s", _du and _du["delay_secs"] == _want)
+_dt = _parse_wake_directive("[BOT_CMD: /wake delay=3days]\n~~~wake\ngo\n~~~")
+_check("a unit typo falls back rather than parsing its prefix",
+       _dt and _dt["delay_secs"] == config.WAKE_FALLBACK_DELAY_SECS)
+
+print("A multi-day delay survives the clamp")
+_sched = lifecycle._wake_schedule_at({"delay_secs": 3 * 86400})
+_check("3d is scheduled as 3d, not truncated to 24h",
+       _sched is not None and _sched[1] == 3 * 86400)
+_check("the ceiling is past a day", config.WAKE_MAX_DELAY_SECS > 86400)
+_over = lifecycle._wake_schedule_at({"delay_secs": 365 * 86400})
+_check("an absurd delay still clamps to the ceiling",
+       _over is not None and _over[1] == config.WAKE_MAX_DELAY_SECS)
+_under = lifecycle._wake_schedule_at({"delay_secs": 1})
+_check("the floor still holds",
+       _under is not None and _under[1] == config.WAKE_MIN_DELAY_SECS)
 
 # ---- delay_secs alias accepted ----
 print("delay_secs alias")

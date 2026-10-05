@@ -15,14 +15,17 @@ from discord import app_commands
 from bot.discord import access as access_mod
 from bot.discord import channels
 from bot.discord.access import (
-    AccessResult, load_access_config, check_user_access,
+    load_access_config, check_user_access,
     effective_mode as access_effective_mode,
 )
 from bot.claude.types import InstanceStatus
 from bot.discord.monitoring import monitor_setup
 from bot.engine import commands
 from bot.engine import sessions as sessions_mod
-from bot.platform.formatting import MODE_DISPLAY, VALID_MODES, format_age, mode_name
+from bot.platform.formatting import (
+    MODE_DISPLAY, VALID_MODES, format_age, model_suggestions,
+    normalize_model, short_model_label,
+)
 from bot.store import history as history_mod
 
 if TYPE_CHECKING:
@@ -80,6 +83,31 @@ def setup(bot: ClaudeBot) -> None:
             await interaction.response.send_message("Unauthorized", ephemeral=True)
             return
         await bot._run_slash(interaction, lambda ctx: commands.on_evals(ctx, days))
+
+    @bot.tree.command(name="promptreview", description="Propose prompt-block edits from the eval record", guild=guild_obj)
+    @app_commands.describe(days="Window in days (default 7)")
+    async def cmd_prompt_review(interaction: discord.Interaction, days: int = 0):
+        # Owner only: it reads the whole eval record and opens a build against
+        # the bot's own instructions.
+        if not bot._is_owner(interaction.user.id):
+            await interaction.response.send_message("Owner only.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        from bot.discord.prompt_review import run_review
+        window = max(1, min(days, 90)) if days else None
+        await interaction.followup.send(
+            "Prompt review starting. It posts into the **Prompt Review** "
+            "thread in The Ark.", ephemeral=True,
+        )
+        try:
+            outcome = await run_review(bot, window)
+        except Exception:
+            log.exception("/promptreview failed")
+            outcome = "Prompt review failed. See the log."
+        try:
+            await interaction.followup.send(outcome, ephemeral=True)
+        except discord.HTTPException:
+            log.debug("/promptreview outcome follow-up failed", exc_info=True)
 
     @bot.tree.command(name="usage", description="Token usage & rate limit estimates", guild=guild_obj)
     @app_commands.describe(force="Force refresh (bypass cache)")
@@ -256,6 +284,42 @@ def setup(bot: ClaudeBot) -> None:
             return
         await bot._run_slash(interaction, lambda ctx: commands.on_effort(ctx, level))
 
+    async def model_autocomplete(
+        interaction: discord.Interaction, current: str,
+    ) -> list[app_commands.Choice[str]]:
+        """Suggest models this deployment actually runs, plus 'default'.
+
+        Never a closed list: whatever the user types is still submitted, so a
+        model released after this build still works by typing its name.
+        """
+        typed = current.strip().lower()
+        names = ["default", *model_suggestions(bot._store)]
+        out: list[app_commands.Choice[str]] = []
+        for name in names:
+            if typed and typed not in name:
+                continue
+            label = "default (normal routing)" if name == "default" else short_model_label(name)
+            out.append(app_commands.Choice(name=f"{label} — {name}"[:100], value=name))
+        # A model released after this build matches nothing above, and an
+        # autocomplete showing zero options is near-unusable on a phone. Only
+        # then offer what the user typed: while they are still typing toward a
+        # name that IS listed, a second row holding their half-finished text is
+        # a mis-tap waiting to happen.
+        if not out:
+            exact = normalize_model(typed) if typed else None
+            if exact:
+                out.append(app_commands.Choice(name=f"Use “{exact}”"[:100], value=exact))
+        return out[:25]
+
+    @bot.tree.command(name="model", description="Model for this thread", guild=guild_obj)
+    @app_commands.describe(name="Model name, or 'default' to clear the pin")
+    @app_commands.autocomplete(name=model_autocomplete)
+    async def cmd_model(interaction: discord.Interaction, name: str = ""):
+        if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
+            await interaction.response.send_message("Unauthorized", ephemeral=True)
+            return
+        await bot._run_slash(interaction, lambda ctx: commands.on_model(ctx, name))
+
     @bot.tree.command(name="provider", description="View or switch CLI provider", guild=guild_obj)
     @app_commands.describe(name="Provider: claude, cursor")
     async def cmd_provider(interaction: discord.Interaction, name: str = ""):
@@ -279,7 +343,10 @@ def setup(bot: ClaudeBot) -> None:
             await interaction.response.send_message("Unauthorized", ephemeral=True)
             return
         stripped = args.strip()
-        repos = bot._store.list_repos()
+        # The menu is a picker, so it shows what you actually work on. A
+        # hidden repo is still switchable by typing its name.
+        repos = bot._store.list_active_repos()
+        hidden_count = len(bot._store.list_dormant_repos())
         if len(repos) >= 2 and stripped in ("", "switch"):
             active, _ = bot._store.get_active_repo()
             select = discord.ui.Select(
@@ -299,11 +366,25 @@ def setup(bot: ClaudeBot) -> None:
             for name, path in repos.items():
                 marker = " \\*" if name == active else ""
                 lines.append(f"`{name}`{marker} → `{path}`")
+            if hidden_count:
+                lines.append(
+                    f"-# {hidden_count} hidden · `/repo list` to see them")
             await interaction.response.send_message(
                 "\n".join(lines), view=view, ephemeral=True,
             )
             return
-        await bot._run_slash(interaction, lambda ctx: commands.on_repo(ctx, args))
+        # _run_slash builds its ctx without a repo, so /repo desc would default
+        # to the globally active repo and write the sentence into the wrong
+        # repo's .claude/repo.json. Resolve the channel's own repo here rather
+        # than in _run_slash: every other slash command shares that ctx, and
+        # /bg would start running against a different repo than it does today.
+        async def _run(ctx):
+            if not ctx.repo_name:
+                ctx.repo_name = bot._forums.repo_for_channel(
+                    str(interaction.channel_id), interaction.channel)
+            await commands.on_repo(ctx, args)
+
+        await bot._run_slash(interaction, _run)
 
     @bot.tree.command(name="session", description="List/resume sessions", guild=guild_obj)
     @app_commands.describe(args="resume <id> | drop")
@@ -320,6 +401,45 @@ def setup(bot: ClaudeBot) -> None:
             await interaction.response.send_message("Unauthorized", ephemeral=True)
             return
         await bot._run_slash(interaction, lambda ctx: commands.on_schedule(ctx, args))
+
+    @bot.tree.command(
+        name="tldr",
+        description="Explain this thread's last turn in plain language",
+        guild=guild_obj,
+    )
+    async def cmd_tldr(interaction: discord.Interaction):
+        """Typed twin of the [TL;DR] button.
+
+        Both land on workflows.on_tldr with the same source instance, so the
+        two surfaces cannot drift on prompt, mode or permission floor. The
+        only extra work here is resolving what the button already knows: the
+        instance whose card it was sitting on.
+        """
+        if not bot._is_owner(interaction.user.id) and not bot._check_access(
+                interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
+            await interaction.response.send_message("Unauthorized", ephemeral=True)
+            return
+
+        lookup = bot._forums.thread_to_project(str(interaction.channel_id))
+        if lookup is None:
+            await interaction.response.send_message(
+                "This isn't a session thread, so there is nothing for /tldr to recap.",
+                ephemeral=True,
+            )
+            return
+        info = lookup[1]
+        inst = bot._store.latest_instance_for_session(info.session_id)
+        if inst is None:
+            await interaction.response.send_message(
+                "Nothing has run in this thread yet, so there is nothing to recap.",
+                ephemeral=True,
+            )
+            return
+
+        from bot.engine import workflows
+        await bot._run_slash(
+            interaction, lambda ctx: workflows.on_tldr(ctx, inst.id),
+        )
 
     @bot.tree.command(name="alias", description="Command shortcuts", guild=guild_obj)
     @app_commands.describe(args="set|delete|list ...")
@@ -399,6 +519,12 @@ def setup(bot: ClaudeBot) -> None:
                 if grant:
                     new_thread_mode = access_effective_mode(grant, new_thread_mode)
 
+        # Hidden repos drop out of the *picker* but stay startable by name:
+        # naming one explicitly is intent, and the repo un-hides itself as
+        # soon as the session starts.
+        pickable_repos = [r for r in available_repos
+                          if not bot._store.is_repo_dormant(r)]
+
         repo = repo.strip()
         if repo:
             lower_map = {k.lower(): k for k in available_repos}
@@ -414,17 +540,17 @@ def setup(bot: ClaudeBot) -> None:
                 user_id=user_id, user_name=user_name,
             )
         else:
-            if len(available_repos) == 0:
+            if len(pickable_repos) == 0:
                 await interaction.response.send_message("No repos available.", ephemeral=True)
-            elif len(available_repos) == 1:
+            elif len(pickable_repos) == 1:
                 await interaction.response.defer(ephemeral=True)
                 await bot._create_new_session(
-                    interaction, available_repos[0], mode=new_thread_mode,
+                    interaction, pickable_repos[0], mode=new_thread_mode,
                     user_id=user_id, user_name=user_name,
                 )
             else:
                 view = discord.ui.View(timeout=60)
-                for name in available_repos:
+                for name in pickable_repos:
                     btn = discord.ui.Button(
                         label=name, style=discord.ButtonStyle.primary,
                         custom_id=f"new_repo:{name}",
@@ -530,6 +656,47 @@ def setup(bot: ClaudeBot) -> None:
         if not parts:
             parts.append("No sessions found")
         await interaction.followup.send("\n".join(parts), ephemeral=True)
+
+    @bot.tree.command(name="reset", description="Unbind this thread's CLI session and start fresh here", guild=guild_obj)
+    async def cmd_reset(interaction: discord.Interaction):
+        """Escape hatch for a thread bound to a session the CLI can't load.
+
+        Keeps the thread (and its Discord history, which is what the next
+        turn's cold priming reads); drops only the session binding.
+        """
+        if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
+            await interaction.response.send_message("Unauthorized", ephemeral=True)
+            return
+        thread_id = str(interaction.channel_id)
+        if not bot._forums.thread_to_project(thread_id):
+            await interaction.response.send_message(
+                "This isn't a session thread.", ephemeral=True,
+            )
+            return
+        # Checked BEFORE the unbind, while the thread still names a session.
+        # A turn in flight writes its own session_id back when it finishes
+        # (lifecycle.should_bind_session), so a reset underneath one silently
+        # doesn't stick — and the whole point of this command is the case
+        # where the user has already watched the thread fail twice.
+        busy = bot._runner.active_instance_for_channel(thread_id)
+        dropped = bot._forums.clear_thread_session(thread_id)
+        if not dropped:
+            await interaction.response.send_message(
+                "This thread has no session bound — your next message already "
+                "starts fresh.", ephemeral=True,
+            )
+            return
+        msg = (
+            f"Session `{dropped[:12]}…` unbound. Your next message starts a "
+            "fresh session in this thread, primed with recent history."
+        )
+        if busy:
+            msg += (
+                f"\n\n⚠️ `{busy}` is still running here and will re-bind its "
+                "own session when it finishes — /kill it first if you want "
+                "this reset to stick."
+            )
+        await interaction.response.send_message(msg, ephemeral=True)
 
     @bot.tree.command(name="sync-channel", description="Refresh this thread's session history", guild=guild_obj)
     async def cmd_sync_channel(interaction: discord.Interaction):

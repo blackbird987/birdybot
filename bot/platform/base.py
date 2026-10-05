@@ -73,12 +73,6 @@ class Messenger(Protocol):
         """Return the platform identifier (e.g. 'discord')."""
         ...
 
-    async def create_conversation(
-        self, instance_id: str, summary: str, is_task: bool,
-    ) -> str:
-        """Create a conversation space. Returns channel_id."""
-        ...
-
     async def send_thinking(
         self, channel_id: str, text: str,
         buttons: list[list[ButtonSpec]] | None = None,
@@ -176,10 +170,26 @@ class Messenger(Protocol):
         Default: no-op.
         """
 
+    async def on_repo_visibility_changed(self, repo_name: str, hidden: bool) -> None:
+        """Called after a repo was hidden or unhidden.
+
+        The platform parks (or retrieves) whatever surface represents the repo.
+        Nothing is destroyed: the repo stays registered either way.
+        Default: no-op.
+        """
+
     async def on_deploy_state_changed(self, repo_name: str) -> None:
         """Called after deploy state is updated post-merge.
 
         Platform implementations use this to refresh UI (e.g., control room).
+        Default: no-op.
+        """
+
+    async def on_repo_meta_changed(self, repo_name: str) -> None:
+        """Called after a repo's displayed metadata changed (e.g. its blurb).
+
+        Separate from on_deploy_state_changed so the call site reads as what
+        it is; both happen to redraw the same surface today.
         Default: no-op.
         """
 
@@ -216,6 +226,9 @@ class RequestContext:
     context: str | None = None        # None=inherit, ""=cleared, str=set
     verbose_level: int | None = None
     effort: str | None = None         # None=inherit, "low"/"medium"/"high"/"max"
+    # Per-thread model pin (/model). None=inherit normal routing, ""=explicitly
+    # cleared back to routing, str=this exact --model for every run in the thread.
+    model: str | None = None
     # Session resolution callbacks (Discord race-condition fix)
     resolve_session_id: Callable[[], str | None] | None = None
     # Async so the platform wrapper can post a user-visible message when it
@@ -272,6 +285,18 @@ class RequestContext:
     # the orchestrator loop can continue. Discord wires this; Telegram leaves
     # it None (no-op). Signature: (status, summary_text) -> None.
     notify_parent_on_finalize: Callable[[str, str], Awaitable[None]] | None = None
+    # [BOT_CMD: /reply] — platform-supplied callback that delivers a message
+    # into an ALREADY-EXISTING thread this session spawned, so a parent can
+    # answer a child that parked on a question instead of the human having to.
+    # The engine enforces the "only your own children" restriction before
+    # calling; the platform just dispatches. Signature:
+    # (child_thread_id, prompt) -> delivered?
+    reply_to_child: Callable[[str, str], Awaitable[bool]] | None = None
+    # Orchestrator join: called once this response's /spawn dispatch loop has
+    # handed out every child it is going to. The platform seals the wave and
+    # re-checks it, which closes the case where every child finished before
+    # the loop did (nothing else would be left to trigger the join).
+    on_spawn_wave_sealed: Callable[[], Awaitable[None]] | None = None
     # Orchestrator wave-cap accessor: returns the current spawn count for THIS
     # thread (the thread issuing the /spawn directive). Used by the engine to
     # enforce _MAX_SPAWN_WAVES across orchestration turns. Returns 0 if the
@@ -312,6 +337,16 @@ class RequestContext:
     def effective_effort(self) -> str:
         return self.effort if self.effort is not None else self.store.effort
 
+    @property
+    def effective_model(self) -> str | None:
+        """The model pinned to this thread, or None to use normal routing.
+
+        "" is the cleared sentinel (mirrors ``context``): the user explicitly
+        went back to default, which resolves the same as never having set one --
+        spawn-time routing first, then the deployment-wide default.
+        """
+        return self.model or None
+
     def update_mode(self, value: str) -> None:
         # Enforce mode ceiling for non-owners
         if self.mode_ceiling:
@@ -328,6 +363,10 @@ class RequestContext:
 
     def update_effort(self, value: str) -> None:
         self.effort = value
+
+    def update_model(self, value: str | None) -> None:
+        """Pin *value* as this thread's model; "" / None clears back to routing."""
+        self.model = value or ""
 
 
 class NotificationService:
@@ -372,16 +411,3 @@ class NotificationService:
             await messenger.delete_message(channel_id, msg_id)
         except Exception:
             pass
-
-    async def broadcast_result(
-        self, text: str,
-        metadata: dict | None = None,
-        buttons: list[list[ButtonSpec]] | None = None,
-        silent: bool = False,
-    ) -> None:
-        """Send result to all registered platforms."""
-        for platform, (messenger, channel_id) in self._messengers.items():
-            try:
-                await messenger.send_result(channel_id, text, metadata, buttons, silent)
-            except Exception:
-                log.exception("Failed to broadcast result to %s", platform)

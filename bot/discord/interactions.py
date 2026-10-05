@@ -10,7 +10,10 @@ from typing import TYPE_CHECKING
 
 import discord
 
-from bot.claude.runner import RebootResult, git_fail_reason
+from bot import config as bot_config
+from bot.claude.runner import (
+    RebootResult, git_fail_reason, missing_predecessor_release,
+)
 from bot.discord import access as access_mod
 from bot.discord import channels
 from bot.discord.access import AccessResult, load_access_config, effective_mode as access_effective_mode
@@ -29,7 +32,7 @@ _QUERY_ACTIONS: frozenset[str] = frozenset({
     "retry", "plan", "build", "review_plan", "apply_revisions",
     "review_code", "commit", "done", "autopilot", "autopilot_hold",
     "build_and_ship", "continue_autopilot", "continue_ppu",
-    "amend", "continue_anyway", "resolve_merge",
+    "amend", "continue_anyway", "resolve_merge", "tldr",
 })
 
 # Human-readable labels for the usage-limit gate UI.  Falls back to a
@@ -52,6 +55,7 @@ _ACTION_LABELS: dict[str, str] = {
     "continue_anyway": "Continue anyway",
     "resolve_merge": "Resolve merge",
     "resolve_cancel": "Cancel resolver",
+    "tldr": "TL;DR",
 }
 
 
@@ -284,6 +288,39 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
         return
     except discord.InteractionResponded:
         pass  # already acked elsewhere (e.g. double-dispatch) — continue
+
+    # --- Stop watching a job (watch_stop:<watch_id>) ---
+    # The trailing portion is a watch id, not an instance id. Disarming leaves
+    # the job itself alone — it only means "stop resuming me when it ends".
+    if action == "watch_stop":
+        watch = bot._store.get_watch(instance_id)
+        if watch is None:
+            # Strip the button too — Discord keeps components live until the
+            # message is edited, so leaving it means a tap that keeps failing.
+            try:
+                await interaction.message.edit(view=None)
+            except Exception:
+                log.debug("watch stop stale-button strip failed", exc_info=True)
+            await settle(interaction, "That watch has already finished or been stopped.")
+            return
+        bot._store.delete_watch(watch.id)
+        label = watch.label or (f"pid {watch.pid}" if watch.pid else "the job")
+        log.info("Watch %s stopped by user in thread %s", watch.id, watch.channel_id)
+        try:
+            await interaction.message.edit(
+                content=f"⏹ Stopped watching **{label}** — the job itself is untouched.",
+                view=None,
+            )
+        except Exception:
+            log.debug("watch stop edit failed", exc_info=True)
+        # The thread is no longer busy, so let the ordinary tag/idle rules
+        # resume: without this it keeps the "active" tag it was holding.
+        try:
+            from bot.discord import tags
+            await tags.try_apply_tags_after_run(bot, str(interaction.channel_id))
+        except Exception:
+            log.debug("watch stop tag refresh failed", exc_info=True)
+        return
 
     # --- Fleet ship roster (Confirm / Cancel) — trailing portion is a token ---
     if action in ("fleet_confirm", "fleet_cancel"):
@@ -1239,6 +1276,27 @@ async def execute_deploy(
         if status_callback:
             await status_callback(msg)
 
+    # Release containment gate. This runs before the push, not after: the
+    # push is what publishes the revert, and a deploy that has already gone
+    # out cannot be warned about usefully. A tree that does not contain its
+    # own newest release ships older code under a newer version. Refusing
+    # is recoverable (merge the tag in and press Deploy again), shipping it
+    # is not.
+    if bot_config.RELEASE_ANCESTRY_CHECK:
+        missing = await asyncio.to_thread(
+            missing_predecessor_release, repo_path, "HEAD",
+        )
+        if missing:
+            log.error(
+                "Deploy of %s blocked: HEAD does not contain release %s",
+                repo_name, missing,
+            )
+            return False, "", (
+                f"Release `{missing}` is not in `HEAD`, so deploying would revert it. "
+                f"Merge that tag into the branch first, or delete it if it was "
+                f"never meant to ship."
+            )
+
     # Push to origin before deploying (safety net)
     await _status("\U0001f680 Pushing to origin...")
     try:
@@ -1371,8 +1429,6 @@ async def _spawn_deploy_fix(
     await spawn_fix_session(
         bot, repo_name,
         trigger="deploy",
-        error_summary=error_summary,
-        error_output=error_output,
         fix_prompt=prompt,
         max_retries=deploy_config.get("auto_fix_retries", 1),
         max_cost_usd=2.0,
@@ -1436,8 +1492,6 @@ async def _post_deploy_healthcheck(
                     await spawn_fix_session(
                         bot, repo_name,
                         trigger="healthcheck",
-                        error_summary=f"Health check failed: {cmd}",
-                        error_output=error_output,
                         fix_prompt=prompt,
                         max_retries=1,
                         max_cost_usd=1.5,
@@ -1572,8 +1626,7 @@ async def _handle_sync_git(
     bot: ClaudeBot, interaction: discord.Interaction, repo_name: str,
 ) -> None:
     """Bidirectional git sync: pull from remote (ff-only), then push local changes + tags."""
-    import subprocess
-    from bot.config import NOWND
+    from bot.procutil import run_capture
 
     repos = bot._store.list_repos()
     repo_path = repos.get(repo_name)
@@ -1588,10 +1641,8 @@ async def _handle_sync_git(
 
     try:
         # Step 1a: Fetch branches (must succeed)
-        fetch = await asyncio.to_thread(
-            subprocess.run,
-            ["git", "fetch", "origin"],
-            cwd=repo_path, capture_output=True, text=True, timeout=30, **NOWND,
+        fetch = await asyncio.to_thread(run_capture, 
+            ["git", "fetch", "origin"], cwd=repo_path, timeout=30,
         )
         if fetch.returncode != 0:
             detail = (fetch.stderr or fetch.stdout or "").strip()
@@ -1602,25 +1653,19 @@ async def _handle_sync_git(
             return
 
         # Step 1b: Fetch tags with --force (non-fatal if it fails)
-        tag_fetch = await asyncio.to_thread(
-            subprocess.run,
-            ["git", "fetch", "origin", "--tags", "--force"],
-            cwd=repo_path, capture_output=True, text=True, timeout=15, **NOWND,
+        tag_fetch = await asyncio.to_thread(run_capture, 
+            ["git", "fetch", "origin", "--tags", "--force"], cwd=repo_path, timeout=15,
         )
         if tag_fetch.returncode != 0:
             log.warning("Tag fetch failed for %s: %s", repo_name,
                         (tag_fetch.stderr or "")[:200])
 
         # Step 2: Check ahead/behind counts
-        ahead_result = await asyncio.to_thread(
-            subprocess.run,
-            ["git", "rev-list", "--count", "@{upstream}..HEAD"],
-            cwd=repo_path, capture_output=True, text=True, timeout=10, **NOWND,
+        ahead_result = await asyncio.to_thread(run_capture, 
+            ["git", "rev-list", "--count", "@{upstream}..HEAD"], cwd=repo_path, timeout=10,
         )
-        behind_result = await asyncio.to_thread(
-            subprocess.run,
-            ["git", "rev-list", "--count", "HEAD..@{upstream}"],
-            cwd=repo_path, capture_output=True, text=True, timeout=10, **NOWND,
+        behind_result = await asyncio.to_thread(run_capture, 
+            ["git", "rev-list", "--count", "HEAD..@{upstream}"], cwd=repo_path, timeout=10,
         )
 
         if ahead_result.returncode != 0 or behind_result.returncode != 0:
@@ -1636,10 +1681,8 @@ async def _handle_sync_git(
         # Step 3: Pull if behind (fast-forward only)
         if behind > 0:
             # Check for dirty worktree before attempting pull
-            status = await asyncio.to_thread(
-                subprocess.run,
-                ["git", "status", "--porcelain"],
-                cwd=repo_path, capture_output=True, text=True, timeout=10, **NOWND,
+            status = await asyncio.to_thread(run_capture, 
+                ["git", "status", "--porcelain"], cwd=repo_path, timeout=10,
             )
             if status.returncode == 0 and status.stdout.strip():
                 await interaction.followup.send(
@@ -1648,10 +1691,8 @@ async def _handle_sync_git(
                 )
                 return
 
-            pull = await asyncio.to_thread(
-                subprocess.run,
-                ["git", "pull", "--ff-only"],
-                cwd=repo_path, capture_output=True, text=True, timeout=30, **NOWND,
+            pull = await asyncio.to_thread(run_capture, 
+                ["git", "pull", "--ff-only"], cwd=repo_path, timeout=30,
             )
             if pull.returncode != 0:
                 detail = (pull.stderr or pull.stdout or "").strip()
@@ -1695,10 +1736,8 @@ async def _handle_sync_git(
 
         # Step 4: Push if ahead
         if ahead > 0:
-            result = await asyncio.to_thread(
-                subprocess.run,
-                ["git", "push"],
-                cwd=repo_path, capture_output=True, text=True, timeout=30, **NOWND,
+            result = await asyncio.to_thread(run_capture, 
+                ["git", "push"], cwd=repo_path, timeout=30,
             )
             if result.returncode == 0:
                 parts.append(f"pushed {ahead} commit{'s' if ahead != 1 else ''}")
@@ -1711,10 +1750,8 @@ async def _handle_sync_git(
                 return
 
         # Step 5: Push tags (best-effort)
-        tag_result = await asyncio.to_thread(
-            subprocess.run,
-            ["git", "push", "--tags"],
-            cwd=repo_path, capture_output=True, text=True, timeout=30, **NOWND,
+        tag_result = await asyncio.to_thread(run_capture, 
+            ["git", "push", "--tags"], cwd=repo_path, timeout=30,
         )
         if tag_result.returncode == 0:
             tag_lines = [

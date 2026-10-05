@@ -69,5 +69,127 @@ RestartSec=10
 TimeoutStopSec=60
 KillMode=mixed
 
+# --- Memory: keep one runaway session from taking the whole bot down ---
+#
+# Every process a session spawns lands in THIS cgroup — the Claude CLI, the
+# shells it opens, and whatever those run. systemd's default OOMPolicy is
+# `stop`, which means the kernel killing any one of those descendants makes
+# systemd tear the entire unit down. That is not theoretical: on 2026-08-17 a
+# build running a diffusion-model experiment grew to 13.7 GB, the kernel
+# (correctly) shot the experiment, and systemd then killed the bot and all ten
+# other sessions with it — twice, 01:09 and 02:34, because the restart resumed
+# the same session and it re-ran the same job.
+#
+# `continue` scopes the damage to the process that actually overran: its shell
+# reports "Killed", the agent sees the error and can adapt, and every other
+# thread keeps answering. The main process being killed still restarts, since
+# Restart=always does not care why we exited.
+#
+# It also silences the desktop popup. Plasma ships a KDED plugin whose whole
+# job is to watch systemd for units that died this way
+# (/usr/lib64/qt6/plugins/kf6/kded/oom_notifier.so, "Memory Shortage
+# Avoided"); it keys on the unit's own oom-kill result, so a killed descendant
+# under `continue` never triggers it.
+OOMPolicy=continue
+
+# The cap is what stops the machine going short in the first place. Without it
+# the kernel picks a victim globally and the shortage is everyone's problem;
+# with it, the reclaim and the kill both happen inside this cgroup, and the
+# cgroup OOM killer picks the fattest process here — the runaway experiment,
+# never the ~250 MB bot.
+#
+# Sized against the Citadel machine: 31 GB total, of which the desktop
+# (Chrome, Discord, Plasma) normally holds 8-10 GB. Note these limits count
+# page cache as well as anonymous memory, and this cgroup routinely holds
+# ~10 GB of cache from reading repos and writing artifacts — that is fine and
+# is NOT a leak, because cache is reclaimable: crossing MemoryHigh evicts it
+# instead of killing anything, which is exactly the intended first response.
+#
+# Honest tradeoff: a job that genuinely needs 14 GB no longer fits alongside a
+# browser. That is the real state of this machine, and it is far better learned
+# as one clearly-labelled session failure than as a 2 AM machine-wide event.
+# Raise both if the box gets more RAM.
+#
+# Lowered on 2026-08-21 from 12G/16G. The old numbers were never breached and
+# the machine died anyway: `memory.events` recorded oom_kill 0 for this unit
+# while the kernel ran a GLOBAL out-of-memory kill (under 230 MB free, swap
+# down to 68 kB) and shot a 5.44 GB Chrome. A 16 GB
+# allowance for the bot alone is half of a 32 GB machine that is also running
+# a browser, a chat client and a charting app; staying under it was never
+# evidence of behaving well. MemoryHigh is now also read by the bot itself
+# (bot/claude/memory.py) as the "our own sessions are the ones filling this"
+# signal that gates cross-session arbitration, so it is a threshold with a
+# second job and not only a throttle.
+MemoryHigh=10G
+MemoryMax=13G
+
+# --- CPU and IO: the bot must never make the desktop unusable ---
+#
+# Everything above governs memory. On 2026-09-08 the machine became unusable
+# with 15 GB free and memory PSI at 3%: a single Roslyn VBCSCompiler was
+# holding 605% CPU (6 of 12 cores) while six sessions ran, load average
+# reached 110, and CPU PSI ran at 9-18% with IO PSI at 11-24%. Every memory
+# guard correctly declined to act, because memory was never the resource that
+# ran out. The unit had no CPU or IO settings at all, which meant this cgroup
+# competed with Plasma, the browser and Discord at the default weight of 100 —
+# equal footing — and a compile farm always wins a fair fight against a
+# desktop.
+#
+# Weight, deliberately, and NOT CPUQuota. These are proportional shares that
+# only bind under contention: on an idle machine the bot still gets all 12
+# cores and a build is no slower than it was. A quota would cap throughput
+# even when nothing else wants the CPU, which pays for the desktop's
+# responsiveness with permanently slower builds — the wrong trade for a
+# machine that is usually unattended.
+#
+# 20 against the desktop's default 100 means that when both want everything,
+# the bot gets about a sixth and the desktop keeps the rest. That is the right
+# ratio for this box: bot work is nearly always something you started and then
+# walked away from, so it is the side that can afford to wait.
+#
+# THAT 20 NOW LIVES ON THE SESSIONS SLICE, NOT HERE, and the move is
+# deliberate (2026-09-22). Since v0.101.27 the CLIs, their shells, dotnet and
+# Roslyn all run in transient scopes under app-claudesessions.slice, which
+# carries CPUWeight=20 / IOWeight=20 of its own. The compile farm the
+# paragraph above is about is therefore already held at a sixth, on the cgroup
+# that actually contains it. What is left inside this unit is the supervisor:
+# a ~250 MB asyncio loop that has to answer a Discord interaction inside three
+# seconds and keep a gateway heartbeat alive. Starving that buys the desktop
+# nothing, because the CPU was never the supervisor's to give, and costs the
+# bot its connection, since a missed heartbeat disconnects it. So the
+# supervisor runs at the default 100 and the workload keeps the 20.
+#
+# Both halves are checked at startup against the live cgroup files
+# (bot/discord/resource_alerts.py): this unit must read 100, the sessions
+# slice must read 20. Keep the numbers here in step with
+# RESOURCE_*_WEIGHT_EXPECTED and SESSION_SLICE_*_WEIGHT_EXPECTED in
+# bot/config.py.
+# --- Who oomd is allowed to kill ---
+#
+# systemd-oomd kills one cgroup at a time. Until 2026-09-21 every session ran
+# directly inside this unit's cgroup, so the only cgroup it could pick was
+# this whole unit, and it did, three times, taking six live sessions with it
+# each time (Sep 14 20:34:46, Sep 20 10:39:47, Sep 21 14:42:18). The last one
+# reads:
+#
+#   Killed .../app.slice/claude-bot.service due to memory pressure for
+#   .../app.slice being 90.79% > 80.00% for > 20s with reclaim activity
+#   Pressure: Avg10: 94.76 ... Current Memory Usage: 10.1G
+#
+# Two halves fix that and both are needed. This line tells oomd to skip the
+# supervisor when it chooses a victim. The other half is in the bot: sessions
+# now spawn into transient scopes in app-claudesessions.slice (see
+# scripts/app-claudesessions.slice and bot/claude/cgroups.py), which gives
+# oomd a session-sized victim to pick instead of a 300 MB asyncio loop that
+# is holding twelve conversations open.
+#
+# `avoid` and not `omit`: omit would take this unit out of oomd's accounting
+# entirely, including the pressure it genuinely contributes. avoid keeps it
+# counted and merely puts it last in line, which is the accurate statement.
+ManagedOOMPreference=avoid
+
+CPUWeight=100
+IOWeight=100
+
 [Install]
 WantedBy=default.target

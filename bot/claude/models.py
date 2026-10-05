@@ -30,11 +30,6 @@ _CACHE_TTL_SECS = 60.0
 _env_cache: dict[str, tuple[float, dict]] = {}
 
 
-def invalidate_cache() -> None:
-    """Drop all cached settings — call from tests or after manual edits."""
-    _env_cache.clear()
-
-
 def _read_env_block(path: Path) -> dict:
     """Read the 'env' block from a settings.json file. Missing/invalid -> {}."""
     try:

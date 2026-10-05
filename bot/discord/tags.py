@@ -78,6 +78,15 @@ async def try_apply_tags_after_run(bot: ClaudeBot, channel_id: str) -> None:
     if not lookup:
         return
     forum_project, info = lookup
+
+    # A thread waiting on a watched job is genuinely busy — the turn ended, but
+    # the bot will resume it the moment the job finishes. Clearing "active"
+    # here would tag it completed and make a working thread look finished.
+    from bot.engine import watches as watches_mod
+    if watches_mod.has_armed_watch(bot._store, channel_id):
+        await set_thread_active_tag(bot, ch, True)
+        return
+
     mode = _thread_mode(bot, info)
     new_status: str | None = None
     # Find the most recent instance for this session

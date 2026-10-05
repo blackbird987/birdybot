@@ -227,7 +227,10 @@ def evaluate_instance(inst: Instance) -> SessionEval:
         ev.flags.extend(_check_narration(inst, text))
         ev.flags.extend(_check_verbosity(inst, text))
         ev.flags.extend(_check_claim_grounding(inst, text))
-    ev.flags.extend(_check_tool_hygiene(inst))
+        ev.flags.extend(_check_copy_block_wrapping(inst, text))
+        ev.flags.extend(_check_unarmed_promise(inst, text))
+        ev.flags.extend(_check_review_prior_attempts(inst, text))
+        ev.flags.extend(_check_chain_prior_attempts(inst, text))
     ev.flags.extend(_check_efficiency(inst))
 
     _save_eval(ev)
@@ -236,8 +239,24 @@ def evaluate_instance(inst: Instance) -> SessionEval:
 
 # --- Heuristic checks ---
 
-_READ_CMD_RE = re.compile(r'\b(cat|head|tail|less|sed\s+-n)\b')
-_SEARCH_CMD_RE = re.compile(r'\b(grep|rg|find\s+\.\s+-name|find\s+\.\s+-type)\b')
+# There is deliberately no tool-hygiene check here any more, and adding one
+# back would be wrong rather than merely noisy.
+#
+# It flagged every Bash command that read a file (`cat`, `head`, `sed -n`) or
+# searched (`grep`, `find`) as "should use the Read/Grep tool". But the Claude
+# provider extends every CLI invocation with `--permission-mode
+# bypassPermissions` unconditionally (`bot/claude/provider.py`, the "always
+# bypass" line -- a non-interactive bot cannot answer permission prompts), and
+# Claude Code's own bypass-permissions system text instructs the session to
+# prefer Bash for reading and searching, falling back to the dedicated tools
+# only when Bash cannot do the job.
+#
+# So the check penalised behaviour the harness itself requires, on every run
+# this bot has ever started. It also fired per command rather than per session:
+# over the 30 days to 2026-09-08 it produced 47,319 "Bash used for file
+# reading" and 25,754 "Bash used for search" flags out of ~76,000 total, which
+# buried every other finding. `tool_hygiene` is retired below so the flags
+# already on disk stay out of future digests too.
 
 
 def _check_narration(inst: Instance, text: str) -> list[EvalFlag]:
@@ -273,46 +292,267 @@ def _check_narration(inst: Instance, text: str) -> list[EvalFlag]:
     return flags
 
 
-def _check_tool_hygiene(inst: Instance) -> list[EvalFlag]:
-    """Check actual Bash commands for dedicated-tool-worthy operations."""
-    flags: list[EvalFlag] = []
-
-    for cmd in inst.bash_commands:
-        # Skip very short commands (likely just `cd` or similar)
-        if len(cmd) < 4:
-            continue
-        if _READ_CMD_RE.search(cmd):
-            flags.append(EvalFlag(
-                category="tool_hygiene", severity="warning",
-                message="Bash used for file reading (should use Read tool)",
-                evidence=cmd.split("\n")[0][:80],
-            ))
-        if _SEARCH_CMD_RE.search(cmd):
-            flags.append(EvalFlag(
-                category="tool_hygiene", severity="warning",
-                message="Bash used for search (should use Grep/Glob)",
-                evidence=cmd.split("\n")[0][:80],
-            ))
-
-    return flags
+# Chars past which a response is flagged as over-long. The prompt asks for
+# ~1200; 2500 is the "twice the target and still growing" line. The old check
+# only fired past 4000 AND only when paragraphs also averaged 300+ chars, so a
+# 6000-char answer written in tidy short paragraphs never registered — which is
+# exactly the shape the bot actually produces.
+_VERBOSE_RESULT_CHARS = 2500
 
 
 def _check_verbosity(inst: Instance, text: str) -> list[EvalFlag]:
     """Mobile-first constraint: is the response appropriately sized?"""
     flags: list[EvalFlag] = []
+    size = len(text)
+    if size <= _VERBOSE_RESULT_CHARS:
+        return flags
 
-    # Direct queries shouldn't produce walls of text
-    if inst.origin == InstanceOrigin.DIRECT and len(text) > 4000:
-        para_count = text.count("\n\n") + 1  # separators + 1 = paragraphs
-        avg_para_len = len(text) / para_count
-        if avg_para_len > 300:
-            flags.append(EvalFlag(
-                category="constraint_violation", severity="info",
-                message=(f"Long response ({len(text)} chars) with dense paragraphs "
-                         f"(avg {avg_para_len:.0f} chars) — mobile readability concern"),
-            ))
+    # Past the inline ceiling the result no longer arrives whole — it collapses
+    # to a preview card the user has to tap. That's a real cost, not a nit.
+    collapsed = size > config.RESULT_INLINE_MAX
+    flags.append(EvalFlag(
+        category="constraint_violation",
+        severity="warning" if collapsed else "info",
+        message=(
+            f"Over-long response ({size:,} chars) — mobile target is ~1200"
+            + (f"; past {config.RESULT_INLINE_MAX:,} it collapses behind Expand"
+               if collapsed else "")
+        ),
+    ))
+    return flags
+
+
+# --- Copy-paste block wrapping (WORKING_CONTEXT / Discord Formatting) ---
+#
+# Discord soft-wraps a long line to the phone's width on its own. A session
+# that hard-wraps the line *itself* bakes real newlines into whatever the user
+# pastes into their mail client, and they have to strip every one by hand.
+#
+# The signal is deliberately narrow: a line that stops on a word and is
+# continued by a lowercase word on the next line is a wrap, not a sentence
+# break. Nothing here rewrites the text -- a mechanical unwrap cannot tell an
+# email paragraph from real code, a table or a diff, so this only reports.
+
+_FENCE_RE = re.compile(r"```([^\n`]*)\n(.*?)```", re.DOTALL)
+
+# A tagged fence is asserting "this is code"; only these tags are prose.
+_PROSE_FENCE_TAGS = {"", "text", "txt", "plain", "email", "markdown", "md"}
+
+# Any of these on a line is enough to call it code rather than prose. English
+# keywords are deliberately absent: "if", "for", "from" and "return" are also
+# ordinary words, and matching them would read every English draft as code.
+# Nothing here needs to match a leading "#" or ">" either -- _is_prose_line has
+# already dropped those lines before this is asked.
+_CODEY_RE = re.compile(
+    r"(?:=|;|\{|\}|\(\)|->|=>|::|\|\||&&|^\s*\$|"
+    r"\b(?:def|import|function|const|npm|pip|sudo|chmod)\b)"
+)
+
+# Above this share of code-ish lines the fence is code, and its short lines
+# are load-bearing. Ordinary prose trips _CODEY_RE only on stray punctuation.
+_CODEY_SHARE = 0.2
+
+# A hard-wrapped block is short by construction. A block whose longest prose
+# line is past this was never reflowed to fit a phone.
+_WRAP_WIDTH_CEILING = 78
+
+# One mid-sentence break is a typo; three is a policy.
+_MIN_WRAP_EVENTS = 3
+
+# Prose punctuates sentences and uses long-ish lines. A block of shell commands
+# does neither, and each command starting with a lowercase word would otherwise
+# read as a continuation of the one above it.
+#
+# The sentence test looks for terminal punctuation ANYWHERE on the line, not at
+# the end of it. A hard-wrapped paragraph almost never ends a line on a period
+# -- that is the whole shape of the defect -- so an end-of-line test would miss
+# every case it exists to catch. "file.py stop" is not a sentence end: the
+# period has to be followed by whitespace.
+_SENTENCE_RE = re.compile(r"[.!?](?:\s|$)")
+_MIN_SENTENCE_LINES = 2
+_MIN_WORDS_PER_LINE = 5.0
+
+
+def _is_prose_line(line: str) -> bool:
+    """Is this a candidate wrapped line, rather than structure?"""
+    if not line.strip():
+        return False
+    if line[:1].isspace():          # indentation -> code, or a nested block
+        return False
+    if line.lstrip()[:1] in "-*#>|+":  # list item / heading / quote / table
+        return False
+    return len(line.split()) >= 3
+
+
+# A wrap stops on a word (or a comma); code stops on punctuation.
+_CONTINUES_RE = re.compile(r"[\w,]$")
+
+
+def _wrap_events(lines: list[str]) -> int:
+    """Count lines continued by a lowercase word on the next line.
+
+    Takes the body already split, so this and the guards above can never
+    disagree about where the lines are.
+    """
+    events = 0
+    for cur, nxt in zip(lines, lines[1:]):
+        if not _is_prose_line(cur) or not _is_prose_line(nxt):
+            continue
+        if not _CONTINUES_RE.search(cur):
+            continue
+        first = nxt.lstrip()[:1]
+        if first.isalpha() and first.islower():
+            events += 1
+    return events
+
+
+def _check_copy_block_wrapping(inst: Instance, text: str) -> list[EvalFlag]:
+    """Did Claude hard-wrap a block the user is meant to copy and paste?"""
+    flags: list[EvalFlag] = []
+
+    for tag, body in _FENCE_RE.findall(text):
+        if tag.strip().lower() not in _PROSE_FENCE_TAGS:
+            continue
+        # splitlines(), not split("\n"): a result file written with CRLF would
+        # otherwise leave a "\r" on every line, so no line would ever end on a
+        # word and the check would go silently dead.
+        lines = body.splitlines()
+        prose = [ln for ln in lines if _is_prose_line(ln)]
+        # N wrap events need N+1 prose lines, so this cannot hide a real one.
+        if len(prose) < _MIN_WRAP_EVENTS + 1:
+            continue
+        if max(len(ln) for ln in prose) > _WRAP_WIDTH_CEILING:
+            continue
+        codey = sum(1 for ln in prose if _CODEY_RE.search(ln))
+        if codey / len(prose) > _CODEY_SHARE:
+            continue
+        if sum(1 for ln in prose if _SENTENCE_RE.search(ln)) < _MIN_SENTENCE_LINES:
+            continue
+        if sum(len(ln.split()) for ln in prose) / len(prose) < _MIN_WORDS_PER_LINE:
+            continue
+        events = _wrap_events(lines)
+        if events < _MIN_WRAP_EVENTS:
+            continue
+        flags.append(EvalFlag(
+            category="constraint_violation", severity="warning",
+            message=(
+                f"Copy-paste block is hard-wrapped ({events} lines break "
+                f"mid-sentence) — the paste carries stray newlines"
+            ),
+            evidence=" / ".join(prose[:2])[:120],
+        ))
 
     return flags
+
+
+def _check_unarmed_promise(inst: Instance, text: str) -> list[EvalFlag]:
+    """Did Claude promise to report back without arming a watch or a self-wake?
+
+    The runtime already recovers from this (``lifecycle.check_wake_request``
+    re-invokes the session with ``_PROMISE_NUDGE_PROMPT``), but a recovery that
+    fires often is a prompt problem, not a runtime one — so it is counted here
+    and attributed to ``WAKE_GUIDANCE``, the block that is supposed to make the
+    session arm the directive in the first place.
+
+    Judged from the result text alone, using the production predicates so the
+    two can't drift. It has to be: ``evaluate_instance`` runs inside
+    ``finalize_run``, which is *before* ``check_wake_request``, so the runtime's
+    own decision does not exist yet and scheduler state would be read one tick
+    early.
+
+    Two known blind spots, both erring toward silence:
+
+    * A turn that promises while a watch armed on an EARLIER turn is still
+      running is fine, and the runtime stands its nudge down for exactly that
+      reason — but the store is not consulted here, so such a turn is flagged.
+    * A worktree build never gets ``WAKE_GUIDANCE`` injected and cannot arm
+      anything, so attributing a promise there to that block would be wrong;
+      those are skipped outright, matching the runtime's own branch gate.
+    """
+    # Local: lifecycle imports eval (to run this), so the dependency stays
+    # one-directional at module scope.
+    from bot.engine.lifecycle import (
+        armed_a_directive,
+        promise_evidence,
+        promises_continuation,
+    )
+
+    if inst.branch:
+        return []
+    if not promises_continuation(text) or armed_a_directive(text):
+        return []
+    return [EvalFlag(
+        category="constraint_violation", severity="issue",
+        message=(
+            "Promised to report back later but armed no self-wake or watch — "
+            "the thread had nothing to resume it"
+        ),
+        evidence=promise_evidence(text),
+    )]
+
+
+_PRIOR_ATTEMPTS_RE = re.compile(r"^\s*PRIOR_ATTEMPTS\s*:", re.MULTILINE)
+# Tolerates the heading, list and bold wrappers a plan body is often written
+# in. A heading may drop the colon; a plain line may not.
+_PLAN_PRIOR_ATTEMPTS_RE = re.compile(
+    r"^\s*(?:#{1,6}\s*(?:\*\*)?prior attempts\b"
+    r"|(?:[-*]\s+)?(?:\*\*)?prior attempts(?:\*\*)?\s*:)",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _check_review_prior_attempts(inst: Instance, text: str) -> list[EvalFlag]:
+    """Was a plan review handed git history and silent about what it found?
+
+    `PRIOR_ATTEMPTS:` is the one place a review has to commit to an answer
+    about earlier attempts, "none" included, so its absence means the history
+    block was not read rather than read and found empty. Only judged when the
+    block was actually in the prompt and the review produced its status block
+    at all: a review that stopped to ask a question has no status block, and
+    that is a different failure with its own handling.
+    """
+    from bot.engine import prior_art
+    from bot.engine.workflows import _REVIEW_STATUS_RE
+
+    if inst.origin != InstanceOrigin.REVIEW_PLAN:
+        return []
+    if prior_art.PRIOR_ART_MARKER not in (inst.prompt or ""):
+        return []
+    m = _REVIEW_STATUS_RE.search(text)
+    if not m or _PRIOR_ATTEMPTS_RE.search(m.group(1)):
+        return []
+    return [EvalFlag(
+        category="constraint_violation", severity="issue",
+        message=(
+            "Plan review got prior history but reported no PRIOR_ATTEMPTS line"
+        ),
+        evidence=m.group(1).strip()[:120],
+    )]
+
+
+def _check_chain_prior_attempts(inst: Instance, text: str) -> list[EvalFlag]:
+    """Did a real /chain go out with a plan that never says what was tried?
+
+    Parsed with the dispatcher's own `_extract_chain_directive`, so a quoted
+    example, or a /chain inside another block's body, is exactly as invisible
+    here as it is to the bot. An origin whose directives are never dispatched
+    is skipped for the same reason: its /chain launched nothing.
+    """
+    from bot.engine.commands import _extract_chain_directive
+    from bot.engine.lifecycle import _NO_DIRECTIVE_ORIGINS
+
+    if inst.origin in _NO_DIRECTIVE_ORIGINS:
+        return []
+    parsed = _extract_chain_directive(text)
+    if not parsed or not parsed[1]:
+        return []
+    if _PLAN_PRIOR_ATTEMPTS_RE.search(parsed[1]):
+        return []
+    return [EvalFlag(
+        category="constraint_violation", severity="issue",
+        message="Emitted /chain with a plan that has no 'Prior attempts:' line",
+        evidence=parsed[1].strip().splitlines()[0][:120],
+    )]
 
 
 def _check_claim_grounding(inst: Instance, text: str) -> list[EvalFlag]:
@@ -514,25 +754,6 @@ def _save_chain_eval(ev: ChainEval) -> None:
         log.debug("Failed to save chain eval for %s", ev.chain_id, exc_info=True)
 
 
-def load_session_eval(instance_id: str) -> SessionEval | None:
-    """Load the persisted SessionEval for a single instance, or None.
-
-    Returns None if eval is disabled, the file doesn't exist, or it can't
-    be parsed. Cheap one-shot read for embed-render time.
-    """
-    if not EVALS_DIR.exists():
-        return None
-    path = EVALS_DIR / f"{instance_id}.json"
-    if not path.is_file():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return SessionEval.from_dict(data)
-    except Exception:
-        log.debug("Failed to load eval for %s", instance_id, exc_info=True)
-        return None
-
-
 def load_evals(since_hours: int = 24) -> list[SessionEval]:
     """Load session evals from the last N hours."""
     if not EVALS_DIR.exists():
@@ -574,6 +795,18 @@ _ATTRIBUTION: tuple[tuple[str, str, str], ...] = (
     ("claim_grounding", "url", "HONESTY_CONSTRAINT"),
     ("narration", "doesn't describe", "CHAT_APP_CONSTRAINT"),
     ("narration", "short response", "CHAT_APP_CONSTRAINT"),
+    # "over-long" must precede the generic "mobile" rule — the length
+    # target lives in CHAT_APP_CONSTRAINT and both words are in that message.
+    ("constraint_violation", "hard-wrapped", "WORKING_CONTEXT"),
+    # A promise with nothing armed is WAKE_GUIDANCE failing to land, not a
+    # length or formatting problem — matched before the generic rules below.
+    ("constraint_violation", "armed no self-wake", "WAKE_GUIDANCE"),
+    # Each names the block that asked for the line it is missing. Neither
+    # message carries "over-long" or "mobile", but both sit up here with the
+    # other owned rules so a later wording change cannot fall through to them.
+    ("constraint_violation", "no prior_attempts line", "PLAN_REVIEW_PROMPT"),
+    ("constraint_violation", "no 'prior attempts:' line", "CHAIN_CONTEXT"),
+    ("constraint_violation", "over-long", "CHAT_APP_CONSTRAINT"),
     ("constraint_violation", "mobile", "MOBILE_HINT"),
     ("efficiency", "prompt-cache", "prompt assembly order (harness)"),
     ("efficiency", "context may be bloated", "context injection (harness)"),
@@ -581,9 +814,24 @@ _ATTRIBUTION: tuple[tuple[str, str, str], ...] = (
     ("efficiency", "revision rounds", "PLAN_REVIEW_PROMPT"),
     ("efficiency", "code review looped", "CODE_REVIEW_PROMPT"),
     ("efficiency", "chain cost", "chain budget (harness)"),
-    ("tool_hygiene", "", "tool gating (harness, not prompt-owned)"),
     ("test_failure", "", "VERIFY_PROMPT"),
 )
+
+
+# Categories whose check has been withdrawn. The flags they produced are still
+# sitting in `data/evals` -- tens of thousands of them -- and a retired check's
+# output must not go on outranking live findings in a digest just because the
+# files outlive the code.
+#
+# Filtered where flags are AGGREGATED for a human, never in `load_evals`: a
+# per-instance eval view should still show what was actually recorded at the
+# time, and rewriting history on read would make an old session unexplainable.
+_RETIRED_CATEGORIES: frozenset[str] = frozenset({"tool_hygiene"})
+
+
+def is_retired_flag(category: str) -> bool:
+    """True for a flag whose check no longer exists (see `_RETIRED_CATEGORIES`)."""
+    return category in _RETIRED_CATEGORIES
 
 
 def attribute_flag(category: str, message: str) -> str:
@@ -600,9 +848,9 @@ class DigestRow:
     """One recurring flag, with who owns it.
 
     ``count`` is the number of SESSIONS the flag appeared in, not the number
-    of times it fired. Per-command checks (tool hygiene) can fire dozens of
-    times in a single session, which would otherwise bury every other finding
-    and make one talkative session look like a systemic problem.
+    of times it fired. A per-command check fires once per tool call and so can
+    fire dozens of times in a single session, which would otherwise bury every
+    other finding and make one talkative session look like a systemic problem.
     """
     category: str
     message: str
@@ -676,6 +924,10 @@ def build_digest(
         # let a single long session outrank a habit spread across fifty.
         seen_here: set[tuple[str, str]] = set()
         for flag in ev.flags:
+            # A withdrawn check's flags stay on disk forever; they must not
+            # keep outranking live findings here.
+            if is_retired_flag(flag.category):
+                continue
             norm = normalise_flag_message(flag.message)
             key = (flag.category, norm)
             slot = grouped.setdefault(key, {

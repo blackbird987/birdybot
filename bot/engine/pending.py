@@ -179,10 +179,6 @@ def channel_has_pending(channel_id: str) -> bool:
     return bool(_by_channel.get(channel_id))
 
 
-def all_pending() -> list[PendingPrompt]:
-    return list(_by_id.values())
-
-
 # --- Persistence ---
 
 def _persist() -> None:
