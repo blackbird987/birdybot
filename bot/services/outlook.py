@@ -385,29 +385,39 @@ def search_emails(query: str, count: int = 10) -> list[dict]:
     return _with_retry(_do)
 
 
+def _find_message(subject: str):
+    """Newest inbox message whose subject contains `subject` (case-insensitive).
+
+    Scans the most recent 200 items. Returns the live COM MailItem or None.
+    """
+    ns = _get_namespace()
+    inbox = ns.GetDefaultFolder(_FOLDER_INBOX)
+    messages = inbox.Items
+    messages.Sort("[ReceivedTime]", True)
+    q = subject.lower()
+    for i in range(min(200, messages.Count)):
+        msg = messages.Item(i + 1)
+        if q in (msg.Subject or "").lower():
+            return msg
+    return None
+
+
 def read_email(subject: str) -> dict | None:
     """Read full email by subject match (searches recent 200)."""
 
     def _do():
-        ns = _get_namespace()
-        inbox = ns.GetDefaultFolder(_FOLDER_INBOX)
-        messages = inbox.Items
-        messages.Sort("[ReceivedTime]", True)
-
-        q = subject.lower()
-        for i in range(min(200, messages.Count)):
-            msg = messages.Item(i + 1)
-            if q in (msg.Subject or "").lower():
-                body = (msg.Body or "").strip()
-                return {
-                    "from": msg.SenderName,
-                    "from_email": getattr(msg, "SenderEmailAddress", ""),
-                    "to": getattr(msg, "To", ""),
-                    "subject": msg.Subject,
-                    "date": _format_time(msg.ReceivedTime),
-                    "body": body[:5000] if body else "",
-                }
-        return None
+        msg = _find_message(subject)
+        if msg is None:
+            return None
+        body = (msg.Body or "").strip()
+        return {
+            "from": msg.SenderName,
+            "from_email": getattr(msg, "SenderEmailAddress", ""),
+            "to": getattr(msg, "To", ""),
+            "subject": msg.Subject,
+            "date": _format_time(msg.ReceivedTime),
+            "body": body[:5000] if body else "",
+        }
 
     return _with_retry(_do)
 
@@ -436,8 +446,9 @@ def create_draft(
         and does not promise.
     """
 
-    def _do():
-        global _app
+    # Build under the retry wrapper; Save() and sync run OUTSIDE it so a COM
+    # error after the save can never re-run the operation and leave two drafts.
+    def _build():
         _get_namespace()  # ensure connection
         mail = _app.CreateItem(0)  # 0 = olMailItem
         mail.To = to
@@ -449,21 +460,87 @@ def create_draft(
                 if not os.path.isfile(abs_path):
                     raise FileNotFoundError(f"Attachment not found: {abs_path}")
                 mail.Attachments.Add(abs_path)
-        mail.Save()  # saves to Drafts, local .ost only
-        # Blocks ~30s: without it the draft never reaches the server and so
-        # never shows up in the mail client the user actually reads.
-        sync_requested = _sync_to_server()
-        return {
-            "subject": subject,
-            "to": to,
-            "attachments": len(attachments) if attachments else 0,
-            "sync_requested": sync_requested,
-        }
+        return mail
 
-    return _with_retry(_do)
+    mail = _with_retry(_build)
+    mail.Save()  # saves to Drafts, local .ost only
+    # Blocks ~30s: without it the draft never reaches the server and so
+    # never shows up in the mail client the user actually reads.
+    sync_requested = _sync_to_server()
+    return {
+        "subject": subject,
+        "to": to,
+        "attachments": len(attachments) if attachments else 0,
+        "sync_requested": sync_requested,
+    }
+
+
+def create_reply_draft(
+    subject: str,
+    body: str,
+    reply_all: bool = False,
+    attachments: list[str] | None = None,
+) -> dict | None:
+    """Create a draft *reply* to the newest inbox mail matching `subject`.
+
+    Unlike `create_draft`, this threads: Outlook builds the reply itself, so
+    the recipient, "RE:" subject, conversation index and quoted original all
+    come from the source mail. `body` is placed above the quoted history.
+
+    Blocks ~`_SYNC_SETTLE_S` seconds for the same reason as `create_draft`.
+    Returns None if no matching mail is found; otherwise the same dict shape
+    as `create_draft` plus `in_reply_to` (the original's subject).
+    """
+
+    # Build the item under the retry wrapper, but Save() and sync OUTSIDE it.
+    # A COM error after Save() would otherwise re-run the whole thing and
+    # leave two drafts. Nothing below the retry touches COM except Save()
+    # and the sync nudge (which never raises); metadata is captured first.
+    def _build():
+        msg = _find_message(subject)
+        if msg is None:
+            return None
+        reply = msg.ReplyAll() if reply_all else msg.Reply()
+        # Reply() pre-fills Body with a header + the quoted original; keep it.
+        reply.Body = body.rstrip() + "\n\n" + (reply.Body or "")
+        if attachments:
+            for path in attachments:
+                abs_path = os.path.abspath(path)
+                if not os.path.isfile(abs_path):
+                    raise FileNotFoundError(f"Attachment not found: {abs_path}")
+                reply.Attachments.Add(abs_path)
+        meta = {
+            "subject": reply.Subject,
+            "to": reply.To,
+            "in_reply_to": msg.Subject,
+            "attachments": len(attachments) if attachments else 0,
+        }
+        return reply, meta
+
+    built = _with_retry(_build)
+    if built is None:
+        return None
+    reply, meta = built
+    reply.Save()  # saves to Drafts, local .ost only
+    meta["sync_requested"] = _sync_to_server()
+    return meta
 
 
 # --- CLI ---
+
+
+def _print_sync_note(sync_requested: bool) -> None:
+    if sync_requested:
+        print(
+            f"Send/receive requested, waited {_SYNC_SETTLE_S}s for Outlook "
+            "to upload it. Delivery to the server is not independently "
+            "confirmable - check your Drafts folder."
+        )
+    else:
+        print(
+            "WARNING: saved locally, but no send/receive could be started - "
+            "it may not appear until Outlook next syncs on its own."
+        )
 
 
 def _print_emails(emails: list[dict]) -> None:
@@ -498,7 +575,7 @@ def main(args: list[str] | None = None) -> int:
     args = args or sys.argv[1:]
     if not args:
         print("Usage: python outlook.py <command> [options]")
-        print("Commands: inbox, calendar, search, unread, read, draft")
+        print("Commands: inbox, calendar, search, unread, read, draft, reply")
         return 1
 
     cmd = args[0]
@@ -532,6 +609,25 @@ def main(args: list[str] | None = None) -> int:
                 print(f"\n{email['body']}")
             else:
                 print(f"No email found matching '{args[1]}'")
+        elif cmd == "reply":
+            usage = 'Usage: reply [--all] "<subject match>" "<body>" [attachment ...]'
+            rest = args[1:]
+            reply_all = bool(rest) and rest[0] == "--all"
+            if reply_all:
+                rest = rest[1:]
+            if len(rest) < 2:
+                print(usage)
+                return 1
+            result = create_reply_draft(rest[0], rest[1], reply_all, rest[2:] or None)
+            if result is None:
+                print(f"No email found matching '{rest[0]}'")
+                return 1
+            print(f"Reply draft created: {result['subject']}")
+            print(f"To: {result['to']}")
+            print(f"In reply to: {result['in_reply_to']}")
+            if result["attachments"]:
+                print(f"Attachments: {result['attachments']}")
+            _print_sync_note(result["sync_requested"])
         elif cmd == "draft":
             if len(args) < 4:
                 print("Usage: draft <to> <subject> <body> [attachment ...]")
@@ -545,17 +641,7 @@ def main(args: list[str] | None = None) -> int:
             print(f"To: {result['to']}")
             if result["attachments"]:
                 print(f"Attachments: {result['attachments']}")
-            if result["sync_requested"]:
-                print(
-                    f"Send/receive requested, waited {_SYNC_SETTLE_S}s for Outlook "
-                    "to upload it. Delivery to the server is not independently "
-                    "confirmable - check your Drafts folder."
-                )
-            else:
-                print(
-                    "WARNING: saved locally, but no send/receive could be started - "
-                    "it may not appear until Outlook next syncs on its own."
-                )
+            _print_sync_note(result["sync_requested"])
         else:
             print(f"Unknown command: {cmd}")
             return 1
