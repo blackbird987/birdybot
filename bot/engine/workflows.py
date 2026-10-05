@@ -1146,7 +1146,8 @@ async def _attempt_inline_worktree_recovery(
 
     Three outcomes, all surfaced to the thread (silent fallback was the
     failure mode of t-3700):
-      - content matches branch tip → ``git worktree add --force`` →
+      - content matches branch tip → re-registered
+        (``ClaudeRunner._reregister_worktree_sync``) →
         thread message ``Recovered prior build {branch}``.
       - content drifted → flag ``manual_recovery_needed=True`` →
         thread message ``Prior build {branch} drifted; starting fresh``.
@@ -1215,34 +1216,27 @@ async def _attempt_inline_worktree_recovery(
             pass
         return
 
-    # decision == "match" → re-register under the per-repo lock
+    # decision == "match" → re-register under the per-repo lock.  Same helper
+    # as the startup pass: `git worktree add --force` was used here too, and
+    # git refuses it for a directory that already exists.
     try:
         repo_lock = runner._get_repo_lock(inst.repo_path)
         async with repo_lock:
-            r = await asyncio.to_thread(run_capture, ["git", "worktree", "add", "--force",
-                 inst.worktree_path, inst.branch],
-                cwd=inst.repo_path, encoding='utf-8', errors='replace',
+            failure = await asyncio.to_thread(
+                runner._reregister_worktree_sync,
+                inst.repo_path, inst.worktree_path, inst.branch,
             )
-    except Exception as e:
+    except Exception as e:  # the helper never raises; this is the lock/thread
         log.warning(
-            "Inline recovery: worktree add raised for %s",
+            "Inline recovery: re-register raised for %s",
             inst.branch, exc_info=True,
         )
-        try:
-            await ctx.messenger.send_text(
-                ctx.channel_id,
-                f"Couldn't re-register prior build `{inst.branch}` "
-                f"({e}); starting fresh from master.",
-                silent=True,
-            )
-        except Exception:
-            pass
-        return
+        failure = str(e)
 
-    if r.returncode != 0:
-        err = (r.stderr or "").strip()[:200]
+    if failure:
+        err = failure[:200]
         log.warning(
-            "Inline recovery: worktree add failed for %s: %s",
+            "Inline recovery: re-register failed for %s: %s",
             inst.branch, err,
         )
         try:

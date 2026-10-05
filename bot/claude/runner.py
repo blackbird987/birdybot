@@ -8347,7 +8347,7 @@ class ClaudeRunner:
 
         Returns one of:
           - ("match", "") — every tracked path's content hash matches the
-            branch tip's tree. Safe to ``git worktree add --force`` — the
+            branch tip's tree. Safe to re-register (``_reregister_worktree_sync``) — the
             re-register won't surprise anyone with overwrites.
           - ("diverged", reason) — at least one tracked file's content has
             been modified relative to the branch tip. Re-registering would
@@ -8417,39 +8417,54 @@ class ClaudeRunner:
 
     @staticmethod
     def _reregister_worktree_sync(
-        repo_path: str, wt_dir: Path, branch: str,
+        repo_path: str, worktree_path: str | Path, branch: str,
     ) -> str | None:
         """Give an intact worktree directory back its lost git metadata.
 
-        Returns None on success, or the reason it could not be done.
+        Returns None on success, or the reason it could not be done.  Never
+        raises.  The caller must already have proved, with
+        ``_check_worktree_content_matches_branch``, that every tracked file
+        matches the branch tip.  Both recovery paths share this: the startup
+        pass (``recover_partial_worktrees``) and the Build button's
+        (``workflows._attempt_inline_worktree_recovery``).
 
         ``git worktree add --force <dir> <branch>`` is the obvious command and
         does not work: git refuses any target path that already exists
         ("'<dir>' already exists"), ``--force`` or not, and an existing
         directory is the whole premise here.  So the registration is built
-        next door and moved in:
+        elsewhere and moved in:
 
-          1. ``worktree add --no-checkout`` at a fresh temporary path creates
-             new metadata for the branch without writing any files.
-          2. That path's ``.git`` file, which points at the new metadata, is
-             written into the real directory, and the temporary one deleted.
-          3. ``worktree repair`` points the metadata back at the real
-             directory — the documented fix for a worktree moved by hand.
+          1. ``worktree add --no-checkout`` at a temporary path with the same
+             basename creates fresh metadata for the branch, writing no files.
+          2. A link to that metadata replaces the directory's ``.git`` file.
+          3. ``worktree repair`` points the metadata back at the directory —
+             git's documented fix for a worktree moved by hand — and the
+             back-link is then read and checked, because ``git worktree
+             prune`` deletes metadata whose back-link is dead.
           4. A mixed ``reset`` rebuilds the index, which lived in the lost
-             metadata.  It never touches working files, and the caller has
-             already proved every tracked file matches the branch tip, so
-             the result is a clean checkout with untracked files kept.
+             metadata.  It never touches working files, and the content check
+             already proved they match the branch tip, so the result is a
+             clean checkout with untracked work kept.
 
-        A failure after step 1 prunes the half-made registration, so a retry
-        on the next startup starts from the same state.
+        The metadata must be named after the directory: ``_is_worktree_live``
+        looks for ``worktrees/<basename>``, so metadata under any other name
+        would be registered with git and still read as dead by the bot.
+
+        Any failure after step 1 deletes the metadata it created and puts the
+        old ``.git`` file back byte for byte.  That is the state the caller
+        started from, so the next attempt meets the same situation.  Prune is
+        not a substitute: once step 3 has run, the back-link is live and
+        prune keeps a registration whose index may still be empty.
         """
+        wt_dir = Path(worktree_path)
         dot_git = wt_dir / ".git"
         if dot_git.is_dir():
             # A real repository, not a linked worktree: not ours to rewire.
             return f"{dot_git} is a directory, not a worktree link"
-        tmp_root = wt_dir.parent / f".recover-{wt_dir.name}-{os.getpid()}-{time.time_ns()}"
-        tmp_wt = tmp_root / wt_dir.name
-        registered = False
+        try:
+            old_link = dot_git.read_bytes() if dot_git.is_file() else None
+        except OSError as e:
+            return f"cannot read {dot_git}: {e}"
 
         def _git(args: list[str], cwd) -> subprocess.CompletedProcess[str]:
             return run_capture(
@@ -8460,41 +8475,107 @@ class ClaudeRunner:
         def _err(r: subprocess.CompletedProcess[str]) -> str:
             return (r.stderr or r.stdout or f"exit {r.returncode}").strip()
 
+        def _link_target(link_file: Path) -> Path | None:
+            # Both halves of a worktree link hold a path, absolute by default
+            # and relative to the file's own directory under
+            # worktree.useRelativePaths: the worktree's .git file reads
+            # "gitdir: <metadata dir>", the metadata's gitdir file reads
+            # "<worktree>/.git".
+            try:
+                text = link_file.read_text(encoding="utf-8").strip()
+            except OSError:
+                return None
+            if text.startswith("gitdir:"):
+                text = text[len("gitdir:"):].strip()
+            if not text:
+                return None
+            target = Path(text)
+            return target if target.is_absolute() else link_file.parent / target
+
+        def _same(a: Path | None, b: Path) -> bool:
+            return a is not None and (
+                os.path.normcase(os.path.realpath(a))
+                == os.path.normcase(os.path.realpath(b))
+            )
+
+        def _replace(path: Path, data: bytes | None) -> None:
+            # Replaced, never overwritten in place: Git for Windows marks a
+            # worktree's .git file hidden, and Windows refuses to open a
+            # hidden file for overwrite (EACCES) while still allowing it to
+            # be deleted.  Bytes, so no newline translation creeps in.
+            if path.exists():
+                os.chmod(path, 0o600)
+                path.unlink()
+            if data is not None:
+                path.write_bytes(data)
+
+        common = git_common_dir(repo_path)
+        if not common:
+            return f"cannot resolve the git directory of {repo_path}"
+        meta_root = Path(common) / "worktrees"
+
+        # Outside the repo on purpose: the startup orphan scans walk
+        # .worktrees/, and a scratch directory left there by a crash would
+        # look like an abandoned build to them.
+        try:
+            tmp_root = Path(tempfile.mkdtemp(prefix="wt-recover-"))
+        except OSError as e:
+            return f"cannot create a scratch directory: {e}"
+        tmp_wt = tmp_root / wt_dir.name
+        added = ok = False
+        created: Path | None = None  # the metadata dir step 1 made
         try:
             r = _git(["worktree", "add", "--no-checkout", str(tmp_wt), branch], repo_path)
             if r.returncode != 0:
                 return _err(r)
-            registered = True
-            link = (tmp_wt / ".git").read_text(encoding="utf-8")
-            # Replaced, not overwritten: Git for Windows marks a worktree's
-            # .git file hidden, and Windows refuses to open a hidden file for
-            # overwrite (EACCES) while still allowing it to be deleted.
-            if dot_git.exists():
-                os.chmod(dot_git, 0o600)
-                dot_git.unlink()
-            dot_git.write_text(link, encoding="utf-8")
+            added = True
+            # Found by its back-link rather than by name, so it is identified
+            # exactly even when git had to pick another name for it.
+            created = next(
+                (d for d in meta_root.iterdir()
+                 if _same(_link_target(d / "gitdir"), tmp_wt / ".git")),
+                None,
+            ) if meta_root.is_dir() else None
+            if created is None:
+                return "git registered the branch but its metadata could not be found"
+            if created.name != wt_dir.name:
+                return (
+                    f"git named the metadata {created.name!r}, not "
+                    f"{wt_dir.name!r}; the bot would not recognise it"
+                )
+            _replace(dot_git, f"gitdir: {created.as_posix()}\n".encode("utf-8"))
             shutil.rmtree(tmp_root, ignore_errors=True)
             r = _git(["worktree", "repair", str(wt_dir)], repo_path)
             if r.returncode != 0:
                 return f"repair: {_err(r)}"
+            if not _same(_link_target(created / "gitdir"), dot_git):
+                return "repair did not point the metadata back at the directory"
             r = _git(["reset", "-q"], wt_dir)
             if r.returncode != 0:
                 return f"index rebuild: {_err(r)}"
-            registered = False  # success: nothing to roll back
+            ok = True
             return None
         except Exception as e:
             return f"raised: {e}"
         finally:
             shutil.rmtree(tmp_root, ignore_errors=True)
-            if registered:
-                # Metadata pointing at a deleted temp path is stale, and
-                # prune is what removes stale metadata.  A half-repaired
-                # entry whose link already points at wt_dir is not stale and
-                # survives, which is fine: its directory is real.
+            if added and not ok:
                 try:
-                    _git(["worktree", "prune"], repo_path)
+                    if created is not None:
+                        shutil.rmtree(created)
+                        _replace(dot_git, old_link)
+                    else:
+                        # Unidentified, so it cannot be removed by path.  Its
+                        # back-link points into the temp dir just deleted,
+                        # which is exactly what prune removes.
+                        _git(["worktree", "prune"], repo_path)
                 except Exception:
-                    log.debug("worktree prune after failed recovery raised", exc_info=True)
+                    # The one outcome worth more than a debug line: the
+                    # directory is now in a state no caller expects.
+                    log.warning(
+                        "Rolling back worktree re-register for %s failed",
+                        wt_dir, exc_info=True,
+                    )
 
     @staticmethod
     def _select_recovery_candidates(store) -> list[Instance]:
@@ -8586,7 +8667,7 @@ class ClaudeRunner:
         FAILED/KILLED skipped, branches with any flagged sibling silenced).
         For each candidate whose metadata dir is missing:
           1. Compare worktree contents against the branch tip blob hashes.
-          2. On match → ``git worktree add --force`` to re-register.
+          2. On match → ``_reregister_worktree_sync`` to re-register.
           3. On drift → flag instance ``manual_recovery_needed`` so the
              user is forced to inspect before the bot touches it again.
           4. On error → emit a "skipped" event, leave instance untouched.
@@ -8677,14 +8758,14 @@ class ClaudeRunner:
                 events.append(WorktreeRecoveryEvent(
                     instance_id=inst.id, repo_name=repo_name,
                     branch=inst.branch, status="skipped",
-                    detail=f"worktree add raised: {e}",
+                    detail=f"re-register raised: {e}",
                 ))
                 continue
             if failure:
                 events.append(WorktreeRecoveryEvent(
                     instance_id=inst.id, repo_name=repo_name,
                     branch=inst.branch, status="skipped",
-                    detail=f"worktree add failed: {failure[:200]}",
+                    detail=f"re-register failed: {failure[:200]}",
                 ))
                 continue
             events.append(WorktreeRecoveryEvent(

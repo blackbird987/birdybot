@@ -136,8 +136,10 @@ def case_chain_is_not_queued() -> None:
 
 
 def case_non_resuming_step_ignores_chain() -> None:
-    # Pre-regression semantics (64043b8): only a step that resumes the source
-    # session is covered by that session's chain.
+    # Pins the semantics 64043b8 shipped with: only a step that resumes the
+    # source session is covered by that session's chain.  Every SpawnConfig
+    # in workflows.py sets resume_session=True today, so this guards the
+    # contract for a future fresh-session step rather than a live caller.
     print("\n[step that does not resume the session: queued even with a chain]")
     ctx = _press({"sess-1": ["verify"]}, resume_session=False)
     _check(len(ctx.runner.replayed) == 1, "replay queued")
