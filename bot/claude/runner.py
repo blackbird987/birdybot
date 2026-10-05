@@ -1092,7 +1092,7 @@ class WorktreeRecoveryEvent(NamedTuple):
 
     `status` is one of:
       - "recovered": metadata was missing, content matched branch tip,
-        ``git worktree add --force`` re-registered it.
+        the registration was rebuilt (``_reregister_worktree_sync``).
       - "manual_recovery_needed": metadata missing AND working-tree content
         had drifted from branch tip — refused to overwrite, parked the
         instance for human review (``manual_recovery_needed=True`` set on
@@ -8416,6 +8416,87 @@ class ClaudeRunner:
             return ("error", f"divergence check raised: {e}")
 
     @staticmethod
+    def _reregister_worktree_sync(
+        repo_path: str, wt_dir: Path, branch: str,
+    ) -> str | None:
+        """Give an intact worktree directory back its lost git metadata.
+
+        Returns None on success, or the reason it could not be done.
+
+        ``git worktree add --force <dir> <branch>`` is the obvious command and
+        does not work: git refuses any target path that already exists
+        ("'<dir>' already exists"), ``--force`` or not, and an existing
+        directory is the whole premise here.  So the registration is built
+        next door and moved in:
+
+          1. ``worktree add --no-checkout`` at a fresh temporary path creates
+             new metadata for the branch without writing any files.
+          2. That path's ``.git`` file, which points at the new metadata, is
+             written into the real directory, and the temporary one deleted.
+          3. ``worktree repair`` points the metadata back at the real
+             directory — the documented fix for a worktree moved by hand.
+          4. A mixed ``reset`` rebuilds the index, which lived in the lost
+             metadata.  It never touches working files, and the caller has
+             already proved every tracked file matches the branch tip, so
+             the result is a clean checkout with untracked files kept.
+
+        A failure after step 1 prunes the half-made registration, so a retry
+        on the next startup starts from the same state.
+        """
+        dot_git = wt_dir / ".git"
+        if dot_git.is_dir():
+            # A real repository, not a linked worktree: not ours to rewire.
+            return f"{dot_git} is a directory, not a worktree link"
+        tmp_root = wt_dir.parent / f".recover-{wt_dir.name}-{os.getpid()}-{time.time_ns()}"
+        tmp_wt = tmp_root / wt_dir.name
+        registered = False
+
+        def _git(args: list[str], cwd) -> subprocess.CompletedProcess[str]:
+            return run_capture(
+                ["git", *args], cwd=str(cwd), encoding="utf-8", errors="replace",
+                timeout=60,
+            )
+
+        def _err(r: subprocess.CompletedProcess[str]) -> str:
+            return (r.stderr or r.stdout or f"exit {r.returncode}").strip()
+
+        try:
+            r = _git(["worktree", "add", "--no-checkout", str(tmp_wt), branch], repo_path)
+            if r.returncode != 0:
+                return _err(r)
+            registered = True
+            link = (tmp_wt / ".git").read_text(encoding="utf-8")
+            # Replaced, not overwritten: Git for Windows marks a worktree's
+            # .git file hidden, and Windows refuses to open a hidden file for
+            # overwrite (EACCES) while still allowing it to be deleted.
+            if dot_git.exists():
+                os.chmod(dot_git, 0o600)
+                dot_git.unlink()
+            dot_git.write_text(link, encoding="utf-8")
+            shutil.rmtree(tmp_root, ignore_errors=True)
+            r = _git(["worktree", "repair", str(wt_dir)], repo_path)
+            if r.returncode != 0:
+                return f"repair: {_err(r)}"
+            r = _git(["reset", "-q"], wt_dir)
+            if r.returncode != 0:
+                return f"index rebuild: {_err(r)}"
+            registered = False  # success: nothing to roll back
+            return None
+        except Exception as e:
+            return f"raised: {e}"
+        finally:
+            shutil.rmtree(tmp_root, ignore_errors=True)
+            if registered:
+                # Metadata pointing at a deleted temp path is stale, and
+                # prune is what removes stale metadata.  A half-repaired
+                # entry whose link already points at wt_dir is not stale and
+                # survives, which is fine: its directory is real.
+                try:
+                    _git(["worktree", "prune"], repo_path)
+                except Exception:
+                    log.debug("worktree prune after failed recovery raised", exc_info=True)
+
+    @staticmethod
     def _select_recovery_candidates(store) -> list[Instance]:
         """Pick the Instance records eligible for the worktree-recovery scan.
 
@@ -8588,11 +8669,9 @@ class ClaudeRunner:
             try:
                 repo_lock = self._get_repo_lock(repo_path)
                 async with repo_lock:
-                    r = await asyncio.to_thread(
-                        _run_capture,
-                        ["git", "worktree", "add", "--force",
-                         str(wt_dir), inst.branch],
-                        cwd=repo_path, encoding="utf-8", errors="replace",
+                    failure = await asyncio.to_thread(
+                        self._reregister_worktree_sync,
+                        repo_path, wt_dir, inst.branch,
                     )
             except Exception as e:
                 events.append(WorktreeRecoveryEvent(
@@ -8601,11 +8680,11 @@ class ClaudeRunner:
                     detail=f"worktree add raised: {e}",
                 ))
                 continue
-            if r.returncode != 0:
+            if failure:
                 events.append(WorktreeRecoveryEvent(
                     instance_id=inst.id, repo_name=repo_name,
                     branch=inst.branch, status="skipped",
-                    detail=f"worktree add failed: {(r.stderr or '').strip()[:200]}",
+                    detail=f"worktree add failed: {failure[:200]}",
                 ))
                 continue
             events.append(WorktreeRecoveryEvent(
@@ -8655,7 +8734,7 @@ class ClaudeRunner:
 
             try:
                 subj_proc = await asyncio.to_thread(
-                    _run_capture, ["git", "log", "-1", "--pretty=%H%n%s"],
+                    run_capture, ["git", "log", "-1", "--pretty=%H%n%s"],
                     cwd=inst.worktree_path, encoding="utf-8", errors="replace",
                 )
             except Exception:
@@ -8678,7 +8757,7 @@ class ClaudeRunner:
 
             try:
                 tag_proc = await asyncio.to_thread(
-                    _run_capture,
+                    run_capture,
                     ["git", "rev-parse", "--verify", f"refs/tags/{version}"],
                     cwd=inst.repo_path, encoding="utf-8", errors="replace",
                 )

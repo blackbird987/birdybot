@@ -778,6 +778,11 @@ async def spawn_from(
 
     # Block spawns during reboot drain. Same-session overlap is allowed —
     # the channel lock + Queued embed serialize it visibly.
+    #
+    # check_session is read only by the drain branch below.  It used to be
+    # computed for check_spawn_allowed as well, and was deleted along with
+    # that argument (42907fd), which left the drain branch raising NameError.
+    check_session = source.session_id if cfg.resume_session else None
     spawn_err = ctx.runner.check_spawn_allowed()
     if spawn_err:
         if ctx.runner.is_draining:

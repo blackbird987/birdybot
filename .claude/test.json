@@ -116,6 +116,8 @@
     "tag_release": "python scripts/test_tag_release.py",
     "release_ancestry": "python scripts/test_release_ancestry.py",
     "worktree_recovery_dedupe": "python scripts/test_worktree_recovery_dedupe.py",
+    "worktree_recovery_git": "python scripts/test_worktree_recovery_git.py",
+    "spawn_during_drain": "python scripts/test_spawn_during_drain.py",
     "fleet_sim": "python scripts/verify_fleet_sim.py",
     "hydrate_same_account": "python scripts/verify_hydrate_same_account.py",
     "plan_floor": "python scripts/verify_plan_floor.py",
