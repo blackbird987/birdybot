@@ -557,6 +557,10 @@ async def _probe_scope() -> tuple[bool, str]:
         # The pid alone is not enough: one process re-probes on the TTL and
         # after every invalidate_scope_probe.
         f"--unit={new_scope_unit(f'probe-{os.getpid()}')}",
+        # The same properties a session is spawned with, so a systemd that
+        # rejects them fails here, as "no scopes", rather than failing every
+        # session spawn.
+        *_ceiling_properties(),
         "--", "true",
     ]
     # Deliberately blocking subprocess.run on a worker thread, and NOT
@@ -580,6 +584,25 @@ async def _probe_scope() -> tuple[bool, str]:
     return True, ""
 
 
+def _ceiling_properties() -> list[str]:
+    """The per-session ceilings as ``systemd-run -p`` arguments.
+
+    Unit properties, not cgroup writes, because systemd owns the scope's
+    cgroup and re-applies its unit properties on every ``daemon-reload`` and
+    every ``SetUnitProperties`` call. Verified on 2026-10-08: one reload reset
+    every live session's memory.high and memory.max from the bot-written
+    8G/10G back to ``max``, because the transient unit itself carried none.
+    uresourced calls SetUnitProperties many times a second on this machine,
+    so a direct write was never going to last. 0 leaves that limit unset.
+    """
+    props: list[str] = []
+    if config.SESSION_MEM_HIGH_MB > 0:
+        props += ["-p", f"MemoryHigh={int(config.SESSION_MEM_HIGH_MB)}M"]
+    if config.SESSION_MEM_HARD_MB > 0:
+        props += ["-p", f"MemoryMax={int(config.SESSION_MEM_HARD_MB)}M"]
+    return props
+
+
 def wrap_command(
     cmd: list[str], instance_id: str, unit: str | None = None,
 ) -> list[str]:
@@ -599,6 +622,7 @@ def wrap_command(
         "systemd-run", "--user", "--scope", "--quiet", "--collect",
         f"--slice={config.SESSION_SLICE}",
         f"--unit={unit or scope_unit_name(instance_id)}",
+        *_ceiling_properties(),
         "--", *cmd,
     ]
 
@@ -665,14 +689,10 @@ def cgroup_of_pid(pid: int) -> Path | None:
     return None
 
 
-def _write_limit(path: Path, name: str, mb: int) -> bool:
-    if mb <= 0:
-        return False
-    try:
-        (path / name).write_text(str(int(mb) * _MB), encoding="utf-8")
-        return True
-    except OSError:
-        return False
+def _read_limit_mb(path: Path, name: str) -> float | None:
+    """A memory limit in MB, or None when it reads ``max`` or not at all."""
+    value = memory._read_int(path / name)
+    return None if value is None else value / _MB
 
 
 def _pid_alive(pid: int) -> bool:
@@ -680,15 +700,22 @@ def _pid_alive(pid: int) -> bool:
 
 
 def _apply_ceilings(path: Path, unit: str) -> SessionCgroup:
+    """Record the ceilings the scope actually carries.
+
+    Nothing is written here any more. The ceilings arrive as unit properties
+    on the ``systemd-run`` command line (``_ceiling_properties``), and a
+    direct write into a systemd-owned cgroup lasts only until the next
+    daemon-reload. ``applied`` is read back from the cgroup so the log says
+    what is in force, not what was asked for.
+    """
     cg = SessionCgroup(path=path, unit=unit)
     applied: list[str] = []
-    # high before max. If both are going to be written, the moment between
-    # them should be the safe ordering: a cgroup briefly holding only a soft
-    # throttle is harmless, one briefly holding only a hard cap is not.
-    if _write_limit(path, "memory.high", config.SESSION_MEM_HIGH_MB):
-        applied.append(f"high={config.SESSION_MEM_HIGH_MB / 1024:.1f}GB")
-    if _write_limit(path, "memory.max", config.SESSION_MEM_HARD_MB):
-        applied.append(f"max={config.SESSION_MEM_HARD_MB / 1024:.1f}GB")
+    high = _read_limit_mb(path, "memory.high")
+    if high is not None:
+        applied.append(f"high={high / 1024:.1f}GB")
+    hard = _read_limit_mb(path, "memory.max")
+    if hard is not None:
+        applied.append(f"max={hard / 1024:.1f}GB")
     cg.applied = tuple(applied)
     return cg
 
@@ -697,7 +724,7 @@ async def adopt_session(
     pid: int, instance_id: str, timeout_s: float | None = None,
     unit: str | None = None,
 ) -> SessionCgroup | None:
-    """Wait for a freshly spawned session's scope, then apply its ceilings.
+    """Wait for a freshly spawned session's scope, then read its ceilings.
 
     **Polled, not read once, and that is the whole correctness of it.**
     ``systemd-run --scope`` registers the transient unit over D-Bus and only
@@ -707,14 +734,14 @@ async def adopt_session(
     ``claude-bot.service`` at t=0, in its own scope by t=50ms. A single read
     at t=0 therefore fails the identity check every single time, and fails it
     *silently* -- it is indistinguishable from "this session got no scope", so
-    no ceiling is written, no cgroup accounting replaces the tree walk, and no
-    atomic kill is available, on a machine where all three were working.
+    no cgroup accounting replaces the tree walk and no atomic kill is
+    available, on a machine where both were working.
 
     Returns None when the process never lands in a scope of its own, which the
     caller treats as "carry on exactly as before". The identity check stays:
     without it a failed scope would leave the session in the bot's own cgroup
-    and this would cheerfully write a 6 GB ``memory.high`` onto the
-    supervisor. Waiting is skipped entirely when scopes are not in use, so the
+    and the supervisor's cgroup would be reported, and later killed through
+    ``cgroup.kill``, as if it were the session's. Waiting is skipped entirely when scopes are not in use, so the
     machines that never had one do not pay the budget on every spawn.
     """
     if not _scope_supported:
@@ -745,6 +772,47 @@ async def adopt_session(
             invalidate_scope_probe()
             return None
         await asyncio.sleep(config.SESSION_SCOPE_ADOPT_POLL_SECS)
+
+
+# What the user service manager writes into a scope's journal when something
+# outside the bot killed it for memory. Verified on 2026-10-08 against the
+# t-8999 and q-19143 kills: "claude-session-t-8999.scope: systemd-oomd killed
+# 7 process(es) in this unit." followed by "Failed with result 'oom-kill'."
+_OOMD_MARKER = "systemd-oomd killed"
+_OOM_RESULT_MARKER = "oom-kill"
+
+
+async def oom_kill_evidence(unit: str) -> str | None:
+    """Who killed ``unit`` for memory, per its journal, or None.
+
+    Returns "systemd-oomd" or "the kernel's OOM killer" when the scope's own
+    journal says so, and None when it says nothing, cannot be read, or the
+    read times out. Corroboration, never a gate: the caller treats an
+    unexplained SIGKILL on a scoped run as an out-of-memory kill anyway, so
+    this only decides how confidently the failure is worded. The journal can
+    lag the process exit by a moment, which is one more reason it cannot be
+    the gate.
+
+    ``subprocess.run`` on a worker thread for the same reason as
+    ``_probe_scope``: the session-spawn API is a harness seam, and a
+    diagnostic sharing it is counted as a session start.
+    """
+    if sys.platform != "linux" or not unit or shutil.which("journalctl") is None:
+        return None
+    cmd = ["journalctl", "--user", "-u", unit, "-o", "cat", "-n", "20", "--no-pager"]
+    try:
+        res = await asyncio.to_thread(
+            subprocess.run, cmd, capture_output=True, timeout=5,
+        )
+    except Exception:
+        log.debug("journal read for %s failed", unit, exc_info=True)
+        return None
+    text = (res.stdout or b"").decode(errors="replace")
+    if _OOMD_MARKER in text:
+        return "systemd-oomd"
+    if _OOM_RESULT_MARKER in text:
+        return "the kernel's OOM killer"
+    return None
 
 
 def session_slice_path() -> Path | None:

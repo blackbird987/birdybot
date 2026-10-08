@@ -86,6 +86,33 @@ def _check_wrapper_shape(failures: list[str]) -> None:
             failures.append(
                 f"the wrapped payload was altered: {wrapped[sep + 1:]}"
             )
+        # The ceilings ride on the command line as unit properties. A direct
+        # cgroup write is wiped by the next daemon-reload (verified live on
+        # 2026-10-08), so this is the only form that lasts.
+        want_props = []
+        if config.SESSION_MEM_HIGH_MB > 0:
+            want_props.append(f"MemoryHigh={config.SESSION_MEM_HIGH_MB}M")
+        if config.SESSION_MEM_HARD_MB > 0:
+            want_props.append(f"MemoryMax={config.SESSION_MEM_HARD_MB}M")
+        head = wrapped[:sep]
+        for prop in want_props:
+            if prop not in head or head[head.index(prop) - 1] != "-p":
+                failures.append(
+                    f"the wrapper does not pass -p {prop} before the payload: "
+                    f"{head}. Without it the ceiling exists only as a cgroup "
+                    "write that the next daemon-reload resets to max"
+                )
+        saved_high = config.SESSION_MEM_HIGH_MB
+        try:
+            config.SESSION_MEM_HIGH_MB = 0
+            zero = cgroups.wrap_command(["claude"], "t-43")
+            if any(a.startswith("MemoryHigh=") for a in zero):
+                failures.append(
+                    "SESSION_MEM_HIGH_MB=0 still passed a MemoryHigh property; "
+                    "0 means leave that limit unset"
+                )
+        finally:
+            config.SESSION_MEM_HIGH_MB = saved_high
         if "--collect" not in wrapped:
             failures.append(
                 "the scope is not --collect, so every finished session leaves "
@@ -355,29 +382,48 @@ async def _check_adoption_identity(failures: list[str]) -> None:
                     "session's scope"
                 )
 
+            # A scope systemd has already applied its properties to. Adoption
+            # reads them back and writes nothing: a direct write into a
+            # systemd-owned cgroup lasts only until the next daemon-reload.
+            want_high = config.SESSION_MEM_HIGH_MB * 1024 * 1024
+            want_max = config.SESSION_MEM_HARD_MB * 1024 * 1024
             right = root / cgroups.scope_unit_name("t-99")
             right.mkdir()
-            (right / "memory.high").write_text("max", encoding="utf-8")
-            (right / "memory.max").write_text("max", encoding="utf-8")
+            (right / "memory.high").write_text(f"{want_high}\n", encoding="utf-8")
+            (right / "memory.max").write_text(f"{want_max}\n", encoding="utf-8")
             cgroups.cgroup_of_pid = lambda pid: right   # type: ignore[assignment]
             cg = await cgroups.adopt_session(1234, "t-99")
             if cg is None:
                 failures.append("a session in its own scope was not adopted")
             else:
-                want_high = config.SESSION_MEM_HIGH_MB * 1024 * 1024
-                want_max = config.SESSION_MEM_HARD_MB * 1024 * 1024
-                got_high = (right / "memory.high").read_text().strip()
-                got_max = (right / "memory.max").read_text().strip()
-                if got_high != str(want_high):
+                want_applied = (
+                    f"high={config.SESSION_MEM_HIGH_MB / 1024:.1f}GB",
+                    f"max={config.SESSION_MEM_HARD_MB / 1024:.1f}GB",
+                )
+                if cg.applied != want_applied:
                     failures.append(
-                        f"memory.high was written as {got_high}, expected {want_high}"
+                        f"the applied ceilings read back as {cg.applied}, "
+                        f"expected {want_applied}"
                     )
-                if got_max != str(want_max):
+
+                # A scope carrying no ceiling must be reported as carrying
+                # none, and must not be written to: the log has to say what
+                # is in force, not what was asked for.
+                bare = root / "bare.scope"
+                bare.mkdir()
+                (bare / "memory.high").write_text("max\n", encoding="utf-8")
+                (bare / "memory.max").write_text("max\n", encoding="utf-8")
+                bare_cg = cgroups._apply_ceilings(bare, "bare.scope")
+                if bare_cg.applied:
                     failures.append(
-                        f"memory.max was written as {got_max}, expected {want_max}"
+                        f"a scope reading max was reported as {bare_cg.applied}"
                     )
-                if not cg.applied:
-                    failures.append("the applied ceilings were not recorded for the log")
+                for name in ("memory.high", "memory.max"):
+                    if (bare / name).read_text().strip() != "max":
+                        failures.append(
+                            f"adoption wrote {name} directly; the ceilings "
+                            "belong in the systemd-run properties"
+                        )
                 # The per-session figure the tree walker cannot produce.
                 (right / "memory.current").write_text(
                     str(3 * 1024 * 1024 * 1024), encoding="utf-8",
@@ -493,6 +539,43 @@ def _check_orphan_roots(failures: list[str]) -> None:
             shutil.rmtree(other, ignore_errors=True)
 
 
+async def _check_ceiling_survives_reload(path: Path, failures: list[str]) -> None:
+    """A daemon-reload must not strip a live session of its ceilings.
+
+    It did until 2026-10-08: the bot wrote memory.high and memory.max into
+    the scope's cgroup directly, systemd re-applied the unit's own properties
+    on the next reload, and the unit carried none, so every live session went
+    back to ``max``. uresourced triggers the same re-apply many times a
+    second here. Skipped when systemctl cannot be reached, since a wedged
+    manager is a machine problem the checks above already report.
+    """
+    want = {
+        "memory.high": config.SESSION_MEM_HIGH_MB,
+        "memory.max": config.SESSION_MEM_HARD_MB,
+    }
+    try:
+        res = await asyncio.to_thread(
+            subprocess.run, ["systemctl", "--user", "daemon-reload"],
+            capture_output=True, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"NOTE: daemon-reload could not run ({exc}); reload check skipped")
+        return
+    if res.returncode != 0:
+        print(f"NOTE: daemon-reload failed (rc={res.returncode}); reload check skipped")
+        return
+    for name, mb in want.items():
+        if mb <= 0:
+            continue
+        got = (path / name).read_text().strip()
+        if got != str(mb * 1024 * 1024):
+            failures.append(
+                f"after systemctl --user daemon-reload the live scope's {name} "
+                f"reads {got}, expected {mb * 1024 * 1024}. The ceiling has to "
+                "be a unit property (systemd-run -p), or systemd resets it"
+            )
+
+
 async def _check_live_scope(failures: list[str]) -> None:
     """Against the real service manager, when there is one.
 
@@ -570,6 +653,7 @@ async def _check_live_scope(failures: list[str]) -> None:
             if not (path / "cgroup.kill").exists():
                 print("NOTE: this kernel has no cgroup.kill; reaps fall back "
                       "to walking the process tree")
+            await _check_ceiling_survives_reload(path, failures)
 
     # The kill shape, through the scope. Getting this wrong makes every Kill
     # and Steer render as a red FAILED card -- and a failure with no turns is

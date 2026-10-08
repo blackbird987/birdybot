@@ -57,11 +57,35 @@ Description=Claude Code session workloads
 # this slice, which means one session dies and the supervisor does not. That
 # is the whole structural change: the failure is scoped to the workload.
 #
-# Sized against 31 GB total with 8-10 GB normally held by the desktop. The
-# supervisor's own unit keeps a larger MemoryMax deliberately, because a
-# machine without systemd-run falls back to running sessions inside it.
-MemoryHigh=11G
-MemoryMax=14G
+# --- Size it for the fleet's page cache, not just its anon memory ---
+#
+# This was MemoryHigh=11G / MemoryMax=14G until 2026-10-08, and on that day
+# the 11G soft ceiling was the killer. systemd-oomd shot two sessions
+# (claude-session-t-8999.scope at 12:54, a dotnet build, and
+# claude-session-q-19143.scope at 13:22, 2.9h into a study) because this
+# slice's memory pressure read 82% and 72% against its 70% limit, while the
+# machine had 11-12 GB of RAM free. The bot's own log said "ours
+# 7.7GB/11.0GB", which is anon only. memory.high counts page cache too, and
+# 5.0G of file cache plus 1.1G of dirty build output put memory.current on the
+# line (memory.peak 11.23G, memory.events high=993628). zram was 100% full,
+# so the forced reclaim could only thrash file cache, and that stall is
+# exactly what oomd kills on.
+#
+# It is the "a soft ceiling at the working set manufactures the stall"
+# mistake documented for SESSION_MEM_HIGH_MB, one level up. A busy build
+# fleet's working set includes the files it reads and writes, so the ceiling
+# has to sit well above anon plus cache, at what the machine can actually
+# afford to give the fleet.
+#
+# Sized against 31 GB total with 8-10 GB normally held by the desktop.
+# MemoryMax must stay below app.slice's MemoryMax (27G, see
+# app.slice.d/50-memory.conf): the ladder has to nest, or the tree's ceiling
+# is reached first and the victim is picked from every application on the
+# machine. The supervisor's own unit keeps a larger MemoryMax deliberately,
+# because a machine without systemd-run falls back to running sessions
+# inside it.
+MemoryHigh=19G
+MemoryMax=21G
 
 # Same reasoning as claude-bot.service: proportional shares that bind only
 # under contention, so an unattended machine still builds at full speed while
