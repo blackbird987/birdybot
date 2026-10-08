@@ -205,6 +205,130 @@ async def _check_scope_disabled_path(failures: list[str]) -> None:
         cgroups._scope_supported, cgroups._scope_reason = saved_state
 
 
+# The exact refusal t-8920 died on (2026-10-06 22:52:48), resuming after an
+# autocompact thrash while its previous attempt's scope was still loaded.
+_T8920_REFUSAL = (
+    "Failed to start transient scope unit: Unit claude-session-t-8920.scope "
+    "was already loaded or has a fragment file."
+)
+
+
+async def _check_unique_unit_per_spawn(failures: list[str]) -> None:
+    """Every spawn gets its own scope name, and adoption looks for that one.
+
+    One instance spawns the CLI several times in a run (thrash resume,
+    overflow resume, account failover), and the previous attempt's scope can
+    still be loaded when the next one starts. With the name derived from the
+    instance id alone, t-8920's resume was refused by systemd-run, and the
+    refusal was then read as the account failing.
+    """
+    a = cgroups.new_scope_unit("t-8920")
+    b = cgroups.new_scope_unit("t-8920")
+    if a == b:
+        failures.append(
+            "two spawns of one instance produced the same scope name; the "
+            "second is refused while the first is still loaded (t-8920)"
+        )
+    for name in (a, b):
+        if not name.endswith(".scope") or "t-8920" not in name:
+            failures.append(
+                f"per-spawn scope name {name!r} lost the .scope suffix or the "
+                "instance id"
+            )
+
+    saved = cgroups._scope_supported
+    try:
+        cgroups._scope_supported = True
+        wrapped = cgroups.wrap_command(["claude", "-p"], "t-8920", unit=a)
+        if f"--unit={a}" not in wrapped:
+            failures.append(
+                f"wrap_command ignored the unit it was handed: {wrapped}"
+            )
+    finally:
+        cgroups._scope_supported = saved
+
+    # Adoption must look for the name the spawn used. A cgroup carrying the
+    # bare per-instance name is someone else's scope, not this spawn's.
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        saved_pid = cgroups.cgroup_of_pid
+        saved_state = (cgroups._scope_supported, cgroups._scope_stale)
+        cgroups._scope_supported = True
+        try:
+            used = root / a
+            used.mkdir()
+            (used / "memory.high").write_text("max", encoding="utf-8")
+            (used / "memory.max").write_text("max", encoding="utf-8")
+            cgroups.cgroup_of_pid = lambda pid: used   # type: ignore[assignment]
+            cg = await cgroups.adopt_session(1234, "t-8920", unit=a)
+            if cg is None:
+                failures.append(
+                    "a session in the scope its spawn named was not adopted"
+                )
+            other = root / cgroups.scope_unit_name("t-8920")
+            other.mkdir()
+            cgroups.cgroup_of_pid = lambda pid: other  # type: ignore[assignment]
+            cg = await cgroups.adopt_session(1234, "t-8920", timeout_s=0.0, unit=a)
+            if cg is not None:
+                failures.append(
+                    "adoption accepted a scope whose name is not the one this "
+                    "spawn was given"
+                )
+        finally:
+            cgroups.cgroup_of_pid = saved_pid   # type: ignore[assignment]
+            cgroups._scope_supported, cgroups._scope_stale = saved_state
+
+    # The runner must hand one generated name to both ends. Checked in the
+    # syntax: the spawn function's wrap_command(unit=X) and the
+    # _adopt_session_scope(..., X) it schedules must name the same variable,
+    # and _adopt_session_scope must pass its unit on to adopt_session.
+    src = Path(__file__).resolve().parents[1] / "bot" / "claude" / "runner.py"
+    tree = ast.parse(src.read_text(encoding="utf-8"))
+    wrap_units: set[str] = set()
+    adopt_units: set[str] = set()
+    forwards_unit = False
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for node in ast.walk(fn):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+                continue
+            attr = node.func.attr
+            if attr == "wrap_command":
+                for kw in node.keywords:
+                    if kw.arg == "unit" and isinstance(kw.value, ast.Name):
+                        wrap_units.add(kw.value.id)
+            elif attr == "_adopt_session_scope" and len(node.args) >= 3:
+                if isinstance(node.args[2], ast.Name):
+                    adopt_units.add(node.args[2].id)
+            elif attr == "adopt_session" and fn.name == "_adopt_session_scope":
+                forwards_unit = any(kw.arg == "unit" for kw in node.keywords)
+    if not wrap_units:
+        failures.append(
+            "the runner wraps the session command without naming the unit, "
+            "so every spawn of one instance reuses one scope name"
+        )
+    elif not (wrap_units & adopt_units):
+        failures.append(
+            f"the runner wraps with unit {sorted(wrap_units)} but adopts "
+            f"{sorted(adopt_units) or 'nothing'}; adoption would wait out its "
+            "budget looking for a scope that never existed"
+        )
+    if not forwards_unit:
+        failures.append(
+            "_adopt_session_scope does not pass the spawn's unit on to "
+            "adopt_session"
+        )
+
+    # A scope refusal is ours, not the account's.
+    from bot.claude import parser
+    if not parser.is_account_agnostic_error(_T8920_REFUSAL):
+        failures.append(
+            "systemd-run refusing the scope reads as an account failure, so "
+            "the no-turns heuristic fails a good account over (t-8920)"
+        )
+
+
 async def _check_adoption_identity(failures: list[str]) -> None:
     """Ceilings are written into the session's scope, or into nothing at all."""
     with tempfile.TemporaryDirectory() as td:
@@ -498,6 +622,7 @@ async def _amain() -> int:
     _check_adoption_offpath(failures)
     await _check_scope_disabled_path(failures)
     await _check_adoption_identity(failures)
+    await _check_unique_unit_per_spawn(failures)
     _check_orphan_roots(failures)
     await _check_live_scope(failures)
 

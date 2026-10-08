@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+- **A step that crashes before its CLI starts is marked failed instead of running forever** (`bot/engine/lifecycle.py`, `scripts/test_run_instance_crash.py`). Only cancellation was handled around a run, so any other exception raised while the runner prepared it (worktree setup, building the command) skipped finalize entirely: the instance stayed RUNNING in state and its card spun on "thinking..." for a day (t-8954). It is now recorded as FAILED with the error, saved through a critical write, the card reads failed, and the exception is still re-raised to the caller.
+- **Done after a merge runs in the main repo instead of crashing** (`bot/claude/runner.py`, `scripts/test_run_instance_crash.py`). Merge and Done tapped seconds apart: Done's step queued behind the merge on the repo lock, the merge cleared the branch off every instance sharing it on its way out, and the step woke up running `git worktree add -b None`. The worktree decision is now made under the lock: a branch cleared while waiting, or an inherited branch whose ref is gone, means the work already landed, so the step runs in the main repo. An inherited branch is never quietly recreated off HEAD as a stand-in, and an instance with no branch gets a clear error rather than a TypeError.
+- **Each CLI spawn gets its own systemd scope name** (`bot/claude/cgroups.py`, `bot/claude/runner.py`, `bot/claude/parser.py`, `scripts/test_session_cgroups.py`). The scope was named after the instance alone, so a resume inside the same run (t-8920, after an autocompact thrash) was refused because the previous attempt's scope was still loaded, and that refusal was then read as the account failing and nearly handed to the backup subscription. A short random tag per spawn makes the name unique, the same name is handed to both the wrapper and adoption, and a scope refusal now counts as our error, not the account's.
+
 ## v0.101.30, A plan is checked against what was already tried (2026-09-29)
 
 ### Added

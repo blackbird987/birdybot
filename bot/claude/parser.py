@@ -794,6 +794,13 @@ def is_account_agnostic_error(error_text: str) -> bool:
         # transcript is on disk and belongs to no account.
         "prompt is too long",
         "automatic compaction failed",
+        # systemd-run refusing to create the session's scope. Ours, not the
+        # account's: the CLI never started, so it has no output and no turns,
+        # and the failover heuristic would hand a perfectly good account's
+        # work to the backup subscription. Seen on t-8920 when a resume
+        # reused the previous attempt's scope name.
+        "failed to start transient scope unit",
+        "already loaded or has a fragment file",
     ]
     return any(p in lower for p in patterns)
 

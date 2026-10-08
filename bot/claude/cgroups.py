@@ -33,6 +33,7 @@ import asyncio
 import logging
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -404,10 +405,11 @@ def check_app_slice_ceiling() -> CeilingCheck:
 # scope's cgroup accepted a memory.high write, cgroup.kill was present, and
 # terminate() produced -15 -- the shape runner.is_kill_shape already accepts.
 
-# The transient unit name. Must end in .scope and must not collide, so the
-# instance id carries it: ids are unique per run and already appear in every
-# log line about the session, which makes `systemd-cgls` readable next to
-# `bot.log` with no translation step.
+# The transient unit name. Must end in .scope and must not collide. The
+# instance id leads it, because it already appears in every log line about
+# the session, which makes `systemd-cgls` readable next to `bot.log` with no
+# translation step. The id alone is not unique, though: one instance spawns
+# the CLI several times, so each spawn adds its own tag (new_scope_unit).
 _SCOPE_PREFIX = "claude-session-"
 # The hyphen is last so it is a literal, not a range. It was once spelled
 # `\\-` inside a raw string, which is a literal backslash followed by a
@@ -425,10 +427,34 @@ _scope_probed_at: float = 0.0
 _scope_stale: bool = False
 
 
-def scope_unit_name(instance_id: str) -> str:
-    """Transient unit name for a session, e.g. ``claude-session-t-8658.scope``."""
+def scope_unit_name(instance_id: str, attempt: str = "") -> str:
+    """Transient unit name for a session, e.g. ``claude-session-t-8658.scope``.
+
+    ``attempt`` tags one spawn of that instance. See ``new_scope_unit``.
+    """
     safe = _SCOPE_SAFE.sub("-", instance_id)[:64] or "unknown"
-    return f"{_SCOPE_PREFIX}{safe}.scope"
+    tag = _SCOPE_SAFE.sub("-", attempt)[:16]
+    return f"{_SCOPE_PREFIX}{safe}{'-' + tag if tag else ''}.scope"
+
+
+def new_scope_unit(instance_id: str) -> str:
+    """A unit name for *this* spawn of ``instance_id``, never reused.
+
+    One instance spawns the CLI more than once: an autocompact-thrash resume,
+    a context-overflow resume, the "No conversation found" recovery and an
+    account failover all re-enter the runner under the same id, often within
+    the same second. The previous attempt's scope is still loaded then
+    (``--collect`` is asynchronous, and a straggler may still be draining), so
+    a name derived from the id alone fails with "Unit ... was already loaded
+    or has a fragment file" and the retry dies before it starts. t-8920 lost
+    its resume that way on 2026-10-06.
+
+    Random rather than a counter, because a counter restarts with the bot and
+    ``/retry`` reuses the id, so the first attempt after a restart could land
+    on a scope from before it. The id stays the readable prefix, so
+    ``systemd-cgls`` still lines up with ``bot.log``.
+    """
+    return scope_unit_name(instance_id, secrets.token_hex(3))
 
 
 def scope_status() -> tuple[bool, str]:
@@ -551,19 +577,25 @@ async def _probe_scope() -> tuple[bool, str]:
     return True, ""
 
 
-def wrap_command(cmd: list[str], instance_id: str) -> list[str]:
+def wrap_command(
+    cmd: list[str], instance_id: str, unit: str | None = None,
+) -> list[str]:
     """Prefix ``cmd`` with the scope wrapper, or hand it straight back.
 
     Returning the command unchanged is a supported outcome, not a failure
     path: it is what happens on Windows, on a machine without systemd, and
     whenever the probe said no. The caller does not branch on it.
+
+    ``unit`` is the name for this spawn (``new_scope_unit``), and the same
+    name has to be handed to ``adopt_session``: recomputing it there would
+    look for a scope this spawn never asked for.
     """
     if not _scope_supported:
         return list(cmd)
     return [
         "systemd-run", "--user", "--scope", "--quiet", "--collect",
         f"--slice={config.SESSION_SLICE}",
-        f"--unit={scope_unit_name(instance_id)}",
+        f"--unit={unit or scope_unit_name(instance_id)}",
         "--", *cmd,
     ]
 
@@ -660,6 +692,7 @@ def _apply_ceilings(path: Path, unit: str) -> SessionCgroup:
 
 async def adopt_session(
     pid: int, instance_id: str, timeout_s: float | None = None,
+    unit: str | None = None,
 ) -> SessionCgroup | None:
     """Wait for a freshly spawned session's scope, then apply its ceilings.
 
@@ -683,7 +716,7 @@ async def adopt_session(
     """
     if not _scope_supported:
         return None
-    unit = scope_unit_name(instance_id)
+    unit = unit or scope_unit_name(instance_id)
     budget = (
         config.SESSION_SCOPE_ADOPT_SECS if timeout_s is None else timeout_s
     )
