@@ -968,8 +968,23 @@ def _reaped_result_base(
 
 
 # A SIGKILL as asyncio reports it: -9 when the kernel delivered it to the CLI
-# directly, 137 (128+9) when it went through a shell first.
+# directly, 137 (128+9) when it went through a shell first. systemd-oomd kills
+# every process in the scope this way, and so does the kernel when the CLI
+# itself is the process it picks.
 _SIGKILL_EXIT_CODES = (-9, 137)
+# A SIGTERM as asyncio reports it: -15, or 143 from a CLI that handled it and
+# exited. This is how a session dies when the kernel's OOM killer picks some
+# OTHER process in its scope (a build, a test runner): scopes carry systemd's
+# default OOMPolicy=stop, so the service manager then stops the whole scope
+# with a SIGTERM. Verified on 2026-10-08 with a 60M scope whose child
+# overran it: the parent exited -15 and the journal read "The kernel OOM
+# killer killed some processes in this unit." A SIGTERM has many innocent
+# senders, so this shape only counts when the journal says so.
+_SIGTERM_EXIT_CODES = (-15, 143)
+# How long a SIGTERM-shaped exit waits for the journal to catch up before
+# concluding it was not an out-of-memory stop. systemd logs the OOM line before
+# it sends the SIGTERM, so this only covers journald's ingestion lag.
+_OOM_JOURNAL_LAG_SECS = 1.0
 
 
 def _describe_last_tool(result: RunResult) -> str:
@@ -992,9 +1007,16 @@ async def _classify_oom_kill(result: RunResult, scope_unit: str) -> bool:
     (``_bot_signalled``), a Kill or Steer (``killed_intentionally``), and an
     unscoped run. A reap that went through normally returns a synthesised
     result with no exit code and never reaches here; the mark is for the one
-    that stood down. The journal is asked which killer it was, and a lookup that finds
-    nothing still classifies: a -9 the bot did not send on a session scope is
-    an outside kill either way, and resuming it once is the safe answer.
+    that stood down. The journal is asked which killer it was, and for a
+    SIGKILL a lookup that finds nothing still classifies: a -9 the bot did not
+    send on a session scope is an outside kill either way, and resuming it
+    once is the safe answer.
+
+    A SIGTERM is the other shape (see ``_SIGTERM_EXIT_CODES``), and for that
+    one the journal IS the gate. Nothing else separates systemd stopping the
+    scope after an OOM kill from any other SIGTERM, including the bot's own
+    terminates that carry no ``_bot_signalled`` mark (the oversized-line
+    guard, a lifetime reap that stood down).
 
     Rewrites ``error_message`` to carry "killed by the system's out-of-memory
     protection", which ``parser.is_account_agnostic_error`` matches. Without
@@ -1004,9 +1026,18 @@ async def _classify_oom_kill(result: RunResult, scope_unit: str) -> bool:
     """
     if not result.is_error or result.memory_kill_note:
         return False
-    if result.exit_code not in _SIGKILL_EXIT_CODES:
+    if result.exit_code in _SIGKILL_EXIT_CODES:
+        needs_evidence = False
+    elif result.exit_code in _SIGTERM_EXIT_CODES:
+        needs_evidence = True
+    else:
         return False
     how = await cgroups.oom_kill_evidence(scope_unit)
+    if how is None and needs_evidence:
+        await asyncio.sleep(_OOM_JOURNAL_LAG_SECS)
+        how = await cgroups.oom_kill_evidence(scope_unit)
+        if how is None:
+            return False
     doing = _describe_last_tool(result)
     if how:
         result.error_message = (
@@ -1272,8 +1303,9 @@ class ClaudeRunner:
         # must never be read as the operating system's out-of-memory killer
         # and resumed. Paths that synthesise their own result (the lifetime
         # reap, the end-of-turn watchdog, AskUserQuestion) carry no exit code
-        # to classify and are not marked. Cleared in run() for the next
-        # top-level run.
+        # to classify and are not marked, and a bare SIGTERM needs no mark
+        # because it is only classified on the journal's word. Cleared in
+        # run() for the next top-level run.
         self._bot_signalled: set[str] = set()
 
         # Reboot draining: set when a reboot is queued to block new spawns
@@ -2984,7 +3016,7 @@ class ClaudeRunner:
             if result.killed_intentionally:
                 return result
 
-            # The operating system SIGKILLed this run for memory. Classified
+            # The operating system killed this run for memory. Classified
             # here, before error_text is read, so every branch below sees the
             # stable wording rather than "Exit code -9": the account-failover
             # heuristic in particular, which would otherwise read a session

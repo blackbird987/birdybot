@@ -596,7 +596,8 @@ class RunResult:
     # The CLI's own exit status, as _stream_output saw it. None on the paths
     # that synthesise a result without one (the memory and lifetime reaps,
     # AskUserQuestion, the end-of-turn watchdog). Read by the out-of-memory
-    # classifier, which is only interested in a SIGKILL (-9 or 137).
+    # classifier, which acts on a SIGKILL (-9 or 137), and on a SIGTERM (-15
+    # or 143) only when the scope's journal records an OOM kill.
     exit_code: int | None = None
     # Set when the operating system, not the bot, SIGKILLed this run for
     # memory (systemd-oomd shooting the session scope, or the kernel at its

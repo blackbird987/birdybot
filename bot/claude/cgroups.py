@@ -777,8 +777,14 @@ async def adopt_session(
 # What the user service manager writes into a scope's journal when something
 # outside the bot killed it for memory. Verified on 2026-10-08 against the
 # t-8999 and q-19143 kills: "claude-session-t-8999.scope: systemd-oomd killed
-# 7 process(es) in this unit." followed by "Failed with result 'oom-kill'."
+# 7 process(es) in this unit." followed by "Failed with result 'oom-kill'".
+# The kernel's own kill logs "The kernel OOM killer killed some processes in
+# this unit." (same day, systemd 259, a test scope overrunning its
+# MemoryMax). That line is written at the kill, before systemd stops the
+# scope; "Failed with result" only once the scope is gone, which can be after
+# the CLI's exit is read, so the kernel line is the one to rely on.
 _OOMD_MARKER = "systemd-oomd killed"
+_KERNEL_OOM_MARKER = "kernel OOM killer killed"
 _OOM_RESULT_MARKER = "oom-kill"
 
 
@@ -810,7 +816,7 @@ async def oom_kill_evidence(unit: str) -> str | None:
     text = (res.stdout or b"").decode(errors="replace")
     if _OOMD_MARKER in text:
         return "systemd-oomd"
-    if _OOM_RESULT_MARKER in text:
+    if _KERNEL_OOM_MARKER in text or _OOM_RESULT_MARKER in text:
         return "the kernel's OOM killer"
     return None
 

@@ -652,7 +652,7 @@ MEMORY_KILL_MAX_RETRIES: int = max(
     0, min(3, int(os.getenv("MEMORY_KILL_MAX_RETRIES", "1")))
 )
 # How many times a run may be auto-resumed after something OUTSIDE the bot
-# SIGKILLed its scope: systemd-oomd, or the kernel at a scope's memory.max.
+# killed its scope for memory: systemd-oomd, or the kernel at a memory.max.
 # Separate from MEMORY_KILL_MAX_RETRIES because the cause is different: the
 # guard's reap measured this session over its own ceiling, while an oomd kill
 # usually means the fleet together filled the slice, and the resume first

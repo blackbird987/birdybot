@@ -28,6 +28,9 @@ Asserted here:
   * an unscoped run, an ordinary crash and the bot's own memory reap are not
   * a signal that lands after the turn reported success keeps the success
   * an uncorroborated kill is still resumed, worded as unconfirmed
+  * a SIGTERM (-15 or 143) is resumed only when the journal records an OOM
+    kill: that is how systemd stops a scope after the kernel killed another
+    process in it, and without the journal it is any other SIGTERM
   * a Kill landing during the admission hold stops the resume
   * OOM_KILL_RESUME_RETRIES=0 classifies but never resumes
   * the journal reader distinguishes oomd from the kernel and fails open
@@ -424,6 +427,43 @@ async def _case_uncorroborated(tmp: str, failures: list[str]) -> None:
         failures.append(f"uncorroborated: wording does not admit it: {err!r}")
 
 
+async def _case_sigterm_needs_journal(tmp: str, failures: list[str]) -> None:
+    saved = runner_mod._OOM_JOURNAL_LAG_SECS
+    runner_mod._OOM_JOURNAL_LAG_SECS = 0
+    try:
+        for rc in (143, -15):
+            h = _Harness(
+                tmp, [_killed(exit_code=rc), _ok()],
+                evidence="the kernel's OOM killer",
+            )
+            result, _ = await h.run()
+            if len(h.spawn_argvs) != 2 or result.is_error:
+                failures.append(
+                    f"SIGTERM {rc} with an OOM journal line: not resumed; "
+                    "that is how systemd stops a scope after the kernel's "
+                    "OOM killer took a process in it"
+                )
+            elif "the kernel's OOM killer" not in h.prompts[1]:
+                failures.append(f"SIGTERM {rc}: the note does not name the kernel")
+
+            h = _Harness(tmp, [_killed(exit_code=rc), _ok()], evidence=None)
+            result, _ = await h.run()
+            if len(h.spawn_argvs) != 1:
+                failures.append(
+                    f"SIGTERM {rc} with no journal line: resumed as an OOM "
+                    "kill; a SIGTERM has many innocent senders"
+                )
+            if PHRASE in (result.error_message or "").lower():
+                failures.append(f"SIGTERM {rc} with no journal line: worded as OOM")
+            if len(h.journal_units) != 2:
+                failures.append(
+                    f"SIGTERM {rc}: the journal was read {len(h.journal_units)} "
+                    "times, want 2 (once more after the ingestion lag)"
+                )
+    finally:
+        runner_mod._OOM_JOURNAL_LAG_SECS = saved
+
+
 async def _case_kill_during_hold(tmp: str, failures: list[str]) -> None:
     async def kill_in_hold(runner, instance, n):
         if n == 2:
@@ -631,9 +671,12 @@ async def _case_journal_reader(failures: list[str]) -> None:
             b"in this unit.\nclaude-session-t-8999.scope: Failed with result "
             b"'oom-kill'.\n"
         ),
+        # systemd 259's real wording, read off a test scope on 2026-10-08.
+        # The "Failed with result" line is left out on purpose: it is logged
+        # only once the scope is gone, which can be after the read.
         "kernel": (
-            b"A process of this unit has been killed by the OOM killer.\n"
-            b"claude-session-x.scope: Failed with result 'oom-kill'.\n"
+            b"claude-session-x.scope: The kernel OOM killer killed some "
+            b"processes in this unit.\n"
         ),
         "none": b"Started claude-session-x.scope.\n",
     }
@@ -673,7 +716,8 @@ async def _main() -> int:
         for case in (
             _case_resumes_once, _case_chain_worktree, _case_second_kill,
             _case_bot_signalled,
-            _case_not_oom, _case_uncorroborated, _case_kill_during_hold,
+            _case_not_oom, _case_uncorroborated, _case_sigterm_needs_journal,
+            _case_kill_during_hold,
             _case_disabled, _case_signal_after_completed_turn,
         ):
             try:

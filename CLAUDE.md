@@ -1464,8 +1464,19 @@ Three things must not drift:
   classified at all: `_stream_output` keeps a signal that landed after a
   completed turn as the success it was (unless it was the user's own Kill or
   Steer), because resuming it would redo finished work. The scope's journal
-  is asked which killer it was (`cgroups.oom_kill_evidence`). That is corroboration and never a gate: a
-  lookup that finds nothing still classifies, and only the wording admits it.
+  is asked which killer it was (`cgroups.oom_kill_evidence`). For a SIGKILL
+  that is corroboration and never a gate: a lookup that finds nothing still
+  classifies, and only the wording admits it.
+- **A SIGTERM is an OOM kill too, but only on the journal's word.** When the
+  kernel's OOM killer picks some *other* process in a scope (the build, not
+  the CLI), systemd's default `OOMPolicy=stop` then stops the whole scope with
+  a SIGTERM, so the CLI exits 143, not -9. Verified on 2026-10-08 with a test
+  scope overrunning its `MemoryMax`: the parent exited -15 and the journal
+  read "The kernel OOM killer killed some processes in this unit." A SIGTERM
+  has innocent senders, including the bot's own unmarked terminates, so for
+  -15/143 the journal is the gate, read once more after a second of ingestion
+  lag. Match that kernel line, not "Failed with result 'oom-kill'", which is
+  only logged once the scope is gone.
   The resume goes through `_await_memory_headroom`, the same hold a new
   session waits in, so it does not re-enter the stall that just killed it.
   It carries `OOM_KILL_NUDGE_TEMPLATE`: which killer, what the session was

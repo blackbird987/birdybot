@@ -805,7 +805,7 @@ def is_account_agnostic_error(error_text: str) -> bool:
         # reused the previous attempt's scope name.
         "failed to start transient scope unit",
         "already loaded or has a fragment file",
-        # systemd-oomd or the kernel SIGKILLed the session's scope. The run
+        # systemd-oomd or the kernel killed the session's scope. The run
         # has no result event, and a session killed early has no turns either,
         # so without this the no-turns heuristic reads the -9 as the account
         # falling over and hands the work to the backup subscription: it did
