@@ -1444,11 +1444,11 @@ Three things must not drift:
 
 - **A scope's ceilings are passed to `systemd-run` as `-p MemoryHigh=` and
   `-p MemoryMax=`, and never written into the cgroup directly.** systemd
-  re-applies a unit's properties on every `daemon-reload` and every
-  `SetUnitProperties`, and `uresourced` calls that many times a second on this
-  box. A direct write into `memory.high` lasts until the next one. This was
-  verified live on 2026-10-08: a directly written value reverted to `max` on a
-  plain `daemon-reload`, and a `-p` value survived it.
+  re-applies a unit's own properties whenever it re-realises the unit, and a
+  `daemon-reload` does that to every unit. A direct write into `memory.high`
+  lasts until the next one. This was verified live on 2026-10-08: a directly
+  written value reverted to `max` on a plain `daemon-reload`, and a `-p` value
+  survived it.
   `cgroups.adopt_session` now only reads the ceilings back, for the log.
   `test_session_cgroups.py` runs a real `daemon-reload` against a live scope
   and fails if either ceiling moves.
@@ -1458,7 +1458,9 @@ Three things must not drift:
   Kill or Steer, not one of the bot's own reaps (those return synthesised
   results with no exit code), and not in `_bot_signalled`. `kill()` adds to
   `_bot_signalled` before it signals, because its escalation after the 5s grace
-  is a SIGKILL too. The scope's journal is asked which killer it was
+  is a SIGKILL too, and so does the memory reap, whose `cgroup.kill` is one:
+  a reap that raced a completed turn stands down and falls through to the
+  normal exit path carrying a real -9. The scope's journal is asked which killer it was
   (`cgroups.oom_kill_evidence`). That is corroboration and never a gate: a
   lookup that finds nothing still classifies, and only the wording admits it.
   The resume goes through `_await_memory_headroom`, the same hold a new

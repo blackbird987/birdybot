@@ -23,7 +23,8 @@ Asserted here:
   * a chain step resumes inside its own build worktree
   * a second kill is not resumed again, and never fails over to the backup
     account
-  * a SIGKILL the bot sent itself (kill() escalating) is not an OOM kill
+  * a SIGKILL the bot sent itself (kill() escalating) is not an OOM kill,
+    and every runner path that SIGKILLs a session tree marks it as the bot's
   * an unscoped run, an ordinary crash and the bot's own memory reap are not
   * an uncorroborated kill is still resumed, worded as unconfirmed
   * a Kill landing during the admission hold stops the resume
@@ -40,6 +41,7 @@ from __future__ import annotations
 
 import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
 
+import ast
 import asyncio
 import copy
 import os
@@ -451,6 +453,55 @@ async def _case_disabled(tmp: str, failures: list[str]) -> None:
         failures.append("retries=0: the failure is no longer named for what it was")
 
 
+def _own_calls(fn: ast.AST):
+    """Calls made in ``fn`` itself, not inside a function nested in it."""
+    stack = list(ast.iter_child_nodes(fn))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        if isinstance(node, ast.Call):
+            yield node
+        stack.extend(ast.iter_child_nodes(node))
+
+
+def _case_bot_sigkills_are_marked(failures: list[str]) -> None:
+    """Every runner path that SIGKILLs a session tree records it as the bot's.
+
+    The memory reap kills through ``cgroup.kill`` and ``kill_tree``, both
+    SIGKILL, and when it raced a completed turn it stands down and falls
+    through to the normal exit path with a real -9. Unmarked, that -9 is
+    classified as the operating system's OOM killer and resumed, redoing a
+    turn that had finished. Asserted on the source because the harness stubs
+    _stream_output, where the reap lives.
+    """
+    src = Path(__file__).resolve().parents[1] / "bot" / "claude" / "runner.py"
+    tree = ast.parse(src.read_text(encoding="utf-8"))
+    found = 0
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        calls = list(_own_calls(fn))
+        names = {
+            ast.unparse(c.func) for c in calls
+        } | {
+            ast.unparse(a) for c in calls for a in c.args
+        }
+        if not ({"session_cg.kill", "memory.kill_tree"} & names):
+            continue
+        found += 1
+        if "self._bot_signalled.add" not in names:
+            failures.append(
+                f"runner.{fn.name} SIGKILLs a session tree without marking "
+                "it in _bot_signalled, so its -9 can be resumed as an OOM kill"
+            )
+    if not found:
+        failures.append(
+            "no runner path kills through session_cg.kill or memory.kill_tree; "
+            "the reap moved and this check no longer guards it"
+        )
+
+
 async def _case_journal_reader(failures: list[str]) -> None:
     if sys.platform != "linux":
         return
@@ -503,7 +554,8 @@ async def _main() -> int:
         failures.append("the phrase is not in is_account_agnostic_error")
     with tempfile.TemporaryDirectory() as tmp:
         for case in (
-            _case_resumes_once, _case_chain_worktree, _case_second_kill, _case_bot_signalled,
+            _case_resumes_once, _case_chain_worktree, _case_second_kill,
+            _case_bot_signalled,
             _case_not_oom, _case_uncorroborated, _case_kill_during_hold,
             _case_disabled,
         ):
@@ -514,6 +566,7 @@ async def _main() -> int:
                 traceback.print_exc()
                 failures.append(f"{case.__name__} raised {exc!r}")
     await _case_journal_reader(failures)
+    _case_bot_sigkills_are_marked(failures)
 
     if failures:
         print("FAIL")

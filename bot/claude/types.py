@@ -317,8 +317,9 @@ class Instance:
     _context_thrash_retry: bool = False
     # Ephemeral twin of the above for the memory guard: holds the recovery note
     # text (not a bool — the numbers are the substance) set just before the
-    # runner re-spawns a session it reaped for memory, consumed and cleared by
-    # _build_command. Not persisted; it describes one attempt.
+    # runner re-spawns a session it reaped for memory, or one the operating
+    # system OOM-killed (the two notes share this slot), consumed and cleared
+    # by _build_command. Not persisted; it describes one attempt.
     _memory_kill_note: str | None = None
     # Third of the same family, for the context-overflow recovery: holds the
     # pre-built note (recovery preamble + the thread's quoted recent history)

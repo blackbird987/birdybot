@@ -988,10 +988,11 @@ async def _classify_oom_kill(result: RunResult, scope_unit: str) -> bool:
     """Recognise a run the operating system killed for memory, and say so.
 
     The shape is a SIGKILL on a scoped run that the bot did not send: the
-    caller has already ruled out its own kill() (``_bot_signalled``), a Kill or
-    Steer (``killed_intentionally``), and an unscoped run. The bot's own reaps
-    never reach here with an exit code, because they return a synthesised
-    result. The journal is asked which killer it was, and a lookup that finds
+    caller has already ruled out its own kill() and memory reap
+    (``_bot_signalled``), a Kill or Steer (``killed_intentionally``), and an
+    unscoped run. A reap that went through normally returns a synthesised
+    result with no exit code and never reaches here; the mark is for the one
+    that stood down. The journal is asked which killer it was, and a lookup that finds
     nothing still classifies: a -9 the bot did not send on a session scope is
     an outside kill either way, and resuming it once is the safe answer.
 
@@ -1264,11 +1265,14 @@ class ClaudeRunner:
         # two into one magic string is what let /kill and the Kill button
         # drift apart in the first place.
         self._kill_card_owners: set[str] = set()
-        # Every instance whose process this bot has signalled through kill(),
-        # intentional or not. kill() escalates to SIGKILL after a 5s grace, and
-        # a -9 the bot sent itself (shutdown's kill_all, a wizard teardown)
+        # Every instance whose process this bot has SIGKILLed or may yet:
+        # kill(), intentional or not, since it escalates after a 5s grace, and
+        # the memory reap, whose cgroup.kill is one. A -9 the bot sent itself
+        # (shutdown's kill_all, a wizard teardown, a reap that stood down)
         # must never be read as the operating system's out-of-memory killer
-        # and resumed. Cleared in run() for the next top-level run.
+        # and resumed. Paths that only SIGTERM (the lifetime reap, the
+        # end-of-turn watchdog) cannot produce a -9 and are not marked.
+        # Cleared in run() for the next top-level run.
         self._bot_signalled: set[str] = set()
 
         # Reboot draining: set when a reboot is queued to block new spawns
@@ -3268,21 +3272,29 @@ class ClaudeRunner:
             # for the same reason that one does: the error text here is ours, so
             # no other parser can match it, but the ordering keeps every
             # "resume the same conversation" case in one place.
-            if result.is_error and result.memory_kill_note:
-                note = result.memory_kill_note
-
-                def _mark_memory() -> None:
+            # Both memory recoveries hand their note to the next attempt
+            # through the same slot, so they share one mark/unmark pair.
+            def _memory_note_slot(
+                note: str,
+            ) -> tuple[Callable[[], None], Callable[[], None]]:
+                def _mark() -> None:
                     instance._memory_kill_note = note
 
-                def _unmark_memory() -> None:
+                def _unmark() -> None:
                     instance._memory_kill_note = None
 
+                return _mark, _unmark
+
+            if result.is_error and result.memory_kill_note:
+                mark_memory, unmark_memory = _memory_note_slot(
+                    result.memory_kill_note,
+                )
                 handled = await _resume_same_conversation(
                     kind="memory_kill",
                     max_retries=config.MEMORY_KILL_MAX_RETRIES,
                     subject="Memory reap",
-                    mark=_mark_memory,
-                    unmark=_unmark_memory,
+                    mark=mark_memory,
+                    unmark=unmark_memory,
                     progress=lambda _spent: (
                         "Out of memory — resuming with a smaller budget",
                         "Picking the session back up and telling it what the "
@@ -3308,13 +3320,7 @@ class ClaudeRunner:
             # lower its parallelism. A second kill is a job that does not fit,
             # and that is the user's call.
             if result.is_error and result.oom_kill_note:
-                oom_note = result.oom_kill_note
-
-                def _mark_oom() -> None:
-                    instance._memory_kill_note = oom_note
-
-                def _unmark_oom() -> None:
-                    instance._memory_kill_note = None
+                mark_oom, unmark_oom = _memory_note_slot(result.oom_kill_note)
 
                 async def _hold_for_memory() -> None:
                     await self._await_memory_headroom(instance, on_progress)
@@ -3323,8 +3329,8 @@ class ClaudeRunner:
                     kind="oom_kill",
                     max_retries=config.OOM_KILL_RESUME_RETRIES,
                     subject="OOM kill",
-                    mark=_mark_oom,
-                    unmark=_unmark_oom,
+                    mark=mark_oom,
+                    unmark=unmark_oom,
                     progress=lambda _spent: (
                         "OOM-killed: resuming once memory frees up",
                         "The system's out-of-memory protection stopped this "
@@ -3801,7 +3807,11 @@ class ClaudeRunner:
         self, instance_id: str, proc: asyncio.subprocess.Process,
         unit: str | None = None,
     ) -> None:
-        """Apply a session's memory ceilings once systemd has registered it.
+        """Adopt a session's scope once systemd has registered it.
+
+        The ceilings themselves were set on the ``systemd-run`` command line;
+        adoption records the cgroup for accounting and ``cgroup.kill``, and
+        reads the ceilings back for the log.
 
         Runs as its own task so the wait never delays reading the CLI's
         output. Nothing downstream requires it to have finished: the kill
@@ -3937,6 +3947,11 @@ class ClaudeRunner:
                         await on_progress(headline, detail)
                     except Exception:
                         log.exception("Progress callback error on memory kill")
+                # cgroup.kill is a SIGKILL, and this reap can still fall
+                # through to the normal exit path (it stands down when it
+                # raced a completed turn). A -9 there with no mark would be
+                # read as the operating system's OOM killer and resumed.
+                self._bot_signalled.add(instance.id)
                 signalled: list[str] = []
                 # cgroup.kill first where the session has its own cgroup: it
                 # is atomic where kill_tree is a walk, so nothing can fork out
@@ -4743,7 +4758,8 @@ class ClaudeRunner:
             instance._context_thrash_retry = False
             prompt = config.CONTEXT_THRASH_NUDGE + "\n\n" + prompt
 
-        # Memory-reap recovery note — same slot, same read-and-clear discipline,
+        # Memory recovery note (the bot's own reap, or the operating system's
+        # OOM kill: both use this one slot). Same read-and-clear discipline,
         # and for the same reason: --resume may replay the original JSONL system
         # prompt verbatim, so the user-message slot is the only delivery that is
         # guaranteed to reach the resumed agent. The text arrives pre-formatted

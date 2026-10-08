@@ -588,12 +588,11 @@ def _ceiling_properties() -> list[str]:
     """The per-session ceilings as ``systemd-run -p`` arguments.
 
     Unit properties, not cgroup writes, because systemd owns the scope's
-    cgroup and re-applies its unit properties on every ``daemon-reload`` and
-    every ``SetUnitProperties`` call. Verified on 2026-10-08: one reload reset
+    cgroup and re-applies its unit properties when it re-realises the unit,
+    which a ``daemon-reload`` does. Verified on 2026-10-08: one reload reset
     every live session's memory.high and memory.max from the bot-written
     8G/10G back to ``max``, because the transient unit itself carried none.
-    uresourced calls SetUnitProperties many times a second on this machine,
-    so a direct write was never going to last. 0 leaves that limit unset.
+    0 leaves that limit unset.
     """
     props: list[str] = []
     if config.SESSION_MEM_HIGH_MB > 0:
@@ -699,7 +698,7 @@ def _pid_alive(pid: int) -> bool:
     return Path(f"/proc/{pid}").exists()
 
 
-def _apply_ceilings(path: Path, unit: str) -> SessionCgroup:
+def _read_ceilings(path: Path, unit: str) -> SessionCgroup:
     """Record the ceilings the scope actually carries.
 
     Nothing is written here any more. The ceilings arrive as unit properties
@@ -754,7 +753,7 @@ async def adopt_session(
     while True:
         path = cgroup_of_pid(pid)
         if path is not None and path.name == unit:
-            return _apply_ceilings(path, unit)
+            return _read_ceilings(path, unit)
         # A process that is already gone is not late, it is finished, and
         # there is nothing to adopt or to conclude about the machine.
         if not _pid_alive(pid):

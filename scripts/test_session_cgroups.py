@@ -413,7 +413,7 @@ async def _check_adoption_identity(failures: list[str]) -> None:
                 bare.mkdir()
                 (bare / "memory.high").write_text("max\n", encoding="utf-8")
                 (bare / "memory.max").write_text("max\n", encoding="utf-8")
-                bare_cg = cgroups._apply_ceilings(bare, "bare.scope")
+                bare_cg = cgroups._read_ceilings(bare, "bare.scope")
                 if bare_cg.applied:
                     failures.append(
                         f"a scope reading max was reported as {bare_cg.applied}"
@@ -612,7 +612,8 @@ async def _check_live_scope(failures: list[str]) -> None:
             "a real scoped session was not adopted at the moment the spawn "
             "returned, which is the moment the runner adopts it: systemd-run "
             "has not finished registering the scope yet, so the session runs "
-            "with no ceilings, no cgroup accounting and no atomic kill"
+            "with no cgroup accounting and no atomic kill (its ceilings are "
+            "on the systemd-run command line and do not depend on adoption)"
         )
     try:
         line = await asyncio.wait_for(proc.stdout.readline(), timeout=20)
