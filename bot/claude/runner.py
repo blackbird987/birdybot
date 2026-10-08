@@ -2778,7 +2778,11 @@ class ClaudeRunner:
         # so a machine without systemd-run pays for the discovery once and
         # then spawns exactly as it always did.
         await cgroups.ensure_scope_support()
-        cmd = cgroups.wrap_command(cmd, instance.id)
+        # A fresh name per spawn, not per instance: this instance may already
+        # have spawned once this run, and that attempt's scope can still be
+        # loaded. Adoption must look for this same name.
+        scope_unit = cgroups.new_scope_unit(instance.id)
+        cmd = cgroups.wrap_command(cmd, instance.id, unit=scope_unit)
 
         acct_tag = f" [acct={account_dir[-20:]}]" if account_dir else ""
         log.info("Running %s%s (prompt: %d chars via stdin): %s",
@@ -2845,7 +2849,7 @@ class ClaudeRunner:
             # reader of _session_cgroups already treats a missing entry as
             # "walk the process tree instead".
             adopt_task = asyncio.create_task(
-                self._adopt_session_scope(instance.id, proc)
+                self._adopt_session_scope(instance.id, proc, scope_unit)
             )
 
             result = await self._stream_output(
@@ -3666,6 +3670,7 @@ class ClaudeRunner:
 
     async def _adopt_session_scope(
         self, instance_id: str, proc: asyncio.subprocess.Process,
+        unit: str | None = None,
     ) -> None:
         """Apply a session's memory ceilings once systemd has registered it.
 
@@ -3676,7 +3681,9 @@ class ClaudeRunner:
         existed.
         """
         try:
-            session_cg = await cgroups.adopt_session(proc.pid, instance_id)
+            session_cg = await cgroups.adopt_session(
+                proc.pid, instance_id, unit=unit,
+            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -5703,21 +5710,76 @@ class ClaudeRunner:
         # If worktree already exists (copy_branch from parent), skip creation
         if instance.worktree_path and Path(instance.worktree_path).is_dir():
             return
-        # worktree_path is set but directory is gone (parent was cleaned up) —
-        # clear it so _create_worktree_sync creates a fresh one
-        if instance.worktree_path:
-            log.warning("Worktree %s no longer exists for %s, recreating",
+        # A recorded worktree_path means the branch was created by an earlier
+        # step. Its directory being gone means that step's worktree was
+        # cleaned up, usually by a merge or discard.
+        inherited = bool(instance.worktree_path)
+        if inherited:
+            log.warning("Worktree %s no longer exists for %s",
                         instance.worktree_path, instance.id)
             instance.worktree_path = None
         repo_lock = self._get_repo_lock(instance.repo_path)
         async with repo_lock:
-            await asyncio.to_thread(self._create_worktree_sync, instance, provider)
+            # Decided under the lock, not before it. A merge holds this lock
+            # for its whole run and clears the branch off every instance that
+            # shares it when it finishes (clear_stale_branches), so a Done
+            # tapped mid-merge used to wake up here with branch=None and die
+            # inside `git worktree add -b None` (t-8954).
+            gone = await asyncio.to_thread(
+                self._worktree_branch_gone, instance, inherited,
+            )
+            if gone:
+                log.info(
+                    "%s, branch already merged or discarded, running %s in "
+                    "main repo", gone, instance.id,
+                )
+                instance.branch = None
+                instance.worktree_path = None
+                return
+            await asyncio.to_thread(
+                self._create_worktree_sync, instance, provider,
+                existing_branch=inherited,
+            )
 
-    def _create_worktree_sync(self, instance: Instance, provider: ProviderConfig | None = None) -> None:
+    def _worktree_branch_gone(self, instance: Instance, inherited: bool) -> str | None:
+        """Say why this run can no longer use its branch, or None if it can.
+
+        Gone means cleared off the instance while we waited, or (for an
+        inherited branch only) its ref deleted. A fresh build's ref not
+        existing yet is normal: _create_worktree_sync is about to make it.
+        A git read that cannot answer is not evidence the branch is gone, so
+        it falls through to creation, which fails loudly if it really is.
+        """
+        if not instance.branch:
+            return "Branch cleared while waiting for the repo lock"
+        if not inherited:
+            return None
+        try:
+            ref = run_capture(
+                ["git", "rev-parse", "--verify", "--quiet",
+                 f"refs/heads/{instance.branch}"],
+                cwd=instance.repo_path, timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            log.warning("Could not check branch %s for %s",
+                        instance.branch, instance.id, exc_info=True)
+            return None
+        if ref.returncode != 0:
+            return f"Branch {instance.branch} no longer exists"
+        return None
+
+    def _create_worktree_sync(
+        self, instance: Instance, provider: ProviderConfig | None = None,
+        existing_branch: bool = False,
+    ) -> None:
         provider = provider or self.provider
         repo = instance.repo_path
         wt_dir = str(Path(repo) / ".worktrees" / instance.id)
         branch = instance.branch
+        if not branch:
+            raise RuntimeError(
+                f"Cannot create a worktree for {instance.id}: it has no branch"
+            )
         default_branch = self._get_default_branch(repo)
 
         # Idempotent: skip if worktree already exists
@@ -5730,11 +5792,17 @@ class ClaudeRunner:
             # Create .worktrees/ parent if needed
             Path(wt_dir).parent.mkdir(parents=True, exist_ok=True)
 
-            # Create worktree with a new branch from current HEAD (master/main)
-            result = run_capture(["git", "worktree", "add", wt_dir, "-b", branch], cwd=repo)
-            if result.returncode != 0:
-                # Branch might already exist (retry/resume) — try without -b
+            if existing_branch:
+                # The branch was made by an earlier step and carries its work.
+                # Never fall back to -b here: if the ref is gone, a new branch
+                # off HEAD would silently stand in for the lost one.
                 run_capture(["git", "worktree", "add", wt_dir, branch], cwd=repo, check=True)
+            else:
+                # Create worktree with a new branch from current HEAD (master/main)
+                result = run_capture(["git", "worktree", "add", wt_dir, "-b", branch], cwd=repo)
+                if result.returncode != 0:
+                    # Branch might already exist (retry/resume), try without -b
+                    run_capture(["git", "worktree", "add", wt_dir, branch], cwd=repo, check=True)
 
             instance.worktree_path = wt_dir
             instance.original_branch = default_branch

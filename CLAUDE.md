@@ -1279,6 +1279,14 @@ Six things that must not drift:
   loaded unit after the scope exits, so every later probe fails with "already
   loaded" and the bot concludes that scopes do not work on a machine where
   they do.
+- **A session's unit name is unique per spawn, not per instance.** One
+  instance spawns the CLI several times in a run (thrash and overflow
+  resumes, failover), and the last attempt's scope stays loaded while
+  anything in it lives. Named after the id alone, t-8920's resume was refused
+  with "already loaded or has a fragment file", which then read as the
+  account failing. `new_scope_unit` makes the name once and the runner hands
+  that same name to both `wrap_command` and `adopt_session`; recomputing it
+  on either side would adopt a scope that was never asked for.
 - **`check_weights` reads the cgroup, never `systemctl show`.** During the
   week the protection was off, `systemctl show` reported 20 and the unit files
   reported 20; `cpu.weight` was the one source telling the truth. The startup

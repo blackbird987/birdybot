@@ -556,6 +556,37 @@ async def run_instance(
                 pass
         raise
 
+    except Exception as e:
+        # Anything that escapes before finalize_run, most often the runner
+        # failing to prepare the run (worktree setup, argv build) before the
+        # CLI ever started. Without this the instance stays RUNNING in state
+        # forever and its card spins on "thinking..." (t-8954 sat that way
+        # for a day after _ensure_worktree raised). Once finalized, the
+        # instance already carries its real status and is left alone.
+        if not finalized:
+            stage = (
+                "before the run could start" if result is None
+                else "while finishing the run"
+            )
+            inst.status = InstanceStatus.FAILED
+            inst.error = f"Internal error {stage}: {type(e).__name__}: {e}"
+            inst.finished_at = datetime.now(timezone.utc).isoformat()
+            try:
+                ctx.store.update_instance(inst, critical=True)
+            except Exception:
+                log.exception("could not persist failure of %s", inst.id)
+            if handle:
+                try:
+                    escaped = ctx.messenger.escape(inst.display_id())
+                    await ctx.messenger.edit_thinking(
+                        handle,
+                        f"❌ {escaped} {_origin_label(inst.origin)}failed",
+                    )
+                except Exception:
+                    pass
+        log.error("run_instance %s raised", inst.id, exc_info=True)
+        raise
+
     finally:
         ctx.runner.end_task(inst.id)
 
