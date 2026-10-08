@@ -564,11 +564,12 @@ async def run_instance(
         # for a day after _ensure_worktree raised). Once finalized, the
         # instance already carries its real status and is left alone.
         if not finalized:
-            inst.status = InstanceStatus.FAILED
-            inst.error = (
-                f"Internal error before the run could start: "
-                f"{type(e).__name__}: {e}"
+            stage = (
+                "before the run could start" if result is None
+                else "while finishing the run"
             )
+            inst.status = InstanceStatus.FAILED
+            inst.error = f"Internal error {stage}: {type(e).__name__}: {e}"
             inst.finished_at = datetime.now(timezone.utc).isoformat()
             try:
                 ctx.store.update_instance(inst, critical=True)

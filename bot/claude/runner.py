@@ -5631,7 +5631,7 @@ class ClaudeRunner:
         # cleaned up, usually by a merge or discard.
         inherited = bool(instance.worktree_path)
         if inherited:
-            log.warning("Worktree %s no longer exists for %s, recreating",
+            log.warning("Worktree %s no longer exists for %s",
                         instance.worktree_path, instance.id)
             instance.worktree_path = None
         repo_lock = self._get_repo_lock(instance.repo_path)
@@ -5646,8 +5646,8 @@ class ClaudeRunner:
             )
             if gone:
                 log.info(
-                    "Branch %s already merged, running %s in main repo",
-                    gone, instance.id,
+                    "%s, branch already merged or discarded, running %s in "
+                    "main repo", gone, instance.id,
                 )
                 instance.branch = None
                 instance.worktree_path = None
@@ -5658,22 +5658,31 @@ class ClaudeRunner:
             )
 
     def _worktree_branch_gone(self, instance: Instance, inherited: bool) -> str | None:
-        """Name the branch this run can no longer use, or None if it can.
+        """Say why this run can no longer use its branch, or None if it can.
 
         Gone means cleared off the instance while we waited, or (for an
         inherited branch only) its ref deleted. A fresh build's ref not
         existing yet is normal: _create_worktree_sync is about to make it.
+        A git read that cannot answer is not evidence the branch is gone, so
+        it falls through to creation, which fails loudly if it really is.
         """
         if not instance.branch:
-            return "(cleared)"
+            return "Branch cleared while waiting for the repo lock"
         if not inherited:
             return None
-        ref = run_capture(
-            ["git", "rev-parse", "--verify", "--quiet",
-             f"refs/heads/{instance.branch}"],
-            cwd=instance.repo_path,
-        )
-        return instance.branch if ref.returncode != 0 else None
+        try:
+            ref = run_capture(
+                ["git", "rev-parse", "--verify", "--quiet",
+                 f"refs/heads/{instance.branch}"],
+                cwd=instance.repo_path, timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            log.warning("Could not check branch %s for %s",
+                        instance.branch, instance.id, exc_info=True)
+            return None
+        if ref.returncode != 0:
+            return f"Branch {instance.branch} no longer exists"
+        return None
 
     def _create_worktree_sync(
         self, instance: Instance, provider: ProviderConfig | None = None,

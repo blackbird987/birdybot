@@ -443,11 +443,12 @@ def new_scope_unit(instance_id: str) -> str:
     One instance spawns the CLI more than once: an autocompact-thrash resume,
     a context-overflow resume, the "No conversation found" recovery and an
     account failover all re-enter the runner under the same id, often within
-    the same second. The previous attempt's scope is still loaded then
-    (``--collect`` is asynchronous, and a straggler may still be draining), so
-    a name derived from the id alone fails with "Unit ... was already loaded
-    or has a fragment file" and the retry dies before it starts. t-8920 lost
-    its resume that way on 2026-10-06.
+    the same second. The previous attempt's scope can still be loaded then: a
+    scope lives while anything spawned in it is alive (a build server, a
+    straggling child), and ``--collect`` only removes it once it is empty. A
+    name derived from the id alone then fails with "Unit ... was already
+    loaded or has a fragment file" and the retry dies before it starts.
+    t-8920 lost its resume that way on 2026-10-06.
 
     Random rather than a counter, because a counter restarts with the bot and
     ``/retry`` reuses the id, so the first attempt after a restart could land
@@ -553,7 +554,9 @@ async def _probe_scope() -> tuple[bool, str]:
         # Unique per probe. A fixed name survives as a loaded unit after the
         # scope exits and every later probe fails with "already loaded",
         # which reads as "scopes do not work here" on a machine where they do.
-        f"--unit={_SCOPE_PREFIX}probe-{os.getpid()}.scope",
+        # The pid alone is not enough: one process re-probes on the TTL and
+        # after every invalidate_scope_probe.
+        f"--unit={new_scope_unit(f'probe-{os.getpid()}')}",
         "--", "true",
     ]
     # Deliberately blocking subprocess.run on a worker thread, and NOT
