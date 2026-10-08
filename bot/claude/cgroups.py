@@ -740,8 +740,9 @@ async def adopt_session(
     caller treats as "carry on exactly as before". The identity check stays:
     without it a failed scope would leave the session in the bot's own cgroup
     and the supervisor's cgroup would be reported, and later killed through
-    ``cgroup.kill``, as if it were the session's. Waiting is skipped entirely when scopes are not in use, so the
-    machines that never had one do not pay the budget on every spawn.
+    ``cgroup.kill``, as if it were the session's. Waiting is skipped entirely
+    when scopes are not in use, so the machines that never had one do not pay
+    the budget on every spawn.
     """
     if not _scope_supported:
         return None

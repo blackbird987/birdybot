@@ -1459,9 +1459,12 @@ Three things must not drift:
   results with no exit code), and not in `_bot_signalled`. `kill()` adds to
   `_bot_signalled` before it signals, because its escalation after the 5s grace
   is a SIGKILL too, and so does the memory reap, whose `cgroup.kill` is one:
-  a reap that raced a completed turn stands down and falls through to the
-  normal exit path carrying a real -9. The scope's journal is asked which killer it was
-  (`cgroups.oom_kill_evidence`). That is corroboration and never a gate: a
+  a reap that stands down falls through to the normal exit path carrying a
+  real -9. A run whose `result` event already reported success is never
+  classified at all: `_stream_output` keeps a signal that landed after a
+  completed turn as the success it was (unless it was the user's own Kill or
+  Steer), because resuming it would redo finished work. The scope's journal
+  is asked which killer it was (`cgroups.oom_kill_evidence`). That is corroboration and never a gate: a
   lookup that finds nothing still classifies, and only the wording admits it.
   The resume goes through `_await_memory_headroom`, the same hold a new
   session waits in, so it does not re-enter the stall that just killed it.

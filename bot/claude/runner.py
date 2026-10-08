@@ -1270,9 +1270,10 @@ class ClaudeRunner:
         # the memory reap, whose cgroup.kill is one. A -9 the bot sent itself
         # (shutdown's kill_all, a wizard teardown, a reap that stood down)
         # must never be read as the operating system's out-of-memory killer
-        # and resumed. Paths that only SIGTERM (the lifetime reap, the
-        # end-of-turn watchdog) cannot produce a -9 and are not marked.
-        # Cleared in run() for the next top-level run.
+        # and resumed. Paths that synthesise their own result (the lifetime
+        # reap, the end-of-turn watchdog, AskUserQuestion) carry no exit code
+        # to classify and are not marked. Cleared in run() for the next
+        # top-level run.
         self._bot_signalled: set[str] = set()
 
         # Reboot draining: set when a reboot is queued to block new spawns
@@ -3948,9 +3949,9 @@ class ClaudeRunner:
                     except Exception:
                         log.exception("Progress callback error on memory kill")
                 # cgroup.kill is a SIGKILL, and this reap can still fall
-                # through to the normal exit path (it stands down when it
-                # raced a completed turn). A -9 there with no mark would be
-                # read as the operating system's OOM killer and resumed.
+                # through to the normal exit path when it stands down. A -9
+                # there with no mark would be read as the operating system's
+                # OOM killer and resumed.
                 self._bot_signalled.add(instance.id)
                 signalled: list[str] = []
                 # cgroup.kill first where the session has its own cgroup: it
@@ -4576,7 +4577,29 @@ class ClaudeRunner:
             result.path_poisoning = list(poisoning_hits)
 
         result.exit_code = proc.returncode
-        if proc.returncode != 0 and not result.is_error:
+        # A turn whose `result` event already reported success and whose
+        # process was then signalled finished its work: the signal landed on
+        # a CLI that was only exiting. That is exactly the case a reap stands
+        # down for above ("raced a completed turn"), and it is also an oomd
+        # kill in the same instant. Failing it here would undo the stand-down
+        # and, for a SIGKILL, have the out-of-memory recovery resume a turn
+        # that is already done. A user's Kill or Steer is left to the normal
+        # path, which renders the stop they asked for. Not on Windows, where
+        # every non-zero code is kill-shaped and a real exit-1 crash would be
+        # hidden.
+        completed_then_signalled = (
+            proc.returncode != 0
+            and os.name != "nt"
+            and is_kill_shape(proc.returncode)
+            and _turn_completed_successfully(events)
+            and instance.id not in self._intentional_kills
+        )
+        if completed_then_signalled:
+            log.warning(
+                "%s exited %s after its turn completed; keeping the completion",
+                instance.id, proc.returncode,
+            )
+        elif proc.returncode != 0 and not result.is_error:
             result.is_error = True
             if not result.error_message:
                 result.error_message = stderr_text or f"Exit code {proc.returncode}"

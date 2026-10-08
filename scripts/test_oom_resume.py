@@ -26,6 +26,7 @@ Asserted here:
   * a SIGKILL the bot sent itself (kill() escalating) is not an OOM kill,
     and every runner path that SIGKILLs a session tree marks it as the bot's
   * an unscoped run, an ordinary crash and the bot's own memory reap are not
+  * a signal that lands after the turn reported success keeps the success
   * an uncorroborated kill is still resumed, worded as unconfirmed
   * a Kill landing during the admission hold stops the resume
   * OOM_KILL_RESUME_RETRIES=0 classifies but never resumes
@@ -453,6 +454,122 @@ async def _case_disabled(tmp: str, failures: list[str]) -> None:
         failures.append("retries=0: the failure is no longer named for what it was")
 
 
+class _ExitingStream:
+    """stdout of a CLI that printed some lines and then exited."""
+
+    def __init__(self, lines: list[bytes], on_read=None) -> None:
+        self._lines = list(lines)
+        self._on_read = on_read
+
+    async def readline(self) -> bytes:
+        if self._on_read is not None:
+            self._on_read()
+        return self._lines.pop(0) if self._lines else b""
+
+    async def read(self) -> bytes:
+        return b""
+
+
+class _ExitedProc:
+    def __init__(self, lines: list[bytes], returncode: int, on_read=None) -> None:
+        self.pid = 95999
+        self.returncode = returncode
+        self.stdout = _ExitingStream(lines, on_read)
+        self.stderr = _ExitingStream([])
+
+    def terminate(self):
+        pass
+
+    def kill(self):
+        pass
+
+    async def wait(self):
+        return self.returncode
+
+
+async def _case_signal_after_completed_turn(tmp: str, failures: list[str]) -> None:
+    """A signal that lands after the turn reported success keeps the success.
+
+    Drives the real _stream_output, because the exit-code check lives there.
+    The memory and lifetime reaps stand down when they race a completed turn,
+    and oomd can shoot a CLI that is only exiting; in every one of those the
+    work is done. Marking it FAILED undid the stand-down, and with a -9 it
+    would also have the out-of-memory recovery resume a finished turn.
+    """
+    if os.name == "nt":
+        return
+    import json as _json
+    done = [
+        _json.dumps({"type": "system", "subtype": "init",
+                     "session_id": SESSION}).encode() + b"\n",
+        _json.dumps({"type": "result", "is_error": False, "result": "Built.",
+                     "session_id": SESSION, "num_turns": 2}).encode() + b"\n",
+    ]
+    unfinished = done[:1]
+
+    async def _stream(lines, rc, *, user_kill: bool = False) -> RunResult:
+        runner = ClaudeRunner()
+        inst = Instance(
+            id=INSTANCE_ID, name=None, instance_type=InstanceType.QUERY,
+            prompt="build it", repo_name="repo", repo_path=tmp,
+            status=InstanceStatus.RUNNING, session_id=None, mode="build",
+        )
+        # A Kill arrives mid-run, after the reader's defensive clear on entry.
+        on_read = (
+            (lambda: runner._intentional_kills.add(INSTANCE_ID))
+            if user_kill else None
+        )
+        proc = _ExitedProc(lines, rc, on_read)
+        return await asyncio.wait_for(
+            runner._stream_output(proc, inst, None, None),  # type: ignore[arg-type]
+            timeout=20,
+        )
+
+    for rc in (-9, 137, -15, 143):
+        got = await _stream(done, rc)
+        if got.is_error:
+            failures.append(
+                f"a completed turn whose CLI then exited {rc} was reported "
+                f"FAILED ({got.error_message!r}), undoing the reap stand-down"
+            )
+        if got.exit_code != rc:
+            failures.append(f"exit code {rc} was not recorded: {got.exit_code!r}")
+        if await _classify_quietly(got):
+            failures.append(
+                f"a completed turn exiting {rc} was classified as OOM-killed"
+            )
+    got = await _stream(done, 143, user_kill=True)
+    if not got.killed_intentionally:
+        failures.append(
+            "a user's Kill landing after the turn completed no longer renders "
+            "as the stop they asked for"
+        )
+    got = await _stream(unfinished, -9)
+    if not got.is_error:
+        failures.append("a -9 with no result event was reported as a success")
+    got = await _stream(done, 1)
+    if not got.is_error:
+        failures.append(
+            "a completed turn that then exited 1 (a crash, not a signal) was "
+            "hidden as a success"
+        )
+
+
+async def _classify_quietly(result: RunResult) -> bool:
+    saved = cgroups.oom_kill_evidence
+
+    async def _none(unit):
+        return None
+
+    cgroups.oom_kill_evidence = _none  # type: ignore[assignment]
+    try:
+        return await runner_mod._classify_oom_kill(
+            copy.deepcopy(result), "claude-session-x.scope",
+        )
+    finally:
+        cgroups.oom_kill_evidence = saved  # type: ignore[assignment]
+
+
 def _own_calls(fn: ast.AST):
     """Calls made in ``fn`` itself, not inside a function nested in it."""
     stack = list(ast.iter_child_nodes(fn))
@@ -557,7 +674,7 @@ async def _main() -> int:
             _case_resumes_once, _case_chain_worktree, _case_second_kill,
             _case_bot_signalled,
             _case_not_oom, _case_uncorroborated, _case_kill_during_hold,
-            _case_disabled,
+            _case_disabled, _case_signal_after_completed_turn,
         ):
             try:
                 await case(tmp, failures)
