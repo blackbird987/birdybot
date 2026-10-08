@@ -317,8 +317,9 @@ class Instance:
     _context_thrash_retry: bool = False
     # Ephemeral twin of the above for the memory guard: holds the recovery note
     # text (not a bool — the numbers are the substance) set just before the
-    # runner re-spawns a session it reaped for memory, consumed and cleared by
-    # _build_command. Not persisted; it describes one attempt.
+    # runner re-spawns a session it reaped for memory, or one the operating
+    # system OOM-killed (the two notes share this slot), consumed and cleared
+    # by _build_command. Not persisted; it describes one attempt.
     _memory_kill_note: str | None = None
     # Third of the same family, for the context-overflow recovery: holds the
     # pre-built note (recovery preamble + the thread's quoted recent history)
@@ -587,6 +588,22 @@ class RunResult:
     # ``killed_intentionally`` on purpose — nobody asked for this, it is a real
     # failure with a specific cause, and the user needs to see it as one.
     memory_kill_note: str | None = None
+    # The newest tool_use the stream showed, repeats included. tools_used is
+    # de-duplicated in first-seen order, so its last entry is not this; an
+    # out-of-memory resume needs to tell the session what it was doing when
+    # the kill landed.
+    last_tool: str = ""
+    # The CLI's own exit status, as _stream_output saw it. None on the paths
+    # that synthesise a result without one (the memory and lifetime reaps,
+    # AskUserQuestion, the end-of-turn watchdog). Read by the out-of-memory
+    # classifier, which acts on a SIGKILL (-9 or 137), and on a SIGTERM (-15
+    # or 143) only when the scope's journal records an OOM kill.
+    exit_code: int | None = None
+    # Set when the operating system, not the bot, SIGKILLed this run for
+    # memory (systemd-oomd shooting the session scope, or the kernel at its
+    # memory.max). The pre-formatted note the resumed attempt is told, the
+    # same shape as memory_kill_note, which is the bot's own reap.
+    oom_kill_note: str | None = None
 
 
 class KillOutcome(str, Enum):

@@ -268,6 +268,8 @@ def extract_result(events: list[dict]) -> RunResult:
                 if isinstance(block, dict):
                     if block.get("type") == "tool_use":
                         name = block.get("name", "")
+                        if name:
+                            result.last_tool = name
                         if name and name not in tools_seen:
                             tools_seen.add(name)
                             result.tools_used.append(name)
@@ -282,6 +284,8 @@ def extract_result(events: list[dict]) -> RunResult:
             cb = event.get("content_block", {})
             if cb.get("type") == "tool_use":
                 name = cb.get("name", "")
+                if name:
+                    result.last_tool = name
                 if name and name not in tools_seen:
                     tools_seen.add(name)
                     result.tools_used.append(name)
@@ -801,6 +805,14 @@ def is_account_agnostic_error(error_text: str) -> bool:
         # reused the previous attempt's scope name.
         "failed to start transient scope unit",
         "already loaded or has a fragment file",
+        # systemd-oomd or the kernel killed the session's scope. The run
+        # has no result event, and a session killed early has no turns either,
+        # so without this the no-turns heuristic reads the -9 as the account
+        # falling over and hands the work to the backup subscription: it did
+        # exactly that to t-8999 on 2026-10-08. Memory is the machine's, not
+        # the account's. runner._classify_oom_kill is required to keep the
+        # phrase.
+        "killed by the system's out-of-memory protection",
     ]
     return any(p in lower for p in patterns)
 

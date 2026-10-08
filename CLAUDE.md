@@ -1326,8 +1326,8 @@ retried on the same id. It still should not have fired, and why it did is
 arithmetic rather than a bug in any one place.
 
 `SESSION_MEM_HIGH_MB` was 6144 and `MAX_CONCURRENT` was 5. That is 30 GB of
-per-session soft ceiling against a slice budget of `MemoryHigh=11G` /
-`MemoryMax=14G`: **two** sessions at their own ceiling already exceed the
+per-session soft ceiling against the slice budget of the time, `MemoryHigh=11G`
+/ `MemoryMax=14G`: **two** sessions at their own ceiling already exceed the
 fleet throttle line. Worse, 6 GB is where a dotnet/Roslyn build session
 naturally sits. The peaks that day read 5.8G, 5.8G, 5.9G and then six sessions
 at *exactly* 6.0G, which is not six coincidences, it is six sessions pinned on
@@ -1351,7 +1351,8 @@ should check the others:
   to `memory.max` only when there is no soft limit. Measuring the hard cap
   meant the gate engaged at 12800 MB of slice usage on this machine, thousands
   of MB above the throttle line where the kill is already being decided; it
-  now engages at 8192 MB.
+  engaged at 8192 MB against the 11G slice of the time, and at 16384 MB
+  against today's 19G (see "The slice ceiling was the killer, again").
 - `MEM_ADMISSION_MIN_SLICE_HEADROOM_MB` (3072) reserves room for what a
   session *becomes*, not what it starts as. The old 1536 was sized on the
   stated assumption that the soft ceiling absorbs later growth. It does not
@@ -1393,8 +1394,8 @@ cgroup, and that was correct until v0.101.27 moved the sessions into scopes of
 their own. After it, `claude-bot.service` holds a ~250 MB asyncio loop, so
 `over_own_high()` and `own_psi_pct` measured the supervisor and answered **no**
 however hard the fleet was thrashing. Measured live on 2026-09-22: the
-supervisor's cgroup read 234 MB while the sessions slice read 3788 MB of an
-11 GB soft ceiling. Two things were silently dead as a result, and both are
+supervisor's cgroup read 234 MB while the sessions slice read 3788 MB of what
+was then an 11 GB soft ceiling. Two things were silently dead as a result, and both are
 exactly what the incident needed:
 
 - **Cross-session arbitration.** `_fleet_arbitration` gates on
@@ -1418,16 +1419,90 @@ The direction of the dependency is why this is a parameter at all:
 sessions slice is without closing a cycle. The runner already imports both and
 is the layer that knows whether scopes are in use, so the decision lives there.
 
+### The slice ceiling was the killer, again
+
+On 2026-10-08 systemd-oomd shot two sessions in half an hour:
+`claude-session-t-8999.scope` at 12:54 in the middle of a dotnet build, and
+`claude-session-q-19143.scope` at 13:22, 2.9 hours into a study. The machine
+had 11-12 GB of RAM free both times. The slice's memory pressure read 82% and
+72% against its 70% limit, and the bot's own log said "ours 7.7GB/11.0GB",
+which looked like room to spare.
+
+It was the "soft ceiling at the working set" mistake from the section above,
+one level up. That 7.7 GB is anon only, and `memory.high` counts page cache as
+well: 5.0 GB of file cache plus 1.1 GB of dirty build output put
+`memory.current` on the 11G line (`memory.peak` 11.23G, `memory.events`
+high=993628). zram was 100% full, so the forced reclaim could only thrash file
+cache, and that stall is exactly what oomd kills on. A build fleet's working
+set includes the files it reads and writes, so the slice ceiling has to sit
+well above anon plus cache. It is now `MemoryHigh=19G` / `MemoryMax=21G`,
+still nested below `app.slice`'s 27G. A second 8 GB zram device (`zram1` in
+`/etc/systemd/zram-generator.conf`, outside this repo) gives the kernel swap
+runway before it has to start thrashing cache.
+
+Three things must not drift:
+
+- **A scope's ceilings are passed to `systemd-run` as `-p MemoryHigh=` and
+  `-p MemoryMax=`, and never written into the cgroup directly.** systemd
+  re-applies a unit's own properties whenever it re-realises the unit, and a
+  `daemon-reload` does that to every unit. A direct write into `memory.high`
+  lasts until the next one. This was verified live on 2026-10-08: a directly
+  written value reverted to `max` on a plain `daemon-reload`, and a `-p` value
+  survived it.
+  `cgroups.adopt_session` now only reads the ceilings back, for the log.
+  `test_session_cgroups.py` runs a real `daemon-reload` against a live scope
+  and fails if either ceiling moves.
+- **An outside kill is resumed once, after the admission hold.** A SIGKILL
+  (-9, or 137 through a shell) on a scoped run that the bot did not send is
+  classified by `runner._classify_oom_kill`. "Did not send" means it is not a
+  Kill or Steer, not one of the bot's own reaps (those return synthesised
+  results with no exit code), and not in `_bot_signalled`. `kill()` adds to
+  `_bot_signalled` before it signals, because its escalation after the 5s grace
+  is a SIGKILL too, and so does the memory reap, whose `cgroup.kill` is one:
+  a reap that stands down falls through to the normal exit path carrying a
+  real -9. A run whose `result` event already reported success is never
+  classified at all: `_stream_output` keeps a signal that landed after a
+  completed turn as the success it was (unless it was the user's own Kill or
+  Steer), because resuming it would redo finished work. The scope's journal
+  is asked which killer it was (`cgroups.oom_kill_evidence`). For a SIGKILL
+  that is corroboration and never a gate: a lookup that finds nothing still
+  classifies, and only the wording admits it.
+- **A SIGTERM is an OOM kill too, but only on the journal's word.** When the
+  kernel's OOM killer picks some *other* process in a scope (the build, not
+  the CLI), systemd's default `OOMPolicy=stop` then stops the whole scope with
+  a SIGTERM, so the CLI exits 143, not -9. Verified on 2026-10-08 with a test
+  scope overrunning its `MemoryMax`: the parent exited -15 and the journal
+  read "The kernel OOM killer killed some processes in this unit." A SIGTERM
+  has innocent senders, including the bot's own unmarked terminates, so for
+  -15/143 the journal is the gate, read once more after a second of ingestion
+  lag. Match that kernel line, not "Failed with result 'oom-kill'", which is
+  only logged once the scope is gone.
+  The resume goes through `_await_memory_headroom`, the same hold a new
+  session waits in, so it does not re-enter the stall that just killed it.
+  It carries `OOM_KILL_NUDGE_TEMPLATE`: which killer, what the session was
+  running, lower the parallelism, and /tmp is RAM. It is resumed once
+  (`OOM_KILL_RESUME_RETRIES`, `0` is off). A second kill is a job that does
+  not fit, and that is for the user to decide.
+- **The error has to say "killed by the system's out-of-memory protection".**
+  `parser.is_account_agnostic_error` matches that phrase. A session killed
+  before its first turn has no output and no turns, which is the no-turns
+  failover heuristic's exact signature. Without the phrase, a two-account setup
+  hands the work to the backup subscription to be killed the same way. This is
+  the same trap as `lifetime limit`.
+
+Harness: `python scripts/test_oom_resume.py`
+
 Knobs: `SESSION_SCOPES_ENABLED`, `SESSION_SLICE`, `SESSION_MEM_HIGH_MB`,
 `SESSION_MEM_HARD_MB`, `SESSION_SCOPE_ADOPT_SECS`,
 `SESSION_SCOPE_PROBE_TTL_SECS`, `OOMD_TIGHT_FRACTION`, `OOMD_CRITICAL_FRACTION`,
 `RESOURCE_CPU_WEIGHT_EXPECTED`, `RESOURCE_IO_WEIGHT_EXPECTED`,
 `SESSION_SLICE_CPU_WEIGHT_EXPECTED`, `SESSION_SLICE_IO_WEIGHT_EXPECTED`,
-`MEM_ADMISSION_OWN_MAX_WAIT_SECS`, `MEM_ADMISSION_NOTIFY_SECS` in
-`bot/config.py`.
+`MEM_ADMISSION_OWN_MAX_WAIT_SECS`, `MEM_ADMISSION_NOTIFY_SECS`,
+`OOM_KILL_RESUME_RETRIES` in `bot/config.py`.
 
-Harnesses: `python scripts/test_session_cgroups.py` and the oomd, weight-check
-and slice-unit cases in `python scripts/test_memory_guard.py`.
+Harnesses: `python scripts/test_session_cgroups.py`,
+`python scripts/test_oom_resume.py`, and the oomd, weight-check and
+slice-unit cases in `python scripts/test_memory_guard.py`.
 
 ## The ceiling stopped one level too low
 
@@ -1467,7 +1542,7 @@ a reaction; a ceiling is an invariant, and the tree had none.
   survivable, and it is worth re-checking before tightening anything: if the
   shell ever moves into `app.slice`, this ceiling starts being able to kill it.
 - **The ladder nests, and the harness asserts it.** The sessions slice's
-  `MemoryMax` (14G) must stay below the tree's (27G), or the tree's ceiling is
+  `MemoryMax` (21G) must stay below the tree's (27G), or the tree's ceiling is
   reached first and oomd picks a victim from every application on the machine
   when the thing filling it was our own fleet. Same arithmetic rule as the
   per-session ceiling against the slice budget.

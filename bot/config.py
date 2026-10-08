@@ -358,6 +358,11 @@ MEM_ADMISSION_NOTIFY_SECS: int = int(
 # the next hour over its throttle line. Ignored entirely when the slice has no
 # limit to measure against (see cgroups.slice_headroom_mb, which measures the
 # throttle line, memory.high, in preference to the hard cap).
+#
+# Re-checked on 2026-10-08 when the slice's MemoryHigh went from 11G to 19G:
+# 3072 still holds. The gate now engages at 16 GB of slice usage instead of
+# 8 GB, and 3 GB left is still about half a build session's working set,
+# which is the room a just-admitted session needs before it is measurable.
 MEM_ADMISSION_MIN_SLICE_HEADROOM_MB: int = int(
     os.getenv("MEM_ADMISSION_MIN_SLICE_HEADROOM_MB", "3072")
 )
@@ -575,8 +580,15 @@ SESSION_SCOPE_PROBE_TTL_SECS: int = int(
 # The fleet total is not this knob's job and never was: it is bounded by the
 # slice's own MemoryHigh and by admission control, which is where a number
 # that has to know about *other* sessions belongs. See the ladder arithmetic
-# note in CLAUDE.md -- per-session ceiling times MAX_CONCURRENT must not
-# exceed the slice budget, or the fleet lives permanently in reclaim.
+# note in CLAUDE.md.
+#
+# Re-checked on 2026-10-08 against the slice's new 19G MemoryHigh: 8192 still
+# sits above a build session's 5.8-6.0 GB working set and below the slice, so
+# one runaway is throttled on its own before it can drag the fleet into
+# reclaim. 8192 times MAX_CONCURRENT (4) is more than 19G, deliberately: no
+# realistic fleet holds four sessions at their runaway ceiling at once, and
+# admission (MEM_ADMISSION_MIN_SLICE_HEADROOM_MB) is what stops the fourth
+# from starting when the first three are large.
 SESSION_MEM_HIGH_MB: int = int(os.getenv("SESSION_MEM_HIGH_MB", "8192"))
 SESSION_MEM_HARD_MB: int = int(os.getenv("SESSION_MEM_HARD_MB", "10240"))
 
@@ -638,6 +650,18 @@ FLEET_REAP_COOLDOWN_SECS: float = float(
 # Clamped to 0..3; 0 disables auto-resume.
 MEMORY_KILL_MAX_RETRIES: int = max(
     0, min(3, int(os.getenv("MEMORY_KILL_MAX_RETRIES", "1")))
+)
+# How many times a run may be auto-resumed after something OUTSIDE the bot
+# killed its scope for memory: systemd-oomd, or the kernel at a memory.max.
+# Separate from MEMORY_KILL_MAX_RETRIES because the cause is different: the
+# guard's reap measured this session over its own ceiling, while an oomd kill
+# usually means the fleet together filled the slice, and the resume first
+# waits in the admission hold for that to clear. One resume, then the normal
+# failure card with its Retry button: a second oomd kill in a row says the
+# job does not fit right now, and a loop of them would stall the slice for
+# every other session. Clamped to 0..3; 0 disables it.
+OOM_KILL_RESUME_RETRIES: int = max(
+    0, min(3, int(os.getenv("OOM_KILL_RESUME_RETRIES", "1")))
 )
 # Total wall-clock budget for the post-build computational sensor step
 # (dotnet build / ruff / tsc). Sensors that don't fit are marked skipped.
@@ -981,6 +1005,31 @@ MEMORY_FLEET_KILL_NUDGE_TEMPLATE = (
     "`nohup` keeps running after the command that launched it returns, and it "
     "counts against this same ceiling. If you left one running, it was killed "
     "too."
+)
+
+# The note for a session the operating system killed, not the bot: systemd-
+# oomd shot its scope because the session slice stalled on memory, or the
+# kernel hit the scope's memory.max. Placeholders: how (which killer, as far
+# as the journal could confirm it) and doing (the last thing the session was
+# running). The advice is about parallelism and /tmp because those are what
+# filled the slice on 2026-10-08: a dotnet build at full parallelism next to
+# other sessions, with its output counted as page cache.
+OOM_KILL_NUDGE_TEMPLATE = (
+    "--- Automatic recovery: your previous attempt was killed for memory ---\n"
+    "Your last run was killed by the operating system's out-of-memory "
+    "protection ({how}), not by this bot and not by an error in your code. "
+    "It happened while you were running {doing}. Several sessions share this "
+    "machine's memory budget with the user's desktop, and together they ran "
+    "it out. This run waited until memory freed up before resuming you.\n"
+    "Your work is NOT lost: every edit the killed attempt made is still on "
+    "disk. Take stock of what is already done FIRST and carry on from there; "
+    "in a repo that means `git status` and `git diff` before anything else.\n"
+    "Before re-running anything heavy, lower its parallelism so it fits in a "
+    "shared machine: `dotnet build -m:2`, `make -j2`, `pytest -n 2`, and the "
+    "equivalent for anything else that fans out by CPU count. Do not write "
+    "large scratch data into /tmp: it is a tmpfs, so every file there is RAM. "
+    "If the job genuinely cannot fit, say so plainly and stop rather than "
+    "being killed a second time."
 )
 
 # Told to every session up front, in the system prompt, rather than only after
