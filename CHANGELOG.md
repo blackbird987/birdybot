@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## v0.101.33, Real Anthropic usage figures on the dashboard (2026-10-09)
+
+### Added
+- **The dashboard, every Control Room and `/usage` show Anthropic's real session and weekly percentages** (`bot/engine/plan_usage.py`, `bot/engine/usage.py`, `bot/config.py`, `scripts/test_plan_usage.py`). The usage bar was a ccusage dollar total divided by a guessed limit, so on 2026-10-09 it read "93% est" for a session Anthropic had at 15%, and it had no weekly percentage at all. It now reads the same figures Claude Code's own `/usage` screen shows, per account in `CLAUDE_ACCOUNTS`: week %, session %, per-model weekly % (the bar lists only models with any use, `/usage` lists all), and when each resets (in your local time). A signed-out account is one line ("`klerk` signed out") and stays in rotation. Readings are cached 60s, a failure is retried after 5 min and serves the last good reading meanwhile, and tokens are never refreshed by the bot. When no account returns figures the bar falls back to the ccusage estimate as before. `/usage` keeps the ccusage section underneath, labelled as the local cost estimate it is, and refreshed in the background when stale since the bar no longer keeps it warm. Knobs: `PLAN_USAGE_API_ENABLED` (default on), `PLAN_USAGE_TTL_SECS` (60).
+
 ## v0.101.32, Sessions survive memory kills instead of dying (2026-10-08)
 
 ### Fixed

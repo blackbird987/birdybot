@@ -1079,6 +1079,15 @@ LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
 # ccusage cache TTL in seconds (adaptive: shortened near rate limits)
 CCUSAGE_CACHE_TTL: int = int(os.getenv("CCUSAGE_CACHE_TTL", "60"))
 
+# Real plan usage (session % and weekly %) read from Anthropic per account,
+# the same figures Claude Code's own /usage screen shows. Off means the
+# dashboard, Control Rooms and /usage fall back to the ccusage dollar estimate
+# exactly as before. See bot/engine/plan_usage.py.
+PLAN_USAGE_API_ENABLED: bool = os.getenv(
+    "PLAN_USAGE_API_ENABLED", "1"
+).lower() in ("1", "true", "yes")
+PLAN_USAGE_TTL_SECS: int = max(15, int(os.getenv("PLAN_USAGE_TTL_SECS", "60")))
+
 # Claude plan settings (for usage percentage display)
 PLAN_NAME: str = os.getenv("PLAN_NAME", "Max 20x")
 PLAN_MONTHLY_COST: float = float(os.getenv("PLAN_MONTHLY_COST", "200.0"))

@@ -499,6 +499,27 @@ async def get_current_block(force: bool = False) -> UsageBlock | None:
 async def get_usage_details(force: bool = False) -> str:
     """Rich usage text for /usage command.  Returns formatted string.
 
+    Leads with the real plan figures from Anthropic (``plan_usage``), then the
+    ccusage section, labelled as the local cost estimate it is.
+    """
+    from bot.engine import plan_usage
+
+    plan_text = None
+    try:
+        plan_text = plan_usage.format_plan_usage_details(
+            await plan_usage.get_plan_usage(force=force)
+        )
+    except Exception:
+        log.warning("Plan usage for /usage failed", exc_info=True)
+    cost_text = await _ccusage_details(force=force)
+    if not plan_text:
+        return cost_text
+    return f"{plan_text}\n\n**Local cost estimate** (ccusage, API-equivalent $)\n{cost_text}"
+
+
+async def _ccusage_details(force: bool = False) -> str:
+    """The ccusage half of /usage.
+
     When *force* is False, serves stale cache instantly (never blocks on
     subprocess).  Only *force=True* triggers a live ccusage call.
     """
@@ -517,6 +538,11 @@ async def get_usage_details(force: bool = False) -> str:
             block = _parse_block(stale_block) if stale_block else None
             daily, weekly = _parse_daily_range(stale_daily)
             age = max(daily_age, block_age)
+            if age > _DEFAULT_TTL:
+                # The embed bar used to keep this cache warm on every redraw;
+                # with real plan figures it no longer calls ccusage, so
+                # refresh in the background for the next /usage instead.
+                _schedule_warmup()
             return _build_usage_text(block, daily, weekly, cache_age=age)
 
     # Live fetch (first call, or force=True)
@@ -738,7 +764,26 @@ def format_usage_bar(
 
 
 async def get_usage_bar_async() -> str | None:
-    """Visual usage bar for embeds. Returns None only if no data ever existed."""
+    """Visual usage bar for embeds. Returns None only if no data ever existed.
+
+    The real plan figures from Anthropic win; the ccusage dollar estimate is
+    the fallback for when no account returned any (feature off, every account
+    signed out, endpoint down with nothing cached).
+    """
+    from bot.engine import plan_usage
+
+    try:
+        real = plan_usage.format_plan_usage_bar(await plan_usage.get_plan_usage())
+    except Exception:
+        log.warning("Plan usage bar failed, falling back to ccusage", exc_info=True)
+        real = None
+    if real:
+        return real
+    return await _ccusage_bar_async()
+
+
+async def _ccusage_bar_async() -> str | None:
+    """The ccusage dollar-estimate bar."""
     since = _daily_range_since()
     daily_key = f"daily --since {since}"
     today_str = datetime.now(timezone.utc).strftime("%Y%m%d")
@@ -762,6 +807,16 @@ async def get_usage_bar_async() -> str | None:
         return format_usage_bar(block, daily, weekly)
 
     return None
+
+
+_warmup_task: asyncio.Task | None = None
+
+
+def _schedule_warmup() -> None:
+    """Start one background ``warmup`` unless one is already running."""
+    global _warmup_task
+    if _warmup_task is None or _warmup_task.done():
+        _warmup_task = asyncio.create_task(warmup())
 
 
 async def warmup() -> None:
