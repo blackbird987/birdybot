@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.101.34, Progress cards stop re-sending identical edits (2026-10-09)
+
 ### Fixed
 - Live progress cards no longer re-send identical edits to Discord. The card clock shows whole minutes (`12m`, `1h05m`), live and finished, so an idle card is edited about once a minute instead of every 10s, which avoids Discord's rate limit on editing hour-old messages.
 
