@@ -100,6 +100,7 @@ def account_dirs() -> list[str]:
         return []
     if config.CLAUDE_ACCOUNTS:
         return list(config.CLAUDE_ACCOUNTS)
+    # No rotation configured: the CLI uses whatever it would use unpinned.
     return [os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")]
 
 
@@ -148,7 +149,6 @@ async def _http_get(token: str) -> tuple[int, object]:
             headers={
                 "Authorization": f"Bearer {token}",
                 "anthropic-beta": _BETA_HEADER,
-                "Content-Type": "application/json",
             },
         )
     try:
@@ -347,10 +347,12 @@ def _state_line(a: AccountUsage) -> str:
 
 
 def _subtext(a: AccountUsage, *, now: float) -> str:
+    # Italic, not ``-#``: these lines go into embed field values, where
+    # Discord does not render subtext and the marker would show literally.
     bits = [f"{name} {_pct(p)}" for name, p, _ in a.scoped if p >= 1]
     if a.stale:
         bits.append(f"as of {_age(now - a.fetched_at)} ago")
-    return "-# " + " · ".join(bits) if bits else ""
+    return "_" + " · ".join(bits) + "_" if bits else ""
 
 
 def format_plan_usage_bar(accounts: list[AccountUsage]) -> str | None:

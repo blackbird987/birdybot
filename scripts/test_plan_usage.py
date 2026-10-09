@@ -172,8 +172,7 @@ async def test_cache(root: Path, http: FakeHttp) -> None:
     check(a.week_pct == 73 and b.week_pct == 73, "good reading returned")
     check(len(http.calls) == n0 + 1, "a second read inside the TTL makes no request")
 
-    await asyncio.gather(*(plan_usage.fetch_account_usage(main, force=True)
-                           for _ in range(1)))
+    await plan_usage.fetch_account_usage(main, force=True)
     check(len(http.calls) == n0 + 2, "force bypasses the cache")
 
     # A network failure serves the last good reading, marked stale.
@@ -235,6 +234,8 @@ async def test_format(root: Path, http: FakeHttp) -> None:
               "per-model line only for models with usage")
         check("est" not in bar and "$" not in bar, "no dollar estimate in the real bar")
         check("\u2014" not in bar, "no em dash")
+        check("-# " not in bar and "_Fable 5%_" in bar,
+              "model line is italic, not subtext (embed fields do not render -#)")
 
         solo = plan_usage.format_plan_usage_bar(accounts[:1])
         check("**main**" not in solo, "a single account is not labelled")

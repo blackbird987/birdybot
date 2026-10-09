@@ -538,6 +538,11 @@ async def _ccusage_details(force: bool = False) -> str:
             block = _parse_block(stale_block) if stale_block else None
             daily, weekly = _parse_daily_range(stale_daily)
             age = max(daily_age, block_age)
+            if age > _DEFAULT_TTL:
+                # The embed bar used to keep this cache warm on every redraw;
+                # with real plan figures it no longer calls ccusage, so
+                # refresh in the background for the next /usage instead.
+                _schedule_warmup()
             return _build_usage_text(block, daily, weekly, cache_age=age)
 
     # Live fetch (first call, or force=True)
@@ -802,6 +807,16 @@ async def _ccusage_bar_async() -> str | None:
         return format_usage_bar(block, daily, weekly)
 
     return None
+
+
+_warmup_task: asyncio.Task | None = None
+
+
+def _schedule_warmup() -> None:
+    """Start one background ``warmup`` unless one is already running."""
+    global _warmup_task
+    if _warmup_task is None or _warmup_task.done():
+        _warmup_task = asyncio.create_task(warmup())
 
 
 async def warmup() -> None:
