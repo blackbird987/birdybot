@@ -24,6 +24,9 @@ Asserted here:
     recovery back to the normal header
   * an edit that raised is not recorded as sent, so the next identical
     edit retries it
+  * an identical edit arriving while the first is still in flight (stuck
+    in a 429 backoff) is skipped, not queued behind it
+  * the finished card's clock reads like the live one
 
 Strategy: swap ``lifecycle.asyncio`` for a stand-in with a fake clock, so the
 real closures run and an hour of heartbeat ticks takes milliseconds.
@@ -43,6 +46,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from bot.engine import lifecycle  # noqa: E402
 from bot.engine.lifecycle import make_progress_callbacks  # noqa: E402
 from bot.claude.types import Instance, InstanceStatus, InstanceType  # noqa: E402
+from bot.platform.formatting import format_elapsed  # noqa: E402
 
 
 class _StopHeartbeat(Exception):
@@ -77,6 +81,7 @@ class _Messenger:
         self.edits: list[tuple[float, str, object]] = []
         self.attempts = 0
         self.fail_next = 0
+        self.gate: asyncio.Event | None = None
         self.clock: _Clock | None = None
 
     def escape(self, text: str) -> str:
@@ -85,6 +90,8 @@ class _Messenger:
     async def edit_thinking(self, handle, text, buttons=None, *, footer=None,
                             severity=None):
         self.attempts += 1
+        if self.gate is not None:
+            await self.gate.wait()
         if self.fail_next:
             self.fail_next -= 1
             raise RuntimeError("simulated Discord failure")
@@ -201,8 +208,42 @@ async def _amain() -> int:
                 f"{len(messenger.edits)} successful edits (expected 2 and 1: "
                 "retry once, then skip the identical third)"
             )
+
+        # 5. An identical edit is skipped while the first is still in flight.
+        clock.now = 0.0
+        messenger, on_progress, _, _ = _build(clock)
+        messenger.gate = asyncio.Event()
+        clock.now = 300.0
+        first = asyncio.create_task(on_progress("Running tests"))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        clock.now = 306.0
+        # A task, not an await: if it were sent it would park on the same
+        # gate, and the test must fail rather than hang.
+        second = asyncio.create_task(on_progress("Running tests"))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        attempts_in_flight = messenger.attempts
+        messenger.gate.set()
+        await asyncio.gather(first, second)
+        if attempts_in_flight != 1:
+            failures.append(
+                f"an identical edit was sent behind one in flight: "
+                f"{attempts_in_flight} attempts (expected 1)"
+            )
     finally:
         lifecycle.asyncio = saved
+
+    # 6. The clock, including the finished card's.
+    for secs, want in ((0, "0s"), (59.7, "59s"), (60, "1m"), (3599, "59m"),
+                       (3600, "1h00m"), (3 * 3600 + 5 * 60, "3h05m")):
+        got = format_elapsed(secs)
+        if got != want:
+            failures.append(f"format_elapsed({secs}) = {got!r}, expected {want!r}")
+    for path in ("bot/engine/lifecycle.py", "bot/engine/commands.py"):
+        src = (Path(__file__).resolve().parent.parent / path).read_text()
+        if ".1f}m" in src:
+            failures.append(f"{path} still renders a card clock with a decimal")
 
     if failures:
         print("FAIL: progress card edit dedupe")

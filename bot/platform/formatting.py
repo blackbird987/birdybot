@@ -221,6 +221,24 @@ def format_duration(ms: int | float | None) -> str:
     return f"{secs:.0f}s"
 
 
+def format_elapsed(secs: float) -> str:
+    """Clock on a progress card: ``13s``, then ``12m``, then ``1h05m``.
+
+    Whole minutes past the first one, on purpose. The heartbeat edits the
+    live card every 10s, and a clock with a decimal ("65.3m") changes on
+    every tick, so no edit could ever be skipped as a no-op. Discord rate
+    limits edits to hour-old messages hard, and each 429 is retried inline
+    in the stream reader. The finished card uses the same clock, so it does
+    not change format at the moment the run ends.
+    """
+    if secs < 60:
+        return f"{int(max(secs, 0))}s"
+    minutes = int(secs // 60)
+    if minutes < 60:
+        return f"{minutes}m"
+    return f"{minutes // 60}h{minutes % 60:02d}m"
+
+
 def format_delay_secs(secs: int) -> str:
     """Human-readable wait, e.g. ``45s`` / ``12 min`` / ``2.5 h``.
 

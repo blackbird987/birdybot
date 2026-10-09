@@ -26,6 +26,7 @@ from bot.platform.formatting import (
     format_context_footer,
     format_delay_secs,
     format_duration,
+    format_elapsed,
     format_inline_meta_line,
     format_tokens,
     format_result_md,
@@ -386,11 +387,9 @@ async def run_instance(
         # we still resolve the card here rather than stranding it on
         # "thinking...".
         if handle and not result.kill_owns_card:
-            elapsed = asyncio.get_event_loop().time() - start_time
-            if elapsed >= 60:
-                elapsed_str = f"{elapsed / 60:.1f}m"
-            else:
-                elapsed_str = f"{elapsed:.0f}s"
+            elapsed_str = format_elapsed(
+                asyncio.get_event_loop().time() - start_time
+            )
             escaped = ctx.messenger.escape(inst.display_id())
             if result.killed_intentionally:
                 # "steered" only when a replacement run is already starting;
@@ -868,10 +867,8 @@ def make_progress_callbacks(
     """
     last_update = [0.0]
     start_time = asyncio.get_event_loop().time()
-    last_text = [None]
-    last_footer = [None]
-    last_severity = [None]
-    last_buttons = [None]
+    # (text, buttons, footer, severity) of the last edit sent or in flight.
+    last_sent: list[tuple | None] = [None]
     is_stalled = [False]
     last_activity = ["processing..."]  # tracks last known tool activity
     has_real_activity = [False]  # False until on_progress sees a real event
@@ -889,18 +886,7 @@ def make_progress_callbacks(
     )]
 
     def _elapsed() -> str:
-        # Whole minutes past the first one, on purpose. The heartbeat edits
-        # every 10s, and a clock with a decimal ("65.3m") changes on every
-        # tick, so no edit could ever be skipped as a no-op. Discord rate
-        # limits edits to hour-old messages hard, and each 429 is retried
-        # inline in the stream reader, so the clock only moves once a minute.
-        elapsed = asyncio.get_event_loop().time() - start_time
-        if elapsed < 60:
-            return f"{elapsed:.0f}s"
-        minutes = int(elapsed // 60)
-        if minutes < 60:
-            return f"{minutes}m"
-        return f"{minutes // 60}h{minutes % 60:02d}m"
+        return format_elapsed(asyncio.get_event_loop().time() - start_time)
 
     def _compute_footer() -> tuple[str | None, str | None]:
         """Render footer text + severity from cached usage. (None, None) if empty.
@@ -953,24 +939,23 @@ def make_progress_callbacks(
         # of the comparison (ButtonSpec is a dataclass, so == is by value):
         # every caller passes them, and treating "has buttons" as "always
         # changed" sent a real PATCH on every heartbeat.
-        if (
-            text == last_text[0]
-            and footer == last_footer[0]
-            and severity == last_severity[0]
-            and buttons == last_buttons[0]
-        ):
+        edit = (text, buttons, footer, severity)
+        if edit == last_sent[0]:
             return
+        # Claimed before the await: the heartbeat and the stream reader both
+        # edit this card, and one stuck in a 429 backoff must not let the
+        # other send the same PATCH behind it.
+        previous = last_sent[0]
+        last_sent[0] = edit
         try:
             await ctx.messenger.edit_thinking(
                 handle, text, buttons, footer=footer, severity=severity,
             )
         except Exception:
-            # Not recorded as sent, so the next identical edit retries it.
-            return
-        last_text[0] = text
-        last_footer[0] = footer
-        last_severity[0] = severity
-        last_buttons[0] = buttons
+            # Not sent, so forget it and let the next identical edit retry,
+            # unless a newer edit has claimed the card since.
+            if last_sent[0] is edit:
+                last_sent[0] = previous
 
     async def _maybe_pin_warning() -> None:
         """Fire once per session when context first crosses 95%."""
