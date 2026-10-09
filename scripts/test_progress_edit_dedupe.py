@@ -37,13 +37,14 @@ Run: ``python scripts/test_progress_edit_dedupe.py``  (exit 0 on pass).
 from __future__ import annotations
 
 import asyncio
+import inspect
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from bot.engine import lifecycle  # noqa: E402
+from bot.engine import commands, lifecycle  # noqa: E402
 from bot.engine.lifecycle import make_progress_callbacks  # noqa: E402
 from bot.claude.types import Instance, InstanceStatus, InstanceType  # noqa: E402
 from bot.platform.formatting import format_elapsed  # noqa: E402
@@ -240,10 +241,14 @@ async def _amain() -> int:
         got = format_elapsed(secs)
         if got != want:
             failures.append(f"format_elapsed({secs}) = {got!r}, expected {want!r}")
-    for path in ("bot/engine/lifecycle.py", "bot/engine/commands.py"):
-        src = (Path(__file__).resolve().parent.parent / path).read_text()
-        if ".1f}m" in src:
-            failures.append(f"{path} still renders a card clock with a decimal")
+    # Both writers of the finished card: the chain/retry path and a chat turn.
+    for fn in (lifecycle.run_instance, commands._execute_query):
+        src = inspect.getsource(fn)
+        if "format_elapsed(" not in src or ".1f}m" in src:
+            failures.append(
+                f"{fn.__module__}.{fn.__name__} does not render the finished "
+                "card with format_elapsed"
+            )
 
     if failures:
         print("FAIL: progress card edit dedupe")
