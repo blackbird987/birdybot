@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Live progress cards no longer re-send identical edits to Discord. Elapsed time shows whole minutes, so an idle card is edited about once a minute instead of every 10s, which avoids Discord's rate limit on editing hour-old messages.
+
 ## v0.101.33, Real Anthropic usage figures on the dashboard (2026-10-09)
 
 ### Added

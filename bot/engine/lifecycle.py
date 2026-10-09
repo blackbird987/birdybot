@@ -871,6 +871,7 @@ def make_progress_callbacks(
     last_text = [None]
     last_footer = [None]
     last_severity = [None]
+    last_buttons = [None]
     is_stalled = [False]
     last_activity = ["processing..."]  # tracks last known tool activity
     has_real_activity = [False]  # False until on_progress sees a real event
@@ -888,10 +889,18 @@ def make_progress_callbacks(
     )]
 
     def _elapsed() -> str:
+        # Whole minutes past the first one, on purpose. The heartbeat edits
+        # every 10s, and a clock with a decimal ("65.3m") changes on every
+        # tick, so no edit could ever be skipped as a no-op. Discord rate
+        # limits edits to hour-old messages hard, and each 429 is retried
+        # inline in the stream reader, so the clock only moves once a minute.
         elapsed = asyncio.get_event_loop().time() - start_time
-        if elapsed >= 60:
-            return f"{elapsed / 60:.1f}m"
-        return f"{elapsed:.0f}s"
+        if elapsed < 60:
+            return f"{elapsed:.0f}s"
+        minutes = int(elapsed // 60)
+        if minutes < 60:
+            return f"{minutes}m"
+        return f"{minutes // 60}h{minutes % 60:02d}m"
 
     def _compute_footer() -> tuple[str | None, str | None]:
         """Render footer text + severity from cached usage. (None, None) if empty.
@@ -940,23 +949,28 @@ def make_progress_callbacks(
     stop_buttons = running_button_specs(inst.id)
 
     async def _edit(text: str, buttons=None, *, footer=None, severity=None):
-        # Skip no-op edits only when text/footer/severity/buttons all match.
+        # Skip an edit that would change nothing on the card. Buttons are part
+        # of the comparison (ButtonSpec is a dataclass, so == is by value):
+        # every caller passes them, and treating "has buttons" as "always
+        # changed" sent a real PATCH on every heartbeat.
         if (
             text == last_text[0]
             and footer == last_footer[0]
             and severity == last_severity[0]
-            and not buttons
+            and buttons == last_buttons[0]
         ):
             return
-        last_text[0] = text
-        last_footer[0] = footer
-        last_severity[0] = severity
         try:
             await ctx.messenger.edit_thinking(
                 handle, text, buttons, footer=footer, severity=severity,
             )
         except Exception:
-            pass
+            # Not recorded as sent, so the next identical edit retries it.
+            return
+        last_text[0] = text
+        last_footer[0] = footer
+        last_severity[0] = severity
+        last_buttons[0] = buttons
 
     async def _maybe_pin_warning() -> None:
         """Fire once per session when context first crosses 95%."""
