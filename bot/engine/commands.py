@@ -36,6 +36,7 @@ from bot.platform.formatting import (
     action_button_specs,
     collapse_bot_directives,
     expanded_button_specs,
+    format_elapsed,
     format_expanded_result_chunks,
     format_instance_list_md,
     format_result_md,
@@ -1389,11 +1390,7 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
             heartbeat_task.cancel()
 
         # Update thinking message to show completion
-        elapsed = asyncio.get_event_loop().time() - start_time
-        if elapsed >= 60:
-            elapsed_str = f"{elapsed / 60:.1f}m"
-        else:
-            elapsed_str = f"{elapsed:.0f}s"
+        elapsed_str = format_elapsed(asyncio.get_event_loop().time() - start_time)
         icon = "✅" if not result.is_error else "❌"
         try:
             await ctx.messenger.edit_thinking(
