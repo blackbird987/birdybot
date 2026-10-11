@@ -180,8 +180,12 @@ def _check_adoption_offpath(failures: list[str]) -> None:
     whole budget in front of every session's first byte, which is the
     tempting shape: it is four lines shorter and passes every test.
     """
-    src = Path(__file__).resolve().parents[1] / "bot" / "claude" / "runner.py"
-    tree = ast.parse(src.read_text(encoding="utf-8"))
+    # The runner is a package; scan every module of it as one tree.
+    pkg = Path(__file__).resolve().parents[1] / "bot" / "claude" / "runner"
+    tree = ast.Module(body=[
+        node for src in sorted(pkg.glob("*.py"))
+        for node in ast.parse(src.read_text(encoding="utf-8")).body
+    ], type_ignores=[])
     for fn in ast.walk(tree):
         if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
@@ -309,8 +313,12 @@ async def _check_unique_unit_per_spawn(failures: list[str]) -> None:
     # syntax: the spawn function's wrap_command(unit=X) and the
     # _adopt_session_scope(..., X) it schedules must name the same variable,
     # and _adopt_session_scope must pass its unit on to adopt_session.
-    src = Path(__file__).resolve().parents[1] / "bot" / "claude" / "runner.py"
-    tree = ast.parse(src.read_text(encoding="utf-8"))
+    # The runner is a package; scan every module of it as one tree.
+    pkg = Path(__file__).resolve().parents[1] / "bot" / "claude" / "runner"
+    tree = ast.Module(body=[
+        node for src in sorted(pkg.glob("*.py"))
+        for node in ast.parse(src.read_text(encoding="utf-8")).body
+    ], type_ignores=[])
     wrap_units: set[str] = set()
     adopt_units: set[str] = set()
     forwards_unit = False

@@ -62,6 +62,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bot import config
 from bot.claude import cgroups
 from bot.claude import runner as runner_mod
+from bot.claude.runner import accounts as runner_accounts
+from bot.claude.runner import reaping as runner_reaping
 from bot.claude.parser import is_account_agnostic_error
 from bot.claude.runner import ClaudeRunner
 from bot.claude.types import Instance, InstanceStatus, InstanceType, RunResult
@@ -172,13 +174,13 @@ class _Harness:
         saved = {
             "accounts": list(config.CLAUDE_ACCOUNTS),
             "spawn": asyncio.create_subprocess_exec,
-            "unusable": runner_mod.unusable_reason,
+            "unusable": runner_accounts.unusable_reason,
             "supported": cgroups._scope_supported,
             "ensure": cgroups.ensure_scope_support,
             "evidence": cgroups.oom_kill_evidence,
         }
         config.CLAUDE_ACCOUNTS[:] = list(self.accounts)
-        runner_mod.unusable_reason = lambda acct: None  # type: ignore[assignment]
+        runner_accounts.unusable_reason = lambda acct: None  # type: ignore[assignment]
         cgroups._scope_supported = self.scoped
 
         async def _ensure():
@@ -253,7 +255,7 @@ class _Harness:
         finally:
             runner._active_tasks.discard(instance.id)
             asyncio.create_subprocess_exec = saved["spawn"]  # type: ignore[assignment]
-            runner_mod.unusable_reason = saved["unusable"]  # type: ignore[assignment]
+            runner_accounts.unusable_reason = saved["unusable"]  # type: ignore[assignment]
             cgroups._scope_supported = saved["supported"]
             cgroups.ensure_scope_support = saved["ensure"]  # type: ignore[assignment]
             cgroups.oom_kill_evidence = saved["evidence"]  # type: ignore[assignment]
@@ -428,8 +430,8 @@ async def _case_uncorroborated(tmp: str, failures: list[str]) -> None:
 
 
 async def _case_sigterm_needs_journal(tmp: str, failures: list[str]) -> None:
-    saved = runner_mod._OOM_JOURNAL_LAG_SECS
-    runner_mod._OOM_JOURNAL_LAG_SECS = 0
+    saved = runner_reaping._OOM_JOURNAL_LAG_SECS
+    runner_reaping._OOM_JOURNAL_LAG_SECS = 0
     try:
         for rc in (143, -15):
             h = _Harness(
@@ -461,7 +463,7 @@ async def _case_sigterm_needs_journal(tmp: str, failures: list[str]) -> None:
                     "times, want 2 (once more after the ingestion lag)"
                 )
     finally:
-        runner_mod._OOM_JOURNAL_LAG_SECS = saved
+        runner_reaping._OOM_JOURNAL_LAG_SECS = saved
 
 
 async def _case_kill_during_hold(tmp: str, failures: list[str]) -> None:
@@ -632,8 +634,12 @@ def _case_bot_sigkills_are_marked(failures: list[str]) -> None:
     turn that had finished. Asserted on the source because the harness stubs
     _stream_output, where the reap lives.
     """
-    src = Path(__file__).resolve().parents[1] / "bot" / "claude" / "runner.py"
-    tree = ast.parse(src.read_text(encoding="utf-8"))
+    # The runner is a package; scan every module of it as one tree.
+    pkg = Path(__file__).resolve().parents[1] / "bot" / "claude" / "runner"
+    tree = ast.Module(body=[
+        node for src in sorted(pkg.glob("*.py"))
+        for node in ast.parse(src.read_text(encoding="utf-8")).body
+    ], type_ignores=[])
     found = 0
     for fn in ast.walk(tree):
         if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):

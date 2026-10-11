@@ -75,7 +75,7 @@ async def main() -> int:
         target = proton / "projects" / encoded_worktree / f"{SID}.jsonl"
         assert not target.exists(), "target should be missing pre-hydrate"
 
-        with patch("bot.claude.runner.config.CLAUDE_ACCOUNTS",
+        with patch("bot.config.CLAUDE_ACCOUNTS",
                    [str(proton), str(klerk)]):
             ok = await runner._hydrate_session_for_account(
                 str(proton), str(worktree), SID, instance,

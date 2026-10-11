@@ -726,7 +726,7 @@ EXPLORE_MODEL: str | None = os.getenv("EXPLORE_MODEL")
 # as the LAST fallback at command-build time (provider.build_command) so
 # DIRECT sessions get it too — and a model-limit failover downgrade
 # (model_override) always beats it, so it can never undo an explicit
-# downgrade. _is_primary_model in runner.py resolves None through this value
+# downgrade. _is_primary_model in runner/core.py resolves None through this value
 # so the Fable-limit machinery doesn't misread an Opus-defaulted run as Fable.
 DEFAULT_SESSION_MODEL: str | None = os.getenv("DEFAULT_SESSION_MODEL") or None
 

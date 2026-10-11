@@ -100,6 +100,7 @@ from bot import config
 from bot.claude import cgroups
 from bot.claude import memory
 from bot.claude import runner as runner_mod
+from bot.claude.runner import accounts as runner_accounts
 from bot.claude.runner import ClaudeRunner
 from bot.claude.types import Instance, InstanceStatus, InstanceType, RunResult
 
@@ -1082,9 +1083,9 @@ class _Harness:
     async def run(self, *, session_id: str | None = None) -> tuple[RunResult, Instance]:
         saved_accounts = list(config.CLAUDE_ACCOUNTS)
         saved_spawn = asyncio.create_subprocess_exec
-        saved_unusable = runner_mod.unusable_reason
+        saved_unusable = runner_accounts.unusable_reason
         config.CLAUDE_ACCOUNTS[:] = [self.account]
-        runner_mod.unusable_reason = lambda acct: None  # type: ignore[assignment]
+        runner_accounts.unusable_reason = lambda acct: None  # type: ignore[assignment]
 
         async def fake_spawn(*args, **kwargs):
             self.spawn_argvs.append(list(args))
@@ -1125,7 +1126,7 @@ class _Harness:
         finally:
             runner._active_tasks.discard(instance.id)
             asyncio.create_subprocess_exec = saved_spawn  # type: ignore[assignment]
-            runner_mod.unusable_reason = saved_unusable  # type: ignore[assignment]
+            runner_accounts.unusable_reason = saved_unusable  # type: ignore[assignment]
             config.CLAUDE_ACCOUNTS[:] = saved_accounts
         return result, instance
 

@@ -1607,7 +1607,7 @@ class StateStore:
         in on_text so Claude doesn't reinterpret it as a fresh task.
 
         ``failure_kind`` is one of the ``MERGE_FAIL_*`` constants in
-        ``bot/claude/runner.py``. When supplied, the platform layer can
+        ``bot/claude/runner/git_merge.py``. When supplied, the platform layer can
         render a more accurate banner (e.g. orphaned-index recovery
         guidance vs a generic conflict resolver). ``None`` means
         "unclassified" and callers fall back to the generic banner copy.

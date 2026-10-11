@@ -90,7 +90,7 @@ commits actually contain, and `git check-ignore -v <path>` on anything missing.
 
 ## 6. Locks — don't fight them, don't bypass them
 
-- **Per-repo git-admin lock** (asyncio, in `bot/claude/runner.py`): serializes
+- **Per-repo git-admin lock** (asyncio, `_get_repo_lock` in `bot/claude/runner/core.py`): serializes
   worktree add/remove, merge, branch delete per repo. If a git admin operation
   seems hung, another session's merge is probably in flight — check bot.log.
 - **Per-repo test-suite mutex** (`{repo}/.worktrees/.test-mutex/`): full test

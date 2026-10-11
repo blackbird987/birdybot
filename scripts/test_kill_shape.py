@@ -24,7 +24,7 @@ The second line of that log is the sharper edge. A killed run has no output and
 no completed turns, which is byte-for-byte the signature the account-failover
 branch uses for "this account fell over instantly" — so on a two-account setup
 a killed session would have been silently restarted on the backup account. The
-guard that prevents exactly that (``runner.py``: ``if result.killed_intentionally:
+guard that prevents exactly that (``runner/core.py``: ``if result.killed_intentionally:
 return result``) keys off the same dead boolean.
 
 Asserted here:

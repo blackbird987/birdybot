@@ -742,7 +742,7 @@ def merge_failed_button_specs(instance_id: str) -> list[list[ButtonSpec]]:
 def merge_failed_banner(failure_kind: str | None) -> str:
     """Compose the user-facing banner for a failed auto-merge.
 
-    Branches on the ``MERGE_FAIL_*`` taxonomy from ``bot/claude/runner.py``
+    Branches on the ``MERGE_FAIL_*`` taxonomy from ``bot/claude/runner/git_merge.py``
     (kept as string constants so this module can stay platform-agnostic
     without importing runner). Empty / unknown kinds fall back to the
     generic conflict copy — same as before the t-4114 work landed.

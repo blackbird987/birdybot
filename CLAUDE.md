@@ -15,6 +15,7 @@ python -m bot          # start the bot
 - **Log file**: `data/logs/bot.log`
 - **State**: `data/state.json`
 - **Engine** (platform-agnostic): `bot/engine/commands.py`, `lifecycle.py`, `workflows.py`, `sessions.py`, `eval.py`, `report.py`
+- **Runner** (`bot/claude/runner/`, a package of mixins): `core.py` (ClaudeRunner: spawn, stream, recovery, kills), `accounts.py`, `admission.py`, `prompt_build.py`, `session_files.py`, `worktrees.py`, `git_merge.py`, `git_release.py`, `reaping.py`, `common.py`. `__init__.py` only re-exports, so patch a name in the module that reads it, never on the package (`scripts/test_runner_package.py` fails a blind patch)
 - **Platform layer**: `bot/platform/base.py` (Messenger protocol), `bot/platform/formatting.py`
 - **Discord**: `bot/discord/bot.py` (orchestrator), `slash_commands.py`, `interactions.py`, `adapter.py`, `channels.py`, `forums.py`, `idle.py`, `tags.py`, `modals.py`, `monitoring.py`, `formatter.py`
 

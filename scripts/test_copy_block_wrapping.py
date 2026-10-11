@@ -161,8 +161,9 @@ check("it says why (the paste carries the newlines)",
       "bakes real newlines" in block)
 check("it names the one legitimate newline", "part of the content" in block)
 # The rule is worthless if the assembler stops handing the block to sessions.
-runner_src = (Path(__file__).resolve().parent.parent
-              / "bot" / "claude" / "runner.py").read_text(encoding="utf-8")
+runner_src = "".join(
+    src.read_text(encoding="utf-8")
+    for src in (Path(__file__).resolve().parent.parent / "bot" / "claude" / "runner").glob("*.py"))
 check("the prompt assembler still appends WORKING_CONTEXT",
       "parts.append(config.WORKING_CONTEXT)" in runner_src)
 
