@@ -1240,13 +1240,6 @@ def format_expanded_result_chunks(
     return chunks
 
 
-def format_expanded_result_md(instance: Instance, result_text: str, budget: int = 3900) -> str:
-    """First screen of the expanded result (compat wrapper)."""
-    return format_expanded_result_chunks(
-        instance, result_text, first_budget=budget, max_chunks=1,
-    )[0]
-
-
 def format_instance_list_md(instances: list[Instance]) -> str:
     """Format instance list with status indicators (markdown)."""
     if not instances:

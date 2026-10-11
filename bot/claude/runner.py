@@ -4684,8 +4684,7 @@ class ClaudeRunner:
 
         if result.is_error:
             # Log raw events for debugging
-            import json as _json
-            event_dump = _json.dumps(events[-5:], default=str)[:1000] if events else "no events"
+            event_dump = _json_mod.dumps(events[-5:], default=str)[:1000] if events else "no events"
             log.warning(
                 "CLI error for %s (exit=%s): %s | stderr: %s | last events: %s",
                 instance.id, proc.returncode,

@@ -1105,26 +1105,6 @@ async def on_text(ctx: RequestContext, text: str) -> None:
         await _execute_query(ctx, text)
 
 
-async def on_unknown_command(ctx: RequestContext, text: str) -> None:
-    """Handle unregistered /commands — check aliases first."""
-    # TODO: alias $N substitution — see note above on_alias.
-    alias_match = re.match(r'^/(\w+)(?:\s+(.*))?$', text, re.DOTALL)
-    if alias_match:
-        alias_name = alias_match.group(1)
-        alias_prompt = ctx.store.get_alias(alias_name)
-        if alias_prompt:
-            extra = alias_match.group(2) or ""
-            prompt = f"{alias_prompt} {extra}".strip() if extra else alias_prompt
-            await _run_query(ctx, prompt)
-            return
-
-    escaped = ctx.messenger.escape(text.split()[0])
-    await ctx.messenger.send_text(
-        ctx.channel_id,
-        f"Unknown command: {escaped}\nUse /help for available commands, or /alias list for aliases.",
-    )
-
-
 async def _run_query(ctx: RequestContext, prompt: str) -> None:
     lock = _get_channel_lock(ctx.channel_id)
     pending = await _enqueue_with_pending_ui(ctx, prompt)
@@ -1491,10 +1471,9 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
         # just queues (no waiting) — the actual reboot fires from end_task.
         await lifecycle.check_reboot_request(ctx)
         # Self-wake: schedule a thread-bound resume if this turn emitted a
-        # [BOT_CMD: /wake] directive (or wrote the legacy wake file); else reset
-        # the runaway counter. Pass the raw result text so the directive can be
-        # parsed and a "I'll keep watching the job" promise with no request can
-        # auto-arm a fallback re-check instead of silently stalling.
+        # [BOT_CMD: /wake] or /watch directive; else reset the runaway counter.
+        # The raw result text is passed so the directive can be parsed, and so
+        # a promise to report back with nothing armed can be nudged once.
         await lifecycle.check_wake_request(ctx, inst, final_text=result.result_text)
     except asyncio.CancelledError:
         # Shutdown cancelled the turn. A finished run is recorded with its real
@@ -2647,9 +2626,8 @@ async def on_context(ctx: RequestContext, text: str) -> None:
 
 # --- /alias ---
 # TODO: deferred — positional var substitution ($1 $2 $N, $$ for literal $).
-# Expansion happens at on_unknown_command (~line 285) and on_bg (~line 545).
-# Both sites currently do `f"{alias_prompt} {extra}".strip()` — swap for a
-# shared _expand_alias(template, extra) helper. Missing args = error; extra
+# Expansion happens in on_bg, which does `f"{alias_prompt} {extra}".strip()`;
+# swap that for an _expand_alias(template, extra) helper. Missing args = error; extra
 # args append (keeps current non-placeholder aliases working unchanged).
 # See TODO.md → Features for full design. Not built because user doesn't use /alias.
 
@@ -4013,9 +3991,6 @@ async def handle_callback(
 
     elif action == "new":
         await on_new(ctx)
-
-    elif action == "log":
-        await on_log(ctx, instance_id)
 
     elif action == "expand":
         inst = ctx.store.get_instance(instance_id)

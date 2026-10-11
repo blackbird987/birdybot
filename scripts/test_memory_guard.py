@@ -736,44 +736,18 @@ def _check_runtime_readings(failures: list[str]) -> None:
 
     # cgroup_memory() always returns a record; it is the *fields* that can be
     # missing, so that is what has to be checked. If there is a cgroup v2 path
-    # to read at all, the anon figure has to come back -- headroom_mb() is built
-    # on it and answers None without it.
+    # to read at all, the anon figure has to come back: the guard's own log
+    # line and the over-high comparison are built on it.
     cg = memory.cgroup_memory()
     if memory._own_cgroup_path() is not None and cg.anon_mb is None:
         failures.append(
             "this process has a cgroup v2 path but no anonymous-memory figure "
-            "was read from it, so headroom_mb() can never answer"
+            "was read from it"
         )
     for field in ("anon_mb", "file_mb", "max_mb"):
         val = getattr(cg, field)
         if val is not None and val < 0:
             failures.append(f"cgroup {field} read as negative: {val}")
-    if cg.max_mb:
-        if cg.headroom_mb() is None:
-            failures.append("a cgroup with a limit reported no headroom figure")
-
-    # Headroom against synthetic values, because the two answers that matter are
-    # both edges the live machine will not be sitting on. "No limit" has to come
-    # back as None rather than as a number, since every caller reads None as
-    # "unbounded" and a 0 would read as "out of room right now"; and a cgroup
-    # already over its cap has to clamp at zero rather than going negative,
-    # which would format as a negative gigabyte figure in a message.
-    if memory.CgroupMemory(anon_mb=8000.0, max_mb=None).headroom_mb() is not None:
-        failures.append(
-            "headroom_mb() answered a number for a cgroup with no limit; "
-            "callers read that as 'this much left' rather than 'unbounded'"
-        )
-    if memory.CgroupMemory(anon_mb=None, max_mb=16384.0).headroom_mb() is not None:
-        failures.append(
-            "headroom_mb() answered without an anonymous-memory reading, so it "
-            "invented a figure it has no basis for"
-        )
-    over = memory.CgroupMemory(anon_mb=17000.0, max_mb=16384.0).headroom_mb()
-    if over != 0.0:
-        failures.append(
-            f"a cgroup over its own cap reported {over} MB of headroom instead "
-            "of zero"
-        )
 
 
 def _installed_unit_settings() -> dict[str, str] | None:
@@ -1490,7 +1464,7 @@ def _check_pressure_classifier(failures: list[str]) -> None:
     if blind.human() != "memory looks fine" and blind.reasons:
         failures.append("a blind read invented evidence it does not have")
 
-    # Ordering helper, used by every at_least() gate.
+    # Ordering helper, used by every pressure gate.
     if not memory.pressure_at_least(memory.PRESSURE_CRITICAL, memory.PRESSURE_TIGHT):
         failures.append("critical did not satisfy an at-least-tight test")
     if memory.pressure_at_least(memory.PRESSURE_TIGHT, memory.PRESSURE_CRITICAL):

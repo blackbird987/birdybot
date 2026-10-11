@@ -674,7 +674,7 @@ class ClaudeBot(discord.Client):
                 ctx.bash_policy = access_result.bash_policy
             if not access_result.is_owner and access_result.max_daily_queries > 0:
                 ctx.max_daily_queries = access_result.max_daily_queries
-                def _make_rate_callbacks(uid, rn, max_q):
+                def _make_rate_callbacks(uid, max_q):
                     def _check():
                         from bot.discord.access import load_access_config, check_rate_limit
                         return check_rate_limit(load_access_config(), uid, max_q)
@@ -683,7 +683,7 @@ class ClaudeBot(discord.Client):
                         increment_query_count(load_access_config(), uid)
                     return _check, _increment
                 ctx.check_rate_limit, ctx.increment_query_count = _make_rate_callbacks(
-                    ctx.user_id or "", ctx.repo_name, access_result.max_daily_queries,
+                    ctx.user_id or "", access_result.max_daily_queries,
                 )
         # Wire up merged-tag callback (covers all ctx creation paths)
         _cid = channel_id

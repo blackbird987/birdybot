@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from collections import Counter
 
 from bot.engine.eval import (
@@ -10,7 +9,6 @@ from bot.engine.eval import (
     load_chain_evals, load_evals, normalise_flag_message,
 )
 
-log = logging.getLogger(__name__)
 
 
 def full_report(days: int = 7) -> str:

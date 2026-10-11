@@ -323,17 +323,6 @@ class CgroupMemory:
     # gap rather than that counter — but nothing in the bot had read either.
     high_mb: float | None = None
 
-    def headroom_mb(self) -> float | None:
-        """MB of anonymous memory left before MemoryMax, or None if unlimited.
-
-        Measured against anon only. Page cache counts toward the limit too, but
-        crossing the limit on cache triggers reclaim rather than a kill, so
-        counting it here would report a crisis during ordinary repo reads.
-        """
-        if self.max_mb is None or self.anon_mb is None:
-            return None
-        return max(0.0, self.max_mb - self.anon_mb)
-
 
 def cgroup_memory(cgroup: Path | None = None) -> CgroupMemory:
     """Read a cgroup's memory accounting. All fields None off Linux.
@@ -745,9 +734,6 @@ class MemoryPressure:
 
     def is_critical(self) -> bool:
         return self.level == PRESSURE_CRITICAL
-
-    def at_least(self, floor: str) -> bool:
-        return pressure_at_least(self.level, floor)
 
     def over_own_high(self) -> bool:
         """True when the cgroup our work runs in is past its MemoryHigh watermark.

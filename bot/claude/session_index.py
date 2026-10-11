@@ -74,20 +74,6 @@ def claude_projects_dirs() -> list[Path]:
     return config.claude_projects_dirs()
 
 
-def cwd_to_project_dir_name(cwd: str) -> str:
-    """Convert a working dir to Claude's project-dir naming convention.
-
-    `C:\\Users\\foo\\bar`           → `C--Users-foo-bar`
-    `C:\\foo\\.worktrees\\t-1`      → `C--foo--worktrees-t-1`
-
-    Delegates to the one shared encoder so the runner, the JSONL forker, the
-    session scanner and this index rebuilder can never disagree about where a
-    project's sessions live.
-    """
-    from bot.engine.session_fork import encode_project_path
-    return encode_project_path(cwd)
-
-
 def extract_session_metadata(jsonl_path: Path) -> dict | None:
     """Parse a session JSONL and extract fields needed for an index entry.
 
@@ -186,7 +172,7 @@ def extract_session_metadata(jsonl_path: Path) -> dict | None:
 
 
 def _project_dir_to_original_path(dir_name: str) -> str:
-    """Best-effort reverse of :func:`cwd_to_project_dir_name`.
+    """Best-effort reverse of :func:`bot.engine.session_fork.encode_project_path`.
 
     Windows drive form: `C--Users-Quincy-...` → `C:\\Users\\Quincy\\...`
     POSIX form:         `-home-quincy-...`    → `/home/quincy/...`

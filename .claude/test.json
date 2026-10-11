@@ -94,7 +94,7 @@
     "copy_block_wrapping": "python scripts/test_copy_block_wrapping.py",
     "repo_desc": "python scripts/test_repo_desc.py",
     "chain_meta": "python scripts/verify_chain_meta.py",
-    "session_picker_filter": "python scripts/verify_t3559.py",
+    "session_picker_filter": "python scripts/test_session_picker_filter.py",
     "access_scoping": "python scripts/test_access_scoping.py",
     "ai_title": "python scripts/test_ai_title.py",
     "branch_scan": "python scripts/test_branch_scan.py",

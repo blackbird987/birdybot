@@ -1751,11 +1751,11 @@ _PROMISE_NUDGE_PROMPT = (
 )
 
 
-# --- [BOT_CMD: /wake] directive (primary self-wake channel) ----------------
+# --- [BOT_CMD: /wake] directive (the self-wake channel) --------------------
 # A finished turn schedules a self-wake by emitting this directive in its
 # output, parsed here post-turn — the same proven mechanism as [BOT_CMD: /spawn]
 # (a separate parser, mirroring its kv + quoted-line-skip approach), and
-# strictly more reliable than the legacy data/wakes/<id>.json file: the
+# strictly more reliable than the data/wakes/<id>.json file it replaced: the
 # directive IS the action (text in the response), so the model can't narrate
 # "self-wake queued" while skipping a separate file-write tool call.
 _WAKE_DIRECTIVE_RE = re.compile(r"\[BOT_CMD:\s*/wake(?:\s+(.+?))?\s*\]")
@@ -1841,14 +1841,12 @@ async def check_wake_request(
 ) -> None:
     """Schedule a thread-bound self-wake requested by the just-finished turn.
 
-    Primary channel: a ``[BOT_CMD: /wake ...]`` directive in the turn's output
-    (parsed by ``_parse_wake_directive``). Legacy channel: a
-    ``data/wakes/<instance_id>.json`` file (still honored so a session running
-    on cached older guidance isn't dropped). Either is converted into a
-    one-shot, thread-bound Schedule that the Scheduler later fires via
+    The channel is a ``[BOT_CMD: /wake ...]`` directive in the turn's output
+    (parsed by ``_parse_wake_directive``), converted into a one-shot,
+    thread-bound Schedule that the Scheduler later fires via
     ``_replay_to_thread``.
 
-    Neither present ⇒ the turn ended without asking to poll, so reset the
+    None present ⇒ the turn ended without asking to poll, so reset the
     runaway counter and stop. An explicit parsed request is the ONLY way this
     function schedules anything: heuristic auto-arming (off watch-promise or
     wake-claim phrases in ``final_text``) was removed after it repeatedly
@@ -1861,8 +1859,6 @@ async def check_wake_request(
     self-wake — their dir may be merged/discarded by fire time — so they're
     refused with a note (parity with the runner gate).
     """
-    path = config.WAKE_DIR / f"{instance.id}.json"
-
     async def _notice(text: str) -> None:
         try:
             await ctx.messenger.send_text(ctx.channel_id, text, silent=True)
@@ -2051,7 +2047,6 @@ async def check_wake_request(
         # against a half-finished run.
         ctx.store.cancel_wakes(ctx.channel_id)
         ctx.store.add_watch(watch)
-        path.unlink(missing_ok=True)   # a stale legacy wake file is superseded too
         label = watch.label or (f"pid {watch.pid}" if watch.pid else "that job")
         if watch.pid_dead_at_arm:
             msg = (f"⏳ Watching **{label}** — heads up, pid {watch.pid} is "
@@ -2081,29 +2076,7 @@ async def check_wake_request(
             "being watched.)"
         )
 
-    # Resolve the wake request: a [BOT_CMD: /wake] directive (primary) takes
-    # precedence over the legacy data/wakes/<id>.json file (kept so a session on
-    # cached older guidance still works). A directive supersedes any stale file
-    # left from an earlier turn.
     data = _parse_wake_directive(final_text)
-    if data is not None:
-        path.unlink(missing_ok=True)
-    elif path.exists():
-        try:
-            raw = path.read_text(encoding="utf-8")
-        except Exception:
-            log.warning("Failed to read wake request %s", path, exc_info=True)
-            path.unlink(missing_ok=True)
-            return
-        # Delete immediately so a crash/restart can't double-process it.
-        path.unlink(missing_ok=True)
-        try:
-            parsed = json.loads(raw)
-        except Exception:
-            log.warning("Malformed wake request, ignoring", exc_info=True)
-            return
-        if isinstance(parsed, dict):
-            data = parsed
 
     if data is None:
         # No wake scheduled this turn. For an UNATTENDED turn (cooldown retry or

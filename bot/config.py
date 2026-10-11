@@ -1252,11 +1252,6 @@ PENDING_IMAGES_MIN_AGE_SECS: int = int(
     os.getenv("PENDING_IMAGES_MIN_AGE_SECS", "900")
 )
 PENDING_IMAGES_SWEEP_SECS: int = int(os.getenv("PENDING_IMAGES_SWEEP_SECS", "3600"))
-# Self-wake: an inner session writes data/wakes/<instance_id>.json to have the
-# bot re-invoke it in the same thread after a delay (see WAKE_GUIDANCE). Per
-# instance-id so concurrent sessions never clobber a shared file, and absolute
-# so it works regardless of the session's cwd (worktree builds run elsewhere).
-WAKE_DIR: Path = DATA_DIR / "wakes"
 # Self-wake delay clamp and runaway cap.
 #
 # The ceiling was 24h until 2026-09-08 and that was the only thing stopping a
@@ -1487,7 +1482,6 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 PENDING_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-WAKE_DIR.mkdir(parents=True, exist_ok=True)
 
 # System prompt appended via --append-system-prompt
 MOBILE_HINT = (
@@ -2700,7 +2694,6 @@ DONE_PROMPT_STANDALONE = (
 )
 
 # Backward-compat alias used by /done and any non-chain caller.
-DONE_PROMPT = DONE_PROMPT_STANDALONE
 
 DONE_PROMPT_CHAIN = (
     'Wrap up this build step (autopilot chain). Do NOT cut a release or '
