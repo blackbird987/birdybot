@@ -31,10 +31,9 @@ What it pins:
      records, no file, corrupt file) come up with defaults instead of
      crashing.
 
-One check is named after the change that will edit it, so that change
-updates exactly one check:
-
-  * `platform_state.discord.orch_resume_payloads` (will be pruned)
+`platform_state.discord.orch_resume_payloads` is persisted verbatim here;
+its age limit (fix S2) is enforced by the orchestrator's sweep, not by the
+store, and is covered in test_orchestrator_join.py.
 
 `instance.bash_commands` is no longer persisted (fix S1): nothing had read
 it since 03531d9 and it was 27% of the live file. A legacy file that still
@@ -477,9 +476,7 @@ def _check_fixture_state() -> None:
         _eq(f"key {key!r} survives load then save unchanged",
             saved.get(key), fixture[key])
 
-    # The one named for the change that is about to edit it.
-    _eq("platform_state.discord.orch_resume_payloads is persisted today "
-        "(will be pruned)",
+    _eq("platform_state.discord.orch_resume_payloads is persisted verbatim",
         saved["platform_state"]["discord"].get("orch_resume_payloads"),
         {"tok-1": "resume prompt one", "tok-2": "resume prompt two"})
 
@@ -752,8 +749,7 @@ def _check_api_populated() -> None:
 
     _check("instance.bash_commands is not persisted (S1)",
            "bash_commands" not in saved["instances"][0])
-    _eq("platform_state.discord.orch_resume_payloads is persisted today "
-        "(will be pruned)",
+    _eq("platform_state.discord.orch_resume_payloads is persisted verbatim",
         saved["platform_state"]["discord"].get("orch_resume_payloads"),
         {"tok-1": "resume prompt one"})
 

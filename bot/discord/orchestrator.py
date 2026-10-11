@@ -69,6 +69,13 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 _PAYLOAD_KEY = "orch_resume_payloads"
+# A parked resume prompt is only reachable through the button that carries its
+# token, and nothing else removes one, so without an age limit the store only
+# ever grew (949 entries, 590 KB of state.json, when this was added). A week is
+# well past the 12h wave horizon: a "Resume parent" button left overnight or
+# over a weekend still works, and the tap after that gets the existing
+# "expired" notice.
+_PAYLOAD_RETENTION_DAYS = 7
 # Excerpt shown inline per child, in the human-facing post AND in the parent's
 # resume prompt. Deliberately small: the full report is a file path away, and
 # padding the prompt with prose the parent may not need is what the old
@@ -143,7 +150,8 @@ def store_resume_payload(bot: ClaudeBot, prompt: str) -> str:
     """Persist a resume prompt and return a short opaque token."""
     token = secrets.token_urlsafe(8)
     payloads = _get_payloads(bot)
-    payloads[token] = prompt
+    payloads[token] = {"prompt": prompt,
+                       "at": datetime.now(timezone.utc).isoformat()}
     bot._store.save()
     return token
 
@@ -151,10 +159,44 @@ def store_resume_payload(bot: ClaudeBot, prompt: str) -> str:
 def pop_resume_payload(bot: ClaudeBot, token: str) -> str | None:
     """Look up and consume a resume prompt by token."""
     payloads = _get_payloads(bot)
-    prompt = payloads.pop(token, None)
-    if prompt is not None:
-        bot._store.save()
-    return prompt
+    entry = payloads.pop(token, None)
+    if entry is None:
+        return None
+    bot._store.save()
+    # Entries written before the age limit are the bare prompt string.
+    return entry.get("prompt") if isinstance(entry, dict) else entry
+
+
+def prune_resume_payloads(bot: ClaudeBot, now: datetime | None = None) -> int:
+    """Drop parked resume prompts older than the retention. Returns count dropped.
+
+    An entry written before entries carried a timestamp is stamped with *now*
+    instead of being dropped: its button may have been posted an hour ago, and
+    stamping gives it the full retention from the first sweep that sees it.
+    """
+    now = now or datetime.now(timezone.utc)
+    payloads = _get_payloads(bot)
+    cutoff = now - timedelta(days=_PAYLOAD_RETENTION_DAYS)
+    changed = dropped = 0
+    for token, entry in list(payloads.items()):
+        if not isinstance(entry, dict):
+            payloads[token] = {"prompt": entry, "at": now.isoformat()}
+            changed += 1
+            continue
+        try:
+            at = datetime.fromisoformat(entry.get("at", ""))
+        except (TypeError, ValueError):
+            at = None
+        if at is None or at.tzinfo is None:
+            entry["at"] = now.isoformat()
+            changed += 1
+        elif at < cutoff:
+            del payloads[token]
+            dropped += 1
+    if changed or dropped:
+        # The sweep runs every five minutes; a deferred write is plenty.
+        bot._store.mark_dirty()
+    return dropped
 
 
 # --- Derived child + wave state ---------------------------------------------
@@ -851,6 +893,9 @@ async def sweep_stale_waves(bot: ClaudeBot) -> int:
     parent open forever, which is strictly worse than the per-child callbacks
     this replaced.
     """
+    dropped = prune_resume_payloads(bot)
+    if dropped:
+        log.info("orchestrator: pruned %d expired resume payload(s)", dropped)
     released = 0
     # Unsealed waves are included on purpose: a bot that died mid-dispatch
     # leaves a roster that will never be sealed, and skipping those here would

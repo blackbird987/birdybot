@@ -131,6 +131,9 @@ class FakeStore:
     def save(self):
         self.saved += 1
 
+    def mark_dirty(self):
+        self.dirty = True
+
 
 class FakeMessenger:
     def __init__(self):
@@ -356,7 +359,7 @@ def test_timeout_sweep() -> None:
            "partial release offers a Resume button instead of auto-resuming")
     _check(not bot.resumes,
            "partial release does NOT auto-resume — proceeding without a child is a human call")
-    resume_prompt = list(bot._store._platform["discord"]["orch_resume_payloads"].values())[0]
+    resume_prompt = list(bot._store._platform["discord"]["orch_resume_payloads"].values())[0]["prompt"]
     _check("never reported back" in resume_prompt,
            "the parent is told which children contributed nothing")
 
@@ -784,6 +787,43 @@ def test_late_child_report() -> None:
            "nobody is woken days later for a wave everyone has forgotten")
 
 
+def test_resume_payload_retention() -> None:
+    """Parked resume prompts expire by age instead of piling up forever (S2)."""
+    print("\n-- resume payload retention --")
+    now = datetime.now(timezone.utc)
+    bot = FakeBot({}, [])
+    fresh = orch.store_resume_payload(bot, "fresh prompt")
+    payloads = bot._store._platform["discord"]["orch_resume_payloads"]
+    payloads["old"] = {"prompt": "old prompt",
+                       "at": (now - timedelta(days=orch._PAYLOAD_RETENTION_DAYS, hours=1)).isoformat()}
+    payloads["legacy"] = "legacy prompt"  # written before entries had a timestamp
+    payloads["naive"] = {"prompt": "naive prompt", "at": "2026-01-01T00:00:00"}
+
+    dropped = orch.prune_resume_payloads(bot, now=now)
+    _check(dropped == 1, "prune drops exactly the entry past the retention")
+    _check("old" not in payloads, "the expired entry is gone")
+    _check(fresh in payloads, "an entry inside the retention is kept")
+    _check(payloads.get("legacy") == {"prompt": "legacy prompt", "at": now.isoformat()},
+           "a legacy string entry is stamped now, not dropped")
+    _check(payloads.get("naive", {}).get("at") == now.isoformat(),
+           "an entry with an unreadable timestamp is restamped, not dropped")
+    _check(getattr(bot._store, "dirty", False), "a prune defers its write to the auto-save")
+
+    _check(orch.pop_resume_payload(bot, "legacy") == "legacy prompt",
+           "a stamped legacy entry still pops its prompt")
+    payloads["bare"] = "bare prompt"
+    _check(orch.pop_resume_payload(bot, "bare") == "bare prompt",
+           "an unstamped legacy entry still pops its prompt")
+    _check(orch.pop_resume_payload(bot, fresh) == "fresh prompt",
+           "a new entry pops its prompt")
+    _check(orch.pop_resume_payload(bot, fresh) is None, "a popped entry is consumed")
+
+    # The wave sweep is what runs it.
+    payloads["old2"] = {"prompt": "x", "at": "2000-01-01T00:00:00+00:00"}
+    asyncio.run(_sweep_and_drain(bot))
+    _check("old2" not in payloads, "the stale-wave sweep prunes expired payloads")
+
+
 def main() -> int:
     print("Orchestrator spawn-wave join regression test")
     test_live_child_holds_wave_open()
@@ -800,6 +840,7 @@ def main() -> int:
     test_timeout_sweep()
     test_archived_parent()
     test_reply_directive()
+    test_resume_payload_retention()
     print()
     if _failures:
         print(f"{len(_failures)} FAILURE(S):")
