@@ -10,6 +10,7 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from bot.textutil import parse_iso_utc
 from bot import paths
 from bot.claude.types import (
     ChainPhaseState,
@@ -580,11 +581,8 @@ class StateStore:
             if all_:
                 result.append(inst)
             else:
-                try:
-                    created = datetime.fromisoformat(inst.created_at)
-                    if created > cutoff:
-                        result.append(inst)
-                except (ValueError, TypeError):
+                created = parse_iso_utc(inst.created_at)
+                if created is None or created > cutoff:
                     result.append(inst)
         result.sort(key=lambda i: i.created_at, reverse=True)
         return result
@@ -639,12 +637,9 @@ class StateStore:
         to_remove = []
         for inst in self._instances.values():
             if inst.status in terminal:
-                try:
-                    created = datetime.fromisoformat(inst.created_at)
-                    if created < cutoff:
-                        to_remove.append(inst)
-                except (ValueError, TypeError):
-                    pass
+                created = parse_iso_utc(inst.created_at)
+                if created is not None and created < cutoff:
+                    to_remove.append(inst)
         # Hard cap: of the terminal instances that survived the age pass, keep
         # only the most-recent _max_retained (by created_at); drop the oldest.
         removing = {i.id for i in to_remove}

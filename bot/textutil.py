@@ -13,6 +13,7 @@ function is. A leaf module with no `bot` imports is the only honest home.
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 
 
 def clip(text: str, limit: int) -> str:
@@ -49,6 +50,25 @@ def flatten(value: object) -> str:
     if value is None:
         return ""
     return " ".join(str(value).split())
+
+
+def parse_iso_utc(raw: object) -> datetime | None:
+    """ISO-8601 timestamp -> timezone-aware datetime, or ``None``.
+
+    ``None`` for anything that is not a non-empty string or does not parse,
+    so a caller only ever has one failure to handle. A NAIVE stamp is taken
+    to be UTC: every writer in the bot uses ``datetime.now(timezone.utc)``, but
+    a hand-edited or migrated ``state.json`` can carry a naive one, and
+    comparing that against an aware ``now`` raises ``TypeError`` deep inside
+    whatever loop was reading it. A trailing ``Z`` parses natively on 3.11+.
+    """
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
 # --- Durations -------------------------------------------------------------

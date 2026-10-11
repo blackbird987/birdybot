@@ -23,13 +23,13 @@ import shutil
 import signal
 import subprocess as _sp
 import sys
-import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from bot import config
+from bot.fsutil import atomic_write_json
 
 log = logging.getLogger(__name__)
 
@@ -123,20 +123,7 @@ def _load_limits() -> dict:
 def _save_limits(data: dict) -> None:
     """Atomic save: write to temp then rename (survives crashes)."""
     try:
-        _LIMITS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_path = tempfile.mkstemp(
-            dir=str(_LIMITS_FILE.parent), suffix=".tmp",
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
-            os.replace(tmp_path, _LIMITS_FILE)
-        except BaseException:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
+        atomic_write_json(_LIMITS_FILE, data)
     except Exception:
         log.warning("Failed to save usage limits", exc_info=True)
 

@@ -9,6 +9,7 @@ from typing import Any
 
 import discord
 
+from bot.textutil import parse_iso_utc
 from bot.monitor import fetcher, formatter
 
 log = logging.getLogger(__name__)
@@ -85,13 +86,8 @@ class MonitorService:
         if not last:
             mon["last_failure_alert_at"] = datetime.now(timezone.utc).isoformat()
             return True
-        try:
-            when = datetime.fromisoformat(last)
-        except ValueError:
-            when = None
+        when = parse_iso_utc(last)
         if when is not None:
-            if when.tzinfo is None:
-                when = when.replace(tzinfo=timezone.utc)
             if (datetime.now(timezone.utc) - when).total_seconds() < FAILURE_ALERT_INTERVAL_SECS:
                 return False
         mon["last_failure_alert_at"] = datetime.now(timezone.utc).isoformat()

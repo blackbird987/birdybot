@@ -33,7 +33,7 @@ from bot import config
 from bot.claude.types import Watch
 from bot.platform.base import ButtonSpec
 from bot.platform.formatting import format_delay_secs
-from bot.textutil import find_tilde_block, is_quoted_example, mask_tilde_bodies, parse_duration
+from bot.textutil import find_tilde_block, is_quoted_example, mask_tilde_bodies, parse_duration, parse_iso_utc
 
 if TYPE_CHECKING:
     from bot.platform.base import Messenger
@@ -276,24 +276,8 @@ def parse_progress(tail: str, pattern: str) -> tuple[float, str] | None:
 _BAR_WIDTH = 16
 
 
-def _parse_ts(raw: str) -> datetime | None:
-    """ISO timestamp -> aware UTC datetime, or None.
-
-    Everything this module writes is timezone-aware, but a hand-edited or
-    migrated state file can carry a NAIVE stamp — and subtracting one of those
-    from an aware ``now`` raises TypeError deep inside the fire path, where it
-    would wedge the watch permanently instead of resuming the thread. Assume
-    UTC for a naive stamp rather than letting the arithmetic explode.
-    """
-    try:
-        dt = datetime.fromisoformat(raw)
-    except (TypeError, ValueError):
-        return None
-    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
-
-
 def _elapsed_secs(watch: Watch, now: datetime) -> int:
-    armed = _parse_ts(watch.armed_at)
+    armed = parse_iso_utc(watch.armed_at)
     if armed is None:
         return 0
     try:
@@ -383,7 +367,7 @@ def _fire_reason(watch: Watch, now: datetime) -> str | None:
                 log.debug("watch done regex invalid: %r", watch.done_re)
     if watch.pid and not process_alive(watch.pid, watch.pid_start):
         return "exited"
-    deadline = _parse_ts(watch.timeout_at)
+    deadline = parse_iso_utc(watch.timeout_at)
     if deadline is None or now >= deadline:
         return "timeout"          # unreadable deadline -> don't wait forever
     return None
@@ -498,7 +482,7 @@ async def _beat(
     """Refresh (or first-post) the heartbeat message if it's due."""
     if messenger is None:
         return
-    last = _parse_ts(watch.last_beat_at) if watch.last_beat_at else None
+    last = parse_iso_utc(watch.last_beat_at) if watch.last_beat_at else None
     if last is not None and now < last + timedelta(seconds=watch.every_secs):
         return
     body = render_heartbeat(watch, now)

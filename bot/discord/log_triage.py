@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 
 import discord
 
+from bot.textutil import parse_iso_utc
 from bot import config
 
 if TYPE_CHECKING:
@@ -283,9 +284,8 @@ def _should_mention(discord_state: dict) -> bool:
     last = discord_state.get("log_triage_last_mention_at")
     if not last:
         return True
-    try:
-        last_dt = datetime.fromisoformat(last)
-    except (ValueError, TypeError):
+    last_dt = parse_iso_utc(last)
+    if last_dt is None:
         return True
     return datetime.now(timezone.utc) - last_dt >= timedelta(seconds=_MENTION_COOLDOWN_SECS)
 

@@ -11,6 +11,7 @@ import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+from bot.textutil import parse_iso_utc
 from bot import config, paths
 from bot.procutil import run_capture
 from bot.claude.auth_health import (
@@ -1434,10 +1435,8 @@ async def _autonomy_ship_sweep(store, discord_bot) -> None:
         stamp = (t.inst.finished_at or t.inst.created_at) if t.inst else None
         age_min: float | None = None
         if stamp:
-            try:
-                age_min = (now - dt.fromisoformat(stamp)).total_seconds() / 60
-            except (ValueError, TypeError):
-                age_min = None
+            parsed = parse_iso_utc(stamp)
+            age_min = (now - parsed).total_seconds() / 60 if parsed else None
         if age_min is None or age_min < policy["ship_grace_minutes"]:
             continue
         ship_ids.append(t.thread_id)
@@ -1511,19 +1510,18 @@ async def _resume_interrupted_chains(
 
         # Stale running chains: crash happened too long ago to safely resume.
         if updated_at:
-            try:
-                ts = datetime.fromisoformat(updated_at)
-                if now - ts > stale_chain_ttl:
-                    log.warning(
-                        "Dropping stale running chain for session %s (age %s, steps: %s)",
-                        session_id, now - ts, steps,
-                    )
-                    store.clear_chain_state(session_id)
-                    continue
-            except (ValueError, TypeError):
+            ts = parse_iso_utc(updated_at)
+            if ts is None:
                 log.warning(
                     "Unparseable chain meta updated_at for session %s: %r — clearing",
                     session_id, updated_at,
+                )
+                store.clear_chain_state(session_id)
+                continue
+            if now - ts > stale_chain_ttl:
+                log.warning(
+                    "Dropping stale running chain for session %s (age %s, steps: %s)",
+                    session_id, now - ts, steps,
                 )
                 store.clear_chain_state(session_id)
                 continue

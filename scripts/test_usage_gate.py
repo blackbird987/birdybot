@@ -41,7 +41,7 @@ Methods replaced on the stub by recorders (the gate's outbound seams):
 Bot attributes the gate reads or writes:
   _usage_queue_lock, _usage_gate_bypass, _forums.thread_to_project
 Module level in bot.discord.bot:
-  prepare_replayed_prompt, refresh_image_retention, unlink_image_paths, _parse_iso
+  prepare_replayed_prompt, refresh_image_retention, unlink_image_paths
 Other modules:
   bot.discord.interactions._handle_usage_action, interactions.action_label,
   bot.discord.usage_notifier.is_usage_limit_active / next_window_end_utc
@@ -362,8 +362,8 @@ async def case_admission() -> None:
            (e.get("channel_id"), e.get("repo_name"), e.get("user_id"), e.get("user_name"))
            == ("100", "Repo", "u1", "owner"))
     _check("created_at is a tz-aware timestamp",
-           bot_mod._parse_iso(e.get("created_at")) is not None
-           and bot_mod._parse_iso(e.get("created_at")).tzinfo is not None)
+           datetime.fromisoformat(e.get("created_at") or "") is not None
+           and datetime.fromisoformat(e.get("created_at") or "").tzinfo is not None)
     _check("message_id is back-filled with the posted message id",
            e.get("message_id") == str(sent[0].id))
 

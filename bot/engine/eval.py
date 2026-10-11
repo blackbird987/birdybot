@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from bot import config
+from bot.fsutil import atomic_write_json
 from bot.claude.types import Instance, InstanceOrigin
 
 log = logging.getLogger(__name__)
@@ -731,12 +732,8 @@ def evaluate_chain(
 def _save_eval(ev: SessionEval) -> None:
     """Save a session eval to data/evals/."""
     try:
-        EVALS_DIR.mkdir(parents=True, exist_ok=True)
         path = EVALS_DIR / f"{ev.instance_id}.json"
-        path.write_text(
-            json.dumps(ev.to_dict(), indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        atomic_write_json(path, ev.to_dict(), ensure_ascii=False)
     except Exception:
         log.debug("Failed to save eval for %s", ev.instance_id, exc_info=True)
 
@@ -744,12 +741,8 @@ def _save_eval(ev: SessionEval) -> None:
 def _save_chain_eval(ev: ChainEval) -> None:
     """Save a chain eval to data/evals/."""
     try:
-        EVALS_DIR.mkdir(parents=True, exist_ok=True)
         path = EVALS_DIR / f"chain-{ev.chain_id}.json"
-        path.write_text(
-            json.dumps(ev.to_dict(), indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        atomic_write_json(path, ev.to_dict(), ensure_ascii=False)
     except Exception:
         log.debug("Failed to save chain eval for %s", ev.chain_id, exc_info=True)
 

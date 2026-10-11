@@ -24,6 +24,8 @@ if TYPE_CHECKING:
     from bot.store.state import StateStore
 
 from bot import config, paths
+from bot.fsutil import atomic_write_text
+from bot.textutil import parse_iso_utc
 from bot.procutil import run_capture
 from bot.claude.auth_health import (
     REASON_ORG_DISABLED,
@@ -1374,9 +1376,8 @@ class ClaudeRunner:
                 persisted_fps = {}
             now = datetime.now(timezone.utc)
             for acct, iso in persisted.items():
-                try:
-                    reset = datetime.fromisoformat(iso)
-                except (TypeError, ValueError):
+                reset = parse_iso_utc(iso)
+                if reset is None:
                     continue
                 if reset > now:
                     self._account_cooldowns[acct] = reset
@@ -1400,9 +1401,8 @@ class ClaudeRunner:
                 persisted_model = {}
             now = datetime.now(timezone.utc)
             for acct, iso in persisted_model.items():
-                try:
-                    reset = datetime.fromisoformat(iso)
-                except (TypeError, ValueError):
+                reset = parse_iso_utc(iso)
+                if reset is None:
                     continue
                 if reset > now:
                     self._model_cooldowns[acct] = reset
@@ -4929,14 +4929,11 @@ class ClaudeRunner:
                 rules_dir = Path(working_dir) / provider.config_dir_name / "rules"
                 rules_dir.mkdir(parents=True, exist_ok=True)
                 rf = rules_dir / "_bot_system.mdc"
-                # TODO(cursor-concurrency): this is a fixed path, but since
-                # _build_command now runs in a worker thread (run-off-loop fix),
-                # two concurrent same-working_dir Cursor spawns can race on this
-                # write. Currently degrades gracefully (OSError -> skip), but the
-                # robust fix is write-temp-then-os.replace for an atomic swap.
-                # Claude path is unaffected (unique NamedTemporaryFile names).
+                # _build_command runs in a worker thread, so two concurrent
+                # same-working_dir Cursor spawns can write this fixed path at
+                # once; the atomic write means neither reads a torn file.
                 try:
-                    rf.write_text(system_prompt, encoding="utf-8")
+                    atomic_write_text(rf, system_prompt)
                     rules_file = str(rf)
                     log.debug("Wrote system prompt to %s", rf)
                 except OSError:
@@ -6554,12 +6551,9 @@ class ClaudeRunner:
                 ts = obj.get("timestamp") if isinstance(obj, dict) else None
                 if not isinstance(ts, str):
                     continue
-                try:
-                    # Normalize trailing Z to +00:00 for fromisoformat.
-                    iso = ts.replace("Z", "+00:00") if ts.endswith("Z") else ts
-                    return datetime.fromisoformat(iso)
-                except ValueError:
-                    continue
+                parsed = parse_iso_utc(ts)
+                if parsed is not None:
+                    return parsed
             return None
 
         result = _parse_tail(256 * 1024)
@@ -9282,10 +9276,7 @@ class ClaudeRunner:
             branch_name = inst.branch
             # Check age — use finished_at, fall back to created_at
             age_ref = inst.finished_at or inst.created_at
-            try:
-                ref_dt = datetime.fromisoformat(age_ref) if age_ref else None
-            except (ValueError, TypeError):
-                ref_dt = None
+            ref_dt = parse_iso_utc(age_ref)
             if ref_dt is None:
                 messages.append(f"skip {branch_name}: no timestamp — use /merge manually")
                 continue

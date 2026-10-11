@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from bot import config
-from bot.textutil import clip, flatten
+from bot.textutil import clip, flatten, parse_iso_utc
 
 log = logging.getLogger(__name__)
 
@@ -211,14 +211,9 @@ def _tokenize(text: str) -> set[str]:
 
 def _recency_score(finished: str, now: datetime) -> float:
     """1.0 for something that just finished, decaying linearly to 0.0."""
-    if not finished:
+    dt = parse_iso_utc(finished)
+    if dt is None:
         return 0.0
-    try:
-        dt = datetime.fromisoformat(finished)
-    except (ValueError, TypeError):
-        return 0.0
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
     age_days = (now - dt).total_seconds() / 86400.0
     if age_days < 0:
         return 1.0
@@ -311,12 +306,10 @@ def rank_entries(
 
 def _format_age(finished: str) -> str:
     """Human age for a history entry, or "" if the timestamp is unusable."""
-    if not finished:
+    dt = parse_iso_utc(finished)
+    if dt is None:
         return ""
-    try:
-        delta = datetime.now(timezone.utc) - datetime.fromisoformat(finished)
-    except Exception:
-        return ""
+    delta = datetime.now(timezone.utc) - dt
     if delta.days > 0:
         return f"{delta.days}d ago"
     hours = delta.seconds // 3600

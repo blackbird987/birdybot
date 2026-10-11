@@ -41,7 +41,7 @@ from bot.platform.formatting import (
 )
 from bot.engine import watches
 from bot.store import history as history_mod
-from bot.textutil import find_tilde_block, is_quoted_example, mask_tilde_bodies, parse_duration
+from bot.textutil import find_tilde_block, is_quoted_example, mask_tilde_bodies, parse_duration, parse_iso_utc
 
 log = logging.getLogger(__name__)
 
@@ -230,10 +230,8 @@ def cooldown_retry_is_due(
         return False
     if accounts_free:
         return True
-    try:
-        return now >= datetime.fromisoformat(retry_at)
-    except (ValueError, TypeError):
-        return False
+    due = parse_iso_utc(retry_at)
+    return due is not None and now >= due
 
 
 # Labels that don't auto-derive well from InstanceOrigin.value
@@ -303,14 +301,9 @@ def get_sibling_summary(store, inst: Instance) -> str | None:
             continue
         if i.id == inst.id:
             continue
-        try:
-            started = datetime.fromisoformat(i.created_at)
-        except (ValueError, TypeError):
+        started = parse_iso_utc(i.created_at)
+        if started is None:
             continue
-        # Legacy state.json entries may be tz-naive; assume UTC so the
-        # subtraction below doesn't crash (aware - naive = TypeError).
-        if started.tzinfo is None:
-            started = started.replace(tzinfo=timezone.utc)
         age_sec = (now - started).total_seconds()
         if age_sec < _SIBLING_MIN_AGE_SEC or age_sec > _SIBLING_MAX_AGE_SEC:
             continue
@@ -1458,13 +1451,8 @@ def _promote_deferred_reboot_if_eligible() -> None:
             pass
         return
 
-    blocked_at_raw = deferred.get("blocked_at")
-    try:
-        blocked_at = datetime.fromisoformat(blocked_at_raw)
-        if blocked_at.tzinfo is None:
-            blocked_at = blocked_at.replace(tzinfo=timezone.utc)
-        age_secs = (datetime.now(timezone.utc) - blocked_at).total_seconds()
-    except Exception:
+    blocked_at = parse_iso_utc(deferred.get("blocked_at"))
+    if blocked_at is None:
         # Missing/unparseable timestamp — treat as stale to avoid resurrecting
         # a record we can't reason about.
         log.error(
@@ -1477,6 +1465,7 @@ def _promote_deferred_reboot_if_eligible() -> None:
             pass
         return
 
+    age_secs = (datetime.now(timezone.utc) - blocked_at).total_seconds()
     if age_secs > config.REBOOT_DEFERRED_TTL_SECS:
         log.error(
             "Dropping stale deferred reboot (age=%.0fs, ttl=%ds, message=%s)",
@@ -1605,12 +1594,9 @@ def _wake_schedule_at(data: dict) -> tuple[str, int] | None:
         except (TypeError, ValueError):
             return None
     elif data.get("wake_at"):
-        try:
-            target = datetime.fromisoformat(str(data["wake_at"]).replace("Z", "+00:00"))
-        except ValueError:
+        target = parse_iso_utc(str(data["wake_at"]))
+        if target is None:
             return None
-        if target.tzinfo is None:
-            target = target.replace(tzinfo=timezone.utc)
         secs = int((target - now).total_seconds())
     if secs is None:
         return None

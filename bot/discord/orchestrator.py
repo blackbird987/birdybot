@@ -59,6 +59,7 @@ from typing import TYPE_CHECKING, NamedTuple
 
 import discord
 
+from bot.textutil import parse_iso_utc
 from bot import config
 from bot.claude.types import Instance, InstanceStatus
 from bot.platform.base import ButtonSpec
@@ -327,12 +328,9 @@ def _wave_started(inst: Instance) -> datetime | None:
     stamp = inst.finished_at or inst.created_at
     if not stamp:
         return None
-    try:
-        started = datetime.fromisoformat(stamp)
-    except (ValueError, TypeError):
+    started = parse_iso_utc(stamp)
+    if started is None:
         return None
-    if started.tzinfo is None:
-        started = started.replace(tzinfo=timezone.utc)
     return started
 
 

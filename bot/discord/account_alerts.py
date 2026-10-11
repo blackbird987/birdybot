@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 
 import discord
 
+from bot.textutil import parse_iso_utc
 from bot import config
 from bot.claude.auth_health import (
     REASON_NO_DIR,
@@ -288,11 +289,11 @@ async def _drain_once(bot: ClaudeBot) -> None:
             # a one-shot that silences the account forever.
             snooze_until = meta.get("snooze_until")
             if snooze_until:
-                try:
-                    if datetime.fromisoformat(snooze_until) > now:
-                        continue
-                except (TypeError, ValueError):
+                until = parse_iso_utc(snooze_until)
+                if until is None:
                     snooze_until = None
+                elif until > now:
+                    continue
             if meta.get("notified") and not snooze_until:
                 continue
 

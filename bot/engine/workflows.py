@@ -7,10 +7,10 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
+from bot.textutil import parse_iso_utc
 from bot import config
 from bot.procutil import run_capture
 from bot.claude.branch_utils import clear_stale_branches  # re-exported for callers
@@ -472,7 +472,7 @@ def _extract_latest_plan_text(
     soft recency cap that keeps unrelated old plans from same-session
     threads from being resurrected; chains paused longer than 24h won't
     get the fallback (degrading to today's no-injection behavior, not to
-    wrong injection). created_at is parsed via `datetime.fromisoformat`
+    wrong injection). created_at is parsed via `parse_iso_utc`
     rather than lexicographic string compare, since the codebase isn't
     audited to guarantee uniform ISO format across all writers; naive
     timestamps are coerced to UTC before comparison so a stray naive
@@ -520,32 +520,18 @@ def _extract_latest_plan_text(
         if source and source.origin == InstanceOrigin.PLAN:
             raw = source.read_result_text() or ""
     if not raw and source and source.session_id and source.created_at:
-        try:
-            source_dt = datetime.fromisoformat(source.created_at)
-        except (ValueError, TypeError):
-            source_dt = None
-        if source_dt is not None and source_dt.tzinfo is None:
-            # Codebase intent is UTC everywhere (writers use
-            # `datetime.now(timezone.utc).isoformat()`), but the helper
-            # acknowledges format isn't audited. Treat naive timestamps as
-            # UTC so a stray naive writer can't trigger a tz-aware/naive
-            # comparison TypeError below that would propagate out of the
-            # helper and halt Build mid-flight.
-            source_dt = source_dt.replace(tzinfo=timezone.utc)
+        # parse_iso_utc reads a naive stamp as UTC, so a stray naive writer
+        # cannot raise an aware/naive TypeError here and halt Build mid-flight.
+        source_dt = parse_iso_utc(source.created_at)
         if source_dt is not None:
             recent = ctx.store.list_instances(all_=False)
             candidates: list[Instance] = []
             for inst in recent:
                 if inst.session_id != source.session_id:
                     continue
-                if not inst.created_at:
+                inst_dt = parse_iso_utc(inst.created_at)
+                if inst_dt is None:
                     continue
-                try:
-                    inst_dt = datetime.fromisoformat(inst.created_at)
-                except (ValueError, TypeError):
-                    continue
-                if inst_dt.tzinfo is None:
-                    inst_dt = inst_dt.replace(tzinfo=timezone.utc)
                 if inst_dt > source_dt:
                     continue
                 candidates.append(inst)

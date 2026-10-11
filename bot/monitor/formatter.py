@@ -8,6 +8,8 @@ from typing import Any
 
 import discord
 
+from bot.textutil import parse_iso_utc
+
 log = logging.getLogger(__name__)
 
 # Discord embed limits
@@ -58,12 +60,9 @@ def _describe_age(iso_ts: str | None) -> str:
     """
     if not iso_ts:
         return "never"
-    try:
-        when = datetime.fromisoformat(iso_ts)
-    except ValueError:
+    when = parse_iso_utc(iso_ts)
+    if when is None:
         return iso_ts
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=timezone.utc)
     stamp = when.strftime("%b %d, %H:%M UTC")
     delta = datetime.now(timezone.utc) - when
     secs = int(delta.total_seconds())
@@ -163,12 +162,9 @@ def build_dashboard_embed(
         desc_parts.append(f"\u23f1 Uptime: {uptime}")
     if version:
         desc_parts.append(f"v{_short_version(version)}")
-    if started_at:
-        try:
-            dt = datetime.fromisoformat(started_at.rstrip("Z") + "+00:00" if not started_at.endswith("Z") else started_at.replace("Z", "+00:00"))
-            desc_parts.append(f"Started: {dt.strftime('%b %d, %H:%M UTC')}")
-        except Exception:
-            pass
+    started = parse_iso_utc(started_at)
+    if started is not None:
+        desc_parts.append(f"Started: {started.astimezone(timezone.utc).strftime('%b %d, %H:%M UTC')}")
     if desc_parts:
         embed.description = _truncate(" \u00b7 ".join(desc_parts), MAX_DESCRIPTION)
 
@@ -284,11 +280,8 @@ def build_dashboard_embed(
             checks_v = vh.get("checksInVersion", 0)
             introduced = len(vh.get("issuesIntroduced", []))
             resolved = len(vh.get("issuesResolved", []))
-            try:
-                dt = datetime.fromisoformat(first.rstrip("Z") + "+00:00" if "Z" in first else first)
-                date_str = dt.strftime("%b %d %H:%M")
-            except Exception:
-                date_str = first[:16]
+            first_dt = parse_iso_utc(first)
+            date_str = first_dt.strftime("%b %d %H:%M") if first_dt else str(first)[:16]
             parts = [f"v{ver} \u00b7 {date_str}"]
             parts.append(f"{checks_v} checks")
             if introduced:

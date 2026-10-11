@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 import discord
 
+from bot.textutil import parse_iso_utc
 from bot import config
 from bot.claude.auth_health import split_accounts
 from bot.claude.types import InstanceStatus
@@ -265,7 +266,7 @@ def build_dashboard_embed(
     if last:
         from datetime import datetime, timezone
         try:
-            created = datetime.fromisoformat(last.created_at)
+            created = parse_iso_utc(last.created_at)
             delta_secs = (datetime.now(timezone.utc) - created).total_seconds()
             ago = format_relative_time(delta_secs)
             if ago != "just now":

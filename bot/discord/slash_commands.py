@@ -27,7 +27,7 @@ from bot.platform.formatting import (
     normalize_model, short_model_label,
 )
 from bot.store import history as history_mod
-from bot.textutil import clip
+from bot.textutil import clip, parse_iso_utc
 
 if TYPE_CHECKING:
     from bot.discord.bot import ClaudeBot
@@ -604,14 +604,10 @@ def setup(bot: ClaudeBot) -> None:
 
             # Relative age from finished timestamp
             age = ""
-            finished = e.get("finished")
-            if finished:
-                try:
-                    from datetime import datetime, timezone
-                    dt = datetime.fromisoformat(finished)
-                    age = format_age(datetime.now(timezone.utc) - dt)
-                except Exception:
-                    pass
+            finished_dt = parse_iso_utc(e.get("finished"))
+            if finished_dt is not None:
+                from datetime import datetime, timezone
+                age = format_age(datetime.now(timezone.utc) - finished_dt)
 
             # Thread link if available
             if thread_id:
@@ -999,13 +995,10 @@ def setup(bot: ClaudeBot) -> None:
             attn = m.get("last_attention_level", "?")
             ch = f"<#{m['channel_id']}>" if m.get("channel_id") else "no channel"
             last = m.get("last_fetch_at", "never")
-            if last and last != "never":
-                try:
-                    from datetime import datetime
-                    dt = datetime.fromisoformat(last)
-                    last = dt.strftime("%b %d, %H:%M UTC")
-                except Exception:
-                    pass
+            last_dt = parse_iso_utc(last)
+            if last_dt is not None:
+                from datetime import timezone
+                last = last_dt.astimezone(timezone.utc).strftime("%b %d, %H:%M UTC")
             fails = m.get("consecutive_failures", 0)
             fail_str = f" ({fails} failures)" if fails else ""
             lines.append(f"{status} **{m['name']}** — {attn} — {ch} — {last}{fail_str}")

@@ -7,6 +7,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Callable
 
+from bot.textutil import parse_iso_utc
 from bot.claude.types import InstanceStatus, InstanceType, Schedule
 
 if TYPE_CHECKING:
@@ -29,12 +30,9 @@ def _step_from(due_iso: str | None, interval_secs: int,
     """
     if not due_iso or interval_secs <= 0:
         return now + timedelta(seconds=max(interval_secs, 1))
-    try:
-        nxt = datetime.fromisoformat(due_iso)
-    except (ValueError, TypeError):
+    nxt = parse_iso_utc(due_iso)
+    if nxt is None:
         return now + timedelta(seconds=interval_secs)
-    if nxt.tzinfo is None:
-        nxt = nxt.replace(tzinfo=timezone.utc)
     step = timedelta(seconds=interval_secs)
     if nxt <= now:
         # Integer arithmetic rather than a while loop: a row left over from a
@@ -101,9 +99,8 @@ class Scheduler:
         for sched in self._store.list_schedules():
             if not sched.next_run_at:
                 continue
-            try:
-                next_run = datetime.fromisoformat(sched.next_run_at)
-            except (ValueError, TypeError):
+            next_run = parse_iso_utc(sched.next_run_at)
+            if next_run is None:
                 continue
 
             if now >= next_run:
@@ -276,15 +273,15 @@ class Scheduler:
                 # restarted, so leave them alone.
                 continue
             if sched.last_run_at:
-                try:
-                    last = datetime.fromisoformat(sched.last_run_at)
+                last = parse_iso_utc(sched.last_run_at)
+                if last is None:
+                    sched.next_run_at = (now + timedelta(seconds=30)).isoformat()
+                else:
                     next_run = last + timedelta(seconds=sched.interval_secs)
                     # If we missed runs, schedule for now
                     if next_run < now:
                         next_run = now + timedelta(seconds=30)
                     sched.next_run_at = next_run.isoformat()
-                except (ValueError, TypeError):
-                    sched.next_run_at = (now + timedelta(seconds=30)).isoformat()
             elif not sched.next_run_at:
                 sched.next_run_at = (
                     now + timedelta(seconds=sched.interval_secs)

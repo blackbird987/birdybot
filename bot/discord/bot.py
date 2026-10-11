@@ -32,7 +32,9 @@ from typing import TYPE_CHECKING
 import discord
 from discord import app_commands
 
+from bot.textutil import parse_iso_utc
 from bot import config
+from bot.fsutil import atomic_write_json
 from bot.discord import channels
 from bot.discord import access as access_mod
 from bot.discord.access import AccessResult, load_access_config, check_user_access, has_any_access, get_most_restrictive_ceiling, get_most_restrictive_bash, effective_mode as access_effective_mode
@@ -56,19 +58,6 @@ if TYPE_CHECKING:
     from bot.store.state import StateStore
 
 log = logging.getLogger(__name__)
-
-
-def _parse_iso(s: str | None) -> datetime | None:
-    """Parse an ISO-8601 datetime string, returning None on any failure."""
-    if not s:
-        return None
-    try:
-        dt = datetime.fromisoformat(s)
-    except (TypeError, ValueError):
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
 
 
 def unlink_image_paths(paths: list[str], *, site: str) -> int:
@@ -1340,12 +1329,7 @@ class ClaudeBot(discord.Client):
             return []
 
     def _write_usage_queue_atomic(self, entries: list[dict]) -> None:
-        tmp = config.USAGE_QUEUE_FILE.with_suffix(".json.tmp")
-        tmp.write_text(
-            json.dumps(entries, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        os.replace(tmp, config.USAGE_QUEUE_FILE)
+        atomic_write_json(config.USAGE_QUEUE_FILE, entries, ensure_ascii=False)
 
     async def _usage_queue_append(self, entry: dict) -> None:
         async with self._usage_queue_lock:
@@ -1392,7 +1376,7 @@ class ClaudeBot(discord.Client):
             for e in entries:
                 if e.get("status") != "awaiting_choice":
                     continue
-                run_at = _parse_iso(e.get("run_at"))
+                run_at = parse_iso_utc(e.get("run_at"))
                 if run_at and run_at <= now_utc:
                     e["status"] = "queued"
                     changed = True
@@ -1407,7 +1391,7 @@ class ClaudeBot(discord.Client):
             kept: list[dict] = []
             for e in entries:
                 if e.get("status") == "queued":
-                    run_at = _parse_iso(e.get("run_at"))
+                    run_at = parse_iso_utc(e.get("run_at"))
                     if run_at and run_at <= now_utc:
                         due.append(e)
                         continue

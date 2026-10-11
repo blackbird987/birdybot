@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 
 import discord
 
+from bot.textutil import parse_iso_utc
 from bot.engine.deploy import DeployState
 from bot.platform.formatting import EFFORT_DISPLAY, MODE_COLOR, MODE_DISPLAY, effort_name, mode_name
 
@@ -621,16 +622,10 @@ def _format_instance_line(
         thread_id = session_to_thread.get(inst.session_id or "")
         if thread_id:
             line += f" \u2022 <#{thread_id}>"
-    if show_elapsed and inst.created_at:
-        try:
-            started = datetime.fromisoformat(inst.created_at)
-            if started.tzinfo is None:
-                started = started.replace(tzinfo=timezone.utc)
-            elapsed = datetime.now(timezone.utc) - started
-            mins = int(elapsed.total_seconds() // 60)
-            line += f" \u2022 {'<1' if mins < 1 else str(mins)}m"
-        except (ValueError, TypeError):
-            pass
+    started = parse_iso_utc(inst.created_at) if show_elapsed else None
+    if started is not None:
+        mins = int((datetime.now(timezone.utc) - started).total_seconds() // 60)
+        line += f" \u2022 {'<1' if mins < 1 else str(mins)}m"
     return line
 
 

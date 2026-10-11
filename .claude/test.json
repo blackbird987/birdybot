@@ -148,7 +148,9 @@
     "chat_crash": "python scripts/test_chat_crash.py",
     "chain_exit_state": "python scripts/test_chain_exit_state.py",
     "discard_paths": "python scripts/test_discard_paths.py",
-    "state_backup": "python scripts/test_state_backup.py"
+    "state_backup": "python scripts/test_state_backup.py",
+    "fsutil": "python scripts/test_fsutil.py",
+    "textutil": "python scripts/test_textutil.py"
   },
 
   "auth": {
