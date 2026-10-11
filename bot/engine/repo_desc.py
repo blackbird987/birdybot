@@ -302,6 +302,11 @@ def resolve_repo_description_with_source(repo_path: str) -> tuple[str, str] | No
     return None
 
 
+def resolve_repo_description(repo_path: str) -> str | None:
+    found = resolve_repo_description_with_source(repo_path)
+    return found[0] if found else None
+
+
 # --- cache ----------------------------------------------------------------
 
 
