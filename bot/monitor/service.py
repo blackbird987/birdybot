@@ -180,7 +180,7 @@ class MonitorService:
             mon["last_fetch_at"] = datetime.now(timezone.utc).isoformat()
             self._save_monitor_state(name, mon)
             failures = mon["consecutive_failures"]
-            embed = formatter.build_dashboard_embed(
+            embed = formatter.build_monitor_embed(
                 name, raw,
                 failures=failures,
                 last_success=mon.get("last_successful_fetch"),
@@ -262,7 +262,7 @@ class MonitorService:
         self._save_monitor_state(name, mon)
 
         # Build and edit embeds
-        dashboard_embed = formatter.build_dashboard_embed(
+        dashboard_embed = formatter.build_monitor_embed(
             name, raw, prev_snapshot, last_success=now_iso,
         )
         history_embed = formatter.build_history_embed(daily, weekly, monthly)

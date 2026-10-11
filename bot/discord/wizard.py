@@ -158,12 +158,7 @@ async def handle_ark_button(
 
     elif action == "refresh":
         await interaction.response.defer(ephemeral=True)
-        from bot.discord.dashboard import refresh_dashboard
-        await refresh_dashboard(
-            bot, bot._store, bot._forums,
-            bot._lobby_channel_id,
-            bot._dashboard_lock, bot._dashboard_pending_flag,
-        )
+        await bot._refresh_dashboard()
         await interaction.followup.send("Refreshed.", ephemeral=True)
 
     elif action == "stop_all":
@@ -179,12 +174,7 @@ async def handle_ark_button(
         await interaction.followup.send(
             f"Stopped {killed}/{len(running)} instances.", ephemeral=True,
         )
-        from bot.discord.dashboard import refresh_dashboard
-        asyncio.create_task(refresh_dashboard(
-            bot, bot._store, bot._forums,
-            bot._lobby_channel_id,
-            bot._dashboard_lock, bot._dashboard_pending_flag,
-        ))
+        asyncio.create_task(bot._refresh_dashboard())
 
     elif action == "switch_provider":
         await interaction.response.defer(ephemeral=True)
@@ -207,12 +197,7 @@ async def handle_ark_button(
             f"Switched to **{next_p}**\nBinary: `{_cfg.CLAUDE_BINARY}`",
             ephemeral=True,
         )
-        from bot.discord.dashboard import refresh_dashboard
-        asyncio.create_task(refresh_dashboard(
-            bot, bot._store, bot._forums,
-            bot._lobby_channel_id,
-            bot._dashboard_lock, bot._dashboard_pending_flag,
-        ))
+        asyncio.create_task(bot._refresh_dashboard())
 
     elif action == "claude_login":
         await _handle_claude_login(bot, interaction)

@@ -102,7 +102,7 @@ def build_initial_embed(name: str, url: str) -> discord.Embed:
     return embed
 
 
-def build_dashboard_embed(
+def build_monitor_embed(
     name: str,
     raw: dict[str, Any],
     prev_snapshot: dict | None = None,
