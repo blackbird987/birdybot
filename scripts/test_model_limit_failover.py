@@ -217,7 +217,7 @@ async def _run_with_streams(
 
     runner._stream_output = fake_stream_output  # type: ignore[assignment]
 
-    async def on_progress(headline, detail=None):
+    async def on_progress(headline, detail=None, **kw):
         if collect_progress is not None:
             collect_progress.append((headline, detail))
 

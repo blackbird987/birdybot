@@ -1105,7 +1105,7 @@ class _Harness:
 
         runner._stream_output = fake_stream_output  # type: ignore[assignment]
 
-        async def on_progress(headline, detail=""):
+        async def on_progress(headline, detail="", **kw):
             self.progress.append((headline, detail))
 
         instance = Instance(
@@ -2045,7 +2045,7 @@ async def _check_admission_gate(failures: list[str]) -> None:
 
         runner._reclaim_idle_daemons = no_reclaim   # type: ignore[assignment]
 
-        async def on_progress(headline, detail=""):
+        async def on_progress(headline, detail="", **kw):
             posts.append((headline, detail))
 
         saved = (

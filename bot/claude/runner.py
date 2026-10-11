@@ -899,6 +899,20 @@ def _memory_warning_detail(tree: memory.TreeMemory, kill_mb: int) -> str:
     )
 
 
+async def _notify(on_progress, headline: str, detail: str, what: str) -> None:
+    """Send one progress update. A failing callback is logged, never raised.
+
+    The update is a courtesy to the user; the recovery or kill it describes
+    must go ahead whether or not the card could be edited.
+    """
+    if not on_progress:
+        return
+    try:
+        await on_progress(headline, detail)
+    except Exception:
+        log.exception("Progress callback error %s", what)
+
+
 def _fmt_duration(secs: float) -> str:
     """Hours-and-minutes for a number the reader has to reason about.
 
@@ -2615,12 +2629,7 @@ class ClaudeRunner:
                     )
                 told = True
                 last_told = now
-                try:
-                    await on_progress(
-                        "Waiting for memory before starting", body,
-                    )
-                except Exception:
-                    log.exception("Progress callback error on memory hold")
+                await _notify(on_progress, "Waiting for memory before starting", body, "on memory hold")
             await asyncio.sleep(max(1, config.MEM_ADMISSION_POLL_SECS))
             if instance.id in self._intentional_kills:
                 log.info(
@@ -2636,13 +2645,12 @@ class ClaudeRunner:
                     instance.id, waited, pressure.summary(),
                 )
                 if told and on_progress:
-                    try:
-                        await on_progress(
-                            "Starting now — memory freed up",
-                            f"Held for {waited}s. {pressure.summary()}.",
-                        )
-                    except Exception:
-                        log.exception("Progress callback error on memory release")
+                    await _notify(
+                        on_progress,
+                        "Starting now — memory freed up",
+                        f"Held for {waited}s. {pressure.summary()}.",
+                        "on memory release",
+                    )
                 return
 
         # Bounded, so this is a normal outcome and not a failure. Say plainly
@@ -2657,17 +2665,16 @@ class ClaudeRunner:
             instance.id, waited, pressure.summary(),
         )
         if told and on_progress:
-            try:
-                await on_progress(
-                    "Starting anyway — memory never freed up",
-                    f"Waited {waited} and "
-                    f"the machine is still short ({pressure.human()}). Starting "
-                    f"regardless rather than blocking your work indefinitely — "
-                    f"but expect this session to be slow, and consider closing "
-                    f"something.",
-                )
-            except Exception:
-                log.exception("Progress callback error on memory hold timeout")
+            await _notify(
+                on_progress,
+                "Starting anyway — memory never freed up",
+                f"Waited {waited} and "
+                f"the machine is still short ({pressure.human()}). Starting "
+                f"regardless rather than blocking your work indefinitely — "
+                f"but expect this session to be slow, and consider closing "
+                f"something.",
+                "on memory hold timeout",
+            )
 
     async def _run_impl(
         self,
@@ -2826,17 +2833,14 @@ class ClaudeRunner:
                 )
                 if on_progress and "model_downgrade_notice" not in recovery_state:
                     recovery_state.add("model_downgrade_notice")
-                    try:
-                        await on_progress(
-                            f"Running on {model_override}",
-                            f"{config.PRIMARY_MODEL.title()} limit until "
-                            f"~{m_reset.strftime('%H:%M')} UTC — "
-                            "switching back automatically",
-                        )
-                    except Exception:
-                        log.exception(
-                            "Progress callback error during model downgrade",
-                        )
+                    await _notify(
+                        on_progress,
+                        f"Running on {model_override}",
+                        f"{config.PRIMARY_MODEL.title()} limit until "
+                        f"~{m_reset.strftime('%H:%M')} UTC — "
+                        "switching back automatically",
+                        "during model downgrade",
+                    )
 
         # Run the whole prompt-build off the event loop: _build_command makes
         # several synchronous `git` subprocess calls via _build_master_context_block
@@ -3262,12 +3266,7 @@ class ClaudeRunner:
                 )
                 if on_progress:
                     headline, detail = progress(attempts)
-                    try:
-                        await on_progress(headline, detail)
-                    except Exception:
-                        log.exception(
-                            "Progress callback error during %s resume", kind,
-                        )
+                    await _notify(on_progress, headline, detail, f"during {kind} resume")
                 # _build_command normally consumes the marker, but the resume
                 # can end before it ever gets there — the refuse-to-spawn
                 # short-circuit returns as soon as every account is on
@@ -3607,18 +3606,14 @@ class ClaudeRunner:
                         # after this one.
                         recovery_state.add("model_downgrade_notice")
                         instance._accounts_tried = set()
-                        if on_progress:
-                            try:
-                                await on_progress(
-                                    headline,
-                                    f"Continuing on {config.MODEL_FALLBACK} "
-                                    f"until ~{m_reset.strftime('%H:%M')} UTC — "
-                                    "switching back automatically",
-                                )
-                            except Exception:
-                                log.exception(
-                                    "Progress callback error during failover",
-                                )
+                        await _notify(
+                            on_progress,
+                            headline,
+                            f"Continuing on {config.MODEL_FALLBACK} "
+                            f"until ~{m_reset.strftime('%H:%M')} UTC — "
+                            "switching back automatically",
+                            "during failover",
+                        )
                         return await _reenter()
 
                     next_account = self._pick_account(
@@ -3632,16 +3627,12 @@ class ClaudeRunner:
                             "Model-limit failover from %s to %s for %s",
                             account_dir[-20:], next_account[-20:], instance.id,
                         )
-                        if on_progress:
-                            try:
-                                await on_progress(
-                                    "Switching to backup account",
-                                    f"{m_label} limit on current account",
-                                )
-                            except Exception:
-                                log.exception(
-                                    "Progress callback error during failover",
-                                )
+                        await _notify(
+                            on_progress,
+                            "Switching to backup account",
+                            f"{m_label} limit on current account",
+                            "during failover",
+                        )
                         inner = await _reenter()
                         # Backup died before doing any work (auth-dead, or
                         # its own account-wide cap): this account can still
@@ -3695,14 +3686,12 @@ class ClaudeRunner:
                         # Keep session_id — _hydrate_session_for_account copies
                         # the JSONL cross-account so --resume continues the same
                         # conversation on the backup account.
-                        if on_progress:
-                            try:
-                                await on_progress(
-                                    "Switching to backup account",
-                                    "Primary account hit usage limit",
-                                )
-                            except Exception:
-                                log.exception("Progress callback error during failover")
+                        await _notify(
+                            on_progress,
+                            "Switching to backup account",
+                            "Primary account hit usage limit",
+                            "during failover",
+                        )
                         inner = await _reenter()
                         # If the failover target died before doing any work
                         # (e.g. paused/cancelled subscription -> 401), the turn
@@ -3821,16 +3810,12 @@ class ClaudeRunner:
                             "cooled down" if confident else "no cooldown",
                             next_account[-20:], instance.id,
                         )
-                        if on_progress:
-                            try:
-                                await on_progress(
-                                    "Switching to backup account",
-                                    "An account looks unavailable",
-                                )
-                            except Exception:
-                                log.exception(
-                                    "Progress callback error during failover"
-                                )
+                        await _notify(
+                            on_progress,
+                            "Switching to backup account",
+                            "An account looks unavailable",
+                            "during failover",
+                        )
                         return await _reenter()
                     if confident:
                         # Nowhere to fail over. Don't dead-end the turn on a
@@ -4030,11 +4015,7 @@ class ClaudeRunner:
                 explaining the kill goes out first. The decision is already
                 irrevocable by the time this is called.
                 """
-                if on_progress:
-                    try:
-                        await on_progress(headline, detail)
-                    except Exception:
-                        log.exception("Progress callback error on memory kill")
+                await _notify(on_progress, headline, detail, "on memory kill")
                 # cgroup.kill is a SIGKILL, and this reap can still fall
                 # through to the normal exit path when it stands down. A -9
                 # there with no mark would be read as the operating system's
@@ -4157,20 +4138,16 @@ class ClaudeRunner:
                         # closes the CLI's stdout, which ends the reader loop,
                         # whose ``finally`` cancels this watchdog. Anything
                         # after that call is on a coin flip.
-                        if on_progress:
-                            try:
-                                await on_progress(
-                                    "Stopped — this session looked hung",
-                                    _lifetime_kill_detail(
-                                        elapsed_since_start,
-                                        elapsed_since_output,
-                                        hit_hard_cap,
-                                    ),
-                                )
-                            except Exception:
-                                log.exception(
-                                    "Progress callback error on lifetime kill",
-                                )
+                        await _notify(
+                            on_progress,
+                            "Stopped — this session looked hung",
+                            _lifetime_kill_detail(
+                                elapsed_since_start,
+                                elapsed_since_output,
+                                hit_hard_cap,
+                            ),
+                            "on lifetime kill",
+                        )
                         proc.terminate()
                         return
 
@@ -4314,14 +4291,12 @@ class ClaudeRunner:
                             # Told to the session, not just the log: while it is
                             # still running it can still choose a smaller batch.
                             # After the kill that choice is gone.
-                            if on_progress:
-                                try:
-                                    await on_progress(
-                                        "Heads up — this session is using a lot of memory",
-                                        _memory_warning_detail(tree, kill_mb),
-                                    )
-                                except Exception:
-                                    log.exception("Progress callback error on memory warning")
+                            await _notify(
+                                on_progress,
+                                "Heads up — this session is using a lot of memory",
+                                _memory_warning_detail(tree, kill_mb),
+                                "on memory warning",
+                            )
 
                 # Stall warning (no auto-kill)
                 if elapsed_since_output > config.STALL_TIMEOUT_SECS:
@@ -4344,12 +4319,6 @@ class ClaudeRunner:
                             if on_stall:
                                 try:
                                     await on_stall(instance.id, snapshot)
-                                except TypeError:
-                                    # Legacy single-arg callback — keep compat.
-                                    try:
-                                        await on_stall(instance.id)
-                                    except Exception:
-                                        log.exception("Stall callback error")
                                 except Exception:
                                     log.exception("Stall callback error")
 
@@ -4427,16 +4396,10 @@ class ClaudeRunner:
                         if progress and progress.message:
                             try:
                                 if usage is not None:
-                                    try:
-                                        await on_progress(
-                                            progress.message, progress.detail,
-                                            usage=usage,
-                                        )
-                                    except TypeError:
-                                        # Older callback signature — fall back.
-                                        await on_progress(
-                                            progress.message, progress.detail,
-                                        )
+                                    await on_progress(
+                                        progress.message, progress.detail,
+                                        usage=usage,
+                                    )
                                 else:
                                     await on_progress(progress.message, progress.detail)
                             except Exception:
@@ -4446,8 +4409,6 @@ class ClaudeRunner:
                             # so the heartbeat renders the latest context count.
                             try:
                                 await on_progress("", "", usage=usage)
-                            except TypeError:
-                                pass
                             except Exception:
                                 log.exception("Progress callback error (usage-only)")
 

@@ -230,7 +230,7 @@ class _Harness:
 
         runner._await_memory_headroom = fake_hold  # type: ignore[assignment]
 
-        async def on_progress(headline, detail=""):
+        async def on_progress(headline, detail="", **kw):
             self.progress.append((headline, detail))
 
         instance = Instance(
