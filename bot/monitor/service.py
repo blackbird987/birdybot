@@ -66,7 +66,10 @@ class MonitorService:
         if "monitors" not in state:
             state["monitors"] = {}
         state["monitors"][name] = data
-        self._store._platform_state["discord"] = state
+        # Picked up by the 60s auto-save: a monitor tick is not worth a
+        # synchronous rewrite of the whole state file.
+        self._store.set_platform_state("discord", state, persist=False)
+        self._store.mark_dirty()
 
     # --- Failure alerting ---
 
@@ -770,7 +773,8 @@ class MonitorService:
         # Save any recovered state
         state = self._store.get_platform_state("discord")
         state["monitors"] = monitors
-        self._store._platform_state["discord"] = state
+        self._store.set_platform_state("discord", state, persist=False)
+        self._store.mark_dirty()
 
     async def _ensure_monitor_thread(
         self,

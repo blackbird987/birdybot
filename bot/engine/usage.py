@@ -206,7 +206,7 @@ def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:
                 ["taskkill", "/T", "/F", "/PID", str(pid)],
                 capture_output=True,
                 timeout=5,
-                creationflags=_sp.CREATE_NO_WINDOW,
+                **config.NOWND,
             )
         except Exception:
             pass
