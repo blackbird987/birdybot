@@ -34,7 +34,7 @@ from bot.claude.auth_health import (
     relogin_command,
     unusable_reason,
 )
-from bot.claude import cgroups, memory
+from bot.claude import cgroups, context_bloat, memory
 from bot.claude.branch_utils import canonical_branch, clear_stale_branches
 from bot.claude.gitpaths import git_common_dir, git_dir, git_toplevel
 from bot.claude.parser import (
@@ -3270,11 +3270,24 @@ class ClaudeRunner:
                 return _carry_forward_work_record(result, resumed)
 
             if result.is_error and is_context_thrash_error(error_text):
+                # Name the file that keeps refilling the context, if there is
+                # one. Diagnosis only: the resume below runs exactly as often
+                # either way. A nested CLAUDE.md of a few hundred KB is the
+                # thrash a resume cannot clear (it reloads after every
+                # compaction), so the resumed attempt is told how to stop
+                # triggering it, and the final failure says what to slim.
+                bloat = await self._thrash_bloat_findings(
+                    instance, result.session_id or instance.session_id,
+                )
+                bloat_note = context_bloat.render_note(bloat)
+
                 def _mark_thrash() -> None:
                     instance._context_thrash_retry = True
+                    instance._context_bloat_note = bloat_note or None
 
                 def _unmark_thrash() -> None:
                     instance._context_thrash_retry = False
+                    instance._context_bloat_note = None
 
                 handled = await _resume_same_conversation(
                     kind="context_thrash",
@@ -3291,6 +3304,15 @@ class ClaudeRunner:
                 )
                 if handled is not None:
                     return handled
+                # Out of resumes. The cause goes AFTER the CLI's own text:
+                # is_context_thrash_error and is_account_agnostic_error read
+                # this message, and the original wording has to stay intact
+                # for them.
+                cause = context_bloat.cause_line(bloat)
+                if cause:
+                    result.error_message = (
+                        (result.error_message or error_text) + "\n\n" + cause
+                    )
 
             # Memory reap: the guard in _stream_output killed this run's process
             # tree for crossing SESSION_MEM_KILL_MB.  Resumed for the same reason
@@ -4736,6 +4758,37 @@ class ClaudeRunner:
 
         return result
 
+    async def _thrash_bloat_findings(
+        self, instance: Instance, session_id: str | None,
+    ) -> list[context_bloat.Autoload]:
+        """Oversized auto-attached files in the session that just thrashed.
+
+        Scanned afresh on every thrash rather than cached: a 38 MB transcript
+        streams in about 0.2s off the event loop, and the rows a resumed
+        attempt appended are exactly what a second thrash should be judged
+        on. Never raises; a scan that fails is no finding.
+        """
+        if not session_id:
+            return []
+        try:
+            findings = await asyncio.to_thread(
+                context_bloat.scan_session, session_id,
+                instance.repo_path, instance.worktree_path,
+            )
+        except Exception:
+            log.debug("Context bloat scan failed for %s", instance.id,
+                      exc_info=True)
+            findings = []
+        if findings:
+            top = findings[0]
+            log.warning(
+                "Autocompact thrash for %s: %s is %d chars and was loaded %d "
+                "times (session %s)",
+                instance.id, top.display_path, top.chars, top.loads,
+                session_id[:12],
+            )
+        return findings
+
     def _build_command(
         self, instance: Instance,
         context: str | None = None,
@@ -4811,7 +4864,14 @@ class ClaudeRunner:
         # a stale "you were just aborted".
         if getattr(instance, "_context_thrash_retry", False):
             instance._context_thrash_retry = False
-            prompt = config.CONTEXT_THRASH_NUDGE + "\n\n" + prompt
+            nudge = config.CONTEXT_THRASH_NUDGE
+            # The named-file note rides with the nudge and is cleared with it,
+            # so it can never reach an attempt the nudge did not.
+            bloat_note = getattr(instance, "_context_bloat_note", None)
+            instance._context_bloat_note = None
+            if bloat_note:
+                nudge = nudge + "\n" + bloat_note
+            prompt = nudge + "\n\n" + prompt
 
         # Memory recovery note (the bot's own reap, or the operating system's
         # OOM kill: both use this one slot). Same read-and-clear discipline,

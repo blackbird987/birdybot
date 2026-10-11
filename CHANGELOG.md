@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## v0.101.35, Thrash errors name the oversized instruction file (2026-10-11)
+
+### Added
+- **An autocompact thrash caused by an oversized instruction file now names that file** (`bot/claude/context_bloat.py`, `bot/claude/runner.py`, `bot/claude/types.py`, `bot/config.py`, `scripts/test_context_bloat.py`). Some thrashes cannot be cleared by resuming: the CLI re-attaches a nested `CLAUDE.md` every time the session touches a file in its folder, and AIAgent's `Services/Automation/CLAUDE.md` is 317K chars and was re-attached 22 times before t-9142 died. On a thrash the bot now reads the session's transcript for auto-attached files over 60K chars at their latest size. The resumed attempt is told which file it is and how to work around it (delegate work in that folder to a subagent, prefer Bash reads there), and when the resumes run out the error ends with a `Cause:` line saying which file to slim. Retries are unchanged, with or without a finding. Knob: `CONTEXT_BLOAT_MIN_CHARS` (default 60000).
+
 ## v0.101.34, Progress cards stop re-sending identical edits (2026-10-09)
 
 ### Fixed

@@ -315,6 +315,11 @@ class Instance:
     # is told why its predecessor was killed and that its edits are still on
     # disk. Not persisted — it describes one attempt, not the instance.
     _context_thrash_retry: bool = False
+    # Ephemeral companion to the above: the note naming an oversized
+    # auto-attached instruction file (bot/claude/context_bloat.py), set and
+    # cleared on exactly the same schedule. Empty when the transcript named
+    # nothing, which is the common case.
+    _context_bloat_note: str | None = None
     # Ephemeral twin of the above for the memory guard: holds the recovery note
     # text (not a bool — the numbers are the substance) set just before the
     # runner re-spawns a session it reaped for memory, or one the operating
