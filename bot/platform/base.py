@@ -282,8 +282,8 @@ class RequestContext:
     # Orchestrator seam — invoked by engine.lifecycle after a child session
     # finalizes terminally (COMPLETED/FAILED). The platform closure posts a
     # summary back into the recorded parent thread with a Resume button so
-    # the orchestrator loop can continue. Discord wires this; Telegram leaves
-    # it None (no-op). Signature: (status, summary_text) -> None.
+    # the orchestrator loop can continue. None is a no-op.
+    # Signature: (status, summary_text) -> None.
     notify_parent_on_finalize: Callable[[str, str], Awaitable[None]] | None = None
     # [BOT_CMD: /reply] — platform-supplied callback that delivers a message
     # into an ALREADY-EXISTING thread this session spawned, so a parent can
@@ -306,13 +306,13 @@ class RequestContext:
     # when a genuine user-typed message arrives (source == "user_message") so
     # the cap allows a fresh orchestration loop after the user re-engages.
     reset_spawn_wave_count: Callable[[], None] | None = None
-    # Self-wake runaway-cap accessors (forum threads only; None on Telegram).
+    # Self-wake runaway-cap accessors (forum threads only; None elsewhere).
     # Mirror the spawn-wave pattern: a per-thread counter on ThreadInfo, read/
     # written by lifecycle.check_wake_request. bump increments and returns the
     # new count; reset zeroes it. Used to cap an endless self-wake poll loop.
     bump_wake_count: Callable[[], int] | None = None
     reset_wake_count: Callable[[], None] | None = None
-    # Unattended-turn nudge-cap accessors (forum threads only; None on Telegram).
+    # Unattended-turn nudge-cap accessors (forum threads only; None elsewhere).
     # Same per-thread ThreadInfo counter pattern as the wake cap. bump increments
     # and returns the new count; reset zeroes it. Used by check_wake_request to
     # cap the auto-nudge loop that re-invokes a dead-ended unattended turn.
@@ -377,9 +377,6 @@ class NotificationService:
 
     def register(self, messenger: Messenger, default_channel_id: str) -> None:
         self._messengers[messenger.platform_name] = (messenger, default_channel_id)
-
-    def unregister(self, platform: str) -> None:
-        self._messengers.pop(platform, None)
 
     async def broadcast(
         self, text: str,

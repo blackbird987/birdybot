@@ -1213,13 +1213,9 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
         )
         return
 
-    # Per-channel session (Discord) is authoritative; global fallback for other platforms
-    if ctx.session_id:
-        resume_session = ctx.session_id
-    elif ctx.platform == "discord":
-        resume_session = None  # Discord channels are isolated — never use global session
-    else:
-        resume_session = ctx.store.active_session_id
+    # The thread's own session is the only one resumed. Threads are isolated:
+    # a thread with no session starts fresh, never on a global one.
+    resume_session = ctx.session_id or None
 
     # Context priming. Two trigger paths:
     #   "cold"   — no resumable session at all (fresh thread, post-account-swap,
