@@ -424,14 +424,9 @@ class StateStore:
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
                     f.write(payload)
-                # Refresh the last-known-good backup only when asked (periodic),
-                # so the 4 MB copy stays off the per-save hot path.
+                # Refresh the last-known-good backup only when asked (periodic).
                 if backup and self._file.exists():
-                    try:
-                        shutil.copy2(str(self._file),
-                                     str(self._file.with_suffix(".bak")))
-                    except Exception:
-                        pass  # best-effort backup
+                    self._rotate_backup()
                 os.replace(tmp_path, str(self._file))  # atomic overwrite
                 self._update_mtime()
             except Exception:
@@ -439,6 +434,29 @@ class StateStore:
                 raise
         except Exception:
             log.exception("Failed to save state")
+
+    def _rotate_backup(self) -> None:
+        """Make the current file the .bak without copying it (best effort).
+
+        A hard link names the same bytes twice, so the replace that follows
+        repoints state.json at the new snapshot and leaves .bak holding the
+        old one: no 4 MB copy, and state.json never stops existing in between,
+        which a rename of the live file would cost. A filesystem without hard
+        links falls back to the copy.
+        """
+        bak = self._file.with_suffix(".bak")
+        tmp_bak = bak.with_name(bak.name + ".tmp")
+        try:
+            tmp_bak.unlink(missing_ok=True)
+            os.link(self._file, tmp_bak)
+            os.replace(tmp_bak, bak)
+            return
+        except OSError:
+            tmp_bak.unlink(missing_ok=True)
+        try:
+            shutil.copy2(str(self._file), str(bak))
+        except Exception:
+            pass  # best-effort backup
 
     def save(self, backup: bool = False) -> None:
         """Atomic save: serialize then write via temp + replace. Cheap enough to
