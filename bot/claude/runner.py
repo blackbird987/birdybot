@@ -4760,29 +4760,25 @@ class ClaudeRunner:
 
     async def _thrash_bloat_findings(
         self, instance: Instance, session_id: str | None,
-    ) -> list:
+    ) -> list[context_bloat.Autoload]:
         """Oversized auto-attached files in the session that just thrashed.
 
-        Scanned once per session per run: a second thrash on the same session
-        reuses the first answer rather than streaming a 30 MB transcript again.
-        Off the event loop, and never raises; a scan that fails is no finding.
+        Scanned afresh on every thrash rather than cached: a 38 MB transcript
+        streams in about 0.2s off the event loop, and the rows a resumed
+        attempt appended are exactly what a second thrash should be judged
+        on. Never raises; a scan that fails is no finding.
         """
         if not session_id:
             return []
-        cached = getattr(instance, "_context_bloat_scan", None)
-        if cached is not None and cached[0] == session_id:
-            findings = cached[1]
-        else:
-            try:
-                findings = await asyncio.to_thread(
-                    context_bloat.scan_session, session_id,
-                    instance.repo_path, instance.worktree_path,
-                )
-            except Exception:
-                log.debug("Context bloat scan failed for %s", instance.id,
-                          exc_info=True)
-                findings = []
-            instance._context_bloat_scan = (session_id, findings)
+        try:
+            findings = await asyncio.to_thread(
+                context_bloat.scan_session, session_id,
+                instance.repo_path, instance.worktree_path,
+            )
+        except Exception:
+            log.debug("Context bloat scan failed for %s", instance.id,
+                      exc_info=True)
+            findings = []
         if findings:
             top = findings[0]
             log.warning(

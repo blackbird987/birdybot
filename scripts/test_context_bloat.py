@@ -2,10 +2,10 @@
 """Regression test: an autocompact thrash caused by an oversized auto-attached
 instruction file is named, both to the resumed attempt and in the final error.
 
-The incident (t-9145 and t-9142, AIAgent, 2026-10-11): builds died with
-"Autocompact is thrashing" and the user pressed Retry until one got through.
-The bot already auto-resumes a thrash, because the CLI's thrash counter lives
-in the process. These did not clear on resume, because the CLI re-attaches a
+The incident (t-9142, AIAgent, 2026-10-11): a build died with "Autocompact is
+thrashing" and the user retried it by hand. The bot already auto-resumes a
+thrash, because the CLI's thrash counter lives in the process. This one did
+not clear on resume, because the CLI re-attaches a
 nested ``CLAUDE.md`` (a ``nested_memory`` transcript row) every time the
 session touches a file in its folder, and ``Services/Automation/CLAUDE.md``
 was 317K chars. Each compaction was undone by the next Read.
@@ -13,7 +13,9 @@ was 317K chars. Each compaction was undone by the next Read.
 Asserted here:
 
   * the scanner finds a large nested file loaded several times, through both
-    the main repo and a build worktree, as ONE file with the loads summed
+    the main repo and a build worktree, as ONE file with the loads summed,
+    at the size of its LAST load
+  * a file that was large but slimmed before its last load is not blamed
   * it finds a large file in an ``instructions`` row, and ignores small files
   * garbage lines, non-object JSON and the spaced JSON spelling are handled
   * a missing transcript is no finding, never an exception
@@ -22,9 +24,12 @@ Asserted here:
     gains a cause line only when resumes are exhausted and there is a finding
   * with no finding, the resumed prompt and the final error are byte-identical
     to a run with no transcript at all
-  * the transcript is scanned once per session per run, not once per thrash
-  * against the real t-9142 transcript, ``Services/Automation/CLAUDE.md`` is
-    found at over 300K chars (skipped when the file is not on this machine)
+  * every thrash scans afresh, so a second thrash is judged on the rows the
+    resumed attempt appended
+  * against the real t-9142 transcript (the bytes it held when that build
+    died, so a later resume of the session cannot move the answer),
+    ``Services/Automation/CLAUDE.md`` is found at over 300K chars (skipped
+    when the file is not on this machine)
 
 The existing thrash, overflow and failover suites cover that retry behaviour
 itself is unchanged; run them alongside this one.
@@ -69,6 +74,9 @@ REAL_TRANSCRIPT = Path(
     "-home-quincy-Programming-DegenAI-AIAgent-AIAgent--worktrees-t-9142/"
     "daab9204-55ed-4bcf-98a9-5b9bb5be7658.jsonl"
 )
+# The transcript's length when t-9142 died. The session has been resumed
+# since, so the replay reads only this prefix (it ends on a line break).
+REAL_TRANSCRIPT_BYTES = 34_541_276
 REAL_REPO = "/home/quincy/Programming/DegenAI/AIAgent/AIAgent"
 REAL_WORKTREE = REAL_REPO + "/.worktrees/t-9142"
 
@@ -146,8 +154,9 @@ def _check_scanner(tmp: str, failures: list[str]) -> None:
             f"the nested file was loaded 3 times (twice via the worktree, once "
             f"via the main repo) but counted {nested.loads}"
         )
-    if nested.chars != BIG or nested.kind != context_bloat.KIND_NESTED:
-        failures.append(f"nested finding is wrong: {nested!r}")
+    # The main repo copy was loaded last, at BIG - 10: the latest size wins.
+    if nested.chars != BIG - 10 or nested.kind != context_bloat.KIND_NESTED:
+        failures.append(f"nested finding should carry its last size: {nested!r}")
     if instr.loads != 2 or instr.kind != context_bloat.KIND_INSTRUCTIONS:
         failures.append(
             f"instructions file should count both spellings as 2 loads: {instr!r}"
@@ -161,6 +170,16 @@ def _check_scanner(tmp: str, failures: list[str]) -> None:
         failures.append("nothing is over 10M chars, yet something was reported")
     if context_bloat.scan_session("", repo, None) != []:
         failures.append("an empty session id must be no finding")
+
+    # Big on its first two loads, slimmed before the third: no longer a cause.
+    slimmed = Path(tmp) / "slimmed.jsonl"
+    slimmed.write_text("\n".join([
+        _nested(f"{repo}/Big/CLAUDE.md", BIG),
+        _nested(f"{repo}/Big/CLAUDE.md", BIG),
+        _nested(f"{repo}/Big/CLAUDE.md", SMALL),
+    ]) + "\n", encoding="utf-8")
+    if context_bloat.find_oversized_autoloads(slimmed, 60_000, [repo]):
+        failures.append("a file slimmed before its last load was still blamed")
 
     note = context_bloat.render_note(found)
     if "`Services/Automation/CLAUDE.md`" not in note or "Agent tool" not in note:
@@ -223,10 +242,10 @@ async def _check_runner(tmp: str, failures: list[str]) -> None:
             failures.append(f"B: exhausted thrash does not name the cause: {err!r}")
         if err.count("Cause:") != 1:
             failures.append(f"B: cause line appended {err.count('Cause:')} times")
-        if scans["n"] != 1:
+        if scans["n"] != len(hb.prompts) or scans["n"] < 2:
             failures.append(
-                f"B: {len(hb.prompts)} attempts scanned the transcript "
-                f"{scans['n']} times; once per session is enough"
+                f"B: {len(hb.prompts)} thrashed attempts scanned the transcript "
+                f"{scans['n']} times; each thrash should scan once"
             )
         if getattr(inst_b, "_context_bloat_note", None):
             failures.append("B: the bloat note was left set after the run")
@@ -253,12 +272,22 @@ async def _check_runner(tmp: str, failures: list[str]) -> None:
         context_bloat.scan_session = real_scan  # type: ignore[assignment]
 
 
-def _check_real_transcript(failures: list[str]) -> str:
-    if not REAL_TRANSCRIPT.is_file():
+def _check_real_transcript(tmp: str, failures: list[str]) -> str:
+    if not REAL_TRANSCRIPT.is_file() \
+            or REAL_TRANSCRIPT.stat().st_size < REAL_TRANSCRIPT_BYTES:
         return "skipped (t-9142 transcript not on this machine)"
+    prefix = Path(tmp) / "t-9142.jsonl"
+    with open(REAL_TRANSCRIPT, "rb") as src, open(prefix, "wb") as dst:
+        remaining = REAL_TRANSCRIPT_BYTES
+        while remaining:
+            chunk = src.read(min(remaining, 1 << 20))
+            if not chunk:
+                break
+            dst.write(chunk)
+            remaining -= len(chunk)
     roots = context_bloat.display_roots(REAL_REPO, REAL_WORKTREE)
     found = context_bloat.find_oversized_autoloads(
-        REAL_TRANSCRIPT, config.CONTEXT_BLOAT_MIN_CHARS, roots,
+        prefix, config.CONTEXT_BLOAT_MIN_CHARS, roots,
     )
     top = found[0] if found else None
     if top is None or top.display_path != "Services/Automation/CLAUDE.md" \
@@ -278,7 +307,7 @@ async def _amain() -> int:
     try:
         _check_scanner(tmp, failures)
         await _check_runner(tmp, failures)
-        real = _check_real_transcript(failures)
+        real = _check_real_transcript(tmp, failures)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

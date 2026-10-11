@@ -320,10 +320,6 @@ class Instance:
     # cleared on exactly the same schedule. Empty when the transcript named
     # nothing, which is the common case.
     _context_bloat_note: str | None = None
-    # Ephemeral: (session_id, findings) from the last transcript scan in this
-    # run, so a second thrash on the same session does not stream a 30 MB
-    # transcript again. Rescanned when the session id changes.
-    _context_bloat_scan: tuple[str, list] | None = None
     # Ephemeral twin of the above for the memory guard: holds the recovery note
     # text (not a bool — the numbers are the substance) set just before the
     # runner re-spawns a session it reaped for memory, or one the operating

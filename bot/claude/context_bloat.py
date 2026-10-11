@@ -8,7 +8,7 @@ session Reads, Edits or Writes a file in that folder, and the project's own
 instruction files come back after every compaction. When one of those is a few
 hundred KB, every compaction is immediately undone and no number of resumes
 helps. t-9142 (AIAgent, 2026-10-11) re-attached a 317K-char
-``Services/Automation/CLAUDE.md`` two dozen times before the CLI gave up.
+``Services/Automation/CLAUDE.md`` 22 times before the CLI gave up.
 
 This module only *names* such a file, from the session's own transcript, so
 the resumed attempt can be told to work around it and the final failure can
@@ -106,20 +106,22 @@ def display_roots(repo_path: str | None, worktree_path: str | None) -> list[str]
     A registered repo can be a subfolder of its git checkout (AIAgent's is
     ``AIAgent/`` inside the checkout), while a build worktree is a copy of the
     whole checkout. The repo's own folder inside the worktree is therefore not
-    the worktree root, and is found through git. The CLI's own ``displayPath``
-    is not used for this: it is relative to wherever the session's shell was
-    standing, so the same file shows up as ``../CLAUDE.md`` from one folder and
+    the worktree root, and is found through git. The checkout root is a root
+    too, so an instruction file above the repo folder gets a short name rather
+    than an absolute path. The CLI's own ``displayPath`` is not used for this:
+    it is relative to wherever the session's shell was standing, so the same
+    file shows up as ``../CLAUDE.md`` from one folder and
     ``AIAgent/Services/Automation/CLAUDE.md`` from another.
     """
     roots = [r for r in (repo_path, worktree_path) if r]
-    if repo_path and worktree_path:
+    if repo_path:
         try:
             from bot.claude.gitpaths import git_toplevel
 
             top = git_toplevel(repo_path)
             if top:
                 rel = os.path.relpath(repo_path, top)
-                if rel != "." and not rel.startswith(".."):
+                if worktree_path and rel != "." and not rel.startswith(".."):
                     roots.append(os.path.join(worktree_path, rel))
                 roots.append(top)
         except Exception:
@@ -136,14 +138,16 @@ def find_oversized_autoloads(
     Streams the transcript line by line. A file is keyed by its path relative
     to ``roots`` (see :func:`display_roots`), so the same ``CLAUDE.md`` reached
     through the main repo and through a build worktree counts as one file
-    loaded N times rather than two. Keeps the largest size seen, since a file
-    edited mid-session reports its newest size.
+    loaded N times rather than two. Its size is the one it had on its LAST
+    load, and the threshold is applied to that: a file slimmed mid-session is
+    no longer the cause, and blaming it for the size it used to be would send
+    the user to slim it again.
     """
     roots = [r for r in (roots or []) if r]
     found: dict[str, Autoload] = {}
 
     def _add(path: str, display: str, chars: int, kind: str) -> None:
-        if chars < min_chars or not path:
+        if not path:
             return
         key = display or path
         hit = found.get(key)
@@ -151,9 +155,8 @@ def find_oversized_autoloads(
             found[key] = Autoload(path, key, chars, 1, kind)
             return
         hit.loads += 1
-        if chars > hit.chars:
-            hit.chars = chars
-            hit.path = path
+        hit.chars = chars
+        hit.path = path
         # A file seen as a nested load is described as one: that is the shape
         # the Read advice applies to.
         if kind == KIND_NESTED:
@@ -200,7 +203,8 @@ def find_oversized_autoloads(
         log.debug("context bloat scan failed on %s", session_file, exc_info=True)
         return []
 
-    return sorted(found.values(), key=lambda a: (-a.chars, a.display_path))
+    big = [a for a in found.values() if a.chars >= min_chars]
+    return sorted(big, key=lambda a: (-a.chars, a.display_path))
 
 
 def locate_transcript(session_id: str, cwds: list[str]) -> Path | None:
@@ -265,17 +269,18 @@ def scan_session(
         return []
 
 
+def _reload_phrase(a: Autoload) -> str:
+    """When the CLI puts the file back, in words. One wording for both texts."""
+    if a.kind == KIND_NESTED:
+        return "every time a file in that folder is Read, Edited or Written"
+    return "at the start and after every compaction"
+
+
 def _file_line(a: Autoload) -> str:
-    where = (
-        "it is re-attached every time you Read, Edit or Write a file in that "
-        "folder"
-        if a.kind == KIND_NESTED
-        else "it is a project instruction file and comes back after every "
-        "compaction"
-    )
     return (
         f"- `{a.display_path}`: {a.kb} KB (~{a.approx_tokens_k}K tokens), "
-        f"loaded {a.loads} time{'s' if a.loads != 1 else ''}; {where}"
+        f"loaded {a.loads} time{'s' if a.loads != 1 else ''}; it is "
+        f"re-attached {_reload_phrase(a)}"
     )
 
 
@@ -292,13 +297,9 @@ def cause_line(findings: list[Autoload]) -> str:
     if not findings:
         return ""
     a = findings[0]
-    when = (
-        "every time the session touches that folder"
-        if a.kind == KIND_NESTED
-        else "at the start and after every compaction"
-    )
     return (
         f"Cause: `{a.display_path}` is {a.kb} KB (~{a.approx_tokens_k}K "
-        f"tokens) and is reloaded into context {when}. Retrying will not fix "
-        f"this; slim that file (move sections into separate docs it links to)."
+        f"tokens) and is reloaded into context {_reload_phrase(a)}. Retrying "
+        f"will not fix this; slim that file (move sections into separate docs "
+        f"it links to)."
     )
