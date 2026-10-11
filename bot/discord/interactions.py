@@ -194,8 +194,9 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
 
     custom_id = interaction.data.get("custom_id", "") if interaction.data else ""
 
-    # --- Select menu: repo switch (owner only) ---
-    if custom_id == "repo_switch_select":
+    # --- Select menu: repo switch (owner only). A long repo list is split
+    # across several menus, ids repo_switch_select:<n> ---
+    if custom_id == "repo_switch_select" or custom_id.startswith("repo_switch_select:"):
         await _handle_repo_switch(bot, interaction, btn_access)
         return
 
@@ -349,6 +350,13 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
     # --- New session with repo picker ---
     if action == "new_repo":
         await _handle_new_repo(bot, interaction, instance_id, btn_access)
+        return
+    # Same picker as Select menus, used once the repos outgrow one View of
+    # buttons. The second id segment is the menu's index, the repo is the value.
+    if action == "new_repo_select":
+        values = interaction.data.get("values", []) if interaction.data else []
+        if values:
+            await _handle_new_repo(bot, interaction, values[0], btn_access)
         return
 
     # --- Sync CLI for a repo (control room button) ---

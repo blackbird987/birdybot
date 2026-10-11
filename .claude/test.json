@@ -142,7 +142,8 @@
     "parser_golden": "python scripts/test_parser_golden.py",
     "parent_notify": "python scripts/test_parent_notify.py",
     "directive_fences": "python scripts/test_directive_fences.py",
-    "state_reload": "python scripts/test_state_reload.py"
+    "state_reload": "python scripts/test_state_reload.py",
+    "repo_picker_cap": "python scripts/test_repo_picker_cap.py"
   },
 
   "auth": {

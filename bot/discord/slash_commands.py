@@ -27,6 +27,7 @@ from bot.platform.formatting import (
     normalize_model, short_model_label,
 )
 from bot.store import history as history_mod
+from bot.textutil import clip
 
 if TYPE_CHECKING:
     from bot.discord.bot import ClaudeBot
@@ -349,28 +350,27 @@ def setup(bot: ClaudeBot) -> None:
         hidden_count = len(bot._store.list_dormant_repos())
         if len(repos) >= 2 and stripped in ("", "switch"):
             active, _ = bot._store.get_active_repo()
-            select = discord.ui.Select(
-                placeholder="Switch repo...",
-                custom_id="repo_switch_select",
-                options=[
-                    discord.SelectOption(
-                        label=name, description=path[:80], value=name,
-                        default=(name == active),
-                    )
-                    for name, path in repos.items()
-                ],
+            view, shown = channels.repo_select_view(
+                [(name, path[:80]) for name, path in repos.items()],
+                "repo_switch_select", "Switch repo...", default=active,
             )
-            view = discord.ui.View(timeout=60)
-            view.add_item(select)
             lines = []
             for name, path in repos.items():
                 marker = " \\*" if name == active else ""
                 lines.append(f"`{name}`{marker} → `{path}`")
+            notes = []
+            if shown < len(repos):
+                notes.append(f"-# {len(repos) - shown} not in the menu"
+                             " · `/repo switch <name>` reaches any of them")
             if hidden_count:
-                lines.append(
+                notes.append(
                     f"-# {hidden_count} hidden · `/repo list` to see them")
+            # The notes are the part that explains what is missing, so the
+            # listing is what gets cut to keep the message under 2000 chars.
+            tail = "\n".join(notes)
+            body = clip("\n".join(lines), 2000 - len(tail) - 1)
             await interaction.response.send_message(
-                "\n".join(lines), view=view, ephemeral=True,
+                "\n".join([body, tail]) if tail else body, view=view, ephemeral=True,
             )
             return
         # _run_slash builds its ctx without a repo, so /repo desc would default
@@ -549,15 +549,20 @@ def setup(bot: ClaudeBot) -> None:
                     user_id=user_id, user_name=user_name,
                 )
             else:
-                view = discord.ui.View(timeout=60)
-                for name in pickable_repos:
-                    btn = discord.ui.Button(
-                        label=name, style=discord.ButtonStyle.primary,
-                        custom_id=f"new_repo:{name}",
+                # Buttons while they fit in one View, Select menus past that:
+                # a 26th button makes Discord reject the whole message.
+                view = channels.repo_button_view(pickable_repos, "new_repo")
+                text = "Pick a repo:"
+                if view is None:
+                    view, shown = channels.repo_select_view(
+                        [(name, "") for name in pickable_repos],
+                        "new_repo_select", "Pick a repo...",
                     )
-                    view.add_item(btn)
+                    if shown < len(pickable_repos):
+                        text += (f"\n-# {len(pickable_repos) - shown} more not shown"
+                                 " · `/new repo:<name>` starts any of them")
                 await interaction.response.send_message(
-                    "Pick a repo:", view=view, ephemeral=True,
+                    text, view=view, ephemeral=True,
                 )
 
     @bot.tree.command(name="history", description="Recent completed sessions", guild=guild_obj)

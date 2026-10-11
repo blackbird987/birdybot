@@ -311,6 +311,58 @@ _MODE_BUTTON_STYLE: dict[str, discord.ButtonStyle] = {
 }
 
 
+# Discord rejects a whole message, not just the overflow, when a View carries
+# more than 5 rows or a Select more than 25 options. A button takes one slot of
+# a 5-wide row, a Select takes a whole row.
+VIEW_MAX_ROWS = 5
+VIEW_MAX_BUTTONS = 25
+SELECT_MAX_OPTIONS = 25
+
+
+def repo_select_view(
+    repos: list[tuple[str, str]], custom_id: str, placeholder: str,
+    default: str | None = None,
+) -> tuple[discord.ui.View, int]:
+    """A repo picker as Select menus that always fits in one message.
+
+    ``repos`` is ``(name, description)`` pairs. They are split across up to
+    five Selects of 25 options each, ids ``<custom_id>:<n>``; anything past
+    125 is left out. Returns the view and how many repos it shows, so the
+    caller can say what was cut.
+    """
+    view = discord.ui.View(timeout=60)
+    shown = repos[:VIEW_MAX_ROWS * SELECT_MAX_OPTIONS]
+    chunks = [shown[i:i + SELECT_MAX_OPTIONS]
+              for i in range(0, len(shown), SELECT_MAX_OPTIONS)]
+    for n, chunk in enumerate(chunks):
+        label = placeholder if len(chunks) == 1 else f"{placeholder} ({n + 1}/{len(chunks)})"
+        view.add_item(discord.ui.Select(
+            placeholder=label,
+            custom_id=f"{custom_id}:{n}",
+            options=[
+                discord.SelectOption(
+                    label=name[:100], value=name[:100],
+                    description=(desc[:100] or None), default=(name == default),
+                )
+                for name, desc in chunk
+            ],
+        ))
+    return view, len(shown)
+
+
+def repo_button_view(names: list[str], custom_id_prefix: str) -> discord.ui.View | None:
+    """One button per repo, or None when they would not fit in one View."""
+    if len(names) > VIEW_MAX_BUTTONS:
+        return None
+    view = discord.ui.View(timeout=60)
+    for name in names:
+        view.add_item(discord.ui.Button(
+            label=name[:80], style=discord.ButtonStyle.primary,
+            custom_id=f"{custom_id_prefix}:{name}",
+        ))
+    return view
+
+
 def session_controls_view(
     current_mode: str = "explore",
     current_effort: str = "high",
