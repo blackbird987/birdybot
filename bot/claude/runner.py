@@ -793,6 +793,22 @@ async def _capture_process_snapshot(
     return snapshot
 
 
+async def _wait_or_kill(proc: asyncio.subprocess.Process, grace: float = 5.0) -> None:
+    """Give a process we already terminated ``grace`` seconds, then SIGKILL it."""
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=grace)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+
+
+def _save_result_file(instance: Instance, text: str) -> None:
+    """Write a run's final text to its result file and point the instance at it."""
+    result_path = config.RESULTS_DIR / f"{instance.id}.md"
+    result_path.write_text(text, encoding="utf-8")
+    instance.result_file = str(result_path)
+
+
 # --- Memory guard: what the user is told, and when a reap is moot -------------
 #
 # Pulled out of the watchdog loop rather than written inline. Both messages are
@@ -3939,6 +3955,20 @@ class ClaudeRunner:
         _poisoning_seen: set[str] = set()
         _wt_path = (instance.worktree_path or "")
         _repo_path = (instance.repo_path or "")
+
+        def _record_poisoning(event: dict, *, warn: bool) -> None:
+            if not (_wt_path and _repo_path):
+                return
+            for hit in detect_path_poisoning(event, _wt_path, _repo_path):
+                if hit not in _poisoning_seen:
+                    _poisoning_seen.add(hit)
+                    poisoning_hits.append(hit)
+                    if warn:
+                        log.warning(
+                            "Path-poisoning hit for %s: %s (worktree=%s, repo=%s)",
+                            instance.id, hit, _wt_path, _repo_path,
+                        )
+
         last_output_time = asyncio.get_event_loop().time()
         process_start_time = last_output_time
         stall_warned = False
@@ -4422,16 +4452,7 @@ class ClaudeRunner:
                     # targets the main repo path instead of the worktree.
                     # Records-only — the worktree-guard hook is the actual
                     # block; this is an observer for the post-run summary.
-                    if _wt_path and _repo_path:
-                        for hit in detect_path_poisoning(event, _wt_path, _repo_path):
-                            if hit not in _poisoning_seen:
-                                _poisoning_seen.add(hit)
-                                poisoning_hits.append(hit)
-                                log.warning(
-                                    "Path-poisoning hit for %s: %s "
-                                    "(worktree=%s, repo=%s)",
-                                    instance.id, hit, _wt_path, _repo_path,
-                                )
+                    _record_poisoning(event, warn=True)
 
                     # Detect AskUserQuestion — Claude is blocking on stdin
                     if ask_question_input is None:
@@ -4457,13 +4478,15 @@ class ClaudeRunner:
                 except asyncio.CancelledError:
                     pass
 
-        # AskUserQuestion — wait for process to die, then return question as result
+        # Both early exits below terminated the CLI themselves, so they give it
+        # a grace period instead of the bare wait the main path uses, and they
+        # run the same post-exit housekeeping before returning.
+        if ask_question_input is not None or end_of_turn_done:
+            await _wait_or_kill(proc)
+            await self._after_exit_housekeeping(instance, account_dir)
+
+        # AskUserQuestion: return the question as the result
         if ask_question_input is not None:
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
             result = extract_result(events)
             result.needs_input = True
             result.is_error = False
@@ -4482,20 +4505,13 @@ class ClaudeRunner:
             if not result.session_id:
                 result.session_id = captured_session_id
             if result.result_text:
-                result_path = config.RESULTS_DIR / f"{instance.id}.md"
-                result_path.write_text(result.result_text, encoding="utf-8")
-                instance.result_file = str(result_path)
+                _save_result_file(instance, result.result_text)
                 instance.summary = extract_summary(result.result_text)
             return result
 
-        # End-of-turn watchdog tripped — CLI hung after stop_reason=end_turn.
+        # End-of-turn watchdog tripped: the CLI hung after stop_reason=end_turn.
         # Synthesise a successful result from the events we captured.
         if end_of_turn_done:
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
             result = extract_result(events)
             result.is_error = False
             result.error_message = None
@@ -4506,49 +4522,19 @@ class ClaudeRunner:
             if poisoning_hits:
                 result.path_poisoning = list(poisoning_hits)
             if result.result_text:
-                result_path = config.RESULTS_DIR / f"{instance.id}.md"
-                result_path.write_text(result.result_text, encoding="utf-8")
-                instance.result_file = str(result_path)
+                _save_result_file(instance, result.result_text)
                 instance.summary = extract_summary(result.result_text)
             return result
 
         await proc.wait()
 
         # Post-exit worktree housekeeping, placed here rather than in the tail
-        # because the tail is not on every path out of this method. Two returns
-        # below leave before it — the lifetime cap and the memory reap — and both
-        # used to skip these entirely. The mutex is the one with teeth: the
-        # release is the backstop for a session killed mid-test-run, and "killed
-        # mid-test-run" is exactly the shape of a watchdog kill, so the case it
-        # exists for was the case it never covered. Siblings on that repo then
-        # wait out the hook's stale TTL, and on the memory path the attempt that
-        # auto-resumes waits on a lock its own predecessor is still holding.
-        #
-        # The AskUserQuestion and end-of-turn returns above still miss it: they
-        # do their own proc.wait() well before this line, and moving cleanup in
-        # front of them is a change to two long-standing success paths that has
-        # nothing to do with the memory guard. Noted, not fixed here.
-        #
-        # Both are idempotent (the release no-ops unless this worktree owns the
-        # lock; the back-copy overwrites), so nothing cares that the tail path
-        # reaches this before doing its own work. It has to happen before the
-        # last-assistant-uuid lookup further down, which reads the JSONL out of
-        # the MAIN repo's project dir — i.e. only ever finds it once the
-        # back-copy has run.
-        if instance.worktree_path:
-            try:
-                await asyncio.to_thread(
-                    self._copy_session_from_worktree, instance, account_dir,
-                )
-            except Exception:
-                log.exception("Session back-copy failed for %s", instance.id)
-            try:
-                await asyncio.to_thread(
-                    self._release_test_mutex,
-                    instance.repo_path, instance.worktree_path,
-                )
-            except Exception:
-                log.exception("Test-mutex release failed for %s", instance.id)
+        # because the tail is not on every path out of this method: the lifetime
+        # cap and the memory reap both return before it. It has to happen before
+        # the last-assistant-uuid lookup further down, which reads the JSONL out
+        # of the MAIN repo's project dir and so only finds it after the
+        # back-copy.
+        await self._after_exit_housekeeping(instance, account_dir)
 
         # Both watchdog reaps stand down for the same two races. Guarded as one
         # block so the O(n) event walk below stays lazy on the ordinary path,
@@ -4621,12 +4607,8 @@ class ClaudeRunner:
         # Final reconciliation pass: walk every event so anything that
         # slipped past the stream-time tripwire (e.g. a content_block_start
         # that arrived in a half-flushed line) is still surfaced.
-        if _wt_path and _repo_path:
-            for ev in events:
-                for hit in detect_path_poisoning(ev, _wt_path, _repo_path):
-                    if hit not in _poisoning_seen:
-                        _poisoning_seen.add(hit)
-                        poisoning_hits.append(hit)
+        for ev in events:
+            _record_poisoning(ev, warn=False)
         if poisoning_hits:
             result.path_poisoning = list(poisoning_hits)
 
@@ -4711,9 +4693,7 @@ class ClaudeRunner:
 
         # Save result file
         if result.result_text:
-            result_path = config.RESULTS_DIR / f"{instance.id}.md"
-            result_path.write_text(result.result_text, encoding="utf-8")
-            instance.result_file = str(result_path)
+            _save_result_file(instance, result.result_text)
 
         # Save git diff for build tasks
         if instance.branch and not result.is_error:
@@ -4757,6 +4737,35 @@ class ClaudeRunner:
                 log.exception("last_assistant_uuid capture failed for %s", instance.id)
 
         return result
+
+    async def _after_exit_housekeeping(
+        self, instance: Instance, account_dir: str | None,
+    ) -> None:
+        """Copy a worktree session back and release the test mutex.
+
+        Runs on every way out of ``_stream_output`` once the CLI has exited. The
+        mutex is the one with teeth: the release is the backstop for a session
+        killed mid-test-run, which is exactly the shape of a watchdog kill, and
+        a build that stops on AskUserQuestion holds the lock until its answer
+        arrives unless it is released here. Siblings on that repo otherwise wait
+        out the hook's stale TTL. Both halves are idempotent (the release
+        no-ops unless this worktree owns the lock; the back-copy overwrites).
+        """
+        if not instance.worktree_path:
+            return
+        try:
+            await asyncio.to_thread(
+                self._copy_session_from_worktree, instance, account_dir,
+            )
+        except Exception:
+            log.exception("Session back-copy failed for %s", instance.id)
+        try:
+            await asyncio.to_thread(
+                self._release_test_mutex,
+                instance.repo_path, instance.worktree_path,
+            )
+        except Exception:
+            log.exception("Test-mutex release failed for %s", instance.id)
 
     async def _thrash_bloat_findings(
         self, instance: Instance, session_id: str | None,

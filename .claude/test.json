@@ -143,7 +143,8 @@
     "parent_notify": "python scripts/test_parent_notify.py",
     "directive_fences": "python scripts/test_directive_fences.py",
     "state_reload": "python scripts/test_state_reload.py",
-    "repo_picker_cap": "python scripts/test_repo_picker_cap.py"
+    "repo_picker_cap": "python scripts/test_repo_picker_cap.py",
+    "stream_exit_cleanup": "python scripts/test_stream_exit_cleanup.py"
   },
 
   "auth": {
