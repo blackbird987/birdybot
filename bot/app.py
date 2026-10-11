@@ -127,6 +127,30 @@ def _release_pid_lock() -> None:
         pass
 
 
+def _write_reboot_msg_and_relaunch(reboot_data: dict) -> None:
+    """Leave the next process its reboot note, then spawn the relauncher.
+
+    The one place both restart paths (the coalesced `/reboot` executor and the
+    Windows Ctrl+Break handler) write ``REBOOT_MSG_FILE`` and start
+    ``scripts/relaunch.py``. The relauncher stands down under the systemd unit,
+    whose ``Restart=always`` brings the bot back instead. A failure to write
+    the note is logged and does not stop the relaunch; a failure to spawn the
+    relauncher raises, so the caller decides whether that aborts the reboot.
+    """
+    import json
+    import subprocess
+
+    try:
+        config.REBOOT_MSG_FILE.write_text(json.dumps(reboot_data), encoding="utf-8")
+    except Exception:
+        log.warning("Failed to write reboot message file", exc_info=True)
+    launcher = config._PROJECT_ROOT / "scripts" / "relaunch.py"
+    subprocess.Popen(
+        [sys.executable, str(launcher), str(config._PROJECT_ROOT)],
+        **detached_kwargs(),
+    )
+
+
 def _detect_update_branch() -> str:
     """Detect the remote default branch for auto-update.
 
@@ -587,63 +611,35 @@ async def run() -> None:
                 ))
                 log.info("Auto-registered file-based deploy config for %s (pending approval)", _rname)
 
-    # Emergency signal handler: if the bot is killed (e.g. by a Claude Code instance
-    # running taskkill), save context and auto-relaunch so we come back online.
+    # Emergency signal handler for Windows Ctrl+Break (SIGBREAK): save state
+    # and relaunch, so a bot broken into from a console comes back online.
+    #
+    # It is deliberately NOT registered for SIGTERM. The graceful handler
+    # further down has always owned SIGTERM (it is registered later and
+    # replaced this one from the day this was added), and on Linux the
+    # restart after a SIGTERM is the systemd unit's job (`Restart=always`).
     def _emergency_reboot_handler(signum, frame):
-        # On Windows this only ever fired for an unusual signal, so relaunching
-        # unconditionally was fine. On Linux SIGTERM is how everything stops a
-        # process — botctl, start.sh, systemctl, shutdown — and a bot that
-        # relaunches itself out of each one cannot be stopped at all. Callers
-        # that mean it leave a sentinel; everything else is still an emergency.
-        # Checked before the imports below: this is a signal handler, and the
-        # deliberate path should not be reaching for the import lock at all.
+        # A caller that means "stop" leaves a sentinel; consult it before
+        # anything else, since this runs as a signal handler.
         if stop_was_requested(config.DATA_DIR):
-            log.warning("Caught signal %s — deliberate stop, not relaunching", signum)
+            log.warning("Caught signal %s, deliberate stop, not relaunching", signum)
             store.save()
             _release_pid_lock()
             os._exit(0)
 
-        import json as _json
-        import subprocess as _sp
-
-        log.warning("Caught signal %s — emergency reboot", signum)
-        # Find any running instance's channel to send confirmation after restart
-        reboot_data: dict = {}
-        for inst in store.list_instances()[:20]:
-            if inst.status == InstanceStatus.RUNNING and inst.message_ids:
-                for platform, msg_ids in inst.message_ids.items():
-                    if msg_ids:
-                        # Use the thread/channel of the first running instance
-                        reboot_data = {"channel_id": msg_ids[0], "platform": platform}
-                        # For Discord, the channel is the thread the msg was sent to
-                        # We need the actual channel_id, not msg_id — check forum threads
-                        break
-                if reboot_data:
-                    break
-        # Always save something so new process knows it was a reboot
-        if not reboot_data:
-            reboot_data = {}
+        log.warning("Caught signal %s, emergency reboot", signum)
+        # No channel and no resume prompt: the note only makes the next
+        # process announce that it is back. (This used to record a running
+        # instance's first *message* id as the channel to resume, which
+        # nothing could resume into.)
         try:
-            config.REBOOT_MSG_FILE.write_text(
-                _json.dumps(reboot_data), encoding="utf-8",
-            )
-        except Exception:
-            pass
-        # Spawn relaunch and exit
-        launcher = config._PROJECT_ROOT / "scripts" / "relaunch.py"
-        try:
-            _sp.Popen(
-                [sys.executable, str(launcher), str(config._PROJECT_ROOT)],
-                **detached_kwargs(),
-            )
+            _write_reboot_msg_and_relaunch({"message": "recovered from an interrupt signal"})
         except Exception:
             log.exception("Emergency relaunch could not be spawned")
         store.save()
         _release_pid_lock()
         os._exit(1)
 
-    # Register for SIGTERM and SIGBREAK (Windows) / SIGTERM (Unix)
-    signal.signal(signal.SIGTERM, _emergency_reboot_handler)
     if hasattr(signal, "SIGBREAK"):
         signal.signal(signal.SIGBREAK, _emergency_reboot_handler)
 
@@ -655,7 +651,6 @@ async def run() -> None:
     # a single reboot instead of racing.
     async def _execute_pending_reboots() -> None:
         """Called by runner when idle + reboots pending. Runs at most once."""
-        import json as _json
         reboots = runner.pending_reboots()
         if not reboots:
             runner._reboot_executing = False
@@ -682,22 +677,8 @@ async def run() -> None:
             if merged_prompt:
                 reboot_data["resume_prompt"] = merged_prompt
 
-            try:
-                config.REBOOT_MSG_FILE.write_text(
-                    _json.dumps(reboot_data), encoding="utf-8",
-                )
-            except Exception:
-                log.warning("Failed to write reboot message file", exc_info=True)
-
             log.info("Executing coalesced reboot (%d requests merged)", len(reboots))
-
-            # Spawn relaunch script and trigger shutdown
-            import subprocess as _sp
-            launcher = config._PROJECT_ROOT / "scripts" / "relaunch.py"
-            _sp.Popen(
-                [sys.executable, str(launcher), str(config._PROJECT_ROOT)],
-                **detached_kwargs(),
-            )
+            _write_reboot_msg_and_relaunch(reboot_data)
             runner.clear_reboots()
             stop_event.set()
         except Exception:

@@ -133,11 +133,12 @@ def harden_git_env() -> None:
 # --------------------------------------------------------------------------
 # "Stay down" handshake
 # --------------------------------------------------------------------------
-# The bot relaunches itself when signalled, so that an agent killing it does
-# not leave it dead. On Windows that only ever fired for an unusual signal;
-# on Linux SIGTERM is *the* ordinary way to stop a process, so `botctl stop`,
-# `start.sh` and `systemctl stop` would all be met by a bot that immediately
-# comes back. A caller that means it writes this file first.
+# The bot's emergency handler relaunches it when signalled, so that an agent
+# killing it does not leave it dead. It is registered for Windows Ctrl+Break
+# (SIGBREAK) only: SIGTERM has always been owned by the graceful shutdown
+# handler in bot/app.py, and under systemd the unit's `Restart=always` does
+# the relaunching. A caller that means "stay down" writes this file first,
+# and the emergency handler honours it.
 STOP_SENTINEL = "stop_requested"
 
 # Long enough for the slowest stop (SIGTERM, 10s grace, SIGKILL), short enough

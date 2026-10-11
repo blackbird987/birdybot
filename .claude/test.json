@@ -137,7 +137,10 @@
     "auto_fix_source": "python scripts/test_auto_fix_source.py",
     "autopilot_chain": "python scripts/test_autopilot_chain.py",
     "usage_gate": "python scripts/test_usage_gate.py",
-    "state_roundtrip": "python scripts/test_state_roundtrip.py"
+    "state_roundtrip": "python scripts/test_state_roundtrip.py",
+    "signal_handlers": "python scripts/test_signal_handlers.py",
+    "parser_golden": "python scripts/test_parser_golden.py",
+    "parent_notify": "python scripts/test_parent_notify.py"
   },
 
   "auth": {
