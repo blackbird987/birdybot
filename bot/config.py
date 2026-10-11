@@ -857,6 +857,37 @@ CONTEXT_THRASH_NUDGE = (
     "enters this context."
 )
 
+# Size from which an auto-attached instruction file counts as the cause of a
+# thrash (bot/claude/context_bloat.py). The CLI re-attaches a nested CLAUDE.md
+# every time the session touches its folder, and reloads the project's own
+# instruction files after every compaction, so one of a few hundred KB undoes
+# each compaction on its own and a resume cannot clear it. 60K chars is about
+# 15K tokens: well above an ordinary CLAUDE.md, well below the 317K one that
+# killed t-9142. Diagnosis only; retries are unchanged either way.
+CONTEXT_BLOAT_MIN_CHARS: int = max(
+    1000, int(os.getenv("CONTEXT_BLOAT_MIN_CHARS", "60000"))
+)
+
+# Appended after CONTEXT_THRASH_NUDGE on a thrash resume, only when the dead
+# session's transcript named an oversized auto-attached file. {files} is one
+# bullet per file. The general nudge says "read less"; this one says which
+# load cannot be avoided by reading less, and how to stop triggering it.
+# Delegation leads because it is the advice that always works: a subagent's
+# context is its own, so the file attaches there and never here.
+CONTEXT_THRASH_BLOAT_NOTE = (
+    "The transcript shows what keeps refilling your context. The CLI attaches "
+    "these instruction files on its own, so reading less does not avoid them:\n"
+    "{files}\n"
+    "Work around them:\n"
+    "- Delegate any edit or inspection inside those folders to a subagent "
+    "(the Agent tool). The file then loads into the subagent's context, not "
+    "yours.\n"
+    "- When you must look at a file there yourself, prefer Bash (`sed -n "
+    "'120,180p' <file>`, `grep -n <pattern> <file>`) over the Read tool.\n"
+    "- Do not read those instruction files themselves; their content is "
+    "already in your context."
+)
+
 # How many times a run whose conversation overflowed the context window may be
 # re-tried on the SAME session before the session is abandoned (see
 # parser.is_context_overflow_error). Deliberately low, and for the opposite
