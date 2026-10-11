@@ -14,7 +14,7 @@ from bot.textutil import hard_clip, parse_iso_utc
 from bot import config
 from bot.procutil import run_capture
 from bot.claude.branch_utils import clear_stale_branches  # re-exported for callers
-from bot.claude.gitpaths import git_dir_stat
+from bot.claude.gitpaths import git_dir_stat, ref_sha
 from bot.claude.types import (
     BUILD_ORIGINS, CODE_CHANGE_TOOLS, ChainPhaseState, Instance, InstanceOrigin,
     InstanceStatus, InstanceType, PHASE_GATES, Phase, merge_msg_is_failure,
@@ -696,18 +696,7 @@ async def _git_head(path: str | None) -> str | None:
     """Return the current git HEAD SHA at *path*, or None if unavailable."""
     if not path or not Path(path).is_dir():
         return None
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "git", "-C", path, "rev-parse", "HEAD",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, _ = await proc.communicate()
-        if proc.returncode == 0:
-            return stdout.decode().strip() or None
-    except Exception:
-        log.debug("git rev-parse failed for %s", path, exc_info=True)
-    return None
+    return await asyncio.to_thread(ref_sha, path)
 
 
 def _phase_gate_suffix(phase: Phase, where: str) -> str:
@@ -2344,23 +2333,8 @@ _JSON_BLOCK_RE = re.compile(
 )
 
 
-def _git_head_sha(repo_path: str) -> str | None:
-    """Return current HEAD SHA in *repo_path*, or None on failure."""
-    # encoding/errors: subprocess.run(text=True) on Windows decodes via
-    # cp1252; UTF-8 bytes in git output crash the reader thread silently
-    # and return CompletedProcess(stdout=None, returncode=0). Force utf-8
-    # with replace so non-decodable bytes never produce None stdout.
-    try:
-        r = run_capture(["git", "rev-parse", "HEAD"],
-            cwd=repo_path, timeout=5, encoding='utf-8', errors='replace',
-        )
-        if r.returncode != 0:
-            return None
-        sha = (r.stdout or "").strip()
-        return sha or None
-    except Exception:
-        log.warning("git rev-parse HEAD failed in %s", repo_path, exc_info=True)
-        return None
+# Sync twin of _git_head; a module attribute so the chain harness can patch it.
+_git_head_sha = ref_sha
 
 
 def _git_log_messages(repo_path: str, entry_sha: str) -> str:

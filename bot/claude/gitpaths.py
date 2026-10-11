@@ -86,11 +86,26 @@ def git_dir_stat(repo: str) -> str | None:
     return None
 
 
-def _rev_parse(repo: str, flag: str) -> str | None:
+def ref_sha(repo: str | None, ref: str = "HEAD", *, short: bool = False) -> str | None:
+    """Commit sha ``ref`` points at in ``repo`` (HEAD by default), or None.
+
+    The one place the bot asks git for a commit id: nine call sites spelled
+    this out by hand, two of them in the same module, with three different
+    ideas of what a failure returns.
+    """
+    if not repo:
+        return None
+    return _rev_parse(repo, "--short", ref) if short else _rev_parse(repo, ref)
+
+
+def _rev_parse(repo: str, *args: str) -> str | None:
     try:
-        r = run_capture(["git", "-C", repo, "rev-parse", flag], timeout=10)
+        # utf-8/replace: text=True on Windows decodes as cp1252, and a byte
+        # it cannot decode leaves stdout None with returncode 0.
+        r = run_capture(["git", "-C", repo, "rev-parse", *args], timeout=10,
+                        encoding="utf-8", errors="replace")
     except (OSError, subprocess.TimeoutExpired):
-        log.warning("git rev-parse %s failed in %s", flag, repo, exc_info=True)
+        log.warning("git rev-parse %s failed in %s", " ".join(args), repo, exc_info=True)
         return None
     if r.returncode != 0:
         return None

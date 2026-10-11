@@ -8,8 +8,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from bot import config
 from bot.procutil import run_capture
+from bot.claude.gitpaths import ref_sha
 
 log = logging.getLogger(__name__)
 
@@ -119,11 +119,7 @@ def detect_version(repo_path: str) -> str | None:
 
 def get_head_ref(repo_path: str) -> str:
     """Get short HEAD commit hash."""
-    try:
-        result = run_capture(["git", "rev-parse", "--short", "HEAD"], cwd=repo_path, timeout=10)
-        return result.stdout.strip() if result.returncode == 0 else ""
-    except Exception:
-        return ""
+    return ref_sha(repo_path, short=True) or ""
 
 
 def get_latest_version_tag_ref(repo_path: str) -> str:

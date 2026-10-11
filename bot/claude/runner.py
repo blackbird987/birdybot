@@ -38,7 +38,7 @@ from bot.claude.auth_health import (
 )
 from bot.claude import cgroups, context_bloat, memory
 from bot.claude.branch_utils import canonical_branch, clear_stale_branches
-from bot.claude.gitpaths import git_common_dir, git_dir, git_toplevel
+from bot.claude.gitpaths import git_common_dir, git_dir, git_toplevel, ref_sha
 from bot.claude.parser import (
     RunResult,
     detect_path_poisoning,
@@ -8361,8 +8361,7 @@ class ClaudeRunner:
                 wt, commit_r.stderr.strip(),
             )
             return None
-        sha_r = run_capture(["git", "rev-parse", "HEAD"], cwd=wt)
-        sha = sha_r.stdout.strip() if sha_r.returncode == 0 else "(unknown)"
+        sha = ref_sha(wt) or "(unknown)"
         log.info(
             "auto_commit_dirty_worktree: rescued %s with commit %s on %s",
             instance.id, sha[:8], instance.branch,

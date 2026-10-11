@@ -14,6 +14,7 @@ from pathlib import Path
 from bot.textutil import parse_iso_utc
 from bot import config, paths
 from bot.procutil import run_capture
+from bot.claude.gitpaths import ref_sha
 from bot.claude.auth_health import (
     REASON_NO_DIR,
     relogin_command,
@@ -215,13 +216,10 @@ async def auto_update_loop(
                     continue
 
                 # 2. Compare HEAD vs remote
-                local_head = await asyncio.to_thread(run_capture, 
-                    ["git", "rev-parse", "HEAD"], cwd=str(config._PROJECT_ROOT), timeout=10,
-                )
-                remote_head = await asyncio.to_thread(run_capture, ["git", "rev-parse", f"origin/{branch}"],
-                    cwd=str(config._PROJECT_ROOT), timeout=10,
-                )
-                if local_head.returncode != 0 or remote_head.returncode != 0:
+                root = str(config._PROJECT_ROOT)
+                local_sha = await asyncio.to_thread(ref_sha, root)
+                remote_sha = await asyncio.to_thread(ref_sha, root, f"origin/{branch}")
+                if not local_sha or not remote_sha:
                     if not failure_notified:
                         log.warning("Auto-update: git rev-parse failed (branch=%s)", branch)
                         await notifier.broadcast(
@@ -230,8 +228,6 @@ async def auto_update_loop(
                         )
                         failure_notified = True
                     continue
-                local_sha = local_head.stdout.strip()
-                remote_sha = remote_head.stdout.strip()
 
                 if local_sha == remote_sha:
                     if failure_notified:
@@ -282,10 +278,8 @@ async def auto_update_loop(
 
                 # 4b. Verify HEAD actually moved (defensive — Fix 1 should
                 # catch the no-op case, but guard against edge cases)
-                post_pull = await asyncio.to_thread(run_capture, 
-                    ["git", "rev-parse", "HEAD"], cwd=str(config._PROJECT_ROOT), timeout=10,
-                )
-                if post_pull.returncode == 0 and post_pull.stdout.strip() == local_sha:
+                post_pull = await asyncio.to_thread(ref_sha, str(config._PROJECT_ROOT))
+                if post_pull == local_sha:
                     log.error(
                         "Auto-update: pull reported success but HEAD unchanged "
                         "— skipping reboot (local likely diverged)"

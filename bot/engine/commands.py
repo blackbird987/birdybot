@@ -19,7 +19,7 @@ from pathlib import Path
 from bot import config
 from bot.procutil import run_capture
 from bot.textutil import find_tilde_block, is_quoted_example, mask_tilde_bodies
-from bot.claude.gitpaths import git_toplevel
+from bot.claude.gitpaths import git_toplevel, ref_sha
 from bot.claude.types import Instance, InstanceOrigin, InstanceStatus, InstanceType, KillOutcome, merge_msg_is_failure
 from bot.engine import (
     lifecycle,
@@ -3440,10 +3440,9 @@ def _resolver_prep_worktree(inst: Instance) -> tuple[str | None, list[str], str 
     # progress this is a harmless no-op (non-zero exit, ignored).
     run_capture(["git", "merge", "--abort"], cwd=wt)
 
-    head_r = run_capture(["git", "rev-parse", "HEAD"], cwd=wt)
-    if head_r.returncode != 0:
-        return (f"Could not read worktree HEAD: {head_r.stderr.strip()}", [], None)
-    pre_sha = head_r.stdout.strip()
+    pre_sha = ref_sha(wt)
+    if not pre_sha:
+        return (f"Could not read worktree HEAD in {wt}", [], None)
 
     # Merge ORIGINAL into FEATURE so resolution lands on the feature ref.
     # We don't pass --no-ff; we want the natural merge attempt.
@@ -3475,10 +3474,9 @@ def _resolver_verify(inst: Instance, pre_sha: str | None) -> tuple[bool, str]:
         return (False, "merge still in progress (MERGE_HEAD present)")
 
     if pre_sha:
-        head_r = run_capture(["git", "rev-parse", "HEAD"], cwd=wt)
-        if head_r.returncode != 0:
+        post_sha = ref_sha(wt)
+        if not post_sha:
             return (False, "could not read post-merge HEAD")
-        post_sha = head_r.stdout.strip()
         if post_sha == pre_sha:
             return (False, "branch SHA did not advance")
     return (True, "ok")
