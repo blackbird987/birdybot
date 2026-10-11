@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json as _json
 import logging
 import time as _time
 from pathlib import Path as _Path
@@ -28,6 +27,7 @@ from bot.platform.formatting import (
 )
 from bot.store import history as history_mod
 from bot.textutil import clip, parse_iso_utc
+from bot.fsutil import atomic_write_json, read_repo_config
 
 if TYPE_CHECKING:
     from bot.discord.bot import ClaudeBot
@@ -1225,15 +1225,7 @@ def setup(bot: ClaudeBot) -> None:
 
         test_json = _Path(repo_path) / ".claude" / "test.json"
 
-        # Load existing config
-        cfg: dict = {}
-        if test_json.exists():
-            try:
-                raw = _json.loads(test_json.read_text(encoding="utf-8"))
-                if isinstance(raw, dict):
-                    cfg = raw
-            except Exception:
-                pass
+        cfg = read_repo_config(repo_path, "test.json") or {}
 
         if toggle == "status":
             enabled = cfg.get("diagnostics", True)
@@ -1245,8 +1237,7 @@ def setup(bot: ClaudeBot) -> None:
 
         # Update
         cfg["diagnostics"] = (toggle == "on")
-        test_json.parent.mkdir(parents=True, exist_ok=True)
-        test_json.write_text(_json.dumps(cfg, indent=2), encoding="utf-8")
+        atomic_write_json(test_json, cfg)
 
         msg = (
             "build steps will scaffold diagnostic endpoints"

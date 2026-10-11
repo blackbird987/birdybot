@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Literal
 
 from bot.textutil import hard_clip, parse_iso_utc
+from bot.fsutil import read_repo_config
 from bot import config
 from bot.procutil import run_capture
 from bot.claude.branch_utils import clear_stale_branches  # re-exported for callers
@@ -1558,16 +1559,8 @@ def _load_verify_policy(source_inst: Instance | None) -> str:
                     warn+advance so unconfigured repos aren't hard-stopped.
       block       — strictest; halt on any of fail/manual/crashed.
     """
-    if not source_inst or not source_inst.repo_path:
-        return "block_fail"
-    test_json = Path(source_inst.repo_path) / ".claude" / "test.json"
-    if test_json.exists():
-        try:
-            cfg = json.loads(test_json.read_text(encoding="utf-8"))
-            return cfg.get("verify_policy", "block_fail")
-        except Exception:
-            pass
-    return "block_fail"
+    cfg = read_repo_config(source_inst.repo_path if source_inst else None, "test.json")
+    return (cfg or {}).get("verify_policy", "block_fail")
 
 
 _WORKFLOW_POLICY_DEFAULT = {
@@ -1599,27 +1592,17 @@ def load_workflow_policy(repo_path: str | None) -> dict:
       ship  — like merge, plus the autonomy sweep fleet-ships any stragglers
               (deploy + verify-back) for this repo.
     """
-    if not repo_path:
+    cfg = read_repo_config(repo_path, "workflow.json")
+    if cfg is None:
         return dict(_WORKFLOW_POLICY_DEFAULT)
-    wf = Path(repo_path) / ".claude" / "workflow.json"
-    if wf.exists():
-        try:
-            cfg = json.loads(wf.read_text(encoding="utf-8"))
-            autonomy = cfg.get("autonomy", "hold")
-            if autonomy not in ("hold", "merge", "ship"):
-                autonomy = "hold"
-            return {
-                "autonomy": autonomy,
-                "merge_veto_minutes": _safe_pos_int(
-                    cfg.get("merge_veto_minutes"), 10,
-                ),
-                "ship_grace_minutes": _safe_pos_int(
-                    cfg.get("ship_grace_minutes"), 30,
-                ),
-            }
-        except Exception:
-            log.debug("Malformed .claude/workflow.json at %s", repo_path, exc_info=True)
-    return dict(_WORKFLOW_POLICY_DEFAULT)
+    autonomy = cfg.get("autonomy", "hold")
+    if autonomy not in ("hold", "merge", "ship"):
+        autonomy = "hold"
+    return {
+        "autonomy": autonomy,
+        "merge_veto_minutes": _safe_pos_int(cfg.get("merge_veto_minutes"), 10),
+        "ship_grace_minutes": _safe_pos_int(cfg.get("ship_grace_minutes"), 30),
+    }
 
 
 async def on_verify(ctx: RequestContext, source_id: str, source_msg_id: str | None = None) -> Instance | None:

@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from bot.fsutil import read_repo_config
 from bot.procutil import run_capture
 from bot.claude.gitpaths import ref_sha
 
@@ -372,14 +372,7 @@ def scan_deploy_config(repo_path: str) -> dict | None:
     File-based configs are always command-based; 'method: self' is an
     internal concept handled by auto-detection, not by file convention.
     """
-    cfg_path = Path(repo_path) / DEPLOY_CONFIG_PATH
-    if not cfg_path.exists():
+    data = read_repo_config(repo_path, Path(DEPLOY_CONFIG_PATH).name)
+    if data is None or "command" not in data:
         return None
-    try:
-        data = json.loads(cfg_path.read_text(encoding="utf-8"))
-        if "command" not in data:
-            return None
-        return data
-    except Exception:
-        log.debug("Failed to read deploy config from %s", cfg_path, exc_info=True)
-        return None
+    return data

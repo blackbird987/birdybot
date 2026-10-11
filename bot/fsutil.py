@@ -1,4 +1,4 @@
-"""Writing a file so a reader never sees half of it.
+"""Writing a file so a reader never sees half of it, and reading repo config.
 
 Stdlib only and free of any bot import, like ``textutil`` and ``procutil``,
 so every layer can use it without closing a cycle.
@@ -18,10 +18,13 @@ need a step between write and rename that this helper does not offer.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 
 def atomic_write_text(path: Path | str, text: str, *, encoding: str = "utf-8") -> None:
@@ -61,3 +64,26 @@ def atomic_write_json(
     if trailing_newline:
         text += "\n"
     atomic_write_text(path, text)
+
+
+def read_repo_config(repo_path: str | Path | None, name: str) -> dict | None:
+    """The JSON object in ``<repo>/.claude/<name>``, or None.
+
+    None covers every reason there is nothing to use: no repo, no file, a file
+    that does not parse, or one whose top level is not an object. Callers
+    apply their own defaults to None, so a hand-edited typo in a repo's
+    ``test.json`` costs that repo its settings, never a crashed step.
+    ``repo.json`` does not use this: its writer must tell "absent" from
+    "unparseable", because it refuses to overwrite the latter.
+    """
+    if not repo_path:
+        return None
+    path = Path(repo_path) / ".claude" / name
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        log.debug("Malformed .claude/%s at %s", name, repo_path, exc_info=True)
+        return None
+    return raw if isinstance(raw, dict) else None

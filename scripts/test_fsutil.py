@@ -107,6 +107,41 @@ def main() -> int:
         check(f"{rel} writes through fsutil", "atomic_write_json(" in src)
         check(f"{rel} has no hand-rolled os.replace", "os.replace(" not in src)
 
+    # 7. read_repo_config: every "nothing usable" case is None, and the
+    # per-repo readers built on it fall back to their defaults.
+    from bot.engine import deploy, sensors, workflows
+    from bot.claude.runner import ClaudeRunner
+    from types import SimpleNamespace
+    r = root / "repo"
+    (r / ".claude").mkdir(parents=True)
+    check("no repo path -> None", fsutil.read_repo_config(None, "test.json") is None)
+    check("missing file -> None", fsutil.read_repo_config(r, "test.json") is None)
+    for bad in ("{not json", "[1, 2]", '"str"'):
+        (r / ".claude" / "test.json").write_text(bad)
+        check(f"{bad!r} -> None", fsutil.read_repo_config(r, "test.json") is None)
+        inst = SimpleNamespace(repo_path=str(r))
+        check(f"{bad!r}: verify policy defaults", workflows._load_verify_policy(inst) == "block_fail")
+        check(f"{bad!r}: diagnostics default on", ClaudeRunner._diagnostics_enabled(inst) is True)
+    (r / ".claude" / "test.json").write_text('{"verify_policy": "warn", "diagnostics": false}')
+    inst = SimpleNamespace(repo_path=str(r))
+    check("test.json read", workflows._load_verify_policy(inst) == "warn"
+          and ClaudeRunner._diagnostics_enabled(inst) is False)
+    (r / ".claude" / "workflow.json").write_text('{"autonomy": "ship", "merge_veto_minutes": 0}')
+    pol = workflows.load_workflow_policy(str(r))
+    check("workflow.json read, bad minutes default", pol == {
+        "autonomy": "ship", "merge_veto_minutes": 10, "ship_grace_minutes": 30})
+    (r / ".claude" / "workflow.json").write_text("[]")
+    check("non-object workflow.json -> hold", workflows.load_workflow_policy(str(r))["autonomy"] == "hold")
+    (r / ".claude" / "deploy.json").write_text('{"label": "x"}')
+    check("deploy.json without command -> None", deploy.scan_deploy_config(str(r)) is None)
+    (r / ".claude" / "deploy.json").write_text('{"command": "make ship"}')
+    check("deploy.json read", (deploy.scan_deploy_config(str(r)) or {}).get("command") == "make ship")
+    (r / ".claude" / "sensors.json").write_text('{"sensors": [{"command": "true"}], "policy": "warn"}')
+    sc = sensors.load_sensor_config(str(r))
+    check("sensors.json read", sc["policy"] == "warn" and sc["sensors"] == [{"command": "true"}])
+    (r / ".claude" / "sensors.json").write_text("nope")
+    check("malformed sensors.json -> defaults", sensors.load_sensor_config(str(r))["policy"] == "block")
+
     shutil.rmtree(root, ignore_errors=True)
     print()
     print(f"{len(FAILS)} failure(s)" if FAILS else "All checks passed")

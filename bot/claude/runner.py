@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from bot.store.state import StateStore
 
 from bot import config, paths
-from bot.fsutil import atomic_write_text
+from bot.fsutil import atomic_write_text, read_repo_config
 from bot.textutil import parse_iso_utc
 from bot.procutil import run_capture
 from bot.claude.auth_health import (
@@ -5012,16 +5012,9 @@ class ClaudeRunner:
     @staticmethod
     def _diagnostics_enabled(instance: Instance) -> bool:
         """Check if diagnostic scaffolding is enabled for this repo."""
-        if not instance.repo_path:
-            return True  # default on
-        test_json = Path(instance.repo_path) / ".claude" / "test.json"
-        if not test_json.exists():
-            return True  # no config = default on
-        try:
-            cfg = _json_mod.loads(test_json.read_text(encoding="utf-8"))
-            return cfg.get("diagnostics", True)
-        except Exception:
-            return True
+        # No repo, no file or a malformed one: default on.
+        cfg = read_repo_config(instance.repo_path, "test.json")
+        return (cfg or {}).get("diagnostics", True)
 
     @staticmethod
     def _build_master_context_block(instance: Instance) -> str:

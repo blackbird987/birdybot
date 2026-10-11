@@ -10,7 +10,6 @@ falls back to stack auto-detection when absent.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import shlex
 import shutil
@@ -18,6 +17,8 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from bot.fsutil import read_repo_config
 
 log = logging.getLogger(__name__)
 
@@ -201,13 +202,10 @@ def load_sensor_config(repo_path: str | Path | None) -> dict:
         "policy": _DEFAULT_POLICY,
         "max_fix_rounds": _DEFAULT_MAX_FIX_ROUNDS,
     }
-    if not repo_path:
-        return cfg
-    path = Path(repo_path) / ".claude" / "sensors.json"
-    if not path.exists():
+    raw = read_repo_config(repo_path, "sensors.json")
+    if raw is None:
         return cfg
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
         sensors = raw.get("sensors")
         if isinstance(sensors, list) and sensors:
             valid = [
