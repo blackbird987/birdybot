@@ -32,6 +32,7 @@
 - **One authorization guard for slash commands.** Forty-six commands opened with a hand-copied three-line "Unauthorized" check in two shapes (owner or channel grant, owner only); they call one helper now.
 - The Ark's Refresh, Stop all and provider buttons refresh the dashboard through the bot's own method instead of re-wiring its six arguments three times. The AIAgent monitor's embed builder is renamed `build_monitor_embed`, so it no longer shares a name with the Ark dashboard's unrelated `build_dashboard_embed`.
 - Nine forum-thread lookups that were the same cache-then-fetch block go through two helpers (`ForumManager._get_or_fetch`, `_fetch_thread`). The lookups that clear a stale id only when Discord says the thread is gone keep their own handling, since a transient error must not erase a Control Room.
+- The spawn-wave, self-wake and nudge caps' six hand-written accessor closures in the context builder are one counter factory. Each still saves through, so a count survives a reboot.
 
 ### Removed
 - **Code nothing called anymore.** The legacy `data/wake/*.json` self-wake path (and `WAKE_DIR` with its startup sweep), since every wake has been a `/wake` directive for months; an unreachable second `log` branch in the button dispatcher; `on_unknown_command`; `format_expanded_result_md`; two unused embed-limit constants; the `DONE_PROMPT` alias; `CgroupMemory.headroom_mb` and `MemoryPressure.at_least`; `SensorResult.duration_s`, which was written and never read; `session_index.cwd_to_project_dir_name`, a copy of `session_fork.encode_project_path`; and an unused parameter on the Discord rate-limit callback factory.
@@ -48,6 +49,7 @@
 - The five refactor scout reports are kept in `docs/refactor/`, since the originals in `data/results/` are pruned after a week.
 - `test_ark_thread.py` pins the Ark thread helper: a gone thread is replaced, a transient failure creates nothing, an archived one is woken.
 - `test_slash_guard.py` drives real registered commands as owner, granted guest and stranger, and fails if a command grows its own copy of the guard again.
+- `test_thread_counters.py` drives the real context builder and checks each per-thread counter lands on its own field and saves through.
 
 ## v0.101.35, Thrash errors name the oversized instruction file (2026-10-11)
 

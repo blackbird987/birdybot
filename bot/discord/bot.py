@@ -895,71 +895,38 @@ class ClaudeBot(discord.Client):
 
         ctx.on_spawn_wave_sealed = _wave_sealed
 
-        # Orchestrator wave-cap accessors. Both look up the thread's ForumProject
-        # entry on demand so they reflect the latest state.json contents and
-        # never operate on a stale snapshot.
-        def _read_wave_count() -> int:
-            lookup = _bot._forums.thread_to_project(channel_id)
-            if lookup is None:
-                return 0
-            return lookup[1].spawn_wave_count
+        # Per-thread counters on ThreadInfo: the spawn-wave cap, the self-wake
+        # runaway cap and the unattended-nudge cap. Each accessor looks the
+        # thread up on demand, so it reflects the latest state.json and never
+        # a stale snapshot, and saves through so a count survives a reboot.
+        def _counter(field: str):
+            def _info():
+                lookup = _bot._forums.thread_to_project(channel_id)
+                return lookup[1] if lookup else None
 
-        def _reset_wave_count() -> None:
-            lookup = _bot._forums.thread_to_project(channel_id)
-            if lookup is None:
-                return
-            info = lookup[1]
-            if info.spawn_wave_count != 0:
-                info.spawn_wave_count = 0
+            def read() -> int:
+                info = _info()
+                return getattr(info, field) if info else 0
+
+            def bump() -> int:
+                info = _info()
+                if info is None:
+                    return 0
+                setattr(info, field, getattr(info, field) + 1)
                 _bot._store.save()
+                return getattr(info, field)
 
-        ctx.read_spawn_wave_count = _read_wave_count
-        ctx.reset_spawn_wave_count = _reset_wave_count
+            def reset() -> None:
+                info = _info()
+                if info is not None and getattr(info, field) != 0:
+                    setattr(info, field, 0)
+                    _bot._store.save()
 
-        # Self-wake runaway-cap accessors — same on-demand lookup so they track
-        # the latest state.json. bump increments + persists; reset zeroes it.
-        def _bump_wake_count() -> int:
-            lookup = _bot._forums.thread_to_project(channel_id)
-            if lookup is None:
-                return 0
-            info = lookup[1]
-            info.wake_count += 1
-            _bot._store.save()
-            return info.wake_count
+            return read, bump, reset
 
-        def _reset_wake_count() -> None:
-            lookup = _bot._forums.thread_to_project(channel_id)
-            if lookup is None:
-                return
-            info = lookup[1]
-            if info.wake_count != 0:
-                info.wake_count = 0
-                _bot._store.save()
-
-        ctx.bump_wake_count = _bump_wake_count
-        ctx.reset_wake_count = _reset_wake_count
-
-        # Unattended-turn nudge-cap accessors — same on-demand lookup pattern.
-        def _bump_nudge_count() -> int:
-            lookup = _bot._forums.thread_to_project(channel_id)
-            if lookup is None:
-                return 0
-            info = lookup[1]
-            info.nudge_count += 1
-            _bot._store.save()
-            return info.nudge_count
-
-        def _reset_nudge_count() -> None:
-            lookup = _bot._forums.thread_to_project(channel_id)
-            if lookup is None:
-                return
-            info = lookup[1]
-            if info.nudge_count != 0:
-                info.nudge_count = 0
-                _bot._store.save()
-
-        ctx.bump_nudge_count = _bump_nudge_count
-        ctx.reset_nudge_count = _reset_nudge_count
+        ctx.read_spawn_wave_count, _, ctx.reset_spawn_wave_count = _counter("spawn_wave_count")
+        _, ctx.bump_wake_count, ctx.reset_wake_count = _counter("wake_count")
+        _, ctx.bump_nudge_count, ctx.reset_nudge_count = _counter("nudge_count")
         return ctx
 
     # --- Delegation to extracted modules ---

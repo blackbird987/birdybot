@@ -152,7 +152,8 @@
     "fsutil": "python scripts/test_fsutil.py",
     "textutil": "python scripts/test_textutil.py",
     "ark_thread": "python scripts/test_ark_thread.py",
-    "slash_guard": "python scripts/test_slash_guard.py"
+    "slash_guard": "python scripts/test_slash_guard.py",
+    "thread_counters": "python scripts/test_thread_counters.py"
   },
 
   "auth": {
