@@ -602,7 +602,7 @@ class StateStore:
         for inst in self._instances.values():
             if inst.status in (InstanceStatus.RUNNING, InstanceStatus.QUEUED):
                 inst.status = InstanceStatus.FAILED
-                inst.error = "Bot restarted — instance interrupted"
+                inst.error = "Bot restarted, instance interrupted"
                 inst.finished_at = datetime.now(timezone.utc).isoformat()
                 orphans.append(inst)
         if orphans:

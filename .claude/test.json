@@ -144,7 +144,8 @@
     "directive_fences": "python scripts/test_directive_fences.py",
     "state_reload": "python scripts/test_state_reload.py",
     "repo_picker_cap": "python scripts/test_repo_picker_cap.py",
-    "stream_exit_cleanup": "python scripts/test_stream_exit_cleanup.py"
+    "stream_exit_cleanup": "python scripts/test_stream_exit_cleanup.py",
+    "chat_crash": "python scripts/test_chat_crash.py"
   },
 
   "auth": {

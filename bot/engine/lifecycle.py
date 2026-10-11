@@ -556,55 +556,70 @@ async def run_instance(
             except (asyncio.CancelledError, Exception):
                 pass
         else:
-            # Killed mid-execution — mark as failed
-            inst.status = InstanceStatus.FAILED
-            inst.error = "Bot restarted — instance interrupted"
-            inst.finished_at = datetime.now(timezone.utc).isoformat()
-            ctx.store.update_instance(inst, critical=True)
-        # Only overwrite thinking message if result wasn't delivered —
+            mark_interrupted(ctx, inst)
+        # Only overwrite thinking message if result wasn't delivered,
         # otherwise it already shows the correct completion status.
-        if not delivered and handle:
-            try:
-                await ctx.messenger.edit_thinking(
-                    handle, "Interrupted by bot restart",
-                )
-            except (asyncio.CancelledError, Exception):
-                pass
+        if not delivered:
+            await edit_interrupted_card(ctx, handle)
         raise
 
     except Exception as e:
-        # Anything that escapes before finalize_run, most often the runner
-        # failing to prepare the run (worktree setup, argv build) before the
-        # CLI ever started. Without this the instance stays RUNNING in state
-        # forever and its card spins on "thinking..." (t-8954 sat that way
-        # for a day after _ensure_worktree raised). Once finalized, the
-        # instance already carries its real status and is left alone.
         if not finalized:
-            stage = (
-                "before the run could start" if result is None
-                else "while finishing the run"
-            )
-            inst.status = InstanceStatus.FAILED
-            inst.error = f"Internal error {stage}: {type(e).__name__}: {e}"
-            inst.finished_at = datetime.now(timezone.utc).isoformat()
-            try:
-                ctx.store.update_instance(inst, critical=True)
-            except Exception:
-                log.exception("could not persist failure of %s", inst.id)
-            if handle:
-                try:
-                    escaped = ctx.messenger.escape(inst.display_id())
-                    await ctx.messenger.edit_thinking(
-                        handle,
-                        f"❌ {escaped} {_origin_label(inst.origin)}failed",
-                    )
-                except Exception:
-                    pass
+            await fail_unfinalized(ctx, inst, handle, e, started=result is not None)
         log.error("run_instance %s raised", inst.id, exc_info=True)
         raise
 
     finally:
         ctx.runner.end_task(inst.id)
+
+def mark_interrupted(ctx: RequestContext, inst: Instance) -> None:
+    """Record a run that shutdown cancelled before it produced a result."""
+    inst.status = InstanceStatus.FAILED
+    inst.error = "Bot restarted, instance interrupted"
+    inst.finished_at = datetime.now(timezone.utc).isoformat()
+    ctx.store.update_instance(inst, critical=True)
+
+
+async def edit_interrupted_card(ctx: RequestContext, handle: dict | None) -> None:
+    if not handle:
+        return
+    try:
+        await ctx.messenger.edit_thinking(handle, "Interrupted by bot restart")
+    except (asyncio.CancelledError, Exception):
+        pass
+
+
+async def fail_unfinalized(
+    ctx: RequestContext, inst: Instance, handle: dict | None,
+    exc: BaseException, *, started: bool,
+) -> None:
+    """Mark a run FAILED when an exception escaped before ``finalize_run``.
+
+    Most often the runner failing to prepare the run (worktree setup, argv
+    build) before the CLI ever started. Without this the instance stays
+    RUNNING in state forever and its card spins on "thinking..." (t-8954 sat
+    that way for a day after _ensure_worktree raised). Callers only use it
+    while the run is unfinalized: once finalized, the instance already carries
+    its real status and is left alone. Shared by ``run_instance`` and the chat
+    path in ``commands._execute_query``.
+    """
+    stage = "while finishing the run" if started else "before the run could start"
+    inst.status = InstanceStatus.FAILED
+    inst.error = f"Internal error {stage}: {type(exc).__name__}: {exc}"
+    inst.finished_at = datetime.now(timezone.utc).isoformat()
+    try:
+        ctx.store.update_instance(inst, critical=True)
+    except Exception:
+        log.exception("could not persist failure of %s", inst.id)
+    if handle:
+        try:
+            escaped = ctx.messenger.escape(inst.display_id())
+            await ctx.messenger.edit_thinking(
+                handle, f"❌ {escaped} {_origin_label(inst.origin)}failed",
+            )
+        except Exception:
+            pass
+
 
 def _repo_has_changes(repo_path: str) -> bool:
     """Check if a repo has uncommitted changes (staged or unstaged)."""

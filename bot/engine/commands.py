@@ -1376,6 +1376,8 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
     heartbeat_task = asyncio.create_task(heartbeat())
     start_time = asyncio.get_event_loop().time()
     ctx.runner.begin_task(inst.id, session_id=inst.session_id, channel_id=ctx.channel_id)
+    result = None
+    finalized = False
     try:
         try:
             result = await ctx.runner.run(
@@ -1398,6 +1400,7 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
             pass
 
         lifecycle.finalize_run(ctx, inst, result)
+        finalized = True
 
         # Write session_id back immediately (before lock release), and BEFORE
         # the cooldown early-return below.  A usage-limit failure is not the end
@@ -1494,6 +1497,27 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
         # parsed and a "I'll keep watching the job" promise with no request can
         # auto-arm a fallback re-check instead of silently stalling.
         await lifecycle.check_wake_request(ctx, inst, final_text=result.result_text)
+    except asyncio.CancelledError:
+        # Shutdown cancelled the turn. A finished run is recorded with its real
+        # outcome; one still running is marked interrupted, as run_instance does.
+        if not finalized:
+            try:
+                if result is not None:
+                    lifecycle.finalize_run(ctx, inst, result)
+                else:
+                    lifecycle.mark_interrupted(ctx, inst)
+            except Exception:
+                log.exception("could not record the interrupted run %s", inst.id)
+            if result is None:
+                await lifecycle.edit_interrupted_card(ctx, handle)
+        raise
+    except Exception as e:
+        # Without this a runner exception left the chat run RUNNING forever,
+        # the t-8954 shape run_instance was already fixed for.
+        if not finalized:
+            await lifecycle.fail_unfinalized(ctx, inst, handle, e, started=result is not None)
+        log.error("chat turn %s raised", inst.id, exc_info=True)
+        raise
     finally:
         ctx.runner.end_task(inst.id)
 
