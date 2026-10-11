@@ -1473,10 +1473,16 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
         # Displayed copy only — directives collapse to one subtext line each
         # (parity with the background path in lifecycle.run_instance, which has
         # always done this). The dispatchers below keep reading RAW text.
-        await lifecycle.send_result(
-            ctx, inst,
-            collapse_bot_directives(strip_verify_blocks(result.result_text)),
-            result=result,
+        display_text = collapse_bot_directives(strip_verify_blocks(result.result_text))
+        await lifecycle.send_result(ctx, inst, display_text, result=result)
+
+        # A /spawn child's own turns run through here, not run_instance, so
+        # this is where most children land. The BLOCKED notice is skipped for
+        # a turn a human typed: they are already in the child's thread, and a
+        # question asked back to them is not the child stuck on its brief.
+        await lifecycle.notify_parent(
+            ctx, inst, result, display_text,
+            skip_blocked=ctx.source == "user_message",
         )
 
         # Tier 2: scan Claude's response for [BOT_CMD: /repo ...] directives

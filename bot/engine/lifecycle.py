@@ -332,6 +332,35 @@ def get_sibling_summary(store, inst: Instance) -> str | None:
     return "Other active sessions in this repo:\n" + "\n".join(lines)
 
 
+async def notify_parent(
+    ctx: RequestContext, inst: Instance, result: RunResult, display_text: str,
+    *, skip_blocked: bool = False,
+) -> None:
+    """Tell a /spawn parent that this child just landed (the wave-join seam).
+
+    The one implementation for both finalize paths, ``run_instance`` and the
+    chat turn in ``commands._execute_query``. The reasoning behind each label
+    is at the ``run_instance`` callsite. ``skip_blocked`` lets a caller drop
+    the BLOCKED notice when a human is already in the child's thread. Never
+    raises: a post failure must not abort the child's finalize.
+    """
+    if ctx.notify_parent_on_finalize is None or result.killed_intentionally:
+        return
+    status_label = None
+    if result.needs_input:
+        status_label = None if skip_blocked else "BLOCKED"
+    elif inst.status == InstanceStatus.COMPLETED:
+        status_label = "COMPLETED"
+    elif inst.status == InstanceStatus.FAILED:
+        status_label = "FAILED"
+    if status_label is None:
+        return
+    try:
+        await ctx.notify_parent_on_finalize(status_label, display_text)
+    except Exception:
+        log.exception("notify_parent_on_finalize failed for inst %s", inst.id)
+
+
 async def run_instance(
     ctx: RequestContext,
     inst: Instance,
@@ -476,19 +505,7 @@ async def run_instance(
         # above, and a user-cancelled child is reported by the wave join as a
         # settled non-result. Wrapped so a post failure (parent archived or
         # deleted, Discord error) never aborts child finalize.
-        if ctx.notify_parent_on_finalize is not None:
-            status_label = None
-            if result.needs_input:
-                status_label = "BLOCKED"
-            elif inst.status == InstanceStatus.COMPLETED:
-                status_label = "COMPLETED"
-            elif inst.status == InstanceStatus.FAILED:
-                status_label = "FAILED"
-            if status_label is not None:
-                try:
-                    await ctx.notify_parent_on_finalize(status_label, display_text)
-                except Exception:
-                    log.exception("notify_parent_on_finalize failed for inst %s", inst.id)
+        await notify_parent(ctx, inst, result, display_text)
 
         # Track API fallback spending for daily budget cap
         if result.api_fallback_used and result.cost_usd:

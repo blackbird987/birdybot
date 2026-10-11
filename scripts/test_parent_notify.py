@@ -8,11 +8,12 @@ every way a child turn can finish ends in
 closure (``bot/discord/bot.py``, ``_notify_parent``) is bound to the child's
 thread and posts the report back into the parent's.
 
-Today exactly one engine path calls it: the finalize tail of
-``lifecycle.run_instance`` (used by builds, chain steps, /bg, retries). The chat
-path (``commands._execute_query``) does not, which is a known gap tracked as
-E1 and deliberately NOT asserted here, see ``_check_chat_path_notifies`` at the
-bottom for where its case goes once it is fixed.
+Two engine paths finish a turn and both go through ``lifecycle.notify_parent``:
+the finalize tail of ``lifecycle.run_instance`` (builds, chain steps, /bg,
+retries) and the chat turn in ``commands._execute_query``, which is how a
+/spawn child's own turns run. The chat path used to skip the hook, so a child
+only closed its wave through the five-minute sweep and a child that parked on
+a question was never reported at all.
 
 What this pins, driving the real ``run_instance`` with the runner stubbed:
 
@@ -24,7 +25,9 @@ What this pins, driving the real ``run_instance`` with the runner stubbed:
   * an intentional kill (Kill/Steer) does NOT call it;
   * a hook that raises never aborts the finalize;
   * no hook on the ctx (every platform but Discord) is a quiet no-op;
-  * the hook is awaited after the result card is posted, not before.
+  * the hook is awaited after the result card is posted, not before;
+  * the chat path awaits it the same way, except that a BLOCKED turn a human
+    typed (``source == "user_message"``) does not ping the parent.
 
 The hook's signature is ``(status, summary_text)``; it does not receive the
 instance, the platform closure holds the child's thread. The harness therefore
@@ -303,21 +306,162 @@ async def _check_no_hook_is_noop() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Placeholder: the chat path (E1). Do not add a failing case before it is fixed.
+# The chat path (E1): commands._execute_query
 # ---------------------------------------------------------------------------
 
 
-async def _check_chat_path_notifies() -> None:
-    """TODO(E1): bot/engine/commands.py ``_execute_query`` does not call
-    ``ctx.notify_parent_on_finalize`` today, so a /spawn child that is answered
-    through the chat path (a user message in its thread) never reports back to
-    its parent. When that is fixed, add the case HERE and call it from
-    ``_amain``: drive ``_execute_query`` with the same stubs as ``_drive`` above
-    (runner returning RunResult, the ``_Case`` recorder as the hook) and assert
-    the hook is awaited exactly once with COMPLETED / FAILED / BLOCKED as in the
-    run_instance cases. Until then this is deliberately a no-op.
+class _ChatStore(_Store):
+    active_session_id = None
+    mode = "explore"
+    effort = None
+    model = None
+
+    def list_repos(self) -> dict[str, str]:
+        return {"harness": tempfile.gettempdir()}
+
+    def create_instance(self, **kw) -> Instance:  # noqa: ANN003
+        return self.inst
+
+
+class _ChatMessenger(_Messenger):
+    async def send_thinking(self, *a, **kw):  # noqa: ANN002, ANN003
+        return MessageHandle(platform="test")
+
+
+async def _drive_chat(result: RunResult, *, source: str) -> _Case:
+    """Run commands._execute_query once, the path a /spawn child's turns take.
+
+    Everything after the run that talks to Discord or schedules follow-up work
+    is replaced by a no-op; ``finalize_run`` and ``notify_parent`` run for real.
     """
-    return None
+    from bot.engine import commands
+
+    case = _Case()
+    inst = _make_instance()
+    case.inst = inst
+
+    async def _notify(status: str, text: str) -> None:
+        case.events.append("notify")
+        case.hook_calls.append((status, text, inst.status))
+
+    async def _send_result(ctx, instance, text, **kw):  # noqa: ANN001, ANN003
+        case.events.append("card")
+        case.sent_cards.append(text)
+
+    async def _anoop(*a, **kw):  # noqa: ANN002, ANN003
+        return None
+
+    async def _no_cooldown(*a, **kw):  # noqa: ANN002, ANN003
+        return False
+
+    async def _heartbeat() -> None:
+        return None
+
+    def _callbacks(*a, **kw):  # noqa: ANN002, ANN003
+        return (None, None, _heartbeat, None, None)
+
+    ctx = RequestContext(
+        messenger=_ChatMessenger(),        # type: ignore[arg-type]
+        channel_id="c1",
+        platform="test",
+        store=_ChatStore(inst),            # type: ignore[arg-type]
+        runner=_Runner(result),            # type: ignore[arg-type]
+        repo_name="harness",
+        is_owner=True,
+        source=source,
+    )
+    ctx.runner.check_spawn_allowed = lambda: None  # type: ignore[attr-defined]
+    ctx.notify_parent_on_finalize = _notify
+
+    patches = [
+        (lifecycle, "send_result", _send_result),
+        (lifecycle, "make_progress_callbacks", _callbacks),
+        (lifecycle, "bind_thread_session", _anoop),
+        (lifecycle, "schedule_cooldown_retry", _no_cooldown),
+        (lifecycle, "check_reboot_request", _anoop),
+        (lifecycle, "check_wake_request", _anoop),
+        (commands, "check_budget", lambda ctx: True),
+        (commands, "budget_warning", _anoop),
+        (commands, "_execute_bot_commands", _anoop),
+    ]
+    saved = [(mod, name, getattr(mod, name)) for mod, name, _ in patches]
+    for mod, name, value in patches:
+        setattr(mod, name, value)
+    try:
+        await commands._execute_query(ctx, "anything")
+    except BaseException as e:  # noqa: BLE001
+        case.raised = e
+    finally:
+        for mod, name, value in saved:
+            setattr(mod, name, value)
+        await asyncio.sleep(0)
+    return case
+
+
+async def _check_chat_path_notifies() -> None:
+    ok = await _drive_chat(
+        RunResult(session_id="s-c1", result_text="Child answered."), source="spawn_dispatch",
+    )
+    _check("chat success: _execute_query did not raise", ok.raised is None, repr(ok.raised))
+    _check(
+        "chat success: hook awaited once, COMPLETED, with the displayed text",
+        [(c[0], c[1]) for c in ok.hook_calls] == [("COMPLETED", "Child answered.")],
+        str(ok.hook_calls),
+    )
+    _check(
+        "chat success: hook fires after the result card is posted",
+        ok.events == ["card", "notify"],
+        str(ok.events),
+    )
+
+    bad = await _drive_chat(
+        RunResult(session_id="s-c2", is_error=True, result_text="Broke.", error_message="Broke."),
+        source="spawn_dispatch",
+    )
+    _check(
+        "chat failure: hook awaited once, FAILED",
+        [c[0] for c in bad.hook_calls] == ["FAILED"],
+        str(bad.hook_calls),
+    )
+
+    ask = await _drive_chat(
+        RunResult(session_id="s-c3", needs_input=True, result_text="Which one?"),
+        source="spawn_dispatch",
+    )
+    _check(
+        "chat needs_input from the child's own brief: BLOCKED reaches the parent",
+        [c[0] for c in ask.hook_calls] == ["BLOCKED"],
+        str(ask.hook_calls),
+    )
+
+    # A human typing in the child's thread who gets a question back is already
+    # there to answer it; pinging the parent would be noise.
+    human_ask = await _drive_chat(
+        RunResult(session_id="s-c4", needs_input=True, result_text="Which one?"),
+        source="user_message",
+    )
+    _check(
+        "chat needs_input on a human's turn: no BLOCKED notice",
+        human_ask.hook_calls == [],
+        str(human_ask.hook_calls),
+    )
+    human_done = await _drive_chat(
+        RunResult(session_id="s-c5", result_text="Done."), source="user_message",
+    )
+    _check(
+        "chat success on a human's turn: COMPLETED still reaches the parent",
+        [c[0] for c in human_done.hook_calls] == ["COMPLETED"],
+        str(human_done.hook_calls),
+    )
+
+    killed = await _drive_chat(
+        RunResult(
+            session_id="s-c6", is_error=True, killed_intentionally=True,
+            kill_reason="kill", error_message="Killed by user",
+        ),
+        source="spawn_dispatch",
+    )
+    _check("chat kill: hook not awaited", killed.hook_calls == [], str(killed.hook_calls))
 
 
 async def _amain() -> int:
@@ -333,9 +477,9 @@ async def _amain() -> int:
     if _failures:
         print(f"FAIL: {len(_failures)} parent-notify check(s) failed")
         return 1
-    print("PASS: lifecycle.run_instance awaits notify_parent_on_finalize exactly once")
-    print("      for COMPLETED, FAILED and BLOCKED, skips it for an intentional kill,")
-    print("      and survives a raising or absent hook.")
+    print("PASS: run_instance and the chat path await notify_parent_on_finalize")
+    print("      exactly once for COMPLETED, FAILED and BLOCKED, skip it for an")
+    print("      intentional kill, and survive a raising or absent hook.")
     return 0
 
 
