@@ -814,12 +814,9 @@ class ForumManager:
         if not session_id:
             return
 
-        ch = self._client.get_channel(int(thread_id))
-        if not ch:
-            try:
-                ch = await self._client.fetch_channel(int(thread_id))
-            except (discord.NotFound, discord.Forbidden):
-                return
+        ch = await self._get_or_fetch(int(thread_id))
+        if ch is None:
+            return
         if not isinstance(ch, (discord.TextChannel, discord.Thread)):
             return
 
@@ -1045,26 +1042,17 @@ class ForumManager:
         for repo_name, proj in self._forum_projects.items():
             tasks: list = []
             if proj.control_thread_id:
-                try:
-                    ch = await self._client.fetch_channel(int(proj.control_thread_id))
-                    if isinstance(ch, discord.Thread):
-                        tasks.append(self._auto_follow_thread(ch, repo_name))
-                except Exception:
-                    pass
+                ch = await self._fetch_thread(int(proj.control_thread_id))
+                if ch is not None:
+                    tasks.append(self._auto_follow_thread(ch, repo_name))
             if proj.archive_thread_id:
-                try:
-                    ch = await self._client.fetch_channel(int(proj.archive_thread_id))
-                    if isinstance(ch, discord.Thread):
-                        tasks.append(self._auto_follow_thread(ch, repo_name))
-                except Exception:
-                    pass
+                ch = await self._fetch_thread(int(proj.archive_thread_id))
+                if ch is not None:
+                    tasks.append(self._auto_follow_thread(ch, repo_name))
             if proj.monitor_thread_id:
-                try:
-                    ch = await self._client.fetch_channel(int(proj.monitor_thread_id))
-                    if isinstance(ch, discord.Thread):
-                        tasks.append(self._auto_follow_thread(ch, repo_name))
-                except Exception:
-                    pass
+                ch = await self._fetch_thread(int(proj.monitor_thread_id))
+                if ch is not None:
+                    tasks.append(self._auto_follow_thread(ch, repo_name))
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
                 await asyncio.sleep(0.5)
@@ -1074,19 +1062,13 @@ class ForumManager:
         for uid, ua in cfg.users.items():
             tasks = []
             if ua.control_thread_id:
-                try:
-                    ch = await self._client.fetch_channel(int(ua.control_thread_id))
-                    if isinstance(ch, discord.Thread):
-                        tasks.append(self._auto_follow_user_thread(ch, uid))
-                except Exception:
-                    pass
+                ch = await self._fetch_thread(int(ua.control_thread_id))
+                if ch is not None:
+                    tasks.append(self._auto_follow_user_thread(ch, uid))
             if ua.archive_thread_id:
-                try:
-                    ch = await self._client.fetch_channel(int(ua.archive_thread_id))
-                    if isinstance(ch, discord.Thread):
-                        tasks.append(self._auto_follow_user_thread(ch, uid))
-                except Exception:
-                    pass
+                ch = await self._fetch_thread(int(ua.archive_thread_id))
+                if ch is not None:
+                    tasks.append(self._auto_follow_user_thread(ch, uid))
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
                 await asyncio.sleep(0.5)
@@ -1235,6 +1217,21 @@ class ForumManager:
             except Exception:
                 return None
         return ch if isinstance(ch, discord.Thread) else None
+
+    async def _get_or_fetch(self, channel_id: int):
+        """A channel from cache, else REST; None when it is gone or hidden.
+
+        Cache first, because discord.py drops an archived thread from its
+        cache and only the fetch finds it. Unlike ``_fetch_thread`` a
+        transient HTTP error is raised, not read as "gone".
+        """
+        ch = self._client.get_channel(channel_id)
+        if ch:
+            return ch
+        try:
+            return await self._client.fetch_channel(channel_id)
+        except (discord.NotFound, discord.Forbidden):
+            return None
 
     # --- Archive Thread ---
 
@@ -1506,12 +1503,7 @@ class ForumManager:
                 if tid in updated_threads:
                     continue
                 updated_threads.add(tid)
-                ch = self._client.get_channel(int(tid))
-                if not ch:
-                    try:
-                        ch = await self._client.fetch_channel(int(tid))
-                    except (discord.NotFound, discord.Forbidden):
-                        ch = None
+                ch = await self._get_or_fetch(int(tid))
                 if ch and isinstance(ch, (discord.TextChannel, discord.Thread)):
                     await self.populate_thread_history(ch, session_id, tid)
                     populated.append(ch)
@@ -2006,12 +1998,9 @@ class ForumManager:
         if info.session_id and self._store.get_autopilot_chain(info.session_id):
             return None
 
-        ch = self._client.get_channel(int(thread_id))
-        if not ch:
-            try:
-                ch = await self._client.fetch_channel(int(thread_id))
-            except (discord.NotFound, discord.Forbidden):
-                return None
+        ch = await self._get_or_fetch(int(thread_id))
+        if ch is None:
+            return None
         if not isinstance(ch, discord.Thread):
             return None
 
@@ -2257,12 +2246,9 @@ class ForumManager:
         if info.session_id:
             return
 
-        ch = self._client.get_channel(int(thread_id))
-        if not ch:
-            try:
-                ch = await self._client.fetch_channel(int(thread_id))
-            except (discord.NotFound, discord.Forbidden):
-                return
+        ch = await self._get_or_fetch(int(thread_id))
+        if ch is None:
+            return
         if not isinstance(ch, (discord.TextChannel, discord.Thread)):
             return
 
