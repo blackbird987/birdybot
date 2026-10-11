@@ -280,16 +280,6 @@ _SIBLING_MAX_AGE_SEC = 2 * 3600
 _SIBLING_MIN_AGE_SEC = 5
 
 
-def _format_age(seconds: float) -> str:
-    if seconds < 60:
-        return f"{int(seconds)}s"
-    if seconds < 3600:
-        return f"{int(seconds // 60)}m"
-    if seconds < 86400:
-        return f"{int(seconds // 3600)}h"
-    return f"{int(seconds // 86400)}d"
-
-
 def get_sibling_summary(store, inst: Instance) -> str | None:
     """Scan running instances in same repo, return summary for system prompt."""
     if not inst.repo_name:
@@ -316,7 +306,7 @@ def get_sibling_summary(store, inst: Instance) -> str | None:
     lines = []
     for s, age_sec in siblings[:8]:
         label = s.origin.value.replace("_", "-")
-        age = _format_age(age_sec)
+        age = format_elapsed(age_sec)
         branch = f" on {s.branch}" if s.branch else ""
         # Collapse whitespace so multi-line prompts don't break the blurb
         # into phantom sibling lines when rendered in the system prompt.

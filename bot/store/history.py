@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from bot import config
+from bot.platform.formatting import format_age
 from bot.textutil import clip, flatten, parse_iso_utc
 
 log = logging.getLogger(__name__)
@@ -309,11 +310,7 @@ def _format_age(finished: str) -> str:
     dt = parse_iso_utc(finished)
     if dt is None:
         return ""
-    delta = datetime.now(timezone.utc) - dt
-    if delta.days > 0:
-        return f"{delta.days}d ago"
-    hours = delta.seconds // 3600
-    return f"{hours}h ago" if hours else f"{delta.seconds // 60}m ago"
+    return format_age(datetime.now(timezone.utc) - dt)
 
 
 def render_recent_block(
