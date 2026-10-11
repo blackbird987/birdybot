@@ -35,6 +35,7 @@
 - The spawn-wave, self-wake and nudge caps' six hand-written accessor closures in the context builder are one counter factory. Each still saves through, so a count survives a reboot.
 - Chain preset names live in one table (`workflows._CHAIN_PRESETS`). The /chain directive parser and the chain label derive from it, and the autopilot harness checks the chip's flow text names the same presets.
 Session scopes check a pid with the shared process-liveness helper, and the cgroup integer reader is public (`memory.read_cgroup_int`) instead of being reached into from `cgroups` (S18, S19).
+The startup orphan-branch scan lists instances once instead of twice (S22).
 
 ### Removed
 - **Code nothing called anymore.** The legacy `data/wake/*.json` self-wake path (and `WAKE_DIR` with its startup sweep), since every wake has been a `/wake` directive for months; an unreachable second `log` branch in the button dispatcher; `on_unknown_command`; `format_expanded_result_md`; two unused embed-limit constants; the `DONE_PROMPT` alias; `CgroupMemory.headroom_mb` and `MemoryPressure.at_least`; `SensorResult.duration_s`, which was written and never read; `session_index.cwd_to_project_dir_name`, a copy of `session_fork.encode_project_path`; and an unused parameter on the Discord rate-limit callback factory.

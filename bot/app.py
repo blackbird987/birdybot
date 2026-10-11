@@ -996,8 +996,9 @@ async def run() -> None:
     scheduler.start()
 
     # Scan for orphaned branches and worktrees across all repos
-    active_branches = {inst.branch for inst in store.list_instances(all_=True) if inst.branch}
-    active_worktrees = {inst.worktree_path for inst in store.list_instances(all_=True) if inst.worktree_path}
+    known = store.list_instances(all_=True)
+    active_branches = {inst.branch for inst in known if inst.branch}
+    active_worktrees = {inst.worktree_path for inst in known if inst.worktree_path}
     for repo_name, repo_path in store.list_repos().items():
         if not Path(repo_path).is_dir():
             continue
