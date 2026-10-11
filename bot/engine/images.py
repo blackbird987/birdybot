@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from bot import config
-from bot.textutil import mask_tilde_bodies
+from bot.textutil import is_quoted_example, mask_tilde_bodies
 
 if TYPE_CHECKING:
     from bot.claude.types import Instance
@@ -54,9 +54,6 @@ _IMAGE_DIRECTIVE_RE = re.compile(
 )
 # key=value, bare or quoted — mirrors the /spawn and display parsers.
 _KV_RE = re.compile(r'''(\w+)=(?:"([^"]*)"|'([^']*)'|(\S+))''')
-# Quoted/code/heading lines never dispatch — a directive shown as an example
-# must stay an example (parity with commands._QUOTED_LINE_PREFIX).
-_QUOTED_LINE_PREFIX = re.compile(r'^\s*(?:>|`|```|#{1,3}\s)')
 
 
 def parse_image_directives(text: str) -> list[tuple[str, str | None]]:
@@ -73,9 +70,8 @@ def parse_image_directives(text: str) -> list[tuple[str, str | None]]:
     # is the other session's to post.
     text = mask_tilde_bodies(text)
     for m in _IMAGE_DIRECTIVE_RE.finditer(text):
-        line_start = text.rfind("\n", 0, m.start()) + 1
-        if _QUOTED_LINE_PREFIX.match(text[line_start:m.start()]):
-            log.debug("/image skipped — inside quoted content")
+        if is_quoted_example(text, m.start()):
+            log.debug("/image skipped: a quoted example")
             continue
         args = m.group(1) or ""
         kv = {

@@ -18,7 +18,7 @@ from pathlib import Path
 
 from bot import config
 from bot.procutil import run_capture
-from bot.textutil import find_tilde_block, mask_tilde_bodies
+from bot.textutil import find_tilde_block, is_quoted_example, mask_tilde_bodies
 from bot.claude.gitpaths import git_toplevel
 from bot.claude.types import Instance, InstanceOrigin, InstanceStatus, InstanceType, KillOutcome, merge_msg_is_failure
 from bot.engine import (
@@ -183,7 +183,6 @@ async def _try_fast_repo_command(ctx: RequestContext, text: str) -> bool:
 _BOT_CMD_RE = re.compile(r'\[BOT_CMD:\s*/repo\s+(.+?)\]')
 _ALLOWED_BOT_CMD_ACTIONS = {"add", "create", "switch"}
 _DANGEROUS_PATH_CHARS = re.compile(r'[;&|`$(){}!<>]')
-_QUOTED_LINE_PREFIX = re.compile(r'^\s*(?:>|`|```|#{1,3}\s)')
 
 
 async def _execute_bot_commands(
@@ -202,11 +201,8 @@ async def _execute_bot_commands(
     # /spawn brief or a ~~~plan is the other session's to run, not ours.
     scan = mask_tilde_bodies(result_text)
     for m in _BOT_CMD_RE.finditer(scan):
-        # Skip matches inside quoted/code content
-        line_start = scan.rfind('\n', 0, m.start()) + 1
-        line_prefix = scan[line_start:m.start()]
-        if _QUOTED_LINE_PREFIX.match(line_prefix):
-            log.debug("BOT_CMD skipped — inside quoted content")
+        if is_quoted_example(scan, m.start()):
+            log.debug("BOT_CMD /repo skipped: a quoted example")
             continue
 
         repo_args = m.group(1).strip()
@@ -360,9 +356,8 @@ def _extract_chain_directive(result_text: str) -> tuple[str | None, str] | None:
     """
     scan = mask_tilde_bodies(result_text)
     for m in _CHAIN_DIRECTIVE_RE.finditer(scan):
-        line_start = scan.rfind('\n', 0, m.start()) + 1
-        if _QUOTED_LINE_PREFIX.match(scan[line_start:m.start()]):
-            log.debug("BOT_CMD /chain skipped — inside quoted content")
+        if is_quoted_example(scan, m.start()):
+            log.debug("BOT_CMD /chain skipped: a quoted example")
             continue
         preset = _parse_chain_preset(m.group(1) or "")
         span = find_tilde_block(result_text, "plan", m.end())
@@ -513,9 +508,8 @@ def _pair_spawn_directives(
     no_body = 0
     over_cap = 0
     for i, m in enumerate(matches):
-        line_start = scan.rfind('\n', 0, m.start()) + 1
-        if _QUOTED_LINE_PREFIX.match(scan[line_start:m.start()]):
-            log.debug("BOT_CMD /spawn skipped — inside quoted content")
+        if is_quoted_example(scan, m.start()):
+            log.debug("BOT_CMD /spawn skipped: a quoted example")
             continue
         if len(pairs) >= _MAX_SPAWNS_PER_RESPONSE:
             over_cap += 1
@@ -869,9 +863,8 @@ def _pair_reply_directives(
     no_body = 0
     over_cap = 0
     for i, m in enumerate(matches):
-        line_start = scan.rfind('\n', 0, m.start()) + 1
-        if _QUOTED_LINE_PREFIX.match(scan[line_start:m.start()]):
-            log.debug("BOT_CMD /reply skipped — inside quoted content")
+        if is_quoted_example(scan, m.start()):
+            log.debug("BOT_CMD /reply skipped: a quoted example")
             continue
         if len(pairs) >= _MAX_REPLIES_PER_RESPONSE:
             over_cap += 1

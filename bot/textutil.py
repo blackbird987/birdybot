@@ -213,3 +213,27 @@ def mask_tilde_bodies(text: str) -> str:
             if chars[i] != "\n":
                 chars[i] = " "
     return "".join(chars)
+
+
+# A line opening with a quote, code or heading marker shows something rather
+# than asking for it.
+_QUOTED_LINE_PREFIX = re.compile(r"^\s*(?:>|`|```|#{1,3}\s)")
+
+
+def is_quoted_example(scan: str, pos: int) -> bool:
+    """True if the directive starting at ``pos`` is an EXAMPLE, not a request.
+
+    The one guard every directive dispatcher shares, so discussing a feature
+    never triggers it. Three shapes count: the line opens with a quote, code
+    or heading marker; the directive sits inside an open ``` fence (an odd
+    number of fences precede it, and the fence marker is on another line, so
+    the prefix check alone misses it); or a backtick sits right before it
+    (inline code in prose). Pass the tilde-MASKED text, so ``` fences inside
+    another directive's body neither count nor hide anything.
+    """
+    line_start = scan.rfind("\n", 0, pos) + 1
+    if _QUOTED_LINE_PREFIX.match(scan[line_start:pos]):
+        return True
+    if scan.count("```", 0, pos) % 2 == 1:
+        return True
+    return pos > 0 and scan[pos - 1] == "`"

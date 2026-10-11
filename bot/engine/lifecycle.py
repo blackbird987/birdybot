@@ -41,7 +41,7 @@ from bot.platform.formatting import (
 )
 from bot.engine import watches
 from bot.store import history as history_mod
-from bot.textutil import find_tilde_block, mask_tilde_bodies, parse_duration
+from bot.textutil import find_tilde_block, is_quoted_example, mask_tilde_bodies, parse_duration
 
 log = logging.getLogger(__name__)
 
@@ -1752,7 +1752,6 @@ _WAKE_KV_RE = re.compile(r'''(\w+)=(?:"([^"]*)"|'([^']*)'|(\S+))''')
 # A directive on a quoted/code/heading line is an EXAMPLE (this guidance quoted
 # back, or a fenced snippet), not a real request — skip it. Mirrors the guard in
 # commands._execute_bot_commands so meta-discussion can't self-trigger a wake.
-_WAKE_QUOTED_PREFIX = re.compile(r"^\s*(?:>|`|```|#{1,3}\s)")
 
 
 def _parse_wake_directive(text: str) -> dict | None:
@@ -1777,21 +1776,10 @@ def _parse_wake_directive(text: str) -> dict | None:
     raw = text
     text = mask_tilde_bodies(raw)
     for m in _WAKE_DIRECTIVE_RE.finditer(text):
-        line_start = text.rfind("\n", 0, m.start()) + 1
-        # Skip EXAMPLES, not real requests. Three ways a directive can be a
-        # quoted demo rather than a live request — all common when the feature
-        # itself is being discussed (the meta-loop we hit): (1) the line is
-        # quoted/code/heading-prefixed; (2) it sits inside an open ``` fenced
-        # block (odd number of fences precede it — the fence marker is on a
-        # different line, so the prefix check alone misses it); (3) it's wrapped
-        # in inline backticks in prose. The first REAL (unquoted) directive wins,
-        # so an example shown ABOVE a real one doesn't shadow it. (~~~wake bodies
-        # use tildes, so they never disturb the ``` fence count.)
-        if _WAKE_QUOTED_PREFIX.match(text[line_start:m.start()]):
-            continue
-        if text.count("```", 0, m.start()) % 2 == 1:
-            continue
-        if m.start() > 0 and text[m.start() - 1] == "`":
+        # Skip EXAMPLES, not real requests (all common when the feature itself
+        # is being discussed). The first REAL directive wins, so an example
+        # shown ABOVE a real one doesn't shadow it.
+        if is_quoted_example(text, m.start()):
             continue
         kv: dict[str, str] = {}
         for kvm in _WAKE_KV_RE.finditer(m.group(1) or ""):

@@ -140,7 +140,8 @@
     "state_roundtrip": "python scripts/test_state_roundtrip.py",
     "signal_handlers": "python scripts/test_signal_handlers.py",
     "parser_golden": "python scripts/test_parser_golden.py",
-    "parent_notify": "python scripts/test_parent_notify.py"
+    "parent_notify": "python scripts/test_parent_notify.py",
+    "directive_fences": "python scripts/test_directive_fences.py"
   },
 
   "auth": {

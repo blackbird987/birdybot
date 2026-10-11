@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from bot import config
 from bot.claude.types import CODE_CHANGE_TOOLS, PLAN_ORIGINS, Instance, InstanceOrigin, InstanceStatus, Schedule
 from bot.platform.base import ButtonSpec
-from bot.textutil import find_tilde_block, mask_tilde_bodies, parse_duration
+from bot.textutil import find_tilde_block, is_quoted_example, mask_tilde_bodies, parse_duration
 
 if TYPE_CHECKING:
     from bot.store.state import StateStore
@@ -73,11 +73,11 @@ def strip_verify_blocks(text: str) -> str:
 # That's the documented format; a mid-sentence directive is left visible rather
 # than mangling the sentence around it.
 #
-# Line-prefix parity with the dispatchers matters. Their guard skips lines
-# starting with `>` / backtick / `#` (commands._QUOTED_LINE_PREFIX), so a
-# quoted example never fires — and the `[ \t]*` prefix below likewise refuses
-# to match those lines, leaving them verbatim. Display shows exactly the set of
-# directives that will actually be acted on.
+# Parity with the dispatchers matters. Their guard (textutil.is_quoted_example)
+# skips lines starting with `>` / backtick / `#` and anything inside a ```
+# fence, so a quoted example never fires. The `[ \t]*` prefix below refuses to
+# match the first kind and the loop skips the second, leaving both verbatim.
+# Display shows exactly the set of directives that will actually be acted on.
 _BOT_CMD_DIRECTIVE_RE = re.compile(
     r"(?m)^[ \t]*\[BOT_CMD:\s*/(\w+)([^\]\n]*)\][ \t]*$"
 )
@@ -185,9 +185,12 @@ def collapse_bot_directives(text: str) -> str:
     # Found on the masked text, like the dispatchers: a directive inside some
     # tilde block is never acted on, so it stays visible rather than becoming
     # a chip claiming it was. Offsets are shared; bodies are read raw.
-    for m in _BOT_CMD_DIRECTIVE_RE.finditer(mask_tilde_bodies(text)):
+    scan = mask_tilde_bodies(text)
+    for m in _BOT_CMD_DIRECTIVE_RE.finditer(scan):
         if m.start() < pos:
             continue  # already swallowed as a previous directive's body
+        if is_quoted_example(scan, m.start()):
+            continue  # an example inside a ``` fence: never acted on, so shown
         out.append(text[pos:m.start()])
         chip = _render_directive_chip(m.group(1), m.group(2))
         if chip is not None:

@@ -33,7 +33,7 @@ from bot import config
 from bot.claude.types import Watch
 from bot.platform.base import ButtonSpec
 from bot.platform.formatting import format_delay_secs
-from bot.textutil import find_tilde_block, mask_tilde_bodies, parse_duration
+from bot.textutil import find_tilde_block, is_quoted_example, mask_tilde_bodies, parse_duration
 
 if TYPE_CHECKING:
     from bot.platform.base import Messenger
@@ -49,7 +49,6 @@ log = logging.getLogger(__name__)
 # mean a parameterised parser nobody can read.
 _WATCH_DIRECTIVE_RE = re.compile(r"\[BOT_CMD:\s*/watch(?:\s+(.+?))?\s*\]")
 _WATCH_KV_RE = re.compile(r'''(\w+)=(?:"([^"]*)"|'([^']*)'|(\S+))''')
-_WATCH_QUOTED_PREFIX = re.compile(r"^\s*(?:>|`|```|#{1,3}\s)")
 # `parse_duration` now lives in `bot.textutil` and is re-exported here: /wake's
 # delay= grew the same unit suffixes, and the chip that renders both sits in
 # `bot.platform`, upstream of this package. Kept importable under this name
@@ -71,14 +70,8 @@ def _unquoted_directives(text: str):
         return
     text = mask_tilde_bodies(text)
     for m in _WATCH_DIRECTIVE_RE.finditer(text):
-        line_start = text.rfind("\n", 0, m.start()) + 1
-        if _WATCH_QUOTED_PREFIX.match(text[line_start:m.start()]):
-            continue
-        if text.count("```", 0, m.start()) % 2 == 1:
-            continue
-        if m.start() > 0 and text[m.start() - 1] == "`":
-            continue
-        yield m
+        if not is_quoted_example(text, m.start()):
+            yield m
 
 
 def has_watch_directive(text: str) -> bool:
