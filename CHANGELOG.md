@@ -28,6 +28,7 @@
 - **One way to read a commit id** (`gitpaths.ref_sha`). Nine hand-written `git rev-parse HEAD` calls across the chain runner, auto-update, deploy, the conflict resolver and the worktree rescue go through it, with one failure value (None). The chain's async HEAD read now runs on a worker thread like every other git call instead of being the one spawn through the session subprocess API.
 - **One reader for a repo's `.claude/*.json` files** (`fsutil.read_repo_config`). `test.json` (read in three places), `workflow.json`, `sensors.json` and `deploy.json` all go through it, so a missing, malformed or non-object file means the same thing everywhere: that repo's defaults. `/diagnostics` writes `test.json` atomically. `repo.json` keeps its own reader, which refuses to overwrite a file it cannot parse.
 - **The runner sends its recovery and kill notices through one helper** (`runner._notify`). Twelve copies of "if there is a progress callback, try it, log a failure" collapsed into it.
+- The prompt review and log triage share one get-or-create helper for their Ark thread (`channels.get_or_create_ark_thread`) instead of two forty-line copies.
 
 ### Removed
 - **Code nothing called anymore.** The legacy `data/wake/*.json` self-wake path (and `WAKE_DIR` with its startup sweep), since every wake has been a `/wake` directive for months; an unreachable second `log` branch in the button dispatcher; `on_unknown_command`; `format_expanded_result_md`; two unused embed-limit constants; the `DONE_PROMPT` alias; `CgroupMemory.headroom_mb` and `MemoryPressure.at_least`; `SensorResult.duration_s`, which was written and never read; `session_index.cwd_to_project_dir_name`, a copy of `session_fork.encode_project_path`; and an unused parameter on the Discord rate-limit callback factory.
@@ -41,6 +42,7 @@
 - **Characterization harnesses pin today's behaviour before the refactor moves it**: the autopilot chain loop for every preset, pause and failure exit (`test_autopilot_chain.py`, 290 checks), the usage-window gate and its replay queue (`test_usage_gate.py`, 143), every persisted `state.json` key and `Instance` field surviving load and save (`test_state_roundtrip.py`, 295), the stream parser against 80 golden cases built from real transcript shapes (`test_parser_golden.py`, `--regen` to rewrite), and the parent-notify hook on finalize (`test_parent_notify.py`).
 - Four harnesses listed in `.claude/test.json` gain the `_bootstrap` import the portability check requires.
 - The five refactor scout reports are kept in `docs/refactor/`, since the originals in `data/results/` are pruned after a week.
+- `test_ark_thread.py` pins the Ark thread helper: a gone thread is replaced, a transient failure creates nothing, an archived one is woken.
 
 ## v0.101.35, Thrash errors name the oversized instruction file (2026-10-11)
 

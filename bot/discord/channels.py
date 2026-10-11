@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from typing import Callable
 from datetime import datetime, timezone
 
 import discord
@@ -123,6 +124,70 @@ async def ensure_lobby(
     channel = await category.guild.create_text_channel(name, category=category)
     log.info("Created lobby channel %s (%s)", channel.id, channel.name)
     return channel
+
+
+async def get_or_create_ark_thread(
+    bot: discord.Client,
+    *,
+    name: str,
+    stored_id: str | None,
+    on_created: Callable[[discord.Thread], None],
+    label: str,
+) -> discord.Thread | None:
+    """A persisted public thread inside The Ark, created on demand.
+
+    The cached channel is tried first, then a fetch. A stored id Discord says
+    is gone is replaced with a new thread; any other HTTP failure returns
+    None, so a transient outage skips this tick instead of creating a
+    duplicate. An archived thread is woken. ``on_created`` persists the new
+    id after the create await, so it reads state then rather than clobbering
+    writes made while the create was in flight.
+    """
+    lobby_id = getattr(bot, "_lobby_channel_id", None)
+    if not lobby_id:
+        log.debug("%s: no lobby channel yet, skipping thread lookup", label)
+        return None
+    lobby = bot.get_channel(int(lobby_id))
+    if not isinstance(lobby, discord.TextChannel):
+        log.warning("%s: lobby channel %s is not a TextChannel", label, lobby_id)
+        return None
+
+    if stored_id:
+        existing: discord.Thread | None = None
+        try:
+            cached = bot.get_channel(int(stored_id))
+            if isinstance(cached, discord.Thread):
+                existing = cached
+            else:
+                fetched = await bot.fetch_channel(int(stored_id))
+                if isinstance(fetched, discord.Thread):
+                    existing = fetched
+        except discord.NotFound:
+            log.info("%s thread %s gone, creating a new one", label, stored_id)
+        except discord.HTTPException:
+            log.warning("%s thread lookup failed transiently", label, exc_info=True)
+            return None
+        if existing is not None:
+            if existing.archived:
+                try:
+                    await existing.edit(archived=False)
+                except discord.HTTPException:
+                    log.debug("Could not unarchive %s thread %s", label, stored_id)
+            return existing
+
+    try:
+        thread = await lobby.create_thread(
+            name=name,
+            auto_archive_duration=10080,  # 7 days (max)
+            type=discord.ChannelType.public_thread,
+        )
+    except discord.HTTPException:
+        log.exception("%s: failed to create thread", label)
+        return None
+
+    on_created(thread)
+    log.info("Created %s thread %s in The Ark", label, thread.id)
+    return thread
 
 
 async def create_archive_post(

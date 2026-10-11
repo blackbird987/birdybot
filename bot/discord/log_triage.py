@@ -22,6 +22,7 @@ import discord
 
 from bot.textutil import parse_iso_utc
 from bot import config
+from bot.discord.channels import get_or_create_ark_thread
 
 if TYPE_CHECKING:
     from bot.discord.bot import ClaudeBot
@@ -223,59 +224,16 @@ def _extract_severity(verdict: str) -> str:
 
 async def _get_or_create_triage_thread(bot: ClaudeBot) -> discord.Thread | None:
     """Return the persisted triage thread, creating one inside The Ark if needed."""
-    if not bot._lobby_channel_id:
-        log.debug("Log triage: no lobby channel yet, skipping thread lookup")
-        return None
-    lobby = bot.get_channel(int(bot._lobby_channel_id))
-    if not isinstance(lobby, discord.TextChannel):
-        log.warning("Log triage: lobby channel %s is not a TextChannel",
-                    bot._lobby_channel_id)
-        return None
+    def _persist(thread: discord.Thread) -> None:
+        discord_state = bot._store.get_platform_state("discord") or {}
+        discord_state["log_triage_thread_id"] = str(thread.id)
+        bot._store.set_platform_state("discord", discord_state)
 
-    discord_state = bot._store.get_platform_state("discord") or {}
-    stored_id = discord_state.get("log_triage_thread_id")
-    if stored_id:
-        existing: discord.Thread | None = None
-        try:
-            cached = bot.get_channel(int(stored_id))
-            if isinstance(cached, discord.Thread):
-                existing = cached
-            else:
-                fetched = await bot.fetch_channel(int(stored_id))
-                if isinstance(fetched, discord.Thread):
-                    existing = fetched
-        except discord.NotFound:
-            log.info("Stored triage thread %s gone — will create a new one",
-                     stored_id)
-        except discord.HTTPException:
-            log.warning("Triage thread lookup failed transiently — skipping tick",
-                        exc_info=True)
-            return None
-        if existing is not None:
-            if existing.archived:
-                try:
-                    await existing.edit(archived=False)
-                except discord.HTTPException:
-                    log.debug("Could not unarchive triage thread %s", stored_id)
-            return existing
-
-    try:
-        thread = await lobby.create_thread(
-            name=_TRIAGE_THREAD_NAME,
-            auto_archive_duration=10080,  # 7 days — max
-            type=discord.ChannelType.public_thread,
-        )
-    except discord.HTTPException:
-        log.exception("Log triage: failed to create triage thread")
-        return None
-
-    # Re-read state after the await so we don't clobber writes made by
-    # other subsystems while create_thread was in flight.
-    discord_state = bot._store.get_platform_state("discord") or {}
-    discord_state["log_triage_thread_id"] = str(thread.id)
-    bot._store.set_platform_state("discord", discord_state)
-    log.info("Created triage thread %s in The Ark", thread.id)
-    return thread
+    stored = (bot._store.get_platform_state("discord") or {}).get("log_triage_thread_id")
+    return await get_or_create_ark_thread(
+        bot, name=_TRIAGE_THREAD_NAME, stored_id=stored,
+        on_created=_persist, label="Log triage",
+    )
 
 
 # --- Mention rate limiting ----------------------------------------------------

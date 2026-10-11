@@ -150,7 +150,8 @@
     "discard_paths": "python scripts/test_discard_paths.py",
     "state_backup": "python scripts/test_state_backup.py",
     "fsutil": "python scripts/test_fsutil.py",
-    "textutil": "python scripts/test_textutil.py"
+    "textutil": "python scripts/test_textutil.py",
+    "ark_thread": "python scripts/test_ark_thread.py"
   },
 
   "auth": {
