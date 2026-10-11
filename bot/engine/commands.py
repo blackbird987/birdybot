@@ -316,7 +316,7 @@ async def _execute_bot_commands(
 # preset= is optional; body is a ~~~plan ... ~~~ fenced block (tilde fences,
 # same rationale as /spawn). One chain per response.
 _CHAIN_DIRECTIVE_RE = re.compile(r'\[BOT_CMD:\s*/chain(?:\s+(.+?))?\]')
-_CHAIN_ALLOWED_PRESETS = {"ship", "hold", "verify"}
+_CHAIN_ALLOWED_PRESETS = frozenset(workflows._CHAIN_PRESETS)
 # Plan body cap — same 32 KiB ceiling as /spawn bodies.
 _CHAIN_PLAN_MAX_BYTES = 32 * 1024
 

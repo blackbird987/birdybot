@@ -1887,11 +1887,7 @@ async def on_conversational_chain(
     steps = _CHAIN_PRESETS.get(preset)
     if steps is None:
         steps = _CHAIN_PRESETS["ship"]
-    label = {
-        "ship": "Chain (ship)",
-        "hold": "Chain (hold)",
-        "verify": "Chain (verify)",
-    }.get(preset, "Chain")
+    label = f"Chain ({preset})" if preset in _CHAIN_PRESETS else "Chain"
     return await _launch_chain(
         ctx, source_id, source_msg_id,
         list(steps), "build",

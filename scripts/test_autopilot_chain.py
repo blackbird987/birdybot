@@ -910,6 +910,15 @@ check_eq("phased resume: only the unfinished phase is built",
 s.close()
 
 
+# One preset table: the directive parser and the chip's flow text must name
+# exactly the presets the chain runner knows.
+from bot.engine import commands as _cmds  # noqa: E402
+from bot.platform import formatting as _fmt  # noqa: E402
+check_eq("the /chain parser accepts exactly the runner's presets",
+         sorted(_cmds._CHAIN_ALLOWED_PRESETS), sorted(workflows._CHAIN_PRESETS))
+check_eq("every preset has flow text on the chip",
+         sorted(_fmt._CHAIN_PRESET_FLOW), sorted(workflows._CHAIN_PRESETS))
+
 print()
 if failures:
     print(f"FAILED {len(failures)} of {checks} checks:")
