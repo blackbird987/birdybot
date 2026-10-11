@@ -547,9 +547,9 @@ class PromptMixin:
             ))
 
         # Spawn capability is depth-gated: a spawned (depth>=1) thread cannot
-        # spawn again (commands.py recursion cap), so telling it the full
+        # spawn again (directives/spawn.py recursion cap), so telling it the full
         # /spawn instructions just makes it propose directives that get
-        # refused. spawn_depth is stamped on the Instance (commands.py:913)
+        # refused. spawn_depth is stamped on the Instance (directives/spawn.py)
         # before this runs, so it's reliable even for a spawned thread's
         # first message. BOT_CONTEXT_TAIL follows so reboot/wake guidance
         # keeps its original position.

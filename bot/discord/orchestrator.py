@@ -45,7 +45,7 @@ wave closed is delivered on its own instead of dropped (``_deliver_late_child``)
 
 Blocked children (parked on a question) do not settle. They are reported to the
 parent immediately, because the parent wrote the child's brief and is the right
-one to answer it — see the ``/reply`` directive in ``bot/engine/commands.py``.
+one to answer it. See the ``/reply`` directive in ``bot/engine/directives/reply.py``.
 """
 
 from __future__ import annotations

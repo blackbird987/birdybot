@@ -334,7 +334,7 @@ async def _drive_chat(result: RunResult, *, source: str) -> _Case:
     Everything after the run that talks to Discord or schedules follow-up work
     is replaced by a no-op; ``finalize_run`` and ``notify_parent`` run for real.
     """
-    from bot.engine import commands
+    from bot.engine import commands, query
 
     case = _Case()
     inst = _make_instance()
@@ -380,9 +380,9 @@ async def _drive_chat(result: RunResult, *, source: str) -> _Case:
         (lifecycle, "schedule_cooldown_retry", _no_cooldown),
         (lifecycle, "check_reboot_request", _anoop),
         (lifecycle, "check_wake_request", _anoop),
-        (commands, "check_budget", lambda ctx: True),
-        (commands, "budget_warning", _anoop),
-        (commands, "_execute_bot_commands", _anoop),
+        (query, "check_budget", lambda ctx: True),
+        (query, "budget_warning", _anoop),
+        (query, "_execute_bot_commands", _anoop),
     ]
     saved = [(mod, name, getattr(mod, name)) for mod, name, _ in patches]
     for mod, name, value in patches:

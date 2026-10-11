@@ -278,11 +278,22 @@ def _func_body(source: str, header: str) -> str:
     return rest[:end.start()] if end else rest
 
 
-_src = _func_body(
-    open(os.path.join(_ROOT, "bot", "engine", "commands.py"),
-         encoding="utf-8").read(),
-    "async def _execute_query(",
-)
+def _command_sources() -> str:
+    """The source of every module bot.engine.commands re-exports from.
+
+    commands.py is a re-export facade over the command modules, so a scan of
+    that one file would find nothing and pass.
+    """
+    import ast
+    facade = os.path.join(_ROOT, "bot", "engine", "commands.py")
+    mods = [n.module for n in ast.parse(open(facade, encoding="utf-8").read()).body
+            if isinstance(n, ast.ImportFrom) and (n.module or "").startswith("bot.engine.")]
+    return "\n".join(
+        open(os.path.join(_ROOT, *m.split(".")) + ".py", encoding="utf-8").read()
+        for m in sorted(set(mods)))
+
+
+_src = _func_body(_command_sources(), "async def _execute_query(")
 _check("_execute_query located", bool(_src))
 _i_bind = _src.find("lifecycle.should_bind_session(result)")
 _i_cooldown = _src.find("lifecycle.schedule_cooldown_retry(ctx, inst, result)")
@@ -300,8 +311,7 @@ print()
 print("direct run_instance callers — each tops up a sessionless thread")
 
 _app = open(os.path.join(_ROOT, "bot", "app.py"), encoding="utf-8").read()
-_cmds = open(os.path.join(_ROOT, "bot", "engine", "commands.py"),
-             encoding="utf-8").read()
+_cmds = _command_sources()
 _flows = open(os.path.join(_ROOT, "bot", "engine", "workflows.py"),
               encoding="utf-8").read()
 
@@ -331,7 +341,7 @@ def _callers_missing_backfill(source: str) -> list[int]:
 
 
 for _mod, _text, _expect in (("bot/app.py", _app, 1),
-                             ("bot/engine/commands.py", _cmds, 3)):
+                             ("the command modules", _cmds, 3)):
     _sites = _text.count("lifecycle.run_instance(")
     _check(f"{_mod}: found the expected {_expect} direct run_instance caller(s)",
            _sites == _expect)

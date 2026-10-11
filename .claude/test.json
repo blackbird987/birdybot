@@ -154,7 +154,8 @@
     "ark_thread": "python scripts/test_ark_thread.py",
     "slash_guard": "python scripts/test_slash_guard.py",
     "thread_counters": "python scripts/test_thread_counters.py",
-    "runner_package": "python scripts/test_runner_package.py"
+    "runner_package": "python scripts/test_runner_package.py",
+    "commands_facade": "python scripts/test_commands_facade.py"
   },
 
   "auth": {

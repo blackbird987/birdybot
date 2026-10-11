@@ -37,6 +37,7 @@
 Session scopes check a pid with the shared process-liveness helper, and the cgroup integer reader is public (`memory.read_cgroup_int`) instead of being reached into from `cgroups` (S18, S19).
 The startup orphan-branch scan lists instances once instead of twice (S22).
 - `bot/claude/runner.py` (9,400 lines) is now the package `bot/claude/runner/`. `ClaudeRunner` is assembled from seven mixins (accounts, admission, prompt build, session files, worktrees, merge, release); reap helpers, release-tag functions and shared helpers have their own modules. Code moved unchanged. `__init__` re-exports every old name, so imports elsewhere did not change; harness patches now target the module that reads the name (R13).
+- `bot/engine/commands.py` (4,177 lines) is split into focused modules: typed-message handling (`query`), the four post-turn directives (a `directives/` package), instance, branch, resolver, repo, settings, admin and button-callback commands, and a small shared-state module (`cmd_state`). Code moved unchanged. `commands.py` re-exports every old name; harness patches moved to the module that reads each name, and `scripts/test_commands_facade.py` fails a facade patch that would be blind.
 
 ### Removed
 - **Code nothing called anymore.** The legacy `data/wake/*.json` self-wake path (and `WAKE_DIR` with its startup sweep), since every wake has been a `/wake` directive for months; an unreachable second `log` branch in the button dispatcher; `on_unknown_command`; `format_expanded_result_md`; two unused embed-limit constants; the `DONE_PROMPT` alias; `CgroupMemory.headroom_mb` and `MemoryPressure.at_least`; `SensorResult.duration_s`, which was written and never read; `session_index.cwd_to_project_dir_name`, a copy of `session_fork.encode_project_path`; and an unused parameter on the Discord rate-limit callback factory.
@@ -2254,6 +2255,7 @@ The startup orphan-branch scan lists instances once instead of twice (S22).
   - `modals.py` (81 lines) — QuickTaskModal
   - `monitoring.py` (57 lines) — monitor service lifecycle
 - bot.py now contains only core orchestration: init, auth, lifecycle, message routing
+- Split `bot/engine/commands.py` (4,177 lines) into focused modules: typed-message handling, the four post-turn directives (a `directives/` package), instance, branch, resolver, repo, settings, admin and button-callback commands, plus a small shared-state module. `commands.py` re-exports every old name; harness patches moved to the module that reads each name, and `scripts/test_commands_facade.py` fails a patch on the facade that would be blind.
 
 ## v0.18.0 — Session Context Awareness (2026-03-16)
 

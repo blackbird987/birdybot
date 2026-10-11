@@ -28,6 +28,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from bot.engine import commands, images, lifecycle, watches  # noqa: E402
+from bot.engine.directives import dispatch  # noqa: E402
 from bot.platform.formatting import collapse_bot_directives  # noqa: E402
 from bot.textutil import is_quoted_example, mask_tilde_bodies  # noqa: E402
 
@@ -135,8 +136,9 @@ async def check_repo() -> None:
         messenger = _Messenger()
         channel_id = "c1"
 
-    saved = commands.on_repo
-    commands.on_repo = _on_repo
+    # The dispatcher reads on_repo from its own module, so patch it there.
+    saved = dispatch.on_repo
+    dispatch.on_repo = _on_repo
     try:
         d = "[BOT_CMD: /repo switch bot]"
         await commands._execute_bot_commands(_Ctx(), _fenced(d))  # type: ignore[arg-type]
@@ -146,7 +148,7 @@ async def check_repo() -> None:
         await commands._execute_bot_commands(_Ctx(), _after_fence(d))  # type: ignore[arg-type]
         _check("/repo: real one after a fence kept", calls == ["switch bot"], str(calls))
     finally:
-        commands.on_repo = saved
+        dispatch.on_repo = saved
 
 
 def check_collapse_parity() -> None:

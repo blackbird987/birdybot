@@ -15,6 +15,7 @@ python -m bot          # start the bot
 - **Log file**: `data/logs/bot.log`
 - **State**: `data/state.json`
 - **Engine** (platform-agnostic): `bot/engine/commands.py`, `lifecycle.py`, `workflows.py`, `sessions.py`, `eval.py`, `report.py`
+- **Commands**: `bot/engine/commands.py` only re-exports. The handlers live in `query.py` (typed messages), `directives/` (`dispatch`, `chain`, `spawn`, `reply`), `instance_cmds.py`, `branch_actions.py`, `resolver.py`, `repo_cmds.py`, `settings_cmds.py`, `admin_cmds.py`, `callbacks.py` (button dispatch) and `cmd_state.py` (uptime, channel locks, budget gate). Patch a name in the module that reads it; only `on_text` and `handle_callback` may be patched on the facade, because the Discord layer calls them through it (`scripts/test_commands_facade.py`)
 - **Runner** (`bot/claude/runner/`, a package of mixins): `core.py` (ClaudeRunner: spawn, stream, recovery, kills), `accounts.py`, `admission.py`, `prompt_build.py`, `session_files.py`, `worktrees.py`, `git_merge.py`, `git_release.py`, `reaping.py`, `common.py`. `__init__.py` only re-exports, so patch a name in the module that reads it, never on the package (`scripts/test_runner_package.py` fails a blind patch)
 - **Platform layer**: `bot/platform/base.py` (Messenger protocol), `bot/platform/formatting.py`
 - **Discord**: `bot/discord/bot.py` (orchestrator), `slash_commands.py`, `interactions.py`, `adapter.py`, `channels.py`, `forums.py`, `idle.py`, `tags.py`, `modals.py`, `monitoring.py`, `formatter.py`
@@ -509,7 +510,7 @@ Three rules, all pinned by `scripts/test_cooldown_session_bind.py`:
   `session_id`. Worktree builds are refused outright — an isolated build
   session must not become a thread's chat session even when the slot is free.
   The harness asserts this structurally: *every* `lifecycle.run_instance`
-  callsite in `app.py` and `commands.py` must be followed by a backfill, so a
+  callsite in `app.py` and the command modules must be followed by a backfill, so a
   fifth caller added later fails the suite instead of silently losing threads.
 
 `should_bind_session` is where the eligibility rule lives, and it stays narrow.

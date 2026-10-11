@@ -34,7 +34,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from bot.claude.types import Instance, InstanceStatus, InstanceType, RunResult  # noqa: E402
-from bot.engine import commands, lifecycle  # noqa: E402
+from bot.engine import commands, lifecycle, query  # noqa: E402
 from bot.platform.base import MessageHandle, RequestContext  # noqa: E402
 
 _failures: list[str] = []
@@ -167,20 +167,20 @@ async def _drive(outcome, *, send_result_raises: bool = False) -> _Case:  # noqa
         (lifecycle, "schedule_cooldown_retry", _no_cooldown),
         (lifecycle, "check_reboot_request", _anoop),
         (lifecycle, "check_wake_request", _anoop),
-        (commands, "check_budget", lambda ctx: True),
-        (commands, "budget_warning", _anoop),
-        (commands, "_execute_bot_commands", _anoop),
+        (query, "check_budget", lambda ctx: True),
+        (query, "budget_warning", _anoop),
+        (query, "_execute_bot_commands", _anoop),
     ]
     saved = [(mod, name, getattr(mod, name)) for mod, name, _ in patches]
     for mod, name, value in patches:
         setattr(mod, name, value)
-    logging.getLogger(commands.__name__).setLevel(logging.CRITICAL)
+    logging.getLogger(query.__name__).setLevel(logging.CRITICAL)
     try:
         await commands._execute_query(ctx, "anything")
     except BaseException as e:  # noqa: BLE001
         case.raised = e
     finally:
-        logging.getLogger(commands.__name__).setLevel(logging.NOTSET)
+        logging.getLogger(query.__name__).setLevel(logging.NOTSET)
         for mod, name, value in saved:
             setattr(mod, name, value)
         await asyncio.sleep(0)

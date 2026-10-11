@@ -1452,7 +1452,7 @@ ORCH_WAVE_TIMEOUT_MIN: int = int(os.getenv("ORCH_WAVE_TIMEOUT_MIN", "45"))
 ORCH_WAVE_MAX_MIN: int = int(os.getenv("ORCH_WAVE_MAX_MIN", "360"))
 # Resume the parent automatically once its wave closes, instead of waiting for
 # a "Resume parent" tap. Safe against runaway because the resumed turn cannot
-# spawn past _MAX_SPAWN_WAVES (bot/engine/commands.py) — a callback resume does
+# spawn past _MAX_SPAWN_WAVES (bot/engine/directives/spawn.py): a callback resume does
 # not reset that counter. A PARTIAL (timed-out) release never auto-resumes:
 # deciding whether to proceed without a straggler is a human call.
 ORCH_AUTO_RESUME: bool = os.getenv("ORCH_AUTO_RESUME", "1").strip().lower() not in (
@@ -1611,7 +1611,7 @@ Rules:
 # Depth-0 spawn capability. Appended only when the current thread is NOT
 # itself a spawned thread (instance.spawn_depth == 0). A spawned (depth>=1)
 # thread gets SPAWN_CAPPED_NOTICE instead, because the recursion cap in
-# bot/engine/commands.py refuses any /spawn it would emit.
+# bot/engine/directives/spawn.py refuses any /spawn it would emit.
 SPAWN_CONTEXT = """
 Spawning a fresh session with a generated prompt:
 When the user asks you to "start a new session", "spawn a new thread", or "kick off another task" — and you have written or can write the prompt that should run there — output a /spawn directive at the END of your response. This hands the generated prompt off to a brand-new forum thread instead of forcing the user to copy-paste between threads.
