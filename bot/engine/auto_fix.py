@@ -136,15 +136,16 @@ async def spawn_fix_session(
         _clear_thread(store, repo_name, trigger, bot)
         return
 
-    # Find latest instance for this session
-    all_instances = store.list_instances()
-    session_instances = [i for i in all_instances if i.session_id == session_id]
-    if not session_instances:
+    # Chain from the diagnosis turn, which is the session's newest instance.
+    # list_instances() is newest-first, so taking its last match picked the
+    # session's OLDEST turn; the store's own lookup is the one implementation
+    # of "newest wins".
+    source_inst = store.latest_instance_for_session(session_id)
+    if source_inst is None:
         log.warning("No instances found for auto-fix session %s", session_id)
         _clear_thread(store, repo_name, trigger, bot)
         return
 
-    source_inst = session_instances[-1]
     source_msg_id = None
     platform_msgs = source_inst.message_ids.get("discord", [])
     if platform_msgs:
