@@ -187,6 +187,10 @@ async def _run_with_streams(
 
     saved_accounts = list(config.CLAUDE_ACCOUNTS)
     saved_spawn = asyncio.create_subprocess_exec
+    # The live .env may set a deployment-wide default model, which makes every
+    # model read as non-primary and switches off the branch under test.
+    saved_default_model = config.DEFAULT_SESSION_MODEL
+    config.DEFAULT_SESSION_MODEL = None
     config.CLAUDE_ACCOUNTS[:] = acct_dirs
 
     spawn_calls: list[tuple[list[str], dict]] = []
@@ -224,6 +228,7 @@ async def _run_with_streams(
     finally:
         asyncio.create_subprocess_exec = saved_spawn  # type: ignore[assignment]
         config.CLAUDE_ACCOUNTS[:] = saved_accounts
+        config.DEFAULT_SESSION_MODEL = saved_default_model
         shutil.rmtree(tmp, ignore_errors=True)
 
     return result, instance, runner, acct_dirs, spawn_calls

@@ -109,7 +109,7 @@ runner._pick_account = _fake_pick
 
 _saved_accounts = config.CLAUDE_ACCOUNTS
 try:
-    config.CLAUDE_ACCOUNTS = ["/home/x/.claude", "/home/x/.claude-alt"]
+    config.CLAUDE_ACCOUNTS = ["/opt/x/.claude", "/opt/x/.claude-alt"]
 
     _fake_pick.answer = None
     _check(
@@ -117,7 +117,7 @@ try:
         "on its own limit waits exactly as before)",
         not runner.has_spawnable_account(),
     )
-    _fake_pick.answer = "/home/x/.claude-alt"
+    _fake_pick.answer = "/opt/x/.claude-alt"
     _check(
         "an account back in rotation reads as free",
         runner.has_spawnable_account(),

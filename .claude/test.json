@@ -56,7 +56,8 @@
   },
 
   "harnesses": {
-    "_note": "Standalone runners for logic with no live surface. Exit 0 = pass.",
+    "_note": "Standalone runners for logic with no live surface. Exit 0 = pass. 'all' runs every scripts/test_*, verify_* and check_portability serially by glob, so a harness missing from this list still runs there. test_session_cgroups is deliberately absent: it creates real systemd scopes and runs daemon-reload.",
+    "all": "python scripts/run_harnesses.py",
     "portability": "python scripts/check_portability.py",
     "stop_sentinel": "python scripts/test_stop_sentinel.py",
     "smoke_window": "python scripts/test_smoke_window.py",
@@ -122,7 +123,16 @@
     "hydrate_same_account": "python scripts/verify_hydrate_same_account.py",
     "plan_floor": "python scripts/verify_plan_floor.py",
     "restore_stash": "python scripts/verify_restore_stash.py",
-    "table_conversion": "python scripts/verify_table_conversion.py"
+    "table_conversion": "python scripts/verify_table_conversion.py",
+    "context_bloat": "python scripts/test_context_bloat.py",
+    "extract_latest_plan_text": "python scripts/test_extract_latest_plan_text.py",
+    "model_limit_failover": "python scripts/test_model_limit_failover.py",
+    "nested_directives": "python scripts/test_nested_directives.py",
+    "oom_resume": "python scripts/test_oom_resume.py",
+    "plan_usage": "python scripts/test_plan_usage.py",
+    "progress_edit_dedupe": "python scripts/test_progress_edit_dedupe.py",
+    "run_instance_crash": "python scripts/test_run_instance_crash.py",
+    "tldr": "python scripts/test_tldr.py"
   },
 
   "auth": {

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Tests
+- **One command runs every harness** (`scripts/run_harnesses.py`). It finds `scripts/test_*`, `verify_*` and `check_portability` by glob, runs them one at a time under the bot's virtualenv, skips `test_session_cgroups` (it creates real systemd scopes), and pins settings from `.env` that change what a test asserts, starting with `DEFAULT_SESSION_MODEL`. `.claude/test.json` gains an `all` entry and the nine harnesses it was missing.
+- The three harnesses that failed at HEAD pass again: the plan-text extractor's fake store gained the method it lacked, the model-limit failover test pins the default model the live `.env` was leaking in, and the portability check no longer trips on `/home` paths in test fixtures (the t-9142 transcript replay now builds its path from the home directory and still runs).
+- The five refactor scout reports are kept in `docs/refactor/`, since the originals in `data/results/` are pruned after a week.
+
 ## v0.101.35, Thrash errors name the oversized instruction file (2026-10-11)
 
 ### Added

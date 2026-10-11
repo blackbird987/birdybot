@@ -70,6 +70,11 @@ class _FakeStore:
             reverse=True,
         )
 
+    def get_chain_plan_override(self, session_id: str | None) -> str | None:
+        # The real store holds a plan override only while an autopilot chain
+        # runs; none of these cases sets one.
+        return None
+
 
 @dataclass
 class _FakeCtx:
