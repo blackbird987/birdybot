@@ -141,7 +141,8 @@
     "signal_handlers": "python scripts/test_signal_handlers.py",
     "parser_golden": "python scripts/test_parser_golden.py",
     "parent_notify": "python scripts/test_parent_notify.py",
-    "directive_fences": "python scripts/test_directive_fences.py"
+    "directive_fences": "python scripts/test_directive_fences.py",
+    "state_reload": "python scripts/test_state_reload.py"
   },
 
   "auth": {

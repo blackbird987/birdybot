@@ -217,92 +217,99 @@ class StateStore:
             log.info("No state file found, starting fresh")
             return
         try:
-            data = json.loads(self._file.read_text(encoding="utf-8"))
-            # Deliberately isolated from the load below.  Everything after this
-            # point is inside a handler whose recovery is "start fresh" — which
-            # for this file means every repo, instance and thread mapping is
-            # dropped and the next auto-save overwrites the real one.  A path
-            # rewrite failing is a degradation (paths stay in the other
-            # machine's spelling); it must never escalate to losing the state.
-            try:
-                _localise_paths(data)
-            except Exception:
-                log.exception("Path localisation failed — loading paths as stored")
-            for d in data.get("instances", []):
-                inst = Instance.from_dict(d)
-                self._instances[inst.id] = inst
-            self._repos = data.get("repos", {})
-            self._repo_descriptions = data.get("repo_descriptions", {})
-            self._dormant_repos = set(data.get("dormant_repos", []) or [])
-            self._active_repo = data.get("active_repo")
-            self._task_counter = data.get("task_counter", 0)
-            self._query_counter = data.get("query_counter", 0)
-            self._schedule_counter = data.get("schedule_counter", 0)
-            self._daily_cost = data.get("daily_cost", 0.0)
-            self._cost_date = data.get("cost_date", "")
-            self._total_cost = data.get("total_cost", 0.0)
-            self._mode = data.get("mode", "explore")
-            self._context = data.get("context")
-            self._aliases = data.get("aliases", {})
-            self._active_session_id = data.get("active_session_id")
-            self._verbose_level = data.get("verbose_level", 1)
-            self._effort = data.get("effort", "high")
-            self._platform_state = data.get("platform_state", {})
-            self._autopilot_chains = data.get("autopilot_chains", {})
-            self._autopilot_chain_meta = data.get("autopilot_chain_meta", {})
-            self._chain_kwargs = data.get("chain_kwargs", {})
-            # Migration: pre-meta chain queues have no status record. Drop them
-            # rather than guess — a stale unmetered chain that resumes after
-            # reboot is exactly the bug this field exists to prevent.
-            unmetered = [
-                sid for sid in list(self._autopilot_chains.keys())
-                if sid not in self._autopilot_chain_meta
-            ]
-            for sid in unmetered:
-                log.warning(
-                    "Dropping unmetered autopilot chain on load: session=%s steps=%s",
-                    sid, self._autopilot_chains.get(sid),
-                )
-                self._autopilot_chains.pop(sid, None)
-            if unmetered:
-                self.mark_dirty()
-            self._pending_merges = data.get("pending_merges", {})
-            self._scheduled_merges = data.get("scheduled_merges", {})
-            self._chain_plan_overrides = data.get("chain_plan_overrides", {})
-            self._chain_deferred = data.get("chain_deferred", {})
-            self._chain_phases = data.get("chain_phases", {})
-            self._chain_entry_sha = data.get("chain_entry_sha", {})
-            self._deploy_state = {
-                k: DeployState.from_dict(v)
-                for k, v in data.get("deploy_state", {}).items()
-            }
-            self._deploy_configs = data.get("deploy_configs", {})
-            self._auto_fix_state = {
-                k: AutoFixState.from_dict(v)
-                for k, v in data.get("auto_fix_state", {}).items()
-            }
-            self._active_provider = data.get("active_provider")
-            self._fallback_cost = data.get("fallback_cost", 0.0)
-            self._fallback_cost_date = data.get("fallback_cost_date", "")
-            self._account_cooldowns = data.get("account_cooldowns", {})
-            self._account_cooldown_fps = data.get("account_cooldown_fps", {})
-            self._model_cooldowns = data.get("model_cooldowns", {})
-            self._account_alerts = data.get("account_alerts", {})
-            for d in data.get("schedules", []):
-                sched = Schedule.from_dict(d)
-                self._schedules[sched.id] = sched
-            self._watch_counter = data.get("watch_counter", 0)
-            for d in data.get("watches", []):
-                try:
-                    w = Watch.from_dict(d)
-                except Exception:
-                    log.warning("Dropping malformed watch record", exc_info=True)
-                    continue
-                self._watches[w.id] = w
-            log.info("Loaded state: %d instances, %d repos, %d schedules",
-                     len(self._instances), len(self._repos), len(self._schedules))
+            self._apply(json.loads(self._file.read_text(encoding="utf-8")))
         except Exception:
             log.exception("Failed to load state file, starting fresh")
+
+    def _apply(self, data: dict) -> None:
+        """Load a parsed state file into this store. Raises on a bad payload.
+
+        Fills the record maps (instances, schedules, watches) rather than
+        replacing them, so ``reload_if_changed`` empties them first.
+        """
+        # Deliberately isolated from the load below.  Everything after this
+        # point raises to a caller whose recovery at startup is "start fresh",
+        # which for this file means every repo, instance and thread mapping is
+        # dropped and the next auto-save overwrites the real one.  A path
+        # rewrite failing is a degradation (paths stay in the other
+        # machine's spelling); it must never escalate to losing the state.
+        try:
+            _localise_paths(data)
+        except Exception:
+            log.exception("Path localisation failed, loading paths as stored")
+        for d in data.get("instances", []):
+            inst = Instance.from_dict(d)
+            self._instances[inst.id] = inst
+        self._repos = data.get("repos", {})
+        self._repo_descriptions = data.get("repo_descriptions", {})
+        self._dormant_repos = set(data.get("dormant_repos", []) or [])
+        self._active_repo = data.get("active_repo")
+        self._task_counter = data.get("task_counter", 0)
+        self._query_counter = data.get("query_counter", 0)
+        self._schedule_counter = data.get("schedule_counter", 0)
+        self._daily_cost = data.get("daily_cost", 0.0)
+        self._cost_date = data.get("cost_date", "")
+        self._total_cost = data.get("total_cost", 0.0)
+        self._mode = data.get("mode", "explore")
+        self._context = data.get("context")
+        self._aliases = data.get("aliases", {})
+        self._active_session_id = data.get("active_session_id")
+        self._verbose_level = data.get("verbose_level", 1)
+        self._effort = data.get("effort", "high")
+        self._platform_state = data.get("platform_state", {})
+        self._autopilot_chains = data.get("autopilot_chains", {})
+        self._autopilot_chain_meta = data.get("autopilot_chain_meta", {})
+        self._chain_kwargs = data.get("chain_kwargs", {})
+        # Migration: pre-meta chain queues have no status record. Drop them
+        # rather than guess: a stale unmetered chain that resumes after
+        # reboot is exactly the bug this field exists to prevent.
+        unmetered = [
+            sid for sid in list(self._autopilot_chains.keys())
+            if sid not in self._autopilot_chain_meta
+        ]
+        for sid in unmetered:
+            log.warning(
+                "Dropping unmetered autopilot chain on load: session=%s steps=%s",
+                sid, self._autopilot_chains.get(sid),
+            )
+            self._autopilot_chains.pop(sid, None)
+        if unmetered:
+            self.mark_dirty()
+        self._pending_merges = data.get("pending_merges", {})
+        self._scheduled_merges = data.get("scheduled_merges", {})
+        self._chain_plan_overrides = data.get("chain_plan_overrides", {})
+        self._chain_deferred = data.get("chain_deferred", {})
+        self._chain_phases = data.get("chain_phases", {})
+        self._chain_entry_sha = data.get("chain_entry_sha", {})
+        self._deploy_state = {
+            k: DeployState.from_dict(v)
+            for k, v in data.get("deploy_state", {}).items()
+        }
+        self._deploy_configs = data.get("deploy_configs", {})
+        self._auto_fix_state = {
+            k: AutoFixState.from_dict(v)
+            for k, v in data.get("auto_fix_state", {}).items()
+        }
+        self._active_provider = data.get("active_provider")
+        self._fallback_cost = data.get("fallback_cost", 0.0)
+        self._fallback_cost_date = data.get("fallback_cost_date", "")
+        self._account_cooldowns = data.get("account_cooldowns", {})
+        self._account_cooldown_fps = data.get("account_cooldown_fps", {})
+        self._model_cooldowns = data.get("model_cooldowns", {})
+        self._account_alerts = data.get("account_alerts", {})
+        for d in data.get("schedules", []):
+            sched = Schedule.from_dict(d)
+            self._schedules[sched.id] = sched
+        self._watch_counter = data.get("watch_counter", 0)
+        for d in data.get("watches", []):
+            try:
+                w = Watch.from_dict(d)
+            except Exception:
+                log.warning("Dropping malformed watch record", exc_info=True)
+                continue
+            self._watches[w.id] = w
+        log.info("Loaded state: %d instances, %d repos, %d schedules",
+                 len(self._instances), len(self._repos), len(self._schedules))
 
     def _update_mtime(self) -> None:
         """Record current file mtime after we read or write."""
@@ -318,12 +325,37 @@ class StateStore:
             current_mtime = self._file.stat().st_mtime if self._file.exists() else 0.0
         except OSError:
             return False
-        if current_mtime > self._last_mtime:
-            log.info("State file changed externally, reloading")
-            self._load()
+        if current_mtime <= self._last_mtime:
+            return False
+        # Unsaved changes win: this process owns the file, and the next
+        # auto-save overwrites the outside edit either way. Reloading over
+        # them would silently drop records created since the last save.
+        if self._dirty:
+            log.warning("State file changed externally with unsaved changes "
+                        "pending; keeping memory, the next save overwrites it")
             self._last_mtime = current_mtime
-            return True
-        return False
+            return False
+        # Parse before touching anything: a half-written or corrupt file must
+        # leave memory alone, or the next save would write the damage back.
+        try:
+            data = json.loads(self._file.read_text(encoding="utf-8"))
+        except Exception:
+            log.exception("State file changed externally but will not parse; "
+                          "keeping memory")
+            self._last_mtime = current_mtime
+            return False
+        log.info("State file changed externally, reloading")
+        # Replace the record maps rather than merging into them, or a record
+        # deleted on disk comes back from memory. Restored whole on failure.
+        saved = (self._instances, self._schedules, self._watches)
+        self._instances, self._schedules, self._watches = {}, {}, {}
+        try:
+            self._apply(data)
+        except Exception:
+            log.exception("State reload failed; keeping the previous records")
+            self._instances, self._schedules, self._watches = saved
+        self._last_mtime = current_mtime
+        return True
 
     def mark_dirty(self) -> None:
         """Mark state as changed — actual write deferred to auto-save loop."""
