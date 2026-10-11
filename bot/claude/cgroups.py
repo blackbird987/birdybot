@@ -43,6 +43,7 @@ from pathlib import Path
 
 from bot import config
 from bot.claude import memory
+from bot.procutil import is_process_alive
 
 log = logging.getLogger(__name__)
 
@@ -645,7 +646,7 @@ class SessionCgroup:
         every process tree the bot holds while never leaving the cgroup it was
         charged to.
         """
-        value = memory._read_int(self.path / "memory.current")
+        value = memory.read_cgroup_int(self.path / "memory.current")
         return None if value is None else value / _MB
 
     def kill(self) -> bool:
@@ -690,12 +691,8 @@ def cgroup_of_pid(pid: int) -> Path | None:
 
 def _read_limit_mb(path: Path, name: str) -> float | None:
     """A memory limit in MB, or None when it reads ``max`` or not at all."""
-    value = memory._read_int(path / name)
+    value = memory.read_cgroup_int(path / name)
     return None if value is None else value / _MB
-
-
-def _pid_alive(pid: int) -> bool:
-    return Path(f"/proc/{pid}").exists()
 
 
 def _read_ceilings(path: Path, unit: str) -> SessionCgroup:
@@ -757,7 +754,7 @@ async def adopt_session(
             return _read_ceilings(path, unit)
         # A process that is already gone is not late, it is finished, and
         # there is nothing to adopt or to conclude about the machine.
-        if not _pid_alive(pid):
+        if not is_process_alive(pid):
             return None
         if time.monotonic() >= deadline:
             # It was wrapped and it never arrived. Distrust the cached probe:
@@ -878,17 +875,17 @@ def slice_headroom_mb() -> float | None:
     None when sessions are not in a slice, when the slice carries neither
     limit, or when the files will not read. Admission treats None as "no
     finding", the same rule the pressure readers follow: a budget check that
-    cannot measure must not refuse work. ``_read_int`` already maps the
+    cannot measure must not refuse work. ``read_cgroup_int`` already maps the
     literal ``max`` that an unset limit reads as onto None, so an unset
     ``memory.high`` falls through to ``memory.max`` on its own.
     """
     path = session_slice_path()
     if path is None:
         return None
-    limit = memory._read_int(path / "memory.high")
+    limit = memory.read_cgroup_int(path / "memory.high")
     if limit is None:
-        limit = memory._read_int(path / "memory.max")
-    current = memory._read_int(path / "memory.current")
+        limit = memory.read_cgroup_int(path / "memory.max")
+    current = memory.read_cgroup_int(path / "memory.current")
     if limit is None or current is None:
         return None
     return max(0.0, (limit - current) / _MB)

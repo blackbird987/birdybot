@@ -296,7 +296,8 @@ def _own_cgroup_path() -> Path | None:
     return None
 
 
-def _read_int(path: Path) -> int | None:
+def read_cgroup_int(path: Path) -> int | None:
+    """An integer cgroup file, or None when unreadable or ``max`` (no limit)."""
     try:
         text = path.read_text(encoding="utf-8").strip()
     except OSError:
@@ -337,10 +338,10 @@ def cgroup_memory(cgroup: Path | None = None) -> CgroupMemory:
     cg = cgroup or _own_cgroup_path()
     if cg is None:
         return out
-    max_bytes = _read_int(cg / "memory.max")
+    max_bytes = read_cgroup_int(cg / "memory.max")
     if max_bytes is not None:
         out.max_mb = max_bytes / _MB
-    high_bytes = _read_int(cg / "memory.high")
+    high_bytes = read_cgroup_int(cg / "memory.high")
     if high_bytes is not None:
         out.high_mb = high_bytes / _MB
     try:
