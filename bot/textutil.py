@@ -37,6 +37,20 @@ def clip(text: str, limit: int) -> str:
     return head.rstrip(" ,.;:-") + "…"
 
 
+def hard_clip(text: str, limit: int, suffix: str = "\u2026") -> str:
+    """Cut text to exactly ``limit`` chars or fewer, ending in ``suffix``.
+
+    For hard platform ceilings (a Discord field, title or description), where
+    one char over is a rejected request. ``clip`` may come in shorter on a
+    word boundary; this never exceeds the limit and never wastes it.
+    """
+    if not text or len(text) <= limit:
+        return text or ""
+    if limit <= len(suffix):
+        return text[: max(0, limit)]
+    return text[: limit - len(suffix)] + suffix
+
+
 def flatten(value: object) -> str:
     """Collapse any whitespace run (including newlines) to single spaces.
 

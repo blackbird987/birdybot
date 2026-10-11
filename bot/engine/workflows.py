@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from bot.textutil import parse_iso_utc
+from bot.textutil import hard_clip, parse_iso_utc
 from bot import config
 from bot.procutil import run_capture
 from bot.claude.branch_utils import clear_stale_branches  # re-exported for callers
@@ -2615,10 +2615,7 @@ async def on_verify_release(
         # Discord's text-message ceiling is 2000 chars. Cap each bullet
         # individually so one runaway claim doesn't push the whole body
         # past the limit and break the gate UI.
-        def _cap(s: str, n: int) -> str:
-            return s if len(s) <= n else s[:n - 1] + "…"
-
-        capped_phantoms = [_cap(b, 200) for b in phantoms[:10]]
+        capped_phantoms = [hard_clip(b, 200) for b in phantoms[:10]]
         more = len(phantoms) - len(capped_phantoms)
 
         if capped_phantoms:
@@ -2628,7 +2625,7 @@ async def on_verify_release(
             body = (
                 f"**Release verifier flagged a mismatch.**\n\n"
                 f"**Phantom claims:**\n{bullets_text}\n\n"
-                f"**Rationale:** {_cap(rationale, 400)}\n\n"
+                f"**Rationale:** {hard_clip(rationale, 400)}\n\n"
                 f"Tap **Amend** to re-run the wrap-up step with this feedback, "
                 f"or **Continue anyway** to proceed to release."
             )
@@ -2637,7 +2634,7 @@ async def on_verify_release(
             # tell the user the gate is fail-closed and why.
             body = (
                 f"**Release verifier output couldn't be parsed — failing closed.**\n\n"
-                f"**Rationale:** {_cap(rationale, 400)}\n\n"
+                f"**Rationale:** {hard_clip(rationale, 400)}\n\n"
                 f"Tap **Amend** to retry the wrap-up step, "
                 f"or **Continue anyway** to proceed to release."
             )

@@ -19,7 +19,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from bot.textutil import parse_iso_utc  # noqa: E402
+from bot.textutil import hard_clip, parse_iso_utc  # noqa: E402
 
 FAILS: list[str] = []
 
@@ -52,6 +52,17 @@ def main() -> int:
     except TypeError:
         ok = False
     check("naive stamp subtracts from an aware now", ok)
+
+    # hard_clip is exact: Discord rejects one char over, so it must land on
+    # the limit and never past it.
+    long = "word " * 500
+    for n, suf in ((1024, "..."), (256, "\u2026"), (200, "\u2026")):
+        out = hard_clip(long, n, suf)
+        check(f"hard_clip({n}, {suf!r}) is exactly {n}", len(out) == n and out.endswith(suf))
+    check("hard_clip leaves short text alone", hard_clip("abc", 10) == "abc")
+    check("hard_clip of None/empty is ''", hard_clip(None, 5) == "" and hard_clip("", 5) == "")
+    check("hard_clip with a limit under the suffix stays in bounds",
+          len(hard_clip("abcdef", 2, "...")) == 2 and hard_clip("abc", -1) == "")
 
     # No module keeps a private copy: every bare fromisoformat left in bot/
     # is one of the deliberate exceptions below.

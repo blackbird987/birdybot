@@ -8,7 +8,7 @@ from typing import Any
 
 import discord
 
-from bot.textutil import parse_iso_utc
+from bot.textutil import hard_clip, parse_iso_utc
 
 log = logging.getLogger(__name__)
 
@@ -43,12 +43,6 @@ def _trend(current: float | None, previous: float | None, threshold: float = 0.0
     if pct < -threshold:
         return " \u2193"
     return " \u2192"
-
-
-def _truncate(text: str, limit: int, suffix: str = "\u2026") -> str:
-    if len(text) <= limit:
-        return text
-    return text[: limit - len(suffix)] + suffix
 
 
 def _describe_age(iso_ts: str | None) -> str:
@@ -100,7 +94,7 @@ def determine_attention(summary: dict | None) -> str:
 def build_initial_embed(name: str, url: str) -> discord.Embed:
     """Build the placeholder embed before first fetch."""
     embed = discord.Embed(
-        title=_truncate(f"\u23f3 {name} \u2014 Initializing", MAX_TITLE),
+        title=hard_clip(f"\u23f3 {name} \u2014 Initializing", MAX_TITLE),
         description=f"Waiting for first successful fetch from {url}",
         color=discord.Color.blurple(),
     )
@@ -131,7 +125,7 @@ def build_dashboard_embed(
                 lines.append(f"Failed {failures} consecutive times.")
             lines.append(f"Last successful fetch: {_describe_age(last_success)}")
             embed = discord.Embed(
-                title=_truncate(f"\u26a0\ufe0f {name} \u2014 Auth Failed", MAX_TITLE),
+                title=hard_clip(f"\u26a0\ufe0f {name} \u2014 Auth Failed", MAX_TITLE),
                 description="\n".join(lines),
                 color=discord.Color.red(),
             )
@@ -149,7 +143,7 @@ def build_dashboard_embed(
     color = _ATTENTION_COLOR.get(attention, discord.Color.green())
 
     embed = discord.Embed(
-        title=_truncate(f"{emoji} {name} \u2014 {label}", MAX_TITLE),
+        title=hard_clip(f"{emoji} {name} \u2014 {label}", MAX_TITLE),
         color=color,
     )
 
@@ -166,7 +160,7 @@ def build_dashboard_embed(
     if started is not None:
         desc_parts.append(f"Started: {started.astimezone(timezone.utc).strftime('%b %d, %H:%M UTC')}")
     if desc_parts:
-        embed.description = _truncate(" \u00b7 ".join(desc_parts), MAX_DESCRIPTION)
+        embed.description = hard_clip(" \u00b7 ".join(desc_parts), MAX_DESCRIPTION)
 
     # Field: Connections (inline)
     conn_lines = []
@@ -189,11 +183,11 @@ def build_dashboard_embed(
         conn_lines.append(f"CB: {cb} \u00b7 {trips} trips")
     discord_ok = status.get("discordConnected")
     if discord_ok is not None:
-        conn_lines.append(f"Discord: {'\u2705' if discord_ok else '\u274c'}")
+        conn_lines.append("Discord: " + ("\u2705" if discord_ok else "\u274c"))
     if conn_lines:
         embed.add_field(
             name="Connections",
-            value=_truncate("\n".join(conn_lines), MAX_FIELD_VALUE),
+            value=hard_clip("\n".join(conn_lines), MAX_FIELD_VALUE),
             inline=True,
         )
 
@@ -221,7 +215,7 @@ def build_dashboard_embed(
     if auto_lines:
         embed.add_field(
             name="Automation",
-            value=_truncate("\n".join(auto_lines), MAX_FIELD_VALUE),
+            value=hard_clip("\n".join(auto_lines), MAX_FIELD_VALUE),
             inline=True,
         )
 
@@ -246,7 +240,7 @@ def build_dashboard_embed(
     if cost_lines:
         embed.add_field(
             name="Costs (today)",
-            value=_truncate("\n".join(cost_lines), MAX_FIELD_VALUE),
+            value=hard_clip("\n".join(cost_lines), MAX_FIELD_VALUE),
             inline=True,
         )
 
@@ -266,7 +260,7 @@ def build_dashboard_embed(
             issue_lines.append(f"\u2026 and {remaining} more")
         embed.add_field(
             name=f"Active Issues ({len(active_issues)})",
-            value=_truncate("\n".join(issue_lines), MAX_FIELD_VALUE),
+            value=hard_clip("\n".join(issue_lines), MAX_FIELD_VALUE),
             inline=False,
         )
 
@@ -291,13 +285,13 @@ def build_dashboard_embed(
             ver_lines.append(" \u00b7 ".join(parts))
         embed.add_field(
             name="Deploys",
-            value=_truncate("\n".join(ver_lines), MAX_FIELD_VALUE),
+            value=hard_clip("\n".join(ver_lines), MAX_FIELD_VALUE),
             inline=False,
         )
 
     # Footer
     embed.set_footer(
-        text=_truncate(
+        text=hard_clip(
             f"Last updated: {datetime.now(timezone.utc).strftime('%b %d, %H:%M UTC')} \u00b7 Refreshes every 4h",
             MAX_FOOTER,
         )
@@ -309,7 +303,7 @@ def build_dashboard_embed(
 def build_stale_banner(name: str, failures: int, last_fetch: str | None) -> discord.Embed:
     """Build a warning embed when data is stale."""
     embed = discord.Embed(
-        title=_truncate(f"\U0001f7e1 {name} \u2014 Stale Data", MAX_TITLE),
+        title=hard_clip(f"\U0001f7e1 {name} \u2014 Stale Data", MAX_TITLE),
         description=f"Failed to fetch data {failures} consecutive times.\nLast successful fetch: {_describe_age(last_fetch)}",
         color=discord.Color.yellow(),
     )
@@ -401,7 +395,7 @@ def build_history_embed(
     if not lines:
         embed.description = "No history yet."
     else:
-        embed.description = _truncate("\n".join(lines), MAX_DESCRIPTION)
+        embed.description = hard_clip("\n".join(lines), MAX_DESCRIPTION)
 
     embed.set_footer(text="7d daily \u2192 weekly \u2192 monthly rollup")
     return embed

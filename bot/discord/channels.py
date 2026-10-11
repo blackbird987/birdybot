@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 import discord
 
-from bot.textutil import parse_iso_utc
+from bot.textutil import hard_clip, parse_iso_utc
 from bot.engine.deploy import DeployState
 from bot.platform.formatting import EFFORT_DISPLAY, MODE_COLOR, MODE_DISPLAY, effort_name, mode_name
 
@@ -602,13 +602,6 @@ async def sync_user_forum_tags(
         log.warning("Failed to sync user forum tags", exc_info=True)
 
 
-def _truncate_field(value: str, limit: int = 1024) -> str:
-    """Truncate a field value to Discord's 1024-char limit."""
-    if len(value) > limit:
-        return value[:limit - 3] + "..."
-    return value
-
-
 def _format_instance_line(
     inst,
     session_to_thread: dict[str, str] | None = None,
@@ -681,7 +674,7 @@ def build_control_embed(
             attn_lines.append(line)
         embed.add_field(
             name=f"Needs Attention ({len(attention_instances)})",
-            value=_truncate_field("\n".join(attn_lines)),
+            value=hard_clip("\n".join(attn_lines), 1024, "..."),
             inline=False,
         )
 
@@ -693,7 +686,7 @@ def build_control_embed(
         ]
         embed.add_field(
             name=f"Running ({active_count})",
-            value=_truncate_field("\n".join(run_lines)),
+            value=hard_clip("\n".join(run_lines), 1024, "..."),
             inline=False,
         )
 
@@ -705,7 +698,7 @@ def build_control_embed(
         ]
         embed.add_field(
             name=f"Recently Completed ({len(completed_instances)})",
-            value=_truncate_field("\n".join(comp_lines)),
+            value=hard_clip("\n".join(comp_lines), 1024, "..."),
             inline=False,
         )
 
@@ -748,7 +741,7 @@ def build_control_embed(
         value = f"{error_line}{version_line}{change_lines}{session_links}".strip()
         if not value:
             value = "Changes detected"
-        value = _truncate_field(value)
+        value = hard_clip(value, 1024, "...")
 
         label = "\U0001f504 Reboot Required" if deploy_state.self_managed else "\U0001f504 Redeploy Required"
         embed.add_field(name=label, value=value, inline=False)
