@@ -56,7 +56,7 @@ from bot.platform.formatting import (
 from bot.textutil import clip
 
 from bot.claude.runner import (
-    ClaudeRunner, MERGE_FAIL_DIVERGED, git_fail_reason, orphaned_releases,
+    ClaudeRunner, DiscardOutcome, MERGE_FAIL_DIVERGED, git_fail_reason, orphaned_releases,
 )
 
 from typing import TYPE_CHECKING
@@ -2129,18 +2129,47 @@ async def on_discard(ctx: RequestContext, text: str) -> None:
         await ctx.messenger.send_text(ctx.channel_id, f"Instance '{text}' not found.")
         return
 
+    if not inst.branch:
+        outcome = await ctx.runner.discard_branch(inst)  # "Already discarded (...)"
+        await _finish_resolved_branch(ctx, inst, outcome.message, None)
+        return
+    outcome = await perform_discard(ctx, inst, "/discard")
+    await ctx.messenger.send_text(ctx.channel_id, outcome.message)
+
+
+async def perform_discard(ctx: RequestContext, inst: Instance, op: str) -> DiscardOutcome:
+    """Discard a build branch: the one path behind /discard and the Discard button.
+
+    Stops a merge-conflict resolver still working in the worktree, ends any
+    chain on the session, deletes the worktree and branch, and only when the
+    branch is really gone drops the pending merge and the branch refs on every
+    instance. A discard that was skipped or that git refused leaves all of that
+    in place, so Merge and Discard keep working on the branch that survived.
+    The two callers were near-copies that disagreed on the resolver, the chain
+    and the failure test, which was a search for "failed" in the message.
+    """
+    # Clear resolver_id BEFORE awaiting the kill so the outer
+    # _on_resolve_merge wait_for sees "externally handled" the moment it
+    # resumes, and the resolver cannot race the branch teardown.
+    live_resolver = _resolver_in_flight(ctx, inst.id)
+    if live_resolver:
+        ctx.store.set_pending_merge_resolver(inst.id, None)
+        killed = await ctx.runner.kill_and_wait(live_resolver, timeout=10)
+        if killed == KillOutcome.FORCE_CLEARED:
+            resolver_inst = ctx.store.get_instance(live_resolver)
+            if resolver_inst and resolver_inst.status == InstanceStatus.RUNNING:
+                resolver_inst.status = InstanceStatus.KILLED
+                resolver_inst.finished_at = datetime.now(timezone.utc).isoformat()
+                ctx.store.update_instance(resolver_inst, critical=True)
+    _clear_chain_on_manual_finalize(ctx.store, inst.session_id, op)
     branch_name = inst.branch  # Save before discard clears it
     outcome = await ctx.runner.discard_branch(inst)
-    msg = outcome.message
     ctx.store.update_instance(inst)
-    if "failed" not in msg.lower():
+    if not outcome.failed:
         ctx.store.clear_pending_merge(inst.id)
-        if not branch_name:
-            from bot.store import history as history_mod
-            branch_name = history_mod.get_branch_for_instance(inst.id)
-        if branch_name:
+        if branch_name and not outcome.preserved_branch:
             workflows.clear_stale_branches(ctx.store, branch_name)
-    await ctx.messenger.send_text(ctx.channel_id, msg)
+    return outcome
 
 
 # --- /branches ---
@@ -3958,36 +3987,14 @@ async def handle_callback(
         if not inst:
             await ctx.messenger.send_text(ctx.channel_id, "Instance not found.")
             return
-        # Resolver in flight: kill it before discarding so the worktree
-        # subprocess doesn't race the branch teardown. Clear resolver_id
-        # BEFORE awaiting the kill so the outer _on_resolve_merge wait_for
-        # sees "externally handled" the moment it resumes.
-        live_resolver = _resolver_in_flight(ctx, inst.id)
-        if live_resolver:
-            ctx.store.set_pending_merge_resolver(inst.id, None)
-            outcome = await ctx.runner.kill_and_wait(live_resolver, timeout=10)
-            if outcome == KillOutcome.FORCE_CLEARED:
-                resolver_inst = ctx.store.get_instance(live_resolver)
-                if resolver_inst and resolver_inst.status == InstanceStatus.RUNNING:
-                    resolver_inst.status = InstanceStatus.KILLED
-                    resolver_inst.finished_at = datetime.now(timezone.utc).isoformat()
-                    ctx.store.update_instance(resolver_inst, critical=True)
-        _clear_chain_on_manual_finalize(ctx.store, inst.session_id, "Discard button")
         # Early guard: branch already cleared by a prior merge/discard
         if not inst.branch:
+            _clear_chain_on_manual_finalize(ctx.store, inst.session_id, "Discard button")
             outcome = await ctx.runner.discard_branch(inst)  # returns "Already discarded (...)"
             await _finish_resolved_branch(ctx, inst, outcome.message, source_msg_id)
             return
-        branch_name = inst.branch  # Save before discard clears it
-        outcome = await ctx.runner.discard_branch(inst)
-        msg = outcome.message
-        ctx.store.update_instance(inst)
-        # Clear stale branch refs on all sibling instances
-        if branch_name:
-            workflows.clear_stale_branches(ctx.store, branch_name)
-        if "failed" not in msg.lower():
-            ctx.store.clear_pending_merge(inst.id)
-        escaped = ctx.messenger.escape(msg)
+        outcome = await perform_discard(ctx, inst, "Discard button")
+        escaped = ctx.messenger.escape(outcome.message)
         await _finish_branch_action(ctx, inst, escaped, source_msg_id)
 
     elif action == "resolve_merge":

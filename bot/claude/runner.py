@@ -1237,9 +1237,12 @@ class DiscardOutcome(NamedTuple):
 
     `preserved_branch` is set when uncommitted work was found and rolled into
     a WIP commit so the branch survives — callers can surface a recovery hint.
+    `failed` means the branch was not discarded and is still there, so callers
+    must keep its pending merge and leave the instances that point at it alone.
     """
     message: str
     preserved_branch: str | None = None
+    failed: bool = False
 
     def __str__(self) -> str:  # back-compat with callers that f-string the result
         return self.message
@@ -8391,9 +8394,9 @@ class ClaudeRunner:
                 return DiscardOutcome(
                     f"Already discarded ({config.BRANCH_PREFIX}/{instance.id})"
                 )
-            return DiscardOutcome("No branch to discard")
+            return DiscardOutcome("No branch to discard", failed=True)
         if not instance.repo_path:
-            return DiscardOutcome("No repo path")
+            return DiscardOutcome("No repo path", failed=True)
         repo_lock = self._get_repo_lock(instance.repo_path)
         async with repo_lock:
             return await asyncio.to_thread(
@@ -8413,7 +8416,7 @@ class ClaudeRunner:
         # session's user. Auto-recover or surface an explicit error.
         precheck = self._check_main_repo_clean(repo)
         if precheck.error:
-            return DiscardOutcome(f"Discard skipped: {precheck.error}")
+            return DiscardOutcome(f"Discard skipped: {precheck.error}", failed=True)
         recovery_note = precheck.recovery_note
 
         worktree_path = instance.worktree_path
@@ -8493,11 +8496,14 @@ class ClaudeRunner:
         branch_deleted = False
         if not preserved_branch:
             r = run_capture(["git", "branch", "-D", instance.branch], cwd=repo)
-            if r.returncode != 0:
+            if r.returncode == 0:
+                branch_deleted = True
+            elif "not found" in r.stderr:
+                # Already gone (deleted by hand): nothing left to discard.
+                branch_deleted = True
+            else:
                 log.warning("Failed to delete branch %s: %s", instance.branch, r.stderr.strip())
                 errors.append(f"branch delete: {r.stderr.strip()}")
-            else:
-                branch_deleted = True
 
         # Worded only once the ref is actually gone. A failed `branch -D`
         # leaves those commits perfectly reachable, and telling the user a
@@ -8520,10 +8526,11 @@ class ClaudeRunner:
         self._cleanup_worktree_session_dir(instance)
 
         # Clear worktree_path always (it's gone). Clear branch only when we
-        # actually deleted it; otherwise the surviving WIP branch stays
-        # tracked on the instance for downstream UI/recovery flows.
+        # actually deleted it; otherwise the surviving branch (a WIP commit,
+        # or one git refused to delete) stays tracked on the instance so
+        # Merge/Discard still have something to act on.
         instance.worktree_path = None
-        if not preserved_branch:
+        if branch_deleted:
             instance.branch = None
 
         # Surface any Path B recovery note so a precheck-stashed change set is
@@ -8539,6 +8546,7 @@ class ClaudeRunner:
             return DiscardOutcome(
                 f"Discarded (with warnings: {'; '.join(errors)})"
                 f"{recovery_suffix}{stranded_note}",
+                failed=not branch_deleted,
             )
         return DiscardOutcome(
             f"Discarded branch, back on {instance.original_branch}"

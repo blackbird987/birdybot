@@ -146,7 +146,8 @@
     "repo_picker_cap": "python scripts/test_repo_picker_cap.py",
     "stream_exit_cleanup": "python scripts/test_stream_exit_cleanup.py",
     "chat_crash": "python scripts/test_chat_crash.py",
-    "chain_exit_state": "python scripts/test_chain_exit_state.py"
+    "chain_exit_state": "python scripts/test_chain_exit_state.py",
+    "discard_paths": "python scripts/test_discard_paths.py"
   },
 
   "auth": {
