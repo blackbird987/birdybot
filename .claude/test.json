@@ -132,7 +132,12 @@
     "plan_usage": "python scripts/test_plan_usage.py",
     "progress_edit_dedupe": "python scripts/test_progress_edit_dedupe.py",
     "run_instance_crash": "python scripts/test_run_instance_crash.py",
-    "tldr": "python scripts/test_tldr.py"
+    "tldr": "python scripts/test_tldr.py",
+    "stop_all": "python scripts/test_stop_all.py",
+    "auto_fix_source": "python scripts/test_auto_fix_source.py",
+    "autopilot_chain": "python scripts/test_autopilot_chain.py",
+    "usage_gate": "python scripts/test_usage_gate.py",
+    "state_roundtrip": "python scripts/test_state_roundtrip.py"
   },
 
   "auth": {

@@ -42,6 +42,8 @@ Exit code is 0 when everything that ran passed, 1 otherwise.
 
 from __future__ import annotations
 
+import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
+
 import argparse
 import os
 import subprocess

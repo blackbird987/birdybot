@@ -5,6 +5,8 @@
 ### Tests
 - **One command runs every harness** (`scripts/run_harnesses.py`). It finds `scripts/test_*`, `verify_*` and `check_portability` by glob, runs them one at a time under the bot's virtualenv, skips `test_session_cgroups` (it creates real systemd scopes), and pins settings from `.env` that change what a test asserts, starting with `DEFAULT_SESSION_MODEL`. `.claude/test.json` gains an `all` entry and the nine harnesses it was missing.
 - The three harnesses that failed at HEAD pass again: the plan-text extractor's fake store gained the method it lacked, the model-limit failover test pins the default model the live `.env` was leaking in, and the portability check no longer trips on `/home` paths in test fixtures (the t-9142 transcript replay now builds its path from the home directory and still runs).
+- **Characterization harnesses pin today's behaviour before the refactor moves it**: the autopilot chain loop for every preset, pause and failure exit (`test_autopilot_chain.py`, 290 checks), the usage-window gate and its replay queue (`test_usage_gate.py`, 143), every persisted `state.json` key and `Instance` field surviving load and save (`test_state_roundtrip.py`, 295), the stream parser against 80 golden cases built from real transcript shapes (`test_parser_golden.py`, `--regen` to rewrite), and the parent-notify hook on finalize (`test_parent_notify.py`).
+- Four harnesses listed in `.claude/test.json` gain the `_bootstrap` import the portability check requires.
 - The five refactor scout reports are kept in `docs/refactor/`, since the originals in `data/results/` are pruned after a week.
 
 ## v0.101.35, Thrash errors name the oversized instruction file (2026-10-11)
