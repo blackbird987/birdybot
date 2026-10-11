@@ -9207,8 +9207,7 @@ class ClaudeRunner:
             # surfaced notice whether to /release again or revert.
             if inst.session_id:
                 try:
-                    store.clear_autopilot_chain(inst.session_id)
-                    store.clear_chain_entry_sha(inst.session_id)
+                    store.clear_chain_state(inst.session_id)
                 except Exception:
                     log.debug(
                         "Failed to clear autopilot chain for session %s",

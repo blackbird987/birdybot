@@ -124,9 +124,7 @@ async def _exit_chain(
     _eval_chain_safe(ctx.store, source_id, steps, completed_steps,
                      chain_instances, outcome, intervention=intervention)
     if clear_state:
-        ctx.store.clear_autopilot_chain(session_id)
-        ctx.store.clear_chain_deferred(session_id)
-        ctx.store.clear_chain_phases(session_id)
+        ctx.store.clear_chain_state(session_id)
     else:
         # Chain queue stays for user-driven resume (needs_input,
         # phantom_detected, phase_gate_risk). Mark it paused so the
@@ -3626,9 +3624,7 @@ async def _run_autopilot_chain(
             except Exception:
                 log.exception("Hold chain handoff message failed to send")
 
-        ctx.store.clear_autopilot_chain(session_id)
-        ctx.store.clear_chain_deferred(session_id)
-        ctx.store.clear_chain_entry_sha(session_id)
+        ctx.store.clear_chain_state(session_id)
         return result
     finally:
         ctx.runner.end_task(chain_task_id)

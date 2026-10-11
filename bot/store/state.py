@@ -1814,6 +1814,17 @@ class StateStore:
         self._chain_deferred.pop(session_id, None)
         self.mark_dirty()
 
+    def clear_chain_state(self, session_id: str | None) -> None:
+        """End a chain: drop its queue, deferred items, phases and entry SHA.
+
+        One call for every terminal exit, so a failure exit cannot leave a
+        field behind that only the success exit remembered to clear.
+        """
+        self.clear_autopilot_chain(session_id)
+        self.clear_chain_deferred(session_id)
+        self.clear_chain_phases(session_id)
+        self.clear_chain_entry_sha(session_id)
+
     # --- Chain Entry SHA (verify_release diff anchor) ---
 
     def get_chain_entry_sha(self, session_id: str | None) -> str | None:

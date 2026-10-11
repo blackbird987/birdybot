@@ -119,8 +119,7 @@ def _clear_chain_on_manual_finalize(
             "Manual %s — clearing autopilot chain queue for session %s",
             op, session_id,
         )
-        store.clear_autopilot_chain(session_id)
-        store.clear_chain_entry_sha(session_id)
+        store.clear_chain_state(session_id)
 
 
 async def budget_warning(ctx: RequestContext) -> None:

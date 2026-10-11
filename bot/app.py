@@ -1511,8 +1511,7 @@ async def _resume_interrupted_chains(
                 "Skipping unmetered chain (post-load) for session %s — clearing",
                 session_id,
             )
-            store.clear_autopilot_chain(session_id)
-            store.clear_chain_entry_sha(session_id)
+            store.clear_chain_state(session_id)
             continue
 
         # Paused chains are waiting on the user (needs_input, phantom, phase
@@ -1534,16 +1533,14 @@ async def _resume_interrupted_chains(
                         "Dropping stale running chain for session %s (age %s, steps: %s)",
                         session_id, now - ts, steps,
                     )
-                    store.clear_autopilot_chain(session_id)
-                    store.clear_chain_entry_sha(session_id)
+                    store.clear_chain_state(session_id)
                     continue
             except (ValueError, TypeError):
                 log.warning(
                     "Unparseable chain meta updated_at for session %s: %r — clearing",
                     session_id, updated_at,
                 )
-                store.clear_autopilot_chain(session_id)
-                store.clear_chain_entry_sha(session_id)
+                store.clear_chain_state(session_id)
                 continue
 
         # Find the thread for this session
@@ -1553,8 +1550,7 @@ async def _resume_interrupted_chains(
                 "No thread found for interrupted chain session %s — clearing",
                 session_id,
             )
-            store.clear_autopilot_chain(session_id)
-            store.clear_chain_entry_sha(session_id)
+            store.clear_chain_state(session_id)
             continue
 
         thread_id, info = lookup
@@ -1574,8 +1570,7 @@ async def _resume_interrupted_chains(
                 "No completed instance for interrupted chain session %s — clearing",
                 session_id,
             )
-            store.clear_autopilot_chain(session_id)
-            store.clear_chain_entry_sha(session_id)
+            store.clear_chain_state(session_id)
             continue
 
         log.info(

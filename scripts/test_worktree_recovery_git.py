@@ -98,11 +98,8 @@ class _Store:
     def update_instance(self, inst) -> None:
         self.updated.append(inst.id)
 
-    def clear_autopilot_chain(self, sid) -> None:
+    def clear_chain_state(self, sid) -> None:
         self.cleared_chains.append(sid)
-
-    def clear_chain_entry_sha(self, sid) -> None:
-        pass
 
 
 def _runner() -> ClaudeRunner:
