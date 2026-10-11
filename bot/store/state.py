@@ -30,7 +30,7 @@ log = logging.getLogger(__name__)
 # rebuilds its history). Untranslated, those two are the quiet failure: the
 # instance list renders fine and the button just returns nothing.
 #
-# `prompt`, `bash_commands` and `path_poisoning` also contain absolute paths
+# `prompt` and `path_poisoning` also contain absolute paths
 # and are deliberately left alone — they are a record of what was said and
 # done, not a handle to open, and rewriting them would falsify history rather
 # than repair it.

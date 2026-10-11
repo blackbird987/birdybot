@@ -468,7 +468,6 @@ def test_state_localisation() -> None:
             "result_file": "C:/Users/Quincy/Desktop/Programming/bot/data/results/q-1.md",  # portability: ok
             "diff_file": "C:/Users/Quincy/Desktop/Programming/bot/data/results/q-1.diff",  # portability: ok
             "prompt": "left alone: C:/Users/Quincy/notes.txt",
-            "bash_commands": ["ls C:/Users/Quincy/x"],
             "path_poisoning": ["C:/Users/Quincy/Desktop/Programming/bot/CHANGELOG.md"],  # portability: ok
         }],
         "schedules": [{"id": "s1", "repo_path": "C:/Users/Quincy/Desktop/Programming/bot"}],  # portability: ok
@@ -493,8 +492,6 @@ def test_state_localisation() -> None:
           lin + "/Desktop/Programming/bot")
     check("prompt text NOT rewritten", data["instances"][0]["prompt"],
           "left alone: C:/Users/Quincy/notes.txt")
-    check("bash history NOT rewritten", data["instances"][0]["bash_commands"],
-          ["ls C:/Users/Quincy/x"])
     check("poisoning record NOT rewritten", data["instances"][0]["path_poisoning"],
           ["C:/Users/Quincy/Desktop/Programming/bot/CHANGELOG.md"])  # portability: ok
     check("cooldown key localised",

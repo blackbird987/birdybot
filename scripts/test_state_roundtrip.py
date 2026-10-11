@@ -31,11 +31,14 @@ What it pins:
      records, no file, corrupt file) come up with defaults instead of
      crashing.
 
-Two checks are named after the change that will edit them, so that change
-updates exactly one check each:
+One check is named after the change that will edit it, so that change
+updates exactly one check:
 
-  * `instance.bash_commands` (fix S1: will stop being persisted)
   * `platform_state.discord.orch_resume_payloads` (will be pruned)
+
+`instance.bash_commands` is no longer persisted (fix S1): nothing had read
+it since 03531d9 and it was 27% of the live file. A legacy file that still
+carries it loads, and the next save drops it.
 
 The store is pointed at a temp dir before construction; the real
 data/state.json is never opened.
@@ -216,7 +219,6 @@ def full_instance() -> Instance:
         user_id="u-77",
         user_name="Quincy",
         tools_used=["Edit", "Write", "Bash"],
-        bash_commands=["git status", "pytest -q"],
         num_turns=17,
         input_tokens=1001,
         output_tokens=2002,
@@ -475,10 +477,7 @@ def _check_fixture_state() -> None:
         _eq(f"key {key!r} survives load then save unchanged",
             saved.get(key), fixture[key])
 
-    # The two named for the changes that are about to edit them.
-    _check("instance.bash_commands is persisted today (S1 will remove this)",
-           saved["instances"][0].get("bash_commands")
-           == ["git status", "pytest -q"])
+    # The one named for the change that is about to edit it.
     _eq("platform_state.discord.orch_resume_payloads is persisted today "
         "(will be pruned)",
         saved["platform_state"]["discord"].get("orch_resume_payloads"),
@@ -751,9 +750,8 @@ def _check_api_populated() -> None:
     _eq("chain_phases", saved["chain_phases"]["sess-chain-1"],
         _chain_phase_state().to_dict())
 
-    _check("instance.bash_commands is persisted today (S1 will remove this)",
-           saved["instances"][0].get("bash_commands")
-           == ["git status", "pytest -q"])
+    _check("instance.bash_commands is not persisted (S1)",
+           "bash_commands" not in saved["instances"][0])
     _eq("platform_state.discord.orch_resume_payloads is persisted today "
         "(will be pruned)",
         saved["platform_state"]["discord"].get("orch_resume_payloads"),
@@ -868,7 +866,22 @@ def _check_old_shaped_inner() -> None:
     _eq("a default store still writes every persisted key",
         set(_read(f2)), set(EXPECTED_KEYS))
 
-    # 2. Minimal shape: only repos + one instance with only required keys.
+    # 1b. A file written before S1 still carries every instance's bash log.
+    #     It loads, the instance is otherwise intact, and the next save drops
+    #     the field instead of carrying 27% of the file forward forever.
+    f = TMP / "old-bash-log" / "state.json"
+    f.parent.mkdir()
+    legacy = full_instance().to_dict()
+    legacy["bash_commands"] = ["git status", "pytest -q"]
+    f.write_text(json.dumps({"instances": [legacy]}), encoding="utf-8")
+    s = _store(f)
+    got = s.get_instance(legacy["id"])
+    _eq("legacy bash log: the instance still loads intact",
+        got.to_dict() if got else None, full_instance().to_dict())
+    s.save()
+    _check("legacy bash log: the next save drops it",
+           "bash_commands" not in _read(f)["instances"][0])
+
     f = TMP / "old-min" / "state.json"
     f.parent.mkdir()
     f.write_text(json.dumps({
