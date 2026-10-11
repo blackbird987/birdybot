@@ -174,17 +174,8 @@ async def handle_ark_button(
         if not running:
             await interaction.followup.send("No running instances.", ephemeral=True)
             return
-        killed = 0
-        for inst in running:
-            try:
-                if await bot._runner.kill(inst.id):
-                    inst.status = InstanceStatus.KILLED
-                    from datetime import datetime, timezone
-                    inst.finished_at = datetime.now(timezone.utc).isoformat()
-                    bot._store.update_instance(inst)
-                    killed += 1
-            except Exception:
-                log.debug("Failed to kill %s during ark stop_all", inst.id, exc_info=True)
+        from bot.engine.commands import stop_instances
+        killed = await stop_instances(bot._store, bot._runner, running)
         await interaction.followup.send(
             f"Stopped {killed}/{len(running)} instances.", ephemeral=True,
         )

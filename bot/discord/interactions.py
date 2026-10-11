@@ -1020,16 +1020,8 @@ async def _handle_stop_all(
     await interaction.followup.send(
         f"Stopping {count} instance{'s' if count != 1 else ''}...", ephemeral=True,
     )
-    killed = 0
-    for inst in running:
-        try:
-            if await bot._runner.kill(inst.id):
-                inst.status = InstanceStatus.KILLED
-                inst.finished_at = datetime.now(timezone.utc).isoformat()
-                bot._store.update_instance(inst)
-                killed += 1
-        except Exception:
-            log.debug("Failed to kill %s during stop_all", inst.id, exc_info=True)
+    from bot.engine.commands import stop_instances
+    killed = await stop_instances(bot._store, bot._runner, running)
     asyncio.create_task(bot._forums.refresh_control_room(repo_name))
     asyncio.create_task(bot._refresh_dashboard())
     log.info("Stop all: killed %d/%d instances for %s", killed, count, repo_name)

@@ -59,6 +59,11 @@ from bot.claude.runner import (
     ClaudeRunner, MERGE_FAIL_DIVERGED, git_fail_reason, orphaned_releases,
 )
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from bot.store.state import StateStore
+
 log = logging.getLogger(__name__)
 
 # --- Shared state for uptime / cli_version / shutdown ---
@@ -1740,6 +1745,51 @@ async def on_list(ctx: RequestContext, text: str) -> None:
 
 # --- /kill ---
 
+async def kill_instance(
+    store: StateStore, runner: ClaudeRunner, inst: Instance,
+    *, owns_card: bool = False,
+) -> KillOutcome:
+    """Stop one instance as a user-requested kill. Every user Kill lands here.
+
+    It announces intent (``reason="kill"``) so the run renders as a quiet
+    tombstone rather than a red FAILED card, and so a killed run is never read
+    as an account that fell over and restarted on the backup subscription.
+    ``kill_and_wait``, not ``kill``, so the channel lock is always released:
+    via lifecycle's finally block, or via the 10s force-clear net.
+    """
+    outcome = await runner.kill_and_wait(inst.id, reason="kill", owns_card=owns_card)
+    # On FORCE_CLEARED the lifecycle never reached finalize (genuinely wedged),
+    # so the engine layer owns the status flip — runner.py is store-agnostic.
+    if outcome == KillOutcome.FORCE_CLEARED:
+        inst.status = InstanceStatus.KILLED
+        inst.finished_at = datetime.now(timezone.utc).isoformat()
+        store.update_instance(inst, critical=True)
+    return outcome
+
+
+async def stop_instances(
+    store: StateStore, runner: ClaudeRunner, instances: list[Instance],
+) -> int:
+    """Kill several instances at once (the Stop all buttons). Returns how many stopped.
+
+    Each goes through ``kill_instance``. The Stop all buttons used to call the
+    bare ``runner.kill``, which defaults to a non-intentional kill: every
+    instance they stopped rendered as a red FAILED card and was eligible for
+    account failover. Killed concurrently, because each wait can take seconds.
+    """
+    outcomes = await asyncio.gather(
+        *(kill_instance(store, runner, inst) for inst in instances),
+        return_exceptions=True,
+    )
+    stopped = 0
+    for inst, outcome in zip(instances, outcomes):
+        if isinstance(outcome, BaseException):
+            log.debug("Failed to kill %s during stop all", inst.id, exc_info=outcome)
+        elif outcome != KillOutcome.NOT_RUNNING:
+            stopped += 1
+    return stopped
+
+
 async def perform_kill(
     ctx: RequestContext, inst: Instance, source_msg_id: str | None = None,
 ) -> None:
@@ -1757,22 +1807,14 @@ async def perform_kill(
     own it, so lifecycle leaves it alone. Absent (typed /kill) -> we post a
     fresh message and lifecycle resolves the live progress card itself.
     """
-    outcome = await ctx.runner.kill_and_wait(
-        # kill_and_wait, not kill, so the channel lock is always released —
-        # via lifecycle's finally block, or via the 10s force-clear net.
-        inst.id, reason="kill", owns_card=source_msg_id is not None,
+    outcome = await kill_instance(
+        ctx.store, ctx.runner, inst, owns_card=source_msg_id is not None,
     )
     if outcome == KillOutcome.NOT_RUNNING:
         await ctx.messenger.send_text(
             ctx.channel_id, "Process not found or already stopped.",
         )
         return
-    # On FORCE_CLEARED the lifecycle never reached finalize (genuinely wedged),
-    # so the engine layer owns the status flip — runner.py is store-agnostic.
-    if outcome == KillOutcome.FORCE_CLEARED:
-        inst.status = InstanceStatus.KILLED
-        inst.finished_at = datetime.now(timezone.utc).isoformat()
-        ctx.store.update_instance(inst, critical=True)
     # Re-fetch in case finalize_run wrote new fields (status, finished_at,
     # error) — render the buttons off the freshest view.
     inst = ctx.store.get_instance(inst.id) or inst
