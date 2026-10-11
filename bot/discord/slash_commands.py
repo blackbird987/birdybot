@@ -49,10 +49,24 @@ def setup(bot: ClaudeBot) -> None:
     """Register all slash commands on the bot's command tree."""
     guild_obj = discord.Object(id=bot._guild_id)
 
+    async def _refused(interaction: discord.Interaction, *, owner_only: bool = False) -> bool:
+        """Reply "Unauthorized" and return True unless this user may run the command.
+
+        The owner always may. Anyone else needs an access grant for the
+        channel, and owner-only commands accept no grant at all.
+        """
+        uid = interaction.user.id
+        if bot._is_owner(uid):
+            return False
+        if not owner_only and bot._check_access(
+                uid, channel_id=str(interaction.channel_id)).allowed:
+            return False
+        await interaction.response.send_message("Unauthorized", ephemeral=True)
+        return True
+
     @bot.tree.command(name="status", description="Health dashboard", guild=guild_obj)
     async def cmd_status(interaction: discord.Interaction):
-        if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction):
             return
         await bot._run_slash(interaction, commands.on_status)
 
@@ -62,8 +76,7 @@ def setup(bot: ClaudeBot) -> None:
         guild=guild_obj,
     )
     async def cmd_auth(interaction: discord.Interaction):
-        if not bot._is_owner(interaction.user.id):
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction, owner_only=True):
             return
         # Same ephemeral panel the Ark's "Claude Login" button opens — this is
         # just a way to reach it from anywhere without hunting for the button.
@@ -72,16 +85,14 @@ def setup(bot: ClaudeBot) -> None:
 
     @bot.tree.command(name="cost", description="Spending breakdown", guild=guild_obj)
     async def cmd_cost(interaction: discord.Interaction):
-        if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction):
             return
         await bot._run_slash(interaction, commands.on_cost)
 
     @bot.tree.command(name="evals", description="Recurring session-quality flags and what owns them", guild=guild_obj)
     @app_commands.describe(days="Window in days (default 7)")
     async def cmd_evals(interaction: discord.Interaction, days: int = 7):
-        if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction):
             return
         await bot._run_slash(interaction, lambda ctx: commands.on_evals(ctx, days))
 
@@ -113,8 +124,7 @@ def setup(bot: ClaudeBot) -> None:
     @bot.tree.command(name="usage", description="Token usage & rate limit estimates", guild=guild_obj)
     @app_commands.describe(force="Force refresh (bypass cache)")
     async def cmd_usage(interaction: discord.Interaction, force: bool = False):
-        if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction):
             return
         # Dedicated ephemeral flow — bypasses _run_slash so the response
         # appears as a private interaction reply, never blocks on subprocess.
@@ -143,72 +153,63 @@ def setup(bot: ClaudeBot) -> None:
     @bot.tree.command(name="list", description="Show instances", guild=guild_obj)
     @app_commands.describe(scope="Show all instances or just recent")
     async def cmd_list(interaction: discord.Interaction, scope: str = ""):
-        if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction):
             return
         await bot._run_slash(interaction, lambda ctx: commands.on_list(ctx, scope))
 
     @bot.tree.command(name="bg", description="Background task (build mode)", guild=guild_obj)
     @app_commands.describe(prompt="Task description")
     async def cmd_bg(interaction: discord.Interaction, prompt: str):
-        if not bot._is_owner(interaction.user.id):
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction, owner_only=True):
             return
         await bot._run_slash(interaction, lambda ctx: commands.on_bg(ctx, prompt))
 
     @bot.tree.command(name="release", description="Cut a versioned release", guild=guild_obj)
     @app_commands.describe(level="patch, minor, major, or explicit version (default: patch)")
     async def cmd_release(interaction: discord.Interaction, level: str = "patch"):
-        if not bot._is_owner(interaction.user.id):
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction, owner_only=True):
             return
         await bot._run_slash(interaction, lambda ctx: commands.on_release(ctx, level))
 
     @bot.tree.command(name="kill", description="Terminate instance", guild=guild_obj)
     @app_commands.describe(target="Instance ID or name")
     async def cmd_kill(interaction: discord.Interaction, target: str):
-        if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction):
             return
         await bot._run_slash(interaction, lambda ctx: commands.on_kill(ctx, target))
 
     @bot.tree.command(name="retry", description="Re-run instance", guild=guild_obj)
     @app_commands.describe(target="Instance ID or name")
     async def cmd_retry(interaction: discord.Interaction, target: str):
-        if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction):
             return
         await bot._run_slash(interaction, lambda ctx: commands.on_retry(ctx, target))
 
     @bot.tree.command(name="log", description="Full output", guild=guild_obj)
     @app_commands.describe(target="Instance ID or name")
     async def cmd_log(interaction: discord.Interaction, target: str):
-        if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction):
             return
         await bot._run_slash(interaction, lambda ctx: commands.on_log(ctx, target))
 
     @bot.tree.command(name="export", description="Export session as HTML transcript", guild=guild_obj)
     @app_commands.describe(target="Instance ID or name")
     async def cmd_export(interaction: discord.Interaction, target: str):
-        if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction):
             return
         await bot._run_slash(interaction, lambda ctx: commands.on_share(ctx, target))
 
     @bot.tree.command(name="diff", description="Git diff", guild=guild_obj)
     @app_commands.describe(target="Instance ID or name")
     async def cmd_diff(interaction: discord.Interaction, target: str):
-        if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction):
             return
         await bot._run_slash(interaction, lambda ctx: commands.on_diff(ctx, target))
 
     @bot.tree.command(name="merge", description="Merge branch", guild=guild_obj)
     @app_commands.describe(target="Instance ID or name")
     async def cmd_merge(interaction: discord.Interaction, target: str):
-        if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction):
             return
 
         # Resolve session_id from the thread (or from the merge target) so we
@@ -231,15 +232,13 @@ def setup(bot: ClaudeBot) -> None:
     @bot.tree.command(name="discard", description="Delete branch", guild=guild_obj)
     @app_commands.describe(target="Instance ID or name")
     async def cmd_discard(interaction: discord.Interaction, target: str):
-        if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction):
             return
         await bot._run_slash(interaction, lambda ctx: commands.on_discard(ctx, target))
 
     @bot.tree.command(name="branches", description="List orphaned branches", guild=guild_obj)
     async def cmd_branches(interaction: discord.Interaction):
-        if not bot._is_owner(interaction.user.id):
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction, owner_only=True):
             return
         await bot._run_slash(interaction, commands.on_branches)
 
@@ -249,8 +248,7 @@ def setup(bot: ClaudeBot) -> None:
         guild=guild_obj,
     )
     async def cmd_fleet(interaction: discord.Interaction):
-        if not bot._is_owner(interaction.user.id):
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction, owner_only=True):
             return
         from bot.discord import fleet
         await fleet.handle_fleet_command(bot, interaction)
@@ -258,8 +256,7 @@ def setup(bot: ClaudeBot) -> None:
     @bot.tree.command(name="mode", description="View/set mode", guild=guild_obj)
     @app_commands.describe(mode="explore or build")
     async def cmd_mode(interaction: discord.Interaction, mode: str = ""):
-        if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction):
             return
         await bot._run_slash(interaction, lambda ctx: commands.on_mode(ctx, mode))
         # Mirror the button-click path: refresh the forum mode tag instantly
@@ -272,16 +269,14 @@ def setup(bot: ClaudeBot) -> None:
     @bot.tree.command(name="verbose", description="Progress detail level", guild=guild_obj)
     @app_commands.describe(level="0, 1, or 2")
     async def cmd_verbose(interaction: discord.Interaction, level: str = ""):
-        if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction):
             return
         await bot._run_slash(interaction, lambda ctx: commands.on_verbose(ctx, level))
 
     @bot.tree.command(name="effort", description="Reasoning effort level", guild=guild_obj)
     @app_commands.describe(level="low, medium, high, or max")
     async def cmd_effort(interaction: discord.Interaction, level: str = ""):
-        if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction):
             return
         await bot._run_slash(interaction, lambda ctx: commands.on_effort(ctx, level))
 
@@ -316,8 +311,7 @@ def setup(bot: ClaudeBot) -> None:
     @app_commands.describe(name="Model name, or 'default' to clear the pin")
     @app_commands.autocomplete(name=model_autocomplete)
     async def cmd_model(interaction: discord.Interaction, name: str = ""):
-        if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction):
             return
         await bot._run_slash(interaction, lambda ctx: commands.on_model(ctx, name))
 
@@ -332,16 +326,14 @@ def setup(bot: ClaudeBot) -> None:
     @bot.tree.command(name="context", description="Pinned context", guild=guild_obj)
     @app_commands.describe(args="set <text> | clear")
     async def cmd_context(interaction: discord.Interaction, args: str = ""):
-        if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction):
             return
         await bot._run_slash(interaction, lambda ctx: commands.on_context(ctx, args))
 
     @bot.tree.command(name="repo", description="Repo management", guild=guild_obj)
     @app_commands.describe(args="add|switch|list [name] [path]")
     async def cmd_repo(interaction: discord.Interaction, args: str = ""):
-        if not bot._is_owner(interaction.user.id):
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction, owner_only=True):
             return
         stripped = args.strip()
         # The menu is a picker, so it shows what you actually work on. A
@@ -389,16 +381,14 @@ def setup(bot: ClaudeBot) -> None:
     @bot.tree.command(name="session", description="List/resume sessions", guild=guild_obj)
     @app_commands.describe(args="resume <id> | drop")
     async def cmd_session(interaction: discord.Interaction, args: str = ""):
-        if not bot._is_owner(interaction.user.id):
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction, owner_only=True):
             return
         await bot._run_slash(interaction, lambda ctx: commands.on_session(ctx, args))
 
     @bot.tree.command(name="schedule", description="Recurring tasks", guild=guild_obj)
     @app_commands.describe(args="every|at|list|delete ...")
     async def cmd_schedule(interaction: discord.Interaction, args: str = ""):
-        if not bot._is_owner(interaction.user.id):
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction, owner_only=True):
             return
         await bot._run_slash(interaction, lambda ctx: commands.on_schedule(ctx, args))
 
@@ -415,9 +405,7 @@ def setup(bot: ClaudeBot) -> None:
         only extra work here is resolving what the button already knows: the
         instance whose card it was sitting on.
         """
-        if not bot._is_owner(interaction.user.id) and not bot._check_access(
-                interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction):
             return
 
         lookup = bot._forums.thread_to_project(str(interaction.channel_id))
@@ -444,24 +432,21 @@ def setup(bot: ClaudeBot) -> None:
     @bot.tree.command(name="alias", description="Command shortcuts", guild=guild_obj)
     @app_commands.describe(args="set|delete|list ...")
     async def cmd_alias(interaction: discord.Interaction, args: str = ""):
-        if not bot._is_owner(interaction.user.id):
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction, owner_only=True):
             return
         await bot._run_slash(interaction, lambda ctx: commands.on_alias(ctx, args))
 
     @bot.tree.command(name="budget", description="Budget info/reset", guild=guild_obj)
     @app_commands.describe(args="reset")
     async def cmd_budget(interaction: discord.Interaction, args: str = ""):
-        if not bot._is_owner(interaction.user.id):
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction, owner_only=True):
             return
         await bot._run_slash(interaction, lambda ctx: commands.on_budget(ctx, args))
 
     @bot.tree.command(name="report", description="Session quality report", guild=guild_obj)
     @app_commands.describe(days="Number of days to cover (default: 1)")
     async def cmd_report(interaction: discord.Interaction, days: int = 1):
-        if not bot._is_owner(interaction.user.id):
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction, owner_only=True):
             return
         await interaction.response.defer(ephemeral=True)
         from bot.engine.report import full_report
@@ -568,8 +553,7 @@ def setup(bot: ClaudeBot) -> None:
     @bot.tree.command(name="history", description="Recent completed sessions", guild=guild_obj)
     @app_commands.describe(count="Number of entries (default 10, max 25)")
     async def cmd_history(interaction: discord.Interaction, count: int = 10):
-        if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction):
             return
         await interaction.response.defer()
         count = max(1, min(count, 25))
@@ -633,8 +617,7 @@ def setup(bot: ClaudeBot) -> None:
     @bot.tree.command(name="sync", description="Sync sessions from CLI", guild=guild_obj)
     @app_commands.describe(count="Number of sessions to sync (0 = this thread only)")
     async def cmd_sync(interaction: discord.Interaction, count: int = 0):
-        if not bot._is_owner(interaction.user.id):
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction, owner_only=True):
             return
         await interaction.response.defer(ephemeral=True)
         thread_id = str(interaction.channel_id)
@@ -665,8 +648,7 @@ def setup(bot: ClaudeBot) -> None:
         Keeps the thread (and its Discord history, which is what the next
         turn's cold priming reads); drops only the session binding.
         """
-        if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction):
             return
         thread_id = str(interaction.channel_id)
         if not bot._forums.thread_to_project(thread_id):
@@ -701,8 +683,7 @@ def setup(bot: ClaudeBot) -> None:
 
     @bot.tree.command(name="sync-channel", description="Refresh this thread's session history", guild=guild_obj)
     async def cmd_sync_channel(interaction: discord.Interaction):
-        if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction):
             return
         thread_id = str(interaction.channel_id)
         lookup = bot._forums.thread_to_project(thread_id)
@@ -735,8 +716,7 @@ def setup(bot: ClaudeBot) -> None:
 
     @bot.tree.command(name="done", description="Wrap up — commit, changelog, release", guild=guild_obj)
     async def cmd_done(interaction: discord.Interaction):
-        if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction):
             return
 
         channel_id = str(interaction.channel_id)
@@ -826,36 +806,31 @@ def setup(bot: ClaudeBot) -> None:
 
     @bot.tree.command(name="help", description="Show available commands", guild=guild_obj)
     async def cmd_help(interaction: discord.Interaction):
-        if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction):
             return
         await bot._run_slash(interaction, commands.on_help)
 
     @bot.tree.command(name="clear", description="Archive old instances", guild=guild_obj)
     async def cmd_clear(interaction: discord.Interaction):
-        if not bot._is_owner(interaction.user.id):
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction, owner_only=True):
             return
         await bot._run_slash(interaction, commands.on_clear)
 
     @bot.tree.command(name="logs", description="Bot log", guild=guild_obj)
     async def cmd_logs(interaction: discord.Interaction):
-        if not bot._is_owner(interaction.user.id):
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction, owner_only=True):
             return
         await bot._run_slash(interaction, commands.on_logs)
 
     @bot.tree.command(name="shutdown", description="Stop the bot", guild=guild_obj)
     async def cmd_shutdown(interaction: discord.Interaction):
-        if not bot._is_owner(interaction.user.id):
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction, owner_only=True):
             return
         await bot._run_slash(interaction, commands.on_shutdown)
 
     @bot.tree.command(name="reboot", description="Restart the bot (apply code changes)", guild=guild_obj)
     async def cmd_reboot(interaction: discord.Interaction):
-        if not bot._is_owner(interaction.user.id):
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction, owner_only=True):
             return
         await bot._run_slash(interaction, commands.on_reboot)
 
@@ -882,8 +857,7 @@ def setup(bot: ClaudeBot) -> None:
     @app_commands.describe(thread="Thread to reference", messages="Messages to include (default 6)")
     @app_commands.autocomplete(thread=thread_autocomplete)
     async def cmd_ref(interaction: discord.Interaction, thread: str, messages: int = 6):
-        if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction):
             return
         messages = max(1, min(messages, 20))
         lookup = bot._forums.thread_to_project(thread)
@@ -925,8 +899,7 @@ def setup(bot: ClaudeBot) -> None:
     @bot.tree.command(name="deferred", description="View/clear deferred review items", guild=guild_obj)
     @app_commands.describe(args="[repo_name] | clear [repo_name]")
     async def cmd_deferred(interaction: discord.Interaction, args: str = ""):
-        if not bot._is_owner(interaction.user.id) and not bot._check_access(interaction.user.id, channel_id=str(interaction.channel_id)).allowed:
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction):
             return
         await bot._run_slash(interaction, lambda ctx: commands.on_deferred(ctx, args))
 
@@ -941,8 +914,7 @@ def setup(bot: ClaudeBot) -> None:
         repo="Repo to place monitor in (creates thread in repo forum)",
     )
     async def cmd_monitor_setup(interaction: discord.Interaction, name: str, repo: str | None = None):
-        if not bot._is_owner(interaction.user.id):
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction, owner_only=True):
             return
         await interaction.response.defer(ephemeral=True)
         result = await monitor_setup(bot, name.lower(), repo_name=repo)
@@ -950,8 +922,7 @@ def setup(bot: ClaudeBot) -> None:
 
     @monitor_group.command(name="refresh", description="Fetch & update all monitors now")
     async def cmd_monitor_refresh(interaction: discord.Interaction):
-        if not bot._is_owner(interaction.user.id):
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction, owner_only=True):
             return
         await interaction.response.defer(ephemeral=True)
         if not bot._monitor_service:
@@ -963,8 +934,7 @@ def setup(bot: ClaudeBot) -> None:
     @monitor_group.command(name="remove", description="Disable a monitor (keeps channel)")
     @app_commands.describe(name="Monitor name")
     async def cmd_monitor_remove(interaction: discord.Interaction, name: str):
-        if not bot._is_owner(interaction.user.id):
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction, owner_only=True):
             return
         await interaction.response.defer(ephemeral=True)
         if not bot._monitor_service:
@@ -978,8 +948,7 @@ def setup(bot: ClaudeBot) -> None:
 
     @monitor_group.command(name="list", description="Show all monitors with status")
     async def cmd_monitor_list(interaction: discord.Interaction):
-        if not bot._is_owner(interaction.user.id):
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction, owner_only=True):
             return
         await interaction.response.defer(ephemeral=True)
         if not bot._monitor_service:
@@ -1194,10 +1163,7 @@ def setup(bot: ClaudeBot) -> None:
         app_commands.Choice(name="status", value="status"),
     ])
     async def cmd_diagnostics(interaction: discord.Interaction, toggle: str = "status"):
-        if not bot._is_owner(interaction.user.id) and not bot._check_access(
-            interaction.user.id, channel_id=str(interaction.channel_id)
-        ).allowed:
-            await interaction.response.send_message("Unauthorized", ephemeral=True)
+        if await _refused(interaction):
             return
         await interaction.response.defer(ephemeral=True)
 
