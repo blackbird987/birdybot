@@ -655,10 +655,9 @@ class PromptMixin:
                     f"this directory or read files outside it."
                 )
             if instance.bash_policy == "allowlist" and instance.mode != "build":
-                from bot.discord.access import DEFAULT_BASH_ALLOWLIST, DEFAULT_BASH_DENYLIST
                 access_parts.append(
-                    f"\nBash commands are restricted. Allowed: {', '.join(DEFAULT_BASH_ALLOWLIST)}."
-                    f"\nDenied: {', '.join(DEFAULT_BASH_DENYLIST)}."
+                    f"\nBash commands are restricted. Allowed: {', '.join(config.DEFAULT_BASH_ALLOWLIST)}."
+                    f"\nDenied: {', '.join(config.DEFAULT_BASH_DENYLIST)}."
                     f"\nDo not run commands outside this allowlist."
                 )
             elif instance.bash_policy == "none" and instance.mode != "build":

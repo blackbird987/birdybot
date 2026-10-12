@@ -193,6 +193,13 @@ class Messenger(Protocol):
         Default: no-op.
         """
 
+    async def set_near_limit(self, channel_id: str, apply: bool) -> None:
+        """Mark (or unmark) a conversation whose session is near its context limit.
+
+        Discord shows this as the `near-limit` forum tag.
+        Default: no-op.
+        """
+
     async def close_conversation(self, channel_id: str, *, skip_mention: bool = False) -> None:
         """Close/archive a conversation.
 

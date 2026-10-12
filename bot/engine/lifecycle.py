@@ -1189,15 +1189,9 @@ def make_progress_callbacks(
 async def _try_apply_near_limit(
     ctx: RequestContext, inst: Instance, apply: bool,
 ) -> None:
-    """Fire-and-forget: apply or clear the `near-limit` Discord forum tag."""
-    if ctx.platform != "discord":
-        return
-    bot = getattr(ctx.messenger, "_bot", None)
-    if bot is None:
-        return
+    """Fire-and-forget: apply or clear the conversation's near-limit marker."""
     try:
-        from bot.discord.tags import set_thread_near_limit_tag
-        await set_thread_near_limit_tag(bot, ctx.channel_id, apply)
+        await ctx.messenger.set_near_limit(ctx.channel_id, apply)
     except Exception:
         log.debug("near-limit tag update failed for %s", inst.id, exc_info=True)
 

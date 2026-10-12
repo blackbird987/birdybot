@@ -44,7 +44,8 @@ from bot.discord.forums import ForumManager, ThreadInfo
 from bot.discord.thread_ctx import ThreadContextMixin
 from bot.discord.titles import generate_title_text, read_ai_title
 from bot.discord.usage_gate import UsageGateMixin
-from bot.engine import commands, memes
+from bot.discord import memes
+from bot.engine import commands
 from bot.services.twitter import enrich_with_tweets
 
 if TYPE_CHECKING:

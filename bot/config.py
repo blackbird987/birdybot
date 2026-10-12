@@ -108,6 +108,22 @@ DISCORD_ENABLED: bool = bool(DISCORD_BOT_TOKEN and DISCORD_GUILD_ID)
 # Test webhook IDs (comma-separated) — allow webhook messages to bypass bot/auth guards
 TEST_WEBHOOK_IDS: set[str] = set(filter(None, os.getenv("TEST_WEBHOOK_IDS", "").split(",")))
 
+# Bash guidance for a guest whose grant uses the allowlist policy. Read by
+# the runner when it builds the access block of the system prompt, so it
+# lives here rather than in bot/discord/access.py. Soft enforcement: the
+# prompt states the lists, nothing intercepts the command.
+DEFAULT_BASH_ALLOWLIST: list[str] = [
+    "git status", "git log", "git diff", "git branch", "git show",
+    "npm test", "npm run", "pip", "pytest", "cargo test", "go test",
+    "python -m pytest", "node", "make", "ls", "find", "wc",
+]
+
+DEFAULT_BASH_DENYLIST: list[str] = [
+    "rm -rf", "rm -r", "curl | sh", "wget | sh",
+    "cat ~/.ssh", "cat .env", "cat ../.env",
+    "git push", "git reset --hard", "git checkout .",
+]
+
 # --- OpenAI (voice transcription) ---
 OPENAI_API_KEY: str | None = os.getenv("OPENAI_API_KEY")
 

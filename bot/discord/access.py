@@ -19,20 +19,6 @@ log = logging.getLogger(__name__)
 
 ACCESS_FILE: Path = config.DATA_DIR / "access.json"
 
-# Default commands allowed in explore mode (soft enforcement via system prompt)
-DEFAULT_BASH_ALLOWLIST: list[str] = [
-    "git status", "git log", "git diff", "git branch", "git show",
-    "npm test", "npm run", "pip", "pytest", "cargo test", "go test",
-    "python -m pytest", "node", "make", "ls", "find", "wc",
-]
-
-DEFAULT_BASH_DENYLIST: list[str] = [
-    "rm -rf", "rm -r", "curl | sh", "wget | sh",
-    "cat ~/.ssh", "cat .env", "cat ../.env",
-    "git push", "git reset --hard", "git checkout .",
-]
-
-
 @dataclass
 class RepoAccess:
     """Access configuration for a single repo grant."""

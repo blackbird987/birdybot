@@ -23,6 +23,8 @@ import asyncio
 import logging
 import os
 
+import discord
+
 from bot import config
 
 log = logging.getLogger(__name__)
@@ -119,8 +121,6 @@ async def handle(message) -> bool:
             continue
 
         try:
-            import discord
-
             await message.reply(
                 delivery.caption,
                 file=discord.File(str(delivery.path), filename=delivery.filename),
