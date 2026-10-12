@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import logging
-import re
 
-from bot.textutil import find_tilde_block, is_quoted_example, mask_tilde_bodies
+from bot.textutil import directive_re
 from bot.platform.base import RequestContext
-from bot.engine.directives.spawn import _parse_spawn_kv
+from bot.engine.directives.common import pair_directives, parse_kv
 
 log = logging.getLogger(__name__)
 
@@ -24,7 +23,7 @@ log = logging.getLogger(__name__)
 # written by the /spawn dispatcher itself, so a session cannot talk its way
 # into an arbitrary thread by naming an id.
 
-_REPLY_DIRECTIVE_RE = re.compile(r'\[BOT_CMD:\s*/reply\s+(.+?)\]')
+_REPLY_DIRECTIVE_RE = directive_re("reply")
 _REPLY_ALLOWED_KEYS = {"thread"}
 _REPLY_BODY_MAX_BYTES = 32 * 1024
 # Bounds one confused turn without blocking a parent answering a whole wave of
@@ -54,36 +53,10 @@ def _own_child_thread_ids(ctx: RequestContext) -> set[str]:
 def _pair_reply_directives(
     result_text: str,
 ) -> tuple[list[tuple[str, str]], int, int]:
-    """Pair each /reply directive with its own adjacent ~~~reply body.
-
-    Same contract as _pair_spawn_directives: a body must sit between its
-    directive and the next one, so two directives can never share a body,
-    and directives on quoted/code lines are skipped.
-    """
-    # Directives are found on the masked text, so one written inside another
-    # block (a /spawn inside a child's brief) is neither dispatched here nor
-    # counted as the next directive that ends this one's region.
-    scan = mask_tilde_bodies(result_text)
-    matches = list(_REPLY_DIRECTIVE_RE.finditer(scan))
-    pairs: list[tuple[str, str]] = []
-    no_body = 0
-    over_cap = 0
-    for i, m in enumerate(matches):
-        if is_quoted_example(scan, m.start()):
-            log.debug("BOT_CMD /reply skipped: a quoted example")
-            continue
-        if len(pairs) >= _MAX_REPLIES_PER_RESPONSE:
-            over_cap += 1
-            continue
-        region_end = (
-            matches[i + 1].start() if i + 1 < len(matches) else len(result_text)
-        )
-        span = find_tilde_block(result_text, "reply", m.end(), region_end)
-        if span is None:
-            no_body += 1
-            continue
-        pairs.append((m.group(1).strip(), result_text[span[0]:span[1]].strip()))
-    return pairs, no_body, over_cap
+    """Pair each /reply directive with its own adjacent ~~~reply body (see pair_directives)."""
+    return pair_directives(
+        result_text, _REPLY_DIRECTIVE_RE, "reply", _MAX_REPLIES_PER_RESPONSE,
+    )
 
 
 async def _handle_reply_directives(ctx: RequestContext, result_text: str) -> None:
@@ -120,7 +93,7 @@ async def _handle_reply_directives(ctx: RequestContext, result_text: str) -> Non
 
     owned = _own_child_thread_ids(ctx)
     for args_str, body in pairs:
-        kv = _parse_spawn_kv(args_str)
+        kv = parse_kv(args_str)
         if kv is None or set(kv) - _REPLY_ALLOWED_KEYS or "thread" not in kv:
             await _notice(
                 "/reply directive ignored — expected exactly "

@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from bot import config
-from bot.textutil import is_quoted_example, mask_tilde_bodies
+from bot.textutil import DIRECTIVE_ARGS, DIRECTIVE_KV_RE, directive_kv, is_quoted_example, mask_tilde_bodies
 
 if TYPE_CHECKING:
     from bot.claude.types import Instance
@@ -50,10 +50,8 @@ MAX_IMAGES_PER_RESPONSE = 4
 # in platform.formatting, so the set of directives that ACT is exactly the set
 # that renders as handled. A mid-sentence match is left alone.
 _IMAGE_DIRECTIVE_RE = re.compile(
-    r"(?m)^[ \t]*\[BOT_CMD:\s*/image([^\]\n]*)\][ \t]*$"
+    rf"(?m)^[ \t]*\[BOT_CMD:\s*/image({DIRECTIVE_ARGS}*)\][ \t]*$"
 )
-# key=value, bare or quoted — mirrors the /spawn and display parsers.
-_KV_RE = re.compile(r'''(\w+)=(?:"([^"]*)"|'([^']*)'|(\S+))''')
 
 
 def parse_image_directives(text: str) -> list[tuple[str, str | None]]:
@@ -74,14 +72,11 @@ def parse_image_directives(text: str) -> list[tuple[str, str | None]]:
             log.debug("/image skipped: a quoted example")
             continue
         args = m.group(1) or ""
-        kv = {
-            k: (d or s or b or "")
-            for k, d, s, b in _KV_RE.findall(args)
-        }
+        kv = directive_kv(args)
         raw_path = kv.get("path", "").strip()
         if not raw_path:
             # Bare form: everything that isn't a key=value pair is the path.
-            raw_path = _KV_RE.sub("", args).strip().strip("\"'")
+            raw_path = DIRECTIVE_KV_RE.sub("", args).strip().strip("\"'")
         if not raw_path:
             log.warning("/image directive has no path: %r", args)
             continue

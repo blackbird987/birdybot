@@ -5,25 +5,22 @@ from __future__ import annotations
 import logging
 import re
 
-from bot.textutil import find_tilde_block, is_quoted_example, mask_tilde_bodies
+from bot.textutil import directive_re
 from bot.claude.types import Instance
 from bot.platform.base import RequestContext, SpawnArgs
 from bot.engine.cmd_state import check_budget
+from bot.engine.directives.common import pair_directives, parse_kv
 
 log = logging.getLogger(__name__)
 
 
 # --- /spawn directive (Tier-2 BOT_CMD — assistant-issued session handoff) ---
 
-_SPAWN_DIRECTIVE_RE = re.compile(r'\[BOT_CMD:\s*/spawn\s+(.+?)\]')
+_SPAWN_DIRECTIVE_RE = directive_re("spawn")
 # The body is a tilde-fenced ~~~spawn ... ~~~ block, located by
 # textutil.find_tilde_block so a brief that itself contains a ~~~wake or
 # ~~~plan block for the child is not cut off at that block's closer. Tildes
 # avoid colliding with the triple-backtick code fences inside the prompt body.
-# kv pair: key=value where value is bare or quoted (single or double).
-_SPAWN_KV_RE = re.compile(
-    r'''(\w+)=(?:"([^"]*)"|'([^']*)'|(\S+))'''
-)
 _SPAWN_ALLOWED_KEYS = {"repo", "title", "mode", "effort"}
 _SPAWN_ALLOWED_MODES = {"explore", "plan", "build"}
 _SPAWN_ALLOWED_EFFORTS = {"low", "medium", "high", "max"}
@@ -45,41 +42,10 @@ _MAX_SPAWN_WAVES = 12
 def _pair_spawn_directives(
     result_text: str,
 ) -> tuple[list[tuple[str, str]], int, int]:
-    """Pair each /spawn directive with its own adjacent ~~~spawn body.
-
-    A directive's body must appear between it and the next directive, so a
-    single body can never satisfy two directives. Directives on quoted lines
-    are skipped silently (same guard as single-spawn had).
-
-    Returns ``(pairs, no_body, over_cap)``: ``pairs`` is the ordered list of
-    ``(args_str, body)`` ready for dispatch (capped at
-    _MAX_SPAWNS_PER_RESPONSE), ``no_body`` counts directives that lacked
-    their own body block, ``over_cap`` counts directives dropped by the cap.
-    """
-    # Directives are found on the masked text, so one written inside another
-    # block (a /spawn inside a child's brief) is neither dispatched here nor
-    # counted as the next directive that ends this one's region.
-    scan = mask_tilde_bodies(result_text)
-    matches = list(_SPAWN_DIRECTIVE_RE.finditer(scan))
-    pairs: list[tuple[str, str]] = []
-    no_body = 0
-    over_cap = 0
-    for i, m in enumerate(matches):
-        if is_quoted_example(scan, m.start()):
-            log.debug("BOT_CMD /spawn skipped: a quoted example")
-            continue
-        if len(pairs) >= _MAX_SPAWNS_PER_RESPONSE:
-            over_cap += 1
-            continue
-        region_end = (
-            matches[i + 1].start() if i + 1 < len(matches) else len(result_text)
-        )
-        span = find_tilde_block(result_text, "spawn", m.end(), region_end)
-        if span is None:
-            no_body += 1
-            continue
-        pairs.append((m.group(1).strip(), result_text[span[0]:span[1]].strip()))
-    return pairs, no_body, over_cap
+    """Pair each /spawn directive with its own adjacent ~~~spawn body (see pair_directives)."""
+    return pair_directives(
+        result_text, _SPAWN_DIRECTIVE_RE, "spawn", _MAX_SPAWNS_PER_RESPONSE,
+    )
 
 
 def _resolve_parent_instance(ctx: RequestContext) -> "Instance | None":
@@ -95,35 +61,6 @@ def _resolve_parent_instance(ctx: RequestContext) -> "Instance | None":
         or ctx.runner.active_instance_for_channel(ctx.channel_id)
     )
     return ctx.store.get_instance(parent_iid) if parent_iid else None
-
-
-def _parse_spawn_kv(args_str: str) -> dict[str, str] | None:
-    """Parse `key=val key="quoted val"` into a dict.
-
-    Returns None if any input bytes are left unparsed (catches malformed
-    input like trailing junk). No values reach a shell — `repo` is
-    whitelisted against the registry, `mode`/`effort` are enum-checked,
-    `title` is a Discord thread topic, and `body` is the prompt — so the
-    over-broad shell-metachar check that used to live here rejected
-    legitimate titles containing `()` `{}` `!`.
-    """
-    out: dict[str, str] = {}
-    consumed_end = 0
-    for m in _SPAWN_KV_RE.finditer(args_str):
-        # Reject if there's non-whitespace junk between matches.
-        between = args_str[consumed_end:m.start()]
-        if between.strip():
-            return None
-        key = m.group(1)
-        val = m.group(2) if m.group(2) is not None else (
-            m.group(3) if m.group(3) is not None else m.group(4)
-        )
-        out[key] = val
-        consumed_end = m.end()
-    # Reject if there's non-whitespace tail.
-    if args_str[consumed_end:].strip():
-        return None
-    return out
 
 
 async def _handle_spawn_directive(
@@ -170,7 +107,7 @@ async def _handle_spawn_directive(
         except Exception:
             pass
 
-    kv = _parse_spawn_kv(args_str)
+    kv = parse_kv(args_str)
     if kv is None:
         await _reject(
             f"args failed to parse: {args_str}",

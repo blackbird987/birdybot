@@ -79,13 +79,11 @@ from bot.engine.directives.spawn import (  # noqa: F401
     _SPAWN_ALLOWED_KEYS,
     _SPAWN_ALLOWED_MODES,
     _SPAWN_DIRECTIVE_RE,
-    _SPAWN_KV_RE,
     _SPAWN_PROMPT_MAX_BYTES,
     _SPAWN_TITLE_MAX,
     _TITLE_CONTROL_CHARS,
     _handle_spawn_directive,
     _pair_spawn_directives,
-    _parse_spawn_kv,
     _resolve_parent_instance,
 )
 from bot.engine.instance_cmds import (  # noqa: F401

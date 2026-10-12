@@ -249,6 +249,33 @@ def mask_tilde_bodies(text: str) -> str:
     return "".join(chars)
 
 
+# The arguments of a ``[BOT_CMD: /verb ...]`` directive, one character or one
+# quoted value at a time, so a quoted value may contain ``]``
+# (``title="[t-9201] Fix it"``). Every directive pattern is built on this; a
+# bare ``[^\]]`` cut such a title off at its inner bracket. One line only.
+# The group is atomic, and has to be: a quote matches both the quoted branch
+# and the single-character one, so a plain group backtracks through every way
+# of pairing the quotes on a line with no closing bracket, 2**n of them (37s
+# for twenty quoted words). Atomic commits to a closed quote when there is
+# one and treats an unbalanced quote as an ordinary character, as before.
+DIRECTIVE_ARGS = r"""(?>"[^"\n]*"|'[^'\n]*'|[^\]\n])"""
+# key=value, bare or quoted: the one grammar every directive's arguments use.
+DIRECTIVE_KV_RE = re.compile(r'''(\w+)=(?:"([^"]*)"|'([^']*)'|(\S+))''')
+
+
+def directive_kv(args: str) -> dict[str, str]:
+    """Every key=value pair in a directive's arguments; anything else is ignored."""
+    return {k: (d or s or b or "") for k, d, s, b in DIRECTIVE_KV_RE.findall(args or "")}
+
+
+def directive_re(verb: str, *, args_optional: bool = False) -> re.Pattern[str]:
+    """``[BOT_CMD: /<verb> args]``, the arguments captured as group 1."""
+    args = rf"\s+({DIRECTIVE_ARGS}+?)"
+    if args_optional:
+        args = f"(?:{args})?"
+    return re.compile(rf"\[BOT_CMD:\s*/{verb}{args}\s*\]")
+
+
 # A line opening with a quote, code or heading marker shows something rather
 # than asking for it.
 _QUOTED_LINE_PREFIX = re.compile(r"^\s*(?:>|`|```|#{1,3}\s)")

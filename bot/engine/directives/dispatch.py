@@ -6,7 +6,7 @@ import logging
 import re
 from pathlib import Path
 
-from bot.textutil import is_quoted_example, mask_tilde_bodies
+from bot.textutil import directive_re, is_quoted_example, mask_tilde_bodies
 from bot.claude.types import Instance
 from bot.platform.base import RequestContext
 from bot.engine.directives.chain import _handle_chain_directive
@@ -24,7 +24,7 @@ log = logging.getLogger(__name__)
 
 # --- Natural language repo detection (Tier 2 — Claude-assisted BOT_CMD) ---
 
-_BOT_CMD_RE = re.compile(r'\[BOT_CMD:\s*/repo\s+(.+?)\]')
+_BOT_CMD_RE = directive_re("repo")
 _ALLOWED_BOT_CMD_ACTIONS = {"add", "create", "switch"}
 _DANGEROUS_PATH_CHARS = re.compile(r'[;&|`$(){}!<>]')
 

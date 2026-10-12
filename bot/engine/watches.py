@@ -33,7 +33,7 @@ from bot import config
 from bot.claude.types import Watch
 from bot.platform.base import ButtonSpec
 from bot.platform.formatting import format_delay_secs
-from bot.textutil import find_tilde_block, is_quoted_example, mask_tilde_bodies, parse_duration, parse_iso_utc
+from bot.textutil import directive_kv, directive_re, find_tilde_block, is_quoted_example, mask_tilde_bodies, parse_duration, parse_iso_utc
 
 if TYPE_CHECKING:
     from bot.platform.base import Messenger
@@ -47,8 +47,7 @@ log = logging.getLogger(__name__)
 # generalisation of it: same kv + tilde-body + quoted-line-skip shape, but the
 # fields, defaults and failure modes are different enough that sharing would
 # mean a parameterised parser nobody can read.
-_WATCH_DIRECTIVE_RE = re.compile(r"\[BOT_CMD:\s*/watch(?:\s+(.+?))?\s*\]")
-_WATCH_KV_RE = re.compile(r'''(\w+)=(?:"([^"]*)"|'([^']*)'|(\S+))''')
+_WATCH_DIRECTIVE_RE = directive_re("watch", args_optional=True)
 # `parse_duration` now lives in `bot.textutil` and is re-exported here: /wake's
 # delay= grew the same unit suffixes, and the chip that renders both sits in
 # `bot.platform`, upstream of this package. Kept importable under this name
@@ -97,12 +96,7 @@ def parse_watch_directive(text: str) -> dict | None:
     caller instead of silently becoming a six-hour wait.
     """
     for m in _unquoted_directives(text):
-        kv: dict[str, str] = {}
-        for kvm in _WATCH_KV_RE.finditer(m.group(1) or ""):
-            val = kvm.group(2) if kvm.group(2) is not None else (
-                kvm.group(3) if kvm.group(3) is not None else kvm.group(4)
-            )
-            kv[kvm.group(1)] = val or ""
+        kv = directive_kv(m.group(1) or "")
         span = find_tilde_block(text, "watch", m.end())
         prompt = (text[span[0]:span[1]].strip() if span
                   else (kv.get("prompt") or "").strip())

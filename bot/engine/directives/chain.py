@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 
-from bot.textutil import find_tilde_block, is_quoted_example, mask_tilde_bodies
+from bot.textutil import DIRECTIVE_KV_RE, directive_re, find_tilde_block, is_quoted_example, mask_tilde_bodies
 from bot.claude.types import Instance
 from bot.engine import (
     prior_art,
@@ -14,7 +13,6 @@ from bot.engine import (
 )
 from bot.platform.base import RequestContext
 from bot.engine.cmd_state import _get_channel_lock
-from bot.engine.directives.spawn import _SPAWN_KV_RE
 
 log = logging.getLogger(__name__)
 
@@ -23,7 +21,7 @@ log = logging.getLogger(__name__)
 
 # preset= is optional; body is a ~~~plan ... ~~~ fenced block (tilde fences,
 # same rationale as /spawn). One chain per response.
-_CHAIN_DIRECTIVE_RE = re.compile(r'\[BOT_CMD:\s*/chain(?:\s+(.+?))?\]')
+_CHAIN_DIRECTIVE_RE = directive_re("chain", args_optional=True)
 _CHAIN_ALLOWED_PRESETS = frozenset(workflows._CHAIN_PRESETS)
 # Plan body cap — same 32 KiB ceiling as /spawn bodies.
 _CHAIN_PLAN_MAX_BYTES = 32 * 1024
@@ -40,7 +38,7 @@ def _parse_chain_preset(args_str: str) -> str | None:
     args_str = (args_str or "").strip()
     if not args_str:
         return None
-    m = _SPAWN_KV_RE.search(args_str)
+    m = DIRECTIVE_KV_RE.search(args_str)
     if m:
         key = m.group(1)
         val = m.group(2) or m.group(3) or m.group(4) or ""

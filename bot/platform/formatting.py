@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from bot import config
 from bot.claude.types import CODE_CHANGE_TOOLS, PLAN_ORIGINS, Instance, InstanceOrigin, InstanceStatus, Schedule
 from bot.platform.base import ButtonSpec
-from bot.textutil import find_tilde_block, is_quoted_example, mask_tilde_bodies, parse_duration
+from bot.textutil import DIRECTIVE_ARGS, directive_kv, find_tilde_block, is_quoted_example, mask_tilde_bodies, parse_duration
 
 if TYPE_CHECKING:
     from bot.store.state import StateStore
@@ -79,7 +79,7 @@ def strip_verify_blocks(text: str) -> str:
 # match the first kind and the loop skips the second, leaving both verbatim.
 # Display shows exactly the set of directives that will actually be acted on.
 _BOT_CMD_DIRECTIVE_RE = re.compile(
-    r"(?m)^[ \t]*\[BOT_CMD:\s*/(\w+)([^\]\n]*)\][ \t]*$"
+    rf"(?m)^[ \t]*\[BOT_CMD:\s*/(\w+)({DIRECTIVE_ARGS}*)\][ \t]*$"
 )
 # The tilde-fenced payload (~~~wake / ~~~spawn / ~~~plan). Matched from the end
 # of the directive line, tolerating a blank line or two in between; a body
@@ -90,8 +90,6 @@ _BOT_CMD_DIRECTIVE_RE = re.compile(
 _BOT_CMD_BODY_OPEN_RE = re.compile(
     r"\n(?:[ \t]*\n){0,2}([ \t]*)~~~([a-zA-Z][\w-]*)[ \t]*(?=\n)",
 )
-# kv pair: key=value, bare or quoted — mirrors commands._SPAWN_KV_RE.
-_BOT_CMD_KV_RE = re.compile(r'''(\w+)=(?:"([^"]*)"|'([^']*)'|(\S+))''')
 # What each chain preset actually runs, so the one-liner explains itself
 # without the reader having to remember the preset table.
 _CHAIN_PRESET_FLOW = {
@@ -115,10 +113,7 @@ def _render_directive_chip(verb: str, args: str) -> str | None:
     entirely (``/image`` — the uploaded picture IS the visible outcome, so a
     chip describing it is pure duplicate noise).
     """
-    kv = {
-        k: (d or s or b or "")
-        for k, d, s, b in _BOT_CMD_KV_RE.findall(args or "")
-    }
+    kv = directive_kv(args)
     parts: list[str] = []
 
     if verb == "image":

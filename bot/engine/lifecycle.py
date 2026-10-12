@@ -41,7 +41,7 @@ from bot.platform.formatting import (
 )
 from bot.engine import watches
 from bot.store import history as history_mod
-from bot.textutil import find_tilde_block, is_quoted_example, mask_tilde_bodies, parse_duration, parse_iso_utc
+from bot.textutil import directive_kv, directive_re, find_tilde_block, is_quoted_example, mask_tilde_bodies, parse_duration, parse_iso_utc
 
 log = logging.getLogger(__name__)
 
@@ -1734,11 +1734,10 @@ _PROMISE_NUDGE_PROMPT = (
 # strictly more reliable than the data/wakes/<id>.json file it replaced: the
 # directive IS the action (text in the response), so the model can't narrate
 # "self-wake queued" while skipping a separate file-write tool call.
-_WAKE_DIRECTIVE_RE = re.compile(r"\[BOT_CMD:\s*/wake(?:\s+(.+?))?\s*\]")
+_WAKE_DIRECTIVE_RE = directive_re("wake", args_optional=True)
 # Tilde-fenced ~~~wake body carries the (possibly multiline) resume prompt,
 # located by textutil.find_tilde_block. Tildes avoid colliding with the ```
 # code fences a prompt body may itself contain.
-_WAKE_KV_RE = re.compile(r'''(\w+)=(?:"([^"]*)"|'([^']*)'|(\S+))''')
 # A directive on a quoted/code/heading line is an EXAMPLE (this guidance quoted
 # back, or a fenced snippet), not a real request — skip it. Mirrors the guard in
 # commands._execute_bot_commands so meta-discussion can't self-trigger a wake.
@@ -1771,12 +1770,7 @@ def _parse_wake_directive(text: str) -> dict | None:
         # shown ABOVE a real one doesn't shadow it.
         if is_quoted_example(text, m.start()):
             continue
-        kv: dict[str, str] = {}
-        for kvm in _WAKE_KV_RE.finditer(m.group(1) or ""):
-            val = kvm.group(2) if kvm.group(2) is not None else (
-                kvm.group(3) if kvm.group(3) is not None else kvm.group(4)
-            )
-            kv[kvm.group(1)] = val or ""
+        kv = directive_kv(m.group(1) or "")
         span = find_tilde_block(raw, "wake", m.end())
         prompt = (raw[span[0]:span[1]].strip() if span
                   else (kv.get("prompt") or "").strip())
