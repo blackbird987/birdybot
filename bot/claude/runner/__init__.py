@@ -75,11 +75,13 @@ from bot.claude.runner.accounts import (  # noqa: F401
 from bot.claude.runner.admission import (  # noqa: F401
     AdmissionBlock,
 )
+from bot.claude.runner.recovery import (  # noqa: F401
+    _carry_forward_work_record,
+    _is_primary_model,
+)
 from bot.claude.runner.core import (  # noqa: F401
     ClaudeRunner,
     RebootResult,
-    _carry_forward_work_record,
-    _is_primary_model,
     _lower_priority,
     _save_result_file,
     _wait_or_kill,

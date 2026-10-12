@@ -171,7 +171,8 @@
     "git_sync": "python scripts/test_git_sync.py",
     "button_dispatch": "python scripts/test_button_dispatch.py",
     "callback_dispatch": "python scripts/test_callback_dispatch.py",
-    "forum_twins": "python scripts/test_forum_twins.py"
+    "forum_twins": "python scripts/test_forum_twins.py",
+    "run_recovery_order": "python scripts/test_run_recovery_order.py"
   },
 
   "auth": {

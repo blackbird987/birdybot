@@ -241,22 +241,34 @@ def _check_not_an_account_failure(failures: list[str]) -> None:
     # turns", which a kill matches exactly; the only thing keeping a cancelled
     # session off the backup account is that the killed early-return comes
     # FIRST. Assert the order rather than trusting a comment.
+    # The rescue branches are steps in recovery.py, run from one loop in
+    # _run_impl in _RECOVERY_STEPS order, so the invariant is: the killed
+    # early-return precedes that loop, and the failover branch is one of the
+    # steps it runs.
+    from bot.claude.runner import recovery as recovery_mod
+
     src = inspect.getsource(ClaudeRunner._run_impl)
     bail = src.find("if result.killed_intentionally:")
+    loop = src.find("for step in _RECOVERY_STEPS:")
     # Anchored on the branch itself. A bare "supports_account_failover" also
-    # matches the account-picking code far earlier in the method, which is not
-    # what this invariant is about.
-    failover = src.find("if result.is_error and provider.supports_account_failover")
-    if bail < 0 or failover < 0:
+    # matches the account-picking code in _prepare_spawn, which is not what
+    # this invariant is about.
+    failover_step = "_recover_account_failure"
+    failover_src = inspect.getsource(getattr(ClaudeRunner, failover_step, lambda: None))
+    has_failover = (
+        failover_step in recovery_mod._RECOVERY_STEPS
+        and "if result.is_error and provider.supports_account_failover" in failover_src
+    )
+    if bail < 0 or loop < 0 or not has_failover:
         failures.append(
-            "could not locate the killed early-return or the failover branch in "
-            "_run_impl — this guard needs rechecking by hand"
+            "could not locate the killed early-return, the recovery loop or the "
+            "failover step, so this guard needs rechecking by hand"
         )
-    elif bail > failover:
+    elif bail > loop:
         failures.append(
-            "the killed early-return no longer precedes the account-failover "
-            "branch: killing a session can hand it to the backup account and "
-            "restart the work that was just cancelled"
+            "the killed early-return no longer precedes the recovery steps "
+            "(account failover among them): killing a session can hand it to "
+            "the backup account and restart the work that was just cancelled"
         )
 
 
