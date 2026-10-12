@@ -5,7 +5,7 @@
 back to the parent (see "Spawn-Wave Join" in CLAUDE.md). The join only works if
 every way a child turn can finish ends in
 ``RequestContext.notify_parent_on_finalize(status_label, text)``: the platform
-closure (``bot/discord/bot.py``, ``_notify_parent``) is bound to the child's
+closure (``bot/discord/thread_ctx.py``, ``_notify_parent``) is bound to the child's
 thread and posts the report back into the parent's.
 
 Two engine paths finish a turn and both go through ``lifecycle.notify_parent``:

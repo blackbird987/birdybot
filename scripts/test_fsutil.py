@@ -101,7 +101,7 @@ def main() -> int:
 
     # 6. Callers moved onto it: no hand-rolled fixed-name temp left behind.
     repo = Path(__file__).resolve().parent.parent
-    for rel in ("bot/paths.py", "bot/discord/bot.py", "bot/engine/repo_desc.py",
+    for rel in ("bot/paths.py", "bot/discord/usage_gate.py", "bot/engine/repo_desc.py",
                 "bot/engine/usage.py", "bot/engine/eval.py"):
         src = (repo / rel).read_text(encoding="utf-8")
         check(f"{rel} writes through fsutil", "atomic_write_json(" in src)

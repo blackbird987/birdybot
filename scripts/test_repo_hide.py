@@ -270,9 +270,9 @@ check("every unattended resume (self-wake, watch, --here schedule, spawn "
       "join, reboot replay) wakes the repo",
       "wake_repo_if_dormant" in replay)
 
-on_msg = inspect.getsource(discord_bot_mod)
+on_msg = inspect.getsource(discord_bot_mod.ClaudeBot.on_message)
 check("and so does a user message in an existing forum thread",
-      on_msg.count("wake_repo_if_dormant") >= 2, str(on_msg.count("wake_repo_if_dormant")))
+      "wake_repo_if_dormant" in on_msg)
 
 tmpdir.cleanup()
 

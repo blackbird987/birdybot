@@ -736,7 +736,7 @@ async def _handle_usage_action(
     if action == "usage_cancel":
         removed = await bot._usage_queue_remove(qid)
         if removed:
-            from bot.discord.bot import unlink_image_paths
+            from bot.discord.attachments import unlink_image_paths
             unlink_image_paths(removed.get("image_paths", []), site="cancel")
             if msg:
                 try:
@@ -787,7 +787,7 @@ async def _handle_usage_action(
     # Restart their retention clock before awaiting anything, or a sweep
     # landing in that gap can delete a picture this click just promised to
     # look at.
-    from bot.discord.bot import prepare_replayed_prompt, refresh_image_retention
+    from bot.discord.attachments import prepare_replayed_prompt, refresh_image_retention
     refresh_image_retention(removed.get("image_paths", []))
 
     if msg:

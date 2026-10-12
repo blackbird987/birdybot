@@ -26,10 +26,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from bot import config  # noqa: E402
+from bot.discord import attachments as attmod  # noqa: E402
 from bot.discord import bot as botmod  # noqa: E402
-from bot.discord.bot import (  # noqa: E402
+from bot.discord.bot import ClaudeBot  # noqa: E402
+from bot.discord.attachments import (  # noqa: E402
     ATTACH_DOC_MAX,
-    ClaudeBot,
     _attachment_reject_note,
     _extract_docx_text,
     _human_size,
@@ -276,17 +277,17 @@ async def main() -> int:
     # imitation: if the wording drifts, the replay would ship a dead path.
     if shot is not None and shot.exists():
         shot.unlink()
-        stripped = botmod._strip_missing_image_refs(prompt, [str(shot)])
+        stripped = attmod._strip_missing_image_refs(prompt, [str(shot)])
         check("a dead path is stripped back out of that exact sentence",
               str(shot) not in stripped, stripped)
     # Same file one byte over the ceiling: the loop must turn it away, and the
     # notice must quote the ceiling the loop actually enforced.
     replies, prompt = await run_upload(
-        "huge.png", b"\x89PNG", size=botmod.ATTACH_IMAGE_MAX + 1)
+        "huge.png", b"\x89PNG", size=attmod.ATTACH_IMAGE_MAX + 1)
     check("an oversized image is refused, not silently dropped",
           bool(replies) and "huge.png" in replies[0], str(replies))
     check("the refusal quotes the limit the loop enforces",
-          bool(replies) and botmod._human_size(botmod.ATTACH_IMAGE_MAX) in replies[0],
+          bool(replies) and attmod._human_size(attmod.ATTACH_IMAGE_MAX) in replies[0],
           str(replies))
 
     print("\n== PDF alongside message text ==")

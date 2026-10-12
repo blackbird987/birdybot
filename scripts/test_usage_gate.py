@@ -1,6 +1,6 @@
 """Characterization harness for the usage-limit gate and its queue.
 
-Pins TODAY's behaviour of the code in ``bot/discord/bot.py`` (``ClaudeBot``)
+Pins TODAY's behaviour of the code in ``bot/discord/usage_gate.py`` (a ``ClaudeBot`` mixin)
 and the button handler in ``bot/discord/interactions.py`` that holds, queues
 and replays work during Anthropic's throttle window.  Written ahead of a
 refactor that extracts this into a ``UsageGate`` class, so that any change of
@@ -76,7 +76,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(_HERE))
 
 from bot import config
-from bot.discord import bot as bot_mod
+from bot.discord import attachments
 from bot.discord import interactions as interactions_mod
 from bot.discord import usage_notifier
 from bot.discord.bot import ClaudeBot
@@ -688,9 +688,9 @@ async def case_drain_images() -> None:
         p = Path(td, "shot.png")
         p.write_bytes(b"x")
         _check("prepare_replayed_prompt is a no-op when all files exist",
-               bot_mod.prepare_replayed_prompt(f"hi at `{p}`", [str(p)]) == f"hi at `{p}`")
+               attachments.prepare_replayed_prompt(f"hi at `{p}`", [str(p)]) == f"hi at `{p}`")
         _check("prepare_replayed_prompt with no images returns the prompt as is",
-               bot_mod.prepare_replayed_prompt("hi", []) == "hi")
+               attachments.prepare_replayed_prompt("hi", []) == "hi")
 
 
 async def case_startup_and_loop() -> None:

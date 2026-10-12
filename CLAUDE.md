@@ -19,7 +19,7 @@ python -m bot          # start the bot
 - **Workflows**: `bot/engine/workflows.py` only re-exports too. Step handlers live in `steps.py` (plan, build, review, verify, commit, done, merge), `release_steps.py`, `chain_runner.py` (autopilot and /chain loops), `step_spawn.py` (`spawn_from`), `step_parse.py` (review, plan and verify parsing), `step_policy.py` (presets, verify and merge policy) and `chain_git.py` (git reads and instance lookups). Only `on_autopilot` and `on_conversational_chain` may be patched on the facade
 - **Runner** (`bot/claude/runner/`, a package of mixins): `core.py` (ClaudeRunner: spawn, stream, recovery, kills), `accounts.py`, `admission.py`, `prompt_build.py`, `session_files.py`, `worktrees.py`, `git_merge.py`, `git_release.py`, `reaping.py`, `common.py`. `__init__.py` only re-exports, so patch a name in the module that reads it, never on the package (`scripts/test_runner_package.py` fails a blind patch)
 - **Platform layer**: `bot/platform/base.py` (Messenger protocol), `bot/platform/formatting.py`
-- **Discord**: `bot/discord/bot.py` (orchestrator), `slash_commands.py`, `interactions.py`, `adapter.py`, `channels.py`, `forums.py`, `idle.py`, `tags.py`, `modals.py`, `monitoring.py`, `formatter.py`
+- **Discord**: `bot/discord/bot.py` (orchestrator; its usage gate, turn context and startup work are mixins in `usage_gate.py`, `thread_ctx.py`, `startup.py`), `attachments.py`, `slash_commands.py`, `interactions.py`, `adapter.py`, `channels.py`, `forums.py`, `idle.py`, `tags.py`, `modals.py`, `monitoring.py`, `formatter.py`
 
 ## You can read the bot's own instance registry
 

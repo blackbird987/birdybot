@@ -2004,7 +2004,7 @@ class ForumManager:
         if not isinstance(ch, discord.Thread):
             return None
 
-        # Bot/webhook role-assignment parity with on_message (bot.py:1040-1047):
+        # Bot/webhook role-assignment parity with on_message in bot.py:
         # TEST_WEBHOOK_IDS messages are user-shaped, even though m.author.bot is True.
         test_webhook_ids = set(config.TEST_WEBHOOK_IDS or ())
 
