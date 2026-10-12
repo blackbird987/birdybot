@@ -841,7 +841,17 @@ class ForumManager:
         log.info("Single-sync refreshed thread %s", thread_id)
 
     async def reconcile_forums(self) -> None:
-        """Validate forum channels on startup. Clean stale mappings."""
+        """Validate forum channels on startup. Clean stale mappings.
+
+        Runs as a fixed sequence of phases. Hidden repos are skipped only by
+        the two that *create or redraw* something in a forum that was
+        deliberately parked (``_ensure_repo_posts`` here, and
+        ``_pin_scopes`` in the pin pass). The rest -- thread-name
+        normalization, stale-tag clearing, legacy verify cleanup, archive
+        migration, auto-follow -- deliberately still run on hidden repos:
+        they repair state that must be correct whenever the forum comes
+        back, and skipping them would leave a woken repo subtly stale.
+        """
         guild = self._client.get_guild(self._guild_id)
         if not guild or not self._category_id:
             return
@@ -849,7 +859,26 @@ class ForumManager:
         if not category or not isinstance(category, discord.CategoryChannel):
             return
 
-        # Validate existing forum mappings
+        valid_projects = self._validated_projects(guild, category)
+        # Publish reconciled mapping under lock so concurrent get_or_create
+        # callers don't see a half-replaced dict.
+        async with self._forum_lock:
+            if valid_projects != self._forum_projects:
+                self._forum_projects = valid_projects
+                self.save_forum_map()
+
+        await self._normalize_forum_threads(guild, valid_projects)
+        await self._ensure_repo_posts()
+        await self._drop_legacy_verify_boards()
+        await self._migrate_archive_channels(guild)
+        await self._ensure_user_posts()
+        await self._auto_follow_pinned()
+
+    def _validated_projects(
+        self, guild: discord.Guild, category: discord.CategoryChannel,
+    ) -> dict[str, ForumProject]:
+        """The forum map minus forums that are gone, plus unmapped forums
+        found in the category (personal forums excepted)."""
         valid_projects: dict[str, ForumProject] = {}
         for repo_name, proj in self._forum_projects.items():
             if not proj.forum_channel_id:
@@ -861,20 +890,16 @@ class ForumManager:
             else:
                 log.info("Removed stale forum mapping for repo %s (forum %s gone)", repo_name, proj.forum_channel_id)
 
-        # Discover unmapped forums in category (skip user personal forums)
-        user_forum_ids = set()
-        cfg = load_access_config()
-        for ua in cfg.users.values():
-            if ua.forum_channel_id:
-                user_forum_ids.add(ua.forum_channel_id)
-
+        user_forum_ids = {
+            ua.forum_channel_id for ua in load_access_config().users.values()
+            if ua.forum_channel_id
+        }
         for ch in category.channels:
             if not isinstance(ch, discord.ForumChannel):
                 continue
             if str(ch.id) in user_forum_ids:
                 continue
-            existing = self.forum_by_channel_id(str(ch.id))
-            if not existing:
+            if not self.forum_by_channel_id(str(ch.id)):
                 repo_name = ch.name
                 if repo_name not in valid_projects:
                     valid_projects[repo_name] = ForumProject(
@@ -882,68 +907,28 @@ class ForumManager:
                         forum_channel_id=str(ch.id),
                     )
                     log.info("Discovered unmapped forum %s (%s)", ch.id, ch.name)
+        return valid_projects
 
-        # Publish reconciled mapping under lock so concurrent get_or_create
-        # callers don't see a half-replaced dict.
-        async with self._forum_lock:
-            if valid_projects != self._forum_projects:
-                self._forum_projects = valid_projects
-                self.save_forum_map()
-
-        # Clean up thread names and stale tags
+    async def _normalize_forum_threads(
+        self, guild: discord.Guild, projects: dict[str, ForumProject],
+    ) -> None:
+        """Clean up thread names and clear stale "active" tags."""
         from bot.claude.types import InstanceStatus
         running_sessions = {
             i.session_id for i in self._store.list_instances()
             if i.status == InstanceStatus.RUNNING and i.session_id
         }
-        for proj in valid_projects.values():
+        for proj in projects.values():
             if not proj.forum_channel_id:
                 continue
             forum = guild.get_channel(int(proj.forum_channel_id))
             if not forum or not isinstance(forum, discord.ForumChannel):
                 continue
-            tag_map = {t.name: t for t in forum.available_tags}
-            active_tag = tag_map.get("active")
+            active_tag = {t.name: t for t in forum.available_tags}.get("active")
             normalized_count = 0
             for thread in forum.threads:
-                # Legacy migration: strip "repo│" prefix
-                if "\u2502" in thread.name:
-                    new_name = thread.name.split("\u2502", 1)[1].strip()
-                    if new_name:
-                        old_name = thread.name
-                        try:
-                            await thread.edit(name=new_name[:100])
-                            log.info("Renamed thread %s: %s -> %s", thread.id, old_name, new_name)
-                        except Exception:
-                            log.debug("Failed to rename thread %s", thread.id, exc_info=True)
-                # Legacy migration: strip old emoji prefixes AND normalize
-                # stacked spawn-color + 💤 prefixes into the single-emoji form.
-                # parse_thread_name now returns a bare topic, so we must
-                # re-apply the active family color (or sleep marker) on rebuild
-                # — otherwise this loop would strip live spawn colors every boot.
-                is_sleeping, topic = channels.parse_thread_name(thread.name)
-                if is_sleeping:
-                    clean_name = await spawn_colors.compose_name(
-                        str(thread.id),
-                        channels.build_sleeping_thread_name(topic),
-                        proj,
-                        self._store,
-                    )
-                else:
-                    clean_name = await spawn_colors.compose_name(
-                        str(thread.id),
-                        channels.build_thread_name(topic),
-                        proj,
-                        self._store,
-                    )
-                if clean_name != thread.name:
-                    try:
-                        await thread.edit(name=clean_name)
-                        log.info("Normalized thread name: %s", thread.id)
-                        normalized_count += 1
-                    except Exception:
-                        log.debug("Failed to normalize thread name", exc_info=True)
-                # Clear stale "active" tag
+                if await self._normalize_thread_name(thread, proj):
+                    normalized_count += 1
                 if active_tag and active_tag in thread.applied_tags:
                     info = proj.threads.get(str(thread.id))
                     if not info or info.session_id not in running_sessions:
@@ -960,14 +945,45 @@ class ForumManager:
                     proj.repo_name,
                 )
 
-        # Ensure control room posts exist for all repo forums. Hidden repos
-        # are skipped here (and in the archive-thread loop and _pin_scopes
-        # below): those three *create or redraw* something in a forum that
-        # was deliberately parked. The other reconcile passes -- thread-name
-        # normalization, stale-tag clearing, legacy verify cleanup, archive
-        # migration, auto-follow -- deliberately still run on hidden repos:
-        # they repair state that must be correct whenever the forum comes
-        # back, and skipping them would leave a woken repo subtly stale.
+    async def _normalize_thread_name(
+        self, thread: discord.Thread, proj: ForumProject,
+    ) -> bool:
+        """Rewrite one thread's name into the current form. True if the
+        normalized name was applied."""
+        # Legacy migration: strip "repo│" prefix
+        if "\u2502" in thread.name:
+            new_name = thread.name.split("\u2502", 1)[1].strip()
+            if new_name:
+                old_name = thread.name
+                try:
+                    await thread.edit(name=new_name[:100])
+                    log.info("Renamed thread %s: %s -> %s", thread.id, old_name, new_name)
+                except Exception:
+                    log.debug("Failed to rename thread %s", thread.id, exc_info=True)
+        # Legacy migration: strip old emoji prefixes AND normalize
+        # stacked spawn-color + 💤 prefixes into the single-emoji form.
+        # parse_thread_name now returns a bare topic, so we must
+        # re-apply the active family color (or sleep marker) on rebuild,
+        # otherwise this would strip live spawn colors every boot.
+        is_sleeping, topic = channels.parse_thread_name(thread.name)
+        build = (channels.build_sleeping_thread_name if is_sleeping
+                 else channels.build_thread_name)
+        clean_name = await spawn_colors.compose_name(
+            str(thread.id), build(topic), proj, self._store,
+        )
+        if clean_name == thread.name:
+            return False
+        try:
+            await thread.edit(name=clean_name)
+            log.info("Normalized thread name: %s", thread.id)
+            return True
+        except Exception:
+            log.debug("Failed to normalize thread name", exc_info=True)
+            return False
+
+    async def _ensure_repo_posts(self) -> None:
+        """Create a missing control room, then a missing archive thread, in
+        every repo forum that is not hidden."""
         for repo_name, proj in self._forum_projects.items():
             if self._store.is_repo_dormant(repo_name):
                 continue
@@ -977,7 +993,6 @@ class ForumManager:
                 except Exception:
                     log.debug("Failed to create control room for %s", repo_name, exc_info=True)
 
-        # Ensure archive threads exist for all repo forums
         for repo_name, proj in self._forum_projects.items():
             if self._store.is_repo_dormant(repo_name):
                 continue
@@ -988,10 +1003,11 @@ class ForumManager:
                     log.debug("Failed to create archive thread for %s",
                               repo_name, exc_info=True)
 
-        # Verify Board removal cleanup — delete the legacy pinned board thread
-        # in each forum, then persist so the stored ids and items drop out of
-        # state.json (to_dict no longer serializes them). Best-effort: a failed
-        # delete just leaves an orphaned pinned thread to remove by hand.
+    async def _drop_legacy_verify_boards(self) -> None:
+        """Verify Board removal cleanup: delete the legacy pinned board thread
+        in each forum, then persist so the stored ids and items drop out of
+        state.json (to_dict no longer serializes them). Best-effort: a failed
+        delete just leaves an orphaned pinned thread to remove by hand."""
         legacy_boards = False
         for repo_name, proj in self._forum_projects.items():
             if not proj.legacy_verify_thread_id:
@@ -1013,13 +1029,15 @@ class ForumManager:
         if legacy_boards:
             self.save_forum_map()
 
-        # Migrate old archive text channels → forum threads
+    async def _migrate_archive_channels(self, guild: discord.Guild) -> None:
+        """Migrate old archive text channels into forum threads."""
         for repo_name, proj in self._forum_projects.items():
             if proj.archive_channel_id and proj.archive_thread_id and not proj.archive_migrated:
                 async with self._forum_lock:
                     await self._migrate_archive_channel(repo_name, proj, guild)
 
-        # Populate user control room thread ID set + create missing control rooms
+    async def _ensure_user_posts(self) -> None:
+        """Record personal control rooms and archives, creating any missing."""
         cfg = load_access_config()
         for uid, ua in cfg.users.items():
             if ua.control_thread_id:
@@ -1030,7 +1048,6 @@ class ForumManager:
                 except Exception:
                     log.debug("Failed to create control room for user %s", uid, exc_info=True)
 
-        # Ensure archive threads in personal forums
         for uid, ua in cfg.users.items():
             if ua.forum_channel_id and not ua.archive_thread_id:
                 try:
@@ -1040,40 +1057,32 @@ class ForumManager:
             elif ua.archive_thread_id:
                 self._archive_channel_ids.add(int(ua.archive_thread_id))
 
-        # Auto-follow all pinned threads (batched per-repo, 0.5s inter-batch sleep)
-        for repo_name, proj in self._forum_projects.items():
-            tasks: list = []
-            if proj.control_thread_id:
-                ch = await self._fetch_thread(int(proj.control_thread_id))
+    async def _auto_follow_pinned(self) -> None:
+        """Auto-follow every pinned thread, batched per forum with a 0.5s
+        sleep between batches."""
+        async def follow_batch(thread_ids, follow) -> None:  # noqa: ANN001
+            tasks = []
+            for tid in thread_ids:
+                if not tid:
+                    continue
+                ch = await self._fetch_thread(int(tid))
                 if ch is not None:
-                    tasks.append(self._auto_follow_thread(ch, repo_name))
-            if proj.archive_thread_id:
-                ch = await self._fetch_thread(int(proj.archive_thread_id))
-                if ch is not None:
-                    tasks.append(self._auto_follow_thread(ch, repo_name))
-            if proj.monitor_thread_id:
-                ch = await self._fetch_thread(int(proj.monitor_thread_id))
-                if ch is not None:
-                    tasks.append(self._auto_follow_thread(ch, repo_name))
+                    tasks.append(follow(ch))
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
                 await asyncio.sleep(0.5)
 
-        # Auto-follow personal forum threads
-        cfg = load_access_config()  # refresh after possible archive creation
-        for uid, ua in cfg.users.items():
-            tasks = []
-            if ua.control_thread_id:
-                ch = await self._fetch_thread(int(ua.control_thread_id))
-                if ch is not None:
-                    tasks.append(self._auto_follow_user_thread(ch, uid))
-            if ua.archive_thread_id:
-                ch = await self._fetch_thread(int(ua.archive_thread_id))
-                if ch is not None:
-                    tasks.append(self._auto_follow_user_thread(ch, uid))
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
-                await asyncio.sleep(0.5)
+        for repo_name, proj in self._forum_projects.items():
+            await follow_batch(
+                (proj.control_thread_id, proj.archive_thread_id, proj.monitor_thread_id),
+                lambda ch, r=repo_name: self._auto_follow_thread(ch, r),
+            )
+        # Re-read: _ensure_user_posts may have just created archives.
+        for uid, ua in load_access_config().users.items():
+            await follow_batch(
+                (ua.control_thread_id, ua.archive_thread_id),
+                lambda ch, u=uid: self._auto_follow_user_thread(ch, u),
+            )
 
     # --- Forum pins ---
 
