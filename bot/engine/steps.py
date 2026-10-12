@@ -691,7 +691,7 @@ class MergeOutcome(enum.Enum):
 
 async def _finalize_merge(
     ctx: RequestContext, merge_target: Instance, *, close_silent: bool = False,
-    skip_close: bool = False,
+    skip_close: bool = False, stop_silent: bool = False,
 ) -> MergeOutcome:
     """Merge a build branch + post-merge bookkeeping + close the thread.
 
@@ -700,7 +700,7 @@ async def _finalize_merge(
 
     Returns MERGED when the whole sequence ran (caller may chain on this),
     STOPPED when the branch landed but the tree must not ship, so deploy and
-    close were skipped and the user was pinged here, and FAILED when the
+    close were skipped and the warning was posted here, and FAILED when the
     merge command reported failure. On FAILED, the caller is responsible for
     posting the "use /merge to resolve" hint and surfacing buttons. On
     STOPPED, it owes nothing more than not calling it merged.
@@ -713,6 +713,10 @@ async def _finalize_merge(
     `skip_close`: merge + bookkeeping + tag, but leave the thread open.
     Fleet ship uses this so the post-deploy verify prompt lands in a live
     thread instead of archiving it only to immediately reopen it.
+
+    `stop_silent`: post the STOPPED warning without a ping. Only for a caller
+    that pings about the stop itself (the chain's exit mention), so the user
+    is notified once rather than twice for one event.
     """
     if not merge_target.branch or not merge_target.original_branch:
         return MergeOutcome.FAILED
@@ -736,6 +740,7 @@ async def _finalize_merge(
             ctx.channel_id,
             f"⛔ **The merge landed, but the repo is now broken — "
             f"do not restart the bot until it is repaired.**\n{merge_msg}",
+            silent=stop_silent,
         )
         return MergeOutcome.STOPPED
 
@@ -754,6 +759,7 @@ async def _finalize_merge(
             ctx.channel_id,
             f"⛔ **The merge landed, but an earlier release is missing from "
             f"it. Do not deploy until it is merged in.**\n{merge_msg}",
+            silent=stop_silent,
         )
         return MergeOutcome.STOPPED
 

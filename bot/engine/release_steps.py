@@ -34,11 +34,13 @@ log = logging.getLogger(__name__)
 def release_verified(result: Instance | None) -> bool:
     """Did the release verifier run and pass? None is not passed.
 
-    The chain runner and the post-amend path both decide whether to go on to
-    the release step from an ``on_verify_release`` result, and they used to
-    read None in opposite ways: a chain failure in one, a pass in the other.
-    An unverified release treated as verified is the unsafe direction, so
-    there is one meaning and it is this.
+    The post-amend path decides whether to resume into the release step from
+    an ``on_verify_release`` result, and it used to read None as a pass while
+    the chain runner's post-step guard read it as a failure. An unverified
+    release treated as verified is the unsafe direction, so this states the
+    guard's meaning for the amend path. The chain keeps its generic guard
+    (same answer for every step); ``scripts/test_autopilot_chain.py`` pins
+    that half and ``scripts/test_verify_release_none.py`` this one.
     """
     return (
         result is not None
@@ -66,7 +68,8 @@ async def on_verify_release(
 
     Returns None when no verifier ran at all: an unresolvable repo, no entry
     SHA, nothing committed since the entry SHA, or a spawn that failed. None
-    is "not passed" to every caller (``release_verified``); the chain's own
+    is "not passed" to every caller (the chain's post-step guard, and
+    ``release_verified`` after an amend); the chain's own
     "nothing to verify" skips are decided before it calls, where they can be
     told apart from a verifier that never ran.
     """

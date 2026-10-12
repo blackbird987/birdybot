@@ -284,6 +284,16 @@ def test_finalize_reports_stopped_on_blocked_tree() -> None:
                 check(f"finalize on {what}: the warning pings (not silent)",
                       any(m["text"].startswith("\u26d4") and not m.get("silent")
                           for m in messenger.sent), str(messenger.sent))
+                # The chain pings about the stop itself, so it asks for the
+                # warning quietly: one event, one notification.
+                messenger = Messenger()
+                inst = make_inst("t-1")
+                ctx, _ = make_ctx(Runner(f"Merged into master.{suffix}"), Store(inst), messenger)
+                quiet = run(steps._finalize_merge(ctx, inst, stop_silent=True))
+                check(f"finalize on {what} with stop_silent: still STOPPED", quiet is want)
+                check(f"finalize on {what} with stop_silent: the warning posts silently",
+                      any(m["text"].startswith("\u26d4") and m.get("silent") is True
+                          for m in messenger.sent), str(messenger.sent))
 
         inst = make_inst("t-1")
         ctx, tagged = make_ctx(Runner("Merge failed: conflict"), Store(inst))

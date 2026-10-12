@@ -88,6 +88,9 @@ def amend_with(verify_result) -> tuple[list[tuple], Messenger, Instance]:
     """Run on_amend_done with the verifier stubbed to return ``verify_result``."""
     vr = make_inst("vr-1", needs_input=True)
     done = make_inst("done-1", origin=InstanceOrigin.DONE)
+    # A resumed step can run under a session of its own, and the chain is
+    # keyed by the verifier's, so Continue anyway has to point at vr.
+    done.session_id = "sess-done"
     messenger = Messenger()
     ctx = SimpleNamespace(
         store=Store(vr, done), messenger=messenger, channel_id="c1", platform="discord",
@@ -140,8 +143,9 @@ def test_amend_none_stays_paused() -> None:
     ids = [b.callback_data for row in (post.get("buttons") or []) for b in row]
     check("it offers Amend on the original verifier run",
           "amend:vr-1" in ids, str(ids))
-    check("and Continue anyway from the amended done step",
-          f"continue_anyway:{done.id}" in ids, str(ids))
+    check("and Continue anyway on the verifier run, whose session keys the chain",
+          "continue_anyway:vr-1" in ids and f"continue_anyway:{done.id}" not in ids,
+          str(ids))
 
 
 def test_amend_pass_resumes() -> None:

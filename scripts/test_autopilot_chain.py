@@ -186,6 +186,7 @@ class Scenario:
         self.head_mode = head_mode
         self.merge_ok = merge_ok
         self.merge_stopped = merge_stopped
+        self.stop_silent: list[bool] = []  # stop_silent per _finalize_merge call
         self.mergeable = mergeable
         self.entry_sha_mode = entry_sha_mode
         self.phases = phases or []
@@ -297,8 +298,10 @@ class Scenario:
                 inst.deferred_revisions = list(sc.review_deferred)
             return inst, (not sc.converged)
 
-        async def finalize_merge(ctx, target, *, close_silent=False, skip_close=False):
+        async def finalize_merge(ctx, target, *, close_silent=False, skip_close=False,
+                                 stop_silent=False):
             sc.finalized.append({"id": target.id, "close_silent": close_silent})
+            sc.stop_silent.append(stop_silent)
             sc._record("merge", target.id, None)
             if sc.merge_stopped:
                 return workflows.MergeOutcome.STOPPED
@@ -731,6 +734,8 @@ check_eq("merge stopped: no conflict banner, no Resolve / Retry buttons",
 check_eq("merge stopped: no pending merge recorded",
          s.store.get_pending_merge(s.finalized[0]["id"]), None)
 check_eq("merge stopped: one mention", len(s.messenger.mentions()), 1)
+check_eq("merge stopped: the warning is posted quietly, the mention is the one ping",
+         s.stop_silent, [True])
 check("merge stopped: mention says it stopped before deploy and close",
       s.messenger.mentions()[0]
       == f"{MENTION} Chain (ship) merged, but stopped before deploy and close. "

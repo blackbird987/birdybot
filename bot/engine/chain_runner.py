@@ -20,9 +20,9 @@ from bot.engine.chain_git import (
     _resolve_chain_repo_path,
 )
 from bot.engine.release_steps import (
-    release_verified,
     on_release_chain,
     on_verify_release,
+    release_verified,
 )
 from bot.engine.step_parse import (
     _REVIEW_LOOP_MAX_ROUNDS,
@@ -626,7 +626,9 @@ async def on_amend_done(
                 "to release without it.",
                 buttons=[[
                     ButtonSpec("Amend", f"amend:{vr.id}"),
-                    ButtonSpec("Continue anyway", f"continue_anyway:{done_result.id}"),
+                    # On vr, not done_result: Continue anyway resumes the
+                    # chain keyed by that instance's session, which is vr's.
+                    ButtonSpec("Continue anyway", f"continue_anyway:{vr.id}"),
                 ]],
                 silent=False,
             )
@@ -1179,8 +1181,11 @@ async def _run_autopilot_chain(
                     # Autopilot keeps the loud chain-completion ping; Build &
                     # Ship opts into a silent close (the in-thread "✅
                     # {merge_msg}" summary + tag flip carry the signal).
+                    # stop_silent: on a STOPPED merge the exit mention below
+                    # is the ping, so the warning itself posts quietly.
                     merge_outcome = await _finalize_merge(
                         ctx, merge_target, close_silent=silent_close,
+                        stop_silent=True,
                     )
                     if merge_outcome is MergeOutcome.STOPPED:
                         # The branch landed on a tree that must not ship:

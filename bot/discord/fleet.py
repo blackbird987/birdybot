@@ -347,7 +347,11 @@ async def run_fleet_ship(
 
 
 async def _ship_one(bot: ClaudeBot, t: ShipTarget) -> MergeOutcome:
-    """Merge one thread's branch; on failure post the standard merge-failed UI."""
+    """Merge one thread's branch; on failure post the standard merge-failed UI.
+
+    Returns the ``MergeOutcome`` so the caller can keep a STOPPED repo out of
+    the deploy phase as well as a FAILED one.
+    """
     from bot.engine.steps import _finalize_merge, record_merge_failure
 
     lookup = bot._forums.thread_to_project(t.thread_id)
@@ -362,9 +366,8 @@ async def _ship_one(bot: ClaudeBot, t: ShipTarget) -> MergeOutcome:
         log.exception("fleet: merge crashed for %s", t.thread_id)
         return MergeOutcome.FAILED
     if outcome is not MergeOutcome.FAILED:
-        # STOPPED landed the branch too, so a failed-merge record from an
-        # earlier attempt is just as stale there.
-        # Clear any stale failed-merge record from an earlier attempt —
+        # MERGED or STOPPED: either way the branch landed, so clear any
+        # stale failed-merge record from an earlier attempt:
         # while one exists, every prompt dispatched into the thread gets
         # the "[system note: auto-merge still unresolved]" prefix, which
         # would wrap the verify prompt in a false warning. Cleared by all
