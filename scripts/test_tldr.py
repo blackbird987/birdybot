@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
 
+import asyncio
 import inspect
 import sys
 from pathlib import Path
@@ -154,9 +155,24 @@ check("the tap is recognised as a long-running query",
 check("and the usage-limit gate can name it",
       '"tldr": "TL;DR"' in _interactions)
 
-_dispatch = inspect.getsource(commands_mod.handle_callback)
+# Behavioural, not textual: the dispatch is a table that reads the step off
+# the workflows facade at tap time, so tap it and see who answers.
+_tapped: list[tuple] = []
+
+
+async def _fake_tldr(ctx, instance_id, source_msg_id):  # noqa: ANN001
+    _tapped.append((ctx, instance_id, source_msg_id))
+
+
+_saved_tldr = workflows.on_tldr
+workflows.on_tldr = _fake_tldr
+try:
+    _ctx = object()
+    asyncio.run(commands_mod.handle_callback(_ctx, "tldr", "q-1", "m-2"))
+finally:
+    workflows.on_tldr = _saved_tldr
 check("the dispatch reaches the handler",
-      'action == "tldr"' in _dispatch and "workflows.on_tldr(ctx" in _dispatch)
+      _tapped == [(_ctx, "q-1", "m-2")])
 
 _slash = (_root / "bot" / "discord" / "slash_commands.py").read_text(encoding="utf-8")
 check("/tldr is registered", 'name="tldr"' in _slash)

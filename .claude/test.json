@@ -169,7 +169,8 @@
     "archive_entry": "python scripts/test_archive_entry.py",
     "reconcile_forums": "python scripts/test_reconcile_forums.py",
     "git_sync": "python scripts/test_git_sync.py",
-    "button_dispatch": "python scripts/test_button_dispatch.py"
+    "button_dispatch": "python scripts/test_button_dispatch.py",
+    "callback_dispatch": "python scripts/test_callback_dispatch.py"
   },
 
   "auth": {
