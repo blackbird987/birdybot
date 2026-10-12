@@ -341,7 +341,7 @@ def _callers_missing_backfill(source: str) -> list[int]:
 
 
 for _mod, _text, _expect in (("bot/app.py", _app, 1),
-                             ("the command modules", _cmds, 3)):
+                             ("the command modules", _cmds, 4)):
     _sites = _text.count("lifecycle.run_instance(")
     _check(f"{_mod}: found the expected {_expect} direct run_instance caller(s)",
            _sites == _expect)

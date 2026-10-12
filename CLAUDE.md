@@ -494,17 +494,18 @@ Three rules, all pinned by `scripts/test_cooldown_session_bind.py`:
   session belongs to the step, not to the conversation, so the chain runner
   must not rewrite the thread's binding. Every *other* caller of
   `run_instance` does own the conversation and has to top the thread up
-  itself. There are four — the cooldown auto-retry (`app`), `/retry`, the
-  Retry button and continue-on-pay-per-use (`commands`) — and none of them
-  did, so re-running the work as many times as you liked never restored a
-  lost binding. Pay-per-use is the sharpest of the four: it is the manual
+  itself. The cooldown auto-retry (`app`), `/retry`, the Retry button,
+  continue-on-pay-per-use, and the `/bg` and `/release` task runner (the
+  command modules) all do. The first four once did not, so re-running the
+  work as many times as you liked never restored a lost binding. Pay-per-use is the sharpest of the four: it is the manual
   twin of the cooldown retry, offered on the same usage-limit card. The
   cooldown retry also has to call `attach_session_callbacks` on its ctx, or
   it has no binding mechanism at all — the same omission already fixed once
   for post-reboot replays, see the comment on `_replay_to_thread`.
 - **That top-up fills a gap; it never rebinds.** `backfill_thread_session` is
-  the one implementation all four share. Chain steps hit usage limits too and
-  land in the same retry function, and `/retry <id>` can be pointed at an
+  the one implementation they all share (a `/bg` build is refused by the
+  worktree rule below, a `/release` on master is not). Chain steps hit usage
+  limits too and land in the same retry function, and `/retry <id>` can be pointed at an
   instance belonging to another thread. Rebinding from there would let a plan
   or review step amputate a thread's chat history on the retry path while
   never doing so on the normal one, so the write only happens into an empty

@@ -112,35 +112,22 @@ async def on_bg(ctx: RequestContext, text: str) -> None:
 
 
 async def _run_bg_task(ctx: RequestContext, inst: Instance) -> None:
+    """Run a /bg or /release instance through the same path as every other run.
+
+    It used to call the runner directly, which skipped task tracking (a
+    reboot did not wait for it), directive dispatch, the self-wake check and
+    the cleaned-up result text. run_instance reports a crash to the thread
+    itself and then re-raises; this runs as a detached task, so the re-raise
+    is logged here rather than left as an unretrieved task exception.
+    """
     try:
-        inst.status = InstanceStatus.RUNNING
-        ctx.store.update_instance(inst, critical=True)
-
-        result = await ctx.runner.run(inst, context=ctx.effective_context)
-        lifecycle.finalize_run(ctx, inst, result)
-
-        # Usage limit: schedule auto-retry instead of showing normal failure
-        if await lifecycle.schedule_cooldown_retry(
-            ctx, inst, result,
-            silent=inst.status == InstanceStatus.COMPLETED,
-        ):
-            return  # Timer loop picks this up
-
-        await lifecycle.send_result(
-            ctx, inst, result.result_text,
-            silent=inst.status == InstanceStatus.COMPLETED,
-        )
+        await lifecycle.run_instance(ctx, inst)
+        # A /release on master in a sessionless thread hands the thread its
+        # session like any other conversation-owning run; a /bg build runs in
+        # a worktree, which backfill refuses.
+        await lifecycle.backfill_thread_session(ctx, inst)
     except Exception:
         log.exception("Background task %s crashed", inst.id)
-        inst.status = InstanceStatus.FAILED
-        inst.error = "Background task crashed unexpectedly"
-        ctx.store.update_instance(inst, critical=True)
-        try:
-            await ctx.messenger.send_text(
-                ctx.channel_id, f"❌ {inst.display_id()} crashed unexpectedly.",
-            )
-        except Exception:
-            pass
 
 
 # --- /release ---

@@ -676,9 +676,10 @@ async def bind_thread_session(
 async def backfill_thread_session(ctx: RequestContext, inst: Instance) -> bool:
     """Give a sessionless thread the session this run just used.  Never rebinds.
 
-    For the four paths that call run_instance directly instead of going through
-    commands._execute_query: the cooldown auto-retry, /retry, the Retry button
-    and "continue on pay-per-use".  run_instance deliberately does not bind — a
+    For the paths that call run_instance directly instead of going through
+    commands._execute_query: the cooldown auto-retry, /retry, the Retry button,
+    "continue on pay-per-use", and /bg and /release (a /bg build is refused
+    below because it runs in a worktree).  run_instance deliberately does not bind: a
     workflow step's session belongs to the step, not the conversation — so
     without this a thread that is already sessionless stays that way, and every
     later resume path (the next message, a self-wake, a fired /watch) has
