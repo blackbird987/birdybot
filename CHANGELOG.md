@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.102.0, Refactor: split the giant files, one copy of duplicated code (2026-10-12)
+
 ### Fixed
 - **Stop all now stops runs as user kills.** The Control Room and Ark Stop all buttons used the bare kill, so every run they stopped showed a red FAILED card and could be restarted on the backup account. Both go through the same kill path as the Kill button now (`commands.stop_instances`, `scripts/test_stop_all.py`).
 - **Auto-fix chains from the diagnosis turn.** It picked the session's *oldest* instance as the source; it now uses the newest, through the store's one "newest wins" lookup (`scripts/test_auto_fix_source.py`).
