@@ -173,26 +173,23 @@ async def on_text(ctx: RequestContext, text: str) -> None:
                 log.debug("Failed to re-post resolver-running buttons", exc_info=True)
             return
         text = f"{_merge_context_prefix(pm_meta)}\n{text}"
-    lock = _get_channel_lock(ctx.channel_id)
-    pending = await _enqueue_with_pending_ui(ctx, text)
-    async with lock:
-        if await _finish_pending_on_acquire(ctx, pending):
-            return
-        if await _try_fast_repo_command(ctx, text):
-            return
-        # Double-checked locking: re-read session_id after acquiring lock
-        if not ctx.session_id and ctx.resolve_session_id is not None:
-            fresh = ctx.resolve_session_id()
-            if fresh:
-                ctx.session_id = fresh
-        await _execute_query(ctx, text)
+    await _run_query(ctx, text, fast_repo_commands=True)
 
 
-async def _run_query(ctx: RequestContext, prompt: str) -> None:
+async def _run_query(
+    ctx: RequestContext, prompt: str, *, fast_repo_commands: bool = False,
+) -> None:
+    """Queue behind the channel's lock, then run `prompt` as a query.
+
+    `fast_repo_commands` lets a typed message that is really a repo command
+    be answered without starting a session; only typed text asks for it.
+    """
     lock = _get_channel_lock(ctx.channel_id)
     pending = await _enqueue_with_pending_ui(ctx, prompt)
     async with lock:
         if await _finish_pending_on_acquire(ctx, pending):
+            return
+        if fast_repo_commands and await _try_fast_repo_command(ctx, prompt):
             return
         # Double-checked locking: re-read session_id after acquiring lock
         if not ctx.session_id and ctx.resolve_session_id is not None:
