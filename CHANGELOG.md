@@ -57,6 +57,7 @@
 - The runner's two copies of the lost-conversation notice and three copies of the switch-account notice are one helper each.
 - The 380-line merge function is a short sequence of steps: stash, sync with origin, merge or abort, remove worktree and branch, tag, push with tags. The three copies of the merge-failed message are one.
 - All five merge paths (/merge, the Merge button, both resolver exits, the chain) now share one merge-and-record routine. The four unattended paths (chain, Done, scheduled auto-merge, fleet ship) now share one failure recorder. A chain merge that succeeds now also drops an earlier failed-merge record, and /merge and the resolver's conflict-free path now apply the merged tag like the button does.
+- Continue on pay-per-use starts through the same routine as Retry, so it now also refuses a repo whose folder is gone instead of failing inside the run (E9)
 
 ### Removed
 - **Code nothing called anymore.** The legacy `data/wake/*.json` self-wake path (and `WAKE_DIR` with its startup sweep), since every wake has been a `/wake` directive for months; an unreachable second `log` branch in the button dispatcher; `on_unknown_command`; `format_expanded_result_md`; two unused embed-limit constants; the `DONE_PROMPT` alias; `CgroupMemory.headroom_mb` and `MemoryPressure.at_least`; `SensorResult.duration_s`, which was written and never read; `session_index.cwd_to_project_dir_name`, a copy of `session_fork.encode_project_path`; and an unused parameter on the Discord rate-limit callback factory.

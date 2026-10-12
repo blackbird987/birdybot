@@ -380,6 +380,7 @@ async def on_kill(ctx: RequestContext, text: str) -> None:
 
 async def _start_retry(
     ctx: RequestContext, inst: Instance, source_msg_id: str | None = None,
+    *, pay_per_use: bool = False,
 ) -> tuple[Instance, dict] | None:
     """Clone `inst` for a re-run and post its progress card.
 
@@ -389,12 +390,17 @@ async def _start_retry(
     message the button sat on: present means the card it was posted under is
     cleared first, absent (the typed path) means there is no card to clear.
 
+    `pay_per_use` is "continue on pay-per-use" from the usage-limit card: the
+    clone runs on the API fallback model with a fresh cooldown budget, and the
+    daily budget is not checked here because the caller gates on the
+    fallback's own spending cap instead.
+
     Returns None, after telling the user why, when the retry cannot start.
     The caller runs the instance and backfills the thread session itself:
     run_instance never binds, and that pairing is checked at every call site
     by scripts/test_cooldown_session_bind.py.
     """
-    if not check_budget(ctx):
+    if not pay_per_use and not check_budget(ctx):
         await ctx.messenger.send_text(ctx.channel_id, "Daily budget exceeded.")
         return None
 
@@ -404,11 +410,14 @@ async def _start_retry(
 
     new_inst = ctx.store.clone_instance_for_rerun(
         inst,
-        name_suffix="retry",
+        name_suffix="ppu" if pay_per_use else "retry",
         origin_platform=ctx.platform,
         effort=ctx.effective_effort,
-        model=inst.model,
+        model=None if pay_per_use else inst.model,
     )
+    if pay_per_use:
+        new_inst.api_fallback = True
+        new_inst.cooldown_retries = 0
     ctx.store.update_instance(new_inst)
 
     if source_msg_id:
@@ -418,9 +427,12 @@ async def _start_retry(
             pass
 
     escaped = ctx.messenger.escape(new_inst.display_id())
+    label = (
+        f"{escaped} continuing with {config.API_FALLBACK_MODEL} (pay-per-use)..."
+        if pay_per_use else f"⏳ {escaped} retrying..."
+    )
     handle = await ctx.messenger.send_thinking(
-        ctx.channel_id, f"⏳ {escaped} retrying...",
-        buttons=running_button_specs(new_inst.id),
+        ctx.channel_id, label, buttons=running_button_specs(new_inst.id),
     )
     if handle.get("message_id"):
         new_inst.message_ids.setdefault(ctx.platform, []).append(handle.get("message_id"))

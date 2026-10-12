@@ -18,7 +18,6 @@ from bot.platform.formatting import (
     format_expanded_result_chunks,
     format_result_md,
     mode_label,
-    running_button_specs,
 )
 from bot.engine.branch_actions import (
     _finish_branch_action,
@@ -295,31 +294,10 @@ async def handle_callback(
         inst.cooldown_retry_at = None
         inst.cooldown_channel_id = None
         ctx.store.update_instance(inst)
-        # Create new instance with api_fallback flag
-        new_inst = ctx.store.clone_instance_for_rerun(
-            inst,
-            name_suffix="ppu",
-            origin_platform=ctx.platform,
-            effort=ctx.effective_effort,
-            model=None,
-        )
-        new_inst.api_fallback = True
-        new_inst.cooldown_retries = 0
-        ctx.store.update_instance(new_inst)
-        if source_msg_id:
-            try:
-                await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, None)
-            except Exception:
-                pass
-        escaped = ctx.messenger.escape(new_inst.display_id())
-        handle = await ctx.messenger.send_thinking(
-            ctx.channel_id,
-            f"{escaped} continuing with {config.API_FALLBACK_MODEL} (pay-per-use)...",
-            buttons=running_button_specs(new_inst.id),
-        )
-        if handle.get("message_id"):
-            new_inst.message_ids.setdefault(ctx.platform, []).append(handle.get("message_id"))
-            ctx.store.update_instance(new_inst)
+        started = await _start_retry(ctx, inst, source_msg_id, pay_per_use=True)
+        if not started:
+            return
+        new_inst, handle = started
         await lifecycle.run_instance(ctx, new_inst, handle=handle)
         # Pay-per-use is the manual twin of the cooldown auto-retry — it fires
         # from the same usage-limit card, so it needs the same backstop.
