@@ -173,7 +173,8 @@
     "callback_dispatch": "python scripts/test_callback_dispatch.py",
     "forum_twins": "python scripts/test_forum_twins.py",
     "run_recovery_order": "python scripts/test_run_recovery_order.py",
-    "session_metadata": "python scripts/test_session_metadata.py"
+    "session_metadata": "python scripts/test_session_metadata.py",
+    "pending_persist": "python scripts/test_pending_persist.py"
   },
 
   "auth": {

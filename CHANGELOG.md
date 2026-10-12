@@ -28,6 +28,7 @@
 - The Merge button on a finished Done card no longer closes the thread when the merge landed on a tree that is missing an earlier release or was left broken. Closing it archived the only warning. No merge path now refreshes deploy state for such a tree; before, only the chain's merge held back.
 - /bg and /release now run through the same path as every other run (E3): a reboot waits for them, their directives and self-wakes are acted on, the result shows the cleaned text, a finished background task notifies, a crash is reported on the card, and a /release in a sessionless thread hands the thread its session.
 - The Mode and Effort buttons on a session's welcome card read the thread's real settings instead of the card's labels, so an older card no longer redraws its buttons on a guessed effort; an owner pressing Effort outside a thread now sets the default, as Mode already did.
+- Queued prompts are saved atomically. A crash or full disk mid-save left a half-written file, which the next boot read as empty, losing every queued prompt (E22)
 
 ### Changed
 - **One atomic file writer** (`bot/fsutil.py`). Five modules hand-rolled write-temp-then-rename, three of them with a fixed `<name>.tmp` that two concurrent writers could truncate under each other; the eval files were written non-atomically. All of them, and the Cursor rules file whose `TODO(cursor-concurrency)` asked for exactly this, use `atomic_write_text` / `atomic_write_json` now: unique temp name in the same directory, nothing stranded on failure. `state.json` and the session index keep their own writers, which need a step between write and rename.
@@ -83,6 +84,7 @@
 - **Legacy callback fallbacks in the runner.** A stall or progress callback that raised `TypeError` was silently retried with fewer arguments, for callback signatures nothing in the bot has used in months. It also hid a real `TypeError` raised inside a callback. The harness fakes now take the production signature.
 - **Telegram leftovers in the platform layer**: the unused `unregister` on the notification fan-out, the comments that still described Telegram's behaviour, and the query path's fallback to a global session for non-Discord platforms, which nothing has reached since Telegram was removed. `ctx.platform` stays: it keys the persisted per-instance message ids, and the old `telegram_message_ids` migration stays for restored backups.
 - The one-time data/deferred to TODO.md migration from March 2026, which ran on every boot and found nothing.
+- The test-only repo description wrapper; the harness keeps its own two-line helper (E21)
 
 ### Tests
 - **`verify_t3559.py` is now `test_session_picker_filter.py`.** Named after the instance that wrote it, it said nothing about what it checks.
