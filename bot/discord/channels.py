@@ -758,7 +758,7 @@ def build_control_embed(
     # Recently Completed
     if completed_instances:
         comp_lines = [
-            f"\u2705 " + _format_instance_line(inst, session_to_thread)
+            "\u2705 " + _format_instance_line(inst, session_to_thread)
             for inst in completed_instances
         ]
         embed.add_field(

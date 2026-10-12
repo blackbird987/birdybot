@@ -32,7 +32,6 @@ import asyncio
 import inspect
 from types import SimpleNamespace
 
-from bot.discord import fleet
 from bot.discord.fleet import (
     ShipTarget,
     _commits_ahead,

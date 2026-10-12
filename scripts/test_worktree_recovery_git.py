@@ -40,7 +40,6 @@ from pathlib import Path
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(_HERE))
 
-from bot.claude import runner as runner_mod
 from bot.claude.runner import worktrees as runner_worktrees
 from bot.claude.runner import ClaudeRunner
 from bot.claude.types import InstanceOrigin, InstanceStatus

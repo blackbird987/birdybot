@@ -645,7 +645,7 @@ class PromptMixin:
         if not instance.is_owner_session:
             user_label = instance.user_name or instance.user_id or "a granted user"
             access_parts = [
-                f"\n\n--- Access Control ---",
+                "\n\n--- Access Control ---",
                 f"This session is being used by {user_label} (not the repo owner).",
                 f"Mode: {instance.mode}.",
             ]

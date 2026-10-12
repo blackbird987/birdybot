@@ -49,7 +49,6 @@ os.environ.setdefault("BOT_PATHS_DISABLED", "1")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from bot import config
-from bot.claude import runner as runner_mod
 from bot.claude.runner import accounts as runner_accounts
 from bot.claude.runner import ClaudeRunner
 from bot.claude.types import Instance, InstanceStatus, InstanceType, RunResult

@@ -603,7 +603,7 @@ def setup(bot: ClaudeBot) -> None:
                 line += f"  *{age}*"
             lines.append(line)
 
-        title = f"Recent Sessions"
+        title = "Recent Sessions"
         if repo_name:
             title += f" — {repo_name}"
         embed = discord.Embed(
