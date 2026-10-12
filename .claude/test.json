@@ -167,7 +167,8 @@
     "mode_ceiling": "python scripts/test_mode_ceiling.py",
     "after_turn": "python scripts/test_after_turn.py",
     "archive_entry": "python scripts/test_archive_entry.py",
-    "reconcile_forums": "python scripts/test_reconcile_forums.py"
+    "reconcile_forums": "python scripts/test_reconcile_forums.py",
+    "git_sync": "python scripts/test_git_sync.py"
   },
 
   "auth": {

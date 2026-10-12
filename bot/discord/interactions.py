@@ -9,9 +9,6 @@ from typing import TYPE_CHECKING
 
 import discord
 
-from bot.claude.runner import (
-    RebootResult, git_fail_reason,
-)
 from bot.discord import channels
 from bot.discord.deploy_flow import _handle_approve_deploy, _handle_reboot_repo
 from bot.discord.access import AccessResult, load_access_config
@@ -1122,160 +1119,13 @@ async def _handle_new_session(
 async def _handle_sync_git(
     bot: ClaudeBot, interaction: discord.Interaction, repo_name: str,
 ) -> None:
-    """Bidirectional git sync: pull from remote (ff-only), then push local changes + tags."""
-    from bot.procutil import run_capture
+    """Bidirectional git sync, run by ``git_sync.sync_repo``."""
+    from bot.engine import git_sync
 
-    repos = bot._store.list_repos()
-    repo_path = repos.get(repo_name)
-    if not repo_path:
-        await interaction.followup.send(
-            f"Repo `{repo_name}` not found.", ephemeral=True,
-        )
-        return
-
-    ds = bot._store.get_deploy_state(repo_name)
-    is_self = ds.self_managed if ds else False
-
-    try:
-        # Step 1a: Fetch branches (must succeed)
-        fetch = await asyncio.to_thread(run_capture, 
-            ["git", "fetch", "origin"], cwd=repo_path, timeout=30,
-        )
-        if fetch.returncode != 0:
-            detail = (fetch.stderr or fetch.stdout or "").strip()
-            err = git_fail_reason(detail) or "unknown error"
-            await interaction.followup.send(
-                f"`{repo_name}`: Fetch failed \u2014 `{err}`", ephemeral=True,
-            )
-            return
-
-        # Step 1b: Fetch tags with --force (non-fatal if it fails)
-        tag_fetch = await asyncio.to_thread(run_capture, 
-            ["git", "fetch", "origin", "--tags", "--force"], cwd=repo_path, timeout=15,
-        )
-        if tag_fetch.returncode != 0:
-            log.warning("Tag fetch failed for %s: %s", repo_name,
-                        (tag_fetch.stderr or "")[:200])
-
-        # Step 2: Check ahead/behind counts
-        ahead_result = await asyncio.to_thread(run_capture, 
-            ["git", "rev-list", "--count", "@{upstream}..HEAD"], cwd=repo_path, timeout=10,
-        )
-        behind_result = await asyncio.to_thread(run_capture, 
-            ["git", "rev-list", "--count", "HEAD..@{upstream}"], cwd=repo_path, timeout=10,
-        )
-
-        if ahead_result.returncode != 0 or behind_result.returncode != 0:
-            await interaction.followup.send(
-                f"`{repo_name}`: No upstream branch configured.", ephemeral=True,
-            )
-            return
-
-        ahead = int(ahead_result.stdout.strip())
-        behind = int(behind_result.stdout.strip())
-        parts = []
-
-        # Step 3: Pull if behind (fast-forward only)
-        if behind > 0:
-            # Check for dirty worktree before attempting pull
-            status = await asyncio.to_thread(run_capture, 
-                ["git", "status", "--porcelain"], cwd=repo_path, timeout=10,
-            )
-            if status.returncode == 0 and status.stdout.strip():
-                await interaction.followup.send(
-                    f"`{repo_name}`: Working tree has uncommitted changes \u2014 commit or stash first.",
-                    ephemeral=True,
-                )
-                return
-
-            pull = await asyncio.to_thread(run_capture, 
-                ["git", "pull", "--ff-only"], cwd=repo_path, timeout=30,
-            )
-            if pull.returncode != 0:
-                detail = (pull.stderr or pull.stdout or "").strip()
-                err = git_fail_reason(detail) or "unknown error"
-                await interaction.followup.send(
-                    f"`{repo_name}`: Pull failed (histories diverged?) \u2014 `{err}`",
-                    ephemeral=True,
-                )
-                return
-            parts.append(f"pulled {behind} commit{'s' if behind != 1 else ''}")
-
-            # Update deploy state — HEAD moved forward
-            from bot.engine.deploy import (
-                get_head_ref, detect_version, get_unreleased_changes,
-            )
-            if ds:
-                ds.current_ref = get_head_ref(repo_path)
-                ds.current_version = detect_version(repo_path)
-                changes = get_unreleased_changes(repo_path)
-                if changes:
-                    ds.pending_changes = changes
-                bot._store.set_deploy_state(repo_name, ds)
-
-            # Self-managed repo pulled new code — queue reboot.
-            # No force=True: this path does NOT call wait_until_idle, so an
-            # active build on another thread should NOT be force-killed. If
-            # the busy-check defers, lifecycle.py auto-promotes the deferred
-            # file at the next idle session-end (within REBOOT_DEFERRED_TTL_SECS).
-            if is_self:
-                result = bot._runner.request_reboot({
-                    "message": f"Sync Git: pulled {behind} commit(s)",
-                    "channel_id": str(interaction.channel_id),
-                    "platform": "discord",
-                })
-                if result is RebootResult.DEFERRED:
-                    parts.append(
-                        "reboot deferred — will auto-retry within 1 h or pulled commits will be dropped"
-                    )
-                else:
-                    parts.append("reboot queued")
-
-        # Step 4: Push if ahead
-        if ahead > 0:
-            result = await asyncio.to_thread(run_capture, 
-                ["git", "push"], cwd=repo_path, timeout=30,
-            )
-            if result.returncode == 0:
-                parts.append(f"pushed {ahead} commit{'s' if ahead != 1 else ''}")
-            else:
-                detail = (result.stderr or result.stdout or "").strip()
-                err = git_fail_reason(detail) or "unknown error"
-                await interaction.followup.send(
-                    f"`{repo_name}`: Push failed \u2014 `{err}`", ephemeral=True,
-                )
-                return
-
-        # Step 5: Push tags (best-effort)
-        tag_result = await asyncio.to_thread(run_capture, 
-            ["git", "push", "--tags"], cwd=repo_path, timeout=30,
-        )
-        if tag_result.returncode == 0:
-            tag_lines = [
-                line for line in (tag_result.stderr or "").splitlines()
-                if "new tag" in line.lower()
-            ]
-            if tag_lines:
-                parts.append(f"{len(tag_lines)} tag{'s' if len(tag_lines) != 1 else ''}")
-        else:
-            err = git_fail_reason((tag_result.stderr or tag_result.stdout or "").strip())
-            if err:
-                parts.append(f"tags failed: `{err}`")
-
-        # Step 6: Report
-        if not parts:
-            await interaction.followup.send(
-                f"`{repo_name}`: Already in sync with remote.", ephemeral=True,
-            )
-        else:
-            await interaction.followup.send(
-                f"`{repo_name}`: {', '.join(parts)}.", ephemeral=True,
-            )
-
+    text, refresh = await git_sync.sync_repo(
+        bot._store, bot._runner, repo_name, str(interaction.channel_id),
+    )
+    await interaction.followup.send(text, ephemeral=True)
+    if refresh:
         # Refresh control room to reflect any version/ref changes
         asyncio.create_task(bot._forums.refresh_control_room(repo_name))
-
-    except Exception as exc:
-        await interaction.followup.send(
-            f"`{repo_name}`: Git sync failed \u2014 {exc}", ephemeral=True,
-        )
