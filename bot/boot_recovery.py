@@ -323,9 +323,7 @@ async def resume_interrupted_chains(
                     "Failed to resume autopilot chain for session %s", session_id,
                 )
             finally:
-                discord_bot._forums.persist_ctx_settings(ctx)
-                asyncio.create_task(discord_bot._try_apply_tags_after_run(thread_id))
-                discord_bot._schedule_sleep(thread_id)
+                await discord_bot._after_turn(ctx, thread_id, dashboard=False)
 
 
 def log_orphan_git(store: StateStore, runner) -> None:

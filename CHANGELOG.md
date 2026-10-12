@@ -66,6 +66,7 @@
 - Session and chain eval files are written and read through one helper each instead of twin copies (E24).
 - Timed messages (a broadcast with a ttl, and slash-command replies in The Ark) share one sleep-then-delete helper instead of two copies.
 - The mode ceiling (a guest's highest allowed mode) is one rule in one place instead of four copies; a grant with no mode recorded now caps at Explore instead of producing an empty mode.
+- Every way a turn can end in a thread (a typed message, a button, a steer, the quick-task form, /done, the usage-limit replays, the boot chain resume, the cooldown retry) now runs one shared after-turn routine for saving the thread's settings, tags, idle timer and dashboard, instead of nine drifting copies.
 
 ### Removed
 - **Code nothing called anymore.** The legacy `data/wake/*.json` self-wake path (and `WAKE_DIR` with its startup sweep), since every wake has been a `/wake` directive for months; an unreachable second `log` branch in the button dispatcher; `on_unknown_command`; `format_expanded_result_md`; two unused embed-limit constants; the `DONE_PROMPT` alias; `CgroupMemory.headroom_mb` and `MemoryPressure.at_least`; `SensorResult.duration_s`, which was written and never read; `session_index.cwd_to_project_dir_name`, a copy of `session_fork.encode_project_path`; and an unused parameter on the Discord rate-limit callback factory.

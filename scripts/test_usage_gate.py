@@ -33,7 +33,8 @@ the stub class below lists them, one line each, in ``_REAL``):
   _usage_queue_update, _usage_queue_remove, _usage_queue_promote_expired,
   _usage_queue_pop_due, _fire_due_entries, _retire_gate_message,
   _migrate_relative_image_paths, _usage_queue_startup_drain,
-  _usage_queue_replay_loop, _replay_to_thread, _replay_callback
+  _usage_queue_replay_loop, _replay_to_thread, _replay_callback,
+  _after_turn (the post-turn bookkeeping both replays end with)
 Methods replaced on the stub by recorders (the gate's outbound seams):
   _replay_to_thread, _replay_callback (for the drain and Run-now cases),
   _wait_for_ready, _sweep_pending_images (for the startup-drain case),
@@ -178,6 +179,7 @@ _REAL = (
     "_usage_queue_pop_due", "_fire_due_entries", "_retire_gate_message",
     "_migrate_relative_image_paths", "_usage_queue_startup_drain",
     "_usage_queue_replay_loop", "_replay_to_thread", "_replay_callback",
+    "_after_turn",
 )
 
 

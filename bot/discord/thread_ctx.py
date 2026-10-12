@@ -384,9 +384,7 @@ class ThreadContextMixin:
         # consented to.  Re-prompting would loop.
         ctx.offer_usage_limit_choice = None
         await commands.on_text(ctx, prompt)
-        self._forums.persist_ctx_settings(ctx)
-        asyncio.create_task(self._try_apply_tags_after_run(channel_id))
-        self._schedule_sleep(channel_id)
+        await self._after_turn(ctx, channel_id, dashboard=False)
         return True
 
     async def _wait_for_ready(self, label: str) -> bool:
@@ -504,6 +502,4 @@ class ThreadContextMixin:
                 log.exception("Failed to replay callback %s in thread %s",
                               button_action, channel_id)
             finally:
-                self._forums.persist_ctx_settings(ctx)
-                asyncio.create_task(self._try_apply_tags_after_run(channel_id))
-                self._schedule_sleep(channel_id)
+                await self._after_turn(ctx, channel_id, dashboard=False)

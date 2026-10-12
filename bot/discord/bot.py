@@ -46,7 +46,7 @@ from bot.discord.titles import generate_title_text, read_ai_title
 from bot.discord.usage_gate import UsageGateMixin
 from bot.discord import memes
 from bot.engine import commands
-from bot.platform.base import delete_after
+from bot.platform.base import RequestContext, delete_after
 from bot.services.twitter import enrich_with_tweets
 
 if TYPE_CHECKING:
@@ -288,6 +288,26 @@ class ClaudeBot(StartupMixin, ThreadContextMixin, UsageGateMixin, PendingImagesM
 
     async def _try_apply_tags_after_run(self, channel_id: str) -> None:
         await tags_mod.try_apply_tags_after_run(self, channel_id)
+
+    async def _after_turn(
+        self, ctx: RequestContext, channel_id: str, *,
+        pending_thread: bool = False, dashboard: bool = True,
+    ) -> None:
+        """What every finished turn in a thread owes it, whatever started it.
+
+        Keep the turn's /mode, /effort and friends on the thread, bind a /new
+        thread to the session it just got (*pending_thread*), redraw the
+        status tags, re-arm the idle timer and, unless told not to, the
+        dashboard. Called from a ``finally`` so a crashed turn still leaves
+        its thread looking idle rather than stuck on "active".
+        """
+        self._forums.persist_ctx_settings(ctx)
+        if pending_thread:
+            await self._forums.update_pending_thread(channel_id)
+        asyncio.create_task(self._try_apply_tags_after_run(channel_id))
+        self._schedule_sleep(channel_id)
+        if dashboard:
+            asyncio.create_task(self._refresh_dashboard())
 
     async def _set_thread_active_tag(self, channel, active: bool) -> None:
         await tags_mod.set_thread_active_tag(self, channel, active)
@@ -687,16 +707,13 @@ class ClaudeBot(StartupMixin, ThreadContextMixin, UsageGateMixin, PendingImagesM
                                 log.warning("Tweet enrichment failed, continuing with original text", exc_info=True)
                             await commands.on_text(ctx, text)
                         finally:
-                            self._forums.persist_ctx_settings(ctx)
                             if was_pending:
                                 await self._forums.finalize_pending_thread(channel_id, message.channel, user_text)
                             if not info._title_generated:
                                 summary = self._forums.get_latest_summary(channel_id)
                                 asyncio.create_task(self._generate_smart_title(
                                     message.channel, user_text, summary))
-                            asyncio.create_task(self._try_apply_tags_after_run(channel_id))
-                            self._schedule_sleep(channel_id)
-                            asyncio.create_task(self._refresh_dashboard())
+                            await self._after_turn(ctx, channel_id)
                         return
 
             # --- Other channel (unmapped): no session ---

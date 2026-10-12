@@ -75,7 +75,4 @@ class QuickTaskModal(discord.ui.Modal):
         try:
             await commands.on_text(ctx, prompt)
         finally:
-            bot._forums.persist_ctx_settings(ctx)
-            asyncio.create_task(bot._try_apply_tags_after_run(thread_id))
-            bot._schedule_sleep(thread_id)
-            asyncio.create_task(bot._refresh_dashboard())
+            await bot._after_turn(ctx, thread_id)

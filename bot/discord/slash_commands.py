@@ -792,11 +792,7 @@ def setup(bot: ClaudeBot) -> None:
                 except Exception:
                     pass
             finally:
-                bot._forums.persist_ctx_settings(ctx)
-                await bot._forums.update_pending_thread(channel_id)
-                asyncio.create_task(bot._try_apply_tags_after_run(channel_id))
-                bot._schedule_sleep(channel_id)
-                asyncio.create_task(bot._refresh_dashboard())
+                await bot._after_turn(ctx, channel_id, pending_thread=True)
 
         try:
             await interaction.delete_original_response()

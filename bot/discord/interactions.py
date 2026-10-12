@@ -444,11 +444,7 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
             try:
                 await commands.handle_callback(ctx, action, instance_id, source_msg_id)
             finally:
-                bot._forums.persist_ctx_settings(ctx)
-                await bot._forums.update_pending_thread(channel_id)
-                asyncio.create_task(bot._try_apply_tags_after_run(channel_id))
-                bot._schedule_sleep(channel_id)
-                asyncio.create_task(bot._refresh_dashboard())
+                await bot._after_turn(ctx, channel_id, pending_thread=True)
     else:
         try:
             await commands.handle_callback(ctx, action, instance_id, source_msg_id)
@@ -617,11 +613,7 @@ async def _handle_pending_action(
             # Always run cleanup, including after cancel-early-return: the
             # prior task was killed so the thread is idle and needs its sleep
             # timer (re)scheduled and tags refreshed.
-            bot._forums.persist_ctx_settings(ctx)
-            await bot._forums.update_pending_thread(channel_id)
-            asyncio.create_task(bot._try_apply_tags_after_run(channel_id))
-            bot._schedule_sleep(channel_id)
-            asyncio.create_task(bot._refresh_dashboard())
+            await bot._after_turn(ctx, channel_id, pending_thread=True)
 
 
 async def _handle_usage_action(

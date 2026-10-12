@@ -862,11 +862,7 @@ async def _do_cooldown_retry_locked(store, runner, inst, discord_bot, channel_id
                     log.exception("Autopilot chain resume failed after cooldown retry %s",
                                   new_inst.id)
     finally:
-        # Post-run cleanup (matches normal query flow in interactions.py)
-        discord_bot._forums.persist_ctx_settings(ctx)
-        discord_bot._schedule_sleep(channel_id)
-        asyncio.create_task(discord_bot._try_apply_tags_after_run(channel_id))
-        asyncio.create_task(discord_bot._refresh_dashboard())
+        await discord_bot._after_turn(ctx, channel_id)
 
 
 async def _start_discord(store, runner, notifier, stop_event):
