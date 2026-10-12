@@ -381,7 +381,10 @@ a point where the revert is still undoable:
   Same pattern as `REPO_UNUSABLE_MARKER` next door. Under autopilot,
   `steps._finalize_merge` stops on the marker **before**
   `apply_post_merge_deploy` and `close_conversation`, so the chain never ships
-  a tree that reverts a release and never closes the thread on one.
+  a tree that reverts a release and never closes the thread on one. It
+  returns `MergeOutcome.STOPPED`, not MERGED and not FAILED: every caller
+  (chain, standalone Done, scheduled auto-merge, fleet ship) must neither
+  call it merged nor hand it to the conflict banner and retry path.
 - **On discard.** A build branch can be the only place a release tag lives,
   and deleting it strands that tag: the version looks shipped and its commits
   are gone. The scan sits **above** the `git branch -D` block in

@@ -15,6 +15,8 @@ Five hand-kept copies had drifted, so this pins what the one copy must do:
 - the Merge button holds a post-Done thread open on a tree that must not ship
 - a failed unattended merge is recorded even when its banner cannot be posted
 - every resolver exit and manual path goes through the shared helper
+- ``_finalize_merge`` reports a merge onto a tree that must not ship as
+  STOPPED, not MERGED: the chain used to log "complete" for one (E17)
 
 Run: python scripts/test_merge_paths.py
 Exit 0 = all pass.
@@ -245,6 +247,68 @@ def test_unattended_failure_recorded_when_post_fails() -> None:
           and post.get("buttons") and post.get("silent") is False, str(post))
 
 
+def test_finalize_reports_stopped_on_blocked_tree() -> None:
+    """E17: both ship-blocking paths are STOPPED, never MERGED or FAILED.
+
+    MERGED is what made the chain log "complete" for a chain that halted
+    before deploy and close. FAILED would be as wrong the other way: the
+    branch landed, so the conflict banner and its Resolve / Retry buttons
+    would offer to redo a merge that already happened.
+    """
+    def body(deploys, cleared):
+        cases = (
+            ("", steps.MergeOutcome.MERGED, 1, "a clean tree"),
+            (f"\n{RELEASE_ORPHANED_MARKER}: x", steps.MergeOutcome.STOPPED, 0,
+             "a tree missing a release"),
+            (f"\n{REPO_UNUSABLE_MARKER}: x", steps.MergeOutcome.STOPPED, 0,
+             "a broken tree"),
+        )
+        for suffix, want, want_closed, what in cases:
+            deploys.clear()
+            inst = make_inst("t-1")
+            store = Store(inst)
+            store.pending["t-1"] = {"failure_kind": "conflict"}
+            messenger = Messenger()
+            ctx, tagged = make_ctx(Runner(f"Merged into master.{suffix}"), store, messenger)
+            got = run(steps._finalize_merge(ctx, inst, close_silent=True))
+            check(f"finalize on {what} returns {want.name}", got is want, str(got))
+            check(f"finalize on {what}: thread closed {want_closed} time(s)",
+                  messenger.closed == want_closed, str(messenger.closed))
+            check(f"finalize on {what}: deploy bookkeeping only when merged",
+                  deploys == (["t-1"] if want is steps.MergeOutcome.MERGED else []),
+                  str(deploys))
+            check(f"finalize on {what}: the landed branch drops its pending merge",
+                  "t-1" not in store.pending, str(store.pending))
+            check(f"finalize on {what}: merged tag applied", tagged == [True])
+            if want is steps.MergeOutcome.STOPPED:
+                check(f"finalize on {what}: the warning pings (not silent)",
+                      any(m["text"].startswith("\u26d4") and not m.get("silent")
+                          for m in messenger.sent), str(messenger.sent))
+
+        inst = make_inst("t-1")
+        ctx, tagged = make_ctx(Runner("Merge failed: conflict"), Store(inst))
+        got = run(steps._finalize_merge(ctx, inst))
+        check("finalize on a failed merge returns FAILED",
+              got is steps.MergeOutcome.FAILED, str(got))
+        check("a failed merge is not tagged merged", tagged == [])
+        check("a branchless target is FAILED, not a crash",
+              run(steps._finalize_merge(ctx, make_inst("t-2", branch=None)))
+              is steps.MergeOutcome.FAILED)
+    patched(body)
+
+    # The stop has to come before the deploy and the close, in that function's
+    # own text, or a later edit can reorder it while the behaviour checks above
+    # still pass on the fakes.
+    src = inspect.getsource(steps._finalize_merge)
+    close = src.find("close_conversation")
+    for name in ("merge_msg_repo_unusable", "merge_msg_release_orphaned"):
+        at = src.find(name)
+        check(f"{name} is checked before the thread is closed",
+              at != -1 and close != -1 and at < close)
+    check("STOPPED is returned on both blocking paths",
+          src.count("return MergeOutcome.STOPPED") == 2)
+
+
 def test_every_path_uses_the_helper() -> None:
     src = inspect.getsource(resolver._on_resolve_merge)
     check("both resolver exits merge through merge_from_user",
@@ -264,6 +328,7 @@ def main() -> int:
     test_failure_refreshes_kind()
     test_button_holds_thread_on_blocked_tree()
     test_unattended_failure_recorded_when_post_fails()
+    test_finalize_reports_stopped_on_blocked_tree()
     test_every_path_uses_the_helper()
     print()
     print(f"{len(FAILS)} failure(s)" if FAILS else "All checks passed")

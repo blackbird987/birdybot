@@ -163,12 +163,14 @@ async def fire_scheduled_merge(store, runner, discord_bot, iid: str, meta: dict)
     lock = _get_channel_lock(channel_id)
     async with lock:
         try:
-            ok = await workflows._finalize_merge(ctx, inst, close_silent=True)
+            outcome = await workflows._finalize_merge(ctx, inst, close_silent=True)
         except Exception:
             log.exception("Scheduled auto-merge crashed for %s", iid)
-            ok = False
+            outcome = workflows.MergeOutcome.FAILED
     store.clear_scheduled_merge(iid)
-    if not ok:
+    # STOPPED already pinged the thread from _finalize_merge, and the branch
+    # landed, so there is no conflict to offer Resolve / Retry for.
+    if outcome is workflows.MergeOutcome.FAILED:
         # Merge failed — surface the standard recovery UI so it isn't silent.
         try:
             await workflows.record_merge_failure(

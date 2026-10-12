@@ -101,6 +101,7 @@ from bot.engine.step_spawn import (  # noqa: F401
 )
 from bot.engine.steps import (  # noqa: F401
     _attempt_inline_worktree_recovery,
+    MergeOutcome,
     _finalize_merge,
     _prior_art_prefix,
     merge_and_record,

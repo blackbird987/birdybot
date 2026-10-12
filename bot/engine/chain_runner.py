@@ -20,6 +20,7 @@ from bot.engine.chain_git import (
     _resolve_chain_repo_path,
 )
 from bot.engine.release_steps import (
+    release_verified,
     on_release_chain,
     on_verify_release,
 )
@@ -48,6 +49,7 @@ from bot.engine.step_spawn import (
     spawn_from,
 )
 from bot.engine.steps import (
+    MergeOutcome,
     _finalize_merge,
     _prior_art_prefix,
     on_done,
@@ -103,6 +105,10 @@ _CHAIN_EXIT_MESSAGES: dict[str, str] = {
     ),
     "budget_exhausted": "Cost budget reached.",
     "merge_failed": "Merge conflict — tap Resolve / Retry / Discard.",
+    "merge_stopped": (
+        "Merged, but stopped before deploy and close. "
+        "Read the warning above."
+    ),
     "review_did_not_converge": "Plan review didn't converge — needs your attention.",
 }
 
@@ -117,7 +123,7 @@ async def _exit_chain_needs_input(
     result: Instance | None,
     outcome: Literal[
         "needs_input", "failed", "phantom_detected",
-        "budget_exhausted", "merge_failed",
+        "budget_exhausted", "merge_failed", "merge_stopped",
         "review_did_not_converge",
     ],
     *,
@@ -143,7 +149,7 @@ async def _exit_chain_needs_input(
     if intervention is None:
         intervention = outcome in (
             "needs_input", "phantom_detected", "failed",
-            "review_did_not_converge",
+            "merge_stopped", "review_did_not_converge",
         )
 
     await _exit_chain(
@@ -601,17 +607,31 @@ async def on_amend_done(
         entry_sha=entry_sha,
     )
 
-    # If verify still fails, on_verify_release already re-posted the gate UI.
-    # If it passed (or was skipped), auto-resume the chain at the next step.
-    if verify_result is None or (
-        verify_result.status == InstanceStatus.COMPLETED
-        and not verify_result.needs_input
-    ):
-        next_source_id = (verify_result or done_result).id
-        next_msg_id = _last_msg_id(verify_result or done_result, ctx.platform)
+    # Passed: auto-resume the chain at the next step. A mismatch has already
+    # re-posted the gate UI from on_verify_release. None means no verifier ran
+    # at all, which is "not passed" here exactly as it is in the chain runner:
+    # the amend is unverified, so the chain stays paused and the user decides.
+    if release_verified(verify_result):
         await resume_autopilot_chain(
-            ctx, next_source_id, next_msg_id, vr.session_id,
+            ctx, verify_result.id,
+            _last_msg_id(verify_result, ctx.platform), vr.session_id,
         )
+    elif verify_result is None:
+        try:
+            await ctx.messenger.send_text(
+                ctx.channel_id,
+                "\u26a0\ufe0f The release verifier did not run after the "
+                "amend, so the release is unverified and the chain stays "
+                "paused. Tap **Amend** to try again, or **Continue anyway** "
+                "to release without it.",
+                buttons=[[
+                    ButtonSpec("Amend", f"amend:{vr.id}"),
+                    ButtonSpec("Continue anyway", f"continue_anyway:{done_result.id}"),
+                ]],
+                silent=False,
+            )
+        except Exception:
+            log.exception("amend: failed to post the unverified-release notice")
     return verify_result
 
 
@@ -1159,10 +1179,26 @@ async def _run_autopilot_chain(
                     # Autopilot keeps the loud chain-completion ping; Build &
                     # Ship opts into a silent close (the in-thread "✅
                     # {merge_msg}" summary + tag flip carry the signal).
-                    merged_ok = await _finalize_merge(
+                    merge_outcome = await _finalize_merge(
                         ctx, merge_target, close_silent=silent_close,
                     )
-                    if not merged_ok:
+                    if merge_outcome is MergeOutcome.STOPPED:
+                        # The branch landed on a tree that must not ship:
+                        # _finalize_merge already skipped deploy and close and
+                        # posted the warning. Not a conflict, so no Resolve /
+                        # Retry banner, and not a finished chain either, so it
+                        # must not be recorded as merged.
+                        completed_steps.append(step)
+                        await _exit_chain_needs_input(
+                            ctx, source_id, session_id, steps, completed_steps,
+                            chain_instances, None, "merge_stopped",
+                            suffix_override=(
+                                f"{chain_label} merged, but stopped before "
+                                f"deploy and close. Read the warning above."
+                            ),
+                        )
+                        return result
+                    if merge_outcome is MergeOutcome.FAILED:
                         await record_merge_failure(
                             ctx, merge_target, session_id=merge_target.session_id,
                         )

@@ -24,7 +24,8 @@ What is pinned:
     step that asks for input (state kept, status "paused", queue starts at the
     stopped step), verify_release needing input (phantom_detected, plus the
     parse-failed wording), a release failure (recovery hint), merge failure
-    (banner, pending merge, merge_failed), budget exhaustion, a review loop
+    (banner, pending merge, merge_failed), a merge that landed on a tree that
+    must not ship (merge_stopped: no banner, not "merged"), budget exhaustion, a review loop
     that does not converge, an empty-diff build (dirty rescue vs halt);
   * verify_release skip rules (no entry SHA, entry == HEAD);
   * multi-phase builds (spawn sequence, design gate, risk gate);
@@ -164,6 +165,7 @@ class Scenario:
         *,
         head_mode: str = "moves",       # "moves" | "parked" for the build guard
         merge_ok: bool = True,
+        merge_stopped: bool = False,
         mergeable: bool = True,
         entry_sha_mode: str = "differs",  # "differs" | "same" | "none"
         phases: list[Phase] | None = None,
@@ -183,6 +185,7 @@ class Scenario:
         self.behaviour = behaviour or {}
         self.head_mode = head_mode
         self.merge_ok = merge_ok
+        self.merge_stopped = merge_stopped
         self.mergeable = mergeable
         self.entry_sha_mode = entry_sha_mode
         self.phases = phases or []
@@ -297,7 +300,9 @@ class Scenario:
         async def finalize_merge(ctx, target, *, close_silent=False, skip_close=False):
             sc.finalized.append({"id": target.id, "close_silent": close_silent})
             sc._record("merge", target.id, None)
-            return sc.merge_ok
+            if sc.merge_stopped:
+                return workflows.MergeOutcome.STOPPED
+            return workflows.MergeOutcome.MERGED if sc.merge_ok else workflows.MergeOutcome.FAILED
 
         async def git_head(path):
             if sc.head_mode == "parked":
@@ -648,6 +653,17 @@ check_eq("verify_release crash: plain failed exit, state cleared",
          (s.final_eval().get("outcome"), s.queue), ("failed", None))
 s.close()
 
+# E18: a verifier that never ran is not a pass. The post-amend path reads
+# None the same way (scripts/test_verify_release_none.py).
+s = scenario({"verify_release": "none"})
+run(_chain("ship")(s))
+check_eq("verify_release returned None: failed exit, release and merge never run",
+         (s.final_eval().get("outcome"), s.order[-1], s.finalized),
+         ("failed", "verify_release", []))
+check("verify_release returned None: mention says blocked at verify_release",
+      blocked_mention(s.messenger.mentions(), "Chain (ship)", "verify_release"))
+s.close()
+
 print()
 print("verify_release is skipped when there is nothing to verify")
 
@@ -695,6 +711,32 @@ check("merge failed: mention uses the chain label and Resolve / Retry / Discard"
       and s.messenger.mentions()[0].endswith("tap Resolve / Retry / Discard."))
 check_eq("merge failed: chain state is terminal (queue cleared)", s.queue, None)
 check_eq("merge failed: returns the release instance",
+         res.id if res else None, s.produced["release"])
+s.close()
+
+
+print()
+print("merge stopped (landed on a tree that must not ship, E17)")
+
+s = scenario(merge_stopped=True)
+res = run(_chain("ship")(s))
+check_eq("merge stopped: all steps ran, merge attempted once",
+         (s.order, len(s.finalized)), (SHIP, 1))
+check_eq("merge stopped: eval outcome is merge_stopped, not merged",
+         s.final_eval().get("outcome"), "merge_stopped")
+check_eq("merge stopped: merge counts as completed (the branch landed)",
+         s.final_eval().get("completed"), SHIP)
+check_eq("merge stopped: no conflict banner, no Resolve / Retry buttons",
+         [t for t in s.messenger.texts if t["buttons"]], [])
+check_eq("merge stopped: no pending merge recorded",
+         s.store.get_pending_merge(s.finalized[0]["id"]), None)
+check_eq("merge stopped: one mention", len(s.messenger.mentions()), 1)
+check("merge stopped: mention says it stopped before deploy and close",
+      s.messenger.mentions()[0]
+      == f"{MENTION} Chain (ship) merged, but stopped before deploy and close. "
+         "Read the warning above.")
+check_eq("merge stopped: chain state is terminal (queue cleared)", s.queue, None)
+check_eq("merge stopped: returns the release instance",
          res.id if res else None, s.produced["release"])
 s.close()
 

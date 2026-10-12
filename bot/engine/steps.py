@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import enum
 import logging
 from typing import Literal
 
@@ -652,8 +653,8 @@ async def on_done(
     # Merge/Discard buttons remain (current behavior) so the user can
     # resolve manually.
     if result.branch and result.original_branch:
-        merged_ok = await _finalize_merge(ctx, result, close_silent=True)
-        if not merged_ok:
+        outcome = await _finalize_merge(ctx, result, close_silent=True)
+        if outcome is MergeOutcome.FAILED:
             # silent=False: this path has no follow-up _exit_chain mention, so
             # the banner post itself must ping or the user never learns the
             # merge failed (the t-4736-class invisible-rot bug).
@@ -673,19 +674,36 @@ async def on_done(
     return result
 
 
+class MergeOutcome(enum.Enum):
+    """How ``_finalize_merge`` ended. Three ways, because two is a lie.
+
+    ``STOPPED`` is the branch landing on a tree that must not ship
+    (``merge_blocks_ship``): it merged, so it is not a failure and must not
+    reach the merge-failure cleanup and retry path, but nothing after the
+    merge ran either, so reporting it as merged logged "complete" for a chain
+    that halted before deploy and close.
+    """
+
+    MERGED = "merged"
+    STOPPED = "stopped"
+    FAILED = "failed"
+
+
 async def _finalize_merge(
     ctx: RequestContext, merge_target: Instance, *, close_silent: bool = False,
     skip_close: bool = False,
-) -> bool:
+) -> MergeOutcome:
     """Merge a build branch + post-merge bookkeeping + close the thread.
 
     Shared between the autopilot `merge` step and the standalone Done button
     so both call sites apply the same tag/deploy/close sequence.
 
-    Returns True on successful merge (caller may chain on this), False if
-    the merge command reported failure. On failure, caller is responsible
-    for posting the "use /merge to resolve" hint and surfacing buttons —
-    `_finalize_merge` only mutates state on the success path.
+    Returns MERGED when the whole sequence ran (caller may chain on this),
+    STOPPED when the branch landed but the tree must not ship, so deploy and
+    close were skipped and the user was pinged here, and FAILED when the
+    merge command reported failure. On FAILED, the caller is responsible for
+    posting the "use /merge to resolve" hint and surfacing buttons. On
+    STOPPED, it owes nothing more than not calling it merged.
 
     `close_silent`: pass True when the caller already pinged the user (or
     intentionally wants the close to skip the participant mention). The
@@ -697,11 +715,11 @@ async def _finalize_merge(
     thread instead of archiving it only to immediately reopen it.
     """
     if not merge_target.branch or not merge_target.original_branch:
-        return False
+        return MergeOutcome.FAILED
     merge_msg = await merge_and_record(ctx, merge_target)
     log.info("Auto-merge: %s", merge_msg)
     if merge_msg_is_failure(merge_msg):
-        return False
+        return MergeOutcome.FAILED
 
     if merge_msg_repo_unusable(merge_msg):
         # The branch landed, but cleanup left conflict markers in tracked
@@ -719,7 +737,7 @@ async def _finalize_merge(
             f"⛔ **The merge landed, but the repo is now broken — "
             f"do not restart the bot until it is repaired.**\n{merge_msg}",
         )
-        return True
+        return MergeOutcome.STOPPED
 
     if merge_msg_release_orphaned(merge_msg):
         # The branch landed, but the target it landed on is missing an
@@ -737,7 +755,7 @@ async def _finalize_merge(
             f"⛔ **The merge landed, but an earlier release is missing from "
             f"it. Do not deploy until it is merged in.**\n{merge_msg}",
         )
-        return True
+        return MergeOutcome.STOPPED
 
     # merge_and_record already did the deploy bookkeeping for a tree that
     # may ship. Apply "merged" tag before close (tag must land before archive)
@@ -753,7 +771,7 @@ async def _finalize_merge(
             )
         except Exception:
             log.debug("Failed to close conversation after merge", exc_info=True)
-    return True
+    return MergeOutcome.MERGED
 
 
 def merge_blocks_ship(msg: str) -> bool:

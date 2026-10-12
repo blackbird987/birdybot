@@ -39,6 +39,7 @@ import discord
 
 from bot.procutil import run_capture
 from bot.claude.types import Instance, InstanceStatus
+from bot.engine.steps import MergeOutcome
 from bot.platform.base import ButtonSpec
 
 if TYPE_CHECKING:
@@ -302,10 +303,16 @@ async def run_fleet_ship(
 
         merged: dict[str, list[ShipTarget]] = {}
         failed: dict[str, list[ShipTarget]] = {}
+        stopped: dict[str, list[ShipTarget]] = {}
+        buckets = {
+            MergeOutcome.MERGED: merged,
+            MergeOutcome.FAILED: failed,
+            MergeOutcome.STOPPED: stopped,
+        }
         for repo, ts in by_repo.items():
             for t in ts:
-                ok = await _ship_one(bot, t)
-                (merged if ok else failed).setdefault(repo, []).append(t)
+                outcome = await _ship_one(bot, t)
+                buckets[outcome].setdefault(repo, []).append(t)
 
         if failed:
             fail_lines = ["Merge failures — deploy skipped for these repos:"]
@@ -313,11 +320,24 @@ async def run_fleet_ship(
                 for t in ts:
                     fail_lines.append(f"- {repo}: <#{t.thread_id}> (fix in-thread, then /fleet again)")
             await _say(bot, origin, "\n".join(fail_lines))
+        if stopped:
+            stop_lines = [
+                "Merged onto a tree that must not ship (see the warning in "
+                "each thread). Deploy skipped for these repos:"
+            ]
+            for repo, ts in stopped.items():
+                for t in ts:
+                    stop_lines.append(f"- {repo}: <#{t.thread_id}>")
+            await _say(bot, origin, "\n".join(stop_lines))
 
-        # Per-repo gate: never deploy a half-shipped repo. Deploy the bot's
+        # Per-repo gate: never deploy a half-shipped repo, nor one a merge
+        # just reported as broken or missing a release. Deploy the bot's
         # own repo LAST — a self deploy reboots the process and would kill
         # the remaining command deploys mid-flight.
-        deployable = [r for r in by_repo if r not in failed and merged.get(r)]
+        deployable = [
+            r for r in by_repo
+            if r not in failed and r not in stopped and merged.get(r)
+        ]
         deployable.sort(key=lambda r: _deploy_method(bot._store, r) == "self")
         for repo in deployable:
             await _deploy_and_verify(bot, origin, repo, merged[repo])
@@ -326,7 +346,7 @@ async def run_fleet_ship(
         await _say(bot, origin, "❌ Fleet ship hit an internal error — check logs.")
 
 
-async def _ship_one(bot: ClaudeBot, t: ShipTarget) -> bool:
+async def _ship_one(bot: ClaudeBot, t: ShipTarget) -> MergeOutcome:
     """Merge one thread's branch; on failure post the standard merge-failed UI."""
     from bot.engine.steps import _finalize_merge, record_merge_failure
 
@@ -337,11 +357,13 @@ async def _ship_one(bot: ClaudeBot, t: ShipTarget) -> bool:
         thread_info=info, source="fleet",
     )
     try:
-        ok = await _finalize_merge(ctx, t.inst, close_silent=True, skip_close=True)
+        outcome = await _finalize_merge(ctx, t.inst, close_silent=True, skip_close=True)
     except Exception:
         log.exception("fleet: merge crashed for %s", t.thread_id)
-        return False
-    if ok:
+        return MergeOutcome.FAILED
+    if outcome is not MergeOutcome.FAILED:
+        # STOPPED landed the branch too, so a failed-merge record from an
+        # earlier attempt is just as stale there.
         # Clear any stale failed-merge record from an earlier attempt —
         # while one exists, every prompt dispatched into the thread gets
         # the "[system note: auto-merge still unresolved]" prefix, which
@@ -359,7 +381,7 @@ async def _ship_one(bot: ClaudeBot, t: ShipTarget) -> bool:
         await record_merge_failure(
             ctx, t.inst, session_id=t.session_id, channel_id=t.thread_id,
         )
-    return ok
+    return outcome
 
 
 async def _deploy_and_verify(
