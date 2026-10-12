@@ -14,6 +14,7 @@ from bot.claude.types import (
 )
 from bot.engine import cmd_state, lifecycle
 from bot.platform.base import RequestContext
+from bot.platform.modes import cap_mode
 from bot.platform.formatting import (
     action_button_specs,
     running_button_specs,
@@ -191,11 +192,7 @@ async def spawn_from(
         return None
 
     # Enforce mode ceiling for non-owner sessions
-    effective_spawn_mode = cfg.mode
-    if ctx.mode_ceiling:
-        _rank = {"explore": 0, "plan": 1, "build": 2}
-        if _rank.get(cfg.mode, 0) > _rank.get(ctx.mode_ceiling, 0):
-            effective_spawn_mode = ctx.mode_ceiling
+    effective_spawn_mode = cap_mode(cfg.mode, ctx.mode_ceiling)
 
     # Apply permission_mode floor BEFORE create_instance so the new mode
     # is what gets persisted from the start (no race window where a parent's

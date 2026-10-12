@@ -27,6 +27,7 @@
 - Merging after Claude resolved a conflict now clears the branch from every instance and from history. Both resolver exits read the branch name after the merge had already erased it, so the cleanup did nothing and the branch kept showing in later prompts.
 - The Merge button on a finished Done card no longer closes the thread when the merge landed on a tree that is missing an earlier release or was left broken. Closing it archived the only warning. No merge path now refreshes deploy state for such a tree; before, only the chain's merge held back.
 - /bg and /release now run through the same path as every other run (E3): a reboot waits for them, their directives and self-wakes are acted on, the result shows the cleaned text, a finished background task notifies, a crash is reported on the card, and a /release in a sessionless thread hands the thread its session.
+- The Mode and Effort buttons on a session's welcome card read the thread's real settings instead of the card's labels, so an older card no longer redraws its buttons on a guessed effort; an owner pressing Effort outside a thread now sets the default, as Mode already did.
 
 ### Changed
 - **One atomic file writer** (`bot/fsutil.py`). Five modules hand-rolled write-temp-then-rename, three of them with a fixed `<name>.tmp` that two concurrent writers could truncate under each other; the eval files were written non-atomically. All of them, and the Cursor rules file whose `TODO(cursor-concurrency)` asked for exactly this, use `atomic_write_text` / `atomic_write_json` now: unique temp name in the same directory, nothing stranded on failure. `state.json` and the session index keep their own writers, which need a step between write and rename.
@@ -64,6 +65,7 @@
 - One case-insensitive repo-name lookup shared by the chat path, the /spawn directive, /new, /access grant and the guest access check, and one budget refusal for /bg, /release, /retry, typed messages and spawned steps, which now all mention /budget reset (E20).
 - Session and chain eval files are written and read through one helper each instead of twin copies (E24).
 - Timed messages (a broadcast with a ttl, and slash-command replies in The Ark) share one sleep-then-delete helper instead of two copies.
+- The mode ceiling (a guest's highest allowed mode) is one rule in one place instead of four copies; a grant with no mode recorded now caps at Explore instead of producing an empty mode.
 
 ### Removed
 - **Code nothing called anymore.** The legacy `data/wake/*.json` self-wake path (and `WAKE_DIR` with its startup sweep), since every wake has been a `/wake` directive for months; an unreachable second `log` branch in the button dispatcher; `on_unknown_command`; `format_expanded_result_md`; two unused embed-limit constants; the `DONE_PROMPT` alias; `CgroupMemory.headroom_mb` and `MemoryPressure.at_least`; `SensorResult.duration_s`, which was written and never read; `session_index.cwd_to_project_dir_name`, a copy of `session_fork.encode_project_path`; and an unused parameter on the Discord rate-limit callback factory.

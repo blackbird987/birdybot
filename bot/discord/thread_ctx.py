@@ -15,13 +15,13 @@ import discord
 
 from bot import config
 from bot.discord import channels
-from bot.discord import access as access_mod
-from bot.discord.access import AccessResult, effective_mode as access_effective_mode
+from bot.discord.access import AccessResult
 from bot.discord import idle as idle_mod
 from bot.discord import spawn_colors
 from bot.discord.forums import ThreadInfo
 from bot.engine import commands
 from bot.platform.base import RequestContext, SpawnArgs, SpawnResult
+from bot.platform.modes import cap_mode
 
 log = logging.getLogger(__name__)
 
@@ -59,18 +59,17 @@ class ThreadContextMixin:
             if not access_result.is_owner and access_result.mode_ceiling:
                 ctx.mode_ceiling = access_result.mode_ceiling
                 current = ctx.mode or self._store.mode
-                ctx.mode = access_effective_mode(
-                    access_mod.RepoAccess(mode=access_result.mode_ceiling),
-                    current,
-                )
+                ctx.mode = cap_mode(current, access_result.mode_ceiling)
             if not access_result.is_owner and access_result.bash_policy:
                 ctx.bash_policy = access_result.bash_policy
             if not access_result.is_owner and access_result.max_daily_queries > 0:
                 ctx.max_daily_queries = access_result.max_daily_queries
+
                 def _make_rate_callbacks(uid, max_q):
                     def _check():
                         from bot.discord.access import load_access_config, check_rate_limit
                         return check_rate_limit(load_access_config(), uid, max_q)
+
                     def _increment():
                         from bot.discord.access import load_access_config, increment_query_count
                         increment_query_count(load_access_config(), uid)

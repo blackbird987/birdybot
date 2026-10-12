@@ -12,17 +12,18 @@ import discord
 from bot.claude.runner import (
     RebootResult, git_fail_reason,
 )
-from bot.discord import access as access_mod
 from bot.discord import channels
 from bot.discord.deploy_flow import _handle_approve_deploy, _handle_reboot_repo
-from bot.discord.access import AccessResult, load_access_config, effective_mode as access_effective_mode
+from bot.discord.access import AccessResult, load_access_config
 from bot.discord.modals import QuickTaskModal
 from bot.engine import commands
 from bot.engine import sessions as sessions_mod
 from bot.platform.formatting import MODE_COLOR, VALID_EFFORTS, VALID_MODES, effort_name, mode_name
+from bot.platform.modes import cap_mode
 
 if TYPE_CHECKING:
     from bot.discord.bot import ClaudeBot
+    from bot.discord.forums import ThreadInfo
 
 log = logging.getLogger(__name__)
 
@@ -760,38 +761,54 @@ async def _handle_repo_switch(
             )
 
 
+def _thread_settings(bot: ClaudeBot, thread_id: str) -> tuple[ThreadInfo | None, str, str]:
+    """The thread's state, and its effective mode and effort.
+
+    Read from the thread (falling back to the deployment default), never from
+    the welcome embed's field labels: an embed posted before the Effort field
+    existed, or one whose label wording changed, would otherwise rebuild the
+    buttons on the wrong value.
+    """
+    lookup = bot._forums.thread_to_project(thread_id)
+    info = lookup[1] if lookup else None
+    mode = (info.mode if info else None) or bot._store.mode
+    effort = (info.effort if info else None) or bot._store.effort
+    return info, mode, effort
+
+
+async def _redraw_session_controls(
+    interaction: discord.Interaction, mode: str, effort: str,
+) -> None:
+    """Show *mode* and *effort* on the welcome embed and its buttons."""
+    if not (interaction.message and interaction.message.embeds):
+        await interaction.response.defer()
+        return
+    embed = interaction.message.embeds[0]
+    embed.color = discord.Color(MODE_COLOR.get(mode, 0x5865F2))
+    for name, value in (("Mode", mode_name(mode)), ("Effort", effort_name(effort))):
+        idx = next((i for i, f in enumerate(embed.fields) if f.name == name), None)
+        if idx is None:
+            embed.add_field(name=name, value=value, inline=True)
+        else:
+            embed.set_field_at(idx, name=name, value=value, inline=True)
+    view = channels.session_controls_view(mode, effort)
+    await interaction.response.edit_message(embed=embed, view=view)
+
+
 async def _handle_mode_set(
     bot: ClaudeBot, interaction: discord.Interaction,
     target_mode: str, btn_access: AccessResult,
 ) -> None:
-    if not btn_access.is_owner and btn_access.mode_ceiling:
-        target_mode = access_effective_mode(
-            access_mod.RepoAccess(mode=btn_access.mode_ceiling), target_mode,
-        )
+    if not btn_access.is_owner:
+        target_mode = cap_mode(target_mode, btn_access.mode_ceiling)
     thread_id = str(interaction.channel_id)
-    lookup = bot._forums.thread_to_project(thread_id)
-    if lookup:
-        lookup[1].mode = target_mode
+    info, _, effort = _thread_settings(bot, thread_id)
+    if info:
+        info.mode = target_mode
         bot._forums.save_forum_map()
     elif btn_access.is_owner:
         bot._store.mode = target_mode
-    if interaction.message and interaction.message.embeds:
-        embed = interaction.message.embeds[0]
-        embed.color = discord.Color(MODE_COLOR.get(target_mode, 0x5865F2))
-        for i, field_obj in enumerate(embed.fields):
-            if field_obj.name == "Mode":
-                embed.set_field_at(i, name="Mode", value=mode_name(target_mode), inline=True)
-                break
-        # Read current effort from embed (default "high" for old embeds)
-        current_effort = "high"
-        for field_obj in embed.fields:
-            if field_obj.name == "Effort":
-                current_effort = field_obj.value.lower()
-                break
-        view = channels.session_controls_view(target_mode, current_effort)
-        await interaction.response.edit_message(embed=embed, view=view)
-    else:
-        await interaction.response.defer()
+    await _redraw_session_controls(interaction, target_mode, effort)
     asyncio.create_task(bot._try_apply_tags_after_run(thread_id))
     log.info("Mode set to %s via welcome button", target_mode)
 
@@ -801,35 +818,15 @@ async def _handle_effort_set(
     target_effort: str, btn_access: AccessResult,
 ) -> None:
     thread_id = str(interaction.channel_id)
-    lookup = bot._forums.thread_to_project(thread_id)
-    if lookup:
-        lookup[1].effort = target_effort
+    info, mode, _ = _thread_settings(bot, thread_id)
+    if info:
+        info.effort = target_effort
         bot._forums.save_forum_map()
-    if interaction.message and interaction.message.embeds:
-        embed = interaction.message.embeds[0]
-        # Update or add Effort field
-        found = False
-        for i, field_obj in enumerate(embed.fields):
-            if field_obj.name == "Effort":
-                embed.set_field_at(i, name="Effort", value=effort_name(target_effort), inline=True)
-                found = True
-                break
-        if not found:
-            embed.add_field(name="Effort", value=effort_name(target_effort), inline=True)
-        # Read current mode from embed to rebuild view
-        current_mode = "explore"
-        for field_obj in embed.fields:
-            if field_obj.name == "Mode":
-                for m in ("explore", "plan", "build"):
-                    if mode_name(m) == field_obj.value:
-                        current_mode = m
-                        break
-                break
-        view = channels.session_controls_view(current_mode, target_effort)
-        await interaction.response.edit_message(embed=embed, view=view)
-    else:
-        await interaction.response.defer()
+    elif btn_access.is_owner:
+        bot._store.effort = target_effort
+    await _redraw_session_controls(interaction, mode, target_effort)
     log.info("Effort set to %s via welcome button", target_effort)
+
 
 async def _handle_load_history(
     bot: ClaudeBot, interaction: discord.Interaction, cli_session_id: str,

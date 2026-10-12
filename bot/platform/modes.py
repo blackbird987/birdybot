@@ -29,6 +29,21 @@ MODE_COLOR: dict[str, int] = {
 
 VALID_MODES = frozenset(MODE_DISPLAY)
 
+# Least to most capable. An unknown mode ranks as explore.
+MODE_RANK: dict[str, int] = {"explore": 0, "plan": 1, "build": 2}
+
+
+def cap_mode(requested: str, ceiling: str | None) -> str:
+    """*requested*, lowered to *ceiling* when it ranks above it.
+
+    The one implementation of the mode ceiling: an access grant, a thread's
+    /mode, a mode button and a spawned workflow step all go through it.
+    """
+    if ceiling and MODE_RANK.get(requested, 0) > MODE_RANK.get(ceiling, 0):
+        return ceiling
+    return requested
+
+
 # Mode cycle order for the toggle button
 _NEXT_MODE: dict[str, str] = {"explore": "plan", "plan": "build", "build": "explore"}
 

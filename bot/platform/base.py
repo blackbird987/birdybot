@@ -8,6 +8,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from bot.platform.modes import cap_mode
+
 if TYPE_CHECKING:
     from bot.claude.runner import ClaudeRunner
     from bot.store.state import StateStore
@@ -356,11 +358,7 @@ class RequestContext:
 
     def update_mode(self, value: str) -> None:
         # Enforce mode ceiling for non-owners
-        if self.mode_ceiling:
-            _rank = {"explore": 0, "plan": 1, "build": 2}
-            if _rank.get(value, 0) > _rank.get(self.mode_ceiling, 0):
-                value = self.mode_ceiling
-        self.mode = value
+        self.mode = cap_mode(value, self.mode_ceiling)
 
     def update_context(self, value: str | None) -> None:
         self.context = value if value is not None else ""  # "" = explicitly cleared
