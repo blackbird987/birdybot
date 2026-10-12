@@ -35,6 +35,8 @@
 
 - [x] **Two test scripts failed at HEAD and were unregistered** (done 2026-10-12): `scripts/test_extract_latest_plan_text.py` and `scripts/test_model_limit_failover.py`. The earlier note here called the model-limit failures genuine; they were not. The live `.env` sets `DEFAULT_SESSION_MODEL`, which made every model read as non-primary, and `load_dotenv(override=True)` means an environment variable cannot undo it. The test now pins the setting itself, `scripts/run_harnesses.py` pins it for every harness, and the plan-text extractor's fake store gained the method it was missing. Both are registered.
 
+- [ ] **Legacy Verify Board and archive-channel migration in `bot/discord/forums.py`** (left in place by the 2026-10 refactor): the Verify Board was removed in 48ce49e (v0.94.0) and the archive-channel migration dates from 4fe1b13 (2026-03-21). This machine's `data/state.json` carries neither `verify_board_thread_id` nor `archive_channel_id` on any of its forum projects, but the other machine's state was not checked, and removing the migration there would strand an old archive channel. Delete `ForumProject.archive_channel_id` / `legacy_verify_thread_id`, `_migrate_archive_channel` and the Verify Board cleanup in `reconcile_forums` once that machine has been started on a current build (or its state.json checked for the two keys).
+
 ## Deferred Revisions
 <!-- Auto-managed by code review. Remove items when addressed. -->
 - [ ] [UX/UI] Mention text should vary by outcome not just path (Low)

@@ -29,7 +29,9 @@ from bot.engine import sessions as sessions_mod
 from bot.platform.base import RequestContext
 
 if TYPE_CHECKING:
+    from bot.claude.types import Instance
     from bot.discord.adapter import DiscordMessenger
+    from bot.platform.formatting import FinalizeInfo
     from bot.store.state import StateStore
 
 log = logging.getLogger(__name__)
@@ -1347,11 +1349,8 @@ class ForumManager:
     async def post_archive_entry(self, channel_id: str) -> None:
         """Post a session summary + link to the archive thread.
 
-        Uses a waterfall to find the best summary:
-        1. CHANGELOG entries from DONE/COMMIT instance result file
-        2. BUILD instance summary (first paragraph of build output)
-        3. Most recent non-DONE instance summary
-        4. Thread topic fallback
+        The summary is chosen by ``pick_archive_summary`` and the line built by
+        ``format_archive_entry``; this only finds where it goes and posts it.
         """
         proj_info = self.thread_to_project(channel_id)
         if not proj_info:
@@ -1360,88 +1359,14 @@ class ForumManager:
         if not info.session_id:
             return
 
-        from bot.claude.types import InstanceOrigin
-        from bot.platform.formatting import parse_finalize_output
-
         candidates = [
             i for i in self._store.list_instances()
             if i.session_id == info.session_id and i.summary
         ]
-
-        summary = None
-        inst = None  # best instance for metadata (status, mode, duration, cost)
-        finalize_info = None
-
-        if candidates:
-            candidates.sort(key=lambda i: i.finished_at or "", reverse=True)
-
-            # Pass 1: CHANGELOG entries from DONE/COMMIT result file
-            done_origins = {InstanceOrigin.DONE, InstanceOrigin.COMMIT}
-            for c in candidates:
-                if c.origin in done_origins and c.result_file:
-                    try:
-                        full_text = Path(c.result_file).read_text(encoding="utf-8")
-                        fi = parse_finalize_output(full_text)
-                        if fi and fi.changelog_entries:
-                            summary = "\n".join(f"- {e}" for e in fi.changelog_entries)
-                            finalize_info = fi
-                            inst = c
-                            break
-                    except OSError:
-                        pass
-
-            # Pass 2: BUILD instance summary
-            if not summary:
-                for c in candidates:
-                    if c.origin == InstanceOrigin.BUILD:
-                        summary = c.summary
-                        inst = c
-                        break
-
-            # Pass 3: Most recent instance, preferring non-DONE/COMMIT
-            if not summary:
-                for c in candidates:
-                    if c.origin not in done_origins:
-                        summary = c.summary
-                        inst = c
-                        break
-                if not summary:
-                    inst = candidates[0]
-                    summary = inst.summary
-
-        if not summary:
-            summary = info.topic or "No summary"
+        summary, inst, finalize_info = pick_archive_summary(candidates, info.topic)
+        msg = format_archive_entry(channel_id, summary, inst, finalize_info)
 
         archive_thread = await self.ensure_archive_thread(proj.repo_name)
-
-        if inst:
-            status_emoji = "\u2705" if inst.status.value == "completed" else "\u274c"
-            mode = inst.mode or "explore"
-            if len(summary) > 200:
-                summary = summary[:197] + "..."
-
-            extras: list[str] = []
-            if inst.duration_ms:
-                secs = inst.duration_ms / 1000
-                extras.append(f"{secs / 60:.0f}m" if secs >= 60 else f"{secs:.0f}s")
-            if inst.cost_usd:
-                extras.append(f"${inst.cost_usd:.2f}")
-            if finalize_info and finalize_info.commit_hash:
-                extras.append(f"`{finalize_info.commit_hash}`")
-            if finalize_info and finalize_info.version:
-                extras.append(finalize_info.version)
-            elif inst.branch:
-                extras.append(f"`{inst.branch}`")
-            extra_str = f" \u2014 {', '.join(extras)}" if extras else ""
-
-            msg = (
-                f"**Session {inst.status.value} {status_emoji}** \u00b7 "
-                f"{mode.title()}{extra_str}\n"
-                f"{summary}\n"
-                f"\U0001f517 <#{channel_id}>"
-            )
-        else:
-            msg = f"**Session closed**\n{summary}\n\U0001f517 <#{channel_id}>"
 
         # Collect archive targets: repo archive + personal forum archive if applicable
         targets: list[discord.Thread] = []
@@ -2319,3 +2244,101 @@ class ForumManager:
             lines.append(f"{role}: {text}")
         lines.append("--- End reference ---")
         return "\n".join(lines)
+
+
+def pick_archive_summary(
+    candidates: list[Instance], topic: str,
+) -> tuple[str, Instance | None, FinalizeInfo | None]:
+    """The best summary of a session for its archive entry.
+
+    *candidates* are the session's instances that carry a summary. Returns
+    ``(summary, instance, finalize_info)``: the instance supplies the entry's
+    status, mode, duration and cost, and is None only when there was nothing
+    to choose from. The waterfall:
+
+    1. CHANGELOG entries from a DONE/COMMIT instance's result file
+    2. the BUILD instance's summary
+    3. the newest instance's summary, preferring one that is not DONE/COMMIT
+    4. the thread topic
+    """
+    from bot.claude.types import InstanceOrigin
+    from bot.platform.formatting import parse_finalize_output
+
+    summary = None
+    inst = None  # best instance for metadata (status, mode, duration, cost)
+    finalize_info = None
+
+    if candidates:
+        candidates = sorted(candidates, key=lambda i: i.finished_at or "", reverse=True)
+
+        # Pass 1: CHANGELOG entries from DONE/COMMIT result file
+        done_origins = {InstanceOrigin.DONE, InstanceOrigin.COMMIT}
+        for c in candidates:
+            if c.origin in done_origins and c.result_file:
+                try:
+                    full_text = Path(c.result_file).read_text(encoding="utf-8")
+                    fi = parse_finalize_output(full_text)
+                    if fi and fi.changelog_entries:
+                        summary = "\n".join(f"- {e}" for e in fi.changelog_entries)
+                        finalize_info = fi
+                        inst = c
+                        break
+                except OSError:
+                    pass
+
+        # Pass 2: BUILD instance summary
+        if not summary:
+            for c in candidates:
+                if c.origin == InstanceOrigin.BUILD:
+                    summary = c.summary
+                    inst = c
+                    break
+
+        # Pass 3: Most recent instance, preferring non-DONE/COMMIT
+        if not summary:
+            for c in candidates:
+                if c.origin not in done_origins:
+                    summary = c.summary
+                    inst = c
+                    break
+            if not summary:
+                inst = candidates[0]
+                summary = inst.summary
+
+    if not summary:
+        summary = topic or "No summary"
+    return summary, inst, finalize_info
+
+
+def format_archive_entry(
+    channel_id: str, summary: str, inst: Instance | None,
+    finalize_info: FinalizeInfo | None,
+) -> str:
+    """The archive line for a session: status, mode, extras, summary, link."""
+    if inst:
+        status_emoji = "\u2705" if inst.status.value == "completed" else "\u274c"
+        mode = inst.mode or "explore"
+        if len(summary) > 200:
+            summary = summary[:197] + "..."
+
+        extras: list[str] = []
+        if inst.duration_ms:
+            secs = inst.duration_ms / 1000
+            extras.append(f"{secs / 60:.0f}m" if secs >= 60 else f"{secs:.0f}s")
+        if inst.cost_usd:
+            extras.append(f"${inst.cost_usd:.2f}")
+        if finalize_info and finalize_info.commit_hash:
+            extras.append(f"`{finalize_info.commit_hash}`")
+        if finalize_info and finalize_info.version:
+            extras.append(finalize_info.version)
+        elif inst.branch:
+            extras.append(f"`{inst.branch}`")
+        extra_str = f" \u2014 {', '.join(extras)}" if extras else ""
+
+        return (
+            f"**Session {inst.status.value} {status_emoji}** \u00b7 "
+            f"{mode.title()}{extra_str}\n"
+            f"{summary}\n"
+            f"\U0001f517 <#{channel_id}>"
+        )
+    return f"**Session closed**\n{summary}\n\U0001f517 <#{channel_id}>"
