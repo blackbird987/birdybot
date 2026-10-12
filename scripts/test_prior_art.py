@@ -46,7 +46,7 @@ from bot.claude.types import InstanceOrigin  # noqa: E402
 from bot.engine import commands, prior_art  # noqa: E402
 from bot.engine import eval as eval_mod  # noqa: E402
 from bot.engine import prompt_review as pr  # noqa: E402
-from bot.engine import workflows  # noqa: E402
+from bot.engine import chain_runner, steps, workflows  # noqa: E402
 
 failures: list[str] = []
 checks = 0
@@ -332,8 +332,9 @@ async def fake_spawn_from(ctx, source_id, cfg, source_msg_id=None):
     return None
 
 
-_orig_spawn = workflows.spawn_from
-workflows.spawn_from = fake_spawn_from
+# Both readers: the Review Plan button (steps) and the autopilot loop (chain_runner).
+_orig_spawn = steps.spawn_from
+steps.spawn_from = chain_runner.spawn_from = fake_spawn_from
 try:
     ctx = SimpleNamespace(store=FakeStore({"p-1": source_inst(plan)}))
     asyncio.run(workflows.on_review_plan(ctx, "p-1"))
@@ -358,7 +359,7 @@ try:
           and "Previously deferred review items" in prompt
           and prompt.endswith(config.PLAN_REVIEW_PROMPT), prompt[:120])
 finally:
-    workflows.spawn_from = _orig_spawn
+    steps.spawn_from = chain_runner.spawn_from = _orig_spawn
 
 # /chain: the override carries plan, block and instruction.
 chain_text = (

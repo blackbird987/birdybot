@@ -99,7 +99,7 @@ async def collect_ship_targets(bot: ClaudeBot) -> list[ShipTarget]:
     autopilot-chain state — a paused/interrupted chain owns its thread's
     lifecycle (it will merge on resume); shipping under it would race.
     """
-    from bot.engine.workflows import _find_session_branch_instance
+    from bot.engine.chain_git import _find_session_branch_instance
 
     store, runner, forums = bot._store, bot._runner, bot._forums
     chained_sessions = set((store.get_all_autopilot_chains() or {}).keys())
@@ -329,7 +329,7 @@ async def run_fleet_ship(
 
 async def _ship_one(bot: ClaudeBot, t: ShipTarget) -> bool:
     """Merge one thread's branch; on failure post the standard merge-failed UI."""
-    from bot.engine.workflows import _finalize_merge
+    from bot.engine.steps import _finalize_merge
 
     lookup = bot._forums.thread_to_project(t.thread_id)
     info = lookup[1] if lookup else None

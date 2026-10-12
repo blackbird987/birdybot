@@ -32,7 +32,7 @@ from types import SimpleNamespace
 from bot.claude.runner import RebootResult
 from bot.claude.types import InstanceStatus
 from bot.discord import fleet
-import bot.engine.workflows as workflows
+import bot.engine.steps as steps
 import bot.discord.interactions as interactions
 
 _failures: list[str] = []
@@ -198,7 +198,7 @@ async def scenario_happy_command_deploy():
         bot_._store.events.append(f"deploy:{repo}")
         return True, "ok", ""
 
-    workflows._finalize_merge = fake_finalize
+    steps._finalize_merge = fake_finalize
     interactions.execute_deploy = fake_deploy
 
     await fleet.run_fleet_ship(bot, "origin-1", ["101", "102"])
@@ -237,7 +237,7 @@ async def scenario_merge_failure_gates_deploy():
         deploys.append(repo)
         return True, "ok", ""
 
-    workflows._finalize_merge = fake_finalize
+    steps._finalize_merge = fake_finalize
     interactions.execute_deploy = fake_deploy
 
     await fleet.run_fleet_ship(bot, "origin-2", ["201", "202"])
@@ -266,7 +266,7 @@ async def scenario_deploy_failure_skips_verify():
     async def fake_deploy(bot_, repo, cfg, **kw):
         return False, "boom", "exit 1"
 
-    workflows._finalize_merge = fake_finalize
+    steps._finalize_merge = fake_finalize
     interactions.execute_deploy = fake_deploy
 
     await fleet.run_fleet_ship(bot, "origin-3", ["301"])
@@ -289,7 +289,7 @@ async def scenario_self_deploy_boot_drain():
     async def fake_finalize(ctx, inst, **kw):
         return True
 
-    workflows._finalize_merge = fake_finalize
+    steps._finalize_merge = fake_finalize
 
     await fleet.run_fleet_ship(bot, "origin-4", ["401"])
     await asyncio.sleep(0.05)
@@ -331,7 +331,7 @@ async def scenario_noop_replay_not_closed():
     async def fake_deploy(bot_, repo, cfg, **kw):
         return True, "ok", ""
 
-    workflows._finalize_merge = fake_finalize
+    steps._finalize_merge = fake_finalize
     interactions.execute_deploy = fake_deploy
 
     await fleet.run_fleet_ship(bot, "origin-5", ["501"])

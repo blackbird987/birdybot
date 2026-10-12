@@ -1536,7 +1536,7 @@ class StateStore:
     ) -> None:
         """Persist chain entry-point kwargs so resume can restore them.
 
-        Written once at chain launch (see `_launch_chain` in workflows.py).
+        Written once at chain launch (see `_launch_chain` in chain_runner.py).
         Resume paths read via `get_chain_kwargs` so a paused Build & Ship that
         the user taps Continue on doesn't revert to "Autopilot" labeling and
         loud close. Unconditional write — no chain-queue guard — because the

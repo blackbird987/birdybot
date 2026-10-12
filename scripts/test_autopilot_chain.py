@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Characterization test: the autopilot chain loop in bot/engine/workflows.py.
+"""Characterization test: the autopilot chain loop in bot/engine/chain_runner.py.
 
 ``_run_autopilot_chain`` drives build -> sensors -> review_code -> verify ->
 done -> verify_release -> release -> merge, and every entry point (Autopilot,
@@ -30,8 +30,8 @@ What is pinned:
   * multi-phase builds (spawn sequence, design gate, risk gate);
   * resume (`resume_autopilot_chain` skips the answered step, restores kwargs).
 
-Everything external is stubbed at the ``workflows`` module attribute the loop
-reads: the step functions (``on_sensors``, ``on_review_code``, ``on_verify``,
+Everything external is stubbed at the ``chain_runner`` module attribute the
+loop reads (patching the ``workflows`` re-export would change nothing): the step functions (``on_sensors``, ``on_review_code``, ``on_verify``,
 ``on_done``, ``on_verify_release``, ``on_release_chain``, ``spawn_from``,
 ``_review_plan_loop``, ``_finalize_merge``), the git helpers (``_git_head``,
 ``_git_head_sha``, ``_resolve_chain_repo_path``, ``_find_mergeable_instance``,
@@ -61,7 +61,7 @@ from bot.claude.types import (  # noqa: E402
     ChainPhaseState, Instance, InstanceOrigin, InstanceStatus, InstanceType,
     Phase,
 )
-from bot.engine import workflows  # noqa: E402
+from bot.engine import chain_runner, workflows  # noqa: E402
 from bot.platform.base import RequestContext  # noqa: E402
 from bot.store.state import StateStore  # noqa: E402
 
@@ -259,8 +259,8 @@ class Scenario:
 
     # ----- patching
     def _patch(self, name: str, value) -> None:
-        self._undo.append((workflows, name, getattr(workflows, name)))
-        setattr(workflows, name, value)
+        self._undo.append((chain_runner, name, getattr(chain_runner, name)))
+        setattr(chain_runner, name, value)
 
     def _install(self) -> None:
         sc = self

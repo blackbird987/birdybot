@@ -15,7 +15,7 @@ the model. Two reasons it is the bot doing the reading rather than the
 session:
 
 - **The plan reviewer cannot run git.** It runs behind the read-only floor
-  (`workflows._enforce_readonly_floor`), which closes Bash along with the
+  (`step_spawn._enforce_readonly_floor`), which closes Bash along with the
   write tools. That floor exists because Bash is a write backdoor, and it is
   not loosened for this.
 - **An instruction to "check the history" is the soft guard.** It gets skipped

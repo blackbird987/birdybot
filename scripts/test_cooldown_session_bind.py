@@ -278,14 +278,14 @@ def _func_body(source: str, header: str) -> str:
     return rest[:end.start()] if end else rest
 
 
-def _command_sources() -> str:
-    """The source of every module bot.engine.commands re-exports from.
+def _command_sources(facade_name: str = "commands") -> str:
+    """The source of every module a bot.engine facade re-exports from.
 
-    commands.py is a re-export facade over the command modules, so a scan of
-    that one file would find nothing and pass.
+    commands.py and workflows.py are re-export facades over their split
+    modules, so a scan of the facade alone would find nothing and pass.
     """
     import ast
-    facade = os.path.join(_ROOT, "bot", "engine", "commands.py")
+    facade = os.path.join(_ROOT, "bot", "engine", facade_name + ".py")
     mods = [n.module for n in ast.parse(open(facade, encoding="utf-8").read()).body
             if isinstance(n, ast.ImportFrom) and (n.module or "").startswith("bot.engine.")]
     return "\n".join(
@@ -312,9 +312,9 @@ print("direct run_instance callers — each tops up a sessionless thread")
 
 _app = open(os.path.join(_ROOT, "bot", "app.py"), encoding="utf-8").read()
 _cmds = _command_sources()
-_flows = open(os.path.join(_ROOT, "bot", "engine", "workflows.py"),
-              encoding="utf-8").read()
+_flows = _command_sources("workflows")
 
+_check("workflow step sources located", "async def _run_autopilot_chain(" in _flows)
 _body = _func_body(_app, "async def _do_cooldown_retry_locked(")
 _check("_do_cooldown_retry_locked located", bool(_body))
 _check("cooldown retry attaches session callbacks (else it cannot bind at all)",
@@ -352,7 +352,7 @@ for _mod, _text, _expect in (("bot/app.py", _app, 1),
         print(f"        unbacked call sites at lines: {_gaps}")
 
 _check(
-    "workflows.py deliberately does NOT backfill (a step's session is the "
+    "workflow step modules deliberately do NOT backfill (a step's session is the "
     "step's, not the conversation's)",
     "backfill_thread_session" not in _flows,
 )

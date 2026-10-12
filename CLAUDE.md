@@ -15,7 +15,8 @@ python -m bot          # start the bot
 - **Log file**: `data/logs/bot.log`
 - **State**: `data/state.json`
 - **Engine** (platform-agnostic): `bot/engine/commands.py`, `lifecycle.py`, `workflows.py`, `sessions.py`, `eval.py`, `report.py`
-- **Commands**: `bot/engine/commands.py` only re-exports. The handlers live in `query.py` (typed messages), `directives/` (`dispatch`, `chain`, `spawn`, `reply`), `instance_cmds.py`, `branch_actions.py`, `resolver.py`, `repo_cmds.py`, `settings_cmds.py`, `admin_cmds.py`, `callbacks.py` (button dispatch) and `cmd_state.py` (uptime, channel locks, budget gate). Patch a name in the module that reads it; only `on_text` and `handle_callback` may be patched on the facade, because the Discord layer calls them through it (`scripts/test_commands_facade.py`)
+- **Commands**: `bot/engine/commands.py` only re-exports. The handlers live in `query.py` (typed messages), `directives/` (`dispatch`, `chain`, `spawn`, `reply`), `instance_cmds.py`, `branch_actions.py`, `resolver.py`, `repo_cmds.py`, `settings_cmds.py`, `admin_cmds.py`, `callbacks.py` (button dispatch) and `cmd_state.py` (uptime, channel locks, budget gate). Patch a name in the module that reads it; only `on_text` and `handle_callback` may be patched on the facade, because the Discord layer calls them through it (`scripts/test_facades.py`)
+- **Workflows**: `bot/engine/workflows.py` only re-exports too. Step handlers live in `steps.py` (plan, build, review, verify, commit, done, merge), `release_steps.py`, `chain_runner.py` (autopilot and /chain loops), `step_spawn.py` (`spawn_from`), `step_parse.py` (review, plan and verify parsing), `step_policy.py` (presets, verify and merge policy) and `chain_git.py` (git reads and instance lookups). Only `on_autopilot` and `on_conversational_chain` may be patched on the facade
 - **Runner** (`bot/claude/runner/`, a package of mixins): `core.py` (ClaudeRunner: spawn, stream, recovery, kills), `accounts.py`, `admission.py`, `prompt_build.py`, `session_files.py`, `worktrees.py`, `git_merge.py`, `git_release.py`, `reaping.py`, `common.py`. `__init__.py` only re-exports, so patch a name in the module that reads it, never on the package (`scripts/test_runner_package.py` fails a blind patch)
 - **Platform layer**: `bot/platform/base.py` (Messenger protocol), `bot/platform/formatting.py`
 - **Discord**: `bot/discord/bot.py` (orchestrator), `slash_commands.py`, `interactions.py`, `adapter.py`, `channels.py`, `forums.py`, `idle.py`, `tags.py`, `modals.py`, `monitoring.py`, `formatter.py`
@@ -184,7 +185,7 @@ Harness: `python scripts/test_repo_desc.py`
 thread, so it came back a different shape each time and usually full of file
 paths and function names, which is unreadable on the phone it is read on. The
 [TL;DR] button and `/tldr` make it one prompt (`config.TLDR_PROMPT`,
-`workflows.on_tldr`).
+`steps.on_tldr`).
 
 The load-bearing decision is that there are **two** shapes and the session
 picks between them, rather than one template stretched over both:
@@ -378,7 +379,7 @@ a point where the revert is still undoable:
   does **not**: the branch landed perfectly well, and treating it as a merge
   failure would hand it to the cleanup and retry path it does not belong in.
   Same pattern as `REPO_UNUSABLE_MARKER` next door. Under autopilot,
-  `workflows._finalize_merge` stops on the marker **before**
+  `steps._finalize_merge` stops on the marker **before**
   `apply_post_merge_deploy` and `close_conversation`, so the chain never ships
   a tree that reverts a release and never closes the thread on one.
 - **On discard.** A build branch can be the only place a release tag lives,
