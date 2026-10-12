@@ -73,6 +73,7 @@
 - Buttons that act on their own are dispatched from one table instead of a 30-branch if-chain, with the owner-only ones named in one set and a test that every entry reaches its handler.
 - Engine button callbacks dispatch from three tables (instance actions, workflow steps, mode switches) instead of one long elif chain; workflow steps are still read off the facade at tap time, so patches keep working.
 - Repo forums and personal forums now share one implementation of auto-follow, archive-thread reuse and the Control Room refresh (including its self-healing when the post or message was deleted); a bad user id in the access config is now skipped instead of aborting auto-follow.
+- The per-run watchdog (orphan safety-net, memory guard, stall warning) is a class of its own instead of a 330-line closure inside the stream reader; its rules, their order and the tell-before-kill reap are unchanged.
 
 ### Removed
 - **Code nothing called anymore.** The legacy `data/wake/*.json` self-wake path (and `WAKE_DIR` with its startup sweep), since every wake has been a `/wake` directive for months; an unreachable second `log` branch in the button dispatcher; `on_unknown_command`; `format_expanded_result_md`; two unused embed-limit constants; the `DONE_PROMPT` alias; `CgroupMemory.headroom_mb` and `MemoryPressure.at_least`; `SensorResult.duration_s`, which was written and never read; `session_index.cwd_to_project_dir_name`, a copy of `session_fork.encode_project_path`; and an unused parameter on the Discord rate-limit callback factory.

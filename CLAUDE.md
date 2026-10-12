@@ -17,7 +17,7 @@ python -m bot          # start the bot
 - **Engine** (platform-agnostic): `bot/engine/commands.py`, `lifecycle.py`, `workflows.py`, `sessions.py`, `eval.py`, `report.py`
 - **Commands**: `bot/engine/commands.py` only re-exports. The handlers live in `query.py` (typed messages), `directives/` (`dispatch`, `chain`, `spawn`, `reply`), `instance_cmds.py`, `branch_actions.py`, `resolver.py`, `repo_cmds.py`, `settings_cmds.py`, `admin_cmds.py`, `callbacks.py` (button dispatch) and `cmd_state.py` (uptime, channel locks, budget gate). Patch a name in the module that reads it; only `on_text` and `handle_callback` may be patched on the facade, because the Discord layer calls them through it (`scripts/test_facades.py`)
 - **Workflows**: `bot/engine/workflows.py` only re-exports too. Step handlers live in `steps.py` (plan, build, review, verify, commit, done, merge), `release_steps.py`, `chain_runner.py` (autopilot and /chain loops), `step_spawn.py` (`spawn_from`), `step_parse.py` (review, plan and verify parsing), `step_policy.py` (presets, verify and merge policy) and `chain_git.py` (git reads and instance lookups). Only `on_autopilot` and `on_conversational_chain` may be patched on the facade
-- **Runner** (`bot/claude/runner/`, a package of mixins): `core.py` (ClaudeRunner: spawn, stream, recovery, kills), `accounts.py`, `admission.py`, `prompt_build.py`, `session_files.py`, `worktrees.py`, `git_merge.py`, `git_release.py`, `reaping.py`, `common.py`. `__init__.py` only re-exports, so patch a name in the module that reads it, never on the package (`scripts/test_runner_package.py` fails a blind patch)
+- **Runner** (`bot/claude/runner/`, a package of mixins): `core.py` (ClaudeRunner: spawn, stream, recovery, kills), `accounts.py`, `admission.py`, `prompt_build.py`, `session_files.py`, `worktrees.py`, `git_merge.py`, `git_release.py`, `reaping.py`, `watchdog.py` (the per-run age, memory and stall checks), `common.py`. `__init__.py` only re-exports, so patch a name in the module that reads it, never on the package (`scripts/test_runner_package.py` fails a blind patch)
 - **Platform layer**: `bot/platform/base.py` (Messenger protocol), `bot/platform/formatting.py` (re-exports `buttons.py`, `modes.py`, `redact.py`)
 - **Discord**: `bot/discord/bot.py` (orchestrator; its usage gate, turn context and startup work are mixins in `usage_gate.py`, `thread_ctx.py`, `startup.py`), `attachments.py`, `slash_commands.py`, `interactions.py` (deploys and the Reboot button in `deploy_flow.py`), `adapter.py`, `channels.py`, `forums.py`, `idle.py`, `tags.py`, `modals.py`, `monitoring.py`, `formatter.py`
 
@@ -458,7 +458,7 @@ Three things that must not drift:
   subscription to burn the same hours again.
 - The session is told **before** `proc.terminate()`, not after. Terminating
   closes the CLI's stdout, which ends the reader loop, whose `finally` cancels
-  the watchdog — same ordering rule as `reap_this_session` in the memory guard.
+  the watchdog — same ordering rule as `_reap_session` in the memory guard.
 - The reap's return must stay **below** the two stand-downs, which both reaps
   share: a `result` event proving the turn finished anyway, and the session
   being in `_intentional_kills`. A user's Kill landing inside the reap window

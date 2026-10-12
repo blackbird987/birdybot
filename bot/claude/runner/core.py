@@ -59,18 +59,14 @@ from bot.claude.runner.common import (
     _notify,
 )
 from bot.claude.runner.reaping import (
-    _capture_process_snapshot,
     _classify_oom_kill,
-    _fleet_kill_detail,
-    _lifetime_kill_detail,
     _lifetime_kill_result,
-    _memory_kill_detail,
     _memory_kill_result,
-    _memory_warning_detail,
     _no_productive_work,
     _turn_completed_successfully,
     is_kill_shape,
 )
+from bot.claude.runner.watchdog import _Watchdog
 
 log = logging.getLogger(__name__)
 
@@ -1760,6 +1756,78 @@ class ClaudeRunner(
                 ", ".join(session_cg.applied),
             )
 
+    async def _reap_session(
+        self, instance: Instance, proc, on_progress, headline: str, detail: str,
+    ) -> None:
+        """Tell the session why, then destroy its whole process tree.
+
+        Told BEFORE the reap, not after, and that ordering is
+        load-bearing. Reaping closes the CLI's stdout, which ends the
+        reader loop, whose ``finally`` cancels the watchdog — and it
+        will usually do so while we are still parked inside kill_tree's
+        grace wait for a multi-gigabyte process to actually die.
+        Anything after that call is on a coin flip, so the one message
+        explaining the kill goes out first. The decision is already
+        irrevocable by the time this is called.
+        """
+        await _notify(on_progress, headline, detail, "on memory kill")
+        # cgroup.kill is a SIGKILL, and this reap can still fall
+        # through to the normal exit path when it stands down. A -9
+        # there with no mark would be read as the operating system's
+        # OOM killer and resumed.
+        self._bot_signalled.add(instance.id)
+        signalled: list[str] = []
+        # cgroup.kill first where the session has its own cgroup: it
+        # is atomic where kill_tree is a walk, so nothing can fork out
+        # from under it, and it reaches a process that reparented away
+        # and left the tree entirely. kill_tree still runs afterwards
+        # -- it is what produces the list of what was signalled for
+        # the log, and it is the whole mechanism on a kernel with no
+        # cgroup.kill (pre-5.14) or when the scope never happened.
+        session_cg = self._session_cgroups.get(instance.id)
+        if session_cg is not None:
+            try:
+                if await asyncio.to_thread(session_cg.kill):
+                    log.warning(
+                        "Killed cgroup %s for %s",
+                        session_cg.unit, instance.id,
+                    )
+            except Exception:
+                log.debug(
+                    "cgroup.kill failed for %s", instance.id,
+                    exc_info=True,
+                )
+        try:
+            signalled = await asyncio.to_thread(
+                memory.kill_tree, proc.pid,
+            )
+            if signalled:
+                log.warning(
+                    "Reaped for %s: %s",
+                    instance.id, ", ".join(signalled),
+                )
+        except Exception:
+            log.exception("Memory reap failed for %s", instance.id)
+        if not signalled:
+            # kill_tree swallows per-process failures and returns an
+            # empty list rather than raising, so "nothing was
+            # signalled" is a silent outcome — and one that must not be
+            # silent HERE. We have already decided this run is over:
+            # leaving the process alive would let it stream to
+            # completion and then be reported as a memory failure it
+            # recovered from, which is a lie in whichever direction the
+            # run happened to end. Reached only when the tree is still
+            # standing, so stdout has not closed, so the watchdog has
+            # not been cancelled — the one case where code after the
+            # reap is guaranteed to run is also the one case that needs
+            # it.
+            log.warning(
+                "Memory reap signalled nothing for %s \u2014 "
+                "terminating the CLI directly",
+                instance.id,
+            )
+            proc.terminate()
+
     async def _stream_output(
         self,
         proc: asyncio.subprocess.Process,
@@ -1777,7 +1845,7 @@ class ClaudeRunner(
         MAX_PROCESS_LIFETIME_SECS (default 4h) of age AND
         MAX_PROCESS_SILENCE_SECS (default 30m) of producing nothing, with
         MAX_PROCESS_HARD_LIFETIME_SECS (default 24h) as an age-only backstop.
-        Age alone never kills — see the branch in check_stall for why.
+        Age alone never kills; see ``_Watchdog._check_lifetime`` for why.
         """
         # Defensive: clear any stale intentional-kill marker from a prior
         # run on the same instance id (e.g. a previous lifetime-exceeded
@@ -1816,372 +1884,11 @@ class ClaudeRunner(
                             instance.id, hit, _wt_path, _repo_path,
                         )
 
-        last_output_time = asyncio.get_event_loop().time()
-        process_start_time = last_output_time
-        stall_warned = False
-        lifetime_exceeded = False
-        # Set alongside lifetime_exceeded so the failure the user reads can say
-        # WHICH of the two conditions fired and with what numbers. A message
-        # that only says "4h limit" is what made the 2026-08-27 kill look
-        # reasonable in the log when it was not.
-        lifetime_elapsed_secs = 0.0
-        lifetime_silence_secs = 0.0
-        lifetime_hard_cap = False
-        # Set by the memory guard below when it reaps this session's tree. Holds
-        # the numbers, not a bool, because the numbers ARE the message — both
-        # the failure the user reads and the nudge the resumed attempt gets are
-        # useless without them.
-        memory_kill: memory.TreeMemory | None = None
-        memory_kill_avail_mb: float | None = None
-        # Set only when the reap was a machine-wide arbitration rather than
-        # this session breaching its own ceiling. Its presence is what switches
-        # every downstream message onto the other explanation, so it is a
-        # reading and not a bool: the numbers are the whole content.
-        memory_kill_pressure: memory.MemoryPressure | None = None
-        stall_check_task: asyncio.Task | None = None
-        # End-of-turn watchdog: set when the LLM signals stop_reason="end_turn"
-        # with no tool_use blocks (genuinely done).  If stdout then stays
-        # silent for END_OF_TURN_GRACE_SECS, terminate and treat as success.
-        end_of_turn_seen = False
+        watchdog = _Watchdog(self, instance, proc, events, on_progress, on_stall)
+        # End-of-turn watchdog: set by the reader loop once the turn has been
+        # silent past END_OF_TURN_GRACE_SECS after a genuine end_turn.
         end_of_turn_done = False
-
-        async def check_stall():
-            nonlocal stall_warned, lifetime_exceeded
-            nonlocal lifetime_elapsed_secs, lifetime_silence_secs
-            nonlocal lifetime_hard_cap
-            nonlocal memory_kill, memory_kill_avail_mb, memory_kill_pressure
-            # Re-log a fresh snapshot every STALL_DIAG_RELOG_SECS while still
-            # stalled — gives a paper trail of CPU/conn state over the silent
-            # period so we can tell "thinking with API call open" from
-            # "actually hung with nothing in flight" after the fact.
-            stall_last_logged = 0.0
-            # -inf, not 0: the clock here is monotonic, whose zero is an
-            # arbitrary boot-relative instant, so 0.0 would only happen to
-            # mean "never logged" because the epoch is far in the past.
-            old_but_alive_logged = float("-inf")
-            mem_last_checked = 0.0
-            mem_warned = False
-
-            async def reap_this_session(headline: str, detail: str) -> None:
-                """Tell the session why, then destroy its whole process tree.
-
-                Told BEFORE the reap, not after, and that ordering is
-                load-bearing. Reaping closes the CLI's stdout, which ends the
-                reader loop, whose ``finally`` cancels this watchdog — and it
-                will usually do so while we are still parked inside kill_tree's
-                grace wait for a multi-gigabyte process to actually die.
-                Anything after that call is on a coin flip, so the one message
-                explaining the kill goes out first. The decision is already
-                irrevocable by the time this is called.
-                """
-                await _notify(on_progress, headline, detail, "on memory kill")
-                # cgroup.kill is a SIGKILL, and this reap can still fall
-                # through to the normal exit path when it stands down. A -9
-                # there with no mark would be read as the operating system's
-                # OOM killer and resumed.
-                self._bot_signalled.add(instance.id)
-                signalled: list[str] = []
-                # cgroup.kill first where the session has its own cgroup: it
-                # is atomic where kill_tree is a walk, so nothing can fork out
-                # from under it, and it reaches a process that reparented away
-                # and left the tree entirely. kill_tree still runs afterwards
-                # -- it is what produces the list of what was signalled for
-                # the log, and it is the whole mechanism on a kernel with no
-                # cgroup.kill (pre-5.14) or when the scope never happened.
-                session_cg = self._session_cgroups.get(instance.id)
-                if session_cg is not None:
-                    try:
-                        if await asyncio.to_thread(session_cg.kill):
-                            log.warning(
-                                "Killed cgroup %s for %s",
-                                session_cg.unit, instance.id,
-                            )
-                    except Exception:
-                        log.debug(
-                            "cgroup.kill failed for %s", instance.id,
-                            exc_info=True,
-                        )
-                try:
-                    signalled = await asyncio.to_thread(
-                        memory.kill_tree, proc.pid,
-                    )
-                    if signalled:
-                        log.warning(
-                            "Reaped for %s: %s",
-                            instance.id, ", ".join(signalled),
-                        )
-                except Exception:
-                    log.exception("Memory reap failed for %s", instance.id)
-                if not signalled:
-                    # kill_tree swallows per-process failures and returns an
-                    # empty list rather than raising, so "nothing was
-                    # signalled" is a silent outcome — and one that must not be
-                    # silent HERE. We have already decided this run is over:
-                    # leaving the process alive would let it stream to
-                    # completion and then be reported as a memory failure it
-                    # recovered from, which is a lie in whichever direction the
-                    # run happened to end. Reached only when the tree is still
-                    # standing, so stdout has not closed, so this watchdog has
-                    # not been cancelled — the one case where code after the
-                    # reap is guaranteed to run is also the one case that needs
-                    # it.
-                    log.warning(
-                        "Memory reap signalled nothing for %s — "
-                        "terminating the CLI directly",
-                        instance.id,
-                    )
-                    proc.terminate()
-
-            while True:
-                await asyncio.sleep(config.WATCHDOG_TICK_SECS)
-                now = asyncio.get_event_loop().time()
-                elapsed_since_output = now - last_output_time
-                elapsed_since_start = now - process_start_time
-
-                # Safety-net: kill truly orphaned processes.
-                #
-                # "Orphaned" is a claim about SILENCE, not about age, and for a
-                # long time this branch only measured age. On 2026-08-27 that
-                # killed a four-hour benchmark run that had produced output
-                # five minutes earlier and had not gone quiet for a single
-                # minute in its final two hours — it was mid-batch, waiting on
-                # subagents, at 350 MB and with live HTTPS connections open.
-                # Raising the number would only move the guillotine; a bench
-                # that farms work out in serial batches can legitimately run
-                # all day. So age is now the point at which we START asking,
-                # and continued output is the answer that keeps it alive.
-                #
-                # The hard cap is the backstop for the other direction: a
-                # process that heartbeats forever without ever finishing must
-                # not be immortal just because it is noisy.
-                if elapsed_since_start > config.MAX_PROCESS_LIFETIME_SECS:
-                    hard_cap = config.MAX_PROCESS_HARD_LIFETIME_SECS
-                    hit_hard_cap = (
-                        hard_cap > 0 and elapsed_since_start > hard_cap
-                    )
-                    silent_enough = (
-                        elapsed_since_output
-                        >= config.MAX_PROCESS_SILENCE_SECS
-                    )
-                    if not silent_enough and not hit_hard_cap:
-                        # Old is not orphaned. Logged on its own slow cadence
-                        # so a legitimate all-day run still leaves a trail
-                        # without writing a line every ten seconds.
-                        if (
-                            now - old_but_alive_logged
-                            >= config.OLD_BUT_ALIVE_RELOG_SECS
-                        ):
-                            old_but_alive_logged = now
-                            log.info(
-                                "Past lifetime age for %s (%ds) but still "
-                                "producing output %ds ago — letting it work "
-                                "(reap after %ds silent)",
-                                instance.id, int(elapsed_since_start),
-                                int(elapsed_since_output),
-                                config.MAX_PROCESS_SILENCE_SECS,
-                            )
-                    else:
-                        lifetime_exceeded = True
-                        lifetime_elapsed_secs = elapsed_since_start
-                        lifetime_silence_secs = elapsed_since_output
-                        lifetime_hard_cap = hit_hard_cap
-                        log.warning(
-                            "Lifetime limit for %s — running for %ds, "
-                            "silent for %ds%s",
-                            instance.id, int(elapsed_since_start),
-                            int(elapsed_since_output),
-                            " (hard cap)" if hit_hard_cap else "",
-                        )
-                        # Told BEFORE the terminate, for the same reason
-                        # reap_this_session says its piece first: terminating
-                        # closes the CLI's stdout, which ends the reader loop,
-                        # whose ``finally`` cancels this watchdog. Anything
-                        # after that call is on a coin flip.
-                        await _notify(
-                            on_progress,
-                            "Stopped — this session looked hung",
-                            _lifetime_kill_detail(
-                                elapsed_since_start,
-                                elapsed_since_output,
-                                hit_hard_cap,
-                            ),
-                            "on lifetime kill",
-                        )
-                        proc.terminate()
-                        return
-
-                # Memory guard. Runs on its own cadence and regardless of
-                # whether the session looks stalled: the 2026-08-17 runaway was
-                # never stalled, it was streaming tool output the whole way up
-                # to 13.7 GB. Checked on every tick that is due, before the
-                # stall branch, because a tree at the ceiling is a decision to
-                # make now while a silent session is only worth a log line.
-                if (
-                    (config.SESSION_MEM_KILL_MB > 0 or config.SESSION_MEM_WARN_MB > 0)
-                    and now - mem_last_checked >= config.SESSION_MEM_CHECK_SECS
-                ):
-                    mem_last_checked = now
-                    try:
-                        tree = await asyncio.to_thread(memory.sample_tree, proc.pid)
-                    except Exception:
-                        # A sampler that can end a session is worse than no
-                        # sampler. Skip this tick and try again on the next.
-                        log.debug("Memory sample failed for %s", instance.id)
-                        tree = None
-
-                    # The cgroup is the honest number when there is one. The
-                    # tree walk can only see what is still a descendant, and
-                    # `dotnet build` deliberately leaves its Roslyn server
-                    # detached and parented to PID 1 so the next build is
-                    # faster -- 4.10 GB of it was invisible to this sampler
-                    # during the 2026-08-21 OOM. A scope keeps charging it.
-                    #
-                    # Taken as a maximum rather than a replacement: RSS
-                    # double-counts pages shared between forks, so on a busy
-                    # tree the walk can read higher than the cgroup's own
-                    # accounting, and this is a safety ceiling where the
-                    # larger of two honest numbers is the safe one. Also
-                    # keeps the offender label, which memory.current has no
-                    # way to produce.
-                    session_cg = self._session_cgroups.get(instance.id)
-                    if tree is not None and session_cg is not None:
-                        try:
-                            charged = await asyncio.to_thread(
-                                session_cg.current_mb,
-                            )
-                        except Exception:
-                            charged = None
-                        if charged is not None and charged > tree.total_mb:
-                            tree.total_mb = charged
-                            if not tree.proc_count:
-                                # Nothing left in the process tree but memory
-                                # still charged to the cgroup is exactly the
-                                # reparented-daemon case, and the ceiling
-                                # checks below are gated on proc_count.
-                                tree.proc_count = 1
-                                tree.biggest_name = "detached (cgroup)"
-
-                    if tree is not None and tree.proc_count:
-                        kill_mb = config.SESSION_MEM_KILL_MB
-                        warn_mb = config.SESSION_MEM_WARN_MB
-                        # Shared so the fleet check below — which runs inside
-                        # a DIFFERENT session's watchdog — can compare trees.
-                        # No one session can answer "am I the largest", and
-                        # that is exactly the question a machine-wide crunch
-                        # asks.
-                        self._tree_samples[instance.id] = tree
-                        if kill_mb > 0 and tree.total_mb >= kill_mb:
-                            memory_kill = tree
-                            memory_kill_avail_mb = await asyncio.to_thread(
-                                memory.available_mb,
-                            )
-                            # The sessions slice where there is one, so the
-                            # line reports what the fleet is holding rather
-                            # than the supervisor's own ~250 MB.
-                            cg = await asyncio.to_thread(
-                                lambda: memory.cgroup_memory(
-                                    self._workload_cgroup(),
-                                ),
-                            )
-                            log.error(
-                                "Memory limit for %s — %s over the %.1fGB "
-                                "ceiling; machine has %s free, cgroup anon "
-                                "%s of %s. Reaping the tree.",
-                                instance.id, tree.summary(), kill_mb / 1024,
-                                f"{memory_kill_avail_mb / 1024:.1f}GB"
-                                if memory_kill_avail_mb is not None else "?",
-                                f"{cg.anon_mb / 1024:.1f}GB"
-                                if cg.anon_mb is not None else "?",
-                                f"{cg.max_mb / 1024:.1f}GB"
-                                if cg.max_mb is not None else "no limit",
-                            )
-                            await reap_this_session(
-                                "Stopped — this session ran out of memory",
-                                _memory_kill_detail(tree, kill_mb),
-                            )
-                            return
-
-                        # Cross-session arbitration: nobody is over their own
-                        # ceiling, but the machine has run out anyway. This is
-                        # the case the per-session guard structurally cannot
-                        # see, and the one that actually happened — five
-                        # reasonable sessions plus a browser, none of them
-                        # individually at fault, and the kernel picking the
-                        # victim in the end.
-                        #
-                        # Both conditions are required before anything dies.
-                        # Machine-critical alone is not enough: under pressure
-                        # the bot did not create, reaping our own sessions
-                        # frees memory the real offender immediately re-takes,
-                        # and charges a session's work for it. Over-our-own-
-                        # MemoryHigh alone is not enough either — that is a
-                        # throttle watermark, crossed routinely, and on its own
-                        # it means the cgroup is working as designed.
-                        fleet_verdict = await self._fleet_arbitration(
-                            instance.id, tree,
-                        )
-                        if fleet_verdict is not None:
-                            memory_kill = tree
-                            memory_kill_pressure = fleet_verdict
-                            memory_kill_avail_mb = fleet_verdict.avail_mb
-                            log.error(
-                                "Machine out of memory (%s) — %s is the "
-                                "largest of %d live sessions at %s. Reaping "
-                                "it rather than leaving the kernel to choose.",
-                                fleet_verdict.summary(), instance.id,
-                                sum(1 for iid in self._tree_samples
-                                    if iid in self._processes),
-                                tree.summary(),
-                            )
-                            await reap_this_session(
-                                "Stopped — the machine ran out of memory",
-                                _fleet_kill_detail(tree, fleet_verdict),
-                            )
-                            return
-
-                        if warn_mb > 0 and tree.total_mb >= warn_mb and not mem_warned:
-                            mem_warned = True
-                            log.warning(
-                                "Memory warning for %s — %s (warn at %.1fGB, "
-                                "kill at %.1fGB)",
-                                instance.id, tree.summary(), warn_mb / 1024,
-                                kill_mb / 1024 if kill_mb > 0 else 0,
-                            )
-                            # Told to the session, not just the log: while it is
-                            # still running it can still choose a smaller batch.
-                            # After the kill that choice is gone.
-                            await _notify(
-                                on_progress,
-                                "Heads up — this session is using a lot of memory",
-                                _memory_warning_detail(tree, kill_mb),
-                                "on memory warning",
-                            )
-
-                # Stall warning (no auto-kill)
-                if elapsed_since_output > config.STALL_TIMEOUT_SECS:
-                    is_first = not stall_warned
-                    should_log = is_first or (
-                        now - stall_last_logged >= config.STALL_DIAG_RELOG_SECS
-                    )
-                    if should_log:
-                        snapshot = await _capture_process_snapshot(
-                            proc.pid, events, end_of_turn_seen,
-                        )
-                        log.warning(
-                            "Stall %s: elapsed=%ds since_output=%ds | %s",
-                            instance.id, int(elapsed_since_start),
-                            int(elapsed_since_output), snapshot.summary_line(),
-                        )
-                        stall_last_logged = now
-                        if is_first:
-                            stall_warned = True
-                            if on_stall:
-                                try:
-                                    await on_stall(instance.id, snapshot)
-                                except Exception:
-                                    log.exception("Stall callback error")
-
-        stall_check_task = asyncio.create_task(check_stall())
+        stall_check_task = asyncio.create_task(watchdog.run())
 
         try:
             assert proc.stdout is not None
@@ -2193,8 +1900,8 @@ class ClaudeRunner(
                 except asyncio.TimeoutError:
                     if proc.returncode is not None:
                         break
-                    if end_of_turn_seen:
-                        idle = asyncio.get_event_loop().time() - last_output_time
+                    if watchdog.end_of_turn_seen:
+                        idle = asyncio.get_event_loop().time() - watchdog.last_output_time
                         if idle > config.END_OF_TURN_GRACE_SECS:
                             recovered_text = last_assistant_text(events)
                             log.warning(
@@ -2215,8 +1922,8 @@ class ClaudeRunner(
                 if not line:
                     break
 
-                last_output_time = asyncio.get_event_loop().time()
-                stall_warned = False
+                watchdog.last_output_time = asyncio.get_event_loop().time()
+                watchdog.stall_warned = False
 
                 decoded = line.decode("utf-8", errors="replace")
                 event = parse_stream_line(decoded)
@@ -2236,16 +1943,16 @@ class ClaudeRunner(
                                 isinstance(b, dict) and b.get("type") == "tool_use"
                                 for b in (_content if isinstance(_content, list) else [])
                             )
-                            end_of_turn_seen = not _has_tool
+                            watchdog.end_of_turn_seen = not _has_tool
                         else:
-                            end_of_turn_seen = False
+                            watchdog.end_of_turn_seen = False
                     elif event.get("type") == "result":
                         # `result` is Claude CLI's terminal event — nothing
                         # follows. If the subprocess fails to close stdout
                         # (orphan child holding the pipe, etc.), arm the
                         # watchdog so the post-result grace fires a forced
                         # terminate instead of hanging indefinitely.
-                        end_of_turn_seen = True
+                        watchdog.end_of_turn_seen = True
                     # Per-turn usage (Claude only) — fed to progress callback
                     # so the lifecycle layer can keep the context footer live.
                     usage = extract_usage(event) if supports_live_usage else None
@@ -2362,11 +2069,11 @@ class ClaudeRunner(
         # Both watchdog reaps stand down for the same two races. Guarded as one
         # block so the O(n) event walk below stays lazy on the ordinary path,
         # where neither watchdog fired.
-        if memory_kill is not None or lifetime_exceeded:
-            reap_name = "Memory reap" if memory_kill is not None else "Orphan reap"
+        if watchdog.memory_kill is not None or watchdog.lifetime_exceeded:
+            reap_name = "Memory reap" if watchdog.memory_kill is not None else "Orphan reap"
             reap_detail = (
-                memory_kill.summary() if memory_kill is not None
-                else f"silent {int(lifetime_silence_secs)}s"
+                watchdog.memory_kill.summary() if watchdog.memory_kill is not None
+                else f"silent {int(watchdog.lifetime_silence_secs)}s"
             )
 
             # A reap and a finishing turn can land in the same instant: the
@@ -2381,8 +2088,7 @@ class ClaudeRunner(
                     "%s for %s raced a completed turn — reporting the "
                     "completion instead (%s)", reap_name, instance.id, reap_detail,
                 )
-                memory_kill = None
-                lifetime_exceeded = False
+                watchdog.stand_down()
 
             # The other race worth standing down for: the user asked this session
             # to stop (Steer, /kill) inside the same few seconds the watchdog
@@ -2402,22 +2108,21 @@ class ClaudeRunner(
                     "%s for %s raced a requested stop — honouring the stop (%s)",
                     reap_name, instance.id, reap_detail,
                 )
-                memory_kill = None
-                lifetime_exceeded = False
+                watchdog.stand_down()
 
-        if memory_kill is not None:
+        if watchdog.memory_kill is not None:
             return _memory_kill_result(
-                events, memory_kill, memory_kill_avail_mb,
+                events, watchdog.memory_kill, watchdog.memory_kill_avail_mb,
                 captured_session_id, poisoning_hits,
-                pressure=memory_kill_pressure,
+                pressure=watchdog.memory_kill_pressure,
             )
 
-        if lifetime_exceeded:
+        if watchdog.lifetime_exceeded:
             return _lifetime_kill_result(
                 events, captured_session_id, poisoning_hits,
-                elapsed_secs=lifetime_elapsed_secs,
-                silence_secs=lifetime_silence_secs,
-                hard_cap=lifetime_hard_cap,
+                elapsed_secs=watchdog.lifetime_elapsed_secs,
+                silence_secs=watchdog.lifetime_silence_secs,
+                hard_cap=watchdog.lifetime_hard_cap,
             )
 
         # Capture stderr for error info
