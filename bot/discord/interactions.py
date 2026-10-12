@@ -991,7 +991,7 @@ async def _handle_branch(
     """
     from bot import config
     from bot.engine import workflows
-    from bot.engine.session_fork import (
+    from bot.claude.session_fork import (
         encode_project_path, fork_session, get_last_assistant_uuid,
     )
 

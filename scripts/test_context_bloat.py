@@ -57,7 +57,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from bot import config
 from bot.claude import context_bloat
-from bot.engine.session_fork import encode_project_path
+from bot.claude.session_fork import encode_project_path
 from bot.claude.types import RunResult
 
 # The thrash harness drives the real _run_impl cascade against a stubbed

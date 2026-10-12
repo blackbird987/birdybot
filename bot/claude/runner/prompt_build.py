@@ -729,7 +729,7 @@ class PromptMixin:
         machines', so an existing local dir always wins.
         """
         try:
-            from bot.engine.session_fork import encoded_spellings
+            from bot.claude.session_fork import encoded_spellings
             spellings = encoded_spellings(repo_path)
         except Exception:
             return None

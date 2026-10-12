@@ -20,8 +20,7 @@ from bot.claude.types import (
     Schedule,
     Watch,
 )
-from bot.engine.auto_fix import AutoFixState
-from bot.engine.deploy import DeployState
+from bot.store.records import AutoFixState, DeployState
 
 log = logging.getLogger(__name__)
 

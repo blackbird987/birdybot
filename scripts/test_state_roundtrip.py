@@ -78,8 +78,7 @@ from bot.claude.types import (  # noqa: E402
     Schedule,
     Watch,
 )
-from bot.engine.auto_fix import AutoFixState  # noqa: E402
-from bot.engine.deploy import DeployState  # noqa: E402
+from bot.store.records import AutoFixState, DeployState  # noqa: E402
 from bot.store.state import StateStore  # noqa: E402
 
 _failures: list[str] = []

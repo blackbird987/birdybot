@@ -313,7 +313,7 @@ def test_history_lookup() -> None:
         session_id = str(uuid.uuid4())
 
         # History written on the OTHER machine: filed under the Windows name.
-        from bot.engine.session_fork import encode_project_path
+        from bot.claude.session_fork import encode_project_path
 
         other = acct / "projects" / encode_project_path(repo_windows)
         other.mkdir(parents=True)
@@ -635,7 +635,7 @@ def test_session_scan_spellings() -> None:
     print("\n[12] /session and the picker look under every spelling")
     from bot import config
     from bot.engine import sessions as sessions_mod
-    from bot.engine.session_fork import encoded_spellings
+    from bot.claude.session_fork import encoded_spellings
 
     win = "C:/Users/Quincy"  # portability: ok
     lin = "/run/media/quincy/SYSTEM/Users/Quincy"

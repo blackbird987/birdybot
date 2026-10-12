@@ -172,7 +172,7 @@ def extract_session_metadata(jsonl_path: Path) -> dict | None:
 
 
 def _project_dir_to_original_path(dir_name: str) -> str:
-    """Best-effort reverse of :func:`bot.engine.session_fork.encode_project_path`.
+    """Best-effort reverse of :func:`bot.claude.session_fork.encode_project_path`.
 
     Windows drive form: `C--Users-Quincy-...` → `C:\\Users\\Quincy\\...`
     POSIX form:         `-home-quincy-...`    → `/home/quincy/...`

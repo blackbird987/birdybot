@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, field
 from pathlib import Path
 
 from bot.fsutil import read_repo_config
 from bot.procutil import run_capture
 from bot.claude.gitpaths import ref_sha
+from bot.store.records import DeployState
 
 log = logging.getLogger(__name__)
 
@@ -34,55 +34,6 @@ _VERSION_PARSERS: list[tuple[str, str]] = [
 
 _CSPROJ_ASM_VERSION_RE = re.compile(r"<AssemblyVersion>([^<]+)</AssemblyVersion>", re.IGNORECASE)
 _CSPROJ_VERSION_RE = re.compile(r"<Version>([^<]+)</Version>", re.IGNORECASE)
-
-
-@dataclass
-class DeployState:
-    """Per-repo deploy state tracking."""
-
-    boot_version: str | None = None
-    boot_ref: str = ""
-    current_version: str | None = None
-    current_ref: str = ""
-    self_managed: bool = False
-    pending_sessions: list[str] = field(default_factory=list)
-    pending_changes: list[str] = field(default_factory=list)
-    last_deploy_error: str | None = None
-    auto_fix_attempt: int = 0
-    auto_fix_thread_id: str | None = None
-
-    @property
-    def needs_reboot(self) -> bool:
-        return self.boot_ref != self.current_ref and self.boot_ref != ""
-
-    def to_dict(self) -> dict:
-        return {
-            "boot_version": self.boot_version,
-            "boot_ref": self.boot_ref,
-            "current_version": self.current_version,
-            "current_ref": self.current_ref,
-            "self_managed": self.self_managed,
-            "pending_sessions": self.pending_sessions,
-            "pending_changes": self.pending_changes,
-            "last_deploy_error": self.last_deploy_error,
-            "auto_fix_attempt": self.auto_fix_attempt,
-            "auto_fix_thread_id": self.auto_fix_thread_id,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> DeployState:
-        return cls(
-            boot_version=data.get("boot_version"),
-            boot_ref=data.get("boot_ref", ""),
-            current_version=data.get("current_version"),
-            current_ref=data.get("current_ref", ""),
-            self_managed=data.get("self_managed", False),
-            pending_sessions=data.get("pending_sessions", []),
-            pending_changes=data.get("pending_changes", []),
-            last_deploy_error=data.get("last_deploy_error"),
-            auto_fix_attempt=data.get("auto_fix_attempt", 0),
-            auto_fix_thread_id=data.get("auto_fix_thread_id"),
-        )
 
 
 def detect_version(repo_path: str) -> str | None:

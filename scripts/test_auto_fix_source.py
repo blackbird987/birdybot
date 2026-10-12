@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from bot.claude.types import Instance, InstanceStatus, InstanceType  # noqa: E402
 from bot.engine import auto_fix, commands, workflows  # noqa: E402
-from bot.engine.auto_fix import AutoFixState  # noqa: E402
+from bot.store.records import AutoFixState  # noqa: E402
 
 _failures: list[str] = []
 

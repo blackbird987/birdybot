@@ -32,7 +32,7 @@ def _encoded_temp_dir() -> str:
     title-gen JSONLs would then never be found, and every one of them would
     accumulate in the session picker.
     """
-    from bot.engine.session_fork import encode_project_path
+    from bot.claude.session_fork import encode_project_path
     return encode_project_path(tempfile.gettempdir())
 
 

@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 import discord
 
 from bot.textutil import hard_clip, parse_iso_utc
-from bot.engine.deploy import DeployState
+from bot.store.records import DeployState
 from bot.platform.formatting import EFFORT_DISPLAY, MODE_COLOR, MODE_DISPLAY, effort_name, mode_name
 
 log = logging.getLogger(__name__)

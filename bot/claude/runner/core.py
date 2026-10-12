@@ -2541,7 +2541,7 @@ class ClaudeRunner(
         session_id = result.session_id or captured_session_id
         if session_id and instance.repo_path:
             try:
-                from bot.engine.session_fork import (
+                from bot.claude.session_fork import (
                     encode_project_path, get_last_assistant_uuid,
                 )
                 projects_root = (

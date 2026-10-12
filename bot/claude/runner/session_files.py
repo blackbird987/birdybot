@@ -45,10 +45,10 @@ class SessionFilesMixin:
     def _encode_project_path(path: str) -> str:
         """Encode path the same way the CLI does for project dirs.
 
-        Delegates to the shared implementation in ``bot.engine.session_fork``
+        Delegates to the shared implementation in ``bot.claude.session_fork``
         so both the runner and the JSONL forker agree on project-dir names.
         """
-        from bot.engine.session_fork import encode_project_path
+        from bot.claude.session_fork import encode_project_path
         return encode_project_path(path)
 
     async def _maybe_rebuild_session_index(
@@ -368,7 +368,7 @@ class SessionFilesMixin:
         # instead of dead ends; without it, resuming on the other machine is a
         # guaranteed "No conversation found" no matter how healthy everything
         # else is.
-        from bot.engine.session_fork import encoded_spellings
+        from bot.claude.session_fork import encoded_spellings
 
         encodings: list[str] = []
 

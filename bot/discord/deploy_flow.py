@@ -241,7 +241,7 @@ async def execute_deploy(
                 ds.auto_fix_thread_id = None
                 bot._store.set_deploy_state(repo_name, ds)
                 # Also reset generic auto-fix state for deploy trigger
-                from bot.engine.auto_fix import AutoFixState
+                from bot.store.records import AutoFixState
                 bot._store.set_auto_fix_state(repo_name, "deploy", AutoFixState())
             return True, output, ""
         else:

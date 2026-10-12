@@ -9,25 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
 from typing import Any, Callable, Awaitable
 
 log = logging.getLogger(__name__)
-
-
-@dataclass
-class AutoFixState:
-    """Per-repo, per-trigger auto-fix tracking."""
-
-    attempt: int = 0
-    thread_id: str | None = None
-
-    def to_dict(self) -> dict:
-        return {"attempt": self.attempt, "thread_id": self.thread_id}
-
-    @classmethod
-    def from_dict(cls, d: dict) -> AutoFixState:
-        return cls(attempt=d.get("attempt", 0), thread_id=d.get("thread_id"))
 
 
 async def spawn_fix_session(
