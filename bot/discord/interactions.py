@@ -84,6 +84,47 @@ async def settle(interaction: discord.Interaction, message: str) -> None:
         log.debug("could not settle interaction", exc_info=True)
 
 
+# Buttons that act on their own once the tap has been deferred, keyed by the
+# action half of "<action>:<arg>". The arg is not always an instance id: it is
+# a watch id, a fleet token, a pending id, a usage-gate qid or a repo name,
+# depending on the action. Each entry is a lambda so the handler is looked up
+# when the button is tapped: harnesses replace module-level handlers
+# (test_repo_picker_cap), and a table holding the functions themselves would
+# keep calling the originals. Anything not listed here falls through to the
+# generic query dispatch in ``handle``.
+_ACTIONS = {
+    "watch_stop": lambda b, i, a, arg, acc: _handle_watch_stop(b, i, arg),
+    "fleet_confirm": lambda b, i, a, arg, acc: _handle_fleet(b, i, a, arg),
+    "fleet_cancel": lambda b, i, a, arg, acc: _handle_fleet(b, i, a, arg),
+    "steer": lambda b, i, a, arg, acc: _handle_pending_action(b, i, a, arg, acc),
+    "cancel_pending": lambda b, i, a, arg, acc: _handle_pending_action(b, i, a, arg, acc),
+    "usage_run": lambda b, i, a, arg, acc: _handle_usage_action(b, i, a, arg),
+    "usage_queue": lambda b, i, a, arg, acc: _handle_usage_action(b, i, a, arg),
+    "usage_cancel": lambda b, i, a, arg, acc: _handle_usage_action(b, i, a, arg),
+    "load_history": lambda b, i, a, arg, acc: _handle_load_history(b, i, arg),
+    "new_repo": lambda b, i, a, arg, acc: _handle_new_repo(b, i, arg, acc),
+    "new_repo_select": lambda b, i, a, arg, acc: _handle_new_repo_select(b, i, acc),
+    "sync_repo": lambda b, i, a, arg, acc: _handle_sync_cli(b, i, arg),
+    "sync_git": lambda b, i, a, arg, acc: _handle_sync_git(b, i, arg),
+    "resume_latest": lambda b, i, a, arg, acc: _handle_resume_latest(b, i, arg),
+    "reboot_repo": lambda b, i, a, arg, acc: _handle_reboot_repo(b, i, arg),
+    "approve_deploy": lambda b, i, a, arg, acc: _handle_approve_deploy(b, i, arg),
+    "refresh_control": lambda b, i, a, arg, acc: _handle_refresh_control(b, i, arg),
+    "refresh_user_control": lambda b, i, a, arg, acc: _handle_refresh_user_control(b, i),
+    "cancel_cooldown": lambda b, i, a, arg, acc: _handle_cancel_cooldown(b, i, arg),
+    "hold_merge": lambda b, i, a, arg, acc: _handle_hold_merge(b, i, arg),
+    "stop_all": lambda b, i, a, arg, acc: _handle_stop_all(b, i, arg, acc),
+    "sess_resume": lambda b, i, a, arg, acc: _handle_sess_resume(b, i, arg, acc),
+    "new": lambda b, i, a, arg, acc: _handle_new_session(b, i, acc),
+    "branch": lambda b, i, a, arg, acc: _handle_branch(b, i, arg, acc),
+}
+
+# Actions in ``_ACTIONS`` that only the owner may use.
+_OWNER_ONLY_ACTIONS: frozenset[str] = frozenset({
+    "sync_repo", "sync_git", "reboot_repo", "approve_deploy",
+})
+
+
 async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
     """Handle button/select/modal interactions (persistent views)."""
     btn_access = bot._check_access(
@@ -191,191 +232,12 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
     except discord.InteractionResponded:
         pass  # already acked elsewhere (e.g. double-dispatch) — continue
 
-    # --- Stop watching a job (watch_stop:<watch_id>) ---
-    # The trailing portion is a watch id, not an instance id. Disarming leaves
-    # the job itself alone — it only means "stop resuming me when it ends".
-    if action == "watch_stop":
-        watch = bot._store.get_watch(instance_id)
-        if watch is None:
-            # Strip the button too — Discord keeps components live until the
-            # message is edited, so leaving it means a tap that keeps failing.
-            try:
-                await interaction.message.edit(view=None)
-            except Exception:
-                log.debug("watch stop stale-button strip failed", exc_info=True)
-            await settle(interaction, "That watch has already finished or been stopped.")
-            return
-        bot._store.delete_watch(watch.id)
-        label = watch.label or (f"pid {watch.pid}" if watch.pid else "the job")
-        log.info("Watch %s stopped by user in thread %s", watch.id, watch.channel_id)
-        try:
-            await interaction.message.edit(
-                content=f"⏹ Stopped watching **{label}** — the job itself is untouched.",
-                view=None,
-            )
-        except Exception:
-            log.debug("watch stop edit failed", exc_info=True)
-        # The thread is no longer busy, so let the ordinary tag/idle rules
-        # resume: without this it keeps the "active" tag it was holding.
-        try:
-            from bot.discord import tags
-            await tags.try_apply_tags_after_run(bot, str(interaction.channel_id))
-        except Exception:
-            log.debug("watch stop tag refresh failed", exc_info=True)
-        return
-
-    # --- Fleet ship roster (Confirm / Cancel) — trailing portion is a token ---
-    if action in ("fleet_confirm", "fleet_cancel"):
-        from bot.discord import fleet
-        await fleet.handle_fleet_button(bot, interaction, action, instance_id)
-        return
-
-    # --- Pending-prompt interactions (Steer / Cancel on Queued embed) ---
-    # Here the trailing portion of the custom_id is a pending_id, not an
-    # instance_id, but we reuse the same ``parts`` split for consistency.
-    if action in ("steer", "cancel_pending"):
-        await _handle_pending_action(bot, interaction, action, instance_id, btn_access)
-        return
-
-    # --- Usage-limit gate interactions (Run now / Queue / Cancel) ---
-    # The trailing portion is a qid assigned by _offer_usage_limit_choice.
-    if action in ("usage_run", "usage_queue", "usage_cancel"):
-        await _handle_usage_action(bot, interaction, action, instance_id)
-        return
-
-    # --- Load CLI history into thread ---
-    if action == "load_history":
-        await _handle_load_history(bot, interaction, instance_id)
-        return
-
-    # --- New session with repo picker ---
-    if action == "new_repo":
-        await _handle_new_repo(bot, interaction, instance_id, btn_access)
-        return
-    # Same picker as Select menus, used once the repos outgrow one View of
-    # buttons. The second id segment is the menu's index, the repo is the value.
-    if action == "new_repo_select":
-        values = interaction.data.get("values", []) if interaction.data else []
-        if values:
-            await _handle_new_repo(bot, interaction, values[0], btn_access)
-        return
-
-    # --- Sync CLI for a repo (control room button) ---
-    if action == "sync_repo":
-        if not btn_access.is_owner:
+    handler = _ACTIONS.get(action)
+    if handler is not None:
+        if action in _OWNER_ONLY_ACTIONS and not btn_access.is_owner:
             await interaction.followup.send("Owner only.", ephemeral=True)
             return
-        created, populated = await bot._forums.sync_cli_sessions(3)
-        parts_msg = []
-        if created:
-            parts_msg.append(f"Created {len(created)} threads")
-        if populated:
-            parts_msg.append(f"Updated {len(populated)} threads")
-        if not parts_msg:
-            parts_msg.append("No sessions found")
-        await interaction.followup.send(
-            f"Synced `{instance_id}`: " + ", ".join(parts_msg), ephemeral=True,
-        )
-        return
-
-    # --- Sync Git for a repo (bidirectional: pull + push) ---
-    if action == "sync_git":
-        if not btn_access.is_owner:
-            await interaction.followup.send("Owner only.", ephemeral=True)
-            return
-        await _handle_sync_git(bot, interaction, instance_id)
-        return
-
-    # --- Resume latest session for a repo (control room button) ---
-    if action == "resume_latest":
-        await _handle_resume_latest(bot, interaction, instance_id)
-        return
-
-    # --- Reboot/Deploy from control room ---
-    if action == "reboot_repo":
-        if not btn_access.is_owner:
-            await interaction.followup.send("Owner only.", ephemeral=True)
-            return
-        await _handle_reboot_repo(bot, interaction, instance_id)
-        return
-
-    # --- Approve file-sourced deploy config ---
-    if action == "approve_deploy":
-        if not btn_access.is_owner:
-            await interaction.followup.send("Owner only.", ephemeral=True)
-            return
-        await _handle_approve_deploy(bot, interaction, instance_id)
-        return
-
-    # --- Refresh control room (repo or user) ---
-    if action == "refresh_control":
-        await bot._forums.refresh_control_room(instance_id)
-        await interaction.followup.send("Refreshed.", ephemeral=True)
-        return
-
-    if action == "refresh_user_control":
-        user_id = str(interaction.user.id)
-        await bot._forums.refresh_user_control_room(user_id)
-        await interaction.followup.send("Refreshed.", ephemeral=True)
-        return
-
-    # --- Cancel cooldown auto-retry (lightweight, no channel lock needed) ---
-    if action == "cancel_cooldown":
-        inst = bot._store.get_instance(instance_id)
-        if inst and inst.cooldown_retry_at:
-            inst.cooldown_retry_at = None
-            inst.cooldown_channel_id = None
-            bot._store.update_instance(inst)
-            # Edit the cooldown message in-place, removing the button
-            try:
-                await interaction.message.edit(
-                    content="Auto-retry cancelled.", view=None,
-                )
-            except Exception:
-                await interaction.followup.send("Auto-retry cancelled.")
-        else:
-            await interaction.followup.send("No pending auto-retry.", ephemeral=True)
-        return
-
-    # --- Hold an auto-merge veto (lightweight, no channel lock needed) ---
-    if action == "hold_merge":
-        held = bot._store.hold_scheduled_merge(instance_id)
-        if held:
-            try:
-                await interaction.message.edit(
-                    content="Auto-merge held — merge manually with the Merge "
-                    "button or `/merge` when you're ready.",
-                    view=None,
-                )
-            except Exception:
-                await interaction.followup.send(
-                    "Auto-merge held.", ephemeral=True,
-                )
-        else:
-            await interaction.followup.send(
-                "No pending auto-merge to hold (already merged or cancelled).",
-                ephemeral=True,
-            )
-        return
-
-    # --- Stop all running instances for a repo (owner-only) ---
-    if action == "stop_all":
-        await _handle_stop_all(bot, interaction, instance_id, btn_access)
-        return
-
-    # --- Session resume: create/find thread, redirect there ---
-    if action == "sess_resume":
-        await _handle_sess_resume(bot, interaction, instance_id, btn_access)
-        return
-
-    # --- New session button: create a new forum thread (like /new) ---
-    if action == "new":
-        await _handle_new_session(bot, interaction, btn_access)
-        return
-
-    # --- Branch from here: fork the JSONL at this message and open new thread ---
-    if action == "branch":
-        await _handle_branch(bot, interaction, instance_id, btn_access)
+        await handler(bot, interaction, action, instance_id, btn_access)
         return
 
     # --- Generic query button dispatch (plan, build, review, etc.) ---
@@ -455,6 +317,127 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
 
 
 # --- Individual handlers ---
+
+
+async def _handle_watch_stop(
+    bot: ClaudeBot, interaction: discord.Interaction, watch_id: str,
+) -> None:
+    """Stop watching a job. Disarming leaves the job itself alone: it only
+    means "stop resuming me when it ends"."""
+    watch = bot._store.get_watch(watch_id)
+    if watch is None:
+        # Strip the button too: Discord keeps components live until the
+        # message is edited, so leaving it means a tap that keeps failing.
+        try:
+            await interaction.message.edit(view=None)
+        except Exception:
+            log.debug("watch stop stale-button strip failed", exc_info=True)
+        await settle(interaction, "That watch has already finished or been stopped.")
+        return
+    bot._store.delete_watch(watch.id)
+    label = watch.label or (f"pid {watch.pid}" if watch.pid else "the job")
+    log.info("Watch %s stopped by user in thread %s", watch.id, watch.channel_id)
+    try:
+        await interaction.message.edit(
+            content=f"\u23f9 Stopped watching **{label}** \u2014 the job itself is untouched.",
+            view=None,
+        )
+    except Exception:
+        log.debug("watch stop edit failed", exc_info=True)
+    # The thread is no longer busy, so let the ordinary tag/idle rules
+    # resume: without this it keeps the "active" tag it was holding.
+    try:
+        from bot.discord import tags
+        await tags.try_apply_tags_after_run(bot, str(interaction.channel_id))
+    except Exception:
+        log.debug("watch stop tag refresh failed", exc_info=True)
+
+
+async def _handle_fleet(
+    bot: ClaudeBot, interaction: discord.Interaction, action: str, token: str,
+) -> None:
+    """Fleet ship roster (Confirm / Cancel)."""
+    from bot.discord import fleet
+    await fleet.handle_fleet_button(bot, interaction, action, token)
+
+
+async def _handle_new_repo_select(
+    bot: ClaudeBot, interaction: discord.Interaction, btn_access: AccessResult,
+) -> None:
+    """Same picker as the new_repo buttons, as Select menus, used once the
+    repos outgrow one View of buttons. The repo is the selected value."""
+    values = interaction.data.get("values", []) if interaction.data else []
+    if values:
+        await _handle_new_repo(bot, interaction, values[0], btn_access)
+
+
+async def _handle_sync_cli(
+    bot: ClaudeBot, interaction: discord.Interaction, repo_name: str,
+) -> None:
+    """Sync CLI sessions into threads (control room button)."""
+    created, populated = await bot._forums.sync_cli_sessions(3)
+    parts_msg = []
+    if created:
+        parts_msg.append(f"Created {len(created)} threads")
+    if populated:
+        parts_msg.append(f"Updated {len(populated)} threads")
+    if not parts_msg:
+        parts_msg.append("No sessions found")
+    await interaction.followup.send(
+        f"Synced `{repo_name}`: " + ", ".join(parts_msg), ephemeral=True,
+    )
+
+
+async def _handle_refresh_control(
+    bot: ClaudeBot, interaction: discord.Interaction, repo_name: str,
+) -> None:
+    await bot._forums.refresh_control_room(repo_name)
+    await interaction.followup.send("Refreshed.", ephemeral=True)
+
+
+async def _handle_refresh_user_control(
+    bot: ClaudeBot, interaction: discord.Interaction,
+) -> None:
+    await bot._forums.refresh_user_control_room(str(interaction.user.id))
+    await interaction.followup.send("Refreshed.", ephemeral=True)
+
+
+async def _handle_cancel_cooldown(
+    bot: ClaudeBot, interaction: discord.Interaction, instance_id: str,
+) -> None:
+    """Cancel a cooldown auto-retry (lightweight, no channel lock needed)."""
+    inst = bot._store.get_instance(instance_id)
+    if not (inst and inst.cooldown_retry_at):
+        await interaction.followup.send("No pending auto-retry.", ephemeral=True)
+        return
+    inst.cooldown_retry_at = None
+    inst.cooldown_channel_id = None
+    bot._store.update_instance(inst)
+    # Edit the cooldown message in-place, removing the button
+    try:
+        await interaction.message.edit(content="Auto-retry cancelled.", view=None)
+    except Exception:
+        await interaction.followup.send("Auto-retry cancelled.")
+
+
+async def _handle_hold_merge(
+    bot: ClaudeBot, interaction: discord.Interaction, instance_id: str,
+) -> None:
+    """Hold an auto-merge veto (lightweight, no channel lock needed)."""
+    if not bot._store.hold_scheduled_merge(instance_id):
+        await interaction.followup.send(
+            "No pending auto-merge to hold (already merged or cancelled).",
+            ephemeral=True,
+        )
+        return
+    try:
+        await interaction.message.edit(
+            content="Auto-merge held \u2014 merge manually with the Merge "
+            "button or `/merge` when you're ready.",
+            view=None,
+        )
+    except Exception:
+        await interaction.followup.send("Auto-merge held.", ephemeral=True)
 
 
 async def _handle_pending_action(

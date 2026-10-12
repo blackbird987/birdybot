@@ -70,6 +70,7 @@
 - The session archive entry is chosen and worded by two small functions that can be tested on their own; posting it is all that is left in the forum code.
 - The startup forum check runs as named phases instead of one long function, with a test pinning their order and which of them skip hidden repos.
 - The Sync Git button's pull-and-push sequence lives in the engine, with a test that runs it against real throwaway repos; the button only posts the result.
+- Buttons that act on their own are dispatched from one table instead of a 30-branch if-chain, with the owner-only ones named in one set and a test that every entry reaches its handler.
 
 ### Removed
 - **Code nothing called anymore.** The legacy `data/wake/*.json` self-wake path (and `WAKE_DIR` with its startup sweep), since every wake has been a `/wake` directive for months; an unreachable second `log` branch in the button dispatcher; `on_unknown_command`; `format_expanded_result_md`; two unused embed-limit constants; the `DONE_PROMPT` alias; `CgroupMemory.headroom_mb` and `MemoryPressure.at_least`; `SensorResult.duration_s`, which was written and never read; `session_index.cwd_to_project_dir_name`, a copy of `session_fork.encode_project_path`; and an unused parameter on the Discord rate-limit callback factory.

@@ -168,7 +168,8 @@
     "after_turn": "python scripts/test_after_turn.py",
     "archive_entry": "python scripts/test_archive_entry.py",
     "reconcile_forums": "python scripts/test_reconcile_forums.py",
-    "git_sync": "python scripts/test_git_sync.py"
+    "git_sync": "python scripts/test_git_sync.py",
+    "button_dispatch": "python scripts/test_button_dispatch.py"
   },
 
   "auth": {
