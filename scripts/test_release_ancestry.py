@@ -273,7 +273,7 @@ def test_h_marker_means_do_not_ship_not_merge_failed() -> None:
 
 def test_i_knob_disables_every_surface() -> None:
     print("\n[i] RELEASE_ANCESTRY_CHECK=0 stands the check down")
-    from bot.discord import interactions
+    from bot.discord import deploy_flow
     from bot.engine import commands as bot_commands
 
     runner = ClaudeRunner()
@@ -289,7 +289,7 @@ def test_i_knob_disables_every_surface() -> None:
             # both are asserted here rather than only in prose: a knob that
             # silences two surfaces out of three is worse than no knob, since
             # the repo it was set for still cannot deploy.
-            deploy_src = inspect.getsource(interactions.execute_deploy)
+            deploy_src = inspect.getsource(deploy_flow.execute_deploy)
             _check("RELEASE_ANCESTRY_CHECK" in deploy_src, True,
                    "deploy gate reads the flag")
             audit_src = inspect.getsource(bot_commands.on_branches)
@@ -343,10 +343,10 @@ def test_k_gates_run_before_the_irreversible_step() -> None:
     next door exists to prevent.
     """
     print("\n[k] both gates precede the step they guard")
-    from bot.discord import interactions
+    from bot.discord import deploy_flow
     from bot.engine import workflows
 
-    deploy_src = inspect.getsource(interactions.execute_deploy)
+    deploy_src = inspect.getsource(deploy_flow.execute_deploy)
     gate = deploy_src.find("missing_predecessor_release")
     push = deploy_src.find('"push"')
     _check(gate != -1 and push != -1 and gate < push, True,

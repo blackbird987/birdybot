@@ -131,7 +131,7 @@ def test_finalize_merge_accepts_skip_close() -> None:
 
 def test_healthcheck_empty_passes() -> None:
     print("test_healthcheck_empty_passes")
-    from bot.discord.interactions import _post_deploy_healthcheck
+    from bot.discord.deploy_flow import _post_deploy_healthcheck
     # No commands configured -> immediately healthy, no sleep taken
     result = asyncio.run(
         _post_deploy_healthcheck(None, "repo", {}, {"commands": [], "delay_secs": 0})

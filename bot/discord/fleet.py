@@ -421,7 +421,7 @@ async def _deploy_and_verify(
         return  # boot-time drain_pending_verify handles the rest
 
     if method == "command":
-        from bot.discord.interactions import (
+        from bot.discord.deploy_flow import (
             _post_deploy_healthcheck, _spawn_deploy_fix, execute_deploy,
         )
         cfg = store.get_deploy_config(repo_name) or {}
