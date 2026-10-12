@@ -46,6 +46,7 @@ from bot.discord.titles import generate_title_text, read_ai_title
 from bot.discord.usage_gate import UsageGateMixin
 from bot.discord import memes
 from bot.engine import commands
+from bot.platform.base import delete_after
 from bot.services.twitter import enrich_with_tweets
 
 if TYPE_CHECKING:
@@ -67,15 +68,8 @@ class _AutoDeleteMessenger:
     async def send_text(self, channel_id, text, buttons=None, silent=False):
         msg_id = await self._inner.send_text(channel_id, text, buttons, silent)
         if channel_id == self._lobby_id and msg_id:
-            asyncio.create_task(self._delete_after(channel_id, msg_id))
+            asyncio.create_task(delete_after(self._inner, channel_id, msg_id, self._ttl))
         return msg_id
-
-    async def _delete_after(self, channel_id: str, msg_id: str) -> None:
-        try:
-            await asyncio.sleep(self._ttl)
-            await self._inner.delete_message(channel_id, msg_id)
-        except Exception:
-            pass
 
     def __getattr__(self, name):
         return getattr(self._inner, name)

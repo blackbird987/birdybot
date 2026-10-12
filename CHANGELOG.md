@@ -63,6 +63,7 @@
 - The Build button, the chain's single build and its first phase put the plan in front of the build prompt through one helper instead of three copies (E14)
 - One case-insensitive repo-name lookup shared by the chat path, the /spawn directive, /new, /access grant and the guest access check, and one budget refusal for /bg, /release, /retry, typed messages and spawned steps, which now all mention /budget reset (E20).
 - Session and chain eval files are written and read through one helper each instead of twin copies (E24).
+- Timed messages (a broadcast with a ttl, and slash-command replies in The Ark) share one sleep-then-delete helper instead of two copies.
 
 ### Removed
 - **Code nothing called anymore.** The legacy `data/wake/*.json` self-wake path (and `WAKE_DIR` with its startup sweep), since every wake has been a `/wake` directive for months; an unreachable second `log` branch in the button dispatcher; `on_unknown_command`; `format_expanded_result_md`; two unused embed-limit constants; the `DONE_PROMPT` alias; `CgroupMemory.headroom_mb` and `MemoryPressure.at_least`; `SensorResult.duration_s`, which was written and never read; `session_index.cwd_to_project_dir_name`, a copy of `session_fork.encode_project_path`; and an unused parameter on the Discord rate-limit callback factory.

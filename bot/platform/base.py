@@ -400,18 +400,18 @@ class NotificationService:
                 msg_id = await messenger.send_text(channel_id, text, buttons, silent)
                 if ttl and msg_id:
                     asyncio.create_task(
-                        self._delete_after(messenger, channel_id, msg_id, ttl)
+                        delete_after(messenger, channel_id, msg_id, ttl)
                     )
             except Exception:
                 log.exception("Failed to broadcast to %s", platform)
 
-    @staticmethod
-    async def _delete_after(
-        messenger: Messenger, channel_id: str, msg_id: str, delay: float,
-    ) -> None:
-        """Sleep then delete — pure async, no call_later."""
-        try:
-            await asyncio.sleep(delay)
-            await messenger.delete_message(channel_id, msg_id)
-        except Exception:
-            pass
+
+async def delete_after(
+    messenger: Messenger, channel_id: str, msg_id: str, delay: float,
+) -> None:
+    """Sleep, then delete the message. Best-effort: a failed delete is ignored."""
+    try:
+        await asyncio.sleep(delay)
+        await messenger.delete_message(channel_id, msg_id)
+    except Exception:
+        pass
