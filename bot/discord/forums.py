@@ -14,7 +14,7 @@ import re
 import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Awaitable, Callable
 
 import discord
 
@@ -291,34 +291,39 @@ class ForumManager:
     # --- Auto-Follow Helpers ---
 
     async def _auto_follow_thread(self, thread: discord.Thread, repo_name: str) -> None:
-        """Add owner + granted users to a thread so they auto-follow.
+        """Add owner + users granted this repo to a thread so they auto-follow."""
+        uids = [str(self._discord_user_id)] if self._discord_user_id else []
+        cfg = load_access_config()
+        uids += [uid for uid, ua in cfg.users.items()
+                 if ua.global_access or repo_name in ua.repos]
+        await self._add_followers(thread, uids)
 
-        Batched via asyncio.gather to minimize wall-clock time.
-        add_user is idempotent — no-op if already joined.
+    async def _auto_follow_user_thread(self, thread: discord.Thread, user_id: str) -> None:
+        """Add specific user + owner to a personal forum thread."""
+        uids = [user_id]
+        if self._discord_user_id:
+            uids.append(str(self._discord_user_id))
+        await self._add_followers(thread, uids)
+
+    async def _add_followers(self, thread: discord.Thread, user_ids: list[str]) -> None:
+        """Add these guild members to a thread, concurrently.
+
+        An id that is not a member (or not a number) is skipped, and
+        add_user is a no-op for someone already in the thread.
         """
         guild = self._client.get_guild(self._guild_id)
         if not guild:
             return
-
         targets: list[discord.Member] = []
-
-        # Owner
-        if self._discord_user_id:
-            member = guild.get_member(self._discord_user_id)
-            if member:
-                targets.append(member)
-
-        # Granted users with access to this repo
-        cfg = load_access_config()
-        for uid, ua in cfg.users.items():
-            if ua.global_access or repo_name in ua.repos:
+        for uid in user_ids:
+            try:
                 member = guild.get_member(int(uid))
-                if member and member not in targets:
-                    targets.append(member)
-
+            except (ValueError, TypeError):
+                continue
+            if member and member not in targets:
+                targets.append(member)
         if not targets:
             return
-
         results = await asyncio.gather(
             *(thread.add_user(m) for m in targets),
             return_exceptions=True,
@@ -326,30 +331,6 @@ class ForumManager:
         for m, r in zip(targets, results):
             if isinstance(r, Exception):
                 log.debug("Failed to auto-follow user %s to thread %s: %s", m.id, thread.id, r)
-
-    async def _auto_follow_user_thread(self, thread: discord.Thread, user_id: str) -> None:
-        """Add specific user + owner to a personal forum thread."""
-        guild = self._client.get_guild(self._guild_id)
-        if not guild:
-            return
-        uids = {user_id}
-        if self._discord_user_id:
-            uids.add(str(self._discord_user_id))
-
-        targets = []
-        for uid in uids:
-            try:
-                member = guild.get_member(int(uid))
-            except (ValueError, TypeError):
-                continue
-            if member:
-                targets.append(member)
-
-        if targets:
-            await asyncio.gather(
-                *(thread.add_user(m) for m in targets),
-                return_exceptions=True,
-            )
 
     # --- Forum-Session Mapping ---
 
@@ -1252,27 +1233,16 @@ class ForumManager:
         if not proj or not proj.forum_channel_id:
             return None
 
-        # Check existing — clear stale ID if thread was deleted
-        if proj.archive_thread_id:
-            try:
-                ch = await self._client.fetch_channel(int(proj.archive_thread_id))
-                if isinstance(ch, discord.Thread):
-                    if ch.archived:
-                        await ch.edit(archived=False)
-                    return ch
-            except discord.NotFound:
-                log.info("Archive thread %s for %s was deleted, recreating",
-                         proj.archive_thread_id, repo_name)
-                self._archive_channel_ids.discard(int(proj.archive_thread_id))
-                proj.archive_thread_id = None
+        existing, deleted = await self._existing_archive_thread(proj.archive_thread_id, repo_name)
+        if existing:
+            return existing
+        if deleted:
+            proj.archive_thread_id = None
 
-        forum = self._client.get_channel(int(proj.forum_channel_id))
-        if not forum or not isinstance(forum, discord.ForumChannel):
+        thread = await self._create_archive_thread(proj.forum_channel_id, repo_name)
+        if not thread:
             return None
-
-        thread, _ = await channels.create_archive_post(forum, repo_name)
         proj.archive_thread_id = str(thread.id)
-        self._archive_channel_ids.add(thread.id)
         self.save_forum_map()
         await self._auto_follow_thread(thread, repo_name)
         return thread
@@ -1284,30 +1254,52 @@ class ForumManager:
         if not ua or not ua.forum_channel_id:
             return None
 
-        # Check existing
-        if ua.archive_thread_id:
-            try:
-                ch = await self._client.fetch_channel(int(ua.archive_thread_id))
-                if isinstance(ch, discord.Thread):
-                    if ch.archived:
-                        await ch.edit(archived=False)
-                    return ch
-            except discord.NotFound:
-                log.info("User archive thread %s for %s was deleted, recreating",
-                         ua.archive_thread_id, ua.display_name)
-                self._archive_channel_ids.discard(int(ua.archive_thread_id))
-                ua.archive_thread_id = None
-                access_mod.save_access_config(cfg)
+        existing, deleted = await self._existing_archive_thread(
+            ua.archive_thread_id, f"user {ua.display_name}",
+        )
+        if existing:
+            return existing
+        if deleted:
+            ua.archive_thread_id = None
+            access_mod.save_access_config(cfg)
 
-        forum = self._client.get_channel(int(ua.forum_channel_id))
-        if not forum or not isinstance(forum, discord.ForumChannel):
+        thread = await self._create_archive_thread(ua.forum_channel_id, ua.display_name)
+        if not thread:
             return None
-
-        thread, _ = await channels.create_archive_post(forum, ua.display_name)
         ua.archive_thread_id = str(thread.id)
-        self._archive_channel_ids.add(thread.id)
         access_mod.save_access_config(cfg)
         await self._auto_follow_user_thread(thread, user_id)
+        return thread
+
+    async def _existing_archive_thread(
+        self, thread_id: str | None, label: str,
+    ) -> tuple[discord.Thread | None, bool]:
+        """The stored archive thread, woken if asleep, and whether it was deleted.
+
+        Only a NotFound counts as deleted, and the caller then clears the id
+        it stored. Either way no thread back means the caller makes a new post.
+        """
+        if not thread_id:
+            return None, False
+        try:
+            ch = await self._client.fetch_channel(int(thread_id))
+            if isinstance(ch, discord.Thread):
+                if ch.archived:
+                    await ch.edit(archived=False)
+                return ch, False
+        except discord.NotFound:
+            log.info("Archive thread %s for %s was deleted, recreating", thread_id, label)
+            self._archive_channel_ids.discard(int(thread_id))
+            return None, True
+        return None, False
+
+    async def _create_archive_thread(self, forum_channel_id: str, name: str) -> discord.Thread | None:
+        """A new archive post in a forum, registered as an archive channel."""
+        forum = self._client.get_channel(int(forum_channel_id))
+        if not forum or not isinstance(forum, discord.ForumChannel):
+            return None
+        thread, _ = await channels.create_archive_post(forum, name)
+        self._archive_channel_ids.add(thread.id)
         return thread
 
     async def _migrate_archive_channel(
@@ -1618,17 +1610,139 @@ class ForumManager:
         proj = self._forum_projects.get(repo_name)
         if not proj or not proj.control_thread_id or not proj.control_message_id:
             return
+
+        def forget() -> None:
+            proj.control_thread_id = None
+            proj.control_message_id = None
+            self.save_forum_map()
+
+        async def render():  # noqa: ANN202
+            return await self._render_repo_control(
+                proj, repo_name, usage_bar=usage_bar, drain_status=drain_status,
+            )
+
+        await self._refresh_control_message(
+            repo_name, proj.control_thread_id, proj.control_message_id,
+            forget=forget, render=render,
+            recreate=lambda: self.ensure_control_post(repo_name),
+        )
+
+    async def _render_repo_control(self, proj: ForumProject, repo_name: str, *,
+                                   usage_bar: str | None,
+                                   drain_status: str | None):  # noqa: ANN202
+        """The embed and buttons of a repo's Control Room, read fresh."""
+        from bot.claude.types import InstanceStatus
+
+        repo_instances = self._store.list_by_repo(repo_name)
+        running = [i for i in repo_instances if i.status == InstanceStatus.RUNNING]
+        attention = [i for i in self._store.needs_attention() if i.repo_name == repo_name]
+        completed = [i for i in repo_instances
+                     if i.status == InstanceStatus.COMPLETED and not i.needs_input][:5]
+
+        # Build session->thread map for this repo
+        session_to_thread: dict[str, str] = {
+            ti.session_id: ti.thread_id
+            for ti in proj.threads.values()
+            if ti.session_id
+        }
+
+        repos = self._store.list_repos()
+        repo_path = repos.get(repo_name, "")
+        branch = await self._get_repo_branch(repo_path)
+        has_remote = await self._has_git_remote(repo_path)
+        today_cost = self._store.get_repo_daily_cost(repo_name)
+        blurb = await repo_desc.refresh_repo_description(
+            self._store, repo_name, repo_path,
+        )
+
+        ds = self._store.get_deploy_state(repo_name)
+        # Build instance_id -> thread_id map for deploy state session links.
+        # pending_sessions stores instance IDs (e.g. "t-523"), but threads
+        # are keyed by session_id (UUID). Bridge via instance lookup.
+        deploy_thread_ids: dict[str, str] = {}
+        if ds and ds.pending_sessions:
+            for inst_id in ds.pending_sessions:
+                inst = self._store.get_instance(inst_id)
+                if inst and inst.session_id and inst.session_id in session_to_thread:
+                    deploy_thread_ids[inst_id] = session_to_thread[inst.session_id]
+        # Use threaded usage_bar if provided (from dashboard cascade),
+        # otherwise fetch independently (standalone refresh).
+        if usage_bar is None:
+            from bot.engine.usage import get_usage_bar_async
+            try:
+                usage_bar = await get_usage_bar_async()
+            except Exception:
+                pass
+        dc = self._store.get_deploy_config(repo_name)
+        embed = channels.build_control_embed(
+            repo_name, repo_path, branch,
+            running_instances=running,
+            attention_instances=attention,
+            completed_instances=completed,
+            session_to_thread=session_to_thread,
+            today_cost=today_cost,
+            deploy_state=ds,
+            deploy_thread_ids=deploy_thread_ids,
+            usage_bar=usage_bar,
+            drain_status=drain_status,
+            description=blurb,
+        )
+        view = channels.build_control_view(
+            repo_name,
+            active_count=len(running),
+            deploy_state=ds,
+            deploy_config=dc,
+            has_remote=has_remote,
+        )
+        return embed, view
+
+    async def refresh_user_control_room(self, user_id: str) -> None:
+        """Update the control room embed for a user's personal forum."""
+        cfg = load_access_config()
+        ua = cfg.users.get(user_id)
+        if not ua or not ua.control_thread_id or not ua.control_message_id:
+            return
+
+        def forget() -> None:
+            self._user_control_thread_ids.discard(ua.control_thread_id)
+            ua.control_thread_id = None
+            ua.control_message_id = None
+            access_mod.save_access_config(cfg)
+
+        async def render():  # noqa: ANN202
+            repo_names = list(ua.repos.keys())
+            return (channels.build_user_control_embed(ua.display_name, repo_names),
+                    channels.build_user_control_view(repo_names))
+
+        await self._refresh_control_message(
+            f"user {ua.display_name}", ua.control_thread_id, ua.control_message_id,
+            forget=forget, render=render,
+            recreate=lambda: self.ensure_user_control_post(user_id),
+        )
+
+    async def _refresh_control_message(
+        self, label: str, thread_id: str, message_id: str, *,
+        forget: Callable[[], None],
+        render: Callable[[], Awaitable[tuple[discord.Embed, discord.ui.View]]],
+        recreate: Callable[[], Awaitable[None]],
+    ) -> None:
+        """Redraw one Control Room embed, repo or personal, healing a deleted post.
+
+        A deleted thread clears the stored ids (``forget``) and stops; the
+        next ensure pass makes a new post. A deleted message clears them too,
+        deletes the now-empty thread and makes the new post at once
+        (``recreate``). Anything else is logged at debug and swallowed: this
+        runs on every instance start and completion and must never raise.
+        """
         thread = None
         try:
             try:
-                thread = await self._client.fetch_channel(int(proj.control_thread_id))
+                thread = await self._client.fetch_channel(int(thread_id))
             except discord.NotFound:
                 thread = None
             if not thread or not isinstance(thread, discord.Thread):
-                log.info("Control room thread for %s was deleted, clearing stale IDs", repo_name)
-                proj.control_thread_id = None
-                proj.control_message_id = None
-                self.save_forum_map()
+                log.info("Control room thread for %s was deleted, clearing stale IDs", label)
+                forget()
                 return
             # Migrate old names to current Control Room name.  The guard on
             # the current name matters: renaming a thread to the name it
@@ -1641,141 +1755,23 @@ class ForumManager:
                     log.info("Renamed %s -> %s (thread=%s)", old_name, channels.CONTROL_ROOM_NAME, thread.id)
                 except Exception:
                     pass
-            msg = await thread.fetch_message(int(proj.control_message_id))
-
-            from bot.claude.types import InstanceStatus
-
-            repo_instances = self._store.list_by_repo(repo_name)
-            running = [i for i in repo_instances if i.status == InstanceStatus.RUNNING]
-            attention = [i for i in self._store.needs_attention() if i.repo_name == repo_name]
-            completed = [i for i in repo_instances
-                         if i.status == InstanceStatus.COMPLETED and not i.needs_input][:5]
-
-            # Build session->thread map for this repo
-            session_to_thread: dict[str, str] = {
-                ti.session_id: ti.thread_id
-                for ti in proj.threads.values()
-                if ti.session_id
-            }
-
-            repos = self._store.list_repos()
-            repo_path = repos.get(repo_name, "")
-            branch = await self._get_repo_branch(repo_path)
-            has_remote = await self._has_git_remote(repo_path)
-            today_cost = self._store.get_repo_daily_cost(repo_name)
-            blurb = await repo_desc.refresh_repo_description(
-                self._store, repo_name, repo_path,
-            )
-
-            ds = self._store.get_deploy_state(repo_name)
-            # Build instance_id -> thread_id map for deploy state session links.
-            # pending_sessions stores instance IDs (e.g. "t-523"), but threads
-            # are keyed by session_id (UUID). Bridge via instance lookup.
-            deploy_thread_ids: dict[str, str] = {}
-            if ds and ds.pending_sessions:
-                for inst_id in ds.pending_sessions:
-                    inst = self._store.get_instance(inst_id)
-                    if inst and inst.session_id and inst.session_id in session_to_thread:
-                        deploy_thread_ids[inst_id] = session_to_thread[inst.session_id]
-            # Use threaded usage_bar if provided (from dashboard cascade),
-            # otherwise fetch independently (standalone refresh).
-            if usage_bar is None:
-                from bot.engine.usage import get_usage_bar_async
-                try:
-                    usage_bar = await get_usage_bar_async()
-                except Exception:
-                    pass
-            dc = self._store.get_deploy_config(repo_name)
-            embed = channels.build_control_embed(
-                repo_name, repo_path, branch,
-                running_instances=running,
-                attention_instances=attention,
-                completed_instances=completed,
-                session_to_thread=session_to_thread,
-                today_cost=today_cost,
-                deploy_state=ds,
-                deploy_thread_ids=deploy_thread_ids,
-                usage_bar=usage_bar,
-                drain_status=drain_status,
-                description=blurb,
-            )
-            view = channels.build_control_view(
-                repo_name,
-                active_count=len(running),
-                deploy_state=ds,
-                deploy_config=dc,
-                has_remote=has_remote,
-            )
+            msg = await thread.fetch_message(int(message_id))
+            embed, view = await render()
             await msg.edit(embed=embed, view=view)
         except discord.NotFound:
-            log.info("Control room message for %s was deleted, recreating", repo_name)
-            proj.control_thread_id = None
-            proj.control_message_id = None
-            self.save_forum_map()
+            log.info("Control room message for %s was deleted, recreating", label)
+            forget()
             try:
                 if thread and isinstance(thread, discord.Thread):
                     await thread.delete()
             except Exception:
                 pass
             try:
-                await self.ensure_control_post(repo_name)
+                await recreate()
             except Exception:
-                log.debug("Failed to recreate control room for %s", repo_name, exc_info=True)
+                log.debug("Failed to recreate control room for %s", label, exc_info=True)
         except Exception:
-            log.debug("Failed to refresh control room for %s", repo_name, exc_info=True)
-
-    async def refresh_user_control_room(self, user_id: str) -> None:
-        """Update the control room embed for a user's personal forum."""
-        cfg = load_access_config()
-        ua = cfg.users.get(user_id)
-        if not ua or not ua.control_thread_id or not ua.control_message_id:
-            return
-        thread = None
-        try:
-            try:
-                thread = await self._client.fetch_channel(int(ua.control_thread_id))
-            except discord.NotFound:
-                thread = None
-            if not thread or not isinstance(thread, discord.Thread):
-                log.info("Control room thread for user %s was deleted, clearing stale IDs", ua.display_name)
-                self._user_control_thread_ids.discard(ua.control_thread_id)
-                ua.control_thread_id = None
-                ua.control_message_id = None
-                access_mod.save_access_config(cfg)
-                return
-            # Migrate old names to current Control Room name (see the note in
-            # refresh_control_room -- a self-rename is not free).
-            if thread.name != channels.CONTROL_ROOM_NAME and thread.name in _LEGACY_CONTROL_ROOM_NAMES:
-                old_name = thread.name
-                try:
-                    await thread.edit(name=channels.CONTROL_ROOM_NAME)
-                    log.info("Renamed %s -> %s (thread=%s)", old_name, channels.CONTROL_ROOM_NAME, thread.id)
-                except Exception:
-                    pass
-            msg = await thread.fetch_message(int(ua.control_message_id))
-
-            repo_names = list(ua.repos.keys())
-
-            embed = channels.build_user_control_embed(ua.display_name, repo_names)
-            view = channels.build_user_control_view(repo_names)
-            await msg.edit(embed=embed, view=view)
-        except discord.NotFound:
-            log.info("Control room message for user %s was deleted, recreating", ua.display_name)
-            self._user_control_thread_ids.discard(ua.control_thread_id)
-            ua.control_thread_id = None
-            ua.control_message_id = None
-            access_mod.save_access_config(cfg)
-            try:
-                if thread and isinstance(thread, discord.Thread):
-                    await thread.delete()
-            except Exception:
-                pass
-            try:
-                await self.ensure_user_control_post(user_id)
-            except Exception:
-                log.debug("Failed to recreate control room for user %s", user_id, exc_info=True)
-        except Exception:
-            log.debug("Failed to refresh control room for user %s", user_id, exc_info=True)
+            log.debug("Failed to refresh control room for %s", label, exc_info=True)
 
     # --- Session Callbacks ---
 

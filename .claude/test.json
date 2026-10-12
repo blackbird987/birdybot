@@ -170,7 +170,8 @@
     "reconcile_forums": "python scripts/test_reconcile_forums.py",
     "git_sync": "python scripts/test_git_sync.py",
     "button_dispatch": "python scripts/test_button_dispatch.py",
-    "callback_dispatch": "python scripts/test_callback_dispatch.py"
+    "callback_dispatch": "python scripts/test_callback_dispatch.py",
+    "forum_twins": "python scripts/test_forum_twins.py"
   },
 
   "auth": {
