@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from bot import config
+from bot.textutil import match_name
 
 log = logging.getLogger(__name__)
 
@@ -201,12 +202,8 @@ def check_user_access(
         )
     if not repo_name:
         return None
-    # Exact match first
-    if repo_name in ua.repos:
-        return ua.repos[repo_name]
-    # Case-insensitive fallback
-    lower_map = {k.lower(): v for k, v in ua.repos.items()}
-    return lower_map.get(repo_name.lower())
+    canonical = match_name(repo_name, ua.repos)
+    return ua.repos[canonical] if canonical else None
 
 
 def has_any_access(cfg: AccessConfig, user_id: str) -> bool:

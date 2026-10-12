@@ -177,10 +177,7 @@ async def spawn_from(
         return None
 
     # Budget guard.
-    if not cmd_state.check_budget(ctx):
-        await ctx.messenger.send_text(
-            ctx.channel_id, "Daily budget exceeded. Use /budget reset to override.",
-        )
+    if await cmd_state.refuse_if_over_budget(ctx):
         return None
 
     # Repo guard
@@ -360,10 +357,7 @@ async def spawn_resolver_detached(
         await ctx.messenger.send_text(ctx.channel_id, spawn_err)
         return None
 
-    if not cmd_state.check_budget(ctx):
-        await ctx.messenger.send_text(
-            ctx.channel_id, "Daily budget exceeded. Use /budget reset to override.",
-        )
+    if await cmd_state.refuse_if_over_budget(ctx):
         return None
 
     if not source.repo_path or not Path(source.repo_path).is_dir():

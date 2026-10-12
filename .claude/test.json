@@ -160,7 +160,8 @@
     "boot_modules": "python scripts/test_boot_modules.py",
     "merge_push": "python scripts/test_merge_push.py",
     "merge_paths": "python scripts/test_merge_paths.py",
-    "bg_release": "python scripts/test_bg_release.py"
+    "bg_release": "python scripts/test_bg_release.py",
+    "repo_lookup": "python scripts/test_repo_lookup.py"
   },
 
   "auth": {

@@ -26,7 +26,7 @@ from bot.platform.formatting import (
     normalize_model, short_model_label,
 )
 from bot.store import history as history_mod
-from bot.textutil import clip, parse_iso_utc
+from bot.textutil import clip, match_name, parse_iso_utc
 from bot.fsutil import atomic_write_json, read_repo_config
 
 if TYPE_CHECKING:
@@ -512,8 +512,7 @@ def setup(bot: ClaudeBot) -> None:
 
         repo = repo.strip()
         if repo:
-            lower_map = {k.lower(): k for k in available_repos}
-            repo_name = repo if repo in available_repos else lower_map.get(repo.lower())
+            repo_name = match_name(repo, available_repos)
             if not repo_name:
                 await interaction.response.send_message(
                     f"Repo '{repo}' not found.", ephemeral=True,
@@ -996,13 +995,11 @@ def setup(bot: ClaudeBot) -> None:
             await interaction.response.send_message("Owner only", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
-        repos = bot._store.list_repos()
-        if repo not in repos:
-            lower_map = {k.lower(): k for k in repos}
-            repo = lower_map.get(repo.lower(), repo)
-        if repo not in repos:
+        canonical = match_name(repo, bot._store.list_repos())
+        if not canonical:
             await interaction.followup.send(f"Repo `{repo}` not found.", ephemeral=True)
             return
+        repo = canonical
         cfg = load_access_config()
         uid = str(user.id)
         if uid not in cfg.users:

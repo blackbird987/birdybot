@@ -23,11 +23,13 @@ from bot.platform.formatting import (
     strip_verify_blocks,
 )
 from bot.engine.cmd_state import (
+    NO_REPO_MSG,
     _get_channel_lock,
     budget_warning,
-    check_budget,
+    refuse_if_over_budget,
 )
 from bot.engine.directives.dispatch import _execute_bot_commands
+from bot.textutil import match_name
 from bot.engine.repo_cmds import _try_fast_repo_command
 from bot.engine.resolver import (
     _merge_context_prefix,
@@ -222,10 +224,7 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
             await ctx.messenger.send_text(ctx.channel_id, spawn_err)
         return
 
-    if not check_budget(ctx):
-        await ctx.messenger.send_text(
-            ctx.channel_id, "Daily budget exceeded. Use /budget reset to override.",
-        )
+    if await refuse_if_over_budget(ctx):
         return
 
     # Rate limit for non-owner users (callbacks populated by platform layer)
@@ -249,13 +248,8 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
     if ctx.repo_name:
         repos = ctx.store.list_repos()
         # Case-insensitive lookup (session project "AIAgent" vs repo "aiagent")
-        repo_path = repos.get(ctx.repo_name)
-        repo_name = ctx.repo_name
-        if not repo_path:
-            lower_map = {k.lower(): (k, v) for k, v in repos.items()}
-            match = lower_map.get(ctx.repo_name.lower())
-            if match:
-                repo_name, repo_path = match
+        repo_name = match_name(ctx.repo_name, repos) or ctx.repo_name
+        repo_path = repos.get(repo_name)
         if not repo_path:
             available = ", ".join(sorted(repos.keys())) if repos else "none"
             await ctx.messenger.send_text(
@@ -288,9 +282,7 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
             return
         repo_name, repo_path = ctx.store.get_active_repo()
     if not repo_path:
-        await ctx.messenger.send_text(
-            ctx.channel_id, "No repo set. Use /repo add <name> <path> first.",
-        )
+        await ctx.messenger.send_text(ctx.channel_id, NO_REPO_MSG)
         return
 
     # The thread's own session is the only one resumed. Threads are isolated:

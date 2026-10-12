@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from bot.store.state import StateStore
-from bot.engine.cmd_state import check_budget
+from bot.engine.cmd_state import NO_REPO_MSG, refuse_if_over_budget
 
 log = logging.getLogger(__name__)
 
@@ -58,13 +58,12 @@ async def on_bg(ctx: RequestContext, text: str) -> None:
         await ctx.messenger.send_text(ctx.channel_id, "Usage: /bg [--name <name>] <description>")
         return
 
-    if not check_budget(ctx):
-        await ctx.messenger.send_text(ctx.channel_id, "Daily budget exceeded.")
+    if await refuse_if_over_budget(ctx):
         return
 
     repo_name, repo_path = ctx.store.get_active_repo()
     if not repo_path:
-        await ctx.messenger.send_text(ctx.channel_id, "No repo set. Use /repo add <name> <path> first.")
+        await ctx.messenger.send_text(ctx.channel_id, NO_REPO_MSG)
         return
 
     name = None
@@ -134,13 +133,12 @@ async def _run_bg_task(ctx: RequestContext, inst: Instance) -> None:
 
 async def on_release(ctx: RequestContext, text: str) -> None:
     """Handle /release [patch|minor|major|X.Y.Z]."""
-    if not check_budget(ctx):
-        await ctx.messenger.send_text(ctx.channel_id, "Daily budget exceeded.")
+    if await refuse_if_over_budget(ctx):
         return
 
     repo_name, repo_path = ctx.store.get_active_repo()
     if not repo_path:
-        await ctx.messenger.send_text(ctx.channel_id, "No repo set. Use /repo add <name> <path> first.")
+        await ctx.messenger.send_text(ctx.channel_id, NO_REPO_MSG)
         return
 
     version_hint = text.strip() if text.strip() else "patch"
@@ -387,8 +385,7 @@ async def _start_retry(
     run_instance never binds, and that pairing is checked at every call site
     by scripts/test_cooldown_session_bind.py.
     """
-    if not pay_per_use and not check_budget(ctx):
-        await ctx.messenger.send_text(ctx.channel_id, "Daily budget exceeded.")
+    if not pay_per_use and await refuse_if_over_budget(ctx):
         return None
 
     if inst.repo_path and not Path(inst.repo_path).is_dir():

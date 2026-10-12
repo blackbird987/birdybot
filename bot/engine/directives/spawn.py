@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import re
 
-from bot.textutil import directive_re
+from bot.textutil import directive_re, match_name
 from bot.claude.types import Instance
 from bot.platform.base import RequestContext, SpawnArgs
 from bot.engine.cmd_state import check_budget
@@ -164,11 +164,7 @@ async def _handle_spawn_directive(
     # Repo must be registered. Match case-insensitively and resolve to the
     # canonical registered name — registrations are lowercase by convention
     # but the model often emits CamelCase based on directory names.
-    repos = ctx.store.list_repos()
-    canonical = next(
-        (name for name in repos if name.lower() == repo.lower()),
-        None,
-    )
+    canonical = match_name(repo, ctx.store.list_repos())
     if canonical is None:
         try:
             await ctx.messenger.send_text(

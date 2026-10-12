@@ -34,7 +34,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from bot.claude.types import Instance, InstanceStatus, InstanceType, RunResult  # noqa: E402
-from bot.engine import commands, lifecycle, query  # noqa: E402
+from bot.engine import cmd_state, commands, lifecycle, query  # noqa: E402
 from bot.platform.base import MessageHandle, RequestContext  # noqa: E402
 
 _failures: list[str] = []
@@ -167,7 +167,7 @@ async def _drive(outcome, *, send_result_raises: bool = False) -> _Case:  # noqa
         (lifecycle, "schedule_cooldown_retry", _no_cooldown),
         (lifecycle, "check_reboot_request", _anoop),
         (lifecycle, "check_wake_request", _anoop),
-        (query, "check_budget", lambda ctx: True),
+        (cmd_state, "check_budget", lambda ctx: True),
         (query, "budget_warning", _anoop),
         (query, "_execute_bot_commands", _anoop),
     ]

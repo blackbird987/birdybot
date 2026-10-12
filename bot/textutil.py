@@ -66,6 +66,23 @@ def flatten(value: object) -> str:
     return " ".join(str(value).split())
 
 
+def match_name(name: str, candidates) -> str | None:  # noqa: ANN001
+    """The candidate spelled ``name``, exactly or else ignoring case.
+
+    Repo names are registered lowercase by convention, while a session's
+    project, a model's /spawn line or a typed slash option often arrives as
+    CamelCase from the directory name. An exact match wins, so two names that
+    differ only in case still resolve to the one asked for.
+    """
+    if not name:
+        return None
+    names = list(candidates)
+    if name in names:
+        return name
+    folded = name.lower()
+    return next((n for n in names if n.lower() == folded), None)
+
+
 def parse_iso_utc(raw: object) -> datetime | None:
     """ISO-8601 timestamp -> timezone-aware datetime, or ``None``.
 

@@ -46,6 +46,19 @@ def check_budget(ctx: RequestContext) -> bool:
     return daily < config.DAILY_BUDGET_USD
 
 
+NO_REPO_MSG = "No repo set. Use /repo add <name> <path> first."
+
+
+async def refuse_if_over_budget(ctx: RequestContext) -> bool:
+    """Tell the user and return True when today's budget is spent."""
+    if check_budget(ctx):
+        return False
+    await ctx.messenger.send_text(
+        ctx.channel_id, "Daily budget exceeded. Use /budget reset to override.",
+    )
+    return True
+
+
 def _clear_chain_on_manual_finalize(
     store, session_id: str | None, op: str,
 ) -> None:

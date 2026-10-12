@@ -30,7 +30,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from bot.claude.types import Instance, InstanceStatus, InstanceType  # noqa: E402
-from bot.engine import instance_cmds, lifecycle  # noqa: E402
+from bot.engine import cmd_state, instance_cmds, lifecycle  # noqa: E402
 
 FAILS: list[str] = []
 
@@ -144,7 +144,7 @@ async def _release(final_status: InstanceStatus) -> tuple[_Runner, _Messenger]:
     async def fake_bg(ctx, inst):  # noqa: ANN001
         inst.status = final_status
 
-    orig_bg, orig_budget = instance_cmds._run_bg_task, instance_cmds.check_budget
+    orig_bg, orig_budget = instance_cmds._run_bg_task, cmd_state.check_budget
     orig_create = asyncio.create_task
 
     def track(coro, **kw):  # noqa: ANN001, ANN003
@@ -153,14 +153,14 @@ async def _release(final_status: InstanceStatus) -> tuple[_Runner, _Messenger]:
         return t
 
     instance_cmds._run_bg_task = fake_bg
-    instance_cmds.check_budget = lambda ctx: True
+    cmd_state.check_budget = lambda ctx: True
     asyncio.create_task = track
     try:
         await instance_cmds.on_release(ctx, "patch")
         await asyncio.gather(*tasks)
     finally:
         instance_cmds._run_bg_task = orig_bg
-        instance_cmds.check_budget = orig_budget
+        cmd_state.check_budget = orig_budget
         asyncio.create_task = orig_create
     return runner, messenger
 
