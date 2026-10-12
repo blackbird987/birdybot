@@ -74,18 +74,66 @@ def claude_projects_dirs() -> list[Path]:
     return config.claude_projects_dirs()
 
 
-def cwd_to_project_dir_name(cwd: str) -> str:
-    """Convert a working dir to Claude's project-dir naming convention.
+def _user_text(rec: dict) -> str:
+    """A user record's prompt: string content, or its first text block."""
+    content = (rec.get("message") or {}).get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                return block.get("text", "")
+    return ""
 
-    `C:\\Users\\foo\\bar`           → `C--Users-foo-bar`
-    `C:\\foo\\.worktrees\\t-1`      → `C--foo--worktrees-t-1`
 
-    Delegates to the one shared encoder so the runner, the JSONL forker, the
-    session scanner and this index rebuilder can never disagree about where a
-    project's sessions live.
-    """
-    from bot.engine.session_fork import encode_project_path
-    return encode_project_path(cwd)
+@dataclass
+class _MetadataScan:
+    """What one pass over a transcript has learned so far."""
+
+    session_id: str | None = None
+    first_prompt: str = ""
+    last_summary: str = ""
+    message_count: int = 0
+    git_branch: str = ""
+    created: str = ""
+    is_sidechain: bool = False
+    # Fallback: queue-operation enqueue often carries the original prompt
+    queue_first: str = ""
+
+    def feed(self, rec: dict) -> None:
+        if not self.session_id:
+            self.session_id = rec.get("sessionId") or rec.get("session_id") or None
+        if not self.created:
+            self.created = rec.get("timestamp") or ""
+        if rec.get("isSidechain"):
+            self.is_sidechain = True
+
+        rtype = rec.get("type")
+        if rtype == "queue-operation" and rec.get("operation") == "enqueue" and not self.queue_first:
+            c = rec.get("content")
+            if isinstance(c, str) and c.strip():
+                self.queue_first = c.strip()[:500]
+        if rtype == "summary":
+            s = rec.get("summary") or rec.get("content") or ""
+            if isinstance(s, str) and s.strip():
+                self.last_summary = s.strip()[:200]
+        if rtype == "user" and not self.first_prompt:
+            self.first_prompt = _user_text(rec).strip()[:500]
+        if rtype in ("user", "assistant"):
+            self.message_count += 1
+        if not self.git_branch:
+            self.git_branch = rec.get("gitBranch") or rec.get("git_branch") or ""
+
+    def entry(self) -> dict:
+        return {
+            "sessionId": self.session_id,
+            "firstPrompt": self.first_prompt or self.queue_first,
+            "summary": self.last_summary,
+            "messageCount": self.message_count,
+            "gitBranch": self.git_branch,
+            "created": self.created,
+            "isSidechain": self.is_sidechain,
+        }
 
 
 def extract_session_metadata(jsonl_path: Path) -> dict | None:
@@ -96,17 +144,7 @@ def extract_session_metadata(jsonl_path: Path) -> dict | None:
     events before any real user turn. Returns None if the file is unreadable
     or contains no usable session id.
     """
-    session_id: str | None = None
-    first_prompt = ""
-    last_summary = ""
-    message_count = 0
-    git_branch = ""
-    created = ""
-    is_sidechain = False
-    first_user_found = False
-    # Fallback: queue-operation enqueue often carries the original prompt
-    queue_first = ""
-
+    scan = _MetadataScan()
     try:
         with open(jsonl_path, encoding="utf-8") as f:
             for line in f:
@@ -117,76 +155,19 @@ def extract_session_metadata(jsonl_path: Path) -> dict | None:
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue  # tolerate truncated last line / corruption
-                if not isinstance(rec, dict):
-                    continue
-
-                if not session_id:
-                    sid = rec.get("sessionId") or rec.get("session_id")
-                    if sid:
-                        session_id = sid
-
-                if not created:
-                    ts = rec.get("timestamp")
-                    if ts:
-                        created = ts
-
-                if rec.get("isSidechain"):
-                    is_sidechain = True
-
-                rtype = rec.get("type")
-
-                if rtype == "queue-operation" and rec.get("operation") == "enqueue" and not queue_first:
-                    c = rec.get("content")
-                    if isinstance(c, str) and c.strip():
-                        queue_first = c.strip()[:500]
-
-                if rtype == "summary":
-                    s = rec.get("summary") or rec.get("content") or ""
-                    if isinstance(s, str) and s.strip():
-                        last_summary = s.strip()[:200]
-
-                if rtype == "user" and not first_user_found:
-                    msg = rec.get("message") or {}
-                    content = msg.get("content")
-                    text = ""
-                    if isinstance(content, str):
-                        text = content
-                    elif isinstance(content, list):
-                        for block in content:
-                            if isinstance(block, dict) and block.get("type") == "text":
-                                text = block.get("text", "")
-                                break
-                    if text.strip():
-                        first_prompt = text.strip()[:500]
-                        first_user_found = True
-
-                if rtype in ("user", "assistant"):
-                    message_count += 1
-
-                gb = rec.get("gitBranch") or rec.get("git_branch")
-                if gb and not git_branch:
-                    git_branch = gb
-
+                if isinstance(rec, dict):
+                    scan.feed(rec)
     except (OSError, PermissionError) as exc:
         log.debug("Could not read %s: %s", jsonl_path, exc)
         return None
 
-    if not session_id:
+    if not scan.session_id:
         return None
-
-    return {
-        "sessionId": session_id,
-        "firstPrompt": first_prompt or queue_first,
-        "summary": last_summary,
-        "messageCount": message_count,
-        "gitBranch": git_branch,
-        "created": created,
-        "isSidechain": is_sidechain,
-    }
+    return scan.entry()
 
 
 def _project_dir_to_original_path(dir_name: str) -> str:
-    """Best-effort reverse of :func:`cwd_to_project_dir_name`.
+    """Best-effort reverse of :func:`bot.claude.session_fork.encode_project_path`.
 
     Windows drive form: `C--Users-Quincy-...` → `C:\\Users\\Quincy\\...`
     POSIX form:         `-home-quincy-...`    → `/home/quincy/...`

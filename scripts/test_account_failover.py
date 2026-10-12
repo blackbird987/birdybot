@@ -2,7 +2,7 @@
 
 Covers the second cross-account failover trigger added so the bot keeps
 working when one Claude subscription is cancelled (auth/subscription error,
-NOT a usage limit).  See bot/claude/runner.py (the block before `return
+NOT a usage limit).  See bot/claude/runner/core.py (the block before `return
 result`) and bot/claude/parser.py classifiers.
 
 Two layers:

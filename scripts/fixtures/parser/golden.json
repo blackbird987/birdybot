@@ -1,0 +1,1212 @@
+{
+ "ask_question_00": "**Pick?**\n\u2022 **A** \u2014 first\n\u2022 B\n\n**Second?**",
+ "ask_question_01": "legacy",
+ "ask_question_02": "",
+ "ask_question_03": "",
+ "ask_question_04": "",
+ "raw_line_00": null,
+ "raw_line_01": null,
+ "raw_line_02": null,
+ "raw_line_03": null,
+ "raw_line_04": {
+  "apiKeySource": "none",
+  "cwd": "/opt/fixture/repo",
+  "mcp_servers": [],
+  "model": "claude-fixture-model",
+  "permissionMode": "bypassPermissions",
+  "session_id": "00000000-0000-4000-8000-00000000f001",
+  "subtype": "init",
+  "tools": [
+   "Bash"
+  ],
+  "type": "system",
+  "uuid": "00000000-0000-4000-8000-000000000069"
+ },
+ "raw_line_05": {
+  "message": {
+   "content": [
+    {
+     "text": "Fixture raw sentence",
+     "type": "text"
+    }
+   ],
+   "id": "msg_fixture_0070",
+   "model": "claude-fixture-model",
+   "role": "assistant",
+   "stop_reason": "end_turn",
+   "type": "message",
+   "usage": {
+    "cache_creation_input_tokens": 69657,
+    "cache_read_input_tokens": 9893,
+    "input_tokens": 2,
+    "output_tokens": 238
+   }
+  },
+  "parent_tool_use_id": null,
+  "session_id": "00000000-0000-4000-8000-00000000f001",
+  "type": "assistant",
+  "uuid": "00000000-0000-4000-8000-000000000070"
+ },
+ "raw_line_06": {
+  "is_error": false,
+  "result": "x",
+  "type": "result"
+ },
+ "raw_line_07": [
+  1,
+  2,
+  3
+ ],
+ "raw_line_08": null,
+ "stream_content_block_start_and_flat_content": {
+  "last_assistant_text": "",
+  "per_event": [
+   {
+    "i": 0,
+    "progress": {
+     "detail": "$ git status...",
+     "message": "Using running command...",
+     "tool_name": "Bash",
+     "turn": 0
+    },
+    "tool_blocks": [
+     {
+      "detail": "$ git status",
+      "input": {
+       "command": "git status"
+      },
+      "name": "Bash"
+     }
+    ],
+    "type": "content_block_start"
+   },
+   {
+    "i": 1,
+    "progress": {
+     "detail": "reading bot/app.py...",
+     "message": "Using reading files...",
+     "tool_name": "Read",
+     "turn": 0
+    },
+    "tool_blocks": [
+     {
+      "detail": "reading bot/app.py",
+      "input": {
+       "file_path": "/opt/fixture/repo/bot/app.py"
+      },
+      "name": "Read"
+     }
+    ],
+    "type": "content_block_start"
+   },
+   {
+    "i": 3,
+    "progress": {
+     "detail": "Turn 1 \u2014 editing bot/config.py",
+     "message": "Turn 1 \u2014 editing code",
+     "tool_name": "Edit",
+     "turn": 1
+    },
+    "tool_blocks": [
+     {
+      "detail": "editing bot/config.py",
+      "input": {
+       "file_path": "/opt/fixture/repo/bot/config.py",
+       "new_string": "b",
+       "old_string": "a"
+      },
+      "name": "Edit"
+     }
+    ],
+    "type": "assistant"
+   },
+   {
+    "i": 4,
+    "progress": {
+     "detail": "",
+     "message": "Processing...",
+     "tool_name": null,
+     "turn": 0
+    },
+    "type": "system"
+   }
+  ],
+  "result": {
+   "bash_commands": [
+    "git status"
+   ],
+   "duration_api_ms": 38100,
+   "duration_ms": 41230,
+   "input_tokens": 41,
+   "last_tool": "Edit",
+   "num_turns": 7,
+   "output_tokens": 2310,
+   "result_text": "streamed",
+   "session_id": "00000000-0000-4000-8000-00000000f001",
+   "tools_used": [
+    "Bash",
+    "Read",
+    "Edit"
+   ]
+  }
+ },
+ "stream_empty": {
+  "last_assistant_text": "",
+  "per_event": [],
+  "result": {}
+ },
+ "stream_error_max_turns": {
+  "last_assistant_text": "Fixture turn sentence about a harmless refactor. Fixture turn sentence about a harmless refactor. Fixture turn sentence",
+  "per_event": [
+   {
+    "i": 1,
+    "type": "assistant",
+    "usage": {
+     "cache_creation_input_tokens": 69657,
+     "cache_read_input_tokens": 9893,
+     "input_tokens": 2,
+     "model": "claude-fixture-model",
+     "output_tokens": 238
+    }
+   }
+  ],
+  "result": {
+   "cache_creation_tokens": 69657,
+   "cache_read_tokens": 9893,
+   "context_tokens": 79552,
+   "duration_api_ms": 38100,
+   "duration_ms": 41230,
+   "error_message": "Reached maximum number of turns (30)",
+   "input_tokens": 41,
+   "is_error": true,
+   "model": "claude-fixture-model",
+   "num_turns": 30,
+   "output_tokens": 2310,
+   "result_text": "Fixture turn sentence about a harmless refactor. Fixture turn sentence about a harmless refactor. Fixture turn sentence ",
+   "session_id": "00000000-0000-4000-8000-00000000f001"
+  }
+ },
+ "stream_error_no_errors_key": {
+  "last_assistant_text": "",
+  "per_event": [],
+  "result": {
+   "error_message": "Unknown error",
+   "is_error": true,
+   "session_id": "00000000-0000-4000-8000-00000000f001"
+  }
+ },
+ "stream_error_with_text": {
+  "last_assistant_text": "",
+  "per_event": [],
+  "result": {
+   "duration_api_ms": 38100,
+   "duration_ms": 41230,
+   "input_tokens": 41,
+   "is_error": true,
+   "num_turns": 1,
+   "output_tokens": 2310,
+   "result_text": "Your organization has disabled Claude subscription access for Claude Code",
+   "session_id": "00000000-0000-4000-8000-00000000f001"
+  }
+ },
+ "stream_long_final_keeps_result_only": {
+  "last_assistant_text": "Fixture end sentence about a h",
+  "per_event": [
+   {
+    "i": 1,
+    "type": "assistant",
+    "usage": {
+     "cache_creation_input_tokens": 69657,
+     "cache_read_input_tokens": 9893,
+     "input_tokens": 2,
+     "model": "claude-fixture-model",
+     "output_tokens": 238
+    }
+   },
+   {
+    "i": 2,
+    "progress": {
+     "detail": "Turn 0 \u2014 List",
+     "message": "Turn 0 \u2014 running command",
+     "tool_name": "Bash",
+     "turn": 0
+    },
+    "tool_blocks": [
+     {
+      "detail": "List",
+      "input": {
+       "command": "ls",
+       "description": "List"
+      },
+      "name": "Bash"
+     }
+    ],
+    "type": "assistant",
+    "usage": {
+     "cache_creation_input_tokens": 69657,
+     "cache_read_input_tokens": 9893,
+     "input_tokens": 2,
+     "model": "claude-fixture-model",
+     "output_tokens": 238
+    }
+   },
+   {
+    "i": 3,
+    "type": "assistant",
+    "usage": {
+     "cache_creation_input_tokens": 267,
+     "cache_read_input_tokens": 96858,
+     "input_tokens": 2,
+     "model": "claude-fixture-model",
+     "output_tokens": 378
+    }
+   }
+  ],
+  "result": {
+   "bash_commands": [
+    "ls"
+   ],
+   "cache_creation_tokens": 139581,
+   "cache_read_tokens": 116644,
+   "context_tokens": 97127,
+   "duration_api_ms": 38100,
+   "duration_ms": 41230,
+   "input_tokens": 41,
+   "last_tool": "Bash",
+   "model": "claude-fixture-model",
+   "num_turns": 7,
+   "output_tokens": 2310,
+   "result_text": "Fixture longfinal sentence about a harmless refactor. Fixture longfinal sentence about a harmless refactor. Fixture longfinal sentence about a harmless refactor. Fixture longfinal sentence about a harmless refactor. Fixture longfinal sentence about a harmless refactor. Fixture longfinal sentence about a harmless refactor. Fixture longfinal sentence about a harmless refactor. Fixture longfinal sentence about a harmless refactor. Fixture longfinal sentence about a harmless refactor. Fixture longfinal sentence about a harmless refactor. Fixture longfinal sentence about a harmless refactor. Fixture longfinal sentence about a harmless refactor. Fixture longfinal sentence about a harmless refactor. Fixture longfinal sentence about a harmless refactor. Fixture longfinal sentence about a harmless refactor. Fixture longfinal sentence about a harmless refactor. Fixture longfinal sentence about a harmless refactor. Fixture longfinal sentence about a harmless refactor. Fixture longfinal sentence about a harmless refactor. Fixture longfinal sentence about a harmless refactor. Fixture longfinal sentence about a harmless refactor. Fixture longfinal sentence about a harmless refactor. Fixture longfinal sentence about a harmless refactor. Fixture longfinal sentence about a harmless refactor. Fixture longfinal sentence about a harmless refactor. Fixture longfinal sentence about a harmless refactor. Fixture longfinal sentence about a harmless refactor. Fixture longfinal sentence about a harmless refactor. Fixture longfinal sentence about a harmless refactor. Fixture longfinal sentence about a harmless refactor. Fixture longfinal sentence about a harmless refactor. Fixture longfinal sentence about a harmless refactor. Fixture longfinal sentence about a harmless refactor. Fixture longfinal sentence about a harmless refactor. Fixture longfinal sentence about a harmless refactor. Fixture longfinal sentence about a harmless refactor. Fixture longfinal sentence about a harmless refactor. Fi",
+   "session_id": "00000000-0000-4000-8000-00000000f001",
+   "tools_used": [
+    "Bash"
+   ]
+  }
+ },
+ "stream_misc_tools_no_result": {
+  "last_assistant_text": "Fixture ask sentence about a harmless refactor. Fixture ask sentence about a harmless refactor. Fixture ask sentence about a harmless refactor. Fixture ask sentence about a harmless refactor. Fixture ask sentence about a harmless refactor. Fixture ask sentence",
+  "per_event": [
+   {
+    "i": 1,
+    "progress": {
+     "detail": "",
+     "message": "Turn 0 \u2014 ToolSearch",
+     "tool_name": "ToolSearch",
+     "turn": 0
+    },
+    "tool_blocks": [
+     {
+      "detail": "",
+      "input": {
+       "max_results": 2,
+       "query": "select:WebFetch,WebSearch"
+      },
+      "name": "ToolSearch"
+     }
+    ],
+    "type": "assistant",
+    "usage": {
+     "cache_creation_input_tokens": 69657,
+     "cache_read_input_tokens": 9893,
+     "input_tokens": 2,
+     "model": "claude-fixture-model",
+     "output_tokens": 238
+    }
+   },
+   {
+    "i": 3,
+    "progress": {
+     "detail": "",
+     "message": "Turn 0 \u2014 Agent",
+     "tool_name": "Agent",
+     "turn": 0
+    },
+    "tool_blocks": [
+     {
+      "detail": "",
+      "input": {
+       "description": "Audit autopilot chain duplication",
+       "prompt": "READ-ONLY task, do not modify any file. Repo: /opt/fixture/Programming/claude-telegram-bot. Read CLAUDE.md first (project rules; many \"must not drift\"/\"delibera...",
+       "subagent_type": "general-purpose"
+      },
+      "name": "Agent"
+     }
+    ],
+    "type": "assistant",
+    "usage": {
+     "cache_creation_input_tokens": 69657,
+     "cache_read_input_tokens": 9893,
+     "input_tokens": 2,
+     "model": "claude-fixture-model",
+     "output_tokens": 238
+    }
+   },
+   {
+    "i": 5,
+    "progress": {
+     "detail": "",
+     "message": "Turn 0 \u2014 Skill",
+     "tool_name": "Skill",
+     "turn": 0
+    },
+    "tool_blocks": [
+     {
+      "detail": "",
+      "input": {
+       "skill": "claude-api"
+      },
+      "name": "Skill"
+     }
+    ],
+    "type": "assistant",
+    "usage": {
+     "cache_creation_input_tokens": 69657,
+     "cache_read_input_tokens": 9893,
+     "input_tokens": 2,
+     "model": "claude-fixture-model",
+     "output_tokens": 238
+    }
+   },
+   {
+    "i": 7,
+    "progress": {
+     "detail": "",
+     "message": "Turn 0 \u2014 TaskStop",
+     "tool_name": "TaskStop",
+     "turn": 0
+    },
+    "tool_blocks": [
+     {
+      "detail": "",
+      "input": {
+       "task_id": "b34d0sjz2"
+      },
+      "name": "TaskStop"
+     }
+    ],
+    "type": "assistant",
+    "usage": {
+     "cache_creation_input_tokens": 69657,
+     "cache_read_input_tokens": 9893,
+     "input_tokens": 2,
+     "model": "claude-fixture-model",
+     "output_tokens": 238
+    }
+   },
+   {
+    "i": 9,
+    "progress": {
+     "detail": "Turn 0 \u2014 fetching https://example.com/docs/some/very/long/path/that/",
+     "message": "Turn 0 \u2014 fetching page",
+     "tool_name": "WebFetch",
+     "turn": 0
+    },
+    "tool_blocks": [
+     {
+      "detail": "fetching https://example.com/docs/some/very/long/path/that/",
+      "input": {
+       "prompt": "Summarise the page",
+       "url": "https://example.com/docs/some/very/long/path/that/keeps/going/and/going/index.html"
+      },
+      "name": "WebFetch"
+     }
+    ],
+    "type": "assistant",
+    "usage": {
+     "cache_creation_input_tokens": 69657,
+     "cache_read_input_tokens": 9893,
+     "input_tokens": 2,
+     "model": "claude-fixture-model",
+     "output_tokens": 238
+    }
+   },
+   {
+    "i": 11,
+    "progress": {
+     "detail": "Turn 0 \u2014 searching 'example query about parser golden tests '",
+     "message": "Turn 0 \u2014 searching web",
+     "tool_name": "WebSearch",
+     "turn": 0
+    },
+    "tool_blocks": [
+     {
+      "detail": "searching 'example query about parser golden tests '",
+      "input": {
+       "query": "example query about parser golden tests and refactors"
+      },
+      "name": "WebSearch"
+     }
+    ],
+    "type": "assistant",
+    "usage": {
+     "cache_creation_input_tokens": 69657,
+     "cache_read_input_tokens": 9893,
+     "input_tokens": 2,
+     "model": "claude-fixture-model",
+     "output_tokens": 238
+    }
+   },
+   {
+    "i": 13,
+    "progress": {
+     "detail": "",
+     "message": "Turn 0 \u2014 TodoWrite",
+     "tool_name": "TodoWrite",
+     "turn": 0
+    },
+    "tool_blocks": [
+     {
+      "detail": "",
+      "input": {
+       "todos": [
+        {
+         "activeForm": "Writing fixture",
+         "content": "Write fixture",
+         "status": "in_progress"
+        }
+       ]
+      },
+      "name": "TodoWrite"
+     }
+    ],
+    "type": "assistant",
+    "usage": {
+     "cache_creation_input_tokens": 69657,
+     "cache_read_input_tokens": 9893,
+     "input_tokens": 2,
+     "model": "claude-fixture-model",
+     "output_tokens": 238
+    }
+   },
+   {
+    "i": 15,
+    "progress": {
+     "detail": "Turn 0 \u2014 task: Audit the parser for drift in a long run",
+     "message": "Turn 0 \u2014 delegating task",
+     "tool_name": "Task",
+     "turn": 0
+    },
+    "tool_blocks": [
+     {
+      "detail": "task: Audit the parser for drift in a long run",
+      "input": {
+       "description": "Audit the parser for drift in a long running subagent",
+       "prompt": "Do the thing",
+       "subagent_type": "general-purpose"
+      },
+      "name": "Task"
+     }
+    ],
+    "type": "assistant",
+    "usage": {
+     "cache_creation_input_tokens": 69657,
+     "cache_read_input_tokens": 9893,
+     "input_tokens": 2,
+     "model": "claude-fixture-model",
+     "output_tokens": 238
+    }
+   },
+   {
+    "i": 17,
+    "progress": {
+     "detail": "",
+     "message": "Turn 0 \u2014 mcp__runpod__get-capacity",
+     "tool_name": "mcp__runpod__get-capacity",
+     "turn": 0
+    },
+    "tool_blocks": [
+     {
+      "detail": "",
+      "input": {
+       "cudaVersions": [
+        "12.8"
+       ],
+       "gpuTypeIds": [
+        "L40S",
+        "A40"
+       ],
+       "secureCloudOnly": true
+      },
+      "name": "mcp__runpod__get-capacity"
+     }
+    ],
+    "type": "assistant",
+    "usage": {
+     "cache_creation_input_tokens": 69657,
+     "cache_read_input_tokens": 9893,
+     "input_tokens": 2,
+     "model": "claude-fixture-model",
+     "output_tokens": 238
+    }
+   },
+   {
+    "i": 19,
+    "progress": {
+     "detail": "Turn 0 \u2014 question: Which approach should we take?",
+     "message": "Turn 0 \u2014 asking a question",
+     "tool_name": "AskUserQuestion",
+     "turn": 0
+    },
+    "tool_blocks": [
+     {
+      "detail": "question: Which approach should we take?",
+      "input": {
+       "questions": [
+        {
+         "header": "Approach",
+         "multiSelect": false,
+         "options": [
+          {
+           "description": "The quick one",
+           "label": "Option A"
+          },
+          {
+           "description": "The thorough one",
+           "label": "Option B"
+          },
+          {
+           "label": "Option C"
+          }
+         ],
+         "question": "Which approach should we take?"
+        }
+       ]
+      },
+      "name": "AskUserQuestion"
+     }
+    ],
+    "type": "assistant",
+    "usage": {
+     "cache_creation_input_tokens": 69657,
+     "cache_read_input_tokens": 9893,
+     "input_tokens": 2,
+     "model": "claude-fixture-model",
+     "output_tokens": 238
+    }
+   },
+   {
+    "i": 21,
+    "type": "assistant",
+    "usage": {
+     "cache_creation_input_tokens": 69657,
+     "cache_read_input_tokens": 9893,
+     "input_tokens": 2,
+     "model": "claude-fixture-model",
+     "output_tokens": 238
+    }
+   }
+  ],
+  "result": {
+   "cache_creation_tokens": 766227,
+   "cache_read_tokens": 108823,
+   "context_tokens": 79552,
+   "last_tool": "AskUserQuestion",
+   "model": "claude-fixture-model",
+   "result_text": "Fixture ask sentence about a harmless refactor. Fixture ask sentence about a harmless refactor. Fixture ask sentence about a harmless refactor. Fixture ask sentence about a harmless refactor. Fixture ask sentence about a harmless refactor. Fixture ask sentence",
+   "tools_used": [
+    "ToolSearch",
+    "Agent",
+    "Skill",
+    "TaskStop",
+    "WebFetch",
+    "WebSearch",
+    "TodoWrite",
+    "Task",
+    "mcp__runpod__get-capacity",
+    "AskUserQuestion"
+   ]
+  }
+ },
+ "stream_no_result_join_all_short": {
+  "last_assistant_text": "Fixture b sentence about a harmless refactor. Fixt",
+  "per_event": [
+   {
+    "i": 0,
+    "type": "assistant",
+    "usage": {
+     "cache_creation_input_tokens": 69657,
+     "cache_read_input_tokens": 9893,
+     "input_tokens": 2,
+     "model": "claude-fixture-model",
+     "output_tokens": 238
+    }
+   },
+   {
+    "i": 1,
+    "type": "assistant",
+    "usage": {
+     "cache_creation_input_tokens": 69657,
+     "cache_read_input_tokens": 9893,
+     "input_tokens": 2,
+     "model": "claude-fixture-model",
+     "output_tokens": 238
+    }
+   }
+  ],
+  "result": {
+   "cache_creation_tokens": 139314,
+   "cache_read_tokens": 19786,
+   "context_tokens": 79552,
+   "model": "claude-fixture-model",
+   "result_text": "Fixture a sentence about a harmless refa\nFixture b sentence about a harmless refactor. Fixt"
+  }
+ },
+ "stream_no_result_last_substantial_turn": {
+  "last_assistant_text": "Fixture short sentence about a harmless",
+  "per_event": [
+   {
+    "i": 0,
+    "type": "assistant",
+    "usage": {
+     "cache_creation_input_tokens": 69657,
+     "cache_read_input_tokens": 9893,
+     "input_tokens": 2,
+     "model": "claude-fixture-model",
+     "output_tokens": 238
+    }
+   },
+   {
+    "i": 1,
+    "type": "assistant",
+    "usage": {
+     "cache_creation_input_tokens": 69657,
+     "cache_read_input_tokens": 9893,
+     "input_tokens": 2,
+     "model": "claude-fixture-model",
+     "output_tokens": 238
+    }
+   }
+  ],
+  "result": {
+   "cache_creation_tokens": 139314,
+   "cache_read_tokens": 19786,
+   "context_tokens": 79552,
+   "model": "claude-fixture-model",
+   "result_text": "Fixture long sentence about a harmless refactor. Fixture long sentence about a harmless refactor. Fixture long sentence about a harmless refactor. Fixture long sentence about a harmless refactor. Fixture long sentence about a harmless refactor. Fixture long sentence about a harmless refactor. Fixtur"
+  }
+ },
+ "stream_real_error_during_execution": {
+  "last_assistant_text": "",
+  "per_event": [],
+  "result": {
+   "error_message": "No conversation found with session ID: 00000000-0000-4000-8000-00000000f001",
+   "is_error": true,
+   "session_id": "00000000-0000-4000-8000-00000000f001"
+  }
+ },
+ "stream_result_as_dict": {
+  "last_assistant_text": "",
+  "per_event": [],
+  "result": {
+   "duration_api_ms": 38100,
+   "duration_ms": 41230,
+   "input_tokens": 41,
+   "num_turns": 7,
+   "output_tokens": 2310,
+   "result_text": "dict text",
+   "session_id": "00000000-0000-4000-8000-00000000f001"
+  }
+ },
+ "stream_result_as_dict_no_text": {
+  "last_assistant_text": "",
+  "per_event": [],
+  "result": {
+   "duration_api_ms": 38100,
+   "duration_ms": 41230,
+   "input_tokens": 41,
+   "num_turns": 7,
+   "output_tokens": 2310,
+   "result_text": "{'other': 1}",
+   "session_id": "00000000-0000-4000-8000-00000000f001"
+  }
+ },
+ "stream_result_as_list": {
+  "last_assistant_text": "",
+  "per_event": [],
+  "result": {
+   "duration_api_ms": 38100,
+   "duration_ms": 41230,
+   "input_tokens": 41,
+   "num_turns": 7,
+   "output_tokens": 2310,
+   "result_text": "part one\npart two",
+   "session_id": "00000000-0000-4000-8000-00000000f001"
+  }
+ },
+ "stream_short_final_prepends_intermediate": {
+  "last_assistant_text": "Fixture end sentence about a h",
+  "per_event": [
+   {
+    "i": 1,
+    "type": "assistant",
+    "usage": {
+     "cache_creation_input_tokens": 69657,
+     "cache_read_input_tokens": 9893,
+     "input_tokens": 2,
+     "model": "claude-fixture-model",
+     "output_tokens": 238
+    }
+   },
+   {
+    "i": 2,
+    "progress": {
+     "detail": "Turn 0 \u2014 List",
+     "message": "Turn 0 \u2014 running command",
+     "tool_name": "Bash",
+     "turn": 0
+    },
+    "tool_blocks": [
+     {
+      "detail": "List",
+      "input": {
+       "command": "ls",
+       "description": "List"
+      },
+      "name": "Bash"
+     }
+    ],
+    "type": "assistant",
+    "usage": {
+     "cache_creation_input_tokens": 69657,
+     "cache_read_input_tokens": 9893,
+     "input_tokens": 2,
+     "model": "claude-fixture-model",
+     "output_tokens": 238
+    }
+   },
+   {
+    "i": 3,
+    "type": "assistant",
+    "usage": {
+     "cache_creation_input_tokens": 267,
+     "cache_read_input_tokens": 96858,
+     "input_tokens": 2,
+     "model": "claude-fixture-model",
+     "output_tokens": 378
+    }
+   }
+  ],
+  "result": {
+   "bash_commands": [
+    "ls"
+   ],
+   "cache_creation_tokens": 139581,
+   "cache_read_tokens": 116644,
+   "context_tokens": 97127,
+   "duration_api_ms": 38100,
+   "duration_ms": 41230,
+   "input_tokens": 41,
+   "last_tool": "Bash",
+   "model": "claude-fixture-model",
+   "num_turns": 7,
+   "output_tokens": 2310,
+   "result_text": "Fixture mid1 sentence about a harmless refactor. Fixture mid1 sentence about a harmless refactor. Fixture mid1 sentence about a harmless refactor. Fixture mid1 sentence about a harmless refactor. Fixture mid1 sentence about a harmless refactor. Fixture mid1 sentence about a harmless refactor. Fixture mid1 sentence about a harmless refactor. Fixture mid1 sentence about a harmless refactor. Fixture mid1 sentence about a harmless refactor. Fixture mid1 sentence about a harmless refactor. Fixture mid1 sentence about a harmless refactor. Fixture mid1 sentence about a harmless refactor. Fixture mid1 sentence about a harmless refactor. Fixture mid1 sentence about a harmless refactor. Fixture mid1 sentence about a harmless refactor. Fixture mid1 sentence about a harmless refactor. Fixture mid1 sentence about a harmless refactor. Fixture mid1 sentence about a harmless refactor. Fixture mid1 sente\n\n---\n\nFixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 s\n\n---\n\nok",
+   "session_id": "00000000-0000-4000-8000-00000000f001",
+   "tools_used": [
+    "Bash"
+   ]
+  }
+ },
+ "stream_sidechain_ignored_for_last_text": {
+  "last_assistant_text": "Fixture main sentence about a harmless refactor. Fixture main sentence about a harmless refactor. Fixture main sentence about a harmless refactor. Fixture main sentence about a harmless refactor. Fixture main sentence ab",
+  "per_event": [
+   {
+    "i": 0,
+    "type": "assistant",
+    "usage": {
+     "cache_creation_input_tokens": 69657,
+     "cache_read_input_tokens": 9893,
+     "input_tokens": 2,
+     "model": "claude-fixture-model",
+     "output_tokens": 238
+    }
+   },
+   {
+    "i": 1,
+    "type": "assistant",
+    "usage": {
+     "cache_creation_input_tokens": 69657,
+     "cache_read_input_tokens": 9893,
+     "input_tokens": 2,
+     "model": "claude-fixture-model",
+     "output_tokens": 238
+    }
+   }
+  ],
+  "result": {
+   "cache_creation_tokens": 139314,
+   "cache_read_tokens": 19786,
+   "context_tokens": 79552,
+   "model": "claude-fixture-model",
+   "result_text": "Fixture side sentence about a harmless refactor. Fixture side sentence about a harmless refactor. Fixture side sentence about a harmless refactor. Fixture side sentence about a harmless refactor. Fixture side sentence ab"
+  }
+ },
+ "stream_tokens_top_level": {
+  "last_assistant_text": "",
+  "per_event": [],
+  "result": {
+   "cost_usd": 0.12,
+   "duration_api_ms": 38100,
+   "duration_ms": 41230,
+   "input_tokens": 11,
+   "num_turns": 7,
+   "output_tokens": 22,
+   "result_text": "ok",
+   "session_id": "00000000-0000-4000-8000-00000000f001"
+  }
+ },
+ "stream_tools_success": {
+  "last_assistant_text": "Fixture final sentence about a harmless refactor. Fixture final sentence about a harmless refactor. Fixture final sentence about a harmless refactor. Fixture final sentence about a harmless refactor. Fixture final sentence about a harmless refactor. Fixture final sentence about a harmless refactor. Fixture final sentence about a harmless refactor. Fixture final sentence about a harmless refactor. Fixture final sentence about a harmless refactor. Fixture final sentence about a harmless refactor. Fixture final sentence about a harmless refactor. Fixture final sentence about a harmless refactor. Fixture final sentence about a harmless refactor. Fixture final sentence about a harmless refactor. Fixture final sentence about a harmless refactor. Fixture final sentence about a harmless refactor. Fixture final sentence about a harmless refactor. Fixture final sentence about a harmless refactor. Fixture final sentence about a harmless refactor. Fixture final sentence about a harmless refactor. Fixture final sentence about a harmless refactor. Fixture final sentence about a harmless refactor. Fixture final sentence about a harmless refactor. Fixture final sentence about a harmless refactor. Fixture final sentence about a harmless refactor. Fixture final sentence about a harmless refactor. Fixture final sentence about a harmless refactor. Fixture final sentence about a harmless refactor.",
+  "per_event": [
+   {
+    "i": 1,
+    "type": "assistant",
+    "usage": {
+     "cache_creation_input_tokens": 69657,
+     "cache_read_input_tokens": 9893,
+     "input_tokens": 2,
+     "model": "claude-fixture-model",
+     "output_tokens": 238
+    }
+   },
+   {
+    "i": 2,
+    "progress": {
+     "detail": "Turn 0 \u2014 Survey codebase size by module",
+     "message": "Turn 0 \u2014 running command",
+     "tool_name": "Bash",
+     "turn": 0
+    },
+    "tool_blocks": [
+     {
+      "detail": "Survey codebase size by module",
+      "input": {
+       "command": "find bot -name '*.py' | xargs wc -l | sort -n | tail -25 && echo && find scripts -name 'test_*.py' | wc -l && find bot -name '*.py' | wc -l",
+       "description": "Survey codebase size by module"
+      },
+      "name": "Bash"
+     }
+    ],
+    "type": "assistant",
+    "usage": {
+     "cache_creation_input_tokens": 69657,
+     "cache_read_input_tokens": 9893,
+     "input_tokens": 2,
+     "model": "claude-fixture-model",
+     "output_tokens": 238
+    }
+   },
+   {
+    "i": 4,
+    "progress": {
+     "detail": "Turn 0 \u2014 reading results/q-19565.md",
+     "message": "Turn 0 \u2014 reading files",
+     "tool_name": "Read",
+     "turn": 0
+    },
+    "tool_blocks": [
+     {
+      "detail": "reading results/q-19565.md",
+      "input": {
+       "file_path": "/opt/fixture/Programming/claude-telegram-bot/data/results/q-19565.md"
+      },
+      "name": "Read"
+     }
+    ],
+    "type": "assistant",
+    "usage": {
+     "cache_creation_input_tokens": 267,
+     "cache_read_input_tokens": 96858,
+     "input_tokens": 2,
+     "model": "claude-fixture-model",
+     "output_tokens": 378
+    }
+   },
+   {
+    "i": 6,
+    "progress": {
+     "detail": "Turn 0 \u2014 editing claude/types.py",
+     "message": "Turn 0 \u2014 editing code",
+     "tool_name": "Edit",
+     "turn": 0
+    },
+    "tool_blocks": [
+     {
+      "detail": "editing claude/types.py",
+      "input": {
+       "file_path": "/opt/fixture/Programming/claude-telegram-bot/.worktrees/t-9155/bot/claude/types.py",
+       "new_string": "    _context_thrash_retry: bool = False\n    # Ephemeral companion to the above: the note naming an oversized\n    # auto-attached instruction file (bot/claude/co...",
+       "old_string": "    _context_thrash_retry: bool = False\n    # Ephemeral twin",
+       "replace_all": false
+      },
+      "name": "Edit"
+     }
+    ],
+    "type": "assistant",
+    "usage": {
+     "cache_creation_input_tokens": 1782,
+     "cache_read_input_tokens": 115328,
+     "input_tokens": 2,
+     "model": "claude-fixture-model",
+     "output_tokens": 486
+    }
+   },
+   {
+    "i": 8,
+    "progress": {
+     "detail": "Turn 0 \u2014 writing refactor/README.md",
+     "message": "Turn 0 \u2014 writing files",
+     "tool_name": "Write",
+     "turn": 0
+    },
+    "tool_blocks": [
+     {
+      "detail": "writing refactor/README.md",
+      "input": {
+       "content": "# Refactor scout reports (2026-10-11)\n\nFive read-only scout sessions mapped the codebase before the October 2026\nrefactor. Their reports are kept here because t...",
+       "file_path": "/opt/fixture/Programming/claude-telegram-bot/.worktrees/t-9201/docs/refactor/README.md"
+      },
+      "name": "Write"
+     }
+    ],
+    "type": "assistant",
+    "usage": {
+     "cache_creation_input_tokens": 1316,
+     "cache_read_input_tokens": 109813,
+     "input_tokens": 2,
+     "model": "claude-fixture-model",
+     "output_tokens": 3402
+    }
+   },
+   {
+    "i": 10,
+    "progress": {
+     "detail": "Turn 0 \u2014 grep 'CONFIRMED RAW FOOTAGE LOSS' in log/2026-09.md",
+     "message": "Turn 0 \u2014 searching code",
+     "tool_name": "Grep",
+     "turn": 0
+    },
+    "tool_blocks": [
+     {
+      "detail": "grep 'CONFIRMED RAW FOOTAGE LOSS' in log/2026-09.md",
+      "input": {
+       "-n": "true",
+       "output_mode": "content",
+       "path": "/opt/fixture/Programming/vin-coach/log/2026-09.md",
+       "pattern": "CONFIRMED RAW FOOTAGE LOSS"
+      },
+      "name": "Grep"
+     }
+    ],
+    "type": "assistant",
+    "usage": {
+     "cache_creation_input_tokens": 128578,
+     "cache_read_input_tokens": 10014,
+     "input_tokens": 2,
+     "model": "claude-fixture-model",
+     "output_tokens": 527
+    }
+   },
+   {
+    "i": 12,
+    "progress": {
+     "detail": "Turn 0 \u2014 glob log/*.md",
+     "message": "Turn 0 \u2014 searching files",
+     "tool_name": "Glob",
+     "turn": 0
+    },
+    "tool_blocks": [
+     {
+      "detail": "glob log/*.md",
+      "input": {
+       "pattern": "log/*.md"
+      },
+      "name": "Glob"
+     }
+    ],
+    "type": "assistant",
+    "usage": {
+     "cache_creation_input_tokens": 29672,
+     "cache_read_input_tokens": 10616,
+     "input_tokens": 2,
+     "model": "claude-fixture-model",
+     "output_tokens": 344
+    }
+   },
+   {
+    "i": 14,
+    "progress": {
+     "detail": "Turn 0 \u2014 running command",
+     "message": "Turn 0 \u2014 running command",
+     "tool_name": "Bash",
+     "turn": 0
+    },
+    "tool_blocks": [
+     {
+      "detail": "running command",
+      "input": {
+       "command": "echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+       "description": ""
+      },
+      "name": "Bash"
+     }
+    ],
+    "type": "assistant",
+    "usage": {
+     "cache_creation_input_tokens": 69657,
+     "cache_read_input_tokens": 9893,
+     "input_tokens": 2,
+     "model": "claude-fixture-model",
+     "output_tokens": 238
+    }
+   },
+   {
+    "i": 16,
+    "type": "assistant",
+    "usage": {
+     "cache_creation_input_tokens": 267,
+     "cache_read_input_tokens": 96858,
+     "input_tokens": 2,
+     "model": "claude-fixture-model",
+     "output_tokens": 378
+    }
+   }
+  ],
+  "result": {
+   "bash_commands": [
+    "find bot -name '*.py' | xargs wc -l | sort -n | tail -25 && echo && find scripts -name 'test_*.py' | wc -l && find bot -name '*.py' | wc -l",
+    "echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   ],
+   "cache_creation_tokens": 370853,
+   "cache_read_tokens": 469166,
+   "context_tokens": 97127,
+   "cost_usd": 0.5,
+   "duration_api_ms": 38100,
+   "duration_ms": 41230,
+   "input_tokens": 41,
+   "last_tool": "Bash",
+   "model": "claude-fixture-model",
+   "num_turns": 7,
+   "output_tokens": 2310,
+   "result_text": "All six tools ran and the refactor is done.",
+   "session_id": "00000000-0000-4000-8000-00000000f001",
+   "tools_used": [
+    "Bash",
+    "Read",
+    "Edit",
+    "Write",
+    "Grep",
+    "Glob"
+   ]
+  }
+ },
+ "stream_two_result_events_last_wins": {
+  "last_assistant_text": "",
+  "per_event": [],
+  "result": {
+   "duration_api_ms": 38100,
+   "duration_ms": 41230,
+   "input_tokens": 41,
+   "num_turns": 7,
+   "output_tokens": 2310,
+   "result_text": "second",
+   "session_id": "00000000-0000-4000-8000-00000000f001"
+  }
+ },
+ "stream_usage_cache_totals": {
+  "last_assistant_text": "Fixture c",
+  "per_event": [
+   {
+    "i": 0,
+    "type": "assistant",
+    "usage": {
+     "cache_creation_input_tokens": 100,
+     "cache_read_input_tokens": 1000,
+     "input_tokens": 5,
+     "model": "claude-fixture-a",
+     "output_tokens": 10
+    }
+   },
+   {
+    "i": 1,
+    "type": "assistant",
+    "usage": {
+     "cache_creation_input_tokens": 200,
+     "cache_read_input_tokens": 2000,
+     "input_tokens": 6,
+     "model": "claude-fixture-b",
+     "output_tokens": 20
+    }
+   },
+   {
+    "i": 2,
+    "type": "assistant",
+    "usage": {
+     "cache_creation_input_tokens": null,
+     "cache_read_input_tokens": null,
+     "input_tokens": 7,
+     "model": "claude-fixture-b",
+     "output_tokens": 30
+    }
+   }
+  ],
+  "result": {
+   "cache_creation_tokens": 300,
+   "cache_read_tokens": 3000,
+   "context_tokens": 7,
+   "duration_api_ms": 38100,
+   "duration_ms": 41230,
+   "model": "claude-fixture-b",
+   "num_turns": 7,
+   "result_text": "Fixture a \n\n---\n\nFixture b \n\n---\n\nok",
+   "session_id": "00000000-0000-4000-8000-00000000f001"
+  }
+ },
+ "tool_detail_00_Read": "reading claude/parser.py",
+ "tool_detail_01_Read": "reading short.py",
+ "tool_detail_02_Read": "reading a/b.py",
+ "tool_detail_03_Read": "",
+ "tool_detail_04_Read": "",
+ "tool_detail_05_Read": "reading sub/file.py",
+ "tool_detail_06_Glob": "glob **/*.py",
+ "tool_detail_07_Glob": "",
+ "tool_detail_08_Grep": "grep 'def extract_result' in claude/parser.py",
+ "tool_detail_09_Grep": "grep 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'",
+ "tool_detail_10_Grep": "grep 'pppppppppppppppppppppppppppppp' in repo/bot",
+ "tool_detail_11_Grep": "",
+ "tool_detail_12_Edit": "editing bot/config.py",
+ "tool_detail_13_Edit": "",
+ "tool_detail_14_Write": "writing repo/new.txt",
+ "tool_detail_15_Write": "",
+ "tool_detail_16_Bash": "Show the working tree status",
+ "tool_detail_17_Bash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+ "tool_detail_18_Bash": "$ ls -la",
+ "tool_detail_19_Bash": "$ ls -la",
+ "tool_detail_20_Bash": "running command",
+ "tool_detail_21_Bash": "$ xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+ "tool_detail_22_Bash": "running command",
+ "tool_detail_23_Bash": "",
+ "tool_detail_24_Bash": "",
+ "tool_detail_25_WebSearch": "searching 'qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq'",
+ "tool_detail_26_WebSearch": "searching 'short'",
+ "tool_detail_27_WebSearch": "",
+ "tool_detail_28_WebFetch": "fetching https://example.com/pppppppppppppppppppppppppppppp",
+ "tool_detail_29_WebFetch": "",
+ "tool_detail_30_Task": "task: tttttttttttttttttttttttttttttttttttttttt",
+ "tool_detail_31_Task": "",
+ "tool_detail_32_Agent": "",
+ "tool_detail_33_TodoWrite": "",
+ "tool_detail_34_AskUserQuestion": "question: Pick one?",
+ "tool_detail_35_AskUserQuestion": "question: QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ",
+ "tool_detail_36_AskUserQuestion": "question: Legacy singular?",
+ "tool_detail_37_AskUserQuestion": "asking a question",
+ "tool_detail_38_AskUserQuestion": "asking a question",
+ "tool_detail_39_AskUserQuestion": "asking a question",
+ "tool_detail_40_AskUserQuestion": "question: \u2022 A",
+ "tool_detail_41_mcp__fixture__tool": "",
+ "tool_detail_42_Unknown": "",
+ "tool_detail_43_Read": "",
+ "tool_detail_44_Bash": "",
+ "tool_detail_45_Bash": "",
+ "tool_detail_46_Bash": ""
+}

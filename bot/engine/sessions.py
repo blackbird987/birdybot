@@ -242,7 +242,7 @@ def _encode_path(path: str) -> str:
     ``…-bot--worktrees-t-6839``, so the lookup could never match. See that
     function for the full list of call sites that share the rule.
     """
-    from bot.engine.session_fork import encode_project_path
+    from bot.claude.session_fork import encode_project_path
     return encode_project_path(path)
 
 
@@ -252,7 +252,7 @@ def _encoded_spellings(path: str) -> list[str]:
     Delegates to the shared implementation, for the same reason ``_encode_path``
     does: one owner for the encoding rule.
     """
-    from bot.engine.session_fork import encoded_spellings
+    from bot.claude.session_fork import encoded_spellings
     return encoded_spellings(path)
 
 

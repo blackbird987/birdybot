@@ -237,7 +237,7 @@ async def test_silent_is_reaped_with_work_kept(
 
     notices: list[tuple[str, str]] = []
 
-    async def on_progress(headline: str, detail: str) -> None:
+    async def on_progress(headline: str, detail: str = "", **kw) -> None:
         notices.append((headline, detail))
 
     # Two real turns land, then stdout goes quiet forever.

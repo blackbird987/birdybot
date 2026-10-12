@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import re
-from dataclasses import dataclass, field
 from pathlib import Path
 
-from bot import config
+from bot.fsutil import read_repo_config
 from bot.procutil import run_capture
+from bot.claude.gitpaths import ref_sha
+from bot.store.records import DeployState
 
 log = logging.getLogger(__name__)
 
@@ -34,55 +34,6 @@ _VERSION_PARSERS: list[tuple[str, str]] = [
 
 _CSPROJ_ASM_VERSION_RE = re.compile(r"<AssemblyVersion>([^<]+)</AssemblyVersion>", re.IGNORECASE)
 _CSPROJ_VERSION_RE = re.compile(r"<Version>([^<]+)</Version>", re.IGNORECASE)
-
-
-@dataclass
-class DeployState:
-    """Per-repo deploy state tracking."""
-
-    boot_version: str | None = None
-    boot_ref: str = ""
-    current_version: str | None = None
-    current_ref: str = ""
-    self_managed: bool = False
-    pending_sessions: list[str] = field(default_factory=list)
-    pending_changes: list[str] = field(default_factory=list)
-    last_deploy_error: str | None = None
-    auto_fix_attempt: int = 0
-    auto_fix_thread_id: str | None = None
-
-    @property
-    def needs_reboot(self) -> bool:
-        return self.boot_ref != self.current_ref and self.boot_ref != ""
-
-    def to_dict(self) -> dict:
-        return {
-            "boot_version": self.boot_version,
-            "boot_ref": self.boot_ref,
-            "current_version": self.current_version,
-            "current_ref": self.current_ref,
-            "self_managed": self.self_managed,
-            "pending_sessions": self.pending_sessions,
-            "pending_changes": self.pending_changes,
-            "last_deploy_error": self.last_deploy_error,
-            "auto_fix_attempt": self.auto_fix_attempt,
-            "auto_fix_thread_id": self.auto_fix_thread_id,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> DeployState:
-        return cls(
-            boot_version=data.get("boot_version"),
-            boot_ref=data.get("boot_ref", ""),
-            current_version=data.get("current_version"),
-            current_ref=data.get("current_ref", ""),
-            self_managed=data.get("self_managed", False),
-            pending_sessions=data.get("pending_sessions", []),
-            pending_changes=data.get("pending_changes", []),
-            last_deploy_error=data.get("last_deploy_error"),
-            auto_fix_attempt=data.get("auto_fix_attempt", 0),
-            auto_fix_thread_id=data.get("auto_fix_thread_id"),
-        )
 
 
 def detect_version(repo_path: str) -> str | None:
@@ -119,11 +70,7 @@ def detect_version(repo_path: str) -> str | None:
 
 def get_head_ref(repo_path: str) -> str:
     """Get short HEAD commit hash."""
-    try:
-        result = run_capture(["git", "rev-parse", "--short", "HEAD"], cwd=repo_path, timeout=10)
-        return result.stdout.strip() if result.returncode == 0 else ""
-    except Exception:
-        return ""
+    return ref_sha(repo_path, short=True) or ""
 
 
 def get_latest_version_tag_ref(repo_path: str) -> str:
@@ -342,17 +289,46 @@ def rescan_deploy_config_after_merge(store, repo_name: str, repo_path: str) -> N
         return
     file_cfg = scan_deploy_config(repo_path)
     if file_cfg:
-        store.set_deploy_config(repo_name, make_deploy_config(
-            "command",
-            command=file_cfg["command"],
-            label=file_cfg.get("label", "Deploy"),
-            cwd=file_cfg.get("cwd"),
-            timeout=file_cfg.get("timeout"),
-            source="file", approved=False,
-            auto_fix=bool(file_cfg.get("auto_fix")),
-            auto_fix_redeploy=bool(file_cfg.get("auto_fix_redeploy")),
-            auto_fix_retries=_safe_int(file_cfg.get("auto_fix_retries"), 1),
-        ))
+        store.set_deploy_config(repo_name, _config_from_file(file_cfg))
+
+
+def _config_from_file(file_cfg: dict) -> dict:
+    """An unapproved command config built from a repo's .claude/deploy.json."""
+    return make_deploy_config(
+        "command",
+        command=file_cfg["command"],
+        label=file_cfg.get("label", "Deploy"),
+        cwd=file_cfg.get("cwd"),
+        timeout=file_cfg.get("timeout"),
+        source="file", approved=False,
+        auto_fix=bool(file_cfg.get("auto_fix")),
+        auto_fix_redeploy=bool(file_cfg.get("auto_fix_redeploy")),
+        auto_fix_retries=_safe_int(file_cfg.get("auto_fix_retries"), 1),
+    )
+
+
+def auto_register_deploy_configs(store) -> None:
+    """At boot, give every repo without a deploy config the one it implies.
+
+    A self-managed repo gets an approved ``self`` config. Any other repo with a
+    ``.claude/deploy.json`` gets an unapproved command config, which the user
+    approves before its first use. A repo that already has a config is left
+    alone; ``rescan_deploy_config_after_merge`` keeps file configs current.
+    """
+    for name, path in store.list_repos().items():
+        ds = store.get_deploy_state(name)
+        if store.get_deploy_config(name):
+            continue
+        if ds and ds.self_managed:
+            store.set_deploy_config(name, make_deploy_config(
+                "self", source="auto", approved=True,
+            ))
+            log.info("Auto-registered self-managed deploy config for %s", name)
+            continue
+        file_cfg = scan_deploy_config(path)
+        if file_cfg:
+            store.set_deploy_config(name, _config_from_file(file_cfg))
+            log.info("Auto-registered file-based deploy config for %s (pending approval)", name)
 
 
 async def apply_post_merge_deploy(messenger, store, inst) -> None:
@@ -376,14 +352,7 @@ def scan_deploy_config(repo_path: str) -> dict | None:
     File-based configs are always command-based; 'method: self' is an
     internal concept handled by auto-detection, not by file convention.
     """
-    cfg_path = Path(repo_path) / DEPLOY_CONFIG_PATH
-    if not cfg_path.exists():
+    data = read_repo_config(repo_path, Path(DEPLOY_CONFIG_PATH).name)
+    if data is None or "command" not in data:
         return None
-    try:
-        data = json.loads(cfg_path.read_text(encoding="utf-8"))
-        if "command" not in data:
-            return None
-        return data
-    except Exception:
-        log.debug("Failed to read deploy config from %s", cfg_path, exc_info=True)
-        return None
+    return data

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 from datetime import timedelta
 from typing import TYPE_CHECKING
@@ -10,12 +9,20 @@ from typing import TYPE_CHECKING
 from dataclasses import dataclass, field
 
 from bot import config
-from bot.claude.types import CODE_CHANGE_TOOLS, PLAN_ORIGINS, Instance, InstanceOrigin, InstanceStatus, Schedule
-from bot.platform.base import ButtonSpec
-from bot.textutil import find_tilde_block, mask_tilde_bodies, parse_duration
+from bot.claude.types import Instance, InstanceStatus, Schedule
+from bot.platform.buttons import (  # noqa: F401  -- re-exported
+    action_button_specs, expanded_button_specs, merge_failed_banner, merge_failed_button_specs,
+    queued_button_specs, resolver_running_button_specs, running_button_specs, stall_button_specs,
+)
+from bot.platform.modes import (  # noqa: F401  -- re-exported
+    _WORKFLOW_ORIGINS, EFFORT_DISPLAY, MODE_COLOR, MODE_DISPLAY, MODEL_CLEAR_WORDS, VALID_EFFORTS,
+    VALID_MODES, effort_name, mode_label, mode_name, model_suggestions, normalize_model,
+)
+from bot.platform.redact import redact_secrets  # noqa: F401  -- re-exported
+from bot.textutil import DIRECTIVE_ARGS, directive_kv, find_tilde_block, is_quoted_example, mask_tilde_bodies, parse_duration
 
 if TYPE_CHECKING:
-    from bot.store.state import StateStore
+    pass
 
 
 # --- Shared Helpers ---
@@ -73,13 +80,13 @@ def strip_verify_blocks(text: str) -> str:
 # That's the documented format; a mid-sentence directive is left visible rather
 # than mangling the sentence around it.
 #
-# Line-prefix parity with the dispatchers matters. Their guard skips lines
-# starting with `>` / backtick / `#` (commands._QUOTED_LINE_PREFIX), so a
-# quoted example never fires — and the `[ \t]*` prefix below likewise refuses
-# to match those lines, leaving them verbatim. Display shows exactly the set of
-# directives that will actually be acted on.
+# Parity with the dispatchers matters. Their guard (textutil.is_quoted_example)
+# skips lines starting with `>` / backtick / `#` and anything inside a ```
+# fence, so a quoted example never fires. The `[ \t]*` prefix below refuses to
+# match the first kind and the loop skips the second, leaving both verbatim.
+# Display shows exactly the set of directives that will actually be acted on.
 _BOT_CMD_DIRECTIVE_RE = re.compile(
-    r"(?m)^[ \t]*\[BOT_CMD:\s*/(\w+)([^\]\n]*)\][ \t]*$"
+    rf"(?m)^[ \t]*\[BOT_CMD:\s*/(\w+)({DIRECTIVE_ARGS}*)\][ \t]*$"
 )
 # The tilde-fenced payload (~~~wake / ~~~spawn / ~~~plan). Matched from the end
 # of the directive line, tolerating a blank line or two in between; a body
@@ -90,8 +97,6 @@ _BOT_CMD_DIRECTIVE_RE = re.compile(
 _BOT_CMD_BODY_OPEN_RE = re.compile(
     r"\n(?:[ \t]*\n){0,2}([ \t]*)~~~([a-zA-Z][\w-]*)[ \t]*(?=\n)",
 )
-# kv pair: key=value, bare or quoted — mirrors commands._SPAWN_KV_RE.
-_BOT_CMD_KV_RE = re.compile(r'''(\w+)=(?:"([^"]*)"|'([^']*)'|(\S+))''')
 # What each chain preset actually runs, so the one-liner explains itself
 # without the reader having to remember the preset table.
 _CHAIN_PRESET_FLOW = {
@@ -115,10 +120,7 @@ def _render_directive_chip(verb: str, args: str) -> str | None:
     entirely (``/image`` — the uploaded picture IS the visible outcome, so a
     chip describing it is pure duplicate noise).
     """
-    kv = {
-        k: (d or s or b or "")
-        for k, d, s, b in _BOT_CMD_KV_RE.findall(args or "")
-    }
+    kv = directive_kv(args)
     parts: list[str] = []
 
     if verb == "image":
@@ -185,9 +187,12 @@ def collapse_bot_directives(text: str) -> str:
     # Found on the masked text, like the dispatchers: a directive inside some
     # tilde block is never acted on, so it stays visible rather than becoming
     # a chip claiming it was. Offsets are shared; bodies are read raw.
-    for m in _BOT_CMD_DIRECTIVE_RE.finditer(mask_tilde_bodies(text)):
+    scan = mask_tilde_bodies(text)
+    for m in _BOT_CMD_DIRECTIVE_RE.finditer(scan):
         if m.start() < pos:
             continue  # already swallowed as a previous directive's body
+        if is_quoted_example(scan, m.start()):
+            continue  # an example inside a ``` fence: never acted on, so shown
         out.append(text[pos:m.start()])
         chip = _render_directive_chip(m.group(1), m.group(2))
         if chip is not None:
@@ -332,137 +337,6 @@ def format_age(delta: timedelta) -> str:
     return "just now"
 
 
-# --- Secret Redaction ---
-
-# Well-known token prefixes (match standalone, no key name needed)
-_TOKEN_PATTERNS = [
-    re.compile(r'sk-ant-[a-zA-Z0-9_-]{20,}'),
-    re.compile(r'sk-[a-zA-Z0-9]{20,}'),
-    re.compile(r'gh[pos]_[a-zA-Z0-9]{20,}'),
-    re.compile(r'github_pat_[a-zA-Z0-9_]{20,}'),
-    re.compile(r'AKIA[A-Z0-9]{16}'),
-    re.compile(r'eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}'),
-    re.compile(r'0x[0-9a-fA-F]{64}\b'),
-    re.compile(r'(?i)Bearer\s+[a-zA-Z0-9_./-]{20,}'),
-]
-
-# Anything sitting between the colon and the @ of a URL is, by definition of
-# the userinfo field, a credential — so there is no length below which it is
-# safe to print. This used to require 8+ characters, which let a short
-# password through verbatim.
-_CONN_STRING_PATTERN = re.compile(r'(://[^:\s]+:)([^@\s]+)(@)')
-
-# A credential can also *be* the userinfo, with no password half at all:
-# `https://<token>@github.com/o/r.git` is a form GitHub accepts, and a token
-# in an unrecognised vendor format matches none of the patterns above. Length
-# is what separates it from a real username, and the floor is set well clear
-# of the longest ones actually in use — `git` (3), `oauth2` (6),
-# `x-access-token` (14), `gitlab-ci-token` (15) — so every SSH remote in the
-# bot's own output stays readable.
-_URL_USERINFO_PATTERN = re.compile(r'(://)([^:/\s@]{20,})(@)')
-
-_SECRET_KEY_WORDS = (
-    r'password|passwd|secret|mnemonic|private[_-]?key|seed[_-]?phrase|'
-    r'api[_-]?key|access[_-]?key|auth[_-]?(?:key|token|secret)|'
-    r'hmac|jwt|credential|client[_-]?secret|app[_-]?secret|'
-    r'signing[_-]?key|encryption[_-]?key|master[_-]?key|'
-    r'db[_-]?password|connection[_-]?string|'
-    r'pinata|infura|alchemy|token'
-)
-
-_KV_PATTERN = re.compile(
-    r'(?i)'
-    r'(?:^|(?<=[\s"\'`]))'
-    r'((?=\w*(?:' + _SECRET_KEY_WORDS + r'))'
-    r'[a-zA-Z_]\w*)'
-    r'["\']?'
-    r'\s*[=:]\s*'
-    r'["\']?'
-    r'(.+?)'
-    r'["\']?'
-    r'(?:[,;\s]|$)',
-    re.MULTILINE,
-)
-
-_MNEMONIC_PATTERN = re.compile(
-    r'(?i)(mnemonic|seed[_-]?phrase|recovery[_-]?phrase)\s*[=:"\']*\s*'
-    r'([a-z]+(?:\s+[a-z]+){11,})',
-)
-
-_HEX_KEY_PATTERN = re.compile(r'(?<![a-zA-Z0-9])[0-9a-fA-F]{64,}(?![a-zA-Z0-9])')
-
-
-# --- Literal .env secret stripping -------------------------------------------
-#
-# The patterns above recognise secret *shapes*, and an audit showed the two
-# that matter most to this bot have no recognisable shape: a bare Discord bot
-# token and a Discord webhook URL both survived every pattern here, bare and in
-# `NAME=value` form alike. A session that prints `env` while debugging, or a
-# traceback that carries the environment, would publish them into a thread
-# verbatim.
-#
-# So match on the *value* instead of the shape: pull the real secrets out of
-# config once and replace them literally. That has no false positives by
-# construction — it can only ever match the actual secret — and it needs no new
-# regex whenever a credential format changes. This is the pattern log_triage
-# has used all along; it just lived in one module instead of the shared path.
-_ENV_SECRET_NAMES = (
-    "DISCORD_BOT_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
-    "TWITTER_BEARER_TOKEN", "TEST_WEBHOOK_URL", "TEST_LOBBY_WEBHOOK_URL",
-)
-
-# Below this length a "secret" is more likely a placeholder than a credential,
-# and blanket-replacing a 3-character string would gut unrelated text.
-_ENV_SECRET_MIN_LEN = 8
-
-_env_secrets_cache: tuple[str, ...] | None = None
-
-
-def _env_secret_values() -> tuple[str, ...]:
-    """The literal secret strings to strip, collected once.
-
-    redact_secrets sits on the display hot path, so this must not re-read
-    config per call. A failure here degrades to regex-only redaction rather
-    than taking down every message the bot renders.
-    """
-    global _env_secrets_cache
-    if _env_secrets_cache is not None:
-        return _env_secrets_cache
-    values: list[str] = []
-    try:
-        for name in _ENV_SECRET_NAMES:
-            v = getattr(config, name, None) or os.getenv(name, "")
-            if v and isinstance(v, str) and len(v) >= _ENV_SECRET_MIN_LEN:
-                values.append(v)
-    except Exception:  # pragma: no cover - defensive
-        values = []
-    # Longest first: a webhook URL contains its own id/token substrings, and
-    # replacing the whole thing before its parts keeps the output readable.
-    values.sort(key=len, reverse=True)
-    _env_secrets_cache = tuple(dict.fromkeys(values))
-    return _env_secrets_cache
-
-
-def redact_secrets(text: str) -> str:
-    """Scrub API keys, tokens, and secrets from text."""
-    # Literal pass FIRST, while every known secret is still verbatim. Running
-    # it last would leave a gap: a pattern below can chew a fragment out of a
-    # secret (``_HEX_KEY_PATTERN`` on a long hex run inside it, say) without
-    # removing the whole thing, and the surviving remainder would then no
-    # longer match the literal we are looking for.
-    for secret in _env_secret_values():
-        if secret in text:
-            text = text.replace(secret, '[REDACTED]')
-    for pattern in _TOKEN_PATTERNS:
-        text = pattern.sub('[REDACTED]', text)
-    text = _CONN_STRING_PATTERN.sub(r'\1[REDACTED]\3', text)
-    text = _URL_USERINFO_PATTERN.sub(r'\1[REDACTED]\3', text)
-    text = _MNEMONIC_PATTERN.sub(lambda m: m.group(1) + '=[REDACTED]', text)
-    text = _KV_PATTERN.sub(lambda m: f'{m.group(1)}=[REDACTED] ', text)
-    text = _HEX_KEY_PATTERN.sub('[REDACTED]', text)
-    return text
-
-
 def strip_markdown(text: str) -> str:
     """Remove markdown formatting and collapse whitespace."""
     text = re.sub(r'#{1,6}\s*', '', text)
@@ -549,164 +423,6 @@ def format_relative_time(seconds: float) -> str:
         return f"{d}d {h}h" if h else f"{d}d"
 
 
-# --- Mode Display ---
-
-MODE_DISPLAY: dict[str, str] = {
-    "explore": "Explore",
-    "plan":    "Plan",
-    "build":   "Build",
-}
-
-# Embed sidebar colors per mode
-MODE_COLOR: dict[str, int] = {
-    "explore": 0x95a5a6,  # gray
-    "plan":    0x5865F2,  # blurple/blue
-    "build":   0x57F287,  # green
-}
-
-VALID_MODES = frozenset(MODE_DISPLAY)
-
-# Mode cycle order for the toggle button
-_NEXT_MODE: dict[str, str] = {"explore": "plan", "plan": "build", "build": "explore"}
-
-# Origins where mode toggle button should NOT appear (user is in a workflow).
-# TLDR is here for a different reason than the rest: its instance is always
-# clamped to explore, so the toggle would read "Mode: Plan" on every recap
-# regardless of the mode the user was actually working in, and tapping it
-# would set the thread's mode off the back of a read-only turn.
-_WORKFLOW_ORIGINS = frozenset({
-    InstanceOrigin.PLAN, InstanceOrigin.BUILD,
-    InstanceOrigin.REVIEW_PLAN, InstanceOrigin.REVIEW_CODE,
-    InstanceOrigin.COMMIT, InstanceOrigin.DONE,
-    InstanceOrigin.APPLY_REVISIONS, InstanceOrigin.RELEASE,
-    InstanceOrigin.VERIFY, InstanceOrigin.VERIFY_RELEASE,
-    InstanceOrigin.BUILD_AND_SHIP, InstanceOrigin.SENSOR_FIX,
-    InstanceOrigin.TLDR,
-})
-
-
-def mode_name(mode: str) -> str:
-    """Human-readable mode name."""
-    return MODE_DISPLAY.get(mode, mode.capitalize())
-
-
-def mode_label(mode: str) -> str:
-    """Human-readable mode label (alias for mode_name)."""
-    return mode_name(mode)
-
-
-# --- Effort Display ---
-
-EFFORT_DISPLAY: dict[str, str] = {
-    "low":    "Low",
-    "medium": "Medium",
-    "high":   "High",
-    "max":    "Max",
-}
-
-VALID_EFFORTS = frozenset(EFFORT_DISPLAY)
-
-
-def effort_name(effort: str) -> str:
-    """Human-readable effort name."""
-    return EFFORT_DISPLAY.get(effort, effort.capitalize())
-
-
-# --- Model Selection (/model) ---
-#
-# Deliberately NO table of model names here. Model names version-bump and get
-# renamed ("opus 5" -> "opus 6" -> something else entirely), so a hardcoded
-# whitelist would go stale and start rejecting the model the user actually
-# wants. Instead:
-#   * display goes through short_model_label(), which parses arbitrary shapes
-#     generically (vendor prefixes, date stamps, '-latest', numeric tails);
-#   * validation is a SHAPE check, not a membership check;
-#   * the suggestion list is derived at runtime from this deployment's own
-#     config plus the models it has actually run.
-
-# What a model identifier may look like on a command line: CLI aliases
-# ("opus"), full API ids ("claude-opus-4-8-20260101"), Bedrock-style
-# ("us.anthropic.claude-opus-5-v1:0"). Rejects spaces and shell metacharacters
-# so a fat-fingered "/model fable x" can never reach the command line, while
-# staying open to names that do not exist yet.
-_MODEL_SHAPE = re.compile(r"^[a-z0-9][a-z0-9._:-]{0,63}$")
-
-# How many recent instances to mine for model names (see model_suggestions).
-_MODEL_HISTORY_SCAN = 200
-
-# Words meaning "stop pinning a model, go back to normal routing". "auto" is
-# in here on purpose even though Cursor has a real model by that name: clearing
-# the pin there falls through to CURSOR_MODEL, which is "auto" by default, so
-# both readings land on the same model.
-MODEL_CLEAR_WORDS = frozenset({"default", "clear", "reset", "none", "auto"})
-
-
-def normalize_model(raw: str) -> str | None:
-    """Canonicalize a user-typed model name, or None if it cannot be one.
-
-    Not a whitelist -- any plausibly-shaped identifier passes, including models
-    released after this code was written. The CLI stays the real authority on
-    whether the name exists; see on_model's soft warning.
-    """
-    value = raw.strip().lower()
-    if not value or not _MODEL_SHAPE.match(value):
-        return None
-    return value
-
-
-def model_suggestions(store: "StateStore | None" = None) -> list[str]:
-    """Model names to offer in /model autocomplete. Never a closed list.
-
-    Sources, all runtime-derived so the list maintains itself:
-      1. ``MODEL_CHOICES`` env override, when a deployment wants explicit control.
-      2. Model names this deployment's own settings already reference -- short
-         CLI aliases like "opus", listed first because they are what a human
-         types and they do not churn between runs.
-      3. Model names this bot has actually run (recorded per instance), newest
-         first -- usually full API ids, and the best available evidence of what
-         the installed CLI accepts.
-    An empty list is fine -- free text still works.
-    """
-    ordered: list[str] = []
-    seen: set[str] = set()
-
-    def _add(name: object) -> None:
-        if not name:
-            return
-        canon = normalize_model(str(name))
-        if canon and canon not in seen:
-            seen.add(canon)
-            ordered.append(canon)
-
-    if config.MODEL_CHOICES:
-        # Explicit override: still normalized, so a stray "Opus 5 " in .env
-        # becomes a usable value instead of one the CLI would reject.
-        for choice in config.MODEL_CHOICES:
-            _add(choice)
-        return ordered
-
-    _add(config.PRIMARY_MODEL)
-    _add(config.MODEL_FALLBACK)
-    _add(config.BUILD_MODEL)
-    _add(config.EXPLORE_MODEL)
-    _add(config.DEFAULT_SESSION_MODEL)
-    for routed in config.MODEL_ROUTING.values():
-        _add(routed)
-
-    if store is not None:
-        try:
-            # Bounded: this runs per autocomplete keystroke, and the newest
-            # slice already covers every model still in rotation.
-            for inst in store.list_instances(all_=True)[:_MODEL_HISTORY_SCAN]:
-                _add(getattr(inst, "context_model", None))
-                _add(getattr(inst, "model", None))
-        except Exception:
-            pass  # suggestions are a convenience, never a failure path
-
-    return ordered
-
-
-
 # --- Status Icon ---
 
 def status_icon(status: InstanceStatus) -> str:
@@ -717,351 +433,6 @@ def status_icon(status: InstanceStatus) -> str:
         InstanceStatus.FAILED: "❌",
         InstanceStatus.KILLED: "💀",
     }.get(status, "❓")
-
-
-# --- Button Specs (platform-agnostic) ---
-
-def merge_failed_button_specs(instance_id: str) -> list[list[ButtonSpec]]:
-    """Buttons posted after an auto-merge failure — retry or discard.
-
-    Posting actual buttons (instead of plain text) means the user's tap is
-    routed through the existing merge/discard handlers rather than typing
-    text into the thread, which Claude would otherwise reinterpret as a
-    fresh review/build prompt.
-    """
-    return [[
-        ButtonSpec("Resolve with Claude", f"resolve_merge:{instance_id}"),
-        ButtonSpec("Try Merge Again", f"merge:{instance_id}"),
-        ButtonSpec("Discard", f"discard:{instance_id}"),
-    ]]
-
-
-def merge_failed_banner(failure_kind: str | None) -> str:
-    """Compose the user-facing banner for a failed auto-merge.
-
-    Branches on the ``MERGE_FAIL_*`` taxonomy from ``bot/claude/runner.py``
-    (kept as string constants so this module can stay platform-agnostic
-    without importing runner). Empty / unknown kinds fall back to the
-    generic conflict copy — same as before the t-4114 work landed.
-    """
-    if failure_kind == "orphaned_index":
-        return (
-            "Auto-merge failed because the main repo has an orphaned "
-            "merge in its index. Tap **Try Merge Again** — the next "
-            "attempt will detect and auto-recover the leftover state "
-            "(any local changes are preserved in a stash). **Resolve "
-            "with Claude** also works. **Discard** drops the branch."
-        )
-    if failure_kind == "recovery_failed":
-        return (
-            "Auto-merge failed and automatic recovery couldn't unstick "
-            "the main repo. **Manual intervention needed** — open a "
-            "terminal in the repo and run `git reset --merge` or "
-            "`git status` to inspect. Any work the bot preserved is "
-            "recorded in a labeled stash (see the failure detail above). "
-            "Once unstuck, tap **Try Merge Again**."
-        )
-    if failure_kind == "diverged":
-        # Deliberately does NOT suggest Resolve with Claude — the resolver
-        # fixes branch-vs-master conflict markers inside the worktree and
-        # never touches local-vs-origin divergence, so it can't help here.
-        return (
-            "Auto-merge stopped before merging: local master and "
-            "origin have diverged (commits exist on both sides — see the "
-            "counts above). Nothing was changed. Run `git pull --rebase` "
-            "in the main repo to reconcile, then tap **Try Merge Again**."
-        )
-    return (
-        "Auto-merge failed. Tap **Try Merge Again** to retry "
-        "(useful if a parallel build just completed) or **Discard** "
-        "to drop the branch. Or describe the situation here to talk "
-        "it through with Claude."
-    )
-
-
-def resolver_running_button_specs(instance_id: str) -> list[list[ButtonSpec]]:
-    """Buttons shown while the merge-conflict resolver is in flight.
-
-    Only Cancel — both Merge and Discard are blocked until the resolver
-    finishes or is cancelled, since either action would race the worktree
-    state Claude is actively editing.
-    """
-    return [[
-        ButtonSpec("Cancel", f"resolve_cancel:{instance_id}"),
-    ]]
-
-
-def _plan_action_rows(iid: str, has_autopilot_chain: bool) -> list[list[ButtonSpec]]:
-    """The button rows offered when a plan is on the table.
-
-    Hide the Autopilot starters when a chain is already paused — Continue
-    Autopilot elsewhere on the card is the correct resumption path.
-    """
-    rows: list[list[ButtonSpec]] = []
-    if not has_autopilot_chain:
-        rows.append([
-            ButtonSpec("Autopilot", f"autopilot:{iid}"),
-            ButtonSpec("Autopilot (Hold)", f"autopilot_hold:{iid}"),
-        ])
-    rows.append([
-        ButtonSpec("Review Plan", f"review_plan:{iid}"),
-        ButtonSpec("Build & Ship", f"build_and_ship:{iid}"),
-        ButtonSpec("Done", f"done:{iid}"),
-    ])
-    return rows
-
-
-def action_button_specs(
-    instance: Instance, show_expand: bool = False,
-    has_autopilot_chain: bool = False,
-) -> list[list[ButtonSpec]]:
-    """Return button row specs based on instance status and origin.
-
-    has_autopilot_chain: if True, this session has a paused autopilot chain
-    that can be resumed via Continue Autopilot.
-    """
-    rows: list[list[ButtonSpec]] = []
-    iid = instance.id
-
-    # Resolver origin: no buttons on the resolver's own result. The resolve_merge
-    # handler posts a follow-up message with the appropriate Merge/Retry/Discard
-    # row once verification + post-merge has run.
-    if instance.origin == InstanceOrigin.RESOLVE_MERGE:
-        return rows
-
-    # Prompt review: its result is a report posted in The Ark, not a turn in a
-    # repo conversation. The Ark is not a repo forum, so Retry / Plan / Build &
-    # Ship / Branch would all resolve against whichever repo happens to be
-    # globally active, and the review's own Approve / Reject buttons are posted
-    # separately by bot/discord/prompt_review.py. Keep only the controls that
-    # mean something here: stopping it, reading its log, and expanding a report
-    # too long to render inline.
-    if instance.origin == InstanceOrigin.PROMPT_REVIEW:
-        if instance.status in (InstanceStatus.RUNNING, InstanceStatus.QUEUED):
-            rows.append([ButtonSpec("Kill", f"kill:{iid}")])
-        elif instance.status == InstanceStatus.FAILED:
-            rows.append([ButtonSpec("Log", f"log:{iid}")])
-        if show_expand:
-            rows.append([
-                ButtonSpec("Expand \u25bc", f"expand:{iid}"),
-                ButtonSpec("Full Log", f"log:{iid}"),
-            ])
-        return rows
-
-    # Done origin: if branch is pending merge and no autopilot, show Merge/Discard
-    if instance.origin == InstanceOrigin.DONE and instance.status == InstanceStatus.COMPLETED:
-        if instance.branch and not has_autopilot_chain:
-            rows.append([
-                ButtonSpec("Merge", f"merge:{iid}"),
-                ButtonSpec("Discard", f"discard:{iid}"),
-            ])
-        return rows
-
-    if instance.status == InstanceStatus.COMPLETED:
-        tools = set(instance.tools_used or [])
-        made_code_changes = bool(tools & CODE_CHANGE_TOOLS)
-        # this_planned: THIS instance produced/dealt with a plan
-        this_planned = bool(
-            {"EnterPlanMode", "ExitPlanMode"} & tools
-            or instance.origin in PLAN_ORIGINS
-            or instance.mode == "plan"
-        )
-        # session_has_plan: inherited plan_active from any sibling
-        session_has_plan = instance.plan_active
-
-        if instance.branch:
-            if has_autopilot_chain:
-                # Autopilot handles merge — show review/action buttons plus a
-                # Discard escape hatch (user may inspect the Diff and decide to
-                # bail out of the branch even mid-chain).
-                rows.append([
-                    ButtonSpec("Diff", f"diff:{iid}"),
-                    ButtonSpec("Review Code", f"review_code:{iid}"),
-                    ButtonSpec("Commit", f"commit:{iid}"),
-                    ButtonSpec("Done", f"done:{iid}"),
-                    ButtonSpec("Discard", f"discard:{iid}"),
-                ])
-            else:
-                # Manual build — keep full merge workflow
-                rows.append([
-                    ButtonSpec("Diff", f"diff:{iid}"),
-                    ButtonSpec("Merge", f"merge:{iid}"),
-                    ButtonSpec("Discard", f"discard:{iid}"),
-                ])
-                rows.append([
-                    ButtonSpec("Review Code", f"review_code:{iid}"),
-                    ButtonSpec("Commit", f"commit:{iid}"),
-                    ButtonSpec("Done", f"done:{iid}"),
-                ])
-        elif this_planned:
-            # This instance directly produced or reviewed a plan
-            if instance.origin == InstanceOrigin.REVIEW_PLAN:
-                # Just reviewed — offer to apply or ship
-                rows.append([
-                    ButtonSpec("Apply Revisions", f"apply_revisions:{iid}"),
-                    ButtonSpec("Build & Ship", f"build_and_ship:{iid}"),
-                    ButtonSpec("Done", f"done:{iid}"),
-                ])
-            else:
-                # Plan created or revisions applied
-                rows.extend(_plan_action_rows(iid, has_autopilot_chain))
-        elif made_code_changes:
-            # Edited/wrote files in-place (no branch)
-            rows.append([
-                ButtonSpec("Review Code", f"review_code:{iid}"),
-                ButtonSpec("Retry", f"retry:{iid}"),
-                ButtonSpec("Done", f"done:{iid}"),
-            ])
-        elif instance.code_active:
-            # Session has uncommitted code changes — offer commit/review
-            rows.append([
-                ButtonSpec("Commit", f"commit:{iid}"),
-                ButtonSpec("Review Code", f"review_code:{iid}"),
-                ButtonSpec("Done", f"done:{iid}"),
-            ])
-        elif session_has_plan:
-            # Fallback: session has a plan from a prior instance, and this
-            # instance didn't do anything code-related — offer plan actions.
-            rows.extend(_plan_action_rows(iid, has_autopilot_chain))
-        else:
-            # Default buttons + workflow row when session exists
-            rows.append([
-                ButtonSpec("New", f"new:{iid}"),
-                ButtonSpec("Retry", f"retry:{iid}"),
-            ])
-            if instance.session_id:
-                rows.append([
-                    ButtonSpec("Plan", f"plan:{iid}"),
-                    ButtonSpec("Build & Ship", f"build_and_ship:{iid}"),
-                    ButtonSpec("Done", f"done:{iid}"),
-                ])
-
-    elif instance.status in (InstanceStatus.RUNNING, InstanceStatus.QUEUED):
-        rows.append([ButtonSpec("Kill", f"kill:{iid}")])
-
-    elif instance.status == InstanceStatus.FAILED:
-        if instance.cooldown_retry_at:
-            row = [ButtonSpec("Cancel Auto-Retry", f"cancel_cooldown:{iid}")]
-            if config.API_FALLBACK_ENABLED:
-                cap = config.API_FALLBACK_MAX_USD
-                row.insert(0, ButtonSpec(
-                    f"Continue with {config.API_FALLBACK_MODEL} (≤${cap:.2f})",
-                    f"continue_ppu:{iid}",
-                ))
-            rows.append(row)
-        else:
-            rows.append([
-                ButtonSpec("Retry", f"retry:{iid}"),
-                ButtonSpec("Log", f"log:{iid}"),
-            ])
-
-    elif instance.status == InstanceStatus.KILLED:
-        rows.append([ButtonSpec("Retry", f"retry:{iid}")])
-
-    # Continue Autopilot — shown when session has a paused chain
-    if has_autopilot_chain and instance.status == InstanceStatus.COMPLETED:
-        rows.append([ButtonSpec("Continue Autopilot", f"continue_autopilot:{iid}")])
-
-    # Mode toggle — only on non-workflow completions
-    if (instance.status == InstanceStatus.COMPLETED
-            and instance.origin not in _WORKFLOW_ORIGINS):
-        target = _NEXT_MODE.get(instance.mode, "explore")
-        label = mode_name(target)
-        rows.append([ButtonSpec(f"Mode: {label}", f"mode_{target}:{iid}")])
-
-    # Branch from here — fork the session at the message this button is on.
-    # Gated on session_id only; the click handler falls back to the last
-    # assistant uuid in the JSONL when the per-message map has no entry
-    # (e.g. the first render, before send_result stamps message ids).
-    # Reserve a row for Expand when show_expand=True so long-result messages
-    # keep their Expand button even with a crowded set of action buttons.
-    # Branch+Share row takes priority; when it fires, omit Share from the
-    # Expand row below to avoid showing two Share buttons on the same message.
-    branch_cap = 4 if show_expand else 5
-    share_added = False
-    branch_row: list[ButtonSpec] | None = None
-    if (instance.status == InstanceStatus.COMPLETED
-            and instance.session_id
-            and len(rows) < branch_cap):
-        branch_row = [
-            ButtonSpec("Branch", f"branch:{iid}"),
-            ButtonSpec("Share", f"share:{iid}"),
-        ]
-        rows.append(branch_row)
-        share_added = True
-
-    expand_row: list[ButtonSpec] | None = None
-    if show_expand:
-        expand_row = [
-            ButtonSpec("Expand \u25bc", f"expand:{iid}"),
-            ButtonSpec("Full Log", f"log:{iid}"),
-        ]
-        if instance.session_id and not share_added:
-            expand_row.append(ButtonSpec("Share", f"share:{iid}"))
-        rows.append(expand_row)
-
-    # TL;DR: a plain-language recap of whatever this turn was about.
-    #
-    # It rides an existing row instead of claiming one of the five Discord
-    # allows: the Expand row when a long result built one, otherwise the
-    # Branch/Share row. Both are gated on session_id, which TL;DR needs
-    # anyway (it resumes the session). When neither row exists the button is
-    # dropped rather than displacing a Merge or plan row, since /tldr covers
-    # the same ground from the keyboard.
-    #
-    # Never on a TL;DR's own card: re-summarising a summary says nothing, and
-    # the recursion has no natural floor.
-    if (instance.status == InstanceStatus.COMPLETED
-            and instance.session_id
-            and instance.origin != InstanceOrigin.TLDR):
-        host = expand_row if expand_row is not None else branch_row
-        if host is not None:
-            host.append(ButtonSpec("TL;DR", f"tldr:{iid}"))
-
-    return rows
-
-
-def expanded_button_specs(instance: Instance) -> list[list[ButtonSpec]]:
-    """Action buttons + Collapse for expanded view."""
-    rows = action_button_specs(instance)
-    collapse_row = [
-        ButtonSpec("Collapse \u25b2", f"collapse:{instance.id}"),
-        ButtonSpec("Full Log", f"log:{instance.id}"),
-    ]
-    # Share fallback: skip if action_button_specs already placed it (Branch row)
-    already_has_share = any(
-        b.callback_data.startswith("share:") for row in rows for b in row
-    )
-    if instance.session_id and not already_has_share:
-        collapse_row.append(ButtonSpec("Share", f"share:{instance.id}"))
-    rows.append(collapse_row)
-    return rows
-
-
-def running_button_specs(instance_id: str) -> list[list[ButtonSpec]]:
-    """Stop button shown on progress messages while an instance is running."""
-    return [[ButtonSpec("Stop", f"kill:{instance_id}")]]
-
-
-def stall_button_specs(instance_id: str) -> list[list[ButtonSpec]]:
-    return [[
-        ButtonSpec("Kill", f"kill:{instance_id}"),
-        ButtonSpec("Wait", f"wait:{instance_id}"),
-    ]]
-
-
-def queued_button_specs(
-    pending_id: str, supports_steer: bool,
-) -> list[list[ButtonSpec]]:
-    """Buttons on a 'Queued' message while a run holds the channel lock.
-
-    Steer button is omitted when the provider can't resume a killed session.
-    """
-    row: list[ButtonSpec] = []
-    if supports_steer:
-        row.append(ButtonSpec("Steer Now", f"steer:{pending_id}"))
-    row.append(ButtonSpec("Cancel", f"cancel_pending:{pending_id}"))
-    return [row]
 
 
 # --- Formatting Functions (markdown — platform adapters convert as needed) ---
@@ -1235,13 +606,6 @@ def format_expanded_result_chunks(
 
     chunks[0] = header + chunks[0]
     return chunks
-
-
-def format_expanded_result_md(instance: Instance, result_text: str, budget: int = 3900) -> str:
-    """First screen of the expanded result (compat wrapper)."""
-    return format_expanded_result_chunks(
-        instance, result_text, first_budget=budget, max_chunks=1,
-    )[0]
 
 
 def format_instance_list_md(instances: list[Instance]) -> str:

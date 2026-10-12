@@ -1,7 +1,7 @@
 """Regression test for the depth-gated /spawn instructions in the system prompt.
 
 Background: a spawned (depth>=1) thread cannot itself spawn — the recursion cap
-in bot/engine/commands.py refuses any /spawn directive it emits. Before this fix
+in bot/engine/directives/spawn.py refuses any /spawn directive it emits. Before this fix
 the full /spawn instructions (config.SPAWN_CONTEXT) were injected into EVERY
 session unconditionally, so spawned threads kept proposing directives that got
 rejected. The fix in ClaudeRunner._build_system_prompt now picks the variant by

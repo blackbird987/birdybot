@@ -218,7 +218,7 @@ def locate_transcript(session_id: str, cwds: list[str]) -> Path | None:
     if not session_id:
         return None
     try:
-        from bot.engine.session_fork import encode_project_path
+        from bot.claude.session_fork import encode_project_path
 
         roots: list[Path] = []
         for acct in config.CLAUDE_ACCOUNTS or []:

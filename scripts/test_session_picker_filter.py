@@ -155,7 +155,7 @@ def main() -> int:
     print("PASS — all assertions held")
     print(f"  cleanup deleted: {removed} (expected 1)")
     print(f"  scan_sessions returned {len(sessions)} entries (expected 2: user_in_temp, normal)")
-    print(f"  filtered out: title-gen jsonl + coincidence")
+    print("  filtered out: title-gen jsonl + coincidence")
     return 0
 
 

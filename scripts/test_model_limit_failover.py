@@ -26,6 +26,8 @@ Run: ``python scripts/test_model_limit_failover.py``  (exit 0 on pass).
 
 from __future__ import annotations
 
+import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
+
 import asyncio
 import os
 import shutil
@@ -187,6 +189,10 @@ async def _run_with_streams(
 
     saved_accounts = list(config.CLAUDE_ACCOUNTS)
     saved_spawn = asyncio.create_subprocess_exec
+    # The live .env may set a deployment-wide default model, which makes every
+    # model read as non-primary and switches off the branch under test.
+    saved_default_model = config.DEFAULT_SESSION_MODEL
+    config.DEFAULT_SESSION_MODEL = None
     config.CLAUDE_ACCOUNTS[:] = acct_dirs
 
     spawn_calls: list[tuple[list[str], dict]] = []
@@ -211,7 +217,7 @@ async def _run_with_streams(
 
     runner._stream_output = fake_stream_output  # type: ignore[assignment]
 
-    async def on_progress(headline, detail=None):
+    async def on_progress(headline, detail=None, **kw):
         if collect_progress is not None:
             collect_progress.append((headline, detail))
 
@@ -224,6 +230,7 @@ async def _run_with_streams(
     finally:
         asyncio.create_subprocess_exec = saved_spawn  # type: ignore[assignment]
         config.CLAUDE_ACCOUNTS[:] = saved_accounts
+        config.DEFAULT_SESSION_MODEL = saved_default_model
         shutil.rmtree(tmp, ignore_errors=True)
 
     return result, instance, runner, acct_dirs, spawn_calls

@@ -108,6 +108,22 @@ DISCORD_ENABLED: bool = bool(DISCORD_BOT_TOKEN and DISCORD_GUILD_ID)
 # Test webhook IDs (comma-separated) — allow webhook messages to bypass bot/auth guards
 TEST_WEBHOOK_IDS: set[str] = set(filter(None, os.getenv("TEST_WEBHOOK_IDS", "").split(",")))
 
+# Bash guidance for a guest whose grant uses the allowlist policy. Read by
+# the runner when it builds the access block of the system prompt, so it
+# lives here rather than in bot/discord/access.py. Soft enforcement: the
+# prompt states the lists, nothing intercepts the command.
+DEFAULT_BASH_ALLOWLIST: list[str] = [
+    "git status", "git log", "git diff", "git branch", "git show",
+    "npm test", "npm run", "pip", "pytest", "cargo test", "go test",
+    "python -m pytest", "node", "make", "ls", "find", "wc",
+]
+
+DEFAULT_BASH_DENYLIST: list[str] = [
+    "rm -rf", "rm -r", "curl | sh", "wget | sh",
+    "cat ~/.ssh", "cat .env", "cat ../.env",
+    "git push", "git reset --hard", "git checkout .",
+]
+
 # --- OpenAI (voice transcription) ---
 OPENAI_API_KEY: str | None = os.getenv("OPENAI_API_KEY")
 
@@ -726,7 +742,7 @@ EXPLORE_MODEL: str | None = os.getenv("EXPLORE_MODEL")
 # as the LAST fallback at command-build time (provider.build_command) so
 # DIRECT sessions get it too — and a model-limit failover downgrade
 # (model_override) always beats it, so it can never undo an explicit
-# downgrade. _is_primary_model in runner.py resolves None through this value
+# downgrade. _is_primary_model in runner/recovery.py resolves None through this value
 # so the Fable-limit machinery doesn't misread an Opus-defaulted run as Fable.
 DEFAULT_SESSION_MODEL: str | None = os.getenv("DEFAULT_SESSION_MODEL") or None
 
@@ -1219,7 +1235,6 @@ if REPOS_BASE_DIR and not REPOS_BASE_DIR.is_dir():
     warnings.warn(f"REPOS_BASE_DIR does not exist: {REPOS_BASE_DIR}")
     REPOS_BASE_DIR = None
 
-# Ensure data dirs exist
 REBOOT_MSG_FILE: Path = DATA_DIR / "reboot_message.json"
 REBOOT_REQUEST_FILE: Path = DATA_DIR / "reboot_request.json"
 # Informational record of a deferred reboot — written fresh on each defer,
@@ -1231,6 +1246,13 @@ DRAIN_QUEUE_FILE: Path = DATA_DIR / "drain_queue.json"
 PENDING_PROMPTS_FILE: Path = DATA_DIR / "pending_prompts.json"
 USAGE_QUEUE_FILE: Path = DATA_DIR / "usage_queue.json"
 PENDING_IMAGES_DIR: Path = DATA_DIR / "pending_images"
+
+# Ensure data dirs exist
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+PENDING_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+
 # Uploads are kept for a retention window, NOT deleted when the turn that
 # received them returns.  The path we hand the session lives on in its
 # transcript, so a steer, a retry, or a plain "look at that screenshot again"
@@ -1252,11 +1274,6 @@ PENDING_IMAGES_MIN_AGE_SECS: int = int(
     os.getenv("PENDING_IMAGES_MIN_AGE_SECS", "900")
 )
 PENDING_IMAGES_SWEEP_SECS: int = int(os.getenv("PENDING_IMAGES_SWEEP_SECS", "3600"))
-# Self-wake: an inner session writes data/wakes/<instance_id>.json to have the
-# bot re-invoke it in the same thread after a delay (see WAKE_GUIDANCE). Per
-# instance-id so concurrent sessions never clobber a shared file, and absolute
-# so it works regardless of the session's cwd (worktree builds run elsewhere).
-WAKE_DIR: Path = DATA_DIR / "wakes"
 # Self-wake delay clamp and runaway cap.
 #
 # The ceiling was 24h until 2026-09-08 and that was the only thing stopping a
@@ -1457,7 +1474,7 @@ ORCH_WAVE_TIMEOUT_MIN: int = int(os.getenv("ORCH_WAVE_TIMEOUT_MIN", "45"))
 ORCH_WAVE_MAX_MIN: int = int(os.getenv("ORCH_WAVE_MAX_MIN", "360"))
 # Resume the parent automatically once its wave closes, instead of waiting for
 # a "Resume parent" tap. Safe against runaway because the resumed turn cannot
-# spawn past _MAX_SPAWN_WAVES (bot/engine/commands.py) — a callback resume does
+# spawn past _MAX_SPAWN_WAVES (bot/engine/directives/spawn.py): a callback resume does
 # not reset that counter. A PARTIAL (timed-out) release never auto-resumes:
 # deciding whether to proceed without a straggler is a human call.
 ORCH_AUTO_RESUME: bool = os.getenv("ORCH_AUTO_RESUME", "1").strip().lower() not in (
@@ -1483,11 +1500,6 @@ Do NOT end with a "next I'll..." plan and no action — that strands the thread 
 with nothing to resume it. Either do the work now, schedule a wake, or emit \
 [TURN_COMPLETE]. If you catch yourself about to describe what you'd do next, do \
 it THIS turn instead."""
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-LOGS_DIR.mkdir(parents=True, exist_ok=True)
-PENDING_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-WAKE_DIR.mkdir(parents=True, exist_ok=True)
 
 # System prompt appended via --append-system-prompt
 MOBILE_HINT = (
@@ -1617,7 +1629,7 @@ Rules:
 # Depth-0 spawn capability. Appended only when the current thread is NOT
 # itself a spawned thread (instance.spawn_depth == 0). A spawned (depth>=1)
 # thread gets SPAWN_CAPPED_NOTICE instead, because the recursion cap in
-# bot/engine/commands.py refuses any /spawn it would emit.
+# bot/engine/directives/spawn.py refuses any /spawn it would emit.
 SPAWN_CONTEXT = """
 Spawning a fresh session with a generated prompt:
 When the user asks you to "start a new session", "spawn a new thread", or "kick off another task" — and you have written or can write the prompt that should run there — output a /spawn directive at the END of your response. This hands the generated prompt off to a brand-new forum thread instead of forcing the user to copy-paste between threads.
@@ -2700,7 +2712,6 @@ DONE_PROMPT_STANDALONE = (
 )
 
 # Backward-compat alias used by /done and any non-chain caller.
-DONE_PROMPT = DONE_PROMPT_STANDALONE
 
 DONE_PROMPT_CHAIN = (
     'Wrap up this build step (autopilot chain). Do NOT cut a release or '

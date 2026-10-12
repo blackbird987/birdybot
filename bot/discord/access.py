@@ -14,23 +14,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from bot import config
+from bot.platform.modes import MODE_RANK, cap_mode
+from bot.textutil import match_name
 
 log = logging.getLogger(__name__)
 
 ACCESS_FILE: Path = config.DATA_DIR / "access.json"
-
-# Default commands allowed in explore mode (soft enforcement via system prompt)
-DEFAULT_BASH_ALLOWLIST: list[str] = [
-    "git status", "git log", "git diff", "git branch", "git show",
-    "npm test", "npm run", "pip", "pytest", "cargo test", "go test",
-    "python -m pytest", "node", "make", "ls", "find", "wc",
-]
-
-DEFAULT_BASH_DENYLIST: list[str] = [
-    "rm -rf", "rm -r", "curl | sh", "wget | sh",
-    "cat ~/.ssh", "cat .env", "cat ../.env",
-    "git push", "git reset --hard", "git checkout .",
-]
 
 
 @dataclass
@@ -215,12 +204,8 @@ def check_user_access(
         )
     if not repo_name:
         return None
-    # Exact match first
-    if repo_name in ua.repos:
-        return ua.repos[repo_name]
-    # Case-insensitive fallback
-    lower_map = {k.lower(): v for k, v in ua.repos.items()}
-    return lower_map.get(repo_name.lower())
+    canonical = match_name(repo_name, ua.repos)
+    return ua.repos[canonical] if canonical else None
 
 
 def has_any_access(cfg: AccessConfig, user_id: str) -> bool:
@@ -262,10 +247,9 @@ def get_most_restrictive_ceiling(cfg: AccessConfig, user_id: str) -> str:
         return "explore"
     if ua.global_access:
         return cfg.default_mode
-    _MODE_RANK = {"explore": 0, "plan": 1, "build": 2}
     min_rank = 2
     for grant in ua.repos.values():
-        rank = _MODE_RANK.get(grant.mode, 0)
+        rank = MODE_RANK.get(grant.mode, 0)
         if rank < min_rank:
             min_rank = rank
     rank_to_mode = {0: "explore", 1: "plan", 2: "build"}
@@ -274,12 +258,8 @@ def get_most_restrictive_ceiling(cfg: AccessConfig, user_id: str) -> str:
 
 def effective_mode(grant: RepoAccess, requested_mode: str) -> str:
     """Enforce mode ceiling. Returns the effective mode."""
-    _MODE_RANK = {"explore": 0, "plan": 1, "build": 2}
-    ceiling_rank = _MODE_RANK.get(grant.mode, 0)
-    requested_rank = _MODE_RANK.get(requested_mode, 0)
-    if requested_rank > ceiling_rank:
-        return grant.mode  # cap at ceiling
-    return requested_mode
+    # A grant with no mode recorded is the most restrictive one, not none.
+    return cap_mode(requested_mode, grant.mode or "explore")
 
 
 def check_rate_limit(cfg: AccessConfig, user_id: str, max_queries: int) -> bool:

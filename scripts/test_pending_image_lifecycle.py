@@ -32,11 +32,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from bot import config  # noqa: E402
-from bot.discord.bot import (  # noqa: E402
-    ClaudeBot,
-    prepare_replayed_prompt,
-    reap_pending_images,
-)
+from bot.discord.attachments import prepare_replayed_prompt, reap_pending_images  # noqa: E402
+from bot.discord.bot import ClaudeBot  # noqa: E402
 
 PASS, FAIL = 0, 0
 # Real clock, not a made-up one: the handoff case touches files through

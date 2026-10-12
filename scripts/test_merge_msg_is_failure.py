@@ -40,7 +40,7 @@ def _check(label: str, msg: str, expected: bool) -> None:
 
 
 # The bug case: merge succeeded, stash-pop rollback failed. The literal
-# string from runner.py's _restore_stash path contains "failed" in the
+# string from runner/git_merge.py's _restore_stash path contains "failed" in the
 # suffix, which the old substring check tripped on.
 _check(
     "success with stash-pop rollback failed in suffix",

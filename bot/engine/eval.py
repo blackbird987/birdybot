@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from bot import config
+from bot.fsutil import atomic_write_json
 from bot.claude.types import Instance, InstanceOrigin
 
 log = logging.getLogger(__name__)
@@ -96,7 +97,7 @@ class ChainEval:
     revision_loops: int = 0
     code_review_rounds: int = 0
     deferred_count: int = 0
-    outcome: str = ""       # "merged", "discarded", "abandoned", "failed", "needs_input", "review_did_not_converge"
+    outcome: str = ""       # "merged", "merge_stopped", "discarded", "abandoned", "failed", "needs_input", "review_did_not_converge"
     intervention: bool = False
     session_evals: list[str] = field(default_factory=list)
     flags: list[EvalFlag] = field(default_factory=list)
@@ -512,7 +513,7 @@ def _check_review_prior_attempts(inst: Instance, text: str) -> list[EvalFlag]:
     that is a different failure with its own handling.
     """
     from bot.engine import prior_art
-    from bot.engine.workflows import _REVIEW_STATUS_RE
+    from bot.engine.step_parse import _REVIEW_STATUS_RE
 
     if inst.origin != InstanceOrigin.REVIEW_PLAN:
         return []
@@ -538,7 +539,7 @@ def _check_chain_prior_attempts(inst: Instance, text: str) -> list[EvalFlag]:
     here as it is to the bot. An origin whose directives are never dispatched
     is skipped for the same reason: its /chain launched nothing.
     """
-    from bot.engine.commands import _extract_chain_directive
+    from bot.engine.directives.chain import _extract_chain_directive
     from bot.engine.lifecycle import _NO_DIRECTIVE_ORIGINS
 
     if inst.origin in _NO_DIRECTIVE_ORIGINS:
@@ -728,49 +729,46 @@ def evaluate_chain(
 
 # --- Persistence ---
 
-def _save_eval(ev: SessionEval) -> None:
-    """Save a session eval to data/evals/."""
+def _write_eval(name: str, data: dict) -> None:
+    """Write one eval file into data/evals/. A failure costs the file, never the run."""
     try:
-        EVALS_DIR.mkdir(parents=True, exist_ok=True)
-        path = EVALS_DIR / f"{ev.instance_id}.json"
-        path.write_text(
-            json.dumps(ev.to_dict(), indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        atomic_write_json(EVALS_DIR / name, data, ensure_ascii=False)
     except Exception:
-        log.debug("Failed to save eval for %s", ev.instance_id, exc_info=True)
+        log.debug("Failed to save eval %s", name, exc_info=True)
+
+
+def _save_eval(ev: SessionEval) -> None:
+    _write_eval(f"{ev.instance_id}.json", ev.to_dict())
 
 
 def _save_chain_eval(ev: ChainEval) -> None:
-    """Save a chain eval to data/evals/."""
-    try:
-        EVALS_DIR.mkdir(parents=True, exist_ok=True)
-        path = EVALS_DIR / f"chain-{ev.chain_id}.json"
-        path.write_text(
-            json.dumps(ev.to_dict(), indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-    except Exception:
-        log.debug("Failed to save chain eval for %s", ev.chain_id, exc_info=True)
+    _write_eval(f"chain-{ev.chain_id}.json", ev.to_dict())
+
+
+def _read_evals(pattern: str, since_hours: int, from_dict, skip=()):  # noqa: ANN001, ANN202
+    """Parse every eval file matching ``pattern`` modified in the last N hours.
+
+    A file that will not parse is skipped, not fatal: one torn write must not
+    blank a whole report.
+    """
+    if not EVALS_DIR.exists():
+        return []
+    cutoff = datetime.now(timezone.utc).timestamp() - (since_hours * 3600)
+    out = []
+    for path in EVALS_DIR.glob(pattern):
+        if path.name.startswith(skip) or path.stat().st_mtime < cutoff:
+            continue
+        try:
+            out.append(from_dict(json.loads(path.read_text(encoding="utf-8"))))
+        except Exception:
+            continue
+    return out
 
 
 def load_evals(since_hours: int = 24) -> list[SessionEval]:
     """Load session evals from the last N hours."""
-    if not EVALS_DIR.exists():
-        return []
-    cutoff = datetime.now(timezone.utc).timestamp() - (since_hours * 3600)
-    evals: list[SessionEval] = []
-    for path in EVALS_DIR.glob("*.json"):
-        if path.name.startswith("chain-") or path.name.startswith("weekly-"):
-            continue
-        if path.stat().st_mtime < cutoff:
-            continue
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            evals.append(SessionEval.from_dict(data))
-        except Exception:
-            continue
-    return evals
+    return _read_evals("*.json", since_hours, SessionEval.from_dict,
+                       skip=("chain-", "weekly-"))
 
 
 # --- Digest / attribution ---
@@ -970,16 +968,4 @@ def build_digest(
 
 def load_chain_evals(since_hours: int = 24) -> list[ChainEval]:
     """Load chain evals from the last N hours."""
-    if not EVALS_DIR.exists():
-        return []
-    cutoff = datetime.now(timezone.utc).timestamp() - (since_hours * 3600)
-    evals: list[ChainEval] = []
-    for path in EVALS_DIR.glob("chain-*.json"):
-        if path.stat().st_mtime < cutoff:
-            continue
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            evals.append(ChainEval.from_dict(data))
-        except Exception:
-            continue
-    return evals
+    return _read_evals("chain-*.json", since_hours, ChainEval.from_dict)

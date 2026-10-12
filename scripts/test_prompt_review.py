@@ -249,7 +249,7 @@ _gate_src = inspect.getsource(pr.should_run_now)
 check("the gate takes the stored stamp as its input",
       "last_run_at: str | None" in _gate_src)
 check("and decides by parsing it, not by counting invocations",
-      "fromisoformat(last_run_at)" in _gate_src and "timedelta(days=" in _gate_src)
+      "parse_iso_utc(last_run_at)" in _gate_src and "timedelta(days=" in _gate_src)
 
 
 # ------------------------------- 6. the reviewer cannot edit what it is reviewing

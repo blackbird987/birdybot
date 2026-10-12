@@ -8,6 +8,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from bot.platform.modes import cap_mode
+
 if TYPE_CHECKING:
     from bot.claude.runner import ClaudeRunner
     from bot.store.state import StateStore
@@ -193,6 +195,13 @@ class Messenger(Protocol):
         Default: no-op.
         """
 
+    async def set_near_limit(self, channel_id: str, apply: bool) -> None:
+        """Mark (or unmark) a conversation whose session is near its context limit.
+
+        Discord shows this as the `near-limit` forum tag.
+        Default: no-op.
+        """
+
     async def close_conversation(self, channel_id: str, *, skip_mention: bool = False) -> None:
         """Close/archive a conversation.
 
@@ -282,8 +291,8 @@ class RequestContext:
     # Orchestrator seam — invoked by engine.lifecycle after a child session
     # finalizes terminally (COMPLETED/FAILED). The platform closure posts a
     # summary back into the recorded parent thread with a Resume button so
-    # the orchestrator loop can continue. Discord wires this; Telegram leaves
-    # it None (no-op). Signature: (status, summary_text) -> None.
+    # the orchestrator loop can continue. None is a no-op.
+    # Signature: (status, summary_text) -> None.
     notify_parent_on_finalize: Callable[[str, str], Awaitable[None]] | None = None
     # [BOT_CMD: /reply] — platform-supplied callback that delivers a message
     # into an ALREADY-EXISTING thread this session spawned, so a parent can
@@ -306,13 +315,13 @@ class RequestContext:
     # when a genuine user-typed message arrives (source == "user_message") so
     # the cap allows a fresh orchestration loop after the user re-engages.
     reset_spawn_wave_count: Callable[[], None] | None = None
-    # Self-wake runaway-cap accessors (forum threads only; None on Telegram).
+    # Self-wake runaway-cap accessors (forum threads only; None elsewhere).
     # Mirror the spawn-wave pattern: a per-thread counter on ThreadInfo, read/
     # written by lifecycle.check_wake_request. bump increments and returns the
     # new count; reset zeroes it. Used to cap an endless self-wake poll loop.
     bump_wake_count: Callable[[], int] | None = None
     reset_wake_count: Callable[[], None] | None = None
-    # Unattended-turn nudge-cap accessors (forum threads only; None on Telegram).
+    # Unattended-turn nudge-cap accessors (forum threads only; None elsewhere).
     # Same per-thread ThreadInfo counter pattern as the wake cap. bump increments
     # and returns the new count; reset zeroes it. Used by check_wake_request to
     # cap the auto-nudge loop that re-invokes a dead-ended unattended turn.
@@ -349,11 +358,7 @@ class RequestContext:
 
     def update_mode(self, value: str) -> None:
         # Enforce mode ceiling for non-owners
-        if self.mode_ceiling:
-            _rank = {"explore": 0, "plan": 1, "build": 2}
-            if _rank.get(value, 0) > _rank.get(self.mode_ceiling, 0):
-                value = self.mode_ceiling
-        self.mode = value
+        self.mode = cap_mode(value, self.mode_ceiling)
 
     def update_context(self, value: str | None) -> None:
         self.context = value if value is not None else ""  # "" = explicitly cleared
@@ -378,9 +383,6 @@ class NotificationService:
     def register(self, messenger: Messenger, default_channel_id: str) -> None:
         self._messengers[messenger.platform_name] = (messenger, default_channel_id)
 
-    def unregister(self, platform: str) -> None:
-        self._messengers.pop(platform, None)
-
     async def broadcast(
         self, text: str,
         buttons: list[list[ButtonSpec]] | None = None,
@@ -396,18 +398,18 @@ class NotificationService:
                 msg_id = await messenger.send_text(channel_id, text, buttons, silent)
                 if ttl and msg_id:
                     asyncio.create_task(
-                        self._delete_after(messenger, channel_id, msg_id, ttl)
+                        delete_after(messenger, channel_id, msg_id, ttl)
                     )
             except Exception:
                 log.exception("Failed to broadcast to %s", platform)
 
-    @staticmethod
-    async def _delete_after(
-        messenger: Messenger, channel_id: str, msg_id: str, delay: float,
-    ) -> None:
-        """Sleep then delete — pure async, no call_later."""
-        try:
-            await asyncio.sleep(delay)
-            await messenger.delete_message(channel_id, msg_id)
-        except Exception:
-            pass
+
+async def delete_after(
+    messenger: Messenger, channel_id: str, msg_id: str, delay: float,
+) -> None:
+    """Sleep, then delete the message. Best-effort: a failed delete is ignored."""
+    try:
+        await asyncio.sleep(delay)
+        await messenger.delete_message(channel_id, msg_id)
+    except Exception:
+        pass

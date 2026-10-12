@@ -23,13 +23,14 @@ import shutil
 import signal
 import subprocess as _sp
 import sys
-import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from bot import config
+from bot.fsutil import atomic_write_json
+from bot.textutil import text_bar
 
 log = logging.getLogger(__name__)
 
@@ -123,20 +124,7 @@ def _load_limits() -> dict:
 def _save_limits(data: dict) -> None:
     """Atomic save: write to temp then rename (survives crashes)."""
     try:
-        _LIMITS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_path = tempfile.mkstemp(
-            dir=str(_LIMITS_FILE.parent), suffix=".tmp",
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
-            os.replace(tmp_path, _LIMITS_FILE)
-        except BaseException:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
+        atomic_write_json(_LIMITS_FILE, data)
     except Exception:
         log.warning("Failed to save usage limits", exc_info=True)
 
@@ -219,7 +207,7 @@ def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:
                 ["taskkill", "/T", "/F", "/PID", str(pid)],
                 capture_output=True,
                 timeout=5,
-                creationflags=_sp.CREATE_NO_WINDOW,
+                **config.NOWND,
             )
         except Exception:
             pass
@@ -725,9 +713,7 @@ def format_usage_bar(
             time_left = f"{remaining}m"
 
         if block_limit > 0:
-            ratio = min(block.cost_usd / block_limit, 1.0)
-            filled = round(ratio * 16)
-            bar = "\u2588" * filled + "\u2591" * (16 - filled)
+            bar = text_bar(block.cost_usd / block_limit)
             pct = min(block.cost_usd / block_limit * 100, 999)
             lines.append(
                 f"`{bar}` ${block.cost_usd:.2f} session"
@@ -745,9 +731,7 @@ def format_usage_bar(
 
     # --- Bar 2: Weekly ---
     if weekly and weekly_limit > 0:
-        ratio = min(weekly.cost_usd / weekly_limit, 1.0)
-        filled = round(ratio * 16)
-        bar = "\u2588" * filled + "\u2591" * (16 - filled)
+        bar = text_bar(weekly.cost_usd / weekly_limit)
         pct = min(weekly.cost_usd / weekly_limit * 100, 999)
         lines.append(
             f"`{bar}` ${weekly.cost_usd:,.0f} / ${weekly_limit:,.0f}"

@@ -5,25 +5,22 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import discord
 
-from bot import config as bot_config
-from bot.claude.runner import (
-    RebootResult, git_fail_reason, missing_predecessor_release,
-)
-from bot.discord import access as access_mod
 from bot.discord import channels
-from bot.discord.access import AccessResult, load_access_config, effective_mode as access_effective_mode
+from bot.discord.deploy_flow import _handle_approve_deploy, _handle_reboot_repo
+from bot.discord.access import AccessResult, load_access_config
 from bot.discord.modals import QuickTaskModal
 from bot.engine import commands
 from bot.engine import sessions as sessions_mod
 from bot.platform.formatting import MODE_COLOR, VALID_EFFORTS, VALID_MODES, effort_name, mode_name
+from bot.platform.modes import cap_mode
 
 if TYPE_CHECKING:
     from bot.discord.bot import ClaudeBot
+    from bot.discord.forums import ThreadInfo
 
 log = logging.getLogger(__name__)
 
@@ -87,100 +84,45 @@ async def settle(interaction: discord.Interaction, message: str) -> None:
         log.debug("could not settle interaction", exc_info=True)
 
 
-# --- Deploy status message management (keeps control rooms clean) ---
+# Buttons that act on their own once the tap has been deferred, keyed by the
+# action half of "<action>:<arg>". The arg is not always an instance id: it is
+# a watch id, a fleet token, a pending id, a usage-gate qid or a repo name,
+# depending on the action. Each entry is a lambda so the handler is looked up
+# when the button is tapped: harnesses replace module-level handlers
+# (test_repo_picker_cap), and a table holding the functions themselves would
+# keep calling the originals. Anything not listed here falls through to the
+# generic query dispatch in ``handle``.
+_ACTIONS = {
+    "watch_stop": lambda b, i, a, arg, acc: _handle_watch_stop(b, i, arg),
+    "fleet_confirm": lambda b, i, a, arg, acc: _handle_fleet(b, i, a, arg),
+    "fleet_cancel": lambda b, i, a, arg, acc: _handle_fleet(b, i, a, arg),
+    "steer": lambda b, i, a, arg, acc: _handle_pending_action(b, i, a, arg, acc),
+    "cancel_pending": lambda b, i, a, arg, acc: _handle_pending_action(b, i, a, arg, acc),
+    "usage_run": lambda b, i, a, arg, acc: _handle_usage_action(b, i, a, arg),
+    "usage_queue": lambda b, i, a, arg, acc: _handle_usage_action(b, i, a, arg),
+    "usage_cancel": lambda b, i, a, arg, acc: _handle_usage_action(b, i, a, arg),
+    "load_history": lambda b, i, a, arg, acc: _handle_load_history(b, i, arg),
+    "new_repo": lambda b, i, a, arg, acc: _handle_new_repo(b, i, arg, acc),
+    "new_repo_select": lambda b, i, a, arg, acc: _handle_new_repo_select(b, i, acc),
+    "sync_repo": lambda b, i, a, arg, acc: _handle_sync_cli(b, i, arg),
+    "sync_git": lambda b, i, a, arg, acc: _handle_sync_git(b, i, arg),
+    "resume_latest": lambda b, i, a, arg, acc: _handle_resume_latest(b, i, arg),
+    "reboot_repo": lambda b, i, a, arg, acc: _handle_reboot_repo(b, i, arg),
+    "approve_deploy": lambda b, i, a, arg, acc: _handle_approve_deploy(b, i, arg),
+    "refresh_control": lambda b, i, a, arg, acc: _handle_refresh_control(b, i, arg),
+    "refresh_user_control": lambda b, i, a, arg, acc: _handle_refresh_user_control(b, i),
+    "cancel_cooldown": lambda b, i, a, arg, acc: _handle_cancel_cooldown(b, i, arg),
+    "hold_merge": lambda b, i, a, arg, acc: _handle_hold_merge(b, i, arg),
+    "stop_all": lambda b, i, a, arg, acc: _handle_stop_all(b, i, arg, acc),
+    "sess_resume": lambda b, i, a, arg, acc: _handle_sess_resume(b, i, arg, acc),
+    "new": lambda b, i, a, arg, acc: _handle_new_session(b, i, acc),
+    "branch": lambda b, i, a, arg, acc: _handle_branch(b, i, arg, acc),
+}
 
-_deploy_status_msgs: dict[str, int] = {}  # repo_name → message_id
-
-
-class DeployStatus:
-    """Manages a single editable deploy status message in a control room.
-
-    Used only for command-based deploys (not self-managed reboots).
-    Uses the bot token (channel.fetch_message) instead of the interaction
-    webhook token for edits, avoiding the 15-minute expiry on long deploys.
-    """
-
-    def __init__(self, channel: discord.abc.Messageable, msg: discord.Message,
-                 repo_name: str, store: object | None = None):
-        self._channel = channel
-        self._msg = msg
-        self._repo_name = repo_name
-        self._store = store
-        self.id = msg.id
-
-    async def update(self, content: str) -> None:
-        """Edit the status message. Cached object first, fetch fallback."""
-        # Truncate to safe limit (leave room for formatting overhead)
-        if len(content) > 1900:
-            lines = content[:1850].rsplit("\n", 1)[0]
-            if "```" in content and not lines.endswith("```"):
-                lines += "\n```"
-            content = lines
-        try:
-            await self._msg.edit(content=content)
-        except (discord.NotFound, discord.HTTPException):
-            try:
-                self._msg = await self._channel.fetch_message(self.id)
-                await self._msg.edit(content=content)
-            except (discord.NotFound, discord.HTTPException):
-                # Message gone — send new one as fallback
-                self._msg = await self._channel.send(content)
-                self.id = self._msg.id
-                _deploy_status_msgs[self._repo_name] = self.id
-
-    async def delete(self) -> None:
-        """Delete the status message. Persist ID to state on failure for startup cleanup."""
-        _deploy_status_msgs.pop(self._repo_name, None)
-        try:
-            await self._msg.delete()
-        except discord.NotFound:
-            pass  # Already gone
-        except Exception:
-            # Rate limit, network error, etc. — try fetch fallback
-            try:
-                msg = await self._channel.fetch_message(self.id)
-                await msg.delete()
-            except discord.NotFound:
-                pass  # Already gone
-            except Exception:
-                self._persist_for_cleanup()
-
-    def _persist_for_cleanup(self) -> None:
-        """Persist message ID to state.json for startup cleanup."""
-        if not self._store:
-            return
-        try:
-            state = self._store.get_platform_state("discord")
-            pending = state.get("deploy_status_msgs", {})
-            pending[self._repo_name] = self.id
-            state["deploy_status_msgs"] = pending
-            self._store.set_platform_state("discord", state, persist=True)
-            log.warning("Persisted orphaned deploy status msg %s for cleanup", self.id)
-        except Exception:
-            log.debug("Failed to persist deploy status msg for cleanup", exc_info=True)
-
-
-async def _start_deploy_status(
-    interaction: discord.Interaction, repo_name: str, initial_text: str,
-    store: object | None = None,
-) -> DeployStatus:
-    """Send initial deploy status message, cleaning up the previous one.
-
-    Used only for command-based deploys (self-managed reboots use the embed).
-    """
-    # Delete previous status message for this repo
-    old_msg_id = _deploy_status_msgs.pop(repo_name, None)
-    if old_msg_id:
-        try:
-            old_msg = await interaction.channel.fetch_message(old_msg_id)
-            await old_msg.delete()
-        except (discord.NotFound, discord.HTTPException):
-            pass  # Already gone — dict entry already cleared by .pop()
-
-    # Send initial message via interaction (one-time use of webhook token)
-    msg = await interaction.followup.send(initial_text, wait=True)
-    _deploy_status_msgs[repo_name] = msg.id
-    return DeployStatus(interaction.channel, msg, repo_name, store=store)
+# Actions in ``_ACTIONS`` that only the owner may use.
+_OWNER_ONLY_ACTIONS: frozenset[str] = frozenset({
+    "sync_repo", "sync_git", "reboot_repo", "approve_deploy",
+})
 
 
 async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
@@ -194,8 +136,9 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
 
     custom_id = interaction.data.get("custom_id", "") if interaction.data else ""
 
-    # --- Select menu: repo switch (owner only) ---
-    if custom_id == "repo_switch_select":
+    # --- Select menu: repo switch (owner only). A long repo list is split
+    # across several menus, ids repo_switch_select:<n> ---
+    if custom_id == "repo_switch_select" or custom_id.startswith("repo_switch_select:"):
         await _handle_repo_switch(bot, interaction, btn_access)
         return
 
@@ -289,184 +232,12 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
     except discord.InteractionResponded:
         pass  # already acked elsewhere (e.g. double-dispatch) — continue
 
-    # --- Stop watching a job (watch_stop:<watch_id>) ---
-    # The trailing portion is a watch id, not an instance id. Disarming leaves
-    # the job itself alone — it only means "stop resuming me when it ends".
-    if action == "watch_stop":
-        watch = bot._store.get_watch(instance_id)
-        if watch is None:
-            # Strip the button too — Discord keeps components live until the
-            # message is edited, so leaving it means a tap that keeps failing.
-            try:
-                await interaction.message.edit(view=None)
-            except Exception:
-                log.debug("watch stop stale-button strip failed", exc_info=True)
-            await settle(interaction, "That watch has already finished or been stopped.")
-            return
-        bot._store.delete_watch(watch.id)
-        label = watch.label or (f"pid {watch.pid}" if watch.pid else "the job")
-        log.info("Watch %s stopped by user in thread %s", watch.id, watch.channel_id)
-        try:
-            await interaction.message.edit(
-                content=f"⏹ Stopped watching **{label}** — the job itself is untouched.",
-                view=None,
-            )
-        except Exception:
-            log.debug("watch stop edit failed", exc_info=True)
-        # The thread is no longer busy, so let the ordinary tag/idle rules
-        # resume: without this it keeps the "active" tag it was holding.
-        try:
-            from bot.discord import tags
-            await tags.try_apply_tags_after_run(bot, str(interaction.channel_id))
-        except Exception:
-            log.debug("watch stop tag refresh failed", exc_info=True)
-        return
-
-    # --- Fleet ship roster (Confirm / Cancel) — trailing portion is a token ---
-    if action in ("fleet_confirm", "fleet_cancel"):
-        from bot.discord import fleet
-        await fleet.handle_fleet_button(bot, interaction, action, instance_id)
-        return
-
-    # --- Pending-prompt interactions (Steer / Cancel on Queued embed) ---
-    # Here the trailing portion of the custom_id is a pending_id, not an
-    # instance_id, but we reuse the same ``parts`` split for consistency.
-    if action in ("steer", "cancel_pending"):
-        await _handle_pending_action(bot, interaction, action, instance_id, btn_access)
-        return
-
-    # --- Usage-limit gate interactions (Run now / Queue / Cancel) ---
-    # The trailing portion is a qid assigned by _offer_usage_limit_choice.
-    if action in ("usage_run", "usage_queue", "usage_cancel"):
-        await _handle_usage_action(bot, interaction, action, instance_id)
-        return
-
-    # --- Load CLI history into thread ---
-    if action == "load_history":
-        await _handle_load_history(bot, interaction, instance_id)
-        return
-
-    # --- New session with repo picker ---
-    if action == "new_repo":
-        await _handle_new_repo(bot, interaction, instance_id, btn_access)
-        return
-
-    # --- Sync CLI for a repo (control room button) ---
-    if action == "sync_repo":
-        if not btn_access.is_owner:
+    handler = _ACTIONS.get(action)
+    if handler is not None:
+        if action in _OWNER_ONLY_ACTIONS and not btn_access.is_owner:
             await interaction.followup.send("Owner only.", ephemeral=True)
             return
-        created, populated = await bot._forums.sync_cli_sessions(3)
-        parts_msg = []
-        if created:
-            parts_msg.append(f"Created {len(created)} threads")
-        if populated:
-            parts_msg.append(f"Updated {len(populated)} threads")
-        if not parts_msg:
-            parts_msg.append("No sessions found")
-        await interaction.followup.send(
-            f"Synced `{instance_id}`: " + ", ".join(parts_msg), ephemeral=True,
-        )
-        return
-
-    # --- Sync Git for a repo (bidirectional: pull + push) ---
-    if action == "sync_git":
-        if not btn_access.is_owner:
-            await interaction.followup.send("Owner only.", ephemeral=True)
-            return
-        await _handle_sync_git(bot, interaction, instance_id)
-        return
-
-    # --- Resume latest session for a repo (control room button) ---
-    if action == "resume_latest":
-        await _handle_resume_latest(bot, interaction, instance_id)
-        return
-
-    # --- Reboot/Deploy from control room ---
-    if action == "reboot_repo":
-        if not btn_access.is_owner:
-            await interaction.followup.send("Owner only.", ephemeral=True)
-            return
-        await _handle_reboot_repo(bot, interaction, instance_id)
-        return
-
-    # --- Approve file-sourced deploy config ---
-    if action == "approve_deploy":
-        if not btn_access.is_owner:
-            await interaction.followup.send("Owner only.", ephemeral=True)
-            return
-        await _handle_approve_deploy(bot, interaction, instance_id)
-        return
-
-    # --- Refresh control room (repo or user) ---
-    if action == "refresh_control":
-        await bot._forums.refresh_control_room(instance_id)
-        await interaction.followup.send("Refreshed.", ephemeral=True)
-        return
-
-    if action == "refresh_user_control":
-        user_id = str(interaction.user.id)
-        await bot._forums.refresh_user_control_room(user_id)
-        await interaction.followup.send("Refreshed.", ephemeral=True)
-        return
-
-    # --- Cancel cooldown auto-retry (lightweight, no channel lock needed) ---
-    if action == "cancel_cooldown":
-        inst = bot._store.get_instance(instance_id)
-        if inst and inst.cooldown_retry_at:
-            inst.cooldown_retry_at = None
-            inst.cooldown_channel_id = None
-            bot._store.update_instance(inst)
-            # Edit the cooldown message in-place, removing the button
-            try:
-                await interaction.message.edit(
-                    content="Auto-retry cancelled.", view=None,
-                )
-            except Exception:
-                await interaction.followup.send("Auto-retry cancelled.")
-        else:
-            await interaction.followup.send("No pending auto-retry.", ephemeral=True)
-        return
-
-    # --- Hold an auto-merge veto (lightweight, no channel lock needed) ---
-    if action == "hold_merge":
-        held = bot._store.hold_scheduled_merge(instance_id)
-        if held:
-            try:
-                await interaction.message.edit(
-                    content="Auto-merge held — merge manually with the Merge "
-                    "button or `/merge` when you're ready.",
-                    view=None,
-                )
-            except Exception:
-                await interaction.followup.send(
-                    "Auto-merge held.", ephemeral=True,
-                )
-        else:
-            await interaction.followup.send(
-                "No pending auto-merge to hold (already merged or cancelled).",
-                ephemeral=True,
-            )
-        return
-
-    # --- Stop all running instances for a repo (owner-only) ---
-    if action == "stop_all":
-        await _handle_stop_all(bot, interaction, instance_id, btn_access)
-        return
-
-    # --- Session resume: create/find thread, redirect there ---
-    if action == "sess_resume":
-        await _handle_sess_resume(bot, interaction, instance_id, btn_access)
-        return
-
-    # --- New session button: create a new forum thread (like /new) ---
-    if action == "new":
-        await _handle_new_session(bot, interaction, btn_access)
-        return
-
-    # --- Branch from here: fork the JSONL at this message and open new thread ---
-    if action == "branch":
-        await _handle_branch(bot, interaction, instance_id, btn_access)
+        await handler(bot, interaction, action, instance_id, btn_access)
         return
 
     # --- Generic query button dispatch (plan, build, review, etc.) ---
@@ -532,11 +303,7 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
             try:
                 await commands.handle_callback(ctx, action, instance_id, source_msg_id)
             finally:
-                bot._forums.persist_ctx_settings(ctx)
-                await bot._forums.update_pending_thread(channel_id)
-                asyncio.create_task(bot._try_apply_tags_after_run(channel_id))
-                bot._schedule_sleep(channel_id)
-                asyncio.create_task(bot._refresh_dashboard())
+                await bot._after_turn(ctx, channel_id, pending_thread=True)
     else:
         try:
             await commands.handle_callback(ctx, action, instance_id, source_msg_id)
@@ -550,6 +317,127 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
 
 
 # --- Individual handlers ---
+
+
+async def _handle_watch_stop(
+    bot: ClaudeBot, interaction: discord.Interaction, watch_id: str,
+) -> None:
+    """Stop watching a job. Disarming leaves the job itself alone: it only
+    means "stop resuming me when it ends"."""
+    watch = bot._store.get_watch(watch_id)
+    if watch is None:
+        # Strip the button too: Discord keeps components live until the
+        # message is edited, so leaving it means a tap that keeps failing.
+        try:
+            await interaction.message.edit(view=None)
+        except Exception:
+            log.debug("watch stop stale-button strip failed", exc_info=True)
+        await settle(interaction, "That watch has already finished or been stopped.")
+        return
+    bot._store.delete_watch(watch.id)
+    label = watch.label or (f"pid {watch.pid}" if watch.pid else "the job")
+    log.info("Watch %s stopped by user in thread %s", watch.id, watch.channel_id)
+    try:
+        await interaction.message.edit(
+            content=f"\u23f9 Stopped watching **{label}** \u2014 the job itself is untouched.",
+            view=None,
+        )
+    except Exception:
+        log.debug("watch stop edit failed", exc_info=True)
+    # The thread is no longer busy, so let the ordinary tag/idle rules
+    # resume: without this it keeps the "active" tag it was holding.
+    try:
+        from bot.discord import tags
+        await tags.try_apply_tags_after_run(bot, str(interaction.channel_id))
+    except Exception:
+        log.debug("watch stop tag refresh failed", exc_info=True)
+
+
+async def _handle_fleet(
+    bot: ClaudeBot, interaction: discord.Interaction, action: str, token: str,
+) -> None:
+    """Fleet ship roster (Confirm / Cancel)."""
+    from bot.discord import fleet
+    await fleet.handle_fleet_button(bot, interaction, action, token)
+
+
+async def _handle_new_repo_select(
+    bot: ClaudeBot, interaction: discord.Interaction, btn_access: AccessResult,
+) -> None:
+    """Same picker as the new_repo buttons, as Select menus, used once the
+    repos outgrow one View of buttons. The repo is the selected value."""
+    values = interaction.data.get("values", []) if interaction.data else []
+    if values:
+        await _handle_new_repo(bot, interaction, values[0], btn_access)
+
+
+async def _handle_sync_cli(
+    bot: ClaudeBot, interaction: discord.Interaction, repo_name: str,
+) -> None:
+    """Sync CLI sessions into threads (control room button)."""
+    created, populated = await bot._forums.sync_cli_sessions(3)
+    parts_msg = []
+    if created:
+        parts_msg.append(f"Created {len(created)} threads")
+    if populated:
+        parts_msg.append(f"Updated {len(populated)} threads")
+    if not parts_msg:
+        parts_msg.append("No sessions found")
+    await interaction.followup.send(
+        f"Synced `{repo_name}`: " + ", ".join(parts_msg), ephemeral=True,
+    )
+
+
+async def _handle_refresh_control(
+    bot: ClaudeBot, interaction: discord.Interaction, repo_name: str,
+) -> None:
+    await bot._forums.refresh_control_room(repo_name)
+    await interaction.followup.send("Refreshed.", ephemeral=True)
+
+
+async def _handle_refresh_user_control(
+    bot: ClaudeBot, interaction: discord.Interaction,
+) -> None:
+    await bot._forums.refresh_user_control_room(str(interaction.user.id))
+    await interaction.followup.send("Refreshed.", ephemeral=True)
+
+
+async def _handle_cancel_cooldown(
+    bot: ClaudeBot, interaction: discord.Interaction, instance_id: str,
+) -> None:
+    """Cancel a cooldown auto-retry (lightweight, no channel lock needed)."""
+    inst = bot._store.get_instance(instance_id)
+    if not (inst and inst.cooldown_retry_at):
+        await interaction.followup.send("No pending auto-retry.", ephemeral=True)
+        return
+    inst.cooldown_retry_at = None
+    inst.cooldown_channel_id = None
+    bot._store.update_instance(inst)
+    # Edit the cooldown message in-place, removing the button
+    try:
+        await interaction.message.edit(content="Auto-retry cancelled.", view=None)
+    except Exception:
+        await interaction.followup.send("Auto-retry cancelled.")
+
+
+async def _handle_hold_merge(
+    bot: ClaudeBot, interaction: discord.Interaction, instance_id: str,
+) -> None:
+    """Hold an auto-merge veto (lightweight, no channel lock needed)."""
+    if not bot._store.hold_scheduled_merge(instance_id):
+        await interaction.followup.send(
+            "No pending auto-merge to hold (already merged or cancelled).",
+            ephemeral=True,
+        )
+        return
+    try:
+        await interaction.message.edit(
+            content="Auto-merge held \u2014 merge manually with the Merge "
+            "button or `/merge` when you're ready.",
+            view=None,
+        )
+    except Exception:
+        await interaction.followup.send("Auto-merge held.", ephemeral=True)
 
 
 async def _handle_pending_action(
@@ -705,11 +593,7 @@ async def _handle_pending_action(
             # Always run cleanup, including after cancel-early-return: the
             # prior task was killed so the thread is idle and needs its sleep
             # timer (re)scheduled and tags refreshed.
-            bot._forums.persist_ctx_settings(ctx)
-            await bot._forums.update_pending_thread(channel_id)
-            asyncio.create_task(bot._try_apply_tags_after_run(channel_id))
-            bot._schedule_sleep(channel_id)
-            asyncio.create_task(bot._refresh_dashboard())
+            await bot._after_turn(ctx, channel_id, pending_thread=True)
 
 
 async def _handle_usage_action(
@@ -728,7 +612,7 @@ async def _handle_usage_action(
     if action == "usage_cancel":
         removed = await bot._usage_queue_remove(qid)
         if removed:
-            from bot.discord.bot import unlink_image_paths
+            from bot.discord.attachments import unlink_image_paths
             unlink_image_paths(removed.get("image_paths", []), site="cancel")
             if msg:
                 try:
@@ -779,7 +663,7 @@ async def _handle_usage_action(
     # Restart their retention clock before awaiting anything, or a sweep
     # landing in that gap can delete a picture this click just promised to
     # look at.
-    from bot.discord.bot import prepare_replayed_prompt, refresh_image_retention
+    from bot.discord.attachments import prepare_replayed_prompt, refresh_image_retention
     refresh_image_retention(removed.get("image_paths", []))
 
     if msg:
@@ -849,38 +733,54 @@ async def _handle_repo_switch(
             )
 
 
+def _thread_settings(bot: ClaudeBot, thread_id: str) -> tuple[ThreadInfo | None, str, str]:
+    """The thread's state, and its effective mode and effort.
+
+    Read from the thread (falling back to the deployment default), never from
+    the welcome embed's field labels: an embed posted before the Effort field
+    existed, or one whose label wording changed, would otherwise rebuild the
+    buttons on the wrong value.
+    """
+    lookup = bot._forums.thread_to_project(thread_id)
+    info = lookup[1] if lookup else None
+    mode = (info.mode if info else None) or bot._store.mode
+    effort = (info.effort if info else None) or bot._store.effort
+    return info, mode, effort
+
+
+async def _redraw_session_controls(
+    interaction: discord.Interaction, mode: str, effort: str,
+) -> None:
+    """Show *mode* and *effort* on the welcome embed and its buttons."""
+    if not (interaction.message and interaction.message.embeds):
+        await interaction.response.defer()
+        return
+    embed = interaction.message.embeds[0]
+    embed.color = discord.Color(MODE_COLOR.get(mode, 0x5865F2))
+    for name, value in (("Mode", mode_name(mode)), ("Effort", effort_name(effort))):
+        idx = next((i for i, f in enumerate(embed.fields) if f.name == name), None)
+        if idx is None:
+            embed.add_field(name=name, value=value, inline=True)
+        else:
+            embed.set_field_at(idx, name=name, value=value, inline=True)
+    view = channels.session_controls_view(mode, effort)
+    await interaction.response.edit_message(embed=embed, view=view)
+
+
 async def _handle_mode_set(
     bot: ClaudeBot, interaction: discord.Interaction,
     target_mode: str, btn_access: AccessResult,
 ) -> None:
-    if not btn_access.is_owner and btn_access.mode_ceiling:
-        target_mode = access_effective_mode(
-            access_mod.RepoAccess(mode=btn_access.mode_ceiling), target_mode,
-        )
+    if not btn_access.is_owner:
+        target_mode = cap_mode(target_mode, btn_access.mode_ceiling)
     thread_id = str(interaction.channel_id)
-    lookup = bot._forums.thread_to_project(thread_id)
-    if lookup:
-        lookup[1].mode = target_mode
+    info, _, effort = _thread_settings(bot, thread_id)
+    if info:
+        info.mode = target_mode
         bot._forums.save_forum_map()
     elif btn_access.is_owner:
         bot._store.mode = target_mode
-    if interaction.message and interaction.message.embeds:
-        embed = interaction.message.embeds[0]
-        embed.color = discord.Color(MODE_COLOR.get(target_mode, 0x5865F2))
-        for i, field_obj in enumerate(embed.fields):
-            if field_obj.name == "Mode":
-                embed.set_field_at(i, name="Mode", value=mode_name(target_mode), inline=True)
-                break
-        # Read current effort from embed (default "high" for old embeds)
-        current_effort = "high"
-        for field_obj in embed.fields:
-            if field_obj.name == "Effort":
-                current_effort = field_obj.value.lower()
-                break
-        view = channels.session_controls_view(target_mode, current_effort)
-        await interaction.response.edit_message(embed=embed, view=view)
-    else:
-        await interaction.response.defer()
+    await _redraw_session_controls(interaction, target_mode, effort)
     asyncio.create_task(bot._try_apply_tags_after_run(thread_id))
     log.info("Mode set to %s via welcome button", target_mode)
 
@@ -890,35 +790,15 @@ async def _handle_effort_set(
     target_effort: str, btn_access: AccessResult,
 ) -> None:
     thread_id = str(interaction.channel_id)
-    lookup = bot._forums.thread_to_project(thread_id)
-    if lookup:
-        lookup[1].effort = target_effort
+    info, mode, _ = _thread_settings(bot, thread_id)
+    if info:
+        info.effort = target_effort
         bot._forums.save_forum_map()
-    if interaction.message and interaction.message.embeds:
-        embed = interaction.message.embeds[0]
-        # Update or add Effort field
-        found = False
-        for i, field_obj in enumerate(embed.fields):
-            if field_obj.name == "Effort":
-                embed.set_field_at(i, name="Effort", value=effort_name(target_effort), inline=True)
-                found = True
-                break
-        if not found:
-            embed.add_field(name="Effort", value=effort_name(target_effort), inline=True)
-        # Read current mode from embed to rebuild view
-        current_mode = "explore"
-        for field_obj in embed.fields:
-            if field_obj.name == "Mode":
-                for m in ("explore", "plan", "build"):
-                    if mode_name(m) == field_obj.value:
-                        current_mode = m
-                        break
-                break
-        view = channels.session_controls_view(current_mode, target_effort)
-        await interaction.response.edit_message(embed=embed, view=view)
-    else:
-        await interaction.response.defer()
+    elif btn_access.is_owner:
+        bot._store.effort = target_effort
+    await _redraw_session_controls(interaction, mode, target_effort)
     log.info("Effort set to %s via welcome button", target_effort)
+
 
 async def _handle_load_history(
     bot: ClaudeBot, interaction: discord.Interaction, cli_session_id: str,
@@ -1020,16 +900,8 @@ async def _handle_stop_all(
     await interaction.followup.send(
         f"Stopping {count} instance{'s' if count != 1 else ''}...", ephemeral=True,
     )
-    killed = 0
-    for inst in running:
-        try:
-            if await bot._runner.kill(inst.id):
-                inst.status = InstanceStatus.KILLED
-                inst.finished_at = datetime.now(timezone.utc).isoformat()
-                bot._store.update_instance(inst)
-                killed += 1
-        except Exception:
-            log.debug("Failed to kill %s during stop_all", inst.id, exc_info=True)
+    from bot.engine.commands import stop_instances
+    killed = await stop_instances(bot._store, bot._runner, running)
     asyncio.create_task(bot._forums.refresh_control_room(repo_name))
     asyncio.create_task(bot._refresh_dashboard())
     log.info("Stop all: killed %d/%d instances for %s", killed, count, repo_name)
@@ -1088,7 +960,7 @@ async def _handle_branch(
     """
     from bot import config
     from bot.engine import workflows
-    from bot.engine.session_fork import (
+    from bot.claude.session_fork import (
         encode_project_path, fork_session, get_last_assistant_uuid,
     )
 
@@ -1227,558 +1099,16 @@ async def _handle_new_session(
         pass
 
 
-async def _handle_approve_deploy(
-    bot: ClaudeBot, interaction: discord.Interaction, repo_name: str,
-) -> None:
-    """Approve a file-sourced deploy config so the Reboot button becomes active."""
-    config = bot._store.get_deploy_config(repo_name)
-    if not config:
-        await interaction.followup.send("No deploy config found.", ephemeral=True)
-        return
-    config["approved"] = True
-    bot._store.set_deploy_config(repo_name, config)
-    await interaction.followup.send(
-        f"Deploy approved for **{repo_name}**: `{config.get('command', 'self')}`",
-        ephemeral=True,
-    )
-    asyncio.create_task(bot._forums.refresh_control_room(repo_name))
-
-
-async def execute_deploy(
-    bot: ClaudeBot,
-    repo_name: str,
-    deploy_config: dict,
-    *,
-    status_callback=None,
-) -> tuple[bool, str, str]:
-    """Run a command-based deploy for a repo.
-
-    Decoupled from discord.Interaction so it can be called from both
-    button handlers and programmatic triggers (auto-fix redeploy).
-
-    Returns (success, output, error_summary).
-    """
-    command = deploy_config["command"]
-    repo_path = bot._store.list_repos().get(repo_name)
-    if not repo_path:
-        return False, "", f"Repo `{repo_name}` not found"
-
-    raw_cwd = deploy_config.get("cwd")
-    if raw_cwd:
-        cwd_path = Path(raw_cwd)
-        if not cwd_path.is_absolute():
-            cwd_path = Path(repo_path) / cwd_path
-        cwd = str(cwd_path.resolve())
-    else:
-        cwd = repo_path
-
-    async def _status(msg: str) -> None:
-        if status_callback:
-            await status_callback(msg)
-
-    # Release containment gate. This runs before the push, not after: the
-    # push is what publishes the revert, and a deploy that has already gone
-    # out cannot be warned about usefully. A tree that does not contain its
-    # own newest release ships older code under a newer version. Refusing
-    # is recoverable (merge the tag in and press Deploy again), shipping it
-    # is not.
-    if bot_config.RELEASE_ANCESTRY_CHECK:
-        missing = await asyncio.to_thread(
-            missing_predecessor_release, repo_path, "HEAD",
-        )
-        if missing:
-            log.error(
-                "Deploy of %s blocked: HEAD does not contain release %s",
-                repo_name, missing,
-            )
-            return False, "", (
-                f"Release `{missing}` is not in `HEAD`, so deploying would revert it. "
-                f"Merge that tag into the branch first, or delete it if it was "
-                f"never meant to ship."
-            )
-
-    # Push to origin before deploying (safety net)
-    await _status("\U0001f680 Pushing to origin...")
-    try:
-        push_proc = await asyncio.create_subprocess_exec(
-            "git", "-C", repo_path, "push", "origin", "HEAD",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        push_out, _ = await asyncio.wait_for(
-            push_proc.communicate(), timeout=30,
-        )
-        if push_proc.returncode != 0:
-            push_output = push_out.decode(errors="replace")[:1500]
-            await _status(
-                f"Push failed (exit {push_proc.returncode}), deploying anyway...\n```\n{push_output}\n```"
-            )
-    except asyncio.TimeoutError:
-        try:
-            push_proc.kill()
-        except ProcessLookupError:
-            pass
-        await _status("Push timed out (30s). Proceeding with deploy...")
-    except Exception as e:
-        await _status(f"Push error: {e}. Proceeding with deploy...")
-
-    await _status(f"\U0001f680 Running: `{command}`...")
-
-    ds = bot._store.get_deploy_state(repo_name)
-    proc = None
-    try:
-        proc = await asyncio.create_subprocess_shell(
-            command, cwd=cwd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        raw_timeout = deploy_config.get("timeout", 600)
-        deploy_timeout = max(10, min(int(raw_timeout), 3600)) if isinstance(raw_timeout, (int, float)) else 600
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=deploy_timeout)
-        output = stdout.decode(errors="replace")[:1500]
-
-        if proc.returncode == 0:
-            if ds:
-                ds.last_deploy_error = None
-                ds.boot_version = ds.current_version
-                ds.boot_ref = ds.current_ref
-                ds.pending_sessions.clear()
-                ds.pending_changes.clear()
-                ds.auto_fix_attempt = 0
-                ds.auto_fix_thread_id = None
-                bot._store.set_deploy_state(repo_name, ds)
-                # Also reset generic auto-fix state for deploy trigger
-                from bot.engine.auto_fix import AutoFixState
-                bot._store.set_auto_fix_state(repo_name, "deploy", AutoFixState())
-            return True, output, ""
-        else:
-            err_summary = ""
-            if output.strip():
-                for line in reversed(output.strip().splitlines()):
-                    line = line.strip()
-                    if line and not line.startswith("---"):
-                        err_summary = line[:200]
-                        break
-            err_summary = err_summary or f"Exit code {proc.returncode}"
-            if ds:
-                ds.last_deploy_error = err_summary
-                bot._store.set_deploy_state(repo_name, ds)
-            return False, output, err_summary
-    except asyncio.TimeoutError:
-        if proc:
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
-        err = f"Timed out ({deploy_timeout}s)"
-        if ds:
-            ds.last_deploy_error = err
-            bot._store.set_deploy_state(repo_name, ds)
-        return False, "", err
-    except Exception as e:
-        err = str(e)[:200]
-        if ds:
-            ds.last_deploy_error = err
-            bot._store.set_deploy_state(repo_name, ds)
-        return False, "", err
-
-
-async def _spawn_deploy_fix(
-    bot: ClaudeBot,
-    repo_name: str,
-    deploy_config: dict,
-    error_output: str,
-    error_summary: str,
-) -> None:
-    """Auto-spawn a fix session after deploy failure.
-
-    Delegates to the generic auto-fix primitive. If auto_fix_redeploy is
-    enabled, re-runs the deploy after a successful merge.
-    Syncs AutoFixState back to DeployState for control room display.
-    """
-    from bot.engine.auto_fix import spawn_fix_session
-
-    command = deploy_config.get("command", "?")
-    prompt = (
-        f"The deploy command `{command}` failed.\n\n"
-        f"**Error:** {error_summary}\n\n"
-    )
-    if error_output.strip():
-        prompt += f"**Full output:**\n```\n{error_output}\n```\n\n"
-    prompt += (
-        "Diagnose the issue and fix it. The deploy command runs in the repo root. "
-        "Focus on what would cause this specific error."
-    )
-
-    # Build redeploy callback if enabled
-    on_success = None
-    if deploy_config.get("auto_fix_redeploy"):
-        async def _redeploy() -> None:
-            await execute_deploy(bot, repo_name, deploy_config)
-        on_success = _redeploy
-
-    # Sync AutoFixState → DeployState for control room display
-    def _sync_deploy_state(channel_id: str) -> None:
-        ds = bot._store.get_deploy_state(repo_name)
-        if ds:
-            afs = bot._store.get_auto_fix_state(repo_name, "deploy")
-            ds.auto_fix_attempt = afs.attempt
-            ds.auto_fix_thread_id = afs.thread_id
-            bot._store.set_deploy_state(repo_name, ds)
-
-    await spawn_fix_session(
-        bot, repo_name,
-        trigger="deploy",
-        fix_prompt=prompt,
-        max_retries=deploy_config.get("auto_fix_retries", 1),
-        max_cost_usd=2.0,
-        on_success=on_success,
-        on_started=_sync_deploy_state,
-    )
-
-    # Final sync after chain completes (thread_id now None)
-    _sync_deploy_state("")
-
-
-async def _post_deploy_healthcheck(
-    bot: ClaudeBot,
-    repo_name: str,
-    deploy_config: dict,
-    healthcheck: dict,
-) -> bool:
-    """Wait, then run health check commands. Trigger auto-fix if unhealthy.
-
-    Returns True when all checks pass (or none are configured), False on
-    any failure/timeout — fleet ship gates its verify-back fan-out on this.
-    Existing callers fire-and-forget via create_task and ignore the value.
-    """
-    from bot.engine.auto_fix import spawn_fix_session
-
-    delay = healthcheck.get("delay_secs", 30)
-    commands = healthcheck.get("commands", [])
-    if not commands:
-        return True
-
-    await asyncio.sleep(delay)
-
-    repo_path = bot._store.list_repos().get(repo_name, "")
-
-    for cmd in commands:
-        try:
-            proc = await asyncio.create_subprocess_shell(
-                cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-                cwd=repo_path or None,
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
-            if proc.returncode != 0:
-                error_output = stdout.decode(errors="replace")[:1500]
-                log.warning("Health check failed for %s: %s (exit %d)",
-                            repo_name, cmd, proc.returncode)
-
-                if deploy_config.get("auto_fix"):
-                    prompt = (
-                        f"Post-deploy health check `{cmd}` failed (exit {proc.returncode}).\n\n"
-                    )
-                    if error_output.strip():
-                        prompt += f"**Output:**\n```\n{error_output}\n```\n\n"
-                    prompt += (
-                        "Diagnose why this health check fails after a successful deploy. "
-                        "Focus on recent changes that could cause this."
-                    )
-
-                    async def _redeploy() -> None:
-                        await execute_deploy(bot, repo_name, deploy_config)
-
-                    await spawn_fix_session(
-                        bot, repo_name,
-                        trigger="healthcheck",
-                        fix_prompt=prompt,
-                        max_retries=1,
-                        max_cost_usd=1.5,
-                        on_success=_redeploy if deploy_config.get("auto_fix_redeploy") else None,
-                    )
-                return False
-        except asyncio.TimeoutError:
-            log.warning("Health check timed out for %s: %s", repo_name, cmd)
-            return False
-        except Exception:
-            log.exception("Health check error for %s: %s", repo_name, cmd)
-            return False
-
-    log.info("All health checks passed for %s", repo_name)
-    return True
-
-
-async def _handle_reboot_repo(
-    bot: ClaudeBot, interaction: discord.Interaction, repo_name: str,
-) -> None:
-    """Execute a reboot/deploy for a repo based on its deploy config.
-
-    Self-managed reboots show drain status in the control room embed.
-    Command-based deploys use a temporary status message (deleted after).
-    """
-    config = bot._store.get_deploy_config(repo_name)
-    if not config or not config.get("approved"):
-        await interaction.followup.send(
-            "Deploy not configured or not approved.", ephemeral=True,
-        )
-        return
-
-    ds = bot._store.get_deploy_state(repo_name)
-    method = config.get("method", "command")
-
-    if method == "self":
-        # Guard against duplicate button clicks while already draining
-        if bot._runner.is_draining:
-            await interaction.followup.send(
-                "Reboot already in progress.", ephemeral=True,
-            )
-            return
-
-        msg = f"Reboot requested from control room ({repo_name})"
-        if ds and ds.pending_changes:
-            msg += f" ({len(ds.pending_changes)} pending changes)"
-
-        # Ephemeral ack — only the user who tapped Reboot sees this
-        await interaction.followup.send("Reboot initiated.", ephemeral=True)
-
-        # Drain active tasks — show status in the control room embed
-        if bot._runner.is_busy:
-            ids = ", ".join(bot._runner.active_ids) or "(between steps)"
-            drain_text = f"Waiting for active work: {ids}"
-            await bot._forums.refresh_control_room(
-                repo_name, drain_status=drain_text,
-            )
-            idle = await bot._runner.wait_until_idle(timeout=300)
-            if not idle:
-                remaining = ", ".join(bot._runner.active_ids)
-                drain_text = (
-                    f"Timed out — force-rebooting with "
-                    f"{bot._runner.active_count} still running: {remaining}"
-                )
-                await bot._forums.refresh_control_room(
-                    repo_name, drain_status=drain_text,
-                )
-
-        # Embed edit confirmed above — safe to request reboot now.
-        # force=True: explicit user-initiated deploy already drained active
-        # work via wait_until_idle above; bypass busy-check.
-        bot._runner.request_reboot({
-            "message": msg,
-            "channel_id": str(interaction.channel_id),
-            "platform": "discord",
-        }, force=True)
-        # NOTE: Do NOT reset deploy state here — capture_boot_baselines()
-        # handles it on the next startup when it detects self_managed=True.
-
-    elif method == "command":
-        repo_path = bot._store.list_repos().get(repo_name)
-        if not repo_path:
-            await interaction.followup.send(
-                f"Repo `{repo_name}` not found — deploy config may be stale.",
-                ephemeral=True,
-            )
-            return
-
-        # Single status message for the deploy cycle (deleted after completion)
-        status = await _start_deploy_status(
-            interaction, repo_name, "Pushing to origin…",
-            store=bot._store,
-        )
-
-        success, output, err_summary = await execute_deploy(
-            bot, repo_name, config,
-            status_callback=status.update,
-        )
-
-        if success:
-            await status.update(
-                f"\u2705 Deploy successful.\n```\n{output}\n```"
-                if output.strip() else "\u2705 Deploy successful.",
-            )
-            # Post-deploy health gate
-            healthcheck = config.get("healthcheck")
-            if healthcheck:
-                asyncio.create_task(_post_deploy_healthcheck(
-                    bot, repo_name, config, healthcheck,
-                ))
-        else:
-            if output.strip():
-                await status.update(
-                    f"\u274c Deploy failed.\n```\n{output}\n```",
-                )
-            else:
-                await status.update(f"\u274c Deploy failed: {err_summary}")
-
-            # Auto-fix: spawn a fix session if enabled
-            if config.get("auto_fix"):
-                asyncio.create_task(_spawn_deploy_fix(
-                    bot, repo_name, config, output, err_summary,
-                ))
-
-        await status.delete()
-
-    asyncio.create_task(bot._forums.refresh_control_room(repo_name))
-    asyncio.create_task(bot._refresh_dashboard())
-
-
 async def _handle_sync_git(
     bot: ClaudeBot, interaction: discord.Interaction, repo_name: str,
 ) -> None:
-    """Bidirectional git sync: pull from remote (ff-only), then push local changes + tags."""
-    from bot.procutil import run_capture
+    """Bidirectional git sync, run by ``git_sync.sync_repo``."""
+    from bot.engine import git_sync
 
-    repos = bot._store.list_repos()
-    repo_path = repos.get(repo_name)
-    if not repo_path:
-        await interaction.followup.send(
-            f"Repo `{repo_name}` not found.", ephemeral=True,
-        )
-        return
-
-    ds = bot._store.get_deploy_state(repo_name)
-    is_self = ds.self_managed if ds else False
-
-    try:
-        # Step 1a: Fetch branches (must succeed)
-        fetch = await asyncio.to_thread(run_capture, 
-            ["git", "fetch", "origin"], cwd=repo_path, timeout=30,
-        )
-        if fetch.returncode != 0:
-            detail = (fetch.stderr or fetch.stdout or "").strip()
-            err = git_fail_reason(detail) or "unknown error"
-            await interaction.followup.send(
-                f"`{repo_name}`: Fetch failed \u2014 `{err}`", ephemeral=True,
-            )
-            return
-
-        # Step 1b: Fetch tags with --force (non-fatal if it fails)
-        tag_fetch = await asyncio.to_thread(run_capture, 
-            ["git", "fetch", "origin", "--tags", "--force"], cwd=repo_path, timeout=15,
-        )
-        if tag_fetch.returncode != 0:
-            log.warning("Tag fetch failed for %s: %s", repo_name,
-                        (tag_fetch.stderr or "")[:200])
-
-        # Step 2: Check ahead/behind counts
-        ahead_result = await asyncio.to_thread(run_capture, 
-            ["git", "rev-list", "--count", "@{upstream}..HEAD"], cwd=repo_path, timeout=10,
-        )
-        behind_result = await asyncio.to_thread(run_capture, 
-            ["git", "rev-list", "--count", "HEAD..@{upstream}"], cwd=repo_path, timeout=10,
-        )
-
-        if ahead_result.returncode != 0 or behind_result.returncode != 0:
-            await interaction.followup.send(
-                f"`{repo_name}`: No upstream branch configured.", ephemeral=True,
-            )
-            return
-
-        ahead = int(ahead_result.stdout.strip())
-        behind = int(behind_result.stdout.strip())
-        parts = []
-
-        # Step 3: Pull if behind (fast-forward only)
-        if behind > 0:
-            # Check for dirty worktree before attempting pull
-            status = await asyncio.to_thread(run_capture, 
-                ["git", "status", "--porcelain"], cwd=repo_path, timeout=10,
-            )
-            if status.returncode == 0 and status.stdout.strip():
-                await interaction.followup.send(
-                    f"`{repo_name}`: Working tree has uncommitted changes \u2014 commit or stash first.",
-                    ephemeral=True,
-                )
-                return
-
-            pull = await asyncio.to_thread(run_capture, 
-                ["git", "pull", "--ff-only"], cwd=repo_path, timeout=30,
-            )
-            if pull.returncode != 0:
-                detail = (pull.stderr or pull.stdout or "").strip()
-                err = git_fail_reason(detail) or "unknown error"
-                await interaction.followup.send(
-                    f"`{repo_name}`: Pull failed (histories diverged?) \u2014 `{err}`",
-                    ephemeral=True,
-                )
-                return
-            parts.append(f"pulled {behind} commit{'s' if behind != 1 else ''}")
-
-            # Update deploy state — HEAD moved forward
-            from bot.engine.deploy import (
-                get_head_ref, detect_version, get_unreleased_changes,
-            )
-            if ds:
-                ds.current_ref = get_head_ref(repo_path)
-                ds.current_version = detect_version(repo_path)
-                changes = get_unreleased_changes(repo_path)
-                if changes:
-                    ds.pending_changes = changes
-                bot._store.set_deploy_state(repo_name, ds)
-
-            # Self-managed repo pulled new code — queue reboot.
-            # No force=True: this path does NOT call wait_until_idle, so an
-            # active build on another thread should NOT be force-killed. If
-            # the busy-check defers, lifecycle.py auto-promotes the deferred
-            # file at the next idle session-end (within REBOOT_DEFERRED_TTL_SECS).
-            if is_self:
-                result = bot._runner.request_reboot({
-                    "message": f"Sync Git: pulled {behind} commit(s)",
-                    "channel_id": str(interaction.channel_id),
-                    "platform": "discord",
-                })
-                if result is RebootResult.DEFERRED:
-                    parts.append(
-                        "reboot deferred — will auto-retry within 1 h or pulled commits will be dropped"
-                    )
-                else:
-                    parts.append("reboot queued")
-
-        # Step 4: Push if ahead
-        if ahead > 0:
-            result = await asyncio.to_thread(run_capture, 
-                ["git", "push"], cwd=repo_path, timeout=30,
-            )
-            if result.returncode == 0:
-                parts.append(f"pushed {ahead} commit{'s' if ahead != 1 else ''}")
-            else:
-                detail = (result.stderr or result.stdout or "").strip()
-                err = git_fail_reason(detail) or "unknown error"
-                await interaction.followup.send(
-                    f"`{repo_name}`: Push failed \u2014 `{err}`", ephemeral=True,
-                )
-                return
-
-        # Step 5: Push tags (best-effort)
-        tag_result = await asyncio.to_thread(run_capture, 
-            ["git", "push", "--tags"], cwd=repo_path, timeout=30,
-        )
-        if tag_result.returncode == 0:
-            tag_lines = [
-                line for line in (tag_result.stderr or "").splitlines()
-                if "new tag" in line.lower()
-            ]
-            if tag_lines:
-                parts.append(f"{len(tag_lines)} tag{'s' if len(tag_lines) != 1 else ''}")
-        else:
-            err = git_fail_reason((tag_result.stderr or tag_result.stdout or "").strip())
-            if err:
-                parts.append(f"tags failed: `{err}`")
-
-        # Step 6: Report
-        if not parts:
-            await interaction.followup.send(
-                f"`{repo_name}`: Already in sync with remote.", ephemeral=True,
-            )
-        else:
-            await interaction.followup.send(
-                f"`{repo_name}`: {', '.join(parts)}.", ephemeral=True,
-            )
-
+    text, refresh = await git_sync.sync_repo(
+        bot._store, bot._runner, repo_name, str(interaction.channel_id),
+    )
+    await interaction.followup.send(text, ephemeral=True)
+    if refresh:
         # Refresh control room to reflect any version/ref changes
         asyncio.create_task(bot._forums.refresh_control_room(repo_name))
-
-    except Exception as exc:
-        await interaction.followup.send(
-            f"`{repo_name}`: Git sync failed \u2014 {exc}", ephemeral=True,
-        )

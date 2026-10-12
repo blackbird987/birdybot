@@ -436,6 +436,11 @@ class DiscordMessenger:
         if forums:
             await forums.refresh_control_room(repo_name)
 
+    async def set_near_limit(self, channel_id: str, apply: bool) -> None:
+        """Apply or clear the thread's `near-limit` forum tag."""
+        from bot.discord.tags import set_thread_near_limit_tag
+        await set_thread_near_limit_tag(self._bot, channel_id, apply)
+
     async def on_repo_meta_changed(self, repo_name: str) -> None:
         """Redraw the control room after a repo's blurb changed."""
         forums = getattr(self._bot, "_forums", None)

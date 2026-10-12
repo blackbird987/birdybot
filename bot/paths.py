@@ -39,6 +39,8 @@ import os
 import uuid
 from pathlib import Path
 
+from bot.fsutil import atomic_write_json
+
 log = logging.getLogger(__name__)
 
 # Written inside the user root (e.g. C:/Users/Quincy). Identifies the physical
@@ -245,10 +247,7 @@ def _save_file(path: Path) -> None:
         "groups": _groups,
     }
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-        os.replace(tmp, path)
+        atomic_write_json(path, payload, trailing_newline=True)
     except OSError:
         log.exception("Could not save %s — path map will re-derive next boot", path)
 

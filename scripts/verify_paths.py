@@ -313,7 +313,7 @@ def test_history_lookup() -> None:
         session_id = str(uuid.uuid4())
 
         # History written on the OTHER machine: filed under the Windows name.
-        from bot.engine.session_fork import encode_project_path
+        from bot.claude.session_fork import encode_project_path
 
         other = acct / "projects" / encode_project_path(repo_windows)
         other.mkdir(parents=True)
@@ -468,7 +468,6 @@ def test_state_localisation() -> None:
             "result_file": "C:/Users/Quincy/Desktop/Programming/bot/data/results/q-1.md",  # portability: ok
             "diff_file": "C:/Users/Quincy/Desktop/Programming/bot/data/results/q-1.diff",  # portability: ok
             "prompt": "left alone: C:/Users/Quincy/notes.txt",
-            "bash_commands": ["ls C:/Users/Quincy/x"],
             "path_poisoning": ["C:/Users/Quincy/Desktop/Programming/bot/CHANGELOG.md"],  # portability: ok
         }],
         "schedules": [{"id": "s1", "repo_path": "C:/Users/Quincy/Desktop/Programming/bot"}],  # portability: ok
@@ -493,8 +492,6 @@ def test_state_localisation() -> None:
           lin + "/Desktop/Programming/bot")
     check("prompt text NOT rewritten", data["instances"][0]["prompt"],
           "left alone: C:/Users/Quincy/notes.txt")
-    check("bash history NOT rewritten", data["instances"][0]["bash_commands"],
-          ["ls C:/Users/Quincy/x"])
     check("poisoning record NOT rewritten", data["instances"][0]["path_poisoning"],
           ["C:/Users/Quincy/Desktop/Programming/bot/CHANGELOG.md"])  # portability: ok
     check("cooldown key localised",
@@ -638,7 +635,7 @@ def test_session_scan_spellings() -> None:
     print("\n[12] /session and the picker look under every spelling")
     from bot import config
     from bot.engine import sessions as sessions_mod
-    from bot.engine.session_fork import encoded_spellings
+    from bot.claude.session_fork import encoded_spellings
 
     win = "C:/Users/Quincy"  # portability: ok
     lin = "/run/media/quincy/SYSTEM/Users/Quincy"

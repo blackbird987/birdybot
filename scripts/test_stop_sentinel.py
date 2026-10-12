@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Does a signalled bot come back, or stay down?
 
-The bot answers a signal by relaunching itself, so that an agent killing it
-does not leave it offline. On Windows that only ever fired for an unusual
-signal. On Linux SIGTERM is how *everything* stops a process — `botctl stop`,
-`start.sh`, `systemctl stop`, shutdown — so the same behaviour makes the bot
-unstoppable, and the only reason it did not was a second bug that made the
-relaunch silently fail on Linux. Fixing that one exposes this one.
+The bot's emergency handler answers a signal by relaunching itself, so that
+an agent killing it does not leave it offline. In bot/app.py it is wired to
+Windows Ctrl+Break (SIGBREAK) only; SIGTERM belongs to the graceful shutdown
+handler, and `scripts/test_signal_handlers.py` pins that split. This harness
+pins the sentinel contract the emergency handler relies on, using SIGTERM on
+a stand-in because that is the signal a POSIX test can deliver.
 
 The handshake: a caller that means it writes `data/stop_requested` first, and
 the signal handler consumes it and stays down.

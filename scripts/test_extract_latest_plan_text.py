@@ -14,6 +14,8 @@ Exit 0 = all pass, exit 1 = failures.
 
 from __future__ import annotations
 
+import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
+
 import os
 import sys
 from dataclasses import dataclass, field
@@ -69,6 +71,11 @@ class _FakeStore:
             key=lambda i: i.created_at or "",
             reverse=True,
         )
+
+    def get_chain_plan_override(self, session_id: str | None) -> str | None:
+        # The real store holds a plan override only while an autopilot chain
+        # runs; none of these cases sets one.
+        return None
 
 
 @dataclass

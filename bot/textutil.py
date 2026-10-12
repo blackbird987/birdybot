@@ -13,6 +13,7 @@ function is. A leaf module with no `bot` imports is the only honest home.
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 
 
 def clip(text: str, limit: int) -> str:
@@ -36,6 +37,26 @@ def clip(text: str, limit: int) -> str:
     return head.rstrip(" ,.;:-") + "…"
 
 
+def hard_clip(text: str, limit: int, suffix: str = "\u2026") -> str:
+    """Cut text to exactly ``limit`` chars or fewer, ending in ``suffix``.
+
+    For hard platform ceilings (a Discord field, title or description), where
+    one char over is a rejected request. ``clip`` may come in shorter on a
+    word boundary; this never exceeds the limit and never wastes it.
+    """
+    if not text or len(text) <= limit:
+        return text or ""
+    if limit <= len(suffix):
+        return text[: max(0, limit)]
+    return text[: limit - len(suffix)] + suffix
+
+
+def text_bar(fraction: float, width: int = 16) -> str:
+    """A ``width``-cell block bar filled to ``fraction``, clamped to 0..1."""
+    filled = round(max(0.0, min(fraction, 1.0)) * width)
+    return "\u2588" * filled + "\u2591" * (width - filled)
+
+
 def flatten(value: object) -> str:
     """Collapse any whitespace run (including newlines) to single spaces.
 
@@ -49,6 +70,42 @@ def flatten(value: object) -> str:
     if value is None:
         return ""
     return " ".join(str(value).split())
+
+
+def match_name(name: str, candidates) -> str | None:  # noqa: ANN001
+    """The candidate spelled ``name``, exactly or else ignoring case.
+
+    Repo names are registered lowercase by convention, while a session's
+    project, a model's /spawn line or a typed slash option often arrives as
+    CamelCase from the directory name. An exact match wins, so two names that
+    differ only in case still resolve to the one asked for.
+    """
+    if not name:
+        return None
+    names = list(candidates)
+    if name in names:
+        return name
+    folded = name.lower()
+    return next((n for n in names if n.lower() == folded), None)
+
+
+def parse_iso_utc(raw: object) -> datetime | None:
+    """ISO-8601 timestamp -> timezone-aware datetime, or ``None``.
+
+    ``None`` for anything that is not a non-empty string or does not parse,
+    so a caller only ever has one failure to handle. A NAIVE stamp is taken
+    to be UTC: every writer in the bot uses ``datetime.now(timezone.utc)``, but
+    a hand-edited or migrated ``state.json`` can carry a naive one, and
+    comparing that against an aware ``now`` raises ``TypeError`` deep inside
+    whatever loop was reading it. A trailing ``Z`` parses natively on 3.11+.
+    """
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
 # --- Durations -------------------------------------------------------------
@@ -213,3 +270,54 @@ def mask_tilde_bodies(text: str) -> str:
             if chars[i] != "\n":
                 chars[i] = " "
     return "".join(chars)
+
+
+# The arguments of a ``[BOT_CMD: /verb ...]`` directive, one character or one
+# quoted value at a time, so a quoted value may contain ``]``
+# (``title="[t-9201] Fix it"``). Every directive pattern is built on this; a
+# bare ``[^\]]`` cut such a title off at its inner bracket. One line only.
+# The group is atomic, and has to be: a quote matches both the quoted branch
+# and the single-character one, so a plain group backtracks through every way
+# of pairing the quotes on a line with no closing bracket, 2**n of them (37s
+# for twenty quoted words). Atomic commits to a closed quote when there is
+# one and treats an unbalanced quote as an ordinary character, as before.
+DIRECTIVE_ARGS = r"""(?>"[^"\n]*"|'[^'\n]*'|[^\]\n])"""
+# key=value, bare or quoted: the one grammar every directive's arguments use.
+DIRECTIVE_KV_RE = re.compile(r'''(\w+)=(?:"([^"]*)"|'([^']*)'|(\S+))''')
+
+
+def directive_kv(args: str) -> dict[str, str]:
+    """Every key=value pair in a directive's arguments; anything else is ignored."""
+    return {k: (d or s or b or "") for k, d, s, b in DIRECTIVE_KV_RE.findall(args or "")}
+
+
+def directive_re(verb: str, *, args_optional: bool = False) -> re.Pattern[str]:
+    """``[BOT_CMD: /<verb> args]``, the arguments captured as group 1."""
+    args = rf"\s+({DIRECTIVE_ARGS}+?)"
+    if args_optional:
+        args = f"(?:{args})?"
+    return re.compile(rf"\[BOT_CMD:\s*/{verb}{args}\s*\]")
+
+
+# A line opening with a quote, code or heading marker shows something rather
+# than asking for it.
+_QUOTED_LINE_PREFIX = re.compile(r"^\s*(?:>|`|```|#{1,3}\s)")
+
+
+def is_quoted_example(scan: str, pos: int) -> bool:
+    """True if the directive starting at ``pos`` is an EXAMPLE, not a request.
+
+    The one guard every directive dispatcher shares, so discussing a feature
+    never triggers it. Three shapes count: the line opens with a quote, code
+    or heading marker; the directive sits inside an open ``` fence (an odd
+    number of fences precede it, and the fence marker is on another line, so
+    the prefix check alone misses it); or a backtick sits right before it
+    (inline code in prose). Pass the tilde-MASKED text, so ``` fences inside
+    another directive's body neither count nor hide anything.
+    """
+    line_start = scan.rfind("\n", 0, pos) + 1
+    if _QUOTED_LINE_PREFIX.match(scan[line_start:pos]):
+        return True
+    if scan.count("```", 0, pos) % 2 == 1:
+        return True
+    return pos > 0 and scan[pos - 1] == "`"

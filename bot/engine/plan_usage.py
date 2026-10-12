@@ -37,9 +37,10 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
+from bot.textutil import parse_iso_utc, text_bar
 from bot import config
 from bot.claude.auth_health import account_label
 
@@ -158,16 +159,6 @@ async def _http_get(token: str) -> tuple[int, object]:
     return resp.status_code, body
 
 
-def _parse_time(value: object) -> datetime | None:
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-
-
 def _num(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
@@ -203,7 +194,7 @@ def parse_usage(body: object, *, label: str, config_dir: str) -> AccountUsage:
             pct = _num(item.get("percent"))
             if pct is None:
                 continue
-            resets = _parse_time(item.get("resets_at"))
+            resets = parse_iso_utc(item.get("resets_at"))
             kind = item.get("kind")
             if kind == "session" and usage.session_pct is None:
                 usage.session_pct, usage.session_resets_at = pct, resets
@@ -221,14 +212,14 @@ def parse_usage(body: object, *, label: str, config_dir: str) -> AccountUsage:
             pct = _num(window.get("utilization"))
             if pct is not None:
                 setattr(usage, f"{attr}_pct", pct)
-                setattr(usage, f"{attr}_resets_at", _parse_time(window.get("resets_at")))
+                setattr(usage, f"{attr}_resets_at", parse_iso_utc(window.get("resets_at")))
     if not usage.scoped:
         for key, name in (("seven_day_opus", "Opus"), ("seven_day_sonnet", "Sonnet")):
             window = body.get(key)
             if isinstance(window, dict):
                 pct = _num(window.get("utilization"))
                 if pct is not None:
-                    usage.scoped.append((name, pct, _parse_time(window.get("resets_at"))))
+                    usage.scoped.append((name, pct, parse_iso_utc(window.get("resets_at"))))
 
     if not usage.has_data:
         usage.state, usage.error = STATE_ERROR, "response carried no usage figures"
@@ -318,11 +309,6 @@ async def get_plan_usage(*, force: bool = False) -> list[AccountUsage]:
 # ---------------------------------------------------------------------------
 
 
-def _bar(pct: float, width: int = 16) -> str:
-    filled = round(max(0.0, min(pct, 100.0)) / 100 * width)
-    return "█" * filled + "░" * (width - filled)
-
-
 def _ts(dt: datetime | None, style: str) -> str:
     return f"<t:{int(dt.timestamp())}:{style}>" if dt else ""
 
@@ -375,10 +361,10 @@ def format_plan_usage_bar(accounts: list[AccountUsage]) -> str | None:
             lines.append(f"**{a.label}**")
         if a.week_pct is not None:
             reset = f" · resets {_ts(a.week_resets_at, 'R')}" if a.week_resets_at else ""
-            lines.append(f"`{_bar(a.week_pct)}` week **{_pct(a.week_pct)}**{reset}")
+            lines.append(f"`{text_bar(a.week_pct / 100)}` week **{_pct(a.week_pct)}**{reset}")
         if a.session_pct is not None:
             reset = f" · resets {_ts(a.session_resets_at, 'R')}" if a.session_resets_at else ""
-            lines.append(f"`{_bar(a.session_pct)}` session {_pct(a.session_pct)}{reset}")
+            lines.append(f"`{text_bar(a.session_pct / 100)}` session {_pct(a.session_pct)}{reset}")
         sub = _subtext(a, now=now)
         if sub:
             subtexts.append((len(blocks), len(lines)))

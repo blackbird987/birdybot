@@ -41,7 +41,7 @@ from bot.platform.formatting import (
 )
 from bot.engine import watches
 from bot.store import history as history_mod
-from bot.textutil import find_tilde_block, mask_tilde_bodies, parse_duration
+from bot.textutil import directive_kv, directive_re, find_tilde_block, is_quoted_example, mask_tilde_bodies, parse_duration, parse_iso_utc
 
 log = logging.getLogger(__name__)
 
@@ -230,10 +230,8 @@ def cooldown_retry_is_due(
         return False
     if accounts_free:
         return True
-    try:
-        return now >= datetime.fromisoformat(retry_at)
-    except (ValueError, TypeError):
-        return False
+    due = parse_iso_utc(retry_at)
+    return due is not None and now >= due
 
 
 # Labels that don't auto-derive well from InstanceOrigin.value
@@ -282,16 +280,6 @@ _SIBLING_MAX_AGE_SEC = 2 * 3600
 _SIBLING_MIN_AGE_SEC = 5
 
 
-def _format_age(seconds: float) -> str:
-    if seconds < 60:
-        return f"{int(seconds)}s"
-    if seconds < 3600:
-        return f"{int(seconds // 60)}m"
-    if seconds < 86400:
-        return f"{int(seconds // 3600)}h"
-    return f"{int(seconds // 86400)}d"
-
-
 def get_sibling_summary(store, inst: Instance) -> str | None:
     """Scan running instances in same repo, return summary for system prompt."""
     if not inst.repo_name:
@@ -303,14 +291,9 @@ def get_sibling_summary(store, inst: Instance) -> str | None:
             continue
         if i.id == inst.id:
             continue
-        try:
-            started = datetime.fromisoformat(i.created_at)
-        except (ValueError, TypeError):
+        started = parse_iso_utc(i.created_at)
+        if started is None:
             continue
-        # Legacy state.json entries may be tz-naive; assume UTC so the
-        # subtraction below doesn't crash (aware - naive = TypeError).
-        if started.tzinfo is None:
-            started = started.replace(tzinfo=timezone.utc)
         age_sec = (now - started).total_seconds()
         if age_sec < _SIBLING_MIN_AGE_SEC or age_sec > _SIBLING_MAX_AGE_SEC:
             continue
@@ -323,13 +306,42 @@ def get_sibling_summary(store, inst: Instance) -> str | None:
     lines = []
     for s, age_sec in siblings[:8]:
         label = s.origin.value.replace("_", "-")
-        age = _format_age(age_sec)
+        age = format_elapsed(age_sec)
         branch = f" on {s.branch}" if s.branch else ""
         # Collapse whitespace so multi-line prompts don't break the blurb
         # into phantom sibling lines when rendered in the system prompt.
         snippet = " ".join(s.prompt.split())[:60]
         lines.append(f"{s.display_id()} {label}{branch} {age} — {snippet}")
     return "Other active sessions in this repo:\n" + "\n".join(lines)
+
+
+async def notify_parent(
+    ctx: RequestContext, inst: Instance, result: RunResult, display_text: str,
+    *, skip_blocked: bool = False,
+) -> None:
+    """Tell a /spawn parent that this child just landed (the wave-join seam).
+
+    The one implementation for both finalize paths, ``run_instance`` and the
+    chat turn in ``commands._execute_query``. The reasoning behind each label
+    is at the ``run_instance`` callsite. ``skip_blocked`` lets a caller drop
+    the BLOCKED notice when a human is already in the child's thread. Never
+    raises: a post failure must not abort the child's finalize.
+    """
+    if ctx.notify_parent_on_finalize is None or result.killed_intentionally:
+        return
+    status_label = None
+    if result.needs_input:
+        status_label = None if skip_blocked else "BLOCKED"
+    elif inst.status == InstanceStatus.COMPLETED:
+        status_label = "COMPLETED"
+    elif inst.status == InstanceStatus.FAILED:
+        status_label = "FAILED"
+    if status_label is None:
+        return
+    try:
+        await ctx.notify_parent_on_finalize(status_label, display_text)
+    except Exception:
+        log.exception("notify_parent_on_finalize failed for inst %s", inst.id)
 
 
 async def run_instance(
@@ -476,19 +488,7 @@ async def run_instance(
         # above, and a user-cancelled child is reported by the wave join as a
         # settled non-result. Wrapped so a post failure (parent archived or
         # deleted, Discord error) never aborts child finalize.
-        if ctx.notify_parent_on_finalize is not None:
-            status_label = None
-            if result.needs_input:
-                status_label = "BLOCKED"
-            elif inst.status == InstanceStatus.COMPLETED:
-                status_label = "COMPLETED"
-            elif inst.status == InstanceStatus.FAILED:
-                status_label = "FAILED"
-            if status_label is not None:
-                try:
-                    await ctx.notify_parent_on_finalize(status_label, display_text)
-                except Exception:
-                    log.exception("notify_parent_on_finalize failed for inst %s", inst.id)
+        await notify_parent(ctx, inst, result, display_text)
 
         # Track API fallback spending for daily budget cap
         if result.api_fallback_used and result.cost_usd:
@@ -539,55 +539,70 @@ async def run_instance(
             except (asyncio.CancelledError, Exception):
                 pass
         else:
-            # Killed mid-execution — mark as failed
-            inst.status = InstanceStatus.FAILED
-            inst.error = "Bot restarted — instance interrupted"
-            inst.finished_at = datetime.now(timezone.utc).isoformat()
-            ctx.store.update_instance(inst, critical=True)
-        # Only overwrite thinking message if result wasn't delivered —
+            mark_interrupted(ctx, inst)
+        # Only overwrite thinking message if result wasn't delivered,
         # otherwise it already shows the correct completion status.
-        if not delivered and handle:
-            try:
-                await ctx.messenger.edit_thinking(
-                    handle, "Interrupted by bot restart",
-                )
-            except (asyncio.CancelledError, Exception):
-                pass
+        if not delivered:
+            await edit_interrupted_card(ctx, handle)
         raise
 
     except Exception as e:
-        # Anything that escapes before finalize_run, most often the runner
-        # failing to prepare the run (worktree setup, argv build) before the
-        # CLI ever started. Without this the instance stays RUNNING in state
-        # forever and its card spins on "thinking..." (t-8954 sat that way
-        # for a day after _ensure_worktree raised). Once finalized, the
-        # instance already carries its real status and is left alone.
         if not finalized:
-            stage = (
-                "before the run could start" if result is None
-                else "while finishing the run"
-            )
-            inst.status = InstanceStatus.FAILED
-            inst.error = f"Internal error {stage}: {type(e).__name__}: {e}"
-            inst.finished_at = datetime.now(timezone.utc).isoformat()
-            try:
-                ctx.store.update_instance(inst, critical=True)
-            except Exception:
-                log.exception("could not persist failure of %s", inst.id)
-            if handle:
-                try:
-                    escaped = ctx.messenger.escape(inst.display_id())
-                    await ctx.messenger.edit_thinking(
-                        handle,
-                        f"❌ {escaped} {_origin_label(inst.origin)}failed",
-                    )
-                except Exception:
-                    pass
+            await fail_unfinalized(ctx, inst, handle, e, started=result is not None)
         log.error("run_instance %s raised", inst.id, exc_info=True)
         raise
 
     finally:
         ctx.runner.end_task(inst.id)
+
+def mark_interrupted(ctx: RequestContext, inst: Instance) -> None:
+    """Record a run that shutdown cancelled before it produced a result."""
+    inst.status = InstanceStatus.FAILED
+    inst.error = "Bot restarted, instance interrupted"
+    inst.finished_at = datetime.now(timezone.utc).isoformat()
+    ctx.store.update_instance(inst, critical=True)
+
+
+async def edit_interrupted_card(ctx: RequestContext, handle: dict | None) -> None:
+    if not handle:
+        return
+    try:
+        await ctx.messenger.edit_thinking(handle, "Interrupted by bot restart")
+    except (asyncio.CancelledError, Exception):
+        pass
+
+
+async def fail_unfinalized(
+    ctx: RequestContext, inst: Instance, handle: dict | None,
+    exc: BaseException, *, started: bool,
+) -> None:
+    """Mark a run FAILED when an exception escaped before ``finalize_run``.
+
+    Most often the runner failing to prepare the run (worktree setup, argv
+    build) before the CLI ever started. Without this the instance stays
+    RUNNING in state forever and its card spins on "thinking..." (t-8954 sat
+    that way for a day after _ensure_worktree raised). Callers only use it
+    while the run is unfinalized: once finalized, the instance already carries
+    its real status and is left alone. Shared by ``run_instance`` and the chat
+    path in ``commands._execute_query``.
+    """
+    stage = "while finishing the run" if started else "before the run could start"
+    inst.status = InstanceStatus.FAILED
+    inst.error = f"Internal error {stage}: {type(exc).__name__}: {exc}"
+    inst.finished_at = datetime.now(timezone.utc).isoformat()
+    try:
+        ctx.store.update_instance(inst, critical=True)
+    except Exception:
+        log.exception("could not persist failure of %s", inst.id)
+    if handle:
+        try:
+            escaped = ctx.messenger.escape(inst.display_id())
+            await ctx.messenger.edit_thinking(
+                handle, f"❌ {escaped} {_origin_label(inst.origin)}failed",
+            )
+        except Exception:
+            pass
+
 
 def _repo_has_changes(repo_path: str) -> bool:
     """Check if a repo has uncommitted changes (staged or unstaged)."""
@@ -661,9 +676,10 @@ async def bind_thread_session(
 async def backfill_thread_session(ctx: RequestContext, inst: Instance) -> bool:
     """Give a sessionless thread the session this run just used.  Never rebinds.
 
-    For the four paths that call run_instance directly instead of going through
-    commands._execute_query: the cooldown auto-retry, /retry, the Retry button
-    and "continue on pay-per-use".  run_instance deliberately does not bind — a
+    For the paths that call run_instance directly instead of going through
+    commands._execute_query: the cooldown auto-retry, /retry, the Retry button,
+    "continue on pay-per-use", and /bg and /release (a /bg build is refused
+    below because it runs in a worktree).  run_instance deliberately does not bind: a
     workflow step's session belongs to the step, not the conversation — so
     without this a thread that is already sessionless stays that way, and every
     later resume path (the next message, a self-wake, a fired /watch) has
@@ -710,7 +726,6 @@ def finalize_run(ctx: RequestContext, inst: Instance, result: RunResult) -> None
     inst.cost_usd = result.cost_usd
     inst.duration_ms = result.duration_ms
     inst.tools_used = result.tools_used
-    inst.bash_commands = result.bash_commands
     inst.num_turns = result.num_turns
     inst.input_tokens = result.input_tokens
     inst.output_tokens = result.output_tokens
@@ -1175,15 +1190,9 @@ def make_progress_callbacks(
 async def _try_apply_near_limit(
     ctx: RequestContext, inst: Instance, apply: bool,
 ) -> None:
-    """Fire-and-forget: apply or clear the `near-limit` Discord forum tag."""
-    if ctx.platform != "discord":
-        return
-    bot = getattr(ctx.messenger, "_bot", None)
-    if bot is None:
-        return
+    """Fire-and-forget: apply or clear the conversation's near-limit marker."""
     try:
-        from bot.discord.tags import set_thread_near_limit_tag
-        await set_thread_near_limit_tag(bot, ctx.channel_id, apply)
+        await ctx.messenger.set_near_limit(ctx.channel_id, apply)
     except Exception:
         log.debug("near-limit tag update failed for %s", inst.id, exc_info=True)
 
@@ -1209,7 +1218,7 @@ async def _maybe_schedule_auto_merge(
     Fires only when: the run completed, left a build branch, isn't part of an
     active chain, the agent didn't pause with a question, and the repo's
     ``.claude/workflow.json`` autonomy is ``merge`` or ``ship``. Posts a
-    "merging in N min — Hold" notice; the autonomy loop in app.py performs the
+    "merging in N min — Hold" notice; the autonomy loop in bot/autonomy.py performs the
     actual merge at the deadline unless Held. Deduped per session so a
     build→verify sequence doesn't stack two countdowns.
     """
@@ -1427,13 +1436,8 @@ def _promote_deferred_reboot_if_eligible() -> None:
             pass
         return
 
-    blocked_at_raw = deferred.get("blocked_at")
-    try:
-        blocked_at = datetime.fromisoformat(blocked_at_raw)
-        if blocked_at.tzinfo is None:
-            blocked_at = blocked_at.replace(tzinfo=timezone.utc)
-        age_secs = (datetime.now(timezone.utc) - blocked_at).total_seconds()
-    except Exception:
+    blocked_at = parse_iso_utc(deferred.get("blocked_at"))
+    if blocked_at is None:
         # Missing/unparseable timestamp — treat as stale to avoid resurrecting
         # a record we can't reason about.
         log.error(
@@ -1446,6 +1450,7 @@ def _promote_deferred_reboot_if_eligible() -> None:
             pass
         return
 
+    age_secs = (datetime.now(timezone.utc) - blocked_at).total_seconds()
     if age_secs > config.REBOOT_DEFERRED_TTL_SECS:
         log.error(
             "Dropping stale deferred reboot (age=%.0fs, ttl=%ds, message=%s)",
@@ -1574,12 +1579,9 @@ def _wake_schedule_at(data: dict) -> tuple[str, int] | None:
         except (TypeError, ValueError):
             return None
     elif data.get("wake_at"):
-        try:
-            target = datetime.fromisoformat(str(data["wake_at"]).replace("Z", "+00:00"))
-        except ValueError:
+        target = parse_iso_utc(str(data["wake_at"]))
+        if target is None:
             return None
-        if target.tzinfo is None:
-            target = target.replace(tzinfo=timezone.utc)
         secs = int((target - now).total_seconds())
     if secs is None:
         return None
@@ -1720,22 +1722,20 @@ _PROMISE_NUDGE_PROMPT = (
 )
 
 
-# --- [BOT_CMD: /wake] directive (primary self-wake channel) ----------------
+# --- [BOT_CMD: /wake] directive (the self-wake channel) --------------------
 # A finished turn schedules a self-wake by emitting this directive in its
 # output, parsed here post-turn — the same proven mechanism as [BOT_CMD: /spawn]
 # (a separate parser, mirroring its kv + quoted-line-skip approach), and
-# strictly more reliable than the legacy data/wakes/<id>.json file: the
+# strictly more reliable than the data/wakes/<id>.json file it replaced: the
 # directive IS the action (text in the response), so the model can't narrate
 # "self-wake queued" while skipping a separate file-write tool call.
-_WAKE_DIRECTIVE_RE = re.compile(r"\[BOT_CMD:\s*/wake(?:\s+(.+?))?\s*\]")
+_WAKE_DIRECTIVE_RE = directive_re("wake", args_optional=True)
 # Tilde-fenced ~~~wake body carries the (possibly multiline) resume prompt,
 # located by textutil.find_tilde_block. Tildes avoid colliding with the ```
 # code fences a prompt body may itself contain.
-_WAKE_KV_RE = re.compile(r'''(\w+)=(?:"([^"]*)"|'([^']*)'|(\S+))''')
 # A directive on a quoted/code/heading line is an EXAMPLE (this guidance quoted
 # back, or a fenced snippet), not a real request — skip it. Mirrors the guard in
 # commands._execute_bot_commands so meta-discussion can't self-trigger a wake.
-_WAKE_QUOTED_PREFIX = re.compile(r"^\s*(?:>|`|```|#{1,3}\s)")
 
 
 def _parse_wake_directive(text: str) -> dict | None:
@@ -1760,28 +1760,12 @@ def _parse_wake_directive(text: str) -> dict | None:
     raw = text
     text = mask_tilde_bodies(raw)
     for m in _WAKE_DIRECTIVE_RE.finditer(text):
-        line_start = text.rfind("\n", 0, m.start()) + 1
-        # Skip EXAMPLES, not real requests. Three ways a directive can be a
-        # quoted demo rather than a live request — all common when the feature
-        # itself is being discussed (the meta-loop we hit): (1) the line is
-        # quoted/code/heading-prefixed; (2) it sits inside an open ``` fenced
-        # block (odd number of fences precede it — the fence marker is on a
-        # different line, so the prefix check alone misses it); (3) it's wrapped
-        # in inline backticks in prose. The first REAL (unquoted) directive wins,
-        # so an example shown ABOVE a real one doesn't shadow it. (~~~wake bodies
-        # use tildes, so they never disturb the ``` fence count.)
-        if _WAKE_QUOTED_PREFIX.match(text[line_start:m.start()]):
+        # Skip EXAMPLES, not real requests (all common when the feature itself
+        # is being discussed). The first REAL directive wins, so an example
+        # shown ABOVE a real one doesn't shadow it.
+        if is_quoted_example(text, m.start()):
             continue
-        if text.count("```", 0, m.start()) % 2 == 1:
-            continue
-        if m.start() > 0 and text[m.start() - 1] == "`":
-            continue
-        kv: dict[str, str] = {}
-        for kvm in _WAKE_KV_RE.finditer(m.group(1) or ""):
-            val = kvm.group(2) if kvm.group(2) is not None else (
-                kvm.group(3) if kvm.group(3) is not None else kvm.group(4)
-            )
-            kv[kvm.group(1)] = val or ""
+        kv = directive_kv(m.group(1) or "")
         span = find_tilde_block(raw, "wake", m.end())
         prompt = (raw[span[0]:span[1]].strip() if span
                   else (kv.get("prompt") or "").strip())
@@ -1822,14 +1806,12 @@ async def check_wake_request(
 ) -> None:
     """Schedule a thread-bound self-wake requested by the just-finished turn.
 
-    Primary channel: a ``[BOT_CMD: /wake ...]`` directive in the turn's output
-    (parsed by ``_parse_wake_directive``). Legacy channel: a
-    ``data/wakes/<instance_id>.json`` file (still honored so a session running
-    on cached older guidance isn't dropped). Either is converted into a
-    one-shot, thread-bound Schedule that the Scheduler later fires via
+    The channel is a ``[BOT_CMD: /wake ...]`` directive in the turn's output
+    (parsed by ``_parse_wake_directive``), converted into a one-shot,
+    thread-bound Schedule that the Scheduler later fires via
     ``_replay_to_thread``.
 
-    Neither present ⇒ the turn ended without asking to poll, so reset the
+    None present ⇒ the turn ended without asking to poll, so reset the
     runaway counter and stop. An explicit parsed request is the ONLY way this
     function schedules anything: heuristic auto-arming (off watch-promise or
     wake-claim phrases in ``final_text``) was removed after it repeatedly
@@ -1842,8 +1824,6 @@ async def check_wake_request(
     self-wake — their dir may be merged/discarded by fire time — so they're
     refused with a note (parity with the runner gate).
     """
-    path = config.WAKE_DIR / f"{instance.id}.json"
-
     async def _notice(text: str) -> None:
         try:
             await ctx.messenger.send_text(ctx.channel_id, text, silent=True)
@@ -2032,7 +2012,6 @@ async def check_wake_request(
         # against a half-finished run.
         ctx.store.cancel_wakes(ctx.channel_id)
         ctx.store.add_watch(watch)
-        path.unlink(missing_ok=True)   # a stale legacy wake file is superseded too
         label = watch.label or (f"pid {watch.pid}" if watch.pid else "that job")
         if watch.pid_dead_at_arm:
             msg = (f"⏳ Watching **{label}** — heads up, pid {watch.pid} is "
@@ -2062,29 +2041,7 @@ async def check_wake_request(
             "being watched.)"
         )
 
-    # Resolve the wake request: a [BOT_CMD: /wake] directive (primary) takes
-    # precedence over the legacy data/wakes/<id>.json file (kept so a session on
-    # cached older guidance still works). A directive supersedes any stale file
-    # left from an earlier turn.
     data = _parse_wake_directive(final_text)
-    if data is not None:
-        path.unlink(missing_ok=True)
-    elif path.exists():
-        try:
-            raw = path.read_text(encoding="utf-8")
-        except Exception:
-            log.warning("Failed to read wake request %s", path, exc_info=True)
-            path.unlink(missing_ok=True)
-            return
-        # Delete immediately so a crash/restart can't double-process it.
-        path.unlink(missing_ok=True)
-        try:
-            parsed = json.loads(raw)
-        except Exception:
-            log.warning("Malformed wake request, ignoring", exc_info=True)
-            return
-        if isinstance(parsed, dict):
-            data = parsed
 
     if data is None:
         # No wake scheduled this turn. For an UNATTENDED turn (cooldown retry or

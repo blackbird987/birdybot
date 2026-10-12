@@ -296,7 +296,8 @@ def _own_cgroup_path() -> Path | None:
     return None
 
 
-def _read_int(path: Path) -> int | None:
+def read_cgroup_int(path: Path) -> int | None:
+    """An integer cgroup file, or None when unreadable or ``max`` (no limit)."""
     try:
         text = path.read_text(encoding="utf-8").strip()
     except OSError:
@@ -323,17 +324,6 @@ class CgroupMemory:
     # gap rather than that counter — but nothing in the bot had read either.
     high_mb: float | None = None
 
-    def headroom_mb(self) -> float | None:
-        """MB of anonymous memory left before MemoryMax, or None if unlimited.
-
-        Measured against anon only. Page cache counts toward the limit too, but
-        crossing the limit on cache triggers reclaim rather than a kill, so
-        counting it here would report a crisis during ordinary repo reads.
-        """
-        if self.max_mb is None or self.anon_mb is None:
-            return None
-        return max(0.0, self.max_mb - self.anon_mb)
-
 
 def cgroup_memory(cgroup: Path | None = None) -> CgroupMemory:
     """Read a cgroup's memory accounting. All fields None off Linux.
@@ -348,10 +338,10 @@ def cgroup_memory(cgroup: Path | None = None) -> CgroupMemory:
     cg = cgroup or _own_cgroup_path()
     if cg is None:
         return out
-    max_bytes = _read_int(cg / "memory.max")
+    max_bytes = read_cgroup_int(cg / "memory.max")
     if max_bytes is not None:
         out.max_mb = max_bytes / _MB
-    high_bytes = _read_int(cg / "memory.high")
+    high_bytes = read_cgroup_int(cg / "memory.high")
     if high_bytes is not None:
         out.high_mb = high_bytes / _MB
     try:
@@ -745,9 +735,6 @@ class MemoryPressure:
 
     def is_critical(self) -> bool:
         return self.level == PRESSURE_CRITICAL
-
-    def at_least(self, floor: str) -> bool:
-        return pressure_at_least(self.level, floor)
 
     def over_own_high(self) -> bool:
         """True when the cgroup our work runs in is past its MemoryHigh watermark.

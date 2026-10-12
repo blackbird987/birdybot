@@ -33,7 +33,7 @@ from bot import config
 from bot.claude.types import Watch
 from bot.platform.base import ButtonSpec
 from bot.platform.formatting import format_delay_secs
-from bot.textutil import find_tilde_block, mask_tilde_bodies, parse_duration
+from bot.textutil import directive_kv, directive_re, find_tilde_block, is_quoted_example, mask_tilde_bodies, parse_duration, parse_iso_utc, text_bar
 
 if TYPE_CHECKING:
     from bot.platform.base import Messenger
@@ -47,9 +47,7 @@ log = logging.getLogger(__name__)
 # generalisation of it: same kv + tilde-body + quoted-line-skip shape, but the
 # fields, defaults and failure modes are different enough that sharing would
 # mean a parameterised parser nobody can read.
-_WATCH_DIRECTIVE_RE = re.compile(r"\[BOT_CMD:\s*/watch(?:\s+(.+?))?\s*\]")
-_WATCH_KV_RE = re.compile(r'''(\w+)=(?:"([^"]*)"|'([^']*)'|(\S+))''')
-_WATCH_QUOTED_PREFIX = re.compile(r"^\s*(?:>|`|```|#{1,3}\s)")
+_WATCH_DIRECTIVE_RE = directive_re("watch", args_optional=True)
 # `parse_duration` now lives in `bot.textutil` and is re-exported here: /wake's
 # delay= grew the same unit suffixes, and the chip that renders both sits in
 # `bot.platform`, upstream of this package. Kept importable under this name
@@ -71,14 +69,8 @@ def _unquoted_directives(text: str):
         return
     text = mask_tilde_bodies(text)
     for m in _WATCH_DIRECTIVE_RE.finditer(text):
-        line_start = text.rfind("\n", 0, m.start()) + 1
-        if _WATCH_QUOTED_PREFIX.match(text[line_start:m.start()]):
-            continue
-        if text.count("```", 0, m.start()) % 2 == 1:
-            continue
-        if m.start() > 0 and text[m.start() - 1] == "`":
-            continue
-        yield m
+        if not is_quoted_example(text, m.start()):
+            yield m
 
 
 def has_watch_directive(text: str) -> bool:
@@ -104,12 +96,7 @@ def parse_watch_directive(text: str) -> dict | None:
     caller instead of silently becoming a six-hour wait.
     """
     for m in _unquoted_directives(text):
-        kv: dict[str, str] = {}
-        for kvm in _WATCH_KV_RE.finditer(m.group(1) or ""):
-            val = kvm.group(2) if kvm.group(2) is not None else (
-                kvm.group(3) if kvm.group(3) is not None else kvm.group(4)
-            )
-            kv[kvm.group(1)] = val or ""
+        kv = directive_kv(m.group(1) or "")
         span = find_tilde_block(text, "watch", m.end())
         prompt = (text[span[0]:span[1]].strip() if span
                   else (kv.get("prompt") or "").strip())
@@ -283,24 +270,8 @@ def parse_progress(tail: str, pattern: str) -> tuple[float, str] | None:
 _BAR_WIDTH = 16
 
 
-def _parse_ts(raw: str) -> datetime | None:
-    """ISO timestamp -> aware UTC datetime, or None.
-
-    Everything this module writes is timezone-aware, but a hand-edited or
-    migrated state file can carry a NAIVE stamp — and subtracting one of those
-    from an aware ``now`` raises TypeError deep inside the fire path, where it
-    would wedge the watch permanently instead of resuming the thread. Assume
-    UTC for a naive stamp rather than letting the arithmetic explode.
-    """
-    try:
-        dt = datetime.fromisoformat(raw)
-    except (TypeError, ValueError):
-        return None
-    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
-
-
 def _elapsed_secs(watch: Watch, now: datetime) -> int:
-    armed = _parse_ts(watch.armed_at)
+    armed = parse_iso_utc(watch.armed_at)
     if armed is None:
         return 0
     try:
@@ -319,8 +290,7 @@ def render_heartbeat(watch: Watch, now: datetime) -> str:
     prog = parse_progress(tail, watch.progress_re)
     if prog is not None:
         frac, detail = prog
-        filled = int(round(frac * _BAR_WIDTH))
-        bar = "█" * filled + "░" * (_BAR_WIDTH - filled)
+        bar = text_bar(frac, _BAR_WIDTH)
         lines.append(f"`{bar}`  {round(frac * 100)}%  ·  {detail}")
     if watch.log_path:
         lines.append(f"-# {watch.log_path[:180]}")
@@ -390,7 +360,7 @@ def _fire_reason(watch: Watch, now: datetime) -> str | None:
                 log.debug("watch done regex invalid: %r", watch.done_re)
     if watch.pid and not process_alive(watch.pid, watch.pid_start):
         return "exited"
-    deadline = _parse_ts(watch.timeout_at)
+    deadline = parse_iso_utc(watch.timeout_at)
     if deadline is None or now >= deadline:
         return "timeout"          # unreadable deadline -> don't wait forever
     return None
@@ -505,7 +475,7 @@ async def _beat(
     """Refresh (or first-post) the heartbeat message if it's due."""
     if messenger is None:
         return
-    last = _parse_ts(watch.last_beat_at) if watch.last_beat_at else None
+    last = parse_iso_utc(watch.last_beat_at) if watch.last_beat_at else None
     if last is not None and now < last + timedelta(seconds=watch.every_secs):
         return
     body = render_heartbeat(watch, now)

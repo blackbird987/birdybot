@@ -40,7 +40,7 @@ from pathlib import Path
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(_HERE))
 
-from bot.claude import runner as runner_mod
+from bot.claude.runner import worktrees as runner_worktrees
 from bot.claude.runner import ClaudeRunner
 from bot.claude.types import InstanceOrigin, InstanceStatus
 from bot.engine import workflows
@@ -98,11 +98,8 @@ class _Store:
     def update_instance(self, inst) -> None:
         self.updated.append(inst.id)
 
-    def clear_autopilot_chain(self, sid) -> None:
+    def clear_chain_state(self, sid) -> None:
         self.cleared_chains.append(sid)
-
-    def clear_chain_entry_sha(self, sid) -> None:
-        pass
 
 
 def _runner() -> ClaudeRunner:
@@ -117,18 +114,18 @@ def _tracked_temp_dirs():
     """Record every scratch dir the helper makes, so the test can prove it
     cleaned up after itself (they live in the system temp dir, not the repo)."""
     made: list[str] = []
-    real = runner_mod.tempfile.mkdtemp
+    real = runner_worktrees.tempfile.mkdtemp
 
     def _mkdtemp(*a, **kw):
         path = real(*a, **kw)
         made.append(path)
         return path
 
-    runner_mod.tempfile.mkdtemp = _mkdtemp
+    runner_worktrees.tempfile.mkdtemp = _mkdtemp
     try:
         yield made
     finally:
-        runner_mod.tempfile.mkdtemp = real
+        runner_worktrees.tempfile.mkdtemp = real
 
 
 @contextlib.contextmanager
@@ -138,18 +135,18 @@ def _git_step_fails(step: str):
     ``step`` matches the subcommand word, so "reset" hits ``git reset`` and
     "repair" hits ``git worktree repair``.
     """
-    real = runner_mod.run_capture
+    real = runner_worktrees.run_capture
 
     def _run(cmd, **kw):
         if len(cmd) > 1 and cmd[0] == "git" and step in cmd[1:3]:
             return subprocess.CompletedProcess(cmd, 1, "", f"forced {step} failure")
         return real(cmd, **kw)
 
-    runner_mod.run_capture = _run
+    runner_worktrees.run_capture = _run
     try:
         yield
     finally:
-        runner_mod.run_capture = real
+        runner_worktrees.run_capture = real
 
 
 def _make_repo(root: Path, *, relative_links: bool = False) -> tuple[Path, Path, str]:

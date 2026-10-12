@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from bot.textutil import parse_iso_utc
 from bot import config
 from bot.engine import prior_art
 
@@ -380,12 +381,9 @@ def should_run_now(
         # First ever tick: seed rather than fire, so enabling the feature does
         # not immediately spend a run on a window nobody asked about.
         return False
-    try:
-        last = datetime.fromisoformat(last_run_at)
-    except (TypeError, ValueError):
+    last = parse_iso_utc(last_run_at)
+    if last is None:
         log.warning("Unparseable prompt-review timestamp %r, treating as due",
                     last_run_at)
         return True
-    if last.tzinfo is None:
-        last = last.replace(tzinfo=timezone.utc)
     return now - last >= timedelta(days=interval_days)

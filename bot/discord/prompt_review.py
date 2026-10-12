@@ -26,6 +26,7 @@ import discord
 from bot import config
 from bot.claude.types import InstanceOrigin, InstanceStatus, InstanceType
 from bot.engine import prompt_review as pr
+from bot.discord.channels import get_or_create_ark_thread
 
 if TYPE_CHECKING:
     from bot.discord.bot import ClaudeBot
@@ -106,52 +107,12 @@ def own_repo(bot: ClaudeBot) -> tuple[str, str] | None:
 
 async def _get_or_create_thread(bot: ClaudeBot) -> discord.Thread | None:
     """The persisted review thread inside The Ark, created on demand."""
-    if not bot._lobby_channel_id:
-        return None
-    lobby = bot.get_channel(int(bot._lobby_channel_id))
-    if not isinstance(lobby, discord.TextChannel):
-        log.warning("Prompt review: lobby channel %s is not a TextChannel",
-                    bot._lobby_channel_id)
-        return None
-
-    stored_id = _state(bot).get(_STATE_THREAD)
-    if stored_id:
-        existing: discord.Thread | None = None
-        try:
-            cached = bot.get_channel(int(stored_id))
-            if isinstance(cached, discord.Thread):
-                existing = cached
-            else:
-                fetched = await bot.fetch_channel(int(stored_id))
-                if isinstance(fetched, discord.Thread):
-                    existing = fetched
-        except discord.NotFound:
-            log.info("Prompt review thread %s gone, creating a new one", stored_id)
-        except discord.HTTPException:
-            log.warning("Prompt review thread lookup failed transiently",
-                        exc_info=True)
-            return None
-        if existing is not None:
-            if existing.archived:
-                try:
-                    await existing.edit(archived=False)
-                except discord.HTTPException:
-                    log.debug("Could not unarchive prompt review thread")
-            return existing
-
-    try:
-        thread = await lobby.create_thread(
-            name=_THREAD_NAME,
-            auto_archive_duration=10080,  # 7 days (max)
-            type=discord.ChannelType.public_thread,
-        )
-    except discord.HTTPException:
-        log.exception("Prompt review: failed to create thread")
-        return None
-
-    _save_state(bot, lambda st: st.__setitem__(_STATE_THREAD, str(thread.id)))
-    log.info("Created prompt review thread %s in The Ark", thread.id)
-    return thread
+    return await get_or_create_ark_thread(
+        bot, name=_THREAD_NAME, stored_id=_state(bot).get(_STATE_THREAD),
+        on_created=lambda t: _save_state(
+            bot, lambda st: st.__setitem__(_STATE_THREAD, str(t.id))),
+        label="Prompt review",
+    )
 
 
 # --- Running the review -------------------------------------------------------

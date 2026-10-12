@@ -87,6 +87,11 @@ def repo(files: dict[str, str]) -> str:
     return make_repo(root, files)
 
 
+def describe(path: str) -> str | None:
+    """The blurb alone, without the source it came from."""
+    found = rd.resolve_repo_description_with_source(path)
+    return found[0] if found else None
+
 
 def _raises_oserror(fn, *a):
     try:
@@ -113,14 +118,14 @@ path = repo({
     "README.md": "# Thing\n\nFrom the README.\n",
 })
 check("CLAUDE.md beats README.md",
-      rd.resolve_repo_description(path) == "From CLAUDE.md.")
+      describe(path) == "From CLAUDE.md.")
 
 path = repo({
     "README.md": "# Thing\n\nFrom the README.\n",
     "pyproject.toml": '[project]\nname = "t"\ndescription = "From pyproject."\n',
 })
 check("README.md beats pyproject.toml",
-      rd.resolve_repo_description(path) == "From the README.")
+      describe(path) == "From the README.")
 
 path = repo({"pyproject.toml": '[project]\nname = "t"\ndescription = "A packaged thing."\n'})
 check("pyproject [project] description is read",
@@ -128,7 +133,7 @@ check("pyproject [project] description is read",
 
 path = repo({"pyproject.toml": '[tool.poetry]\nname = "t"\ndescription = "A poetry thing."\n'})
 check("pyproject [tool.poetry] description is read",
-      rd.resolve_repo_description(path) == "A poetry thing.")
+      describe(path) == "A poetry thing.")
 
 path = repo({"package.json": '{"name": "t", "description": "A node thing."}'})
 check("package.json description is read",
@@ -136,9 +141,9 @@ check("package.json description is read",
 
 path = repo({"Cargo.toml": '[package]\nname = "t"\ndescription = "A rust thing."\n'})
 check("Cargo.toml description is read",
-      rd.resolve_repo_description(path) == "A rust thing.")
+      describe(path) == "A rust thing.")
 
-check("an empty repo yields nothing", rd.resolve_repo_description(repo({})) is None)
+check("an empty repo yields nothing", describe(repo({})) is None)
 
 # A repo.json that a human hand-edited into invalid JSON must not hide the
 # perfectly good CLAUDE.md behind it, and must not take the refresh down.
@@ -147,14 +152,14 @@ path = repo({
     "CLAUDE.md": "# Thing\n\nStill found this.\n",
 })
 check("malformed repo.json falls through to the next source",
-      rd.resolve_repo_description(path) == "Still found this.")
+      describe(path) == "Still found this.")
 
 path = repo({
     ".claude/repo.json": '{"deploy": {"command": "x"}}',
     "CLAUDE.md": "# Thing\n\nNo description key.\n",
 })
 check("repo.json without a description key falls through",
-      rd.resolve_repo_description(path) == "No description key.")
+      describe(path) == "No description key.")
 
 
 # --- Prose extraction -----------------------------------------------------
@@ -163,7 +168,7 @@ print("\nProse extraction")
 
 path = repo({"CLAUDE.md": "# Claude Code Bot\n\nDiscord bot for managing instances.\n"})
 check("the H1 title is skipped",
-      rd.resolve_repo_description(path) == "Discord bot for managing instances.")
+      describe(path) == "Discord bot for managing instances.")
 
 path = repo({"README.md": (
     "# Thing\n\n"
@@ -172,46 +177,46 @@ path = repo({"README.md": (
     "Actual sentence about the thing.\n"
 )})
 check("badge rows are skipped",
-      rd.resolve_repo_description(path) == "Actual sentence about the thing.")
+      describe(path) == "Actual sentence about the thing.")
 
 path = repo({"README.md": "# Thing\n\n```bash\npip install thing\n```\n\nWhat it does.\n"})
 check("fenced code is skipped",
-      rd.resolve_repo_description(path) == "What it does.")
+      describe(path) == "What it does.")
 
 path = repo({"README.md": "# Thing\n\n- a bullet\n- another\n\nThe prose line.\n"})
 check("bullets are skipped",
-      rd.resolve_repo_description(path) == "The prose line.")
+      describe(path) == "The prose line.")
 
 path = repo({"README.md": "# Thing\n\n> a quote\n\nThe prose line.\n"})
 check("block quotes are skipped",
-      rd.resolve_repo_description(path) == "The prose line.")
+      describe(path) == "The prose line.")
 
 path = repo({"README.md": "# Thing\n\n<!-- a note\nspanning lines -->\n\nThe prose line.\n"})
 check("multi-line HTML comments are skipped",
-      rd.resolve_repo_description(path) == "The prose line.")
+      describe(path) == "The prose line.")
 
 path = repo({"README.md": "# Thing\n\n<!-- note --> The prose line.\n"})
 check("prose after a closed comment on the same line is kept",
-      rd.resolve_repo_description(path) == "The prose line.",
-      str(rd.resolve_repo_description(path)))
+      describe(path) == "The prose line.",
+      str(describe(path)))
 
 # An unterminated comment must not leak its body as the blurb.
 path = repo({"README.md": "# Thing\n\n<!-- unterminated\nsecret internal note\n"})
 check("an unterminated HTML comment yields nothing",
-      rd.resolve_repo_description(path) is None,
-      str(rd.resolve_repo_description(path)))
+      describe(path) is None,
+      str(describe(path)))
 
 path = repo({"README.md": "Thing\n=====\n\n---\n\nThe prose line.\n"})
 check("horizontal rules are skipped",
-      rd.resolve_repo_description(path) == "The prose line.")
+      describe(path) == "The prose line.")
 
 path = repo({"README.md": "# Thing\n\n| a | b |\n|---|---|\n\nThe prose line.\n"})
 check("table rows are skipped",
-      rd.resolve_repo_description(path) == "The prose line.")
+      describe(path) == "The prose line.")
 
 path = repo({"README.md": "# Thing\n\n## Install\n\n### Also\n"})
 check("a file of nothing but headings yields nothing",
-      rd.resolve_repo_description(path) is None)
+      describe(path) is None)
 
 
 # A badge row right under the paragraph, with no blank line between them --
@@ -231,8 +236,8 @@ print("\nCleanup and truncation")
 
 path = repo({"CLAUDE.md": "# T\n\n**Bold** and *italic* and `code` and [a link](http://x).\n"})
 check("markdown is reduced to plain text",
-      rd.resolve_repo_description(path) == "Bold and italic and code and a link.",
-      rd.resolve_repo_description(path) or "")
+      describe(path) == "Bold and italic and code and a link.",
+      describe(path) or "")
 
 # snake_case is the exact thing a blunt underscore strip would eat, and it is
 # all over the first line of a developer README.
@@ -248,7 +253,7 @@ long_line = ("This project is a very long winded description of something that "
              "goes on and on well past the limit that the control room embed "
              "is willing to show for one repo.")
 path = repo({"CLAUDE.md": f"# T\n\n{long_line}\n"})
-got = rd.resolve_repo_description(path) or ""
+got = describe(path) or ""
 check("an over-long line is truncated to the cap",
       len(got) <= rd.MAX_LEN, f"{len(got)} chars")
 check("it truncates on a word boundary with an ellipsis",
@@ -258,11 +263,11 @@ check("the truncated text is a prefix of the source",
 
 path = repo({".claude/repo.json": '{"description": "ab"}', "CLAUDE.md": "# T\n\nok\n"})
 check("a sub-3-char blurb is rejected rather than shown",
-      rd.resolve_repo_description(path) is None)
+      describe(path) is None)
 
 path = repo({"CLAUDE.md": "# T\n\nOne line\nthat wrapped.\n"})
 check("the result is always a single line",
-      "\n" not in (rd.resolve_repo_description(path) or ""))
+      "\n" not in (describe(path) or ""))
 
 # A hard-wrapped README is the common case, and its first *line* ends
 # mid-sentence — a blurb that stops at "a plain-language request like" reads as
@@ -274,29 +279,29 @@ path = repo({"README.md": (
     "## Install\n"
 )})
 check("a hard-wrapped paragraph is joined, not cut at the line break",
-      rd.resolve_repo_description(path)
+      describe(path)
       == 'Agentic media downloader. You take a plain-language request like '
          '"grab that reel" and work out the rest yourself.',
-      rd.resolve_repo_description(path) or "")
+      describe(path) or "")
 
 path = repo({"README.md": "# T\n\nFirst para.\n\nSecond para.\n"})
 check("the paragraph stops at the blank line",
-      rd.resolve_repo_description(path) == "First para.")
+      describe(path) == "First para.")
 
 path = repo({"README.md": "# T\n\nThe opener.\n- a bullet\n"})
 check("the paragraph stops at a bullet",
-      rd.resolve_repo_description(path) == "The opener.")
+      describe(path) == "The opener.")
 
 path = repo({"README.md": "# T\n\nThe opener.\n## Next\n"})
 check("the paragraph stops at a heading",
-      rd.resolve_repo_description(path) == "The opener.")
+      describe(path) == "The opener.")
 
 # Two whole sentences fit inside the cap, so both are kept; a third would not.
 two = ("A short name for the thing. It does the second thing as well. "
        "And here is a third sentence that pushes the whole paragraph past the "
        "hundred and twenty character cap entirely.")
 path = repo({"README.md": f"# T\n\n{two}\n"})
-got = rd.resolve_repo_description(path) or ""
+got = describe(path) or ""
 check("truncation keeps as many whole sentences as fit",
       got == "A short name for the thing. It does the second thing as well.", got)
 check("and does not append an ellipsis to a clean sentence cut",
@@ -307,7 +312,7 @@ check("and does not append an ellipsis to a clean sentence cut",
 terse = ("Hi. This is a much longer explanation of what the project actually is "
          "and it runs well past the cap so it has to be cut somewhere sensible.")
 path = repo({"README.md": f"# T\n\n{terse}\n"})
-got = rd.resolve_repo_description(path) or ""
+got = describe(path) or ""
 check("a too-short first sentence falls back to the ellipsis cut",
       got.endswith("…") and len(got) > 24, got)
 
@@ -322,8 +327,8 @@ path = repo({})
 try:
     os.symlink(outside, Path(path) / "CLAUDE.md")
     check("a symlink pointing out of the repo is refused",
-          rd.resolve_repo_description(path) is None,
-          str(rd.resolve_repo_description(path)))
+          describe(path) is None,
+          str(describe(path)))
 except OSError:
     check("a symlink pointing out of the repo is refused", True, "symlinks unsupported, skipped")
 

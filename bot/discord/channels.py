@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import logging
 import re
+from typing import Callable
 from datetime import datetime, timezone
 
 import discord
 
-from bot.engine.deploy import DeployState
+from bot.textutil import hard_clip, parse_iso_utc
+from bot.store.records import DeployState
 from bot.platform.formatting import EFFORT_DISPLAY, MODE_COLOR, MODE_DISPLAY, effort_name, mode_name
 
 log = logging.getLogger(__name__)
@@ -122,6 +124,70 @@ async def ensure_lobby(
     channel = await category.guild.create_text_channel(name, category=category)
     log.info("Created lobby channel %s (%s)", channel.id, channel.name)
     return channel
+
+
+async def get_or_create_ark_thread(
+    bot: discord.Client,
+    *,
+    name: str,
+    stored_id: str | None,
+    on_created: Callable[[discord.Thread], None],
+    label: str,
+) -> discord.Thread | None:
+    """A persisted public thread inside The Ark, created on demand.
+
+    The cached channel is tried first, then a fetch. A stored id Discord says
+    is gone is replaced with a new thread; any other HTTP failure returns
+    None, so a transient outage skips this tick instead of creating a
+    duplicate. An archived thread is woken. ``on_created`` persists the new
+    id after the create await, so it reads state then rather than clobbering
+    writes made while the create was in flight.
+    """
+    lobby_id = getattr(bot, "_lobby_channel_id", None)
+    if not lobby_id:
+        log.debug("%s: no lobby channel yet, skipping thread lookup", label)
+        return None
+    lobby = bot.get_channel(int(lobby_id))
+    if not isinstance(lobby, discord.TextChannel):
+        log.warning("%s: lobby channel %s is not a TextChannel", label, lobby_id)
+        return None
+
+    if stored_id:
+        existing: discord.Thread | None = None
+        try:
+            cached = bot.get_channel(int(stored_id))
+            if isinstance(cached, discord.Thread):
+                existing = cached
+            else:
+                fetched = await bot.fetch_channel(int(stored_id))
+                if isinstance(fetched, discord.Thread):
+                    existing = fetched
+        except discord.NotFound:
+            log.info("%s thread %s gone, creating a new one", label, stored_id)
+        except discord.HTTPException:
+            log.warning("%s thread lookup failed transiently", label, exc_info=True)
+            return None
+        if existing is not None:
+            if existing.archived:
+                try:
+                    await existing.edit(archived=False)
+                except discord.HTTPException:
+                    log.debug("Could not unarchive %s thread %s", label, stored_id)
+            return existing
+
+    try:
+        thread = await lobby.create_thread(
+            name=name,
+            auto_archive_duration=10080,  # 7 days (max)
+            type=discord.ChannelType.public_thread,
+        )
+    except discord.HTTPException:
+        log.exception("%s: failed to create thread", label)
+        return None
+
+    on_created(thread)
+    log.info("Created %s thread %s in The Ark", label, thread.id)
+    return thread
 
 
 async def create_archive_post(
@@ -309,6 +375,58 @@ _MODE_BUTTON_STYLE: dict[str, discord.ButtonStyle] = {
     "plan":    discord.ButtonStyle.primary,
     "build":   discord.ButtonStyle.success,
 }
+
+
+# Discord rejects a whole message, not just the overflow, when a View carries
+# more than 5 rows or a Select more than 25 options. A button takes one slot of
+# a 5-wide row, a Select takes a whole row.
+VIEW_MAX_ROWS = 5
+VIEW_MAX_BUTTONS = 25
+SELECT_MAX_OPTIONS = 25
+
+
+def repo_select_view(
+    repos: list[tuple[str, str]], custom_id: str, placeholder: str,
+    default: str | None = None,
+) -> tuple[discord.ui.View, int]:
+    """A repo picker as Select menus that always fits in one message.
+
+    ``repos`` is ``(name, description)`` pairs. They are split across up to
+    five Selects of 25 options each, ids ``<custom_id>:<n>``; anything past
+    125 is left out. Returns the view and how many repos it shows, so the
+    caller can say what was cut.
+    """
+    view = discord.ui.View(timeout=60)
+    shown = repos[:VIEW_MAX_ROWS * SELECT_MAX_OPTIONS]
+    chunks = [shown[i:i + SELECT_MAX_OPTIONS]
+              for i in range(0, len(shown), SELECT_MAX_OPTIONS)]
+    for n, chunk in enumerate(chunks):
+        label = placeholder if len(chunks) == 1 else f"{placeholder} ({n + 1}/{len(chunks)})"
+        view.add_item(discord.ui.Select(
+            placeholder=label,
+            custom_id=f"{custom_id}:{n}",
+            options=[
+                discord.SelectOption(
+                    label=name[:100], value=name[:100],
+                    description=(desc[:100] or None), default=(name == default),
+                )
+                for name, desc in chunk
+            ],
+        ))
+    return view, len(shown)
+
+
+def repo_button_view(names: list[str], custom_id_prefix: str) -> discord.ui.View | None:
+    """One button per repo, or None when they would not fit in one View."""
+    if len(names) > VIEW_MAX_BUTTONS:
+        return None
+    view = discord.ui.View(timeout=60)
+    for name in names:
+        view.add_item(discord.ui.Button(
+            label=name[:80], style=discord.ButtonStyle.primary,
+            custom_id=f"{custom_id_prefix}:{name}",
+        ))
+    return view
 
 
 def session_controls_view(
@@ -549,13 +667,6 @@ async def sync_user_forum_tags(
         log.warning("Failed to sync user forum tags", exc_info=True)
 
 
-def _truncate_field(value: str, limit: int = 1024) -> str:
-    """Truncate a field value to Discord's 1024-char limit."""
-    if len(value) > limit:
-        return value[:limit - 3] + "..."
-    return value
-
-
 def _format_instance_line(
     inst,
     session_to_thread: dict[str, str] | None = None,
@@ -569,16 +680,10 @@ def _format_instance_line(
         thread_id = session_to_thread.get(inst.session_id or "")
         if thread_id:
             line += f" \u2022 <#{thread_id}>"
-    if show_elapsed and inst.created_at:
-        try:
-            started = datetime.fromisoformat(inst.created_at)
-            if started.tzinfo is None:
-                started = started.replace(tzinfo=timezone.utc)
-            elapsed = datetime.now(timezone.utc) - started
-            mins = int(elapsed.total_seconds() // 60)
-            line += f" \u2022 {'<1' if mins < 1 else str(mins)}m"
-        except (ValueError, TypeError):
-            pass
+    started = parse_iso_utc(inst.created_at) if show_elapsed else None
+    if started is not None:
+        mins = int((datetime.now(timezone.utc) - started).total_seconds() // 60)
+        line += f" \u2022 {'<1' if mins < 1 else str(mins)}m"
     return line
 
 
@@ -634,7 +739,7 @@ def build_control_embed(
             attn_lines.append(line)
         embed.add_field(
             name=f"Needs Attention ({len(attention_instances)})",
-            value=_truncate_field("\n".join(attn_lines)),
+            value=hard_clip("\n".join(attn_lines), 1024, "..."),
             inline=False,
         )
 
@@ -646,19 +751,19 @@ def build_control_embed(
         ]
         embed.add_field(
             name=f"Running ({active_count})",
-            value=_truncate_field("\n".join(run_lines)),
+            value=hard_clip("\n".join(run_lines), 1024, "..."),
             inline=False,
         )
 
     # Recently Completed
     if completed_instances:
         comp_lines = [
-            f"\u2705 " + _format_instance_line(inst, session_to_thread)
+            "\u2705 " + _format_instance_line(inst, session_to_thread)
             for inst in completed_instances
         ]
         embed.add_field(
             name=f"Recently Completed ({len(completed_instances)})",
-            value=_truncate_field("\n".join(comp_lines)),
+            value=hard_clip("\n".join(comp_lines), 1024, "..."),
             inline=False,
         )
 
@@ -701,7 +806,7 @@ def build_control_embed(
         value = f"{error_line}{version_line}{change_lines}{session_links}".strip()
         if not value:
             value = "Changes detected"
-        value = _truncate_field(value)
+        value = hard_clip(value, 1024, "...")
 
         label = "\U0001f504 Reboot Required" if deploy_state.self_managed else "\U0001f504 Redeploy Required"
         embed.add_field(name=label, value=value, inline=False)

@@ -18,7 +18,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from bot.platform.formatting import redact_secrets
+from bot.platform.formatting import format_duration, redact_secrets
 
 
 # --- Noise filter (mirrors sessions._parse_record) ---
@@ -404,15 +404,6 @@ def _fmt_cost(cost: float | None) -> str:
     return f"${cost:.4f}"
 
 
-def _fmt_duration_ms(ms: int | float | None) -> str:
-    if not ms:
-        return ""
-    secs = ms / 1000
-    if secs >= 60:
-        return f"{secs / 60:.1f}m"
-    return f"{secs:.0f}s"
-
-
 def render_transcript_html(
     session_file: Path,
     *,
@@ -492,7 +483,7 @@ def render_transcript_html(
 
     if turns_num:
         footer_bits.append(f"{turns_num} turns")
-    dur = _fmt_duration_ms(duration_ms)
+    dur = format_duration(duration_ms) if duration_ms else ""
     if dur:
         footer_bits.append(dur)
     cost_str = _fmt_cost(cost)

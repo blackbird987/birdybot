@@ -39,8 +39,8 @@ import discord
 
 from bot.procutil import run_capture
 from bot.claude.types import Instance, InstanceStatus
+from bot.engine.steps import MergeOutcome
 from bot.platform.base import ButtonSpec
-from bot.platform.formatting import merge_failed_banner, merge_failed_button_specs
 
 if TYPE_CHECKING:
     from bot.discord.bot import ClaudeBot
@@ -99,7 +99,7 @@ async def collect_ship_targets(bot: ClaudeBot) -> list[ShipTarget]:
     autopilot-chain state — a paused/interrupted chain owns its thread's
     lifecycle (it will merge on resume); shipping under it would race.
     """
-    from bot.engine.workflows import _find_session_branch_instance
+    from bot.engine.chain_git import _find_session_branch_instance
 
     store, runner, forums = bot._store, bot._runner, bot._forums
     chained_sessions = set((store.get_all_autopilot_chains() or {}).keys())
@@ -303,10 +303,16 @@ async def run_fleet_ship(
 
         merged: dict[str, list[ShipTarget]] = {}
         failed: dict[str, list[ShipTarget]] = {}
+        stopped: dict[str, list[ShipTarget]] = {}
+        buckets = {
+            MergeOutcome.MERGED: merged,
+            MergeOutcome.FAILED: failed,
+            MergeOutcome.STOPPED: stopped,
+        }
         for repo, ts in by_repo.items():
             for t in ts:
-                ok = await _ship_one(bot, t)
-                (merged if ok else failed).setdefault(repo, []).append(t)
+                outcome = await _ship_one(bot, t)
+                buckets[outcome].setdefault(repo, []).append(t)
 
         if failed:
             fail_lines = ["Merge failures — deploy skipped for these repos:"]
@@ -314,11 +320,24 @@ async def run_fleet_ship(
                 for t in ts:
                     fail_lines.append(f"- {repo}: <#{t.thread_id}> (fix in-thread, then /fleet again)")
             await _say(bot, origin, "\n".join(fail_lines))
+        if stopped:
+            stop_lines = [
+                "Merged onto a tree that must not ship (see the warning in "
+                "each thread). Deploy skipped for these repos:"
+            ]
+            for repo, ts in stopped.items():
+                for t in ts:
+                    stop_lines.append(f"- {repo}: <#{t.thread_id}>")
+            await _say(bot, origin, "\n".join(stop_lines))
 
-        # Per-repo gate: never deploy a half-shipped repo. Deploy the bot's
+        # Per-repo gate: never deploy a half-shipped repo, nor one a merge
+        # just reported as broken or missing a release. Deploy the bot's
         # own repo LAST — a self deploy reboots the process and would kill
         # the remaining command deploys mid-flight.
-        deployable = [r for r in by_repo if r not in failed and merged.get(r)]
+        deployable = [
+            r for r in by_repo
+            if r not in failed and r not in stopped and merged.get(r)
+        ]
         deployable.sort(key=lambda r: _deploy_method(bot._store, r) == "self")
         for repo in deployable:
             await _deploy_and_verify(bot, origin, repo, merged[repo])
@@ -327,9 +346,13 @@ async def run_fleet_ship(
         await _say(bot, origin, "❌ Fleet ship hit an internal error — check logs.")
 
 
-async def _ship_one(bot: ClaudeBot, t: ShipTarget) -> bool:
-    """Merge one thread's branch; on failure post the standard merge-failed UI."""
-    from bot.engine.workflows import _finalize_merge
+async def _ship_one(bot: ClaudeBot, t: ShipTarget) -> MergeOutcome:
+    """Merge one thread's branch; on failure post the standard merge-failed UI.
+
+    Returns the ``MergeOutcome`` so the caller can keep a STOPPED repo out of
+    the deploy phase as well as a FAILED one.
+    """
+    from bot.engine.steps import _finalize_merge, record_merge_failure
 
     lookup = bot._forums.thread_to_project(t.thread_id)
     info = lookup[1] if lookup else None
@@ -338,12 +361,13 @@ async def _ship_one(bot: ClaudeBot, t: ShipTarget) -> bool:
         thread_info=info, source="fleet",
     )
     try:
-        ok = await _finalize_merge(ctx, t.inst, close_silent=True, skip_close=True)
+        outcome = await _finalize_merge(ctx, t.inst, close_silent=True, skip_close=True)
     except Exception:
         log.exception("fleet: merge crashed for %s", t.thread_id)
-        return False
-    if ok:
-        # Clear any stale failed-merge record from an earlier attempt —
+        return MergeOutcome.FAILED
+    if outcome is not MergeOutcome.FAILED:
+        # MERGED or STOPPED: either way the branch landed, so clear any
+        # stale failed-merge record from an earlier attempt:
         # while one exists, every prompt dispatched into the thread gets
         # the "[system note: auto-merge still unresolved]" prefix, which
         # would wrap the verify prompt in a false warning. Cleared by all
@@ -357,24 +381,10 @@ async def _ship_one(bot: ClaudeBot, t: ShipTarget) -> bool:
             ctx.store.clear_pending_merge(pm[0])
         ctx.store.clear_pending_merge(t.inst.id)
     else:
-        failure_kind = ctx.runner._last_merge_failure_kind.get(t.inst.id)
-        msg = merge_failed_banner(failure_kind)
-        try:
-            await ctx.messenger.send_text(
-                t.thread_id, msg,
-                buttons=merge_failed_button_specs(t.inst.id), silent=True,
-            )
-        except Exception:
-            log.debug("fleet: failed to post merge-failed banner", exc_info=True)
-        ctx.store.set_pending_merge(
-            t.inst.id,
-            session_id=t.session_id,
-            channel_id=t.thread_id,
-            repo_name=t.repo_name,
-            message=msg,
-            failure_kind=failure_kind,
+        await record_merge_failure(
+            ctx, t.inst, session_id=t.session_id, channel_id=t.thread_id,
         )
-    return ok
+    return outcome
 
 
 async def _deploy_and_verify(
@@ -421,7 +431,7 @@ async def _deploy_and_verify(
         return  # boot-time drain_pending_verify handles the rest
 
     if method == "command":
-        from bot.discord.interactions import (
+        from bot.discord.deploy_flow import (
             _post_deploy_healthcheck, _spawn_deploy_fix, execute_deploy,
         )
         cfg = store.get_deploy_config(repo_name) or {}

@@ -9,6 +9,7 @@ from typing import Any
 
 import discord
 
+from bot.textutil import parse_iso_utc
 from bot.monitor import fetcher, formatter
 
 log = logging.getLogger(__name__)
@@ -65,7 +66,10 @@ class MonitorService:
         if "monitors" not in state:
             state["monitors"] = {}
         state["monitors"][name] = data
-        self._store._platform_state["discord"] = state
+        # Picked up by the 60s auto-save: a monitor tick is not worth a
+        # synchronous rewrite of the whole state file.
+        self._store.set_platform_state("discord", state, persist=False)
+        self._store.mark_dirty()
 
     # --- Failure alerting ---
 
@@ -85,13 +89,8 @@ class MonitorService:
         if not last:
             mon["last_failure_alert_at"] = datetime.now(timezone.utc).isoformat()
             return True
-        try:
-            when = datetime.fromisoformat(last)
-        except ValueError:
-            when = None
+        when = parse_iso_utc(last)
         if when is not None:
-            if when.tzinfo is None:
-                when = when.replace(tzinfo=timezone.utc)
             if (datetime.now(timezone.utc) - when).total_seconds() < FAILURE_ALERT_INTERVAL_SECS:
                 return False
         mon["last_failure_alert_at"] = datetime.now(timezone.utc).isoformat()
@@ -181,7 +180,7 @@ class MonitorService:
             mon["last_fetch_at"] = datetime.now(timezone.utc).isoformat()
             self._save_monitor_state(name, mon)
             failures = mon["consecutive_failures"]
-            embed = formatter.build_dashboard_embed(
+            embed = formatter.build_monitor_embed(
                 name, raw,
                 failures=failures,
                 last_success=mon.get("last_successful_fetch"),
@@ -263,7 +262,7 @@ class MonitorService:
         self._save_monitor_state(name, mon)
 
         # Build and edit embeds
-        dashboard_embed = formatter.build_dashboard_embed(
+        dashboard_embed = formatter.build_monitor_embed(
             name, raw, prev_snapshot, last_success=now_iso,
         )
         history_embed = formatter.build_history_embed(daily, weekly, monthly)
@@ -774,7 +773,8 @@ class MonitorService:
         # Save any recovered state
         state = self._store.get_platform_state("discord")
         state["monitors"] = monitors
-        self._store._platform_state["discord"] = state
+        self._store.set_platform_state("discord", state, persist=False)
+        self._store.mark_dirty()
 
     async def _ensure_monitor_thread(
         self,

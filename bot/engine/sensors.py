@@ -10,7 +10,6 @@ falls back to stack auto-detection when absent.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import shlex
 import shutil
@@ -18,6 +17,8 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from bot.fsutil import read_repo_config
 
 log = logging.getLogger(__name__)
 
@@ -46,7 +47,6 @@ class SensorResult:
     status: str  # "pass" | "fail" | "skipped" | "timeout" | "error"
     exit_code: int | None = None
     output: str = ""
-    duration_s: float = 0.0
     blocking: bool = True
 
     _STATUS_MARKS = {
@@ -202,13 +202,10 @@ def load_sensor_config(repo_path: str | Path | None) -> dict:
         "policy": _DEFAULT_POLICY,
         "max_fix_rounds": _DEFAULT_MAX_FIX_ROUNDS,
     }
-    if not repo_path:
-        return cfg
-    path = Path(repo_path) / ".claude" / "sensors.json"
-    if not path.exists():
+    raw = read_repo_config(repo_path, "sensors.json")
+    if raw is None:
         return cfg
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
         sensors = raw.get("sensors")
         if isinstance(sensors, list) and sensors:
             valid = [
@@ -351,7 +348,6 @@ async def _run_one_inner(
             blocking=blocking,
         )
 
-    start = time.monotonic()
     try:
         proc = await asyncio.create_subprocess_shell(
             command,
@@ -369,7 +365,7 @@ async def _run_one_inner(
             return SensorResult(
                 name=name, command=command, status="timeout",
                 output=f"timed out after {int(timeout_s)}s",
-                duration_s=time.monotonic() - start, blocking=blocking,
+                blocking=blocking,
             )
         text = (out or b"").decode("utf-8", errors="replace")
         if len(text) > _OUTPUT_CAP:
@@ -378,14 +374,14 @@ async def _run_one_inner(
         return SensorResult(
             name=name, command=command, status=status,
             exit_code=proc.returncode, output=text,
-            duration_s=time.monotonic() - start, blocking=blocking,
+            blocking=blocking,
         )
     except Exception as exc:  # never let a sensor take down the chain
         log.debug("Sensor %r errored", name, exc_info=True)
         return SensorResult(
             name=name, command=command, status="error",
             output=f"{type(exc).__name__}: {exc}",
-            duration_s=time.monotonic() - start, blocking=blocking,
+            blocking=blocking,
         )
 
 

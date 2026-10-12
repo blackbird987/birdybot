@@ -24,6 +24,8 @@ import re
 from collections.abc import Callable
 from pathlib import Path
 
+from bot.fsutil import atomic_write_json
+
 log = logging.getLogger(__name__)
 
 MAX_LEN = 120
@@ -302,11 +304,6 @@ def resolve_repo_description_with_source(repo_path: str) -> tuple[str, str] | No
     return None
 
 
-def resolve_repo_description(repo_path: str) -> str | None:
-    found = resolve_repo_description_with_source(repo_path)
-    return found[0] if found else None
-
-
 # --- cache ----------------------------------------------------------------
 
 
@@ -426,13 +423,6 @@ def write_manual_description(repo_path: str, text: str | None) -> None:
         data["description"] = text
     else:
         data.pop("description", None)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.parent / (path.name + ".tmp")
-    try:
-        tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-        os.replace(tmp, path)
-    except Exception:
-        # Never strand a .tmp inside someone's repo -- it is not gitignored
-        # and would show up in their git status until they noticed it.
-        tmp.unlink(missing_ok=True)
-        raise
+    # atomic_write_json never strands a .tmp inside someone's repo, where it
+    # is not gitignored and would show up in their git status.
+    atomic_write_json(path, data, trailing_newline=True)

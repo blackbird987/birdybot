@@ -32,8 +32,8 @@ from types import SimpleNamespace
 from bot.claude.runner import RebootResult
 from bot.claude.types import InstanceStatus
 from bot.discord import fleet
-import bot.engine.workflows as workflows
-import bot.discord.interactions as interactions
+import bot.engine.steps as steps
+import bot.discord.deploy_flow as deploy_flow
 
 _failures: list[str] = []
 
@@ -157,7 +157,7 @@ def make_bot():
 def make_target(tid, repo):
     return fleet.ShipTarget(
         thread_id=tid, session_id=f"sess-{tid}",
-        inst=SimpleNamespace(id=f"ship-{tid}", branch=f"branch-{tid}"),
+        inst=SimpleNamespace(id=f"ship-{tid}", branch=f"branch-{tid}", repo_name=repo),
         repo_name=repo, title=f"Thread {tid}",
     )
 
@@ -189,7 +189,7 @@ async def scenario_happy_command_deploy():
         merged.append(inst.id)
         ctx.store.events.append(f"merge:{inst.id}")
         assert skip_close, "fleet must merge with skip_close=True"
-        return True
+        return steps.MergeOutcome.MERGED
 
     deploys: list[str] = []
 
@@ -198,8 +198,8 @@ async def scenario_happy_command_deploy():
         bot_._store.events.append(f"deploy:{repo}")
         return True, "ok", ""
 
-    workflows._finalize_merge = fake_finalize
-    interactions.execute_deploy = fake_deploy
+    steps._finalize_merge = fake_finalize
+    deploy_flow.execute_deploy = fake_deploy
 
     await fleet.run_fleet_ship(bot, "origin-1", ["101", "102"])
     await asyncio.sleep(0.05)  # let verify tasks finish
@@ -229,7 +229,10 @@ async def scenario_merge_failure_gates_deploy():
     patch_collect(targets)
 
     async def fake_finalize(ctx, inst, **kw):
-        return inst.id != "ship-202"  # second merge fails
+        # second merge fails
+        if inst.id == "ship-202":
+            return steps.MergeOutcome.FAILED
+        return steps.MergeOutcome.MERGED
 
     deploys: list[str] = []
 
@@ -237,8 +240,8 @@ async def scenario_merge_failure_gates_deploy():
         deploys.append(repo)
         return True, "ok", ""
 
-    workflows._finalize_merge = fake_finalize
-    interactions.execute_deploy = fake_deploy
+    steps._finalize_merge = fake_finalize
+    deploy_flow.execute_deploy = fake_deploy
 
     await fleet.run_fleet_ship(bot, "origin-2", ["201", "202"])
     await asyncio.sleep(0.05)
@@ -251,6 +254,49 @@ async def scenario_merge_failure_gates_deploy():
     _check(len(banner_posts) == 1, "merge-failed banner posted in the thread")
 
 
+async def scenario_stopped_merge_gates_deploy():
+    """A merge that landed on a tree that must not ship (E17).
+
+    It used to come back as plain success, so fleet put the repo in the
+    deployable list. It is neither merged-and-shippable nor a conflict: no
+    deploy, no merge-failed banner, no pending merge, and the origin is told.
+    """
+    print("scenario 2b: a stopped merge gates the repo without a failure banner")
+    bot = make_bot()
+    bot._store.deploy_configs["web"] = {
+        "method": "command", "approved": True, "command": "echo deploy",
+    }
+    targets = [make_target("211", "web"), make_target("212", "web")]
+    patch_collect(targets)
+
+    async def fake_finalize(ctx, inst, **kw):
+        if inst.id == "ship-212":
+            return steps.MergeOutcome.STOPPED
+        return steps.MergeOutcome.MERGED
+
+    deploys: list[str] = []
+
+    async def fake_deploy(bot_, repo, cfg, **kw):
+        deploys.append(repo)
+        return True, "ok", ""
+
+    steps._finalize_merge = fake_finalize
+    deploy_flow.execute_deploy = fake_deploy
+
+    await fleet.run_fleet_ship(bot, "origin-2b", ["211", "212"])
+    await asyncio.sleep(0.05)
+
+    _check(deploys == [], "deploy skipped for a repo with a stopped merge")
+    _check(bot.replay_calls == [], "no verify replay for a stopped repo")
+    _check("ship-212" not in bot._store.pending_merges,
+           "a stopped merge is not recorded as a merge failure")
+    _check([m for m in bot.messenger.sent if m[0] == "212"] == [],
+           "no merge-failed banner in the stopped thread")
+    origin_posts = [t for ch, t in bot.messenger.sent if ch == "origin-2b"]
+    _check(any("must not ship" in t and "<#212>" in t for t in origin_posts),
+           "origin told which thread stopped and that deploy was skipped")
+
+
 async def scenario_deploy_failure_skips_verify():
     print("scenario 3: deploy failure skips verify")
     bot = make_bot()
@@ -261,13 +307,13 @@ async def scenario_deploy_failure_skips_verify():
     patch_collect(targets)
 
     async def fake_finalize(ctx, inst, **kw):
-        return True
+        return steps.MergeOutcome.MERGED
 
     async def fake_deploy(bot_, repo, cfg, **kw):
         return False, "boom", "exit 1"
 
-    workflows._finalize_merge = fake_finalize
-    interactions.execute_deploy = fake_deploy
+    steps._finalize_merge = fake_finalize
+    deploy_flow.execute_deploy = fake_deploy
 
     await fleet.run_fleet_ship(bot, "origin-3", ["301"])
     await asyncio.sleep(0.05)
@@ -287,9 +333,9 @@ async def scenario_self_deploy_boot_drain():
     patch_collect(targets)
 
     async def fake_finalize(ctx, inst, **kw):
-        return True
+        return steps.MergeOutcome.MERGED
 
-    workflows._finalize_merge = fake_finalize
+    steps._finalize_merge = fake_finalize
 
     await fleet.run_fleet_ship(bot, "origin-4", ["401"])
     await asyncio.sleep(0.05)
@@ -326,13 +372,13 @@ async def scenario_noop_replay_not_closed():
     patch_collect(targets)
 
     async def fake_finalize(ctx, inst, **kw):
-        return True
+        return steps.MergeOutcome.MERGED
 
     async def fake_deploy(bot_, repo, cfg, **kw):
         return True, "ok", ""
 
-    workflows._finalize_merge = fake_finalize
-    interactions.execute_deploy = fake_deploy
+    steps._finalize_merge = fake_finalize
+    deploy_flow.execute_deploy = fake_deploy
 
     await fleet.run_fleet_ship(bot, "origin-5", ["501"])
     await asyncio.sleep(0.05)
@@ -346,6 +392,7 @@ async def scenario_noop_replay_not_closed():
 async def main() -> int:
     await scenario_happy_command_deploy()
     await scenario_merge_failure_gates_deploy()
+    await scenario_stopped_merge_gates_deploy()
     await scenario_deploy_failure_skips_verify()
     await scenario_self_deploy_boot_drain()
     await scenario_noop_replay_not_closed()

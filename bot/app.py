@@ -9,10 +9,8 @@ import signal
 import sys
 import time
 from logging.handlers import RotatingFileHandler
-from pathlib import Path
 
-from bot import config, paths
-from bot.procutil import run_capture
+from bot import auto_update, autonomy, boot_recovery, config
 from bot.claude.auth_health import (
     REASON_NO_DIR,
     relogin_command,
@@ -127,274 +125,28 @@ def _release_pid_lock() -> None:
         pass
 
 
-def _detect_update_branch() -> str:
-    """Detect the remote default branch for auto-update.
+def _write_reboot_msg_and_relaunch(reboot_data: dict) -> None:
+    """Leave the next process its reboot note, then spawn the relauncher.
 
-    Priority: AUTO_UPDATE_BRANCH env > git symbolic-ref > fallback 'master'.
+    The one place both restart paths (the coalesced `/reboot` executor and the
+    Windows Ctrl+Break handler) write ``REBOOT_MSG_FILE`` and start
+    ``scripts/relaunch.py``. The relauncher stands down under the systemd unit,
+    whose ``Restart=always`` brings the bot back instead. A failure to write
+    the note is logged and does not stop the relaunch; a failure to spawn the
+    relauncher raises, so the caller decides whether that aborts the reboot.
     """
-    if config.AUTO_UPDATE_BRANCH:
-        return config.AUTO_UPDATE_BRANCH
+    import json
+    import subprocess
+
     try:
-        result = run_capture(["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
-            cwd=str(config._PROJECT_ROOT), timeout=10,
-        )
-        if result.returncode == 0:
-            # "refs/remotes/origin/main" -> "main"
-            ref = result.stdout.strip()
-            return ref.rsplit("/", 1)[-1]
+        config.REBOOT_MSG_FILE.write_text(json.dumps(reboot_data), encoding="utf-8")
     except Exception:
-        pass
-    return "master"
-
-
-async def auto_update_loop(
-    stop_event: asyncio.Event,
-    runner: ClaudeRunner,
-    notifier: NotificationService,
-) -> None:
-    """Periodically check for upstream changes, pull, and reboot."""
-    branch = _detect_update_branch()
-    interval = config.AUTO_UPDATE_INTERVAL_SECS
-    log.info("Auto-update started (branch=%s, interval=%ds)", branch, interval)
-
-    failure_notified = False  # dedup: only notify once per ongoing failure
-    first_check = True
-
-    while not stop_event.is_set():
-        if not first_check:
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=interval)
-                break  # stop_event was set
-            except asyncio.TimeoutError:
-                pass  # normal: interval elapsed
-        first_check = False
-
-        try:
-            # Hold repo lock for the entire fetch-compare-pull sequence
-            # to prevent racing with worktree operations on the bot repo
-            repo_lock = runner._get_repo_lock(str(config._PROJECT_ROOT))
-            async with repo_lock:
-                # 1. Fetch
-                fetch = await asyncio.to_thread(run_capture, ["git", "fetch", "origin", "--tags", "--force"],
-                    cwd=str(config._PROJECT_ROOT), timeout=30,
-                )
-                if fetch.returncode != 0:
-                    err = fetch.stderr.strip() or "unknown error"
-                    if not failure_notified:
-                        log.warning("Auto-update: git fetch failed — %s", err)
-                        await notifier.broadcast(
-                            f"Auto-update: git fetch failed — {err}",
-                            ttl=10,
-                        )
-                        failure_notified = True
-                    continue
-
-                # 2. Compare HEAD vs remote
-                local_head = await asyncio.to_thread(run_capture, 
-                    ["git", "rev-parse", "HEAD"], cwd=str(config._PROJECT_ROOT), timeout=10,
-                )
-                remote_head = await asyncio.to_thread(run_capture, ["git", "rev-parse", f"origin/{branch}"],
-                    cwd=str(config._PROJECT_ROOT), timeout=10,
-                )
-                if local_head.returncode != 0 or remote_head.returncode != 0:
-                    if not failure_notified:
-                        log.warning("Auto-update: git rev-parse failed (branch=%s)", branch)
-                        await notifier.broadcast(
-                            f"Auto-update: can't resolve branch `{branch}` — check AUTO_UPDATE_BRANCH",
-                            ttl=10,
-                        )
-                        failure_notified = True
-                    continue
-                local_sha = local_head.stdout.strip()
-                remote_sha = remote_head.stdout.strip()
-
-                if local_sha == remote_sha:
-                    if failure_notified:
-                        failure_notified = False  # reset on success
-                    continue
-
-                # 3. Get commit log for notification
-                log_result = await asyncio.to_thread(run_capture, ["git", "log", "--oneline", f"{local_sha}..{remote_sha}"],
-                    cwd=str(config._PROJECT_ROOT), timeout=10,
-                )
-                if log_result.returncode == 0 and log_result.stdout.strip():
-                    commits = log_result.stdout.strip().splitlines()
-                    n_commits = len(commits)
-                    # Strip the short SHA prefix from the first commit message
-                    latest_msg = commits[0].split(" ", 1)[1] if " " in commits[0] else commits[0]
-                else:
-                    # No new commits on remote — local is ahead or diverged
-                    if not failure_notified:
-                        log.warning(
-                            "Auto-update: HEAD differs from origin/%s but no new "
-                            "remote commits — local may be ahead/diverged", branch,
-                        )
-                        await notifier.broadcast(
-                            f"Auto-update: local HEAD differs from `origin/{branch}` "
-                            "but remote has no new commits. Manual sync may be needed.",
-                            ttl=10,
-                        )
-                        failure_notified = True
-                    continue
-
-                log.info("Auto-update: %d new commit(s) on origin/%s",
-                         n_commits, branch)
-
-                # 4. Pull (ff-only)
-                pull = await asyncio.to_thread(run_capture, ["git", "pull", "--ff-only", "origin", branch],
-                    cwd=str(config._PROJECT_ROOT), timeout=30,
-                )
-                if pull.returncode != 0:
-                    err = pull.stderr.strip() or "unknown error"
-                    if not failure_notified:
-                        log.warning("Auto-update: git pull failed — %s", err)
-                        await notifier.broadcast(
-                            f"Auto-update: pull failed — {err}. Manual intervention needed.",
-                            ttl=10,
-                        )
-                        failure_notified = True
-                    continue
-
-                # 4b. Verify HEAD actually moved (defensive — Fix 1 should
-                # catch the no-op case, but guard against edge cases)
-                post_pull = await asyncio.to_thread(run_capture, 
-                    ["git", "rev-parse", "HEAD"], cwd=str(config._PROJECT_ROOT), timeout=10,
-                )
-                if post_pull.returncode == 0 and post_pull.stdout.strip() == local_sha:
-                    log.error(
-                        "Auto-update: pull reported success but HEAD unchanged "
-                        "— skipping reboot (local likely diverged)"
-                    )
-                    continue
-
-            # 5. pip install (non-fatal)
-            try:
-                await asyncio.to_thread(run_capture, [sys.executable, "-m", "pip", "install", "-e", ".", "--quiet"],
-                    cwd=str(config._PROJECT_ROOT), timeout=120,
-                )
-            except Exception:
-                log.warning("Auto-update: pip install failed (non-fatal)", exc_info=True)
-
-            # 6. Build human-friendly strings (reused in reboot request + broadcast)
-            failure_notified = False
-            count_str = f"pulled {n_commits} commit(s)"
-            detail = f"`{latest_msg}`"
-
-            runner.request_reboot({
-                "message": f"Auto-update: {count_str}",
-            })
-
-            # 7. Notify (best-effort — reboot already queued)
-            try:
-                await notifier.broadcast(
-                    f"🔄 Auto-update: {count_str} — {detail}\nRebooting...",
-                    ttl=10,
-                )
-            except Exception:
-                log.warning("Auto-update: notification failed (reboot still queued)")
-            return  # reboot requested, exit loop
-
-        except asyncio.CancelledError:
-            return
-        except Exception:
-            log.exception("Auto-update: unexpected error")
-            if not failure_notified:
-                await notifier.broadcast("Auto-update: unexpected error — check logs.", ttl=10)
-                failure_notified = True
-
-
-def _audit_repo_portability(store: StateStore) -> None:
-    """Warn about registered repos that only exist on this machine.
-
-    The state file is shared between machines, so a repo registered outside
-    every known root simply will not be there after the next reboot into the
-    other OS.  Worse, it can be a *second checkout* of a repo whose history
-    all sits under the shared copy — identical contents, different folder, so
-    nothing looks wrong except that no conversation in it can ever resume.
-    That cost a night of 16-minute retry loops before anyone noticed, and the
-    whole diagnosis is one line the bot was in a position to print at boot.
-
-    Log-only, deliberately: which copy is the right one is a judgement call,
-    and silently re-pointing a repo is a far worse failure than saying so.
-    """
-    log.info("%s", paths.describe())
-    repos = store.list_repos()
-    if not repos:
-        return
-    stray = {n: p for n, p in repos.items() if not paths.is_portable(p)}
-    if not stray:
-        return
-    for name, path in sorted(stray.items()):
-        log.warning(
-            "Repo %r is outside every known root (%s) — it will not resolve "
-            "on another machine sharing this state file, and CLI history "
-            "written elsewhere for the same project will not be found from "
-            "here. Re-register it under a shared root, or add its root to "
-            "data/%s.",
-            name, path, paths.ROOTS_FILENAME,
-        )
-    log.warning(
-        "Repo portability: %d of %d registered repos are machine-local",
-        len(stray), len(repos),
+        log.warning("Failed to write reboot message file", exc_info=True)
+    launcher = config._PROJECT_ROOT / "scripts" / "relaunch.py"
+    subprocess.Popen(
+        [sys.executable, str(launcher), str(config._PROJECT_ROOT)],
+        **detached_kwargs(),
     )
-
-
-def _migrate_deferred_to_todo(store: StateStore) -> None:
-    """One-time migration: data/deferred/*.md → repo TODO.md files.
-
-    Reads old deferred files directly, deduplicates items, writes them
-    into each repo's TODO.md, then deletes the data/deferred/ directory.
-    """
-    import re
-    import shutil
-
-    deferred_dir = config.DATA_DIR / "deferred"
-    if not deferred_dir.exists():
-        return
-
-    def _slug(name: str) -> str:
-        """Inline slug logic (config.safe_repo_slug is removed)."""
-        s = re.sub(r'[^\w\-.]', '-', name.strip()).strip('.-')
-        return s or 'unknown'
-
-    repos = store.list_repos()
-    # Build slug → repo_name lookup
-    slug_to_repo: dict[str, str] = {}
-    for name in repos:
-        slug_to_repo[_slug(name)] = name
-
-    migrated_total = 0
-    for fpath in deferred_dir.glob("*.md"):
-        slug = fpath.stem
-        repo_name = slug_to_repo.get(slug)
-        if not repo_name:
-            log.warning("Deferred migration: no repo for slug %r, skipping %s", slug, fpath.name)
-            continue
-
-        # Read old file directly
-        text = fpath.read_text(encoding="utf-8")
-        raw_items = [line.strip()[2:] for line in text.splitlines()
-                     if line.strip().startswith("- ")]
-
-        # Deduplicate
-        seen: set[str] = set()
-        unique: list[str] = []
-        for item in raw_items:
-            norm = StateStore.deferred_dedup_key(item)
-            if norm not in seen:
-                seen.add(norm)
-                unique.append(item)
-
-        if unique:
-            store.append_deferred(repo_name, unique)
-            migrated_total += len(unique)
-            log.info("Migrated %d unique deferred items for %s", len(unique), repo_name)
-
-    shutil.rmtree(deferred_dir, ignore_errors=True)
-    if migrated_total:
-        log.info("Deferred migration complete: %d total unique items → TODO.md files", migrated_total)
-    else:
-        log.info("Deferred migration: no items to migrate, cleaned up empty directory")
 
 
 async def run() -> None:
@@ -484,7 +236,7 @@ async def run() -> None:
         max_retained=config.INSTANCE_MAX_RETAINED,
     )
 
-    _audit_repo_portability(store)
+    boot_recovery.audit_repo_portability(store)
 
     orphans = store.mark_orphans()
     # Stays None on a clean restart and on every non-Linux host — read much
@@ -510,9 +262,6 @@ async def run() -> None:
     archive_count = store.archive_old()
     if archive_count:
         log.info("Archived %d old instances", archive_count)
-
-    # One-time migration: data/deferred/*.md → repo TODO.md files
-    _migrate_deferred_to_todo(store)
 
     # Sweep stale title-gen jsonls so /session pickers don't list "[Temp]…"
     # entries from prior runs that crashed before per-call cleanup ran.
@@ -554,96 +303,41 @@ async def run() -> None:
     # Initialize engine module state
     engine_commands.init(start_time, cli_version, shutdown_fn=lambda: stop_event.set())
 
-    # Capture deploy state baselines for all repos
-    from bot.engine.deploy import (
-        capture_boot_baselines, make_deploy_config,
-        is_deploy_protected, scan_deploy_config, _safe_int,
-    )
+    # Capture deploy state baselines for all repos, then register the deploy
+    # config each repo implies.
+    from bot.engine.deploy import auto_register_deploy_configs, capture_boot_baselines
     capture_boot_baselines(store, str(config._PROJECT_ROOT))
+    auto_register_deploy_configs(store)
 
-    # Auto-register deploy configs
-    for _rname, _rpath in store.list_repos().items():
-        _ds = store.get_deploy_state(_rname)
-        _existing_cfg = store.get_deploy_config(_rname)
-        # Self-managed repos: auto-register with approved=True
-        if _ds and _ds.self_managed and not _existing_cfg:
-            store.set_deploy_config(_rname, make_deploy_config(
-                "self", source="auto", approved=True,
-            ))
-            log.info("Auto-registered self-managed deploy config for %s", _rname)
-        # File-based configs: register unapproved — skip protected repos
-        elif not is_deploy_protected(_existing_cfg, _ds) and not _existing_cfg:
-            _file_cfg = scan_deploy_config(_rpath)
-            if _file_cfg:
-                store.set_deploy_config(_rname, make_deploy_config(
-                    "command",
-                    command=_file_cfg["command"],
-                    label=_file_cfg.get("label", "Deploy"),
-                    cwd=_file_cfg.get("cwd"),
-                    source="file", approved=False,
-                    auto_fix=bool(_file_cfg.get("auto_fix")),
-                    auto_fix_redeploy=bool(_file_cfg.get("auto_fix_redeploy")),
-                    auto_fix_retries=_safe_int(_file_cfg.get("auto_fix_retries"), 1),
-                ))
-                log.info("Auto-registered file-based deploy config for %s (pending approval)", _rname)
-
-    # Emergency signal handler: if the bot is killed (e.g. by a Claude Code instance
-    # running taskkill), save context and auto-relaunch so we come back online.
+    # Emergency signal handler for Windows Ctrl+Break (SIGBREAK): save state
+    # and relaunch, so a bot broken into from a console comes back online.
+    #
+    # It is deliberately NOT registered for SIGTERM. The graceful handler
+    # further down has always owned SIGTERM (it is registered later and
+    # replaced this one from the day this was added), and on Linux the
+    # restart after a SIGTERM is the systemd unit's job (`Restart=always`).
     def _emergency_reboot_handler(signum, frame):
-        # On Windows this only ever fired for an unusual signal, so relaunching
-        # unconditionally was fine. On Linux SIGTERM is how everything stops a
-        # process — botctl, start.sh, systemctl, shutdown — and a bot that
-        # relaunches itself out of each one cannot be stopped at all. Callers
-        # that mean it leave a sentinel; everything else is still an emergency.
-        # Checked before the imports below: this is a signal handler, and the
-        # deliberate path should not be reaching for the import lock at all.
+        # A caller that means "stop" leaves a sentinel; consult it before
+        # anything else, since this runs as a signal handler.
         if stop_was_requested(config.DATA_DIR):
-            log.warning("Caught signal %s — deliberate stop, not relaunching", signum)
+            log.warning("Caught signal %s, deliberate stop, not relaunching", signum)
             store.save()
             _release_pid_lock()
             os._exit(0)
 
-        import json as _json
-        import subprocess as _sp
-
-        log.warning("Caught signal %s — emergency reboot", signum)
-        # Find any running instance's channel to send confirmation after restart
-        reboot_data: dict = {}
-        for inst in store.list_instances()[:20]:
-            if inst.status == InstanceStatus.RUNNING and inst.message_ids:
-                for platform, msg_ids in inst.message_ids.items():
-                    if msg_ids:
-                        # Use the thread/channel of the first running instance
-                        reboot_data = {"channel_id": msg_ids[0], "platform": platform}
-                        # For Discord, the channel is the thread the msg was sent to
-                        # We need the actual channel_id, not msg_id — check forum threads
-                        break
-                if reboot_data:
-                    break
-        # Always save something so new process knows it was a reboot
-        if not reboot_data:
-            reboot_data = {}
+        log.warning("Caught signal %s, emergency reboot", signum)
+        # No channel and no resume prompt: the note only makes the next
+        # process announce that it is back. (This used to record a running
+        # instance's first *message* id as the channel to resume, which
+        # nothing could resume into.)
         try:
-            config.REBOOT_MSG_FILE.write_text(
-                _json.dumps(reboot_data), encoding="utf-8",
-            )
-        except Exception:
-            pass
-        # Spawn relaunch and exit
-        launcher = config._PROJECT_ROOT / "scripts" / "relaunch.py"
-        try:
-            _sp.Popen(
-                [sys.executable, str(launcher), str(config._PROJECT_ROOT)],
-                **detached_kwargs(),
-            )
+            _write_reboot_msg_and_relaunch({"message": "recovered from an interrupt signal"})
         except Exception:
             log.exception("Emergency relaunch could not be spawned")
         store.save()
         _release_pid_lock()
         os._exit(1)
 
-    # Register for SIGTERM and SIGBREAK (Windows) / SIGTERM (Unix)
-    signal.signal(signal.SIGTERM, _emergency_reboot_handler)
     if hasattr(signal, "SIGBREAK"):
         signal.signal(signal.SIGBREAK, _emergency_reboot_handler)
 
@@ -655,7 +349,6 @@ async def run() -> None:
     # a single reboot instead of racing.
     async def _execute_pending_reboots() -> None:
         """Called by runner when idle + reboots pending. Runs at most once."""
-        import json as _json
         reboots = runner.pending_reboots()
         if not reboots:
             runner._reboot_executing = False
@@ -682,22 +375,8 @@ async def run() -> None:
             if merged_prompt:
                 reboot_data["resume_prompt"] = merged_prompt
 
-            try:
-                config.REBOOT_MSG_FILE.write_text(
-                    _json.dumps(reboot_data), encoding="utf-8",
-                )
-            except Exception:
-                log.warning("Failed to write reboot message file", exc_info=True)
-
             log.info("Executing coalesced reboot (%d requests merged)", len(reboots))
-
-            # Spawn relaunch script and trigger shutdown
-            import subprocess as _sp
-            launcher = config._PROJECT_ROOT / "scripts" / "relaunch.py"
-            _sp.Popen(
-                [sys.executable, str(launcher), str(config._PROJECT_ROOT)],
-                **detached_kwargs(),
-            )
+            _write_reboot_msg_and_relaunch(reboot_data)
             runner.clear_reboots()
             stop_event.set()
         except Exception:
@@ -902,106 +581,15 @@ async def run() -> None:
             except Exception:
                 log.exception("Cooldown loop error")
 
-    # Autonomy loop — fires due auto-merge vetoes (Phase 2) and sweeps
-    # ship-policy stragglers (Phase 3). Both are no-ops unless a repo opted
-    # into merge/ship autonomy via .claude/workflow.json.
-    async def autonomy_loop():
-        from datetime import datetime as dt, timezone as tz_mod
-        if not discord_bot:
-            return
-        if not await discord_bot._wait_for_ready("autonomy_loop"):
-            return
-        sweep_running = {"v": False}
-        ticks = 0
-        while True:
-            await asyncio.sleep(60)
-            try:
-                store.reload_if_changed()
-                now_iso = dt.now(tz_mod.utc).isoformat()
-                for iid, meta in store.list_due_scheduled_merges(now_iso):
-                    try:
-                        await _fire_scheduled_merge(store, runner, discord_bot, iid, meta)
-                    except Exception:
-                        log.exception("Scheduled merge fire failed for %s", iid)
-                ticks += 1
-                # Orchestrator: release spawn waves whose children never all
-                # came back — killed during a reboot, or dead before recording
-                # a session. The join is derived per child, so it self-corrects
-                # for everything EXCEPT a child that never reaches a terminal
-                # state at all; without this sweep such a wave would hold its
-                # parent open forever, which is worse than the per-child
-                # callbacks it replaced. Deliberately outside the ship-sweep
-                # overlap guard: this is a cheap scan and must not be starved
-                # by a fleet ship that runs for minutes.
-                if ticks % 5 == 0:
-                    try:
-                        from bot.discord.orchestrator import sweep_stale_waves
-                        n_released = await sweep_stale_waves(discord_bot)
-                        if n_released:
-                            log.info(
-                                "Orchestrator: released %d stale spawn wave(s)",
-                                n_released,
-                            )
-                    except Exception:
-                        log.exception("Stale spawn-wave sweep failed")
-                # Weekly prompt review. Checked on the same 5-minute cadence
-                # as the sweeps, but gated on a PERSISTED timestamp rather
-                # than on `ticks`: a reboot resets the counter, which would
-                # otherwise either fire on every restart or skip the week.
-                if ticks % 5 == 0:
-                    try:
-                        from bot.discord.prompt_review import maybe_run_weekly
-                        asyncio.create_task(maybe_run_weekly(discord_bot))
-                    except Exception:
-                        log.exception("Prompt review scheduling failed")
-                # The supervisor's own footprint. Recorded, never acted on:
-                # see the note on SUPERVISOR_MEM_WARN_MB. Its own tick gate
-                # rather than the 5-minute one, because this is a log line
-                # for a curve read over days and a 5-minute cadence would
-                # bury the thing it is meant to make visible.
-                _sup_every = config.SUPERVISOR_MEM_LOG_MINS
-                if _sup_every > 0 and ticks % _sup_every == 0:
-                    try:
-                        from bot.claude import memory as _mem
-                        foot = _mem.supervisor_footprint()
-                        warn_at = config.SUPERVISOR_MEM_WARN_MB
-                        if warn_at > 0 and foot.rss_mb > warn_at and not foot.error:
-                            log.warning(
-                                "Supervisor footprint: %s (above the %.0fMB "
-                                "this is expected to stay under; nothing is "
-                                "being reaped, this is a note to look)",
-                                foot.summary(), warn_at,
-                            )
-                        else:
-                            log.info("Supervisor footprint: %s", foot.summary())
-                    except Exception:
-                        log.exception("Supervisor footprint read failed")
-                # Ship sweep every ~5 min, guarded against overlap (a fleet
-                # ship can run for minutes and may self-deploy/reboot).
-                if ticks % 5 == 0 and not sweep_running["v"]:
-                    sweep_running["v"] = True
-
-                    async def _sweep():
-                        try:
-                            await _autonomy_ship_sweep(store, discord_bot)
-                        except Exception:
-                            log.exception("Autonomy ship sweep failed")
-                        finally:
-                            sweep_running["v"] = False
-
-                    asyncio.create_task(_sweep())
-            except Exception:
-                log.exception("Autonomy loop error")
-
     # Start background tasks (store refs to prevent GC)
     _bg_tasks = [
         asyncio.create_task(auto_save_loop()),
         asyncio.create_task(cooldown_loop()),
-        asyncio.create_task(autonomy_loop()),
+        asyncio.create_task(autonomy.autonomy_loop(store, runner, discord_bot)),
     ]
     if config.AUTO_UPDATE:
         _bg_tasks.append(asyncio.create_task(
-            auto_update_loop(stop_event, runner, notifier),
+            auto_update.auto_update_loop(stop_event, runner, notifier),
         ))
     if discord_bot:
         from bot.discord.account_alerts import run_account_alert_notifier
@@ -1019,41 +607,7 @@ async def run() -> None:
         ))
     scheduler.start()
 
-    # Sweep orphaned self-wake files. A wake file is consumed (deleted) at the
-    # writing turn's end (check_wake_request); any file still present at startup
-    # means that turn was cancelled/crashed before consuming it (e.g. a reboot
-    # caught it mid-finalize, before lifecycle.py's check_wake_request call). The
-    # real pending wake, if any, already lives in state.json as a Schedule, so
-    # the leftover file is a dead hand-off — drop it to keep data/wakes/ bounded.
-    try:
-        orphan_wakes = list(config.WAKE_DIR.glob("*.json"))
-        for wf in orphan_wakes:
-            wf.unlink(missing_ok=True)
-        if orphan_wakes:
-            log.info("Swept %d orphaned self-wake file(s)", len(orphan_wakes))
-    except Exception:
-        log.debug("Wake-file sweep failed", exc_info=True)
-
-    # Scan for orphaned branches and worktrees across all repos
-    active_branches = {inst.branch for inst in store.list_instances(all_=True) if inst.branch}
-    active_worktrees = {inst.worktree_path for inst in store.list_instances(all_=True) if inst.worktree_path}
-    for repo_name, repo_path in store.list_repos().items():
-        if not Path(repo_path).is_dir():
-            continue
-        orphan_branches = runner.scan_orphan_branches(repo_path, active_branches)
-        if orphan_branches:
-            log.warning(
-                "Repo '%s' has %d orphaned branches: %s",
-                repo_name, len(orphan_branches),
-                ", ".join(orphan_branches[:5]) + ("..." if len(orphan_branches) > 5 else ""),
-            )
-        orphan_wts = runner.scan_orphan_worktrees(repo_path, active_worktrees)
-        if orphan_wts:
-            log.warning(
-                "Repo '%s' has %d orphaned worktrees: %s",
-                repo_name, len(orphan_wts),
-                ", ".join(orphan_wts[:5]) + ("..." if len(orphan_wts) > 5 else ""),
-            )
+    boot_recovery.log_orphan_git(store, runner)
 
     log.info(
         "Bot ready — PC: %s, CLI: %s, platforms: %s",
@@ -1061,39 +615,9 @@ async def run() -> None:
         ", ".join(name for name, _ in platform_tasks),
     )
 
-    # Send reboot announcement + auto-resume if a reboot_message.json was saved
-    reboot_data = await _send_reboot_announcement(notifier)
-
-    if reboot_data:
-        # Wait for notifier to have at least one messenger registered
-        for _ in range(60):
-            if notifier._messengers:
-                break
-            await asyncio.sleep(1)
-
-        # Always broadcast "back online" to The Ark (persistent — no TTL)
-        reason = reboot_data.get("message", "")
-        back_msg = f"✅ {config.PC_NAME} back online."
-        if reason:
-            back_msg += f" ({reason})"
-        await notifier.broadcast(back_msg)
-
-        # Additionally resume a specific thread if channel_id was set
-        _resume_channel = reboot_data.get("channel_id")
-        _resume_platform = reboot_data.get("platform")
-        _resume_prompt = reboot_data.get("resume_prompt")
-
-        if _resume_channel and _resume_platform == "discord" and discord_bot:
-            asyncio.create_task(discord_bot.dispatch_resume(
-                _resume_channel, _resume_prompt or "", announce=None,
-            ))
-            log.info("Dispatched post-reboot resume to discord channel %s", _resume_channel)
-
-        # Clean up reboot file (dispatch_resume also tries via unlink(missing_ok=True))
-        try:
-            config.REBOOT_MSG_FILE.unlink(missing_ok=True)
-        except Exception:
-            pass
+    # Announce the restart and resume the thread that asked for it, if a
+    # reboot note was left behind.
+    await boot_recovery.announce_reboot(notifier, discord_bot)
 
     # Replay messages that were queued during reboot drain
     drain_queue = runner.read_drain_queue()
@@ -1132,63 +656,24 @@ async def run() -> None:
     # Resume autopilot chains that were interrupted by the restart
     if discord_bot:
         asyncio.create_task(
-            _resume_interrupted_chains(store, discord_bot, drain_callback_channel_ids)
+            boot_recovery.resume_interrupted_chains(store, discord_bot, drain_callback_channel_ids)
         )
 
     # Update thinking messages for orphaned instances (interrupted by restart).
     # Skips instances that will be auto-resumed to avoid confusing
     # "interrupted" → immediate restart sequence.
-    await _cleanup_orphan_messages(
+    await boot_recovery.cleanup_orphan_messages(
         notifier, orphans, auto_resuming_sessions, drain_callback_channel_ids,
         interrupt_reason=oom_reason,
     )
 
-    # One Ark notice for the whole outage, not one per dead session: an OOM kill
-    # takes every running session at once, so per-thread notices would say the
-    # same thing ten times over.
-    #
-    # The reason is taken from the marker as well as from this boot's own
-    # journal read, and that fallback is the marker's entire reason to exist.
-    # The orphans are marked failed by the *first* boot after the kill, so if
-    # that boot dies anywhere between marking them and getting here, the next
-    # one finds nothing orphaned, never asks the journal, and the outage is
-    # never reported at all. Cleared only once the notice has actually landed,
-    # for the same reason — clearing it first would turn one failed send into
-    # silence.
-    notice_reason = oom_reason or claude_memory.read_oom_marker(config.DATA_DIR)
-    if discord_bot and notice_reason:
-        lobby_id = str(getattr(discord_bot, "_lobby_channel_id", "") or "")
-        if lobby_id:
-            # Zero is the normal count on the second-boot path above: the
-            # sessions were already marked failed by the boot that died.
-            took = (
-                f", taking {len(orphans)} running session(s) with it"
-                if orphans else ""
-            )
-            try:
-                await discord_bot.messenger.send_text(
-                    lobby_id,
-                    f"⚠️ **The bot was killed for memory and has restarted.** "
-                    # Not .capitalize() — that lowercases everything after the
-                    # first letter, so the day this reason carries a figure the
-                    # notice would read "13.9g".
-                    f"{notice_reason[:1].upper()}{notice_reason[1:]}{took}.\n"
-                    f"Any work in progress is still on disk — the branches and "
-                    f"worktrees are untouched. Check `/status` and resume "
-                    f"anything that matters.\n"
-                    f"If this repeats, the machine is genuinely short on RAM: "
-                    f"see the memory settings in `scripts/claude-bot.service` "
-                    f"and `SESSION_MEM_KILL_MB`.",
-                )
-                claude_memory.clear_oom_marker(config.DATA_DIR)
-            except Exception:
-                log.exception("Could not post OOM notice to the Ark")
+    await boot_recovery.post_oom_notice(discord_bot, orphans, oom_reason)
 
     # Restore interactive pending-prompt entries (Steer/Queue embeds) from
     # before the reboot.  Instances they reference are dead — we edit the
     # embed to "Lost on restart" so the user knows to resend.
     if discord_bot:
-        asyncio.create_task(_restore_pending_prompts(discord_bot))
+        asyncio.create_task(boot_recovery.restore_pending_prompts(discord_bot))
 
     # Wait for shutdown
     await stop_event.wait()
@@ -1227,414 +712,6 @@ async def run() -> None:
 
     _release_pid_lock()
     log.info("Shutdown complete")
-
-
-async def _send_reboot_announcement(notifier: NotificationService) -> dict | None:
-    """If a reboot_message.json was left by a previous process, read and return it.
-
-    The caller handles broadcasting, optional thread resume, and file cleanup.
-    """
-    import json
-    try:
-        data = json.loads(config.REBOOT_MSG_FILE.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        return None
-
-    log.info(
-        "Read reboot message for %s channel %s (deferred)",
-        data.get("platform"), data.get("channel_id"),
-    )
-    return data
-
-
-async def _restore_pending_prompts(discord_bot) -> None:
-    """Reconcile persisted pending-prompt entries after a reboot.
-
-    At reboot all instances are gone — so every persisted pending entry is
-    stale (the run it was queued behind is dead).  For each entry: edit the
-    Queued embed to say "Lost on restart — please resend", then drop it from
-    disk.  If a live replacement is needed later, the user sends again.
-    """
-    from bot.engine import pending as pending_mod
-
-    if not await discord_bot._wait_for_ready("restore_pending_prompts"):
-        return
-    entries = pending_mod.load_from_disk()
-    if not entries:
-        return
-    log.info("Reconciling %d pending-prompt entries from prior run", len(entries))
-    for p in entries:
-        if not p.message_id:
-            continue
-        try:
-            await discord_bot.messenger.edit_text(
-                p.channel_id, p.message_id,
-                "Lost on restart — please resend your message.", None,
-            )
-        except Exception:
-            log.debug("Could not edit stale pending embed %s", p.message_id)
-    pending_mod.clear_persisted_file()
-
-
-async def _cleanup_orphan_messages(
-    notifier: NotificationService,
-    orphans: list,
-    auto_resuming_sessions: set[str] | None = None,
-    drain_callback_channel_ids: set[str] | None = None,
-    interrupt_reason: str | None = None,
-) -> None:
-    """Update thinking messages for instances that were interrupted by a restart.
-
-    Finds the last message sent by each orphaned instance and edits it to show
-    the interrupted status, so users see a clean resolution instead of a stale
-    'processing...' indicator.
-
-    Skips instances that will be auto-resumed (via chain resume or drain queue
-    callback) to avoid the confusing "interrupted" → immediate restart sequence.
-
-    ``interrupt_reason`` names the cause when startup managed to establish one
-    (currently: the previous run was OOM-killed). It lands in the thread the
-    user is actually looking at, which is the difference between "something
-    happened at 2 AM" and an answer.
-    """
-    if not orphans:
-        return
-    _resuming = auto_resuming_sessions or set()
-    _drain_cbs = drain_callback_channel_ids or set()
-    from bot.platform.base import MessageHandle
-    for inst in orphans:
-        # Skip instances that will auto-resume via chain or drain callback
-        if inst.session_id and inst.session_id in _resuming:
-            continue
-
-        for platform, msg_ids in inst.message_ids.items():
-            if not msg_ids or platform not in notifier._messengers:
-                continue
-            messenger, _ = notifier._messengers[platform]
-            # The last message_id is typically the thinking/progress message
-            last_msg_id = msg_ids[-1]
-            try:
-                channel_id = None
-                if inst.session_id and hasattr(messenger, 'find_channel_for_session'):
-                    channel_id = messenger.find_channel_for_session(inst.session_id)
-                # Also skip if channel is in drain callback set
-                if channel_id and channel_id in _drain_cbs:
-                    continue
-                if channel_id:
-                    handle = MessageHandle(
-                        platform=platform,
-                        _data={"message_id": last_msg_id, "channel_id": channel_id},
-                    )
-                    try:
-                        await messenger.edit_thinking(
-                            handle,
-                            f"{inst.display_id()} interrupted by bot restart"
-                            + (f" — {interrupt_reason}" if interrupt_reason else ""),
-                        )
-                        log.info("Updated orphan thinking msg for %s in %s:%s",
-                                 inst.id, platform, channel_id)
-                    except Exception:
-                        log.debug("Could not edit orphan thinking msg for %s", inst.id)
-            except Exception:
-                log.debug("Orphan message cleanup failed for %s", inst.id, exc_info=True)
-
-
-def _find_last_completed_instance(store, session_id: str):
-    """Find the most recent COMPLETED instance for a session.
-
-    Returns the last successfully completed step — the one whose output
-    the next chain step should build upon.  Skips FAILED instances
-    (which include the interrupted step marked by mark_orphans).
-    """
-    for inst in store.list_instances(all_=True):
-        if inst.session_id == session_id and inst.status == InstanceStatus.COMPLETED:
-            return inst
-    return None
-
-
-async def _fire_scheduled_merge(store, runner, discord_bot, iid: str, meta: dict) -> None:
-    """Perform one due auto-merge veto: merge the branch like a Merge tap.
-
-    Re-validates before merging (instance/branch still present, no chain took
-    over, session not active again) and drops the entry if the state is stale.
-    Uses ``_finalize_merge`` — the exact path the Merge button and autopilot
-    use, so tag/deploy/close behavior is identical. Always clears the
-    scheduled-merge record afterward so a stuck entry can't re-fire forever.
-    """
-    from bot.engine import workflows
-    from bot.engine.commands import _get_channel_lock
-
-    channel_id = meta.get("channel_id")
-    session_id = meta.get("session_id") or None
-    inst = store.get_instance(iid)
-
-    if inst is None or not inst.branch or not inst.original_branch or not channel_id:
-        store.clear_scheduled_merge(iid)
-        return
-    # A chain that started after scheduling owns the merge now; and a
-    # re-activated session means the user is back working — don't merge under
-    # either. Leave the branch for manual/chain handling.
-    if store.get_autopilot_chain(session_id) or runner.is_session_active(session_id):
-        store.clear_scheduled_merge(iid)
-        return
-
-    # No-op guard: a build that committed nothing leaves a branch level with
-    # its base. Merging it would report "already up to date" (a non-failure)
-    # and _finalize_merge would then close the thread — silently archiving a
-    # build that did nothing. Skip and drop the entry instead.
-    from bot.discord.fleet import _commits_ahead
-    ahead = await asyncio.to_thread(
-        _commits_ahead, inst.repo_path, inst.original_branch, inst.branch,
-    )
-    if ahead <= 0:
-        store.clear_scheduled_merge(iid)
-        return
-
-    lookup = discord_bot._forums.thread_to_project(channel_id)
-    info = lookup[1] if lookup else None
-    ctx = discord_bot._ctx(
-        channel_id, session_id=session_id, repo_name=inst.repo_name,
-        thread_info=info, source="autonomy",
-    )
-    # Only attach callbacks when the thread is still registered — passing a
-    # None thread_info would raise, and (outside the try below) that would
-    # leave the entry to re-fire and re-raise every tick. Without callbacks
-    # the merge still runs; only the "merged" tag is skipped.
-    if info is not None:
-        discord_bot._forums.attach_session_callbacks(ctx, info, channel_id)
-
-    lock = _get_channel_lock(channel_id)
-    async with lock:
-        try:
-            ok = await workflows._finalize_merge(ctx, inst, close_silent=True)
-        except Exception:
-            log.exception("Scheduled auto-merge crashed for %s", iid)
-            ok = False
-    store.clear_scheduled_merge(iid)
-    if not ok:
-        # Merge failed — surface the standard recovery UI so it isn't silent.
-        try:
-            from bot.platform.formatting import (
-                merge_failed_banner, merge_failed_button_specs,
-            )
-            failure_kind = runner._last_merge_failure_kind.get(inst.id)
-            msg = merge_failed_banner(failure_kind)
-            await ctx.messenger.send_text(
-                channel_id,
-                "Auto-merge hit a conflict — needs your attention.\n\n" + msg,
-                buttons=merge_failed_button_specs(inst.id), silent=False,
-            )
-            store.set_pending_merge(
-                inst.id, session_id=session_id, channel_id=channel_id,
-                repo_name=inst.repo_name, message=msg, failure_kind=failure_kind,
-            )
-        except Exception:
-            log.debug("Failed to post auto-merge failure UI for %s", iid, exc_info=True)
-
-
-async def _autonomy_ship_sweep(store, discord_bot) -> None:
-    """Fleet-ship stragglers for repos on ``ship`` autonomy.
-
-    Backstop for the per-build veto (Phase 2): sweeps any committed-unmerged
-    work in ship-policy repos that's aged past ``ship_grace_minutes`` and isn't
-    already covered by a scheduled merge. Runs the existing fleet pipeline
-    (merge → deploy → verify-back). No-op when nothing qualifies.
-    """
-    from datetime import datetime as dt, timezone as tz_mod
-
-    from bot.discord import fleet
-    from bot.engine.workflows import load_workflow_policy
-
-    try:
-        targets = await fleet.collect_ship_targets(discord_bot)
-    except Exception:
-        log.debug("autonomy sweep: collect_ship_targets failed", exc_info=True)
-        return
-    if not targets:
-        return
-
-    now = dt.now(tz_mod.utc)
-    ship_ids: list[str] = []
-    for t in targets:
-        policy = load_workflow_policy(t.inst.repo_path if t.inst else None)
-        if policy["autonomy"] != "ship":
-            continue
-        # A per-build veto already owns this session — let Phase 2 handle it.
-        if store.get_scheduled_merge_by_session(t.session_id):
-            continue
-        # Grace window: only ship work we can CONFIRM is aged past the grace
-        # period. If the timestamp is missing or unparseable, fail safe (skip)
-        # rather than auto-deploying work of unknown age.
-        stamp = (t.inst.finished_at or t.inst.created_at) if t.inst else None
-        age_min: float | None = None
-        if stamp:
-            try:
-                age_min = (now - dt.fromisoformat(stamp)).total_seconds() / 60
-            except (ValueError, TypeError):
-                age_min = None
-        if age_min is None or age_min < policy["ship_grace_minutes"]:
-            continue
-        ship_ids.append(t.thread_id)
-
-    if not ship_ids:
-        return
-    origin = str(getattr(discord_bot, "_lobby_channel_id", "") or "")
-    log.info("Autonomy sweep: fleet-shipping %d straggler(s)", len(ship_ids))
-    await fleet.run_fleet_ship(discord_bot, origin, ship_ids)
-
-
-async def _resume_interrupted_chains(
-    store, discord_bot, drain_callback_channel_ids: set[str],
-) -> None:
-    """Find autopilot chains that were interrupted by restart and resume them.
-
-    Skips sessions whose thread already has a callback entry in the drain queue
-    (that callback will replay the equivalent work).  Text-only drain entries
-    do NOT suppress chain resume — they answer a user message but don't
-    continue the autopilot chain.
-
-    Brief delay lets drain queue dispatch start first and acquire its locks.
-    """
-    from datetime import datetime, timedelta, timezone
-
-    from bot.engine import workflows
-    from bot.engine.commands import _get_channel_lock
-
-    if not await discord_bot._wait_for_ready("resume_interrupted_chains"):
-        return
-
-    # Brief delay to let drain queue dispatch start and acquire channel locks
-    await asyncio.sleep(5)
-
-    all_chains = store.get_all_autopilot_chains()
-    if not all_chains:
-        return
-
-    log.info("Found %d interrupted autopilot chains to resume", len(all_chains))
-    # Stale-chain TTL: a queue older than this is presumed abandoned and
-    # dropped. Long enough to cover an overnight pause (user steps away with
-    # a needs_input pending), short enough to avoid resurrecting weeks-old
-    # work after a long downtime.
-    stale_chain_ttl = timedelta(hours=48)
-    now = datetime.now(timezone.utc)
-    for session_id, steps in all_chains.items():
-        meta = store.get_autopilot_chain_meta(session_id) or {}
-        status = meta.get("status")
-        updated_at = meta.get("updated_at")
-
-        # Defensive: any chain without meta got dropped at load. If we still
-        # see one here, something added a queue without going through
-        # set_autopilot_chain — log and skip rather than guess intent.
-        if not status:
-            log.warning(
-                "Skipping unmetered chain (post-load) for session %s — clearing",
-                session_id,
-            )
-            store.clear_autopilot_chain(session_id)
-            store.clear_chain_entry_sha(session_id)
-            continue
-
-        # Paused chains are waiting on the user (needs_input, phantom, phase
-        # gate). They MUST NOT resume on reboot — that's the bug this whole
-        # field exists to prevent.
-        if status == "paused":
-            log.info(
-                "Skipping paused autopilot chain for session %s (steps: %s)",
-                session_id, steps,
-            )
-            continue
-
-        # Stale running chains: crash happened too long ago to safely resume.
-        if updated_at:
-            try:
-                ts = datetime.fromisoformat(updated_at)
-                if now - ts > stale_chain_ttl:
-                    log.warning(
-                        "Dropping stale running chain for session %s (age %s, steps: %s)",
-                        session_id, now - ts, steps,
-                    )
-                    store.clear_autopilot_chain(session_id)
-                    store.clear_chain_entry_sha(session_id)
-                    continue
-            except (ValueError, TypeError):
-                log.warning(
-                    "Unparseable chain meta updated_at for session %s: %r — clearing",
-                    session_id, updated_at,
-                )
-                store.clear_autopilot_chain(session_id)
-                store.clear_chain_entry_sha(session_id)
-                continue
-
-        # Find the thread for this session
-        lookup = discord_bot._forums.session_to_thread(session_id)
-        if not lookup:
-            log.warning(
-                "No thread found for interrupted chain session %s — clearing",
-                session_id,
-            )
-            store.clear_autopilot_chain(session_id)
-            store.clear_chain_entry_sha(session_id)
-            continue
-
-        thread_id, info = lookup
-
-        # Skip sessions whose thread has a callback in the drain queue
-        if thread_id in drain_callback_channel_ids:
-            log.info(
-                "Skipping chain resume for session %s — thread %s covered by drain queue callback",
-                session_id, thread_id,
-            )
-            continue
-
-        # Find the last COMPLETED instance to use as source
-        source = _find_last_completed_instance(store, session_id)
-        if not source:
-            log.warning(
-                "No completed instance for interrupted chain session %s — clearing",
-                session_id,
-            )
-            store.clear_autopilot_chain(session_id)
-            store.clear_chain_entry_sha(session_id)
-            continue
-
-        log.info(
-            "Resuming autopilot chain for session %s in thread %s (steps: %s)",
-            session_id, thread_id, steps,
-        )
-
-        ctx = discord_bot._ctx(thread_id, session_id=session_id, thread_info=info)
-        discord_bot._forums.attach_session_callbacks(ctx, info, thread_id)
-
-        # Notify user that chain is resuming
-        try:
-            await ctx.messenger.send_text(
-                thread_id, "Resuming interrupted chain...", silent=True,
-            )
-        except Exception:
-            log.debug("Could not send chain resume notice to %s", thread_id)
-
-        # Acquire channel lock to prevent racing with user messages
-        lock = _get_channel_lock(thread_id)
-        async with lock:
-            try:
-                # Re-run from chain[0] — the interrupted step that never
-                # completed.  This differs from resume_autopilot_chain()
-                # which skips [0] (designed for needs_input pauses where
-                # [0] DID complete).
-                label, silent_close = store.get_chain_kwargs(session_id)
-                await workflows._run_autopilot_chain(
-                    ctx, source.id, None, steps, session_id,
-                    silent_close=silent_close,
-                    chain_label=label,
-                )
-            except Exception:
-                log.exception(
-                    "Failed to resume autopilot chain for session %s", session_id,
-                )
-            finally:
-                discord_bot._forums.persist_ctx_settings(ctx)
-                asyncio.create_task(discord_bot._try_apply_tags_after_run(thread_id))
-                discord_bot._schedule_sleep(thread_id)
 
 
 async def _do_cooldown_retry(store, runner, inst, discord_bot, retrying_set):
@@ -1785,11 +862,7 @@ async def _do_cooldown_retry_locked(store, runner, inst, discord_bot, channel_id
                     log.exception("Autopilot chain resume failed after cooldown retry %s",
                                   new_inst.id)
     finally:
-        # Post-run cleanup (matches normal query flow in interactions.py)
-        discord_bot._forums.persist_ctx_settings(ctx)
-        discord_bot._schedule_sleep(channel_id)
-        asyncio.create_task(discord_bot._try_apply_tags_after_run(channel_id))
-        asyncio.create_task(discord_bot._refresh_dashboard())
+        await discord_bot._after_turn(ctx, channel_id)
 
 
 async def _start_discord(store, runner, notifier, stop_event):

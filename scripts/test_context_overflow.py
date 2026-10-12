@@ -69,7 +69,7 @@ os.environ.setdefault("BOT_PATHS_DISABLED", "1")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from bot import config
-from bot.claude import runner as runner_mod
+from bot.claude.runner import accounts as runner_accounts
 from bot.claude.parser import (
     is_account_agnostic_error,
     is_context_overflow_error,
@@ -193,9 +193,9 @@ class _Harness:
     async def run(self, *, session_id: str | None = DEAD_SESSION):
         saved_accounts = list(config.CLAUDE_ACCOUNTS)
         saved_spawn = asyncio.create_subprocess_exec
-        saved_unusable = runner_mod.unusable_reason
+        saved_unusable = runner_accounts.unusable_reason
         config.CLAUDE_ACCOUNTS[:] = [self.account]
-        runner_mod.unusable_reason = lambda acct: None  # type: ignore[assignment]
+        runner_accounts.unusable_reason = lambda acct: None  # type: ignore[assignment]
 
         async def fake_spawn(*args, **kwargs):
             self.spawn_argvs.append(list(args))
@@ -217,7 +217,7 @@ class _Harness:
 
         runner._stream_output = fake_stream_output  # type: ignore[assignment]
 
-        async def on_progress(headline, detail=""):
+        async def on_progress(headline, detail="", **kw):
             self.progress.append((headline, detail))
 
         async def on_recovery(reason, lost_session_id, worktree_path):
@@ -251,7 +251,7 @@ class _Harness:
         finally:
             runner._active_tasks.discard(instance.id)
             asyncio.create_subprocess_exec = saved_spawn  # type: ignore[assignment]
-            runner_mod.unusable_reason = saved_unusable  # type: ignore[assignment]
+            runner_accounts.unusable_reason = saved_unusable  # type: ignore[assignment]
             config.CLAUDE_ACCOUNTS[:] = saved_accounts
         return result, instance
 

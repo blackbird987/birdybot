@@ -10,13 +10,16 @@ python -m bot          # start the bot
 
 ## Key Paths
 
-- **Entry point**: `bot/__main__.py` -> `bot/app.py:run()`
+- **Entry point**: `bot/__main__.py` -> `bot/app.py:run()`, which starts `bot/autonomy.py` (merge and sweep loop) and `bot/auto_update.py`, and calls `bot/boot_recovery.py` for what the previous process left behind
 - **Config**: `bot/config.py` (reads `.env`)
 - **Log file**: `data/logs/bot.log`
 - **State**: `data/state.json`
 - **Engine** (platform-agnostic): `bot/engine/commands.py`, `lifecycle.py`, `workflows.py`, `sessions.py`, `eval.py`, `report.py`
-- **Platform layer**: `bot/platform/base.py` (Messenger protocol), `bot/platform/formatting.py`
-- **Discord**: `bot/discord/bot.py` (orchestrator), `slash_commands.py`, `interactions.py`, `adapter.py`, `channels.py`, `forums.py`, `idle.py`, `tags.py`, `modals.py`, `monitoring.py`, `formatter.py`
+- **Commands**: `bot/engine/commands.py` only re-exports. The handlers live in `query.py` (typed messages), `directives/` (`dispatch`, `chain`, `spawn`, `reply`), `instance_cmds.py`, `branch_actions.py`, `resolver.py`, `repo_cmds.py`, `settings_cmds.py`, `admin_cmds.py`, `callbacks.py` (button dispatch) and `cmd_state.py` (uptime, channel locks, budget gate). Patch a name in the module that reads it; only `on_text` and `handle_callback` may be patched on the facade, because the Discord layer calls them through it (`scripts/test_facades.py`)
+- **Workflows**: `bot/engine/workflows.py` only re-exports too. Step handlers live in `steps.py` (plan, build, review, verify, commit, done, merge), `release_steps.py`, `chain_runner.py` (autopilot and /chain loops), `step_spawn.py` (`spawn_from`), `step_parse.py` (review, plan and verify parsing), `step_policy.py` (presets, verify and merge policy) and `chain_git.py` (git reads and instance lookups). Only `on_autopilot`, `on_conversational_chain` and `on_tldr` may be patched on the facade
+- **Runner** (`bot/claude/runner/`, a package of mixins): `core.py` (ClaudeRunner: spawn, stream, kills), `recovery.py` (the rescue steps a failed run is offered, in `_RECOVERY_STEPS` order, pinned by `scripts/test_run_recovery_order.py`), `accounts.py`, `admission.py`, `prompt_build.py`, `session_files.py`, `worktrees.py`, `git_merge.py`, `git_release.py`, `reaping.py`, `watchdog.py` (the per-run age, memory and stall checks), `common.py`. `__init__.py` only re-exports, so patch a name in the module that reads it, never on the package (`scripts/test_runner_package.py` fails a blind patch)
+- **Platform layer**: `bot/platform/base.py` (Messenger protocol), `bot/platform/formatting.py` (re-exports `buttons.py`, `modes.py`, `redact.py`)
+- **Discord**: `bot/discord/bot.py` (orchestrator; its usage gate, turn context and startup work are mixins in `usage_gate.py`, `thread_ctx.py`, `startup.py`), `attachments.py`, `slash_commands.py`, `interactions.py` (deploys and the Reboot button in `deploy_flow.py`), `adapter.py`, `channels.py`, `forums.py`, `idle.py`, `tags.py`, `modals.py`, `monitoring.py`, `formatter.py`
 
 ## You can read the bot's own instance registry
 
@@ -182,7 +185,7 @@ Harness: `python scripts/test_repo_desc.py`
 thread, so it came back a different shape each time and usually full of file
 paths and function names, which is unreadable on the phone it is read on. The
 [TL;DR] button and `/tldr` make it one prompt (`config.TLDR_PROMPT`,
-`workflows.on_tldr`).
+`steps.on_tldr`).
 
 The load-bearing decision is that there are **two** shapes and the session
 picks between them, rather than one template stretched over both:
@@ -376,9 +379,12 @@ a point where the revert is still undoable:
   does **not**: the branch landed perfectly well, and treating it as a merge
   failure would hand it to the cleanup and retry path it does not belong in.
   Same pattern as `REPO_UNUSABLE_MARKER` next door. Under autopilot,
-  `workflows._finalize_merge` stops on the marker **before**
+  `steps._finalize_merge` stops on the marker **before**
   `apply_post_merge_deploy` and `close_conversation`, so the chain never ships
-  a tree that reverts a release and never closes the thread on one.
+  a tree that reverts a release and never closes the thread on one. It
+  returns `MergeOutcome.STOPPED`, not MERGED and not FAILED: every caller
+  (chain, standalone Done, scheduled auto-merge, fleet ship) must neither
+  call it merged nor hand it to the conflict banner and retry path.
 - **On discard.** A build branch can be the only place a release tag lives,
   and deleting it strands that tag: the version looks shipped and its commits
   are gone. The scan sits **above** the `git branch -D` block in
@@ -455,7 +461,7 @@ Three things that must not drift:
   subscription to burn the same hours again.
 - The session is told **before** `proc.terminate()`, not after. Terminating
   closes the CLI's stdout, which ends the reader loop, whose `finally` cancels
-  the watchdog — same ordering rule as `reap_this_session` in the memory guard.
+  the watchdog — same ordering rule as `_reap_session` in the memory guard.
 - The reap's return must stay **below** the two stand-downs, which both reaps
   share: a `result` event proving the turn finished anyway, and the session
   being in `_intentional_kills`. A user's Kill landing inside the reap window
@@ -491,24 +497,25 @@ Three rules, all pinned by `scripts/test_cooldown_session_bind.py`:
   session belongs to the step, not to the conversation, so the chain runner
   must not rewrite the thread's binding. Every *other* caller of
   `run_instance` does own the conversation and has to top the thread up
-  itself. There are four — the cooldown auto-retry (`app`), `/retry`, the
-  Retry button and continue-on-pay-per-use (`commands`) — and none of them
-  did, so re-running the work as many times as you liked never restored a
-  lost binding. Pay-per-use is the sharpest of the four: it is the manual
+  itself. The cooldown auto-retry (`app`), `/retry`, the Retry button,
+  continue-on-pay-per-use, and the `/bg` and `/release` task runner (the
+  command modules) all do. The first four once did not, so re-running the
+  work as many times as you liked never restored a lost binding. Pay-per-use is the sharpest of the four: it is the manual
   twin of the cooldown retry, offered on the same usage-limit card. The
   cooldown retry also has to call `attach_session_callbacks` on its ctx, or
   it has no binding mechanism at all — the same omission already fixed once
   for post-reboot replays, see the comment on `_replay_to_thread`.
 - **That top-up fills a gap; it never rebinds.** `backfill_thread_session` is
-  the one implementation all four share. Chain steps hit usage limits too and
-  land in the same retry function, and `/retry <id>` can be pointed at an
+  the one implementation they all share (a `/bg` build is refused by the
+  worktree rule below, a `/release` on master is not). Chain steps hit usage
+  limits too and land in the same retry function, and `/retry <id>` can be pointed at an
   instance belonging to another thread. Rebinding from there would let a plan
   or review step amputate a thread's chat history on the retry path while
   never doing so on the normal one, so the write only happens into an empty
   `session_id`. Worktree builds are refused outright — an isolated build
   session must not become a thread's chat session even when the slot is free.
   The harness asserts this structurally: *every* `lifecycle.run_instance`
-  callsite in `app.py` and `commands.py` must be followed by a backfill, so a
+  callsite in `app.py` and the command modules must be followed by a backfill, so a
   fifth caller added later fails the suite instead of silently losing threads.
 
 `should_bind_session` is where the eligibility rule lives, and it stays narrow.

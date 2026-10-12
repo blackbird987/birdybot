@@ -20,6 +20,7 @@ import time
 from dataclasses import asdict, dataclass
 
 from bot import config
+from bot.fsutil import atomic_write_json
 
 log = logging.getLogger(__name__)
 
@@ -184,9 +185,9 @@ def channel_has_pending(channel_id: str) -> bool:
 def _persist() -> None:
     try:
         data = [p.to_json() for p in _by_id.values()]
-        config.PENDING_PROMPTS_FILE.write_text(
-            _json.dumps(data, indent=2), encoding="utf-8",
-        )
+        # Atomic: a crash mid-write used to leave invalid JSON, and
+        # load_from_disk drops the whole file then, losing every queued prompt.
+        atomic_write_json(config.PENDING_PROMPTS_FILE, data)
     except Exception:
         log.exception("Failed to persist pending prompts")
 

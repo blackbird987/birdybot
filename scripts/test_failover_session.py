@@ -39,7 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bot import config
 from bot.claude.runner import ClaudeRunner
 from bot.claude.types import Instance, InstanceStatus, InstanceType, RunResult
-from bot.engine.session_fork import encode_project_path
+from bot.claude.session_fork import encode_project_path
 
 
 SESSION_ID = "00000000-1111-2222-3333-444444444444"

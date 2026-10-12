@@ -49,7 +49,7 @@ os.environ.setdefault("BOT_PATHS_DISABLED", "1")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from bot import config
-from bot.claude import runner as runner_mod
+from bot.claude.runner import accounts as runner_accounts
 from bot.claude.runner import ClaudeRunner
 from bot.claude.types import Instance, InstanceStatus, InstanceType, RunResult
 
@@ -100,7 +100,7 @@ async def _amain() -> int:
 
     saved_accounts = list(config.CLAUDE_ACCOUNTS)
     saved_spawn = asyncio.create_subprocess_exec
-    saved_unusable = runner_mod.unusable_reason
+    saved_unusable = runner_accounts.unusable_reason
     config.CLAUDE_ACCOUNTS[:] = [primary, backup]
 
     # The machine's real state during the incident: primary signed in and
@@ -108,7 +108,7 @@ async def _amain() -> int:
     # credential check has two callers (the account picker and the refusal
     # message) and stubbing only one would let scratch dirs with no
     # credentials file read as "primary is dead too".
-    runner_mod.unusable_reason = lambda acct: (  # type: ignore[assignment]
+    runner_accounts.unusable_reason = lambda acct: (  # type: ignore[assignment]
         "no refresh token — not logged in" if acct == backup else None
     )
 
@@ -207,7 +207,7 @@ async def _amain() -> int:
             )
     finally:
         asyncio.create_subprocess_exec = saved_spawn  # type: ignore[assignment]
-        runner_mod.unusable_reason = saved_unusable  # type: ignore[assignment]
+        runner_accounts.unusable_reason = saved_unusable  # type: ignore[assignment]
         config.CLAUDE_ACCOUNTS[:] = saved_accounts
         shutil.rmtree(tmp, ignore_errors=True)
 

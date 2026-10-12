@@ -44,6 +44,7 @@ import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
 import asyncio
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -56,7 +57,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from bot import config
 from bot.claude import context_bloat
-from bot.engine.session_fork import encode_project_path
+from bot.claude.session_fork import encode_project_path
 from bot.claude.types import RunResult
 
 # The thrash harness drives the real _run_impl cascade against a stubbed
@@ -68,17 +69,19 @@ from test_context_thrash import (  # noqa: E402
 BIG = 120_000
 SMALL = 2_000
 
-# Real transcript of t-9142, the build that thrashed on the 317K file.
-REAL_TRANSCRIPT = Path(
-    "/home/quincy/.claude-main/projects/"
-    "-home-quincy-Programming-DegenAI-AIAgent-AIAgent--worktrees-t-9142/"
-    "daab9204-55ed-4bcf-98a9-5b9bb5be7658.jsonl"
+# Real transcript of t-9142, the build that thrashed on the 317K file. The
+# paths are built from the home directory rather than written out, so the
+# replay still finds it on this machine without pinning one OS's spelling.
+REAL_REPO = str(Path.home() / "Programming" / "DegenAI" / "AIAgent" / "AIAgent")
+REAL_WORKTREE = REAL_REPO + "/.worktrees/t-9142"
+REAL_TRANSCRIPT = (
+    Path.home() / ".claude-main" / "projects"
+    / re.sub(r"[^A-Za-z0-9]", "-", REAL_WORKTREE)
+    / "daab9204-55ed-4bcf-98a9-5b9bb5be7658.jsonl"
 )
 # The transcript's length when t-9142 died. The session has been resumed
 # since, so the replay reads only this prefix (it ends on a line break).
 REAL_TRANSCRIPT_BYTES = 34_541_276
-REAL_REPO = "/home/quincy/Programming/DegenAI/AIAgent/AIAgent"
-REAL_WORKTREE = REAL_REPO + "/.worktrees/t-9142"
 
 
 def _nested(path: str, chars: int, display: str = "x") -> str:
@@ -124,7 +127,7 @@ def _write_transcript(path: Path, repo: str, worktree: str | None) -> None:
         _nested(f"{wt}/Services/Small/CLAUDE.md", SMALL),
         # Instructions row: one big project file, one small user file.
         _instructions([(f"{repo}/.claude/CLAUDE.md", BIG // 2 + 30_000),
-                       ("/home/u/.claude/CLAUDE.md", SMALL)]),
+                       ("/opt/u/.claude/CLAUDE.md", SMALL)]),
         # Same file again in the spaced JSON spelling.
         _instructions([(f"{repo}/.claude/CLAUDE.md", BIG // 2 + 30_000)],
                       spaced=True),
