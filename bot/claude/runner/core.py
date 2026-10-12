@@ -189,6 +189,26 @@ def _carry_forward_work_record(aborted: RunResult, resumed: RunResult) -> RunRes
     return resumed
 
 
+async def _announce_session_loss(
+    on_recovery, instance: Instance, error_text: str, session_id: str | None,
+) -> bool:
+    """Tell the platform a conversation is being abandoned; True if it landed.
+
+    Called while the old id is still known, so the thread warning can name
+    it. Best-effort: a failing callback must not block the recovery. The
+    result rides on ``recovery_warning_posted`` so commands.py can drop its
+    terser duplicate of the same notice.
+    """
+    if not on_recovery:
+        return False
+    try:
+        await on_recovery(error_text, session_id, instance.worktree_path)
+        return True
+    except Exception:
+        log.exception("on_recovery callback failed for %s", instance.id)
+        return False
+
+
 class RebootResult(enum.Enum):
     """Outcome of ``Runner.request_reboot``.
 
@@ -578,6 +598,19 @@ class ClaudeRunner(
                 on_recovery=on_recovery,
                 on_context_reset=on_context_reset,
             )
+
+        async def _switch_account(reason: str) -> RunResult:
+            """Announce a move to the next account, then re-run there.
+
+            The three account rungs (model limit, usage limit, unusable
+            account) each pick their target and mark the tried set first;
+            this is only the shared tail, so their order is untouched.
+            """
+            await _notify(
+                on_progress, "Switching to backup account", reason,
+                "during failover",
+            )
+            return await _reenter()
 
         # Waiting on the semaphore, and the gap between one attempt ending and
         # the next starting, are both windows with no process to signal.
@@ -975,19 +1008,10 @@ class ClaudeRunner(
                 # callback failure block recovery.  Track success so the
                 # downstream `session_recovery_exhausted` notice in
                 # commands.py can suppress its older, terser duplicate.
-                warning_posted = False
-                if on_recovery:
-                    try:
-                        await on_recovery(
-                            error_text or "No conversation found",
-                            original_session_id,
-                            instance.worktree_path,
-                        )
-                        warning_posted = True
-                    except Exception:
-                        log.exception(
-                            "on_recovery callback failed for %s", instance.id,
-                        )
+                warning_posted = await _announce_session_loss(
+                    on_recovery, instance,
+                    error_text or "No conversation found", original_session_id,
+                )
                 instance.session_id = None
                 # Layer 2 marked the account it just used as "tried" — but
                 # that mark means "this conversation isn't filed on that
@@ -1390,20 +1414,10 @@ class ClaudeRunner(
                     # Same ordering rule as Layer 3 above: tell the user while
                     # the id is still known, and record whether it landed so
                     # commands.py doesn't post its terser duplicate on top.
-                    warning_posted = False
-                    if on_recovery:
-                        try:
-                            await on_recovery(
-                                error_text or "Prompt is too long",
-                                original_session_id,
-                                instance.worktree_path,
-                            )
-                            warning_posted = True
-                        except Exception:
-                            log.exception(
-                                "on_recovery callback failed for %s",
-                                instance.id,
-                            )
+                    warning_posted = await _announce_session_loss(
+                        on_recovery, instance,
+                        error_text or "Prompt is too long", original_session_id,
+                    )
                     instance.session_id = None
                     instance._context_overflow_note = note
                     # A `finally` for the same reason the thrash unmark has
@@ -1484,13 +1498,9 @@ class ClaudeRunner(
                             "Model-limit failover from %s to %s for %s",
                             account_dir[-20:], next_account[-20:], instance.id,
                         )
-                        await _notify(
-                            on_progress,
-                            "Switching to backup account",
+                        inner = await _switch_account(
                             f"{m_label} limit on current account",
-                            "during failover",
                         )
-                        inner = await _reenter()
                         # Backup died before doing any work (auth-dead, or
                         # its own account-wide cap): this account can still
                         # run the fallback model — keep working instead of
@@ -1543,13 +1553,9 @@ class ClaudeRunner(
                         # Keep session_id — _hydrate_session_for_account copies
                         # the JSONL cross-account so --resume continues the same
                         # conversation on the backup account.
-                        await _notify(
-                            on_progress,
-                            "Switching to backup account",
+                        inner = await _switch_account(
                             "Primary account hit usage limit",
-                            "during failover",
                         )
-                        inner = await _reenter()
                         # If the failover target died before doing any work
                         # (e.g. paused/cancelled subscription -> 401), the turn
                         # is still fundamentally usage-limited. Carry the
@@ -1667,13 +1673,9 @@ class ClaudeRunner(
                             "cooled down" if confident else "no cooldown",
                             next_account[-20:], instance.id,
                         )
-                        await _notify(
-                            on_progress,
-                            "Switching to backup account",
+                        return await _switch_account(
                             "An account looks unavailable",
-                            "during failover",
                         )
-                        return await _reenter()
                     if confident:
                         # Nowhere to fail over. Don't dead-end the turn on a
                         # raw 401 (the t-6570 symptom): if any other account is
