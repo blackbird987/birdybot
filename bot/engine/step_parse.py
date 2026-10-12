@@ -189,6 +189,19 @@ def _extract_latest_plan_text(
     return raw[:_BUILD_PLAN_INJECT_MAX]
 
 
+def _with_plan(plan_text: str, prompt: str) -> str:
+    """Put the verbatim plan in front of a build prompt, when there is one.
+
+    A resumed and possibly compacted session then implements the plan as
+    written rather than its own recollection of it. The caller recovers the
+    plan with `_extract_latest_plan_text`, which stays a separate call so the
+    chain harness can stub it where the chain reads it.
+    """
+    if not plan_text:
+        return prompt
+    return config.BUILD_PLAN_INJECTION_PREFIX.replace("{plan_text}", plan_text) + prompt
+
+
 def _needs_revision(inst: Instance) -> bool:
     """Check if a plan review found Critical/High revisions.
 

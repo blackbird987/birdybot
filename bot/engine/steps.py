@@ -28,6 +28,7 @@ from bot.engine.chain_git import (
 from bot.engine.step_parse import (
     _extract_latest_plan_text,
     _verify_outcome,
+    _with_plan,
     _verify_why,
 )
 from bot.engine.step_policy import _load_verify_policy
@@ -72,12 +73,7 @@ async def on_build(ctx: RequestContext, source_id: str, source_msg_id: str | Non
     # call sites at the single-shot and phase-build branches. See
     # _extract_latest_plan_text for how the plan is recovered when the
     # in-flight chain list is empty (broken-chain recovery).
-    plan_text = _extract_latest_plan_text(ctx, [], source_id)
-    prompt = (
-        config.BUILD_PLAN_INJECTION_PREFIX.replace("{plan_text}", plan_text)
-        + base_prompt
-        if plan_text else base_prompt
-    )
+    prompt = _with_plan(_extract_latest_plan_text(ctx, [], source_id), base_prompt)
 
     # Stack on the prior unmerged build in this thread/session if one exists,
     # so successive Builds extend the same branch instead of re-cutting from

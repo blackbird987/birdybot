@@ -33,6 +33,7 @@ from bot.engine.step_parse import (
     _parse_verifier_json,
     _phase_gate_suffix,
     _stop_reason_snippet,
+    _with_plan,
 )
 from bot.engine.step_policy import (
     _AUTOPILOT_HOLD_STEPS,
@@ -859,15 +860,12 @@ async def _run_autopilot_chain(
                         # with just-committed code as their anchor, so the
                         # extra prompt budget isn't worth it on every phase.
                         if is_first:
-                            plan_text = _extract_latest_plan_text(
-                                ctx, chain_instances, source_id,
+                            phase_prompt = _with_plan(
+                                _extract_latest_plan_text(
+                                    ctx, chain_instances, source_id,
+                                ),
+                                phase_prompt,
                             )
-                            if plan_text:
-                                phase_prompt = (
-                                    config.BUILD_PLAN_INJECTION_PREFIX
-                                    .replace("{plan_text}", plan_text)
-                                    + phase_prompt
-                                )
 
                         phase_result = await spawn_from(
                             ctx, spawn_source_id,
@@ -1077,14 +1075,11 @@ async def _run_autopilot_chain(
                         config.BUILD_FROM_PLAN_PROMPT if is_plan
                         else config.BUILD_FROM_QUERY_PROMPT
                     )
-                    plan_text = _extract_latest_plan_text(
-                        ctx, chain_instances, source_id,
-                    )
-                    build_prompt = (
-                        config.BUILD_PLAN_INJECTION_PREFIX
-                        .replace("{plan_text}", plan_text)
-                        + base_prompt
-                        if plan_text else base_prompt
+                    build_prompt = _with_plan(
+                        _extract_latest_plan_text(
+                            ctx, chain_instances, source_id,
+                        ),
+                        base_prompt,
                     )
                     result = await spawn_from(ctx, current_id, SpawnConfig(
                         instance_type=InstanceType.TASK,
