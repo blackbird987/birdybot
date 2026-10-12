@@ -40,7 +40,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 
-from bot.textutil import parse_iso_utc
+from bot.textutil import parse_iso_utc, text_bar
 from bot import config
 from bot.claude.auth_health import account_label
 
@@ -309,11 +309,6 @@ async def get_plan_usage(*, force: bool = False) -> list[AccountUsage]:
 # ---------------------------------------------------------------------------
 
 
-def _bar(pct: float, width: int = 16) -> str:
-    filled = round(max(0.0, min(pct, 100.0)) / 100 * width)
-    return "█" * filled + "░" * (width - filled)
-
-
 def _ts(dt: datetime | None, style: str) -> str:
     return f"<t:{int(dt.timestamp())}:{style}>" if dt else ""
 
@@ -366,10 +361,10 @@ def format_plan_usage_bar(accounts: list[AccountUsage]) -> str | None:
             lines.append(f"**{a.label}**")
         if a.week_pct is not None:
             reset = f" · resets {_ts(a.week_resets_at, 'R')}" if a.week_resets_at else ""
-            lines.append(f"`{_bar(a.week_pct)}` week **{_pct(a.week_pct)}**{reset}")
+            lines.append(f"`{text_bar(a.week_pct / 100)}` week **{_pct(a.week_pct)}**{reset}")
         if a.session_pct is not None:
             reset = f" · resets {_ts(a.session_resets_at, 'R')}" if a.session_resets_at else ""
-            lines.append(f"`{_bar(a.session_pct)}` session {_pct(a.session_pct)}{reset}")
+            lines.append(f"`{text_bar(a.session_pct / 100)}` session {_pct(a.session_pct)}{reset}")
         sub = _subtext(a, now=now)
         if sub:
             subtexts.append((len(blocks), len(lines)))

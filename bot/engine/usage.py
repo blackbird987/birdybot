@@ -30,6 +30,7 @@ from pathlib import Path
 
 from bot import config
 from bot.fsutil import atomic_write_json
+from bot.textutil import text_bar
 
 log = logging.getLogger(__name__)
 
@@ -712,9 +713,7 @@ def format_usage_bar(
             time_left = f"{remaining}m"
 
         if block_limit > 0:
-            ratio = min(block.cost_usd / block_limit, 1.0)
-            filled = round(ratio * 16)
-            bar = "\u2588" * filled + "\u2591" * (16 - filled)
+            bar = text_bar(block.cost_usd / block_limit)
             pct = min(block.cost_usd / block_limit * 100, 999)
             lines.append(
                 f"`{bar}` ${block.cost_usd:.2f} session"
@@ -732,9 +731,7 @@ def format_usage_bar(
 
     # --- Bar 2: Weekly ---
     if weekly and weekly_limit > 0:
-        ratio = min(weekly.cost_usd / weekly_limit, 1.0)
-        filled = round(ratio * 16)
-        bar = "\u2588" * filled + "\u2591" * (16 - filled)
+        bar = text_bar(weekly.cost_usd / weekly_limit)
         pct = min(weekly.cost_usd / weekly_limit * 100, 999)
         lines.append(
             f"`{bar}` ${weekly.cost_usd:,.0f} / ${weekly_limit:,.0f}"

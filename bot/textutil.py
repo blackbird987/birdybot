@@ -51,6 +51,12 @@ def hard_clip(text: str, limit: int, suffix: str = "\u2026") -> str:
     return text[: limit - len(suffix)] + suffix
 
 
+def text_bar(fraction: float, width: int = 16) -> str:
+    """A ``width``-cell block bar filled to ``fraction``, clamped to 0..1."""
+    filled = round(max(0.0, min(fraction, 1.0)) * width)
+    return "\u2588" * filled + "\u2591" * (width - filled)
+
+
 def flatten(value: object) -> str:
     """Collapse any whitespace run (including newlines) to single spaces.
 

@@ -33,7 +33,7 @@ from bot import config
 from bot.claude.types import Watch
 from bot.platform.base import ButtonSpec
 from bot.platform.formatting import format_delay_secs
-from bot.textutil import directive_kv, directive_re, find_tilde_block, is_quoted_example, mask_tilde_bodies, parse_duration, parse_iso_utc
+from bot.textutil import directive_kv, directive_re, find_tilde_block, is_quoted_example, mask_tilde_bodies, parse_duration, parse_iso_utc, text_bar
 
 if TYPE_CHECKING:
     from bot.platform.base import Messenger
@@ -290,8 +290,7 @@ def render_heartbeat(watch: Watch, now: datetime) -> str:
     prog = parse_progress(tail, watch.progress_re)
     if prog is not None:
         frac, detail = prog
-        filled = int(round(frac * _BAR_WIDTH))
-        bar = "█" * filled + "░" * (_BAR_WIDTH - filled)
+        bar = text_bar(frac, _BAR_WIDTH)
         lines.append(f"`{bar}`  {round(frac * 100)}%  ·  {detail}")
     if watch.log_path:
         lines.append(f"-# {watch.log_path[:180]}")
