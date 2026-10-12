@@ -3245,8 +3245,8 @@ def _check_supervisor_footprint(failures: list[str]) -> None:
                 f"supervisor_footprint reaches for {forbidden} — it is a "
                 "recorder, not a guard"
             )
-    app = (REPO_ROOT / "bot" / "app.py").read_text(encoding="utf-8")
-    if "supervisor_footprint" not in app:
+    loop = (REPO_ROOT / "bot" / "autonomy.py").read_text(encoding="utf-8")
+    if "supervisor_footprint" not in loop:
         failures.append(
             "nothing ever calls supervisor_footprint, so no growth curve is "
             "recorded and the question it exists to answer stays unanswerable"

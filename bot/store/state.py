@@ -1732,7 +1732,7 @@ class StateStore:
     ) -> None:
         """Schedule a completed build branch to auto-merge at *merge_at* (ISO).
 
-        The autonomy loop in app.py fires due, un-held entries through
+        The autonomy loop in bot/autonomy.py fires due, un-held entries through
         ``_finalize_merge`` — the same path the Merge button uses. Persisted so
         a reboot mid-window resumes the countdown instead of dropping it.
         """

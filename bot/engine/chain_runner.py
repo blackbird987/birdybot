@@ -1461,7 +1461,7 @@ async def resume_autopilot_chain(
         invoked via the "amend" / "continue_anyway" buttons, same lock path.
       - ``app._do_cooldown_retry_locked`` — wraps the full retry in the lock.
     The companion ``_run_autopilot_chain`` is also called directly by
-    ``app._resume_interrupted_chains`` under its own lock acquisition.
+    ``boot_recovery.resume_interrupted_chains`` under its own lock acquisition.
 
     Returns None only when no chain exists.
     """
@@ -1503,7 +1503,7 @@ async def _launch_chain(
     except ValueError:
         idx = 0
     # Persist entry-point kwargs so resume paths (Continue button +
-    # `app._resume_interrupted_chains`) restore the originating chain label
+    # `boot_recovery.resume_interrupted_chains`) restore the originating chain label
     # and silent_close preference, instead of defaulting to "Autopilot" /
     # loud close on continuation.
     if source.session_id:

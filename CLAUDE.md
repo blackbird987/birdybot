@@ -10,7 +10,7 @@ python -m bot          # start the bot
 
 ## Key Paths
 
-- **Entry point**: `bot/__main__.py` -> `bot/app.py:run()`
+- **Entry point**: `bot/__main__.py` -> `bot/app.py:run()`, which starts `bot/autonomy.py` (merge and sweep loop) and `bot/auto_update.py`, and calls `bot/boot_recovery.py` for what the previous process left behind
 - **Config**: `bot/config.py` (reads `.env`)
 - **Log file**: `data/logs/bot.log`
 - **State**: `data/state.json`

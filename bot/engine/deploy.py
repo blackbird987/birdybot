@@ -289,17 +289,46 @@ def rescan_deploy_config_after_merge(store, repo_name: str, repo_path: str) -> N
         return
     file_cfg = scan_deploy_config(repo_path)
     if file_cfg:
-        store.set_deploy_config(repo_name, make_deploy_config(
-            "command",
-            command=file_cfg["command"],
-            label=file_cfg.get("label", "Deploy"),
-            cwd=file_cfg.get("cwd"),
-            timeout=file_cfg.get("timeout"),
-            source="file", approved=False,
-            auto_fix=bool(file_cfg.get("auto_fix")),
-            auto_fix_redeploy=bool(file_cfg.get("auto_fix_redeploy")),
-            auto_fix_retries=_safe_int(file_cfg.get("auto_fix_retries"), 1),
-        ))
+        store.set_deploy_config(repo_name, _config_from_file(file_cfg))
+
+
+def _config_from_file(file_cfg: dict) -> dict:
+    """An unapproved command config built from a repo's .claude/deploy.json."""
+    return make_deploy_config(
+        "command",
+        command=file_cfg["command"],
+        label=file_cfg.get("label", "Deploy"),
+        cwd=file_cfg.get("cwd"),
+        timeout=file_cfg.get("timeout"),
+        source="file", approved=False,
+        auto_fix=bool(file_cfg.get("auto_fix")),
+        auto_fix_redeploy=bool(file_cfg.get("auto_fix_redeploy")),
+        auto_fix_retries=_safe_int(file_cfg.get("auto_fix_retries"), 1),
+    )
+
+
+def auto_register_deploy_configs(store) -> None:
+    """At boot, give every repo without a deploy config the one it implies.
+
+    A self-managed repo gets an approved ``self`` config. Any other repo with a
+    ``.claude/deploy.json`` gets an unapproved command config, which the user
+    approves before its first use. A repo that already has a config is left
+    alone; ``rescan_deploy_config_after_merge`` keeps file configs current.
+    """
+    for name, path in store.list_repos().items():
+        ds = store.get_deploy_state(name)
+        if store.get_deploy_config(name):
+            continue
+        if ds and ds.self_managed:
+            store.set_deploy_config(name, make_deploy_config(
+                "self", source="auto", approved=True,
+            ))
+            log.info("Auto-registered self-managed deploy config for %s", name)
+            continue
+        file_cfg = scan_deploy_config(path)
+        if file_cfg:
+            store.set_deploy_config(name, _config_from_file(file_cfg))
+            log.info("Auto-registered file-based deploy config for %s (pending approval)", name)
 
 
 async def apply_post_merge_deploy(messenger, store, inst) -> None:

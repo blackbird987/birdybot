@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
 
+import ast
 import os
 import re
 import sys
@@ -143,8 +144,11 @@ print()
 print("app.cooldown_loop — the loop consults availability, not just the clock")
 
 _app = open(os.path.join(_ROOT, "bot", "app.py"), encoding="utf-8").read()
-_loop = _app[_app.index("async def cooldown_loop"):]
-_loop = _loop[:_loop.index("async def autonomy_loop")]
+# The loop is a closure inside run(); take exactly its own source.
+_loop = next(
+    ast.get_source_segment(_app, n) for n in ast.walk(ast.parse(_app))
+    if isinstance(n, ast.AsyncFunctionDef) and n.name == "cooldown_loop"
+)
 
 _check(
     "the loop asks has_spawnable_account()",

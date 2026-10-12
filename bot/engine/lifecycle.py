@@ -1217,7 +1217,7 @@ async def _maybe_schedule_auto_merge(
     Fires only when: the run completed, left a build branch, isn't part of an
     active chain, the agent didn't pause with a question, and the repo's
     ``.claude/workflow.json`` autonomy is ``merge`` or ``ship``. Posts a
-    "merging in N min — Hold" notice; the autonomy loop in app.py performs the
+    "merging in N min — Hold" notice; the autonomy loop in bot/autonomy.py performs the
     actual merge at the deadline unless Held. Deduped per session so a
     build→verify sequence doesn't stack two countdowns.
     """
