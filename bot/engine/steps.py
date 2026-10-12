@@ -658,27 +658,13 @@ async def on_done(
     if result.branch and result.original_branch:
         merged_ok = await _finalize_merge(ctx, result, close_silent=True)
         if not merged_ok:
-            failure_kind = ctx.runner._last_merge_failure_kind.get(result.id)
-            msg = merge_failed_banner(failure_kind)
             # silent=False: this path has no follow-up _exit_chain mention, so
             # the banner post itself must ping or the user never learns the
             # merge failed (the t-4736-class invisible-rot bug).
-            lead = "Done hit a merge conflict — needs your attention.\n\n"
-            try:
-                await ctx.messenger.send_text(
-                    ctx.channel_id, lead + msg,
-                    buttons=merge_failed_button_specs(result.id),
-                    silent=False,
-                )
-            except Exception:
-                log.debug("Failed to send merge-failed hint", exc_info=True)
-            ctx.store.set_pending_merge(
-                result.id,
-                session_id=result.session_id,
-                channel_id=ctx.channel_id,
-                repo_name=result.repo_name,
-                message=msg,
-                failure_kind=failure_kind,
+            await record_merge_failure(
+                ctx, result, session_id=result.session_id,
+                lead="Done hit a merge conflict — needs your attention.\n\n",
+                silent=False,
             )
         return result
 
@@ -716,13 +702,10 @@ async def _finalize_merge(
     """
     if not merge_target.branch or not merge_target.original_branch:
         return False
-    branch_name = merge_target.branch
-    merge_msg = await ctx.runner.merge_branch(merge_target)
-    ctx.store.update_instance(merge_target)
+    merge_msg = await merge_and_record(ctx, merge_target)
     log.info("Auto-merge: %s", merge_msg)
     if merge_msg_is_failure(merge_msg):
         return False
-    clear_stale_branches(ctx.store, branch_name)
 
     if merge_msg_repo_unusable(merge_msg):
         # The branch landed, but cleanup left conflict markers in tracked
@@ -760,9 +743,8 @@ async def _finalize_merge(
         )
         return True
 
-    from bot.engine.deploy import apply_post_merge_deploy
-    await apply_post_merge_deploy(ctx.messenger, ctx.store, merge_target)
-    # Apply "merged" tag before close (tag must land before archive)
+    # merge_and_record already did the deploy bookkeeping for a tree that
+    # may ship. Apply "merged" tag before close (tag must land before archive)
     if ctx.on_merged:
         await ctx.on_merged()
     await ctx.messenger.send_text(
@@ -776,6 +758,98 @@ async def _finalize_merge(
         except Exception:
             log.debug("Failed to close conversation after merge", exc_info=True)
     return True
+
+
+def merge_blocks_ship(msg: str) -> bool:
+    """Did the merge land on a tree that must not be shipped or closed on?
+
+    Both markers mean the branch landed (so neither is a merge failure) but
+    what it landed on is broken or is missing an earlier release. Every
+    merge path stops at the same two things for either: no deploy
+    bookkeeping, and no closing the thread on the only notice the user gets.
+    """
+    return merge_msg_repo_unusable(msg) or merge_msg_release_orphaned(msg)
+
+
+async def merge_and_record(ctx: RequestContext, inst: Instance) -> str:
+    """Merge a build branch and do the bookkeeping every merge path owes.
+
+    The one sequence behind /merge, the Merge button, both resolver exits and
+    ``_finalize_merge``. Five copies of it had drifted: two resolver paths
+    cleared stale branch refs by ``inst.branch`` after the merge had already
+    set it to None, so they cleared nothing, and only the chain path stopped
+    short of deploy bookkeeping on a tree missing a release.
+
+    On failure it refreshes the pending merge's failure kind, so the banner a
+    retry shows matches this attempt. On success it drops the pending merge,
+    clears the branch from every instance and from history, and refreshes
+    deploy state unless ``merge_blocks_ship``. Returns the runner's message;
+    tagging, posting and closing stay with the caller.
+    """
+    branch_name = inst.branch  # Save before the merge clears it
+    if not branch_name:
+        from bot.store import history as history_mod
+        branch_name = history_mod.get_branch_for_instance(inst.id)
+    msg = await ctx.runner.merge_branch(inst)
+    ctx.store.update_instance(inst)
+    if merge_msg_is_failure(msg):
+        ctx.store.set_pending_merge_failure_kind(
+            inst.id, ctx.runner._last_merge_failure_kind.get(inst.id),
+        )
+        return msg
+    ctx.store.clear_pending_merge(inst.id)
+    if branch_name:
+        clear_stale_branches(ctx.store, branch_name)
+    if merge_blocks_ship(msg):
+        return msg
+    from bot.engine.deploy import apply_post_merge_deploy
+    await apply_post_merge_deploy(ctx.messenger, ctx.store, inst)
+    return msg
+
+
+async def merge_from_user(ctx: RequestContext, inst: Instance) -> tuple[str, str]:
+    """A merge the user asked for: returns ``(card_text, runner_message)``.
+
+    The card text is the runner's message escaped, plus the unescaped
+    merge-failed banner when it did not land (its **bold** and `code` are
+    intentional). A merge that landed applies the "merged" tag.
+    """
+    msg = await merge_and_record(ctx, inst)
+    text = ctx.messenger.escape(msg)
+    if merge_msg_is_failure(msg):
+        kind = ctx.runner._last_merge_failure_kind.get(inst.id)
+        return f"{text}\n\n{merge_failed_banner(kind)}", msg
+    if ctx.on_merged:
+        await ctx.on_merged()
+    return text, msg
+
+
+async def record_merge_failure(
+    ctx: RequestContext, inst: Instance, *, session_id: str | None,
+    channel_id: str | None = None, lead: str = "", silent: bool = True,
+) -> None:
+    """Post the merge-failed banner and open the pending merge that holds it.
+
+    Every unattended merge ends this way when the branch did not land: the
+    chain's merge step, standalone Done, a scheduled auto-merge and fleet
+    ship. The pending merge is recorded even if the post fails, because it is
+    what keeps Resolve / Retry / Discard reachable and prefixes later
+    messages in the thread with the unresolved-merge note.
+    """
+    channel_id = channel_id or ctx.channel_id
+    failure_kind = ctx.runner._last_merge_failure_kind.get(inst.id)
+    msg = merge_failed_banner(failure_kind)
+    try:
+        await ctx.messenger.send_text(
+            channel_id, lead + msg,
+            buttons=merge_failed_button_specs(inst.id), silent=silent,
+        )
+    except Exception:
+        log.debug("Failed to post the merge-failed banner for %s", inst.id, exc_info=True)
+    ctx.store.set_pending_merge(
+        inst.id, session_id=session_id, channel_id=channel_id,
+        repo_name=inst.repo_name, message=msg, failure_kind=failure_kind,
+    )
 
 
 # --- Session resume ---

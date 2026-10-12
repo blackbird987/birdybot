@@ -12,10 +12,6 @@ from bot.claude.types import (
     InstanceStatus, InstanceType,
 )
 from bot.platform.base import ButtonSpec, RequestContext
-from bot.platform.formatting import (
-    merge_failed_banner,
-    merge_failed_button_specs,
-)
 
 from bot.engine.chain_git import (
     _find_mergeable_instance,
@@ -57,6 +53,7 @@ from bot.engine.steps import (
     on_review_code,
     on_sensors,
     on_verify,
+    record_merge_failure,
 )
 
 log = logging.getLogger(__name__)
@@ -1171,22 +1168,8 @@ async def _run_autopilot_chain(
                         ctx, merge_target, close_silent=silent_close,
                     )
                     if not merged_ok:
-                        failure_kind = ctx.runner._last_merge_failure_kind.get(
-                            merge_target.id,
-                        )
-                        msg = merge_failed_banner(failure_kind)
-                        await ctx.messenger.send_text(
-                            ctx.channel_id, msg,
-                            buttons=merge_failed_button_specs(merge_target.id),
-                            silent=True,
-                        )
-                        ctx.store.set_pending_merge(
-                            merge_target.id,
-                            session_id=merge_target.session_id,
-                            channel_id=ctx.channel_id,
-                            repo_name=merge_target.repo_name,
-                            message=msg,
-                            failure_kind=failure_kind,
+                        await record_merge_failure(
+                            ctx, merge_target, session_id=merge_target.session_id,
                         )
                         completed_steps.append(step)
                         repo_ref = merge_target.repo_name or "repo"

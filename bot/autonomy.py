@@ -171,22 +171,13 @@ async def fire_scheduled_merge(store, runner, discord_bot, iid: str, meta: dict)
     if not ok:
         # Merge failed — surface the standard recovery UI so it isn't silent.
         try:
-            from bot.platform.formatting import (
-                merge_failed_banner, merge_failed_button_specs,
-            )
-            failure_kind = runner._last_merge_failure_kind.get(inst.id)
-            msg = merge_failed_banner(failure_kind)
-            await ctx.messenger.send_text(
-                channel_id,
-                "Auto-merge hit a conflict — needs your attention.\n\n" + msg,
-                buttons=merge_failed_button_specs(inst.id), silent=False,
-            )
-            store.set_pending_merge(
-                inst.id, session_id=session_id, channel_id=channel_id,
-                repo_name=inst.repo_name, message=msg, failure_kind=failure_kind,
+            await workflows.record_merge_failure(
+                ctx, inst, session_id=session_id, channel_id=channel_id,
+                lead="Auto-merge hit a conflict — needs your attention.\n\n",
+                silent=False,
             )
         except Exception:
-            log.debug("Failed to post auto-merge failure UI for %s", iid, exc_info=True)
+            log.debug("Failed to record auto-merge failure for %s", iid, exc_info=True)
 
 
 async def ship_sweep(store, discord_bot) -> None:

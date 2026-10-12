@@ -8,12 +8,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from bot import config
-from bot.claude.types import Instance, InstanceOrigin, InstanceStatus, KillOutcome, merge_msg_is_failure
+from bot.claude.types import Instance, InstanceOrigin, InstanceStatus, KillOutcome
 from bot.engine import workflows
 from bot.platform.base import RequestContext
 from bot.platform.formatting import (
     action_button_specs,
-    merge_failed_banner,
 )
 
 from bot.claude.runner import (
@@ -38,24 +37,8 @@ async def on_merge(ctx: RequestContext, text: str) -> None:
         await ctx.messenger.send_text(ctx.channel_id, f"Instance '{text}' not found.")
         return
 
-    branch_name = inst.branch  # Save before merge clears it
-    msg = await ctx.runner.merge_branch(inst)
-    ctx.store.update_instance(inst)
-    if not merge_msg_is_failure(msg):
-        ctx.store.clear_pending_merge(inst.id)
-        # Resolve branch name for history cleanup (None when "already merged")
-        if not branch_name:
-            from bot.store import history as history_mod
-            branch_name = history_mod.get_branch_for_instance(inst.id)
-        if branch_name:
-            workflows.clear_stale_branches(ctx.store, branch_name)
-        from bot.engine.deploy import apply_post_merge_deploy
-        await apply_post_merge_deploy(ctx.messenger, ctx.store, inst)
-    else:
-        failure_kind = ctx.runner._last_merge_failure_kind.get(inst.id)
-        ctx.store.set_pending_merge_failure_kind(inst.id, failure_kind)
-        msg = f"{msg}\n\n{merge_failed_banner(failure_kind)}"
-    await ctx.messenger.send_text(ctx.channel_id, msg)
+    text, _ = await workflows.merge_from_user(ctx, inst)
+    await ctx.messenger.send_text(ctx.channel_id, text)
 
 
 # --- /discard ---
@@ -234,12 +217,15 @@ async def _finish_resolved_branch(
 
 async def _finish_branch_action(
     ctx: RequestContext, inst: Instance, escaped: str, source_msg_id: str | None,
+    *, keep_open: bool = False,
 ) -> None:
     """Post the outcome of a merge/discard and tidy up if the branch is gone.
 
     `escaped` arrives ready to send because Merge appends an unescaped failure
     banner to it and Discard does not; everything after that point was the same
-    thirteen lines in both branches.
+    thirteen lines in both branches. `keep_open` holds a post-Done thread open
+    when the merge landed on a tree that must not ship (``merge_blocks_ship``):
+    closing it would archive the only notice the user gets.
     """
     # Pass updated buttons when branch was resolved (strips Merge/Discard)
     buttons = action_button_specs(inst) if not inst.branch else None
@@ -251,7 +237,7 @@ async def _finish_branch_action(
     if not inst.branch:
         await _strip_post_merge_buttons(ctx, inst, skip_msg_id=source_msg_id)
     # Close thread if this was a post-Done merge/discard (branch resolved)
-    if inst.origin == InstanceOrigin.DONE and not inst.branch:
+    if inst.origin == InstanceOrigin.DONE and not inst.branch and not keep_open:
         try:
             await ctx.messenger.close_conversation(ctx.channel_id, skip_mention=True)
         except Exception:

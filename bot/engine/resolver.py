@@ -9,11 +9,10 @@ from pathlib import Path
 
 from bot.procutil import run_capture
 from bot.claude.gitpaths import ref_sha
-from bot.claude.types import Instance, InstanceStatus, KillOutcome, merge_msg_is_failure
+from bot.claude.types import Instance, InstanceStatus, KillOutcome
 from bot.engine import workflows
 from bot.platform.base import RequestContext
 from bot.platform.formatting import (
-    merge_failed_banner,
     merge_failed_button_specs,
     resolver_running_button_specs,
 )
@@ -183,22 +182,8 @@ async def _on_resolve_merge(
             ctx.channel_id,
             "Replay of the merge succeeded without conflicts — proceeding to merge into master.",
         )
-        msg = await ctx.runner.merge_branch(inst)
-        ctx.store.update_instance(inst)
-        banner_suffix = ""
-        if not merge_msg_is_failure(msg):
-            ctx.store.clear_pending_merge(inst.id)
-            workflows.clear_stale_branches(ctx.store, inst.branch or "")
-        else:
-            failure_kind = ctx.runner._last_merge_failure_kind.get(inst.id)
-            ctx.store.set_pending_merge_failure_kind(inst.id, failure_kind)
-            banner_suffix = f"\n\n{merge_failed_banner(failure_kind)}"
-        # Escape only the runner output (may contain conflict file paths with
-        # underscores etc.); the banner is trusted formatting and must keep
-        # its **bold** + `code` markdown intact.
-        await ctx.messenger.send_text(
-            ctx.channel_id, f"{ctx.messenger.escape(msg)}{banner_suffix}",
-        )
+        text, _ = await workflows.merge_from_user(ctx, inst)
+        await ctx.messenger.send_text(ctx.channel_id, text)
         return
 
     # Build prompt, consume any deferred user-typed guidance.
@@ -301,24 +286,8 @@ async def _on_resolve_merge(
             )
         except Exception:
             log.debug("Could not edit source message after resolve success", exc_info=True)
-    msg = await ctx.runner.merge_branch(inst)
-    ctx.store.update_instance(inst)
-    banner_suffix = ""
-    if not merge_msg_is_failure(msg):
-        ctx.store.clear_pending_merge(inst.id)
-        if inst.branch:
-            workflows.clear_stale_branches(ctx.store, inst.branch)
-        from bot.engine.deploy import apply_post_merge_deploy
-        await apply_post_merge_deploy(ctx.messenger, ctx.store, inst)
-        if ctx.on_merged:
-            await ctx.on_merged()
-    else:
-        failure_kind = ctx.runner._last_merge_failure_kind.get(inst.id)
-        ctx.store.set_pending_merge_failure_kind(inst.id, failure_kind)
-        banner_suffix = f"\n\n{merge_failed_banner(failure_kind)}"
-    await ctx.messenger.send_text(
-        ctx.channel_id, f"{ctx.messenger.escape(msg)}{banner_suffix}",
-    )
+    text, _ = await workflows.merge_from_user(ctx, inst)
+    await ctx.messenger.send_text(ctx.channel_id, text)
 
 
 async def _post_resolver_failure(

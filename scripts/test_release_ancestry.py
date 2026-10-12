@@ -352,14 +352,28 @@ def test_k_gates_run_before_the_irreversible_step() -> None:
     _check(gate != -1 and push != -1 and gate < push, True,
            "deploy gate runs before the push to origin")
 
+    # Every merge path records through merge_and_record, so the deploy gate
+    # lives there; the chain's close lives in _finalize_merge.
+    record_src = inspect.getsource(workflows.merge_and_record)
+    check = record_src.find("merge_blocks_ship")
+    deploy = record_src.find("apply_post_merge_deploy")
+    _check(check != -1 and deploy != -1 and check < deploy, True,
+           "every merge path checks containment before deploy bookkeeping")
+    _check("merge_msg_release_orphaned" in inspect.getsource(workflows.merge_blocks_ship),
+           True, "and the containment check includes the orphaned release")
     merge_src = inspect.getsource(workflows._finalize_merge)
     check = merge_src.find("merge_msg_release_orphaned")
-    deploy = merge_src.find("apply_post_merge_deploy")
     close = merge_src.find("close_conversation")
-    _check(check != -1 and deploy != -1 and check < deploy, True,
-           "chain checks containment before deploying")
-    _check(close != -1 and check < close, True,
+    _check("merge_and_record" in merge_src, True,
+           "the chain merges through the shared bookkeeping")
+    _check(close != -1 and check != -1 and check < close, True,
            "chain checks containment before closing the thread")
+    from bot.engine import branch_actions, callbacks
+    finish_src = inspect.getsource(branch_actions._finish_branch_action)
+    _check("not keep_open" in finish_src, True,
+           "the Merge button's post-Done close can be held open")
+    _check("keep_open=workflows.merge_blocks_ship(msg)" in inspect.getsource(callbacks),
+           True, "and the Merge button holds it open on a tree that must not ship")
 
     # Discard has two orderings to keep, in opposite directions: the scan has
     # to read the branch while it still exists, and the note has to be worded

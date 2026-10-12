@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 
 from bot import config
-from bot.claude.types import Instance, merge_msg_is_failure
+from bot.claude.types import Instance
 from bot.engine import (
     lifecycle,
     workflows,
@@ -17,7 +17,6 @@ from bot.platform.formatting import (
     expanded_button_specs,
     format_expanded_result_chunks,
     format_result_md,
-    merge_failed_banner,
     mode_label,
     running_button_specs,
 )
@@ -141,31 +140,12 @@ async def handle_callback(
             msg = await ctx.runner.merge_branch(inst)  # returns "Already merged (...)"
             await _finish_resolved_branch(ctx, inst, msg, source_msg_id)
             return
-        branch_name = inst.branch  # Save before merge clears it
-        msg = await ctx.runner.merge_branch(inst)
-        ctx.store.update_instance(inst)
-        banner_suffix = ""
-        # Clear stale branch refs on all sibling instances
-        if branch_name and not merge_msg_is_failure(msg):
-            ctx.store.clear_pending_merge(inst.id)
-            workflows.clear_stale_branches(ctx.store, branch_name)
-            from bot.engine.deploy import apply_post_merge_deploy
-            await apply_post_merge_deploy(ctx.messenger, ctx.store, inst)
-            # Apply "merged" tag before close (tag must land before archive)
-            if ctx.on_merged:
-                await ctx.on_merged()
-        elif merge_msg_is_failure(msg):
-            # Refresh the pending_merge failure_kind so the banner the user
-            # sees next time matches this attempt's symptom, not the original
-            # failure that opened the pending_merge entry.
-            failure_kind = ctx.runner._last_merge_failure_kind.get(inst.id)
-            ctx.store.set_pending_merge_failure_kind(inst.id, failure_kind)
-            banner_suffix = f"\n\n{merge_failed_banner(failure_kind)}"
-        # Escape the runner output but append the banner unescaped — its
-        # **bold** + `code` markdown is intentional. Same escape model as the
-        # /merge slash and resolve_merge follow-ups above.
-        escaped = f"{ctx.messenger.escape(msg)}{banner_suffix}"
-        await _finish_branch_action(ctx, inst, escaped, source_msg_id)
+        # The "merged" tag lands inside merge_from_user, before the close.
+        escaped, msg = await workflows.merge_from_user(ctx, inst)
+        await _finish_branch_action(
+            ctx, inst, escaped, source_msg_id,
+            keep_open=workflows.merge_blocks_ship(msg),
+        )
 
     elif action == "discard":
         inst = ctx.store.get_instance(instance_id)

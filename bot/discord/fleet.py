@@ -40,7 +40,6 @@ import discord
 from bot.procutil import run_capture
 from bot.claude.types import Instance, InstanceStatus
 from bot.platform.base import ButtonSpec
-from bot.platform.formatting import merge_failed_banner, merge_failed_button_specs
 
 if TYPE_CHECKING:
     from bot.discord.bot import ClaudeBot
@@ -329,7 +328,7 @@ async def run_fleet_ship(
 
 async def _ship_one(bot: ClaudeBot, t: ShipTarget) -> bool:
     """Merge one thread's branch; on failure post the standard merge-failed UI."""
-    from bot.engine.steps import _finalize_merge
+    from bot.engine.steps import _finalize_merge, record_merge_failure
 
     lookup = bot._forums.thread_to_project(t.thread_id)
     info = lookup[1] if lookup else None
@@ -357,22 +356,8 @@ async def _ship_one(bot: ClaudeBot, t: ShipTarget) -> bool:
             ctx.store.clear_pending_merge(pm[0])
         ctx.store.clear_pending_merge(t.inst.id)
     else:
-        failure_kind = ctx.runner._last_merge_failure_kind.get(t.inst.id)
-        msg = merge_failed_banner(failure_kind)
-        try:
-            await ctx.messenger.send_text(
-                t.thread_id, msg,
-                buttons=merge_failed_button_specs(t.inst.id), silent=True,
-            )
-        except Exception:
-            log.debug("fleet: failed to post merge-failed banner", exc_info=True)
-        ctx.store.set_pending_merge(
-            t.inst.id,
-            session_id=t.session_id,
-            channel_id=t.thread_id,
-            repo_name=t.repo_name,
-            message=msg,
-            failure_kind=failure_kind,
+        await record_merge_failure(
+            ctx, t.inst, session_id=t.session_id, channel_id=t.thread_id,
         )
     return ok
 

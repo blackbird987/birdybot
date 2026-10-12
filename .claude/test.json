@@ -158,7 +158,8 @@
     "facades": "python scripts/test_facades.py",
     "directive_args": "python scripts/test_directive_args.py",
     "boot_modules": "python scripts/test_boot_modules.py",
-    "merge_push": "python scripts/test_merge_push.py"
+    "merge_push": "python scripts/test_merge_push.py",
+    "merge_paths": "python scripts/test_merge_paths.py"
   },
 
   "auth": {
