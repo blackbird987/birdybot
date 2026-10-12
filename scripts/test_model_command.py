@@ -129,12 +129,13 @@ def _test_source_has_no_model_name_table() -> list[str]:
     """The regression this whole design exists to prevent."""
     failures: list[str] = []
     root = Path(__file__).resolve().parents[1]
-    fmt = (root / "bot/platform/formatting.py").read_text()
-    # A MODEL_DISPLAY-style dict would be exactly the stale-list trap.
-    if "MODEL_DISPLAY" in fmt:
-        failures.append("formatting.py grew a hardcoded MODEL_DISPLAY table")
-    if "VALID_MODELS" in fmt:
-        failures.append("formatting.py grew a closed VALID_MODELS whitelist")
+    for rel in ("bot/platform/formatting.py", "bot/platform/modes.py"):
+        src = (root / rel).read_text()
+        # A MODEL_DISPLAY-style dict would be exactly the stale-list trap.
+        if "MODEL_DISPLAY" in src:
+            failures.append(f"{rel} grew a hardcoded MODEL_DISPLAY table")
+        if "VALID_MODELS" in src:
+            failures.append(f"{rel} grew a closed VALID_MODELS whitelist")
     return failures
 
 

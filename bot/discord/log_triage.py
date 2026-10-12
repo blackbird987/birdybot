@@ -133,7 +133,7 @@ def _seed_initial_offset(log_path: Path, max_lines: int) -> int:
 # second copy here would be duplication that can only drift.
 #
 # Log content goes straight to Discord, so if a secret name ever needs adding,
-# add it to `_ENV_SECRET_NAMES` in bot/platform/formatting.py and every output
+# add it to `_ENV_SECRET_NAMES` in bot/platform/redact.py and every output
 # path gains it at once -- which is the whole point of it living there.
 
 

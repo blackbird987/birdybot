@@ -25,7 +25,7 @@ _NOWND: dict = config.NOWND
 #
 # Public because the log-triage subprocess (bot/discord/log_triage.py) spawns
 # a CLI too and has exactly the same reason to strip these. Kept separate from
-# `_ENV_SECRET_NAMES` in bot/platform/formatting.py on purpose -- that list
+# `_ENV_SECRET_NAMES` in bot/platform/redact.py on purpose -- that list
 # answers "what must never be PRINTED", this one answers "what must never be
 # INHERITED", and they genuinely differ at both ends.
 SESSION_STRIPPED_ENV_VARS: tuple[str, ...] = (
