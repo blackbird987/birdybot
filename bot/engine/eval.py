@@ -513,7 +513,7 @@ def _check_review_prior_attempts(inst: Instance, text: str) -> list[EvalFlag]:
     that is a different failure with its own handling.
     """
     from bot.engine import prior_art
-    from bot.engine.workflows import _REVIEW_STATUS_RE
+    from bot.engine.step_parse import _REVIEW_STATUS_RE
 
     if inst.origin != InstanceOrigin.REVIEW_PLAN:
         return []
@@ -539,7 +539,7 @@ def _check_chain_prior_attempts(inst: Instance, text: str) -> list[EvalFlag]:
     here as it is to the bot. An origin whose directives are never dispatched
     is skipped for the same reason: its /chain launched nothing.
     """
-    from bot.engine.commands import _extract_chain_directive
+    from bot.engine.directives.chain import _extract_chain_directive
     from bot.engine.lifecycle import _NO_DIRECTIVE_ORIGINS
 
     if inst.origin in _NO_DIRECTIVE_ORIGINS:

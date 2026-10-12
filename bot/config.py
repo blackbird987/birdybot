@@ -1235,7 +1235,6 @@ if REPOS_BASE_DIR and not REPOS_BASE_DIR.is_dir():
     warnings.warn(f"REPOS_BASE_DIR does not exist: {REPOS_BASE_DIR}")
     REPOS_BASE_DIR = None
 
-# Ensure data dirs exist
 REBOOT_MSG_FILE: Path = DATA_DIR / "reboot_message.json"
 REBOOT_REQUEST_FILE: Path = DATA_DIR / "reboot_request.json"
 # Informational record of a deferred reboot — written fresh on each defer,
@@ -1247,6 +1246,13 @@ DRAIN_QUEUE_FILE: Path = DATA_DIR / "drain_queue.json"
 PENDING_PROMPTS_FILE: Path = DATA_DIR / "pending_prompts.json"
 USAGE_QUEUE_FILE: Path = DATA_DIR / "usage_queue.json"
 PENDING_IMAGES_DIR: Path = DATA_DIR / "pending_images"
+
+# Ensure data dirs exist
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+PENDING_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+
 # Uploads are kept for a retention window, NOT deleted when the turn that
 # received them returns.  The path we hand the session lives on in its
 # transcript, so a steer, a retry, or a plain "look at that screenshot again"
@@ -1494,10 +1500,6 @@ Do NOT end with a "next I'll..." plan and no action — that strands the thread 
 with nothing to resume it. Either do the work now, schedule a wake, or emit \
 [TURN_COMPLETE]. If you catch yourself about to describe what you'd do next, do \
 it THIS turn instead."""
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-LOGS_DIR.mkdir(parents=True, exist_ok=True)
-PENDING_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
 # System prompt appended via --append-system-prompt
 MOBILE_HINT = (
