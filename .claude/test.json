@@ -161,7 +161,8 @@
     "merge_push": "python scripts/test_merge_push.py",
     "merge_paths": "python scripts/test_merge_paths.py",
     "bg_release": "python scripts/test_bg_release.py",
-    "repo_lookup": "python scripts/test_repo_lookup.py"
+    "repo_lookup": "python scripts/test_repo_lookup.py",
+    "eval_files": "python scripts/test_eval_files.py"
   },
 
   "auth": {

@@ -10,7 +10,6 @@ from bot.engine.eval import (
 )
 
 
-
 def full_report(days: int = 7) -> str:
     """Generate a weekly report with per-repo breakdown and trends.
 
