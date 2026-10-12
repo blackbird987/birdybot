@@ -345,10 +345,9 @@ class MergeMixin:
             return await asyncio.to_thread(self._merge_branch_sync, instance)
 
     def _merge_branch_sync(self, instance: Instance) -> str:
-        stashed = False
         repo = instance.repo_path
         target = instance.original_branch
-        # Fresh attempt — clear any stale failure-kind from a prior run.
+        # Fresh attempt, so clear any stale failure-kind from a prior run.
         # Success paths intentionally don't clear: pending_merge is wiped by
         # the platform layer on success, so the side-channel entry simply
         # ages out the next time merge_branch is invoked for this instance.
@@ -386,8 +385,17 @@ class MergeMixin:
             # attempted and failed — distinct from a generic merge failure.
             self._last_merge_failure_kind[instance.id] = MERGE_FAIL_RECOVERY_FAILED
             return f"Merge failed: {precheck.error}"
-        recovery_note = precheck.recovery_note
+        # Surface any recovery note from the precheck path (e.g. orphaned
+        # index recovery stashed local changes) on success AND failure, so we
+        # never silently mutate the user's main repo without telling them.
+        recovery_suffix = f"\n{precheck.recovery_note}" if precheck.recovery_note else ""
+        stash_sha: str | None = None
         merge_succeeded = False
+
+        def failed(detail: str) -> str:
+            stash_status = self._restore_stash(repo, stash_sha) if stash_sha else ""
+            return f"Merge failed: {detail}{stash_status}{recovery_suffix}"
+
         try:
             # Copy session files back before cleanup.  account_dir=None lets
             # the helper fall through to instance.session_account (the account
@@ -401,28 +409,9 @@ class MergeMixin:
                 target = self._get_default_branch(repo)
                 instance.original_branch = target
 
-            # Stash uncommitted changes that would block checkout.  Capture
-            # the file list (capped for display) and the true total so the
-            # post-merge message can report state honestly without hiding
-            # the count behind the cap.
-            dirty_files: list[str] = []
-            dirty_total = 0
-            status_r = run_capture(["git", "status", "--porcelain"], cwd=repo)
-            if status_r.stdout.strip():
-                parsed = [
-                    line[3:].strip() for line in status_r.stdout.strip().splitlines()
-                ]
-                dirty_total = len(parsed)
-                dirty_files = parsed[:5]  # display cap only — dirty_total carries truth
-                log.info("Stashing dirty working tree in %s before merge (%d files): %s",
-                         repo, dirty_total, ", ".join(dirty_files))
-                stash_r = run_capture(
-                    ["git", "stash", "push", "-m",
-                     f"auto-stash for merge {instance.branch}"],
-                    cwd=repo,
-                )
-                if stash_r.returncode == 0:
-                    stashed = True
+            stash_sha, dirty_files, dirty_total = self._stash_dirty(
+                repo, f"auto-stash for merge {instance.branch}",
+            )
 
             # Set up union merge driver for changelog (prevents conflict
             # failures).
@@ -431,151 +420,21 @@ class MergeMixin:
             # Ensure main repo is on the correct branch before merging
             run_capture(["git", "checkout", target], cwd=repo, check=True)
 
-            # Sync target with origin before merging: releases can land on
-            # origin from another machine first, and merging/tagging against
-            # a stale local target mints versions below the remote's.
-            # Offline-tolerant — a failed fetch degrades to a local merge
-            # with a visible note rather than blocking.
-            sync_note = ""
             has_remote = run_capture(
                 ["git", "remote", "get-url", "origin"], cwd=repo,
             ).returncode == 0
+            sync_note = ""
             if has_remote:
-                fetch_err: str | None = None
-                try:
-                    fetch_r = run_capture(
-                        ["git", "fetch", "origin", "--tags", "--prune"], cwd=repo, timeout=30,
-                    )
-                    if fetch_r.returncode != 0:
-                        fetch_err = (fetch_r.stderr or fetch_r.stdout or "").strip()
-                except subprocess.TimeoutExpired:
-                    fetch_err = "timed out (30s)"
-                except Exception as e:
-                    fetch_err = f"{type(e).__name__}"
-                if fetch_err is not None:
-                    log.warning("Fetch origin failed in %s before merge: %s",
-                                repo, fetch_err)
-                    sync_note = (
-                        "\nCould not sync with origin — merged against local state"
-                    )
-                    # Same reasoning as the push note below: without git's own
-                    # sentence this says only that something went wrong, and
-                    # this is the branch the credential hang actually landed
-                    # in ("Fetch origin failed ... timed out (30s)").
-                    if reason := git_fail_reason(fetch_err):
-                        sync_note += f"\n`{reason}`"
-                else:
-                    ahead = self._rev_count(repo, f"origin/{target}..{target}")
-                    behind = self._rev_count(repo, f"{target}..origin/{target}")
-                    if ahead and behind:
-                        # Local target and origin have diverged — merging
-                        # now would build on a history origin rejects.
-                        self._last_merge_failure_kind[instance.id] = (
-                            MERGE_FAIL_DIVERGED
-                        )
-                        log.error(
-                            "Local %s and origin/%s diverged in %s "
-                            "(+%d local / +%d remote) — aborting merge",
-                            target, target, repo, ahead, behind,
-                        )
-                        stash_status = self._restore_stash(repo) if stashed else ""
-                        recovery_suffix = (
-                            f"\n{recovery_note}" if recovery_note else ""
-                        )
-                        return (
-                            f"Merge failed: local {target} and origin/{target} "
-                            f"have diverged (+{ahead} local / +{behind} remote). "
-                            f"Run `git pull --rebase` in the main repo, then "
-                            f"Try Merge Again."
-                            f"{stash_status}{recovery_suffix}"
-                        )
-                    if behind and not ahead:
-                        ff_r = run_capture(
-                            ["git", "merge", "--ff-only", f"origin/{target}"], cwd=repo,
-                        )
-                        if ff_r.returncode != 0:
-                            ff_detail = (ff_r.stderr or ff_r.stdout or "").strip()
-                            log.warning(
-                                "Fast-forward of %s to origin failed in %s: %s",
-                                target, repo, ff_detail,
-                            )
-                            sync_note = (
-                                "\nCould not fast-forward to origin — "
-                                "merged against local state"
-                            )
-                            if reason := git_fail_reason(ff_detail):
-                                sync_note += f"\n`{reason}`"
-                        else:
-                            log.info(
-                                "Fast-forwarded %s to origin/%s (+%d) in %s",
-                                target, target, behind, repo,
-                            )
+                sync_note, diverged = self._sync_target_with_origin(instance, repo, target)
+                if diverged:
+                    return failed(diverged)
 
-            # Merge the worktree's branch.  No -X ours: real conflicts
-            # surface and flow through _auto_resolve_merge_conflicts, which
-            # tries three-way merge-file first (preserving both sides'
-            # non-overlapping changes via the union-style result) and falls
-            # back to the feature branch only on textual hunk overlap.
-            # -X ours silently kept master's hunk on every conflict, which
-            # invisibly clobbered the second of two parallel builds touching
-            # the same file.
-            merge_r = run_capture(
-                ["git", "merge", instance.branch, "--no-ff",
-                 "-m", f"Merge {instance.branch} ({instance.display_id()})"],
-                cwd=repo,
-            )
-
-            auto_resolved = 0
-            if merge_r.returncode != 0:
-                detail = (merge_r.stderr or merge_r.stdout or "").strip()
-                log.warning("Merge conflict for %s into %s: %s — attempting auto-resolve",
-                            instance.branch, target, detail)
-                try:
-                    auto_resolved = self._auto_resolve_merge_conflicts(
-                        repo, instance.branch, detail,
-                    )
-                except Exception:
-                    log.warning("Auto-resolve raised unexpected error for %s",
-                                instance.branch, exc_info=True)
-                    auto_resolved = -1
-                if auto_resolved < 0:
-                    run_capture(["git", "merge", "--abort"], cwd=repo)
-                    self._last_merge_failure_kind[instance.id] = (
-                        self._classify_post_abort_state(repo)
-                    )
-                    log.error("Merge failed for %s into %s in %s: %s",
-                              instance.branch, target, repo, detail)
-                    stash_status = self._restore_stash(repo) if stashed else ""
-                    # Surface precheck recovery_note even on failure — if Path B
-                    # stashed local changes during recovery, the user must be
-                    # told regardless of whether the subsequent merge worked.
-                    recovery_suffix = f"\n{recovery_note}" if recovery_note else ""
-                    return f"Merge failed: {detail}{stash_status}{recovery_suffix}"
+            auto_resolved, conflict = self._merge_or_abort(instance, repo, target)
+            if conflict is not None:
+                return failed(conflict)
 
             # --- Cleanup (reached on successful merge) ---
-
-            # Remove worktree (--force handles uncommitted changes)
-            if instance.worktree_path and Path(instance.worktree_path).exists():
-                r = run_capture(
-                    ["git", "worktree", "remove", instance.worktree_path, "--force"], cwd=repo,
-                )
-                if r.returncode != 0:
-                    log.warning("git worktree remove failed for %s: %s",
-                                instance.worktree_path, r.stderr.strip())
-                    # Fallback: manual removal + prune
-                    try:
-                        shutil.rmtree(instance.worktree_path, ignore_errors=True)
-                        run_capture(["git", "worktree", "prune"], cwd=repo)
-                    except Exception:
-                        pass
-
-            # Delete branch (-d safe after merge; -D fallback if -d fails)
-            r = run_capture(["git", "branch", "-d", instance.branch], cwd=repo)
-            if r.returncode != 0:
-                run_capture(["git", "branch", "-D", instance.branch], cwd=repo)
-
-            # Clean up worktree project dir
-            self._cleanup_worktree_session_dir(instance)
+            self._remove_worktree_and_branch(instance, repo)
 
             # Deferred tag creation: the LLM committed `vX.Y.Z: Summary` but
             # did not run `git tag` in the worktree. Now that the merge
@@ -598,97 +457,19 @@ class MergeMixin:
             # release we just cut is the ceiling rather than its own subject.
             tag_warning += self._release_containment_warning(repo, tag_name)
 
-            # Push merged result to origin.  `has_remote` was probed by the
-            # pre-merge sync block above.
-            push_note = ""
-            try:
-                if not has_remote:
-                    log.info("No remote 'origin' in %s — skipping push", repo)
-                    push_note = "\nℹ️ No remote configured — local merge is fine"
-                elif (push_r := run_capture(
-                    ["git", "push", "origin", target], cwd=repo, timeout=30,
-                )).returncode != 0:
-                    push_detail = (push_r.stderr or push_r.stdout or "").strip()
-                    log.error("Push to origin after merge in %s: %s",
-                              repo, push_detail)
-                    push_note = f"\nCould not push to origin (exit {push_r.returncode})"
-                    if reason := git_fail_reason(push_detail):
-                        push_note += f"\n`{reason}`"
-                else:
-                    log.info("Pushed %s to origin after merge in %s", target, repo)
-                    # Push tags pointing at any commit in the branch-unique
-                    # window. Covers the bot-created release tag plus any
-                    # legacy LLM-self-tagged commits that may still exist
-                    # on those shas.
-                    try:
-                        tag_names: list[str] = []
-                        seen: set[str] = set()
-                        for sha in candidate_shas:
-                            tag_r = run_capture(["git", "tag", "--points-at", sha], cwd=repo)
-                            if tag_r.returncode != 0:
-                                log.debug(
-                                    "git tag --points-at %s failed in %s (rc=%d), skipping",
-                                    sha[:7], repo, tag_r.returncode,
-                                )
-                                continue
-                            for name in (tag_r.stdout or "").splitlines():
-                                name = name.strip()
-                                if name and name not in seen:
-                                    seen.add(name)
-                                    tag_names.append(name)
-                        if tag_names:
-                            tag_push_r = run_capture(
-                                ["git", "push", "origin"] + tag_names, cwd=repo, timeout=30,
-                            )
-                            if tag_push_r.returncode != 0:
-                                tag_detail = (tag_push_r.stderr or tag_push_r.stdout or "").strip()
-                                log.error("Tag push to origin in %s: %s", repo, tag_detail)
-                                push_note += f"\nTags not pushed (exit {tag_push_r.returncode})"
-                                if reason := git_fail_reason(tag_detail):
-                                    push_note += f"\n`{reason}`"
-                            else:
-                                tag_list = ", ".join(tag_names)
-                                log.info("Pushed tags [%s] to origin in %s", tag_list, repo)
-                                push_note += f"\nTags pushed: {tag_list}"
-                    except subprocess.TimeoutExpired:
-                        log.error("Tag push to origin timed out (30s) in %s", repo)
-                        push_note += "\nTag push timed out (30s)"
-                    except Exception as e:
-                        log.error("Tag push error in %s: %s", repo, e)
-                        push_note += f"\nTag push error: {type(e).__name__}"
-            except subprocess.TimeoutExpired:
-                log.error("Push to origin timed out (30s) in %s", repo)
-                push_note = "\nPush to origin timed out (30s)"
-            except Exception as e:
-                log.error("Push to origin error in %s: %s", repo, e)
-                push_note = f"\nPush to origin error: {type(e).__name__}"
+            push_note = self._push_with_tags(repo, target, has_remote, candidate_shas)
 
             instance.branch = None
             instance.worktree_path = None
             suffix = ""
             if auto_resolved > 0:
                 suffix = f" (auto-resolved {auto_resolved} conflict{'s' if auto_resolved != 1 else ''})"
-            dirty_note = ""
-            if dirty_total:
-                files_str = ", ".join(f"`{f}`" for f in dirty_files)
-                if dirty_total > len(dirty_files):
-                    dirty_note = (
-                        f"\nℹ️ Stashed {dirty_total} uncommitted file(s) before merge "
-                        f"(showing first {len(dirty_files)}): {files_str}"
-                    )
-                else:
-                    dirty_note = (
-                        f"\nℹ️ Stashed {dirty_total} uncommitted file(s) before merge: {files_str}"
-                    )
-            stash_status = self._restore_stash(repo) if stashed else ""
+            stash_status = self._restore_stash(repo, stash_sha) if stash_sha else ""
             merge_succeeded = True
-            # Surface any recovery note from the precheck path (e.g. orphaned
-            # index recovery stashed local changes) so we never silently
-            # mutate the user's main repo without telling them.
-            recovery_suffix = f"\n{recovery_note}" if recovery_note else ""
             return (
-                f"Merged into {target}{suffix}{dirty_note}{sync_note}"
-                f"{tag_warning}{push_note}{stash_status}{recovery_suffix}"
+                f"Merged into {target}{suffix}"
+                f"{self._dirty_note(dirty_files, dirty_total) if stash_sha else ''}"
+                f"{sync_note}{tag_warning}{push_note}{stash_status}{recovery_suffix}"
             )
         except subprocess.CalledProcessError as e:
             # Abort any in-progress merge to keep main repo clean for other sessions
@@ -699,11 +480,7 @@ class MergeMixin:
             detail = (e.stderr or e.stdout or "").strip()
             log.error("Merge failed for %s into %s in %s: %s",
                       instance.branch, target, repo, detail)
-            stash_status = self._restore_stash(repo) if stashed else ""
-            # Same rationale as the auto_resolved<0 branch above — if Path B
-            # stashed during recovery, surface it on failure too.
-            recovery_suffix = f"\n{recovery_note}" if recovery_note else ""
-            return f"Merge failed: {detail}{stash_status}{recovery_suffix}"
+            return failed(detail)
         finally:
             # Bug 2 fix: any non-CalledProcessError exception (OSError,
             # KeyboardInterrupt, SystemExit, etc.) raised after `git merge`
@@ -726,6 +503,252 @@ class MergeMixin:
                 except Exception:
                     log.exception("git merge --abort raised during finally cleanup")
 
+    @staticmethod
+    def _stash_dirty(repo: str, label: str) -> tuple[str | None, list[str], int]:
+        """Stash the main repo's tracked changes that would block checkout.
+
+        Returns the new stash entry's sha (None when nothing was stashed), the
+        stashed paths capped for display, and their true total so the merge
+        message can report state honestly without hiding the count behind the
+        cap. Untracked files are not counted: a plain ``git stash push``
+        leaves them where they are, and with nothing but untracked files it
+        exits 0 having made no entry at all. Treating that as a stash used to
+        name files as stashed that never were and then pop ``stash@{0}``,
+        which is whatever entry happened to be on top of a stack every
+        worktree of the repo shares.
+        """
+        status_r = run_capture(["git", "status", "--porcelain"], cwd=repo)
+        tracked = [
+            line[3:].strip() for line in status_r.stdout.splitlines()
+            if line.strip() and not line.startswith("??")
+        ]
+        if not tracked:
+            return None, [], 0
+        log.info("Stashing dirty working tree in %s before merge (%d files): %s",
+                 repo, len(tracked), ", ".join(tracked[:5]))
+        before = ref_sha(repo, "refs/stash")
+        stash_r = run_capture(["git", "stash", "push", "-m", label], cwd=repo)
+        after = ref_sha(repo, "refs/stash")
+        if stash_r.returncode != 0 or not after or after == before:
+            return None, [], 0
+        return after, tracked[:5], len(tracked)
+
+    @staticmethod
+    def _dirty_note(dirty_files: list[str], dirty_total: int) -> str:
+        if not dirty_total:
+            return ""
+        files_str = ", ".join(f"`{f}`" for f in dirty_files)
+        if dirty_total > len(dirty_files):
+            return (
+                f"\nℹ️ Stashed {dirty_total} uncommitted file(s) before merge "
+                f"(showing first {len(dirty_files)}): {files_str}"
+            )
+        return f"\nℹ️ Stashed {dirty_total} uncommitted file(s) before merge: {files_str}"
+
+    def _sync_target_with_origin(
+        self, instance: Instance, repo: str, target: str,
+    ) -> tuple[str, str | None]:
+        """Bring ``target`` level with origin before merging into it.
+
+        Releases can land on origin from another machine first, and
+        merging/tagging against a stale local target mints versions below the
+        remote's. Offline-tolerant: a failed fetch degrades to a local merge
+        with a visible note rather than blocking. Returns ``(note, refusal)``;
+        a refusal means the two have diverged and the merge must not run.
+        """
+        fetch_err: str | None = None
+        try:
+            fetch_r = run_capture(
+                ["git", "fetch", "origin", "--tags", "--prune"], cwd=repo, timeout=30,
+            )
+            if fetch_r.returncode != 0:
+                fetch_err = (fetch_r.stderr or fetch_r.stdout or "").strip()
+        except subprocess.TimeoutExpired:
+            fetch_err = "timed out (30s)"
+        except Exception as e:
+            fetch_err = f"{type(e).__name__}"
+        if fetch_err is not None:
+            log.warning("Fetch origin failed in %s before merge: %s",
+                        repo, fetch_err)
+            note = "\nCould not sync with origin — merged against local state"
+            # Same reasoning as the push note: without git's own sentence this
+            # says only that something went wrong, and this is the branch the
+            # credential hang actually landed in ("Fetch origin failed ...
+            # timed out (30s)").
+            if reason := git_fail_reason(fetch_err):
+                note += f"\n`{reason}`"
+            return note, None
+        ahead = self._rev_count(repo, f"origin/{target}..{target}")
+        behind = self._rev_count(repo, f"{target}..origin/{target}")
+        if ahead and behind:
+            # Local target and origin have diverged — merging now would build
+            # on a history origin rejects.
+            self._last_merge_failure_kind[instance.id] = MERGE_FAIL_DIVERGED
+            log.error(
+                "Local %s and origin/%s diverged in %s "
+                "(+%d local / +%d remote) — aborting merge",
+                target, target, repo, ahead, behind,
+            )
+            return "", (
+                f"local {target} and origin/{target} "
+                f"have diverged (+{ahead} local / +{behind} remote). "
+                f"Run `git pull --rebase` in the main repo, then "
+                f"Try Merge Again."
+            )
+        if behind and not ahead:
+            ff_r = run_capture(
+                ["git", "merge", "--ff-only", f"origin/{target}"], cwd=repo,
+            )
+            if ff_r.returncode != 0:
+                ff_detail = (ff_r.stderr or ff_r.stdout or "").strip()
+                log.warning(
+                    "Fast-forward of %s to origin failed in %s: %s",
+                    target, repo, ff_detail,
+                )
+                note = (
+                    "\nCould not fast-forward to origin — "
+                    "merged against local state"
+                )
+                if reason := git_fail_reason(ff_detail):
+                    note += f"\n`{reason}`"
+                return note, None
+            log.info(
+                "Fast-forwarded %s to origin/%s (+%d) in %s",
+                target, target, behind, repo,
+            )
+        return "", None
+
+    def _merge_or_abort(
+        self, instance: Instance, repo: str, target: str,
+    ) -> tuple[int, str | None]:
+        """Merge the build branch; returns ``(auto_resolved, failure_detail)``.
+
+        No -X ours: real conflicts surface and flow through
+        _auto_resolve_merge_conflicts, which tries three-way merge-file first
+        (preserving both sides' non-overlapping changes via the union-style
+        result) and falls back to the feature branch only on textual hunk
+        overlap. -X ours silently kept master's hunk on every conflict, which
+        invisibly clobbered the second of two parallel builds touching the
+        same file. A conflict that cannot be resolved is aborted and
+        classified, and its git output comes back as the failure detail.
+        """
+        merge_r = run_capture(
+            ["git", "merge", instance.branch, "--no-ff",
+             "-m", f"Merge {instance.branch} ({instance.display_id()})"],
+            cwd=repo,
+        )
+        if merge_r.returncode == 0:
+            return 0, None
+        detail = (merge_r.stderr or merge_r.stdout or "").strip()
+        log.warning("Merge conflict for %s into %s: %s — attempting auto-resolve",
+                    instance.branch, target, detail)
+        try:
+            auto_resolved = self._auto_resolve_merge_conflicts(
+                repo, instance.branch, detail,
+            )
+        except Exception:
+            log.warning("Auto-resolve raised unexpected error for %s",
+                        instance.branch, exc_info=True)
+            auto_resolved = -1
+        if auto_resolved >= 0:
+            return auto_resolved, None
+        run_capture(["git", "merge", "--abort"], cwd=repo)
+        self._last_merge_failure_kind[instance.id] = (
+            self._classify_post_abort_state(repo)
+        )
+        log.error("Merge failed for %s into %s in %s: %s",
+                  instance.branch, target, repo, detail)
+        return auto_resolved, detail
+
+    def _remove_worktree_and_branch(self, instance: Instance, repo: str) -> None:
+        """After a successful merge: drop the worktree, the branch and its session dir."""
+        # --force handles uncommitted changes
+        if instance.worktree_path and Path(instance.worktree_path).exists():
+            r = run_capture(
+                ["git", "worktree", "remove", instance.worktree_path, "--force"], cwd=repo,
+            )
+            if r.returncode != 0:
+                log.warning("git worktree remove failed for %s: %s",
+                            instance.worktree_path, r.stderr.strip())
+                # Fallback: manual removal + prune
+                try:
+                    shutil.rmtree(instance.worktree_path, ignore_errors=True)
+                    run_capture(["git", "worktree", "prune"], cwd=repo)
+                except Exception:
+                    pass
+
+        # Delete branch (-d safe after merge; -D fallback if -d fails)
+        r = run_capture(["git", "branch", "-d", instance.branch], cwd=repo)
+        if r.returncode != 0:
+            run_capture(["git", "branch", "-D", instance.branch], cwd=repo)
+
+        self._cleanup_worktree_session_dir(instance)
+
+    @staticmethod
+    def _push_with_tags(
+        repo: str, target: str, has_remote: bool, candidate_shas: list[str],
+    ) -> str:
+        """Push the merged target, then the tags in the branch's window; returns the note."""
+        if not has_remote:
+            log.info("No remote 'origin' in %s — skipping push", repo)
+            return "\nℹ️ No remote configured — local merge is fine"
+        try:
+            push_r = run_capture(["git", "push", "origin", target], cwd=repo, timeout=30)
+        except subprocess.TimeoutExpired:
+            log.error("Push to origin timed out (30s) in %s", repo)
+            return "\nPush to origin timed out (30s)"
+        except Exception as e:
+            log.error("Push to origin error in %s: %s", repo, e)
+            return f"\nPush to origin error: {type(e).__name__}"
+        if push_r.returncode != 0:
+            push_detail = (push_r.stderr or push_r.stdout or "").strip()
+            log.error("Push to origin after merge in %s: %s",
+                      repo, push_detail)
+            note = f"\nCould not push to origin (exit {push_r.returncode})"
+            if reason := git_fail_reason(push_detail):
+                note += f"\n`{reason}`"
+            return note
+        log.info("Pushed %s to origin after merge in %s", target, repo)
+        # Push tags pointing at any commit in the branch-unique window.
+        # Covers the bot-created release tag plus any legacy
+        # LLM-self-tagged commits that may still exist on those shas.
+        note = ""
+        try:
+            tag_names: list[str] = []
+            for sha in candidate_shas:
+                tag_r = run_capture(["git", "tag", "--points-at", sha], cwd=repo)
+                if tag_r.returncode != 0:
+                    log.debug(
+                        "git tag --points-at %s failed in %s (rc=%d), skipping",
+                        sha[:7], repo, tag_r.returncode,
+                    )
+                    continue
+                for name in (tag_r.stdout or "").splitlines():
+                    name = name.strip()
+                    if name and name not in tag_names:
+                        tag_names.append(name)
+            if tag_names:
+                tag_push_r = run_capture(
+                    ["git", "push", "origin"] + tag_names, cwd=repo, timeout=30,
+                )
+                if tag_push_r.returncode != 0:
+                    tag_detail = (tag_push_r.stderr or tag_push_r.stdout or "").strip()
+                    log.error("Tag push to origin in %s: %s", repo, tag_detail)
+                    note += f"\nTags not pushed (exit {tag_push_r.returncode})"
+                    if reason := git_fail_reason(tag_detail):
+                        note += f"\n`{reason}`"
+                else:
+                    tag_list = ", ".join(tag_names)
+                    log.info("Pushed tags [%s] to origin in %s", tag_list, repo)
+                    note += f"\nTags pushed: {tag_list}"
+        except subprocess.TimeoutExpired:
+            log.error("Tag push to origin timed out (30s) in %s", repo)
+            note += "\nTag push timed out (30s)"
+        except Exception as e:
+            log.error("Tag push error in %s: %s", repo, e)
+            note += f"\nTag push error: {type(e).__name__}"
+        return note
+
     def _unmerged_paths(self, repo: str) -> list[str]:
         """Tracked paths git still considers unmerged (conflict markers on disk).
 
@@ -743,8 +766,16 @@ class MergeMixin:
             log.debug("unmerged-path check failed in %s", repo, exc_info=True)
             return []
 
-    def _restore_stash(self, repo: str) -> str:
+    def _restore_stash(self, repo: str, stash_sha: str | None = None) -> str:
         """Pop the auto-stash if safe; return user-facing status string.
+
+        ``stash_sha`` names the entry ``_stash_dirty`` made. The stash stack
+        is shared by every worktree of the repo, so another session can push
+        on top of ours while the merge runs; popping ``stash@{0}`` blind
+        would then restore its work into the main repo and leave ours behind.
+        The entry is found by sha, and an entry that is gone is reported
+        rather than replaced by whatever is on top. Without a sha the top
+        entry is used, which is what a caller that just pushed one wants.
 
         Distinguishes five user-facing outcomes (icon shown is what the user sees;
         log severity is set independently per call site):
@@ -767,6 +798,18 @@ class MergeMixin:
         return its merge-result string with stash status appended.
         """
         try:
+            ref = "stash@{0}"
+            if stash_sha:
+                listed = run_capture(["git", "stash", "list", "--format=%H"], cwd=repo)
+                shas = listed.stdout.split()
+                if stash_sha not in shas:
+                    log.warning("Auto-stash %s is no longer in the stash list of %s",
+                                stash_sha[:10], repo)
+                    return (
+                        f"\nThe pre-merge auto-stash (`{stash_sha[:10]}`) is no longer "
+                        "in the stash list. Check `git stash list` manually."
+                    )
+                ref = f"stash@{{{shas.index(stash_sha)}}}"
             check_r = run_capture(["git", "status", "--porcelain"], cwd=repo)
             # Narrow the dirty check to TRACKED changes only. Untracked
             # entries (`??`) don't block a stash pop unless there's an
@@ -790,9 +833,9 @@ class MergeMixin:
                 )
                 return (
                     "\nℹ️ Stashed changes not auto-restored (tracked changes present after merge). "
-                    "Recover with `git stash pop` — list with `git stash list`."
+                    f"Recover with `git stash pop {ref}` — list with `git stash list`."
                 )
-            pop_r = run_capture(["git", "stash", "pop"], cwd=repo)
+            pop_r = run_capture(["git", "stash", "pop", ref], cwd=repo)
             if pop_r.returncode != 0:
                 # A conflicted pop leaves UNMERGED index entries, and
                 # `git checkout -- .` refuses to touch those ("path ... is
@@ -843,7 +886,7 @@ class MergeMixin:
                     )
                     return (
                         "\nStash pop conflicted — aborted. "
-                        "Your changes are safe in `stash@{0}`."
+                        f"Your changes are safe in `{ref}`."
                     )
                 else:
                     log.error(
@@ -857,7 +900,7 @@ class MergeMixin:
                         "could not be undone, so tracked files still contain "
                         "conflict markers. Code in this repo will not import "
                         "until it is repaired. Your pre-merge work is safe in "
-                        "`stash@{0}`. Repair with `git reset --hard HEAD`, then "
+                        f"`{ref}`. Repair with `git reset --hard HEAD`, then "
                         "re-apply the stash."
                     )
             # Clean pop — confirm restoration so the user never has to guess

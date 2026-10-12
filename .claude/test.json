@@ -157,7 +157,8 @@
     "runner_package": "python scripts/test_runner_package.py",
     "facades": "python scripts/test_facades.py",
     "directive_args": "python scripts/test_directive_args.py",
-    "boot_modules": "python scripts/test_boot_modules.py"
+    "boot_modules": "python scripts/test_boot_modules.py",
+    "merge_push": "python scripts/test_merge_push.py"
   },
 
   "auth": {
