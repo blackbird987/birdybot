@@ -10,8 +10,9 @@ honest:
   through the facade. The Discord layer and auto_fix call
   ``commands.on_text`` and ``commands.handle_callback`` that way, and
   auto_fix and the /chain directive call ``workflows.on_autopilot`` and
-  ``workflows.on_conversational_chain`` that way, so those may be patched on
-  their facade. Any other facade patch is green and blind: patch the module
+  ``workflows.on_conversational_chain`` that way, and the button table and
+  /tldr both read ``workflows.on_tldr`` off the facade at call time, so those
+  may be patched on their facade. Any other facade patch is green and blind: patch the module
   that reads the name instead (``query.check_budget``,
   ``chain_runner.spawn_from``).
 - Every name imported or read from a facade anywhere in ``bot/`` or
@@ -38,7 +39,7 @@ import importlib  # noqa: E402
 # facade -> (names a patch on it may target, leaf modules that import no sibling)
 FACADES = {
     "bot.engine.commands": ({"on_text", "handle_callback"}, {"bot.engine.cmd_state"}),
-    "bot.engine.workflows": ({"on_autopilot", "on_conversational_chain"},
+    "bot.engine.workflows": ({"on_autopilot", "on_conversational_chain", "on_tldr"},
                              {"bot.engine.step_policy", "bot.engine.step_parse", "bot.engine.chain_git"}),
 }
 FAILS: list[str] = []
