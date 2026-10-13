@@ -208,6 +208,23 @@ OLD_BUT_ALIVE_RELOG_SECS: int = int(os.getenv("OLD_BUT_ALIVE_RELOG_SECS", "3600"
 # scale the whole watchdog down instead of sleeping through real minutes.
 WATCHDOG_TICK_SECS: float = float(os.getenv("WATCHDOG_TICK_SECS", "10"))
 
+# --- systemd service watchdog (bot/sd_watchdog.py) ---
+#
+# Not the per-run watchdog above: this one watches the bot itself. With
+# WatchdogSec= on the unit, systemd restarts a bot whose event loop froze or
+# whose Discord client is gone for good, where Restart=always only covers a
+# process that exited. Inert without WatchdogSec=, so this switch only matters
+# on a unit that sets it.
+SD_WATCHDOG_ENABLED: bool = os.getenv(
+    "SD_WATCHDOG_ENABLED", "1"
+).lower() in ("1", "true", "yes")
+# How long the Discord client must stay down (closed, or its start task ended)
+# before the pings stop. discord.py rides out ordinary outages by itself, so
+# this is long enough that only a client that will never come back counts.
+SD_WATCHDOG_DOWN_GRACE_SECS: float = float(
+    os.getenv("SD_WATCHDOG_DOWN_GRACE_SECS", "300")
+)
+
 # --- Result delivery sizing ---
 #
 # A finished answer is posted inline (as one or more plain messages) when it

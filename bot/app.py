@@ -10,7 +10,7 @@ import sys
 import time
 from logging.handlers import RotatingFileHandler
 
-from bot import auto_update, autonomy, boot_recovery, config
+from bot import auto_update, autonomy, boot_recovery, config, sd_watchdog
 from bot.claude.auth_health import (
     REASON_NO_DIR,
     relogin_command,
@@ -227,6 +227,20 @@ async def run() -> None:
 
     start_time = time.time()
     stop_event = asyncio.Event()
+
+    # systemd's watchdog, armed as early as possible: its timer runs from
+    # service start, so a slow but healthy startup still has to ping inside
+    # WatchdogSec, and a hang anywhere in startup is caught too. Inert unless
+    # the unit sets WatchdogSec=. The health check binds
+    # `discord_bot` late, which is why it is declared here and not where
+    # Discord starts. See CLAUDE.md -> "A frozen bot is restarted, not waited on".
+    discord_bot = None
+    sd_watchdog_task = asyncio.create_task(sd_watchdog.watchdog_loop(
+        sd_watchdog.DownGate(
+            lambda: _discord_is_down(discord_bot),
+            config.SD_WATCHDOG_DOWN_GRACE_SECS,
+        ),
+    ))
 
     # Initialize shared store
     store = StateStore(
@@ -498,7 +512,6 @@ async def run() -> None:
     platform_tasks = []
 
     # --- Discord ---
-    discord_bot = None
     if config.DISCORD_ENABLED:
         try:
             discord_bot = await _start_discord(store, runner, notifier, stop_event)
@@ -583,6 +596,7 @@ async def run() -> None:
 
     # Start background tasks (store refs to prevent GC)
     _bg_tasks = [
+        sd_watchdog_task,
         asyncio.create_task(auto_save_loop()),
         asyncio.create_task(cooldown_loop()),
         asyncio.create_task(autonomy.autonomy_loop(store, runner, discord_bot)),
@@ -865,6 +879,21 @@ async def _do_cooldown_retry_locked(store, runner, inst, discord_bot, channel_id
         await discord_bot._after_turn(ctx, channel_id)
 
 
+def _discord_is_down(bot) -> bool:
+    """True when this Discord client will not come back without a restart.
+
+    Closed, or its start task ended: login failed, or connect() raised past
+    its own reconnect loop. In both cases `_run_discord` has already logged
+    and returned, and nothing in the process will ever try again. A client
+    that is merely reconnecting is neither, and None (not started yet, or
+    Discord disabled) is not down either.
+    """
+    if bot is None:
+        return False
+    task = getattr(bot, "_start_task", None)
+    return bot.is_closed() or (task is not None and task.done())
+
+
 async def _start_discord(store, runner, notifier, stop_event):
     """Start the Discord platform."""
     from bot.discord.bot import ClaudeBot
@@ -886,7 +915,10 @@ async def _start_discord(store, runner, notifier, stop_event):
         except Exception:
             log.exception("Discord bot crashed")
 
-    asyncio.create_task(_run_discord())
+    # Kept on the bot, not fire-and-forget: asyncio holds only a weak reference
+    # to a task, and _discord_is_down reads this one to tell a client that
+    # gave up from one that is reconnecting.
+    bot._start_task = asyncio.create_task(_run_discord())
 
     # Wait for on_ready to finish (auto-provisions category/lobby)
     try:

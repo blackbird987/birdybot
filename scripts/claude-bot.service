@@ -69,6 +69,18 @@ RestartSec=10
 TimeoutStopSec=60
 KillMode=mixed
 
+# Restart=always only covers a process that EXITS. A bot whose event loop froze,
+# or whose Discord client gave up and will never reconnect, is alive and
+# useless, and the phone has nothing to talk to. With WatchdogSec set, the bot
+# pings WATCHDOG=1 every half-timeout (bot/sd_watchdog.py) and systemd restarts
+# it when the pings stop: a frozen loop stops them by itself, and the bot
+# withholds them once Discord has been down for SD_WATCHDOG_DOWN_GRACE_SECS.
+# NotifyAccess=main so a session's child process inheriting NOTIFY_SOCKET can
+# never ping on the bot's behalf. Deploy the code before this setting, or an
+# old build that never pings is killed every five minutes.
+WatchdogSec=300
+NotifyAccess=main
+
 # --- Memory: keep one runaway session from taking the whole bot down ---
 #
 # Every process a session spawns lands in THIS cgroup — the Claude CLI, the
