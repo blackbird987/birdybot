@@ -8,6 +8,7 @@ $NOTIFY_SOCKET, both by path and in the abstract namespace. Pins:
     SD_WATCHDOG_ENABLED off -> the loop returns at once and sends nothing
   * healthy -> READY=1 then WATCHDOG=1 each interval; unhealthy -> no pings
   * a health check that raises still pings (fail open)
+  * an unhealthy spell is logged once going down and once on recovery
   * a send that cannot be delivered returns False, never raises
   * DownGate only reports unhealthy after the grace has run out
   * _discord_is_down: closed or a finished start task is down, None is not
@@ -34,6 +35,7 @@ from bot import app, config, sd_watchdog  # noqa: E402
 
 _failures: list[str] = []
 _ENV_KEYS = ("NOTIFY_SOCKET", "WATCHDOG_USEC", "WATCHDOG_PID")
+_TMP = tempfile.TemporaryDirectory(prefix="sdwd-")
 
 
 def _check(name: str, cond: bool, detail: str = "") -> None:
@@ -75,7 +77,7 @@ def _receiver(abstract: bool = False) -> tuple[socket.socket, str]:
         sock.bind("\0" + name)
         env = "@" + name
     else:
-        path = os.path.join(tempfile.mkdtemp(prefix="sdwd-"), "notify")
+        path = os.path.join(_TMP.name, f"notify-{len(os.listdir(_TMP.name))}")
         sock.bind(path)
         env = path
     sock.setblocking(False)
@@ -183,6 +185,23 @@ def check_loop() -> None:
     _check("raising health check still pings", "WATCHDOG=1" in got, repr(got))
     _check("a broken check is logged once, not every interval",
            sum("health check raised" in m for m in logged) == 1, repr(logged))
+
+    states = iter([False, False])
+    logged.clear()
+    sd_watchdog.log.addHandler(handler)
+    sd_watchdog.log.propagate = False
+    try:
+        with _Env(NOTIFY_SOCKET=env, WATCHDOG_USEC=usec, WATCHDOG_PID=pid):
+            _run_loop(lambda: next(states, True))
+    finally:
+        sd_watchdog.log.removeHandler(handler)
+        sd_watchdog.log.propagate = True
+    got = _drain(sock)
+    _check("recovery: pings resume after an unhealthy spell",
+           "WATCHDOG=1" in got, repr(got))
+    _check("recovery: withheld and resumed each logged once",
+           sum("withholding" in m for m in logged) == 1
+           and sum("pings resumed" in m for m in logged) == 1, repr(logged))
 
     with _Env(NOTIFY_SOCKET=env):
         _run_loop(lambda: True, secs=0.2)

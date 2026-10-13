@@ -228,8 +228,10 @@ async def run() -> None:
     start_time = time.time()
     stop_event = asyncio.Event()
 
-    # systemd's watchdog, armed first so a hang anywhere in startup is caught
-    # too. Inert unless the unit sets WatchdogSec=. The health check binds
+    # systemd's watchdog, armed as early as possible: its timer runs from
+    # service start, so a slow but healthy startup still has to ping inside
+    # WatchdogSec, and a hang anywhere in startup is caught too. Inert unless
+    # the unit sets WatchdogSec=. The health check binds
     # `discord_bot` late, which is why it is declared here and not where
     # Discord starts. See CLAUDE.md -> "A frozen bot is restarted, not waited on".
     discord_bot = None

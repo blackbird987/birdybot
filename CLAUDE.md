@@ -486,8 +486,8 @@ Discord client gave up and will never reconnect, is alive and useless, and
 systemd reports it as healthy indefinitely.
 
 The unit now sets `WatchdogSec=300` and `NotifyAccess=main`. A task started
-first thing in `app.run()` sends `WATCHDOG=1` on `$NOTIFY_SOCKET` every half
-timeout, and systemd restarts the unit when the pings stop (`Result=watchdog`,
+in `app.run()` as soon as the PID lock is held sends `WATCHDOG=1` on
+`$NOTIFY_SOCKET` every half timeout, and systemd restarts the unit when the pings stop (`Result=watchdog`,
 SIGABRT). A frozen loop stops them by itself, because the pinger runs on that
 loop. The other half is the health check: `_discord_is_down` reads the client
 as gone when it `is_closed()` **or** its start task has ended, and
@@ -497,6 +497,11 @@ as gone when it `is_closed()` **or** its start task has ended, and
 `bot.start()` without ever closing the client, so `is_closed()` alone reads
 that bot as healthy forever. The task is kept on the bot as `_start_task`,
 which also fixes it being held only by asyncio's weak reference.
+
+Worst case, a client that gave up is restarted about ten minutes after it
+did: up to 150s until the next health sample, the 300s grace, then systemd's
+300s timeout. A loop frozen for 300s had already lost its gateway heartbeat
+(about 41s), so the restart costs nothing that was not already gone.
 
 Verified live with `systemd-run --user -p WatchdogSec=4 -p NotifyAccess=main`:
 a healthy loop stayed `active`, an unhealthy one was killed with

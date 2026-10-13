@@ -3,7 +3,7 @@
 ## [Unreleased]
 
 ### Added
-- **A frozen bot is restarted by systemd.** `Restart=always` only covers a bot that exits; one whose event loop hung, or whose Discord client gave up for good, stayed "running" and unreachable from the phone. The unit now sets `WatchdogSec=300` / `NotifyAccess=main` and the bot pings systemd from its event loop, withholding the pings once Discord has been down (closed, or its login/connect task ended) for five minutes, so systemd restarts it. Inert on a unit without `WatchdogSec` (`bot/sd_watchdog.py`, `SD_WATCHDOG_ENABLED`, `SD_WATCHDOG_DOWN_GRACE_SECS`, `scripts/test_sd_watchdog.py`). The deployed unit in `~/.config/systemd/user/` needs the same two lines after this code is running.
+- **A frozen bot is restarted by systemd.** `Restart=always` only covers a bot that exits; one whose event loop hung, or whose Discord client gave up for good, stayed "running" and unreachable from the phone. The unit now sets `WatchdogSec=300` / `NotifyAccess=main` and the bot pings systemd from its event loop, withholding the pings once Discord has been down (closed, or its login/connect task ended) for five minutes, so systemd restarts it (within about ten minutes of the client giving up). Inert on a unit without `WatchdogSec` (`bot/sd_watchdog.py`, `SD_WATCHDOG_ENABLED`, `SD_WATCHDOG_DOWN_GRACE_SECS`, `scripts/test_sd_watchdog.py`). The deployed unit in `~/.config/systemd/user/` needs the same two lines after this code is running.
 
 ## v0.102.0, Refactor: split the giant files, one copy of duplicated code (2026-10-12)
 
