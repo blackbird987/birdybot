@@ -1261,6 +1261,30 @@ async def _maybe_schedule_auto_merge(
         log.debug("Failed to post auto-merge notice for %s", inst.id, exc_info=True)
 
 
+def _is_marker_only_unattended(
+    ctx: RequestContext,
+    inst: Instance,
+    display_text: str,
+    result: RunResult | None,
+) -> bool:
+    """True for an unattended turn that succeeded and said nothing but the marker.
+
+    *display_text* is the already-stripped copy, so empty means nothing was
+    left for the user once [TURN_COMPLETE] came out. A failed turn, a
+    user-typed turn, or an empty reply without the marker keeps the summary
+    card: those are not a deliberate silence.
+    """
+    if getattr(ctx, "source", None) not in ("wake", "cooldown"):
+        return False
+    if inst.status != InstanceStatus.COMPLETED:
+        return False
+    if result is None or result.is_error:
+        return False
+    if (display_text or "").strip():
+        return False
+    return has_turn_complete_marker(result.result_text or "")
+
+
 async def send_result(
     ctx: RequestContext,
     inst: Instance,
@@ -1269,6 +1293,18 @@ async def send_result(
     result: RunResult | None = None,
 ) -> None:
     """Send result to channel — short inline, long as summary + file."""
+    if _is_marker_only_unattended(ctx, inst, result_text, result):
+        # A system-fired turn (scheduled nudge, self-wake, cooldown retry)
+        # that chose to say nothing: its whole reply was [TURN_COMPLETE].
+        # The empty-text branch below would post a summary card for it, which
+        # in a thread a non-developer reads is a bare engine marker plus build
+        # buttons. The "done" status line already shows the turn ran.
+        log.info(
+            "send_result: marker-only unattended turn %s (source=%s), "
+            "result card suppressed", inst.id, ctx.source,
+        )
+        ctx.store.update_instance(inst)
+        return
     has_chain = bool(ctx.store.get_autopilot_chain(inst.session_id))
     # Stamp the JSONL uuid on every chunk we send so the Branch button can
     # locate the fork point.  Only the last chunk renders the button (buttons

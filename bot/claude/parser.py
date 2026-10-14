@@ -407,6 +407,13 @@ def extract_summary(text: str, max_len: int = 500) -> str:
     if not text:
         return ""
 
+    # The summary is display copy (result card, /list, parent notices), so the
+    # engine control marker must not survive into it: a held-back nudge whose
+    # whole reply is [TURN_COMPLETE] otherwise shows exactly that on its card.
+    # Imported here because bot.platform.formatting imports bot.claude.types.
+    from bot.platform.formatting import strip_verify_blocks
+    text = strip_verify_blocks(text)
+
     # Strip leading whitespace and markdown headers
     text = text.strip()
     text = re.sub(r'^#+\s+', '', text)
