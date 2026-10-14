@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Run costs are recorded.** The parser read `cost_usd`, but the Claude CLI's result event names it `total_cost_usd`, so all 259 instances in `state.json` were stored at $0, and the daily total, the control room's "today" figure and every dollar gate saw nothing. It now reads `total_cost_usd` first and falls back to `cost_usd`; the parser golden harness names the field so a `--regen` cannot quietly bless a regression (`scripts/test_parser_golden.py`). The global cost counter no longer rewrites the multi-megabyte state file on every run now that it is non-zero; it rides the 60s auto-save.
+
+### Changed
+- **Dollar gates are off by default, behind `COST_GATES_ENFORCE`.** With costs recorded, the daily budget ($20 in `.env`), its 80% warning, the /spawn budget refusal and the auto-fix chain's per-chain cost cap would have started refusing work within the hour, against roughly $1K a day of notional subscription cost. Costs are recorded either way; they gate only with `COST_GATES_ENFORCE=true`. Every check goes through one helper and the harness fails a comparison that bypasses it (`cmd_state.within_dollar_budget`, `scripts/test_cost_gates.py`). The chain eval's "unusually expensive" flag (over $1) follows the same switch, since every ordinary chain now exceeds $1 and it would flag them all. The API fallback's own daily cap is real money and stays enforced.
+
 ## v0.102.1, systemd restarts a frozen or unreachable bot (2026-10-13)
 
 ### Added

@@ -173,6 +173,16 @@ CURSOR_MODEL: str = os.getenv("CURSOR_MODEL", "auto")
 # decides whether the 2nd, 3rd or 4th actually starts right now.
 MAX_CONCURRENT: int = int(os.getenv("MAX_CONCURRENT", "4"))
 DAILY_BUDGET_USD: float = float(os.getenv("DAILY_BUDGET_USD", "20.0"))
+# Whether the dollar figures above (and the per-chain cost_budget_usd an
+# auto-fix chain carries) are allowed to refuse or pause work. Off by default:
+# on a subscription the CLI's total_cost_usd is a notional API-price figure,
+# a busy day here is roughly $1K of it, and the limit that actually runs out
+# is the plan's usage percentage (bot/engine/plan_usage.py). Costs are
+# recorded either way; this only decides whether they gate. Every check goes
+# through cmd_state.within_dollar_budget, and test_cost_gates.py fails the
+# suite on a comparison that bypasses it. The API fallback's own daily cap
+# (API_FALLBACK_DAILY_MAX_USD) is real money and is enforced regardless.
+COST_GATES_ENFORCE: bool = os.getenv("COST_GATES_ENFORCE", "false").lower() in ("1", "true", "yes", "on")
 PC_NAME: str = os.getenv("PC_NAME", "") or __import__("platform").node()
 STALL_TIMEOUT_SECS: int = int(os.getenv("STALL_TIMEOUT_SECS", "60"))
 # Re-log a fresh stall snapshot every N seconds while a session is still

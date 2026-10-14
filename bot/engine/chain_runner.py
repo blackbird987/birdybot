@@ -12,6 +12,7 @@ from bot.claude.types import (
     InstanceStatus, InstanceType,
 )
 from bot.platform.base import ButtonSpec, RequestContext
+from bot.engine.cmd_state import within_dollar_budget
 
 from bot.engine.chain_git import (
     _find_mergeable_instance,
@@ -722,7 +723,7 @@ async def _run_autopilot_chain(
             # Cost budget guard (used by auto-fix sessions)
             if cost_budget_usd is not None and chain_instances:
                 chain_cost = sum(i.cost_usd or 0 for i in chain_instances)
-                if chain_cost >= cost_budget_usd:
+                if not within_dollar_budget(chain_cost, cost_budget_usd):
                     await ctx.messenger.send_text(
                         ctx.channel_id,
                         f"Cost budget exhausted (${chain_cost:.2f} / ${cost_budget_usd:.2f}). Pausing chain.",

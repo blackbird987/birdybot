@@ -41,9 +41,22 @@ def get_start_time() -> float:
     return _start_time
 
 
+def within_dollar_budget(spent: float, limit: float) -> bool:
+    """True when ``spent`` dollars may continue against ``limit``.
+
+    The one place a dollar figure is allowed to refuse work. With
+    ``COST_GATES_ENFORCE`` off (the default) it always answers True, because
+    subscription costs are notional and would otherwise block every session
+    within the hour. See the comment on the setting in ``bot/config.py``.
+    """
+    if not config.COST_GATES_ENFORCE:
+        return True
+    return spent < limit
+
+
 def check_budget(ctx: RequestContext) -> bool:
     daily = ctx.store.get_daily_cost()
-    return daily < config.DAILY_BUDGET_USD
+    return within_dollar_budget(daily, config.DAILY_BUDGET_USD)
 
 
 NO_REPO_MSG = "No repo set. Use /repo add <name> <path> first."
@@ -81,9 +94,10 @@ def _clear_chain_on_manual_finalize(
 
 async def budget_warning(ctx: RequestContext) -> None:
     daily = ctx.store.get_daily_cost()
-    if daily >= config.DAILY_BUDGET_USD * 0.8:
-        await ctx.messenger.send_text(
-            ctx.channel_id,
-            f"Budget warning: ${daily:.4f} / ${config.DAILY_BUDGET_USD:.2f} "
-            f"({daily / config.DAILY_BUDGET_USD * 100:.0f}%)",
-        )
+    if within_dollar_budget(daily, config.DAILY_BUDGET_USD * 0.8):
+        return
+    await ctx.messenger.send_text(
+        ctx.channel_id,
+        f"Budget warning: ${daily:.4f} / ${config.DAILY_BUDGET_USD:.2f} "
+        f"({daily / config.DAILY_BUDGET_USD * 100:.0f}%)",
+    )

@@ -135,6 +135,7 @@
    "bash_commands": [
     "git status"
    ],
+   "cost_usd": 0.4213,
    "duration_api_ms": 38100,
    "duration_ms": 41230,
    "input_tokens": 41,
@@ -148,6 +149,20 @@
     "Read",
     "Edit"
    ]
+  }
+ },
+ "stream_cost_total_only": {
+  "last_assistant_text": "",
+  "per_event": [],
+  "result": {
+   "cost_usd": 1.0731,
+   "duration_api_ms": 398000,
+   "duration_ms": 412000,
+   "input_tokens": 120,
+   "num_turns": 13,
+   "output_tokens": 4500,
+   "result_text": "done",
+   "session_id": "00000000-0000-4000-8000-00000000f001"
   }
  },
  "stream_empty": {
@@ -174,6 +189,7 @@
    "cache_creation_tokens": 69657,
    "cache_read_tokens": 9893,
    "context_tokens": 79552,
+   "cost_usd": 0.4213,
    "duration_api_ms": 38100,
    "duration_ms": 41230,
    "error_message": "Reached maximum number of turns (30)",
@@ -199,6 +215,7 @@
   "last_assistant_text": "",
   "per_event": [],
   "result": {
+   "cost_usd": 0.4213,
    "duration_api_ms": 38100,
    "duration_ms": 41230,
    "input_tokens": 41,
@@ -269,6 +286,7 @@
    "cache_creation_tokens": 139581,
    "cache_read_tokens": 116644,
    "context_tokens": 97127,
+   "cost_usd": 0.4213,
    "duration_api_ms": 38100,
    "duration_ms": 41230,
    "input_tokens": 41,
@@ -698,6 +716,7 @@
   "last_assistant_text": "",
   "per_event": [],
   "result": {
+   "cost_usd": 0.4213,
    "duration_api_ms": 38100,
    "duration_ms": 41230,
    "input_tokens": 41,
@@ -711,6 +730,7 @@
   "last_assistant_text": "",
   "per_event": [],
   "result": {
+   "cost_usd": 0.4213,
    "duration_api_ms": 38100,
    "duration_ms": 41230,
    "input_tokens": 41,
@@ -724,6 +744,7 @@
   "last_assistant_text": "",
   "per_event": [],
   "result": {
+   "cost_usd": 0.4213,
    "duration_api_ms": 38100,
    "duration_ms": 41230,
    "input_tokens": 41,
@@ -793,6 +814,7 @@
    "cache_creation_tokens": 139581,
    "cache_read_tokens": 116644,
    "context_tokens": 97127,
+   "cost_usd": 0.4213,
    "duration_api_ms": 38100,
    "duration_ms": 41230,
    "input_tokens": 41,
@@ -845,7 +867,7 @@
   "last_assistant_text": "",
   "per_event": [],
   "result": {
-   "cost_usd": 0.12,
+   "cost_usd": 0.4213,
    "duration_api_ms": 38100,
    "duration_ms": 41230,
    "input_tokens": 11,
@@ -1104,6 +1126,7 @@
   "last_assistant_text": "",
   "per_event": [],
   "result": {
+   "cost_usd": 0.4213,
    "duration_api_ms": 38100,
    "duration_ms": 41230,
    "input_tokens": 41,
@@ -1154,6 +1177,7 @@
    "cache_creation_tokens": 300,
    "cache_read_tokens": 3000,
    "context_tokens": 7,
+   "cost_usd": 0.4213,
    "duration_api_ms": 38100,
    "duration_ms": 41230,
    "model": "claude-fixture-b",

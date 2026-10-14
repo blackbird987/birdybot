@@ -179,6 +179,19 @@ def main() -> int:
 
     actual = {c["id"]: _jsonable(run_case(c)) for c in cases}
 
+    # The run cost, asserted by name and not only through the golden file: a
+    # --regen would bless a parser that went back to reading only cost_usd,
+    # which recorded every run at $0 for months.
+    by_id = {c["id"]: c for c in cases}
+    if "stream_cost_total_only" in by_id:
+        got = parser.extract_result(by_id["stream_cost_total_only"]["events"]).cost_usd
+        _check("total_cost_usd alone is read as the run cost", got == 1.0731, str(got))
+    if "stream_tokens_top_level" in by_id:
+        got = parser.extract_result(by_id["stream_tokens_top_level"]["events"]).cost_usd
+        _check("total_cost_usd wins over the older cost_usd", got == 0.4213, str(got))
+    legacy = parser.extract_result([{"type": "result", "cost_usd": 0.25}]).cost_usd
+    _check("cost_usd alone is still read", legacy == 0.25, str(legacy))
+
     if regen:
         GOLDEN.write_text(
             json.dumps(actual, indent=1, sort_keys=True) + "\n",

@@ -278,7 +278,12 @@ def _apply_result_event(
 ) -> None:
     """Copy the ``result`` event's totals, text and error onto ``result``."""
     result.session_id = result_event.get("session_id")
-    result.cost_usd = result_event.get("cost_usd", 0.0)
+    # The CLI names it total_cost_usd. Reading only the older cost_usd left
+    # every run recorded at $0 and every dollar gate inert.
+    cost = result_event.get("total_cost_usd")
+    if cost is None:
+        cost = result_event.get("cost_usd")
+    result.cost_usd = float(cost or 0.0)
     result.duration_ms = result_event.get("duration_ms", 0)
     result.duration_api_ms = result_event.get("duration_api_ms", 0)
     result.is_error = result_event.get("is_error", False)
