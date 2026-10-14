@@ -15,7 +15,16 @@ Everything is deterministic except the optional judge:
   stream        turns, tools, tokens, cost, compactions, wall time
 
 The reference tests are copied in only for scoring and the session never saw
-them: the sandbox has no object past the base commit.
+them: the clone has no object past the base commit, and the run's sandbox
+hid every other copy (``run.hidden_paths``). They go in last, after lint and
+the suite, so neither of those ever measures the reference's code as the
+session's.
+
+Every harness runs in the same sandbox, plus its own pid namespace so a
+timeout kills the whole tree, with ``PYTHONPATH`` set to the clone: the
+venv's editable install of the bot points at the live checkout, and an
+import that fell through to it would score the shipped solution instead of
+the session's tree.
 
 TODO: a ``--review`` pass (the bot's own review-code prompt over the
 session's diff) would score code quality the tests cannot see. Deferred: it
@@ -25,7 +34,6 @@ what the first rounds need.
 
 from __future__ import annotations
 
-import os
 import re
 import shutil
 import subprocess
@@ -34,18 +42,22 @@ from pathlib import Path
 
 from common import git, read_json, venv_python, write_json
 import run as run_mod
-from sandbox import GIT_ENV
 
 TEST_TIMEOUT_S = 600
 
 
 def snapshot(repo: Path) -> str:
     """Commit whatever the session left uncommitted, so the diff is complete."""
-    env = {**os.environ, **GIT_ENV}
-    subprocess.run(["git", "add", "-A"], cwd=str(repo), env=env, capture_output=True)
-    subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "replay: snapshot"],
-                   cwd=str(repo), env=env, capture_output=True)
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "--allow-empty", "--no-verify", "-m", "replay: snapshot",
+        identity=True)
     return git(repo, "rev-parse", "HEAD")
+
+
+def restore(repo: Path, sha: str) -> None:
+    """Put the tree back to ``sha``, dropping anything a scoring step wrote."""
+    git(repo, "reset", "-q", "--hard", sha)
+    git(repo, "clean", "-fdq")
 
 
 def _changed(repo: Path, a: str, b: str) -> tuple[set[str], int, int]:
@@ -80,11 +92,12 @@ DUMMY_ENV = {
 
 
 def _run_py(repo: Path, args: list[str], timeout: int) -> dict:
-    """Run a harness in the clone, sandboxed like the session was."""
+    """Run a harness in the clone, sandboxed like the session was, in its own pid namespace."""
     env = run_mod.child_env("")
     env.pop("CLAUDE_CONFIG_DIR", None)
-    env.update(DUMMY_ENV, BOT_PATHS_DISABLED="1", PYTHONDONTWRITEBYTECODE="1")
-    cmd = run_mod.sandbox_args(repo) + ["--", venv_python(), *args]
+    env.update(DUMMY_ENV, BOT_PATHS_DISABLED="1", PYTHONDONTWRITEBYTECODE="1",
+               PYTHONPATH=str(repo))
+    cmd = run_mod.sandbox_args(repo, contain=True) + ["--", venv_python(), *args]
     t0 = time.time()
     try:
         p = subprocess.run(cmd, cwd=str(repo), env=env,
@@ -101,13 +114,14 @@ def fail_to_pass(repo: Path, live_repo: Path, tip: str, tests: list[str]) -> dic
     results = {}
     for rel in tests:
         try:
-            body = git(live_repo, "show", f"{tip}:{rel}")
+            body = git(live_repo, "show", f"{tip}:{rel}", strip=False)
         except RuntimeError as e:
-            results[rel] = {"rc": None, "passed": False, "tail": f"not in reference: {e}"}
+            results[rel] = {"rc": None, "passed": False, "kind": "missing",
+                            "tail": f"not in reference: {e}"}
             continue
         dst = repo / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
-        dst.write_text(body + "\n", encoding="utf-8")
+        dst.write_text(body, encoding="utf-8")
         res = _run_py(repo, [rel], TEST_TIMEOUT_S)
         res["kind"] = classify(res)
         results[rel] = res
@@ -171,29 +185,36 @@ def score(rep_dir: Path, case, *, start_sha: str, suite: bool = False) -> dict:
     # t-9086 spike, before this pin existed.
     end = (read_json(rep_dir / "score.json", {}) or {}).get("snapshot_sha")
     if end:
-        git(repo, "reset", "-q", "--hard", end)
-        git(repo, "clean", "-fdq")
+        restore(repo, end)
     else:
         end = snapshot(repo)
     diff = diff_stats(repo, start_sha, end, live, case.base_sha, case.ref_tip)
+    # The session's own tree first: its tests, lint, and the suite. The
+    # reference harnesses go in last, because they overwrite a session test
+    # of the same name and would otherwise be linted and suite-run as its work.
+    own = own_tests(repo, start_sha, end)
+    lint_res = lint(repo, diff["files"])
+    suite_res = None
+    if suite:
+        suite_res = _run_py(repo, ["scripts/run_harnesses.py"], 3600)
+        restore(repo, end)
+    f2p = fail_to_pass(repo, live, case.ref_tip, case.ref_tests)
     out = {
         "label": run.get("label"),
         "run_ok": run.get("returncode") == 0 and not run.get("is_error") and not run.get("timed_out"),
         "resume_failed": run.get("resume_failed"),
         "diff": diff,
-        # Before the reference tests are dropped in, which overwrite the session's own.
-        "own_tests": own_tests(repo, start_sha, end),
-        "fail_to_pass": fail_to_pass(repo, live, case.ref_tip, case.ref_tests),
-        "lint": lint(repo, diff["files"]),
-        "suite": _run_py(repo, ["scripts/run_harnesses.py"], 3600) if suite else None,
+        "own_tests": own,
+        "fail_to_pass": f2p,
+        "lint": lint_res,
+        "suite": suite_res,
         "snapshot_sha": end,
         "stream": {k: run.get(k) for k in (
             "num_turns", "total_cost_usd", "wall_s", "input_tokens", "output_tokens",
-            "cache_read_tokens", "cache_creation_tokens", "compactions", "tools")},
+            "cache_read_tokens", "cache_creation_tokens", "compactions", "tools", "peeks")},
     }
-    # Put the tree back to the snapshot: the reference harnesses and whatever
-    # the test runs wrote must not read as the session's work on a re-score.
-    git(repo, "reset", "-q", "--hard", end)
-    git(repo, "clean", "-fdq")
+    # Back to the snapshot: the reference harnesses and whatever the test
+    # runs wrote must not read as the session's work on a re-score.
+    restore(repo, end)
     write_json(rep_dir / "score.json", out)
     return out

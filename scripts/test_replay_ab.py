@@ -16,8 +16,12 @@ Asserted:
     and master-activity blocks are absent from every arm, and a solution sha
     in a system prompt is caught;
   * the command line is the provider's own plus --fork-session right after
-    the resumed id and a spend cap, wrapped in a scope, nice and bwrap with
-    the live checkout read-only;
+    the resumed id and a spend cap, wrapped in a scope, nice and bwrap;
+  * the sandbox hides the live checkout, the run root, every other account
+    and the run account's transcripts and history behind tmpfs, never the
+    home itself, and binds back only the venv, the clone and the fork's own
+    transcript dir, after the hiding; a tool call naming a hidden path is
+    reported as a peek;
   * the replay's environment drops the parent session's identity and the
     bot's secrets;
   * the conversation fork writes only a transcript, and the credentials file
@@ -25,7 +29,11 @@ Asserted:
   * scoring runs the reference harness fail-to-pass, tells an import
     mismatch from a wrong fix, runs the session's own harnesses, and a
     re-score never commits the reference harness as the session's work;
-  * the spend cap stops new runs;
+  * the spend cap stops new runs, counting runs in flight, and a run that
+    raises is recorded without ending the round;
+  * destroy removes only the transcript dir keyed on its own clone;
+  * a reference harness absent at the tip is "missing", and two arms that
+    differ only by name are an A/A round;
   * nothing the harness writes can land under the live data/.
 
 Run: python scripts/test_replay_ab.py
@@ -43,6 +51,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -66,7 +75,7 @@ def _check(cond: bool, name: str) -> None:
         _failures.append(name)
 
 
-GENV = {**os.environ, **sandbox.GIT_ENV}
+GENV = {**os.environ, **common.GIT_ENV}
 
 
 def _g(cwd: Path, *args: str) -> str:
@@ -185,8 +194,12 @@ def test_sandbox(case, w: dict, tmp: Path):
     _check((sb2.repo / "CLAUDE.md").read_text() == "trimmed\n" and sb2.start_sha != case.base_sha,
            "arm files: overlaid as a setup commit")
     _check(_g(sb2.repo, "status", "--porcelain") == "", "arm files: tree clean after setup")
-    sandbox.destroy(tmp / "rep2", sb2.project_dir)
+    wrong = sandbox.destroy(tmp / "rep2", sb.project_dir)
+    _check(wrong == {"clone": True, "transcripts": False} and sb.project_dir.is_dir(),
+           "destroy: another clone's transcript dir is refused")
     _check(not (tmp / "rep2" / "repo").exists(), "destroy: clone removed")
+    right = sandbox.destroy(tmp / "rep2", sb2.project_dir)
+    _check(right["transcripts"] and not sb2.project_dir.exists(), "destroy: its own transcript dir removed")
     return sb
 
 
@@ -229,9 +242,9 @@ def test_prompt(case, sb):
            "--slice=app-claudesessions.slice" in wrapped, "wrap: session scope in the sessions slice")
     j = wrapped.index("bwrap")
     seg = wrapped[j:wrapped.index("--", j + 1)]
-    _check(seg[seg.index("--ro-bind") + 1] == "/live", "wrap: live checkout read-only")
     _check(["--bind", str(sb.repo), str(sb.repo)] == seg[seg.index("--bind"):seg.index("--bind") + 3],
            "wrap: clone writable")
+    _check(seg[seg.index("--chdir") + 1] == str(sb.repo), "wrap: starts in the clone")
     _check(wrapped[wrapped.index("nice") + 2] == "10", "wrap: niced like a session")
     _check(wrapped[-len(cmd):] == cmd, "wrap: command passed through unchanged")
 
@@ -316,6 +329,38 @@ def test_score_and_cap(case, w: dict, tmp: Path):
     finally:
         ab_run.run_one, ab_run.slice_headroom_mb = orig_one, orig_room
     _check(ran == ["j0", "j1"], "cap: no new run starts once spend reaches the cap")
+    _check([j.result.get("skipped") for j in jobs[2:]] == [True] * 3, "cap: unstarted runs marked skipped")
+
+    # Two in flight at $4 caps each under $9: the third waits for one to come
+    # in, and starts only because it came in under its cap.
+    ran.clear()
+    scored = []
+
+    def flaky_run_one(job, log=print):
+        ran.append(job.label)
+        time.sleep(0.2)
+        if job.label == "k0":
+            raise OSError("no bwrap")
+        return {"label": job.label, "total_cost_usd": 1.0}
+
+    ab_run.run_one, ab_run.slice_headroom_mb = flaky_run_one, lambda: None
+    try:
+        jobs = [ab_run.Job(label=f"k{i}", workdir=tmp, repo=tmp, account="", cmd=[], prompt="",
+                           budget_usd=4, timeout_s=1) for i in range(4)]
+        res = ab_run.run_all(jobs, concurrency=3, total_cap_usd=9.0, log=lambda *_: None,
+                             on_done=lambda j: scored.append(j.label))
+    finally:
+        ab_run.run_one, ab_run.slice_headroom_mb = orig_one, orig_room
+    _check(sorted(ran) == ["k0", "k1", "k2", "k3"], "cap: in-flight caps reserve room, runs resume as they land")
+    _check(any(r.get("error", "").startswith("OSError") for r in res) and "k0" not in scored
+           and sorted(scored) == ["k1", "k2", "k3"], "run_all: a run that raises is recorded, the round goes on")
+
+    missing = score.fail_to_pass(sb.repo, Path(case.repo_path), case.ref_tip, ["scripts/test_nope.py"])
+    _check(missing["tests"]["scripts/test_nope.py"]["kind"] == "missing" and missing["passed"] == 0,
+           "score: a harness absent at the tip is missing")
+    _check(ab_main.same_arm({"name": "a"}, {"name": "b"})
+           and not ab_main.same_arm({"name": "a"}, {"name": "b", "model": "haiku"}),
+           "aa: arms equal but for the name are an A/A round")
 
     run_dir = tmp / "runs" / "r"
     for arm, src in (("a", sb.root), ("b", sb2.root)):
@@ -329,6 +374,44 @@ def test_score_and_cap(case, w: dict, tmp: Path):
     with contextlib.redirect_stdout(buf):
         rc = ab_main.cmd_report(type("A", (), {"run_dir": str(run_dir)})())
     _check(rc == 0 and "paired pass (b - a): 1.00" in buf.getvalue(), "report: paired delta printed")
+
+
+def test_hiding(tmp: Path):
+    home = tmp / "home"
+    own, other = home / ".claude-a", home / ".claude-b"
+    live, runs = tmp / "live", tmp / "runs"
+    for d in (own / "projects" / "p", own / "plans", other / "projects", live / ".venv" / "bin",
+              live / "data" / "results", runs / "x" / "repo"):
+        d.mkdir(parents=True)
+    for f in (own / "history.jsonl", own / "settings.json"):
+        f.write_text("{}\n")
+    repo, pd = runs / "x" / "repo", own / "projects" / "p"
+    hidden = ab_run.hidden_paths(account=own, live_root=live, runs_root=runs, home=home)
+    _check({live, runs, other, own / "projects", own / "plans", own / "history.jsonl"} <= set(hidden),
+           "hide: live checkout, run root, other accounts, own transcripts and history")
+    _check(own not in hidden and own / "settings.json" not in hidden and own / "todos" not in hidden,
+           "hide: own account settings kept, absent paths skipped")
+    _check(home not in ab_run.hidden_paths(account=own, live_root=live, runs_root=home, home=home),
+           "hide: never the home directory")
+
+    args = ab_run.sandbox_args(repo, live, account=own, project_dir=pd, runs_root=runs, home=home,
+                               contain=True)
+    last_hide = max(i for i, a in enumerate(args) if a in ("--tmpfs", "--dev-bind") and i > 3)
+    binds = {args[i + 1]: (i, args[i]) for i, a in enumerate(args) if a in ("--bind", "--ro-bind")}
+    _check(binds.get(str(live / ".venv"), (0, ""))[1] == "--ro-bind"
+           and binds.get(str(pd), (0, ""))[1] == "--bind" and binds.get(str(repo), (0, ""))[1] == "--bind",
+           "hide: venv read-only, clone and its transcript dir writable")
+    _check(all(i > last_hide for i, _ in binds.values()), "hide: binds come after the hiding")
+    _check(["--dev-bind", "/dev/null", str(own / "history.jsonl")] ==
+           args[args.index(str(own / "history.jsonl")) - 2:args.index(str(own / "history.jsonl")) + 1],
+           "hide: a file is masked with a device bind of /dev/null")
+    _check("--unshare-pid" in args and "--unshare-pid" not in ab_run.sandbox_args(repo, live, home=home),
+           "hide: scoring gets its own pid namespace")
+
+    texts = [json.dumps({"command": f"cat {live}/data/results/t-1.md && {live}/.venv/bin/python x"}),
+             json.dumps({"file_path": f"{repo}/a.py"}), json.dumps({"file_path": f"{pd}/s.jsonl"})]
+    peeks = ab_run.find_peeks(texts, hidden, [live / ".venv", pd, repo])
+    _check(peeks == [f"{live}/data/results/t-1.md"], "peek: a hidden path is caught, kept paths are not")
 
 
 def test_clone_path(case, tmp: Path):
@@ -367,6 +450,7 @@ def main() -> int:
         test_prompt(case, sb)
         test_env()
         test_score_and_cap(case, w, tmp)
+        test_hiding(tmp)
         test_clone_path(case, tmp)
         test_live_data_guard()
     finally:

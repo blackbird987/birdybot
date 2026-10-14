@@ -26,8 +26,8 @@ Method, from the replay literature this was designed against:
     Logged tool results are never spliced into a variant.
   * Replicates are mandatory, since one run of an agent is one sample. Run an
     A/A round (both arms ``current``) first: its spread is the noise floor a
-    real A/B difference has to clear, and ``report`` prints it whenever both
-    arms carry the same name prefix or an ``--aa`` run is reported.
+    real A/B difference has to clear. ``run`` records a round as A/A when the
+    two arms are the same apart from their names, and ``report`` labels it.
   * Replicates of the two arms are interleaved, so drift in the API over the
     run lands on both arms instead of on whichever ran second.
 
@@ -67,7 +67,7 @@ def leaks(system_prompt: str, case) -> list[str]:
     return found
 
 
-def prepare(case, arm: dict, rep_dir: Path) -> run_mod.Job:
+def prepare(case, arm: dict, rep_dir: Path, *, budget_usd: float, timeout_s: int) -> run_mod.Job:
     assert_outside_live_data(rep_dir)
     rep_dir.mkdir(parents=True, exist_ok=True)
     sb = sandbox_mod.build(case, rep_dir, arm.get("files"))
@@ -83,13 +83,21 @@ def prepare(case, arm: dict, rep_dir: Path) -> run_mod.Job:
     })
     return run_mod.Job(
         label=f"{case.instance_id}/{arm['name']}/{rep_dir.name}", workdir=rep_dir, repo=sb.repo,
-        account=case.account, cmd=p["cmd"], prompt=case.prompt, budget_usd=0.0, timeout_s=0,
+        account=case.account, cmd=p["cmd"], prompt=case.prompt, budget_usd=budget_usd,
+        timeout_s=timeout_s, project_dir=sb.project_dir,
     )
+
+
+def same_arm(a: dict, b: dict) -> bool:
+    """Two arms that differ only in their name: an A/A round."""
+    strip = lambda arm: {k: v for k, v in arm.items() if k != "name"}  # noqa: E731
+    return strip(a) == strip(b)
 
 
 def cmd_run(args) -> int:
     arm_a = prompt_mod.load_arm(args.arm_a)
     arm_b = prompt_mod.load_arm(args.arm_b) if args.arm_b else None
+    aa = bool(arm_b) and same_arm(arm_a, arm_b)
     if arm_b and arm_b["name"] == arm_a["name"]:
         arm_a = {**arm_a, "name": arm_a["name"] + "-a"}
         arm_b = {**arm_b, "name": arm_b["name"] + "-b"}
@@ -98,7 +106,7 @@ def cmd_run(args) -> int:
     run_dir = RUNS_ROOT / run_id
     assert_outside_live_data(run_dir)
     write_json(run_dir / "run.json", {
-        "instances": args.instances, "arms": arms, "k": args.k, "budget": args.budget,
+        "instances": args.instances, "arms": arms, "aa": aa, "k": args.k, "budget": args.budget,
         "per_run": args.per_run, "max_parallel": args.max_parallel, "suite": args.suite,
     })
     print(f"run dir: {run_dir}")
@@ -111,8 +119,7 @@ def cmd_run(args) -> int:
         for rep in range(args.k):
             for arm in (arms if rep % 2 == 0 else list(reversed(arms))):
                 rep_dir = run_dir / iid / arm["name"] / f"r{rep}"
-                job = prepare(case, arm, rep_dir)
-                job.budget_usd, job.timeout_s = args.per_run, args.timeout
+                job = prepare(case, arm, rep_dir, budget_usd=args.per_run, timeout_s=args.timeout)
                 jobs.append(job)
                 starts[job.label] = (read_json(rep_dir / "meta.json") or {})["start_sha"]
                 print(f"  prepared {job.label}")
@@ -126,6 +133,12 @@ def cmd_run(args) -> int:
 
     run_mod.run_all(jobs, concurrency=args.max_parallel, total_cap_usd=args.budget,
                     on_done=on_done)
+    # A replicate the cap never started still holds a forked transcript in
+    # the account's projects/, where it would sit in every session listing.
+    for job in jobs:
+        if job.result.get("skipped"):
+            sandbox_mod.destroy(job.workdir, job.project_dir)
+            print(f"  removed unstarted {job.label}")
     return cmd_report(argparse.Namespace(run_dir=str(run_dir)))
 
 
@@ -152,6 +165,7 @@ def _metric(s: dict) -> dict:
         "wall": st.get("wall_s"),
         "files": len(s["diff"]["files"]),
         "overlap": s["diff"]["file_jaccard"],
+        "peeks": len(st.get("peeks") or []),
     }
 
 
@@ -175,7 +189,7 @@ def cmd_report(args) -> int:
         print("no scored replicates")
         return 1
     arm_names = [a["name"] for a in meta.get("arms", [])] or sorted({a for v in by.values() for a in v})
-    keys = ("pass", "iface", "own", "ok", "turns", "cost", "wall", "files", "overlap")
+    keys = ("pass", "iface", "own", "ok", "turns", "cost", "wall", "files", "overlap", "peeks")
     print()
     for iid, arms in by.items():
         print(f"== {iid}")
@@ -189,8 +203,9 @@ def cmd_report(args) -> int:
                 d = [b[r][k] - a[r][k] for r in paired
                      if a[r][k] is not None and b[r][k] is not None]
                 print(f"  paired {k} ({arm_names[1]} - {arm_names[0]}): {_fmt(d)}")
-    same = len(arm_names) == 2 and arm_names[0].rsplit("-", 1)[0] == arm_names[1].rsplit("-", 1)[0]
-    if same:
+    if any(r["peeks"] for arms in by.values() for reps in arms.values() for r in reps.values()):
+        print("\nWARNING: a replicate named hidden paths in its tool calls (score.json stream.peeks).")
+    if meta.get("aa"):
         print("\nA/A round: the paired spread above is the noise floor for this case set.")
     return 0
 
@@ -203,7 +218,11 @@ def cmd_score(args) -> int:
         if not (rep_dir / "repo").is_dir():
             print(f"  {rep_dir}: clone already removed, skipped")
             continue
-        case = extract_mod.Case.from_dict(read_json(rep_dir.parent.parent / "case.json"))
+        case_d = read_json(rep_dir.parent.parent / "case.json")
+        if not case_d:
+            print(f"  {rep_dir}: no case.json beside it, skipped")
+            continue
+        case = extract_mod.Case.from_dict(case_d)
         start = (read_json(meta_path) or {})["start_sha"]
         s = score_mod.score(rep_dir, case, start_sha=start, suite=args.suite)
         f2p = s["fail_to_pass"]
@@ -214,13 +233,15 @@ def cmd_score(args) -> int:
 
 def cmd_clean(args) -> int:
     run_dir = Path(args.run_dir)
-    n = 0
+    clones = transcripts = 0
     for meta_path in run_dir.glob("*/*/r*/meta.json"):
         meta = read_json(meta_path, {}) or {}
         pd = meta.get("project_dir")
-        sandbox_mod.destroy(meta_path.parent, Path(pd) if pd else None)
-        n += 1
-    print(f"removed {n} clone(s) and their forked transcripts; results kept in {run_dir}")
+        removed = sandbox_mod.destroy(meta_path.parent, Path(pd) if pd else None)
+        clones += removed["clone"]
+        transcripts += removed["transcripts"]
+    print(f"removed {clones} clone(s) and {transcripts} forked transcript dir(s); "
+          f"results kept in {run_dir}")
     if args.all:
         shutil.rmtree(run_dir, ignore_errors=True)
         print("removed the run directory")

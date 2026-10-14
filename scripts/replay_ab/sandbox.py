@@ -22,7 +22,6 @@ which is not recoverable.
 
 from __future__ import annotations
 
-import os
 import re
 import shutil
 import subprocess
@@ -32,10 +31,6 @@ from pathlib import Path
 from common import assert_outside_live_data, git
 from bot.claude.session_fork import encode_project_path, fork_session
 
-GIT_ENV = {
-    "GIT_AUTHOR_NAME": "replay-ab", "GIT_AUTHOR_EMAIL": "replay-ab@localhost",
-    "GIT_COMMITTER_NAME": "replay-ab", "GIT_COMMITTER_EMAIL": "replay-ab@localhost",
-}
 
 
 @dataclass
@@ -45,19 +40,6 @@ class Sandbox:
     start_sha: str        # base commit, plus the arm's setup commit if any
     session_id: str | None
     project_dir: Path | None
-
-
-def _git_env(cwd: Path, *args: str) -> str:
-    old = {k: os.environ.get(k) for k in GIT_ENV}
-    os.environ.update(GIT_ENV)
-    try:
-        return git(cwd, *args)
-    finally:
-        for k, v in old.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
 
 
 def check_clone_path(dest: Path) -> None:
@@ -131,8 +113,8 @@ def apply_arm_files(repo: Path, files: dict[str, str]) -> str:
         dst = repo / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src, dst)
-    _git_env(repo, "add", "-A")
-    _git_env(repo, "commit", "-q", "-m", "replay: arm setup")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "replay: arm setup", identity=True)
     return git(repo, "rev-parse", "HEAD")
 
 
@@ -157,8 +139,21 @@ def build(case, root: Path, arm_files: dict[str, str] | None = None) -> Sandbox:
     return Sandbox(root=root, repo=repo, start_sha=start, session_id=sid, project_dir=project_dir)
 
 
-def destroy(sb_root: Path, project_dir: Path | None) -> None:
-    """Remove a replicate's clone and the transcripts the CLI wrote for it."""
-    if project_dir and project_dir.is_dir() and "replay-ab" in project_dir.name:
+def destroy(sb_root: Path, project_dir: Path | None) -> dict:
+    """Remove a replicate's clone and the transcripts the CLI wrote for it.
+
+    The project dir is removed only when it is exactly the one the CLI keys on
+    this replicate's clone path, directly under an account's ``projects/``:
+    ``meta.json`` is a file on disk, and a path read back from it must not be
+    able to name any other project's transcripts. Returns what was removed.
+    """
+    repo = sb_root / "repo"
+    removed = {"clone": False, "transcripts": False}
+    if (project_dir and project_dir.is_dir() and project_dir.parent.name == "projects"
+            and project_dir.name == encode_project_path(str(repo))):
         shutil.rmtree(project_dir, ignore_errors=True)
-    shutil.rmtree(sb_root / "repo", ignore_errors=True)
+        removed["transcripts"] = not project_dir.exists()
+    if repo.exists():
+        shutil.rmtree(repo, ignore_errors=True)
+        removed["clone"] = not repo.exists()
+    return removed

@@ -38,14 +38,25 @@ def venv_python() -> str:
     return str(cand) if cand.exists() else sys.executable
 
 
-def git(cwd: Path | str, *args: str, check: bool = True, timeout: int = 120) -> str:
+# Commits the harness makes (an arm's setup, the end-of-run snapshot) are
+# authored as this, passed per call rather than set on os.environ: the runs
+# score on worker threads, and a process-wide env swap is not thread-safe.
+GIT_ENV = {
+    "GIT_AUTHOR_NAME": "replay-ab", "GIT_AUTHOR_EMAIL": "replay-ab@localhost",
+    "GIT_COMMITTER_NAME": "replay-ab", "GIT_COMMITTER_EMAIL": "replay-ab@localhost",
+}
+
+
+def git(cwd: Path | str, *args: str, check: bool = True, timeout: int = 120,
+        strip: bool = True, identity: bool = False) -> str:
+    """Run git. ``strip=False`` returns stdout verbatim, for file bodies."""
     out = subprocess.run(
         ["git", *args], cwd=str(cwd), capture_output=True, text=True,
-        timeout=timeout,
+        timeout=timeout, env={**os.environ, **GIT_ENV} if identity else None,
     )
     if check and out.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed in {cwd}: {out.stderr.strip()}")
-    return out.stdout.strip()
+    return out.stdout.strip() if strip else out.stdout
 
 
 def write_json(path: Path, obj) -> None:
