@@ -238,7 +238,6 @@ from bot.engine import prior_art, workflows
 from bot.engine.cmd_state import _get_channel_lock
 from bot.engine.directives import chain as chain_mod
 
-prior_art.collect = lambda repo_path, plan_text, **kw: ""
 
 
 def _chain_text(plan: str, preset: str = "ship") -> str:
@@ -274,7 +273,10 @@ def _chain_env(channel: str, store: _ChainStore):
         store=store, runner=SimpleNamespace(), session_id="sess-c",
         repo_name="bot",
     )
-    src = SimpleNamespace(id="q-src", session_id="sess-c", repo_path="")
+    src = SimpleNamespace(
+        id="q-src", session_id="sess-c", repo_path="",
+        origin=InstanceOrigin.DIRECT,
+    )
     return ctx, msgr, src
 
 
@@ -298,19 +300,23 @@ class _FakeChains:
 
 
 async def _settle() -> None:
-    for _ in range(20):
-        await asyncio.sleep(0)
-    while chain_mod._chain_drainers:
+    for _ in range(500):
+        if not chain_mod._chain_drainers:
+            return
         await asyncio.sleep(0.01)
+    _check(False, "drain finished within 5s")
 
 
 def _with_fake(fake, coro_fn) -> None:
-    orig = workflows.on_conversational_chain
+    orig_chain = workflows.on_conversational_chain
+    orig_collect = prior_art.collect
     workflows.on_conversational_chain = fake
+    prior_art.collect = lambda repo_path, plan_text, **kw: ""
     try:
         asyncio.run(coro_fn())
     finally:
-        workflows.on_conversational_chain = orig
+        workflows.on_conversational_chain = orig_chain
+        prior_art.collect = orig_collect
         chain_mod._pending_chains.clear()
 
 
@@ -338,7 +344,53 @@ def test_chain_supersedes_paused() -> None:
             for m in msgr.sent),
         "supersede note reads '12h ago (stopped at build)'",
     )
+    start = next((i for i, m in enumerate(msgr.sent) if "Starting **" in m), None)
+    note = next((i for i, m in enumerate(msgr.sent) if "Replaced a" in m), None)
+    _check(start is not None and note is not None and start < note,
+           "start notice lands above the supersede note")
     _check(not chain_mod._chain_drainers, "drainer set empty")
+
+
+def test_chain_supersedes_crash_leftover() -> None:
+    print("/chain from chat over a 'running' leftover supersedes it:")
+    store = _ChainStore(
+        chain=["review_code", "verify"],
+        meta={"status": "running", "updated_at": None},
+    )
+    ctx, msgr, src = _chain_env("chan-left", store)
+    fake = _FakeChains(store)
+
+    async def go():
+        await chain_mod._handle_chain_directive(ctx, _chain_text("PLAN L"), src)
+        await _settle()
+
+    _with_fake(fake, go)
+    _check(store.cleared == 1 and fake.calls == [("ship", "PLAN L")],
+           "leftover cleared, new chain launched")
+    _check(any("Replaced a leftover chain (stopped at review code)" in m
+               for m in msgr.sent),
+           "note calls it a leftover, step name humanized")
+
+
+def test_chain_step_cannot_chain() -> None:
+    print("a step of the running chain cannot queue another chain:")
+    store = _ChainStore(
+        chain=["verify", "done"],
+        meta={"status": "running", "updated_at": None},
+    )
+    ctx, msgr, src = _chain_env("chan-step", store)
+    src.origin = InstanceOrigin.VERIFY
+    fake = _FakeChains(store)
+
+    async def go():
+        await chain_mod._handle_chain_directive(ctx, _chain_text("PLAN S"), src)
+        await _settle()
+
+    _with_fake(fake, go)
+    _check(fake.calls == [], "no chain queued or launched")
+    _check(store.cleared == 0, "the running chain's state is untouched")
+    _check(not chain_mod._pending_chains, "nothing left pending")
+    _check(any("Ignored a /chain" in m for m in msgr.sent), "user told why")
 
 
 def test_chain_coalesces_before_start() -> None:
@@ -432,6 +484,8 @@ def main() -> int:
     test_error_result_not_scanned()
     test_plain_result_no_noise()
     test_chain_supersedes_paused()
+    test_chain_supersedes_crash_leftover()
+    test_chain_step_cannot_chain()
     test_chain_coalesces_before_start()
     test_chain_queues_during_run()
     test_chain_fresh_launch()

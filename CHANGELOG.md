@@ -3,7 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
-- A new /chain replaces a paused or leftover chain on the thread instead of being refused; two /chain directives before the first starts merge into one run (newest plan wins), and one sent mid-chain runs right after it (`bot/engine/directives/chain.py`). Two directives two minutes apart had run the newer plan and then an empty build that paused, and that pause blocked the thread's next /chain 12h later.
+- A new /chain replaces a paused or leftover chain on the thread instead of being refused; two /chain directives before the first starts merge into one run (newest plan wins), and one sent mid-chain runs right after it (`bot/engine/directives/chain.py`). Two directives two minutes apart had run the newer plan and then an empty build that paused, and that pause blocked the thread's next /chain 12h later. A /chain written by a step of the running chain is still ignored, so a chain cannot keep queuing another, and boot recovery no longer resumes an interrupted chain that a /chain replaced while it waited for the thread (`bot/boot_recovery.py`).
 
 ## v0.102.4, CLAUDE.md slimmed to a map, design notes moved to docs/design (2026-10-14)
 

@@ -307,6 +307,15 @@ async def resume_interrupted_chains(
         # Acquire channel lock to prevent racing with user messages
         lock = _get_channel_lock(thread_id)
         async with lock:
+            # A /chain sent while this waited for the lock supersedes the
+            # interrupted chain and clears its queue (directives/chain.py).
+            # Re-running the steps read above would resurrect it.
+            if store.get_autopilot_chain(session_id) != steps:
+                log.info(
+                    "Chain for session %s changed while waiting for the "
+                    "lock; not resuming it", session_id,
+                )
+                continue
             try:
                 # Re-run from chain[0] — the interrupted step that never
                 # completed.  This differs from resume_autopilot_chain()

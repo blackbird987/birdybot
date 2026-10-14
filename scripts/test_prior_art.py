@@ -386,7 +386,12 @@ try:
 
     async def _run_chain():
         await commands._handle_chain_directive(ctx, chain_text, source_inst(plan))
-        await asyncio.sleep(0)
+        # The drain task attaches the history once it holds the lock.
+        from bot.engine.directives import chain as chain_mod
+        for _ in range(500):
+            if not chain_mod._chain_drainers:
+                break
+            await asyncio.sleep(0.01)
 
     asyncio.run(_run_chain())
 finally:
