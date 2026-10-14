@@ -245,7 +245,7 @@ _ORIGIN_LABEL_OVERRIDES: dict[InstanceOrigin, str] = {
 # emit is dispatched as a [BOT_CMD:] directive.
 #
 # The prompt review is pointed straight at the documents that carry literal
-# directive examples: the /watch block in CLAUDE.md, the /spawn, /reply, /image
+# directive examples: the /watch block in docs/design/watches.md, the /spawn, /reply, /image
 # and /repo lines in WORKING_CONTEXT. Quoting one of those inside a proposal is
 # the normal thing for it to do, and every directive parser would then arm it
 # for real. The quoted-prefix guards in those parsers do not save us: an

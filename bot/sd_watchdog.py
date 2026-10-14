@@ -14,7 +14,7 @@ health check says the bot can no longer be reached.
 
 Inert unless the unit asks for it: no ``WATCHDOG_USEC`` in the environment
 (no ``WatchdogSec=``, not under systemd, Windows) means the loop returns at
-once. See CLAUDE.md -> "A frozen bot is restarted, not waited on".
+once. See docs/design/sd-watchdog.md.
 """
 
 from __future__ import annotations

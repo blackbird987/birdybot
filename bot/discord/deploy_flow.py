@@ -2,8 +2,8 @@
 
 The deploy gate (``missing_predecessor_release``) runs in ``execute_deploy``
 ahead of the safety-net ``git push origin HEAD``: pushing first is the
-irreversible half. See CLAUDE.md, "A higher version number is not proof the
-release is in there".
+irreversible half. See docs/design/release-ancestry.md, "A higher version
+number is not proof the release is in there".
 """
 
 from __future__ import annotations

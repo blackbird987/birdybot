@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## v0.102.4, CLAUDE.md slimmed to a map, design notes moved to docs/design (2026-10-14)
+
+### Changed
+- **CLAUDE.md slimmed from about 118K to about 16K characters** (`CLAUDE.md`, `docs/design/`). The CLI loads it on every session start and after every compaction, and most of it was long incident write-ups that matter only when editing the code they describe. Those moved verbatim into one file each under `docs/design/`, and CLAUDE.md keeps the map, the rules that bite from unrelated edits, and an index saying which doc to read before touching which files, so every session in this repo starts about 25K tokens lighter. The plan reviewer (any repo's `docs/` folder) and the weekly prompt review (`docs/design/`) are told to search the design notes too.
+
 ## v0.102.3, Build worktrees guarded again and quiet nudges post nothing (2026-10-14)
 
 ### Fixed

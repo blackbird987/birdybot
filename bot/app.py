@@ -182,7 +182,7 @@ async def run() -> None:
             if reason == REASON_NO_DIR:
                 log.error(
                     "CLAUDE_ACCOUNTS entry dropped: %s (%s). "
-                    "See CLAUDE.md -> Multi-Account Setup.",
+                    "See docs/design/multi-account.md.",
                     acct,
                     reason,
                 )
@@ -219,7 +219,7 @@ async def run() -> None:
         log.warning(
             "CLAUDE_ACCOUNTS unset or all invalid -- running single-account "
             "from default ~/.claude. Failover is DISABLED. "
-            "See CLAUDE.md -> Multi-Account Setup."
+            "See docs/design/multi-account.md."
         )
 
     if not _acquire_pid_lock():
@@ -233,7 +233,7 @@ async def run() -> None:
     # WatchdogSec, and a hang anywhere in startup is caught too. Inert unless
     # the unit sets WatchdogSec=. The health check binds
     # `discord_bot` late, which is why it is declared here and not where
-    # Discord starts. See CLAUDE.md -> "A frozen bot is restarted, not waited on".
+    # Discord starts. See docs/design/sd-watchdog.md.
     discord_bot = None
     sd_watchdog_task = asyncio.create_task(sd_watchdog.watchdog_loop(
         sd_watchdog.DownGate(

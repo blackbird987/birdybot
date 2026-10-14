@@ -623,7 +623,7 @@ SESSION_SCOPE_PROBE_TTL_SECS: int = int(
 # The fleet total is not this knob's job and never was: it is bounded by the
 # slice's own MemoryHigh and by admission control, which is where a number
 # that has to know about *other* sessions belongs. See the ladder arithmetic
-# note in CLAUDE.md.
+# note in docs/design/oomd-session-scopes.md.
 #
 # Re-checked on 2026-10-08 against the slice's new 19G MemoryHigh: 8192 still
 # sits above a build session's 5.8-6.0 GB working set and below the slice, so
@@ -2220,8 +2220,9 @@ PLAN_REVIEW_PROMPT = (
     'Check the plan against what was already tried. If a "Prior history" '
     'block is present above, look for a [reversal] commit that removed '
     'what this plan adds, or a recorded decision it reverses. The idea may '
-    'have lived under another name, so also Grep CHANGELOG.md and '
-    'CLAUDE.md for the plan\'s core idea. If the plan re-adds something '
+    'have lived under another name, so also Grep CHANGELOG.md, '
+    'CLAUDE.md and the docs/ folder if there is one (design notes live '
+    'there) for the plan\'s core idea. If the plan re-adds something '
     'that was removed and does not name that earlier attempt and say why '
     'this time is different, raise a High revision tagged History.\n\n'
     'IMPORTANT formatting rules:\n'

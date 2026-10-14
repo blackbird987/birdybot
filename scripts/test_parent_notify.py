@@ -2,7 +2,7 @@
 """Pins the spawn-wave parent notification: a finished child tells its parent.
 
 ``/spawn`` fans work out into child threads and the orchestrator joins the wave
-back to the parent (see "Spawn-Wave Join" in CLAUDE.md). The join only works if
+back to the parent (see docs/design/spawn-wave-join.md). The join only works if
 every way a child turn can finish ends in
 ``RequestContext.notify_parent_on_finalize(status_label, text)``: the platform
 closure (``bot/discord/thread_ctx.py``, ``_notify_parent``) is bound to the child's

@@ -2595,7 +2595,7 @@ def _check_cgroup_psi_readers(failures: list[str]) -> None:
                     "cannot measure must not vote"
                 )
 
-    # Seam independence. CLAUDE.md's memory-guard section requires each PSI
+    # Seam independence. docs/design/cpu-io-weights.md requires each PSI
     # signal to keep its own reader, because the harness stubs one of them and
     # a shared entry point lets that stub silently decide the others' answers
     # too. Assert it structurally rather than trusting the current wiring.
@@ -2858,7 +2858,7 @@ def _check_oomd_escalation(failures: list[str]) -> None:
     if _oomd_pressure(30.0, 5.0, 80.0).oomd_at_least(memory.PRESSURE_TIGHT):
         failures.append("a calm slice satisfied an at-least-tight oomd test")
 
-    # summary() still refuses to look healthy on no readings. CLAUDE.md pins
+    # summary() still refuses to look healthy on no readings. cpu-io-weights.md pins
     # this for cpu/io; the slice figure joins the same rule, since a summary
     # built only from context bits describes a machine nothing was measured on.
     nothing = _oomd_pressure(None, None, None, avail=None, swap=None, psi=None)

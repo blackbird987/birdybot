@@ -8,7 +8,7 @@ chain's source. It found that instance as the LAST session match in
 chain was seeded from the session's OLDEST turn instead.
 
 It now uses ``StateStore.latest_instance_for_session``, the store's single
-"newest wins" scan, which CLAUDE.md asks every thread-to-instance lookup to
+"newest wins" scan, which docs/design/tldr.md asks every thread-to-instance lookup to
 share. This drives the real function with fakes and asserts the source
 instance and message id handed to the chain.
 """
