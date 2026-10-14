@@ -408,6 +408,17 @@ def test_hiding(tmp: Path):
     _check("--unshare-pid" in args and "--unshare-pid" not in ab_run.sandbox_args(repo, live, home=home),
            "hide: scoring gets its own pid namespace")
 
+    sysprompt = runs / "x" / "sysprompt.txt"
+    sysprompt.write_text("prompt\n")
+    other_file = runs / "x" / "score.json"
+    other_file.write_text("{}\n")
+    args = ab_run.sandbox_args(repo, live, account=own, project_dir=pd, runs_root=runs, home=home,
+                               cmd=["claude", "--append-system-prompt-file", str(sysprompt)])
+    i = args.index(str(sysprompt))
+    _check(args[i - 1:i + 2] == ["--ro-bind", str(sysprompt), str(sysprompt)] and i > last_hide
+           and str(other_file) not in args,
+           "hide: a hidden file the command names is bound back read-only, nothing beside it")
+
     texts = [json.dumps({"command": f"cat {live}/data/results/t-1.md && {live}/.venv/bin/python x"}),
              json.dumps({"file_path": f"{repo}/a.py"}), json.dumps({"file_path": f"{pd}/s.jsonl"})]
     peeks = ab_run.find_peeks(texts, hidden, [live / ".venv", pd, repo])

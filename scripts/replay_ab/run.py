@@ -127,10 +127,15 @@ def hidden_paths(*, account: str | Path | None, live_root: Path = LIVE_ROOT,
     return [p for p in out if p.exists() and not under(home, p)]
 
 
-def kept_paths(repo: Path, *, project_dir: Path | None = None,
-               live_root: Path = LIVE_ROOT) -> list[tuple[Path, str]]:
-    """What is bound back over the hidden paths: (path, "ro" | "rw")."""
-    out: list[tuple[Path, str]] = []
+def kept_paths(repo: Path, *, project_dir: Path | None = None, live_root: Path = LIVE_ROOT,
+               inputs: tuple[Path, ...] = ()) -> list[tuple[Path, str]]:
+    """What is bound back over the hidden paths: (path, "ro" | "rw").
+
+    ``inputs`` are single files the command line itself names, read-only.
+    The arm's system prompt sits in the replicate's directory beside the
+    clone, under the hidden run root, and the CLI refuses to start without it.
+    """
+    out: list[tuple[Path, str]] = [(f, "ro") for f in inputs]
     venv = live_root / ".venv"
     if venv.is_dir():
         # The interpreter sessions are told to use. Its editable install of
@@ -145,7 +150,8 @@ def kept_paths(repo: Path, *, project_dir: Path | None = None,
 
 def sandbox_args(repo: Path, live_root: Path = LIVE_ROOT, *, account: str | Path | None = None,
                  project_dir: Path | None = None, runs_root: Path = RUNS_ROOT,
-                 home: Path | None = None, contain: bool = False) -> list[str]:
+                 home: Path | None = None, contain: bool = False,
+                 cmd: list[str] | None = None) -> list[str]:
     """bwrap: the answer hidden, ~/.config read-only, the clone writable.
 
     ``--die-with-parent`` ties the sandbox to whoever launched it. With
@@ -157,15 +163,23 @@ def sandbox_args(repo: Path, live_root: Path = LIVE_ROOT, *, account: str | Path
     args = ["bwrap", "--dev-bind", "/", "/", "--die-with-parent"]
     if contain:
         args += ["--unshare-pid", "--proc", "/proc"]
-    for p in hidden_paths(account=account, live_root=live_root, runs_root=runs_root, home=home):
+    hidden = hidden_paths(account=account, live_root=live_root, runs_root=runs_root, home=home)
+    for p in hidden:
         # A file is masked with /dev/null as a device bind: a plain bind is
         # nodev, so the CLI's own read of it would fail with EACCES. Reads
         # come back empty and its appends go nowhere.
         args += ["--tmpfs", str(p)] if p.is_dir() else ["--dev-bind", "/dev/null", str(p)]
     args += ["--ro-bind-try", str(home / ".config"), str(home / ".config")]
-    for p, mode in kept_paths(repo, project_dir=project_dir, live_root=live_root):
+    inputs = command_inputs(cmd or [], hidden)
+    for p, mode in kept_paths(repo, project_dir=project_dir, live_root=live_root, inputs=inputs):
         args += ["--ro-bind" if mode == "ro" else "--bind", str(p), str(p)]
     return args + ["--chdir", str(repo)]
+
+
+def command_inputs(cmd: list[str], hidden: list[Path]) -> tuple[Path, ...]:
+    """Existing files named in ``cmd`` that the hiding would otherwise cover."""
+    return tuple(Path(a) for a in cmd if a.startswith("/") and Path(a).is_file()
+                 and any(under(Path(a), h) for h in hidden))
 
 
 def wrap(cmd: list[str], *, repo: Path, unit: str, live_root: Path = LIVE_ROOT,
@@ -175,7 +189,7 @@ def wrap(cmd: list[str], *, repo: Path, unit: str, live_root: Path = LIVE_ROOT,
         f"--slice={SLICE}", f"--unit={unit}",
         "-p", f"MemoryHigh={MEM_HIGH}", "-p", f"MemoryMax={MEM_MAX}",
         "--", "nice", "-n", str(NICE),
-        *sandbox_args(repo, live_root, account=account, project_dir=project_dir),
+        *sandbox_args(repo, live_root, account=account, project_dir=project_dir, cmd=cmd),
         "--", *cmd,
     ]
 
