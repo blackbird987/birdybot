@@ -26,6 +26,10 @@ from bot.claude.types import (
 
 log = logging.getLogger(__name__)
 
+# The hook scripts live in bot/claude/hooks/, one level above this package.
+# Resolving next to this file broke silently when runner.py became a package.
+_HOOKS_DIR = Path(__file__).resolve().parent.parent / "hooks"
+
 
 class WorktreeRecoveryEvent(NamedTuple):
     """Result of a single worktree-recovery decision at startup.
@@ -255,9 +259,7 @@ class WorktreeMixin:
         identifiable by an `_owner: "claude-telegram-bot"` marker so we can
         replace it on re-install instead of stacking duplicates.
         """
-        hook_script = (
-            Path(__file__).resolve().parent / "hooks" / "worktree_guard.py"
-        )
+        hook_script = _HOOKS_DIR / "worktree_guard.py"
         if not hook_script.is_file():
             log.warning("worktree_guard.py not found at %s", hook_script)
             return
@@ -289,9 +291,7 @@ class WorktreeMixin:
         # so a waiting session never trips the stall-warning embed).
         mutex_entries: list[tuple[str, dict]] = []
         if config.TEST_MUTEX_ENABLED:
-            mutex_script = (
-                Path(__file__).resolve().parent / "hooks" / "test_mutex.py"
-            )
+            mutex_script = _HOOKS_DIR / "test_mutex.py"
             if mutex_script.is_file():
                 for event, phase, timeout in (
                     ("PreToolUse", "pre", 90),
