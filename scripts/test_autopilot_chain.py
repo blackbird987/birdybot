@@ -788,6 +788,10 @@ s.close()
 print()
 print("cost budget")
 
+# The chain budget only binds with the dollar gates switched on
+# (config.COST_GATES_ENFORCE, off by default; see scripts/test_cost_gates.py).
+_enforce_saved = config.COST_GATES_ENFORCE
+config.COST_GATES_ENFORCE = True
 s = scenario(step_cost=5.0)
 run(workflows.on_autopilot(s.ctx, SOURCE_ID, SOURCE_MSG, start_from="build",
                            cost_budget_usd=1.0))
@@ -805,6 +809,7 @@ run(workflows.on_autopilot(s.ctx, SOURCE_ID, SOURCE_MSG, start_from="build",
                            cost_budget_usd=100.0))
 check_eq("budget not reached: chain completes", s.order, SHIP)
 s.close()
+config.COST_GATES_ENFORCE = _enforce_saved
 
 
 # --------------------------------------------------------------------------
