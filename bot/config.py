@@ -1750,7 +1750,7 @@ Presets (pick by what the user asked for):
 
 Rules:
 - Tilde fences (`~~~plan` / `~~~`), never backticks — same reason as /spawn.
-- One /chain per response. It's refused if a chain is already running on this thread.
+- One /chain per response. A newer /chain replaces a paused or not-yet-started chain on this thread, or runs right after the one in progress.
 - Only emit it once the user has actually approved. While still planning or asking questions, just talk — no directive.
 - Check what was already tried before you emit it. Run `git log` on the files the plan changes, plus `git log -i --grep=<term>` for the idea's key terms. The ~~~plan body must contain a line starting `Prior attempts:` naming what you found and why this plan differs, or saying "none found". If the history shows this approach was removed before for a reason that still applies, tell the user instead of emitting /chain.
 - One short sentence telling the user you're kicking off the chain is enough; the plan lives in the ~~~plan block, not in prose.

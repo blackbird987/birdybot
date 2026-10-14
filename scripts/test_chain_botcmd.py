@@ -16,6 +16,13 @@ seams (messenger, runner, store):
 - error result -> no scan, no spawn
 - directive-free result -> no spawn, no notices
 
+Plus the /chain directive's per-session queue (bot/engine/directives/chain.py):
+- a paused chain on the session is superseded, not refused
+- two /chain directives before the first starts run ONE chain, newest plan
+- a /chain during a running chain runs right after it, one drain task
+- no stored chain -> launches with no supersede note
+- the drainer set is empty afterwards, even when the chain raises
+
 Run: python scripts/test_chain_botcmd.py
 Exit 0 = all pass, exit 1 = failures.
 """
@@ -223,11 +230,212 @@ def test_plain_result_no_noise() -> None:
     )
 
 
+# --- /chain directive queue ------------------------------------------------
+
+from datetime import datetime, timedelta, timezone
+
+from bot.engine import prior_art, workflows
+from bot.engine.cmd_state import _get_channel_lock
+from bot.engine.directives import chain as chain_mod
+
+prior_art.collect = lambda repo_path, plan_text, **kw: ""
+
+
+def _chain_text(plan: str, preset: str = "ship") -> str:
+    return f"Kicking it off.\n\n[BOT_CMD: /chain preset={preset}]\n~~~plan\n{plan}\n~~~\n"
+
+
+class _ChainStore:
+    def __init__(self, chain=None, meta=None) -> None:
+        self.chain = chain
+        self.meta = meta
+        self.cleared = 0
+        self.overrides: list[str] = []
+
+    def get_autopilot_chain(self, sid):
+        return self.chain
+
+    def get_autopilot_chain_meta(self, sid):
+        return self.meta
+
+    def clear_chain_state(self, sid):
+        self.cleared += 1
+        self.chain = None
+        self.meta = None
+
+    def set_chain_plan_override(self, sid, plan):
+        self.overrides.append(plan)
+
+
+def _chain_env(channel: str, store: _ChainStore):
+    msgr = _FakeMessenger()
+    ctx = RequestContext(
+        messenger=msgr, channel_id=channel, platform="discord",
+        store=store, runner=SimpleNamespace(), session_id="sess-c",
+        repo_name="bot",
+    )
+    src = SimpleNamespace(id="q-src", session_id="sess-c", repo_path="")
+    return ctx, msgr, src
+
+
+class _FakeChains:
+    """Stands in for workflows.on_conversational_chain (facade-patchable)."""
+
+    def __init__(self, store: _ChainStore, gate: asyncio.Event | None = None,
+                 raise_on_call: bool = False) -> None:
+        self.calls: list[tuple[str, str]] = []
+        self.store = store
+        self.gate = gate
+        self.raise_on_call = raise_on_call
+
+    async def __call__(self, ctx, source_id, preset, source_msg_id=None):
+        self.calls.append((preset, self.store.overrides[-1] if self.store.overrides else ""))
+        if self.gate is not None:
+            await self.gate.wait()
+        if self.raise_on_call:
+            raise RuntimeError("chain blew up")
+        return None
+
+
+async def _settle() -> None:
+    for _ in range(20):
+        await asyncio.sleep(0)
+    while chain_mod._chain_drainers:
+        await asyncio.sleep(0.01)
+
+
+def _with_fake(fake, coro_fn) -> None:
+    orig = workflows.on_conversational_chain
+    workflows.on_conversational_chain = fake
+    try:
+        asyncio.run(coro_fn())
+    finally:
+        workflows.on_conversational_chain = orig
+        chain_mod._pending_chains.clear()
+
+
+def test_chain_supersedes_paused() -> None:
+    print("/chain over a paused chain supersedes it:")
+    twelve_h = (datetime.now(timezone.utc) - timedelta(hours=12, minutes=5)).isoformat()
+    store = _ChainStore(
+        chain=["build", "sensors", "review_code", "verify"],
+        meta={"status": "paused", "updated_at": twelve_h},
+    )
+    ctx, msgr, src = _chain_env("chan-sup", store)
+    fake = _FakeChains(store)
+
+    async def go():
+        await chain_mod._handle_chain_directive(ctx, _chain_text("PLAN NEW"), src)
+        await _settle()
+
+    _with_fake(fake, go)
+    _check(not any("already running" in m for m in msgr.sent), "no refusal notice")
+    _check(store.cleared == 1, "stored chain state cleared once")
+    _check(store.overrides == ["PLAN NEW"], "override set to the new plan")
+    _check(fake.calls == [("ship", "PLAN NEW")], "one chain launched")
+    _check(
+        any("Replaced a paused chain from 12h ago (stopped at build)" in m
+            for m in msgr.sent),
+        "supersede note reads '12h ago (stopped at build)'",
+    )
+    _check(not chain_mod._chain_drainers, "drainer set empty")
+
+
+def test_chain_coalesces_before_start() -> None:
+    print("two /chain directives before the first starts -> one chain:")
+    store = _ChainStore()
+    ctx, msgr, src = _chain_env("chan-coal", store)
+    fake = _FakeChains(store)
+
+    async def go():
+        lock = _get_channel_lock(ctx.channel_id)
+        async with lock:
+            await chain_mod._handle_chain_directive(ctx, _chain_text("PLAN ONE", "ship"), src)
+            await chain_mod._handle_chain_directive(ctx, _chain_text("PLAN TWO", "verify"), src)
+            for _ in range(10):
+                await asyncio.sleep(0)
+            _check(fake.calls == [], "nothing runs while the lock is held")
+        await _settle()
+
+    _with_fake(fake, go)
+    _check(fake.calls == [("verify", "PLAN TWO")], "exactly one chain, newest plan and preset")
+    _check(store.cleared == 0, "no supersede when nothing was stored")
+    _check(
+        any("Got the newer plan" in m for m in msgr.sent),
+        "second directive acknowledged",
+    )
+    _check(not chain_mod._chain_drainers, "drainer set empty")
+
+
+def test_chain_queues_during_run() -> None:
+    print("/chain during a running chain runs after it:")
+    store = _ChainStore()
+    ctx, msgr, src = _chain_env("chan-queue", store)
+
+    async def go():
+        gate = asyncio.Event()
+        fake.gate = gate
+        await chain_mod._handle_chain_directive(ctx, _chain_text("PLAN A"), src)
+        for _ in range(20):
+            await asyncio.sleep(0)
+        _check(fake.calls == [("ship", "PLAN A")], "first chain running")
+        n_tasks = len(asyncio.all_tasks())
+        await chain_mod._handle_chain_directive(ctx, _chain_text("PLAN B", "hold"), src)
+        _check(len(asyncio.all_tasks()) == n_tasks, "no second drain task")
+        _check(len(fake.calls) == 1, "second plan waits for the first")
+        gate.set()
+        await _settle()
+
+    fake = _FakeChains(store)
+    _with_fake(fake, go)
+    _check(
+        fake.calls == [("ship", "PLAN A"), ("hold", "PLAN B")],
+        "both ran, in order",
+    )
+    _check(not chain_mod._chain_drainers, "drainer set empty")
+
+
+def test_chain_fresh_launch() -> None:
+    print("/chain with no stored chain launches quietly:")
+    store = _ChainStore()
+    ctx, msgr, src = _chain_env("chan-fresh", store)
+    fake = _FakeChains(store)
+
+    async def go():
+        await chain_mod._handle_chain_directive(ctx, _chain_text("PLAN F"), src)
+        await _settle()
+
+    _with_fake(fake, go)
+    _check(fake.calls == [("ship", "PLAN F")], "chain launched")
+    _check(not any("Replaced" in m for m in msgr.sent), "no supersede note")
+    _check(any("Starting **ship** chain" in m for m in msgr.sent), "start notice sent")
+
+
+def test_chain_raise_clears_drainer() -> None:
+    print("a chain that raises still releases the drainer:")
+    store = _ChainStore()
+    ctx, msgr, src = _chain_env("chan-raise", store)
+    fake = _FakeChains(store, raise_on_call=True)
+
+    async def go():
+        await chain_mod._handle_chain_directive(ctx, _chain_text("PLAN X"), src)
+        await _settle()
+
+    _with_fake(fake, go)
+    _check(len(fake.calls) == 1, "chain was attempted")
+    _check(not chain_mod._chain_drainers, "drainer set empty after a raise")
+
+
 def main() -> int:
     test_chain_turn_dispatches()
     test_autopilot_gate_posts_notice()
     test_error_result_not_scanned()
     test_plain_result_no_noise()
+    test_chain_supersedes_paused()
+    test_chain_coalesces_before_start()
+    test_chain_queues_during_run()
+    test_chain_fresh_launch()
+    test_chain_raise_clears_drainer()
     if _failures:
         print(f"\n{len(_failures)} FAILURE(S):")
         for f in _failures:
