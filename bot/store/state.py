@@ -672,7 +672,10 @@ class StateStore(ReposMixin, AccountsMixin, SchedulesMixin, ChainsMixin):
             self._cost_date = today
         self._daily_cost += amount
         self._total_cost += amount
-        self.save()
+        # Deferred, not saved through: this runs after every finished run,
+        # straight after the critical update_instance that already persisted
+        # the run's own cost, and state.json is megabytes.
+        self.mark_dirty()
 
     def get_daily_cost(self) -> float:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")

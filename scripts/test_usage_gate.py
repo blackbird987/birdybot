@@ -300,8 +300,11 @@ async def _settle() -> None:
         await asyncio.sleep(0)
 
 
-NOW = datetime(2026, 10, 12, 15, 0, tzinfo=timezone.utc)   # a Monday, 8am PDT
-WINDOW_END = datetime(2026, 10, 12, 18, 0, tzinfo=timezone.utc)  # 11am PDT
+# Anchored to the real clock: the Run Now bypass is compared against
+# datetime.now() inside the gate, so a fixed date turned the bypass checks
+# into a time bomb the day after it was written.
+NOW = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+WINDOW_END = NOW + timedelta(hours=3)
 
 
 def _patch_window(active: bool, end: datetime = WINDOW_END):

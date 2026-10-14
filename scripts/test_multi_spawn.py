@@ -236,8 +236,19 @@ def test_handler_stop_vs_continue() -> None:
     ctx, _, spawned, _ = _fake_ctx(wave_count=_MAX_SPAWN_WAVES)
     _check(_dispatch(ctx) is False, "wave cap returns False")
 
+    # The daily budget only refuses with the dollar gates switched on
+    # (config.COST_GATES_ENFORCE, off by default; see scripts/test_cost_gates.py).
+    from bot import config as _config
+    _enforce_saved = _config.COST_GATES_ENFORCE
+    _config.COST_GATES_ENFORCE = True
+    try:
+        ctx, _, spawned, _ = _fake_ctx(daily_cost=10**9)
+        _check(_dispatch(ctx) is False, "budget gate returns False")
+    finally:
+        _config.COST_GATES_ENFORCE = _enforce_saved
     ctx, _, spawned, _ = _fake_ctx(daily_cost=10**9)
-    _check(_dispatch(ctx) is False, "budget gate returns False")
+    _check(_dispatch(ctx) is True and len(spawned) == 1,
+           "budget gate off: a huge day still spawns")
 
     ctx, _, spawned, _ = _fake_ctx(with_spawn_session=False)
     _check(_dispatch(ctx) is False, "missing platform seam returns False")

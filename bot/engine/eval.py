@@ -712,7 +712,11 @@ def evaluate_chain(
             category="efficiency", severity="warning",
             message=f"Code review looped {code_review_rounds} times — review prompt may be too strict",
         ))
-    if total_cost and total_cost > 1.0:
+    # Off with the dollar gates: on a subscription the recorded cost is a
+    # notional API-price figure, and an ordinary chain runs well past $1 of
+    # it, so this would flag every chain and bury the flags that mean
+    # something. The figure itself is still recorded in total_cost.
+    if config.COST_GATES_ENFORCE and total_cost and total_cost > 1.0:
         ev.flags.append(EvalFlag(
             category="efficiency", severity="issue",
             message=f"Chain cost ${total_cost:.2f} — unusually expensive",
