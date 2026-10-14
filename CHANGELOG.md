@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **A nudge that chooses to stay quiet no longer posts "[TURN_COMPLETE]"** (`bot/claude/parser.py`, `bot/engine/lifecycle.py`, `scripts/test_marker_only_result.py`). On 2026-10-13 two scheduled nudges in a vin-coach thread (q-19872, q-19905) held back because a conversation was already going and replied with only the marker. The display copy stripped it, the empty text fell through to the summary card, and that card printed `inst.summary`, which `extract_summary` built from the raw text, so the thread got a card reading "[TURN_COMPLETE]" with build buttons. The summary now has the marker stripped, so no card, `/list` or parent notice can show it, and a successful unattended turn (`source` wake or cooldown) whose whole reply was the marker posts no result card at all; the done status line still shows it ran. User-typed, failed and marker-less empty turns keep their card.
+
 ## v0.102.1, systemd restarts a frozen or unreachable bot (2026-10-13)
 
 ### Added
