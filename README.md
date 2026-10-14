@@ -286,11 +286,11 @@ python scripts/discord_test.py read <thread_id> 5
 
 ---
 
-## CLAUDE.md is the interesting file
+## CLAUDE.md and docs/design are the interesting files
 
-If you are here to build your own version rather than run this one, read [`CLAUDE.md`](CLAUDE.md) before the source.
+If you are here to build your own version rather than run this one, read [`CLAUDE.md`](CLAUDE.md) and the design notes it indexes in [`docs/design/`](docs/design/) before the source.
 
-It is the instruction file the agent itself loads, and almost every rule in it is written as *the incident that produced it* — the watchdog that reaped a live four-hour benchmark for being old rather than silent, the three overnight child sessions lost because a rate-limited turn never recorded its session id, the forum pin race that left five of fourteen channels pinned to the wrong post, the kill that read as a crash because the CLI exits 143 instead of -15.
+CLAUDE.md is the instruction file the agent itself loads, kept short because it is paid for on every session. The design notes are read on demand, before editing the code they cover, and almost every rule in them is written as *the incident that produced it*: the watchdog that reaped a live four-hour benchmark for being old rather than silent, the three overnight child sessions lost because a rate-limited turn never recorded its session id, the forum pin race that left five of fourteen channels pinned to the wrong post, the kill that read as a crash because the CLI exits 143 instead of -15.
 
 Not "do X" but "X, because on this date Y broke this way." That framing is most of why the agent follows the rules instead of drifting from them, and it is the part that transfers to any project.
 

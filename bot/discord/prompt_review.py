@@ -181,8 +181,8 @@ async def _run_review_locked(bot, days, repo_name, repo_path, thread) -> str:
     # No session binding here, deliberately. This thread is not a conversation:
     # each week's review is a fresh context by design (a reviewer that
     # remembers last week's proposals argues for them). Same reasoning as the
-    # chain runner. See "A thread must always know its session" in CLAUDE.md
-    # for why binding is the caller's job and why this caller declines it.
+    # chain runner. See "A thread must always know its session" in
+    # docs/design/thread-session-binding.md for why binding is the caller's job and why this caller declines it.
     ctx.maybe_prime_briefing = None
 
     from bot.engine import lifecycle

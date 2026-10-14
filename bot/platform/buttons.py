@@ -1,7 +1,7 @@
 """Platform-agnostic button specs for result, running and queued cards, split out of formatting.py.
 
-The TL;DR button placement rules live in ``action_button_specs``; see CLAUDE.md,
-"TL;DR has two shapes".
+The TL;DR button placement rules live in ``action_button_specs``; see
+docs/design/tldr.md, "TL;DR has two shapes".
 """
 
 from __future__ import annotations

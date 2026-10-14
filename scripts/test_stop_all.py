@@ -9,7 +9,7 @@ kill. Every run they stopped therefore rendered as a red FAILED card, and a
 killed run's "no output, no turns" shape is exactly what the account-failover
 branch reads as an account that fell over, so on a two-account setup the work
 the user had just cancelled could be restarted on the backup subscription.
-See "Interrupting a session" in CLAUDE.md.
+See docs/design/kill-steer.md.
 
 Asserted here:
 

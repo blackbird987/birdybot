@@ -13,7 +13,7 @@
 
 - [ ] **Gate autopilot/spawns/wakes on real plan-usage %, see `bot/engine/plan_usage.py`.** The dollar gates are off by default (`COST_GATES_ENFORCE`) because subscription costs are notional; the figure that actually runs out is the session/weekly percentage `plan_usage` already reads per account. A brake there (hold unattended chains, spawn waves and self-wakes past, say, 90% weekly) is the real version of what `DAILY_BUDGET_USD` was meant to be.
 
-- [ ] **Replay A/B: run the A/A round, then the first real arm.** `scripts/replay_ab/` works (one spike on t-9086). Next: an A/A round (both arms `current`, k=3, 4-6 cases) to measure the noise floor, then the trimmed-CLAUDE.md arm against it. Still missing: the pairwise judge (`main.py` docstring) and the `--review` code-quality score (`score.py` docstring). Known gap: a replay starts with no project auto-memory (`sandbox.py` docstring).
+- [ ] **Replay A/B: run the A/A round, then the first real arm.** `scripts/replay_ab/` works (one spike on t-9086). Next: an A/A round (both arms `current`, k=3, 4-6 cases) to measure the noise floor, then the trimmed-CLAUDE.md arm against it. Still missing: the pairwise judge (`main.py` docstring) and the `--review` code-quality score (`score.py` docstring). Known gap: a replay starts with no project auto-memory (`sandbox.py` docstring). Update 2026-10-14: the slim CLAUDE.md shipped without waiting for the A/B, so that arm is now pre-slim CLAUDE.md (`git show d32927c:CLAUDE.md`) vs current.
 
 ## Tech Debt
 

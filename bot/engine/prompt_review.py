@@ -159,7 +159,7 @@ Every session this bot runs is scored by heuristic checks in \
 that was supposed to prevent it. Owner names in CAPITALS are constants in \
 `bot/config.py`; owners described in prose (e.g. "prompt assembly order \
 (harness)") are code, not prompt text. The long-form rules also live in \
-`CLAUDE.md` at the repo root.
+`CLAUDE.md` at the repo root and in `docs/design/`.
 
 Read the owning block before you say anything about it. A proposal that \
 misquotes the text it wants to change is worse than no proposal.

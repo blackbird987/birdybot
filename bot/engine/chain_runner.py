@@ -712,7 +712,7 @@ async def _run_autopilot_chain(
     # Individual steps run through lifecycle.run_instance, which deliberately
     # does NOT bind their session onto the thread (a step's session belongs to
     # the step, not the conversation — see "A thread must always know its
-    # session" in CLAUDE.md).
+    # session" in docs/design/thread-session-binding.md).
     ctx.runner.begin_task(chain_task_id)
     try:
         for step in steps:
