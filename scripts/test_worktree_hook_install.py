@@ -11,6 +11,9 @@ WARNING line per build. Nothing exercised the install, so this does:
 - Installing into a real ``git worktree add``'d tree writes a
   ``settings.local.json`` whose guard and mutex commands name scripts that
   exist, and logs no "not found" warning.
+- The installed guard command runs as written: it allows a Write inside
+  the worktree and blocks one into the main repo. A path that exists but a
+  command line that does not run would be the same silent failure.
 """
 from __future__ import annotations
 
@@ -53,6 +56,14 @@ def _git(*args: str, cwd: Path) -> None:
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
 
 
+def _run_hook(command: str, tool_input: dict) -> int:
+    """Run an installed hook command the way Claude Code does: through a
+    shell, with the tool call as JSON on stdin. Returns the exit code."""
+    payload = json.dumps({"tool_name": "Write", "tool_input": tool_input})
+    return subprocess.run(command, shell=True, input=payload, text=True,
+                          capture_output=True, timeout=30).returncode
+
+
 def _script_paths(entry: dict) -> list[Path]:
     """The .py paths a hook entry's commands point at."""
     out = []
@@ -71,6 +82,39 @@ def check_hooks_dir() -> None:
         check(f"hooks dir holds {name}", (hooks_dir / name).is_file(), str(hooks_dir))
 
 
+def _check_settings(repo: Path, wt_dir: Path) -> None:
+    settings = wt_dir / ".claude" / "settings.local.json"
+    check("settings.local.json written", settings.is_file())
+    if not settings.is_file():
+        return
+    hooks = json.loads(settings.read_text(encoding="utf-8")).get("hooks", {})
+
+    guard = [e for e in hooks.get("PreToolUse", [])
+             if e.get("_owner") == "claude-telegram-bot"]
+    check("guard entry installed", len(guard) == 1, f"{len(guard)} entries")
+    if guard:
+        paths = _script_paths(guard[0])
+        check("guard command names an existing worktree_guard.py",
+              any(p.name == "worktree_guard.py" and p.is_file() for p in paths),
+              str(paths))
+        command = guard[0]["hooks"][0]["command"]
+        rc = _run_hook(command, {"file_path": str(wt_dir / "ok.txt")})
+        check("installed guard allows a write inside the worktree", rc == 0, f"exit {rc}")
+        rc = _run_hook(command, {"file_path": str(repo / "leak.txt")})
+        check("installed guard blocks a write into the main repo", rc == 2, f"exit {rc}")
+
+    for event in ("PreToolUse", "PostToolUse"):
+        mutex = [e for e in hooks.get(event, [])
+                 if e.get("_owner") == "claude-telegram-bot-test-mutex"]
+        check(f"test-mutex {event} entry installed", len(mutex) == 1,
+              f"{len(mutex)} entries")
+        if mutex:
+            paths = _script_paths(mutex[0])
+            check(f"test-mutex {event} command names an existing test_mutex.py",
+                  any(p.name == "test_mutex.py" and p.is_file() for p in paths),
+                  str(paths))
+
+
 def check_install() -> None:
     cap = _Capture()
     logger = logging.getLogger(wt_mod.__name__)
@@ -82,45 +126,19 @@ def check_install() -> None:
             repo = Path(tmp) / "repo"
             repo.mkdir()
             _git("init", "-q", "-b", "master", cwd=repo)
-            _git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q",
-                 "--allow-empty", "-m", "init", cwd=repo)
+            _git("-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false",
+                 "commit", "-q", "--allow-empty", "-m", "init", cwd=repo)
             wt_dir = repo / ".worktrees" / "t-1"
             _git("worktree", "add", "-q", "-b", "claude-bot/t-1", str(wt_dir), cwd=repo)
 
             ClaudeRunner._install_worktree_hook(str(repo), str(wt_dir))
-
-            settings = wt_dir / ".claude" / "settings.local.json"
-            check("settings.local.json written", settings.is_file())
-            if not settings.is_file():
-                return
-            hooks = json.loads(settings.read_text(encoding="utf-8")).get("hooks", {})
-
-            pre = hooks.get("PreToolUse", [])
-            post = hooks.get("PostToolUse", [])
-            guard = [e for e in pre if e.get("_owner") == "claude-telegram-bot"]
-            check("guard entry installed", len(guard) == 1, f"{len(guard)} entries")
-            if guard:
-                paths = _script_paths(guard[0])
-                check("guard command names an existing worktree_guard.py",
-                      any(p.name == "worktree_guard.py" and p.is_file() for p in paths),
-                      str(paths))
-
-            for event, entries in (("PreToolUse", pre), ("PostToolUse", post)):
-                mutex = [e for e in entries
-                         if e.get("_owner") == "claude-telegram-bot-test-mutex"]
-                check(f"test-mutex {event} entry installed", len(mutex) == 1,
-                      f"{len(mutex)} entries")
-                if mutex:
-                    paths = _script_paths(mutex[0])
-                    check(f"test-mutex {event} command names an existing test_mutex.py",
-                          any(p.name == "test_mutex.py" and p.is_file() for p in paths),
-                          str(paths))
-
-            not_found = [m for m in cap.messages if "not found" in m]
-            check("no 'not found' warning logged", not not_found, "; ".join(not_found))
+            _check_settings(repo, wt_dir)
     finally:
         config.TEST_MUTEX_ENABLED = saved_mutex
         logger.removeHandler(cap)
+
+    not_found = [m for m in cap.messages if "not found" in m]
+    check("no 'not found' warning logged", not not_found, "; ".join(not_found))
 
 
 def main() -> int:
