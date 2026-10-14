@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- **Offline replay A/B harness (`scripts/replay_ab/`).** Reruns a finished build from its own starting point (the base commit, and the conversation forked at the row the build prompt hung off) under one or two prompt arms, with replicates and interleaved arms, then scores each run against the shipped solution: the shipped harnesses run on the session's tree (a failure on import is counted as an interface mismatch, not a wrong fix), the session's own tests, files and lines changed, overlap with the real diff, and turns, cost and wall time. Nothing touches the live bot: the clone is `git init` plus a fetch of the base commit only, so the solution is not in it (checked before every run), the account's `.credentials.json` is never read, every run sits in its own memory-capped scope under the sessions slice at nice 10 inside bwrap with the live checkout read-only and its `.env` masked, and results live under `~/.cache/replay-ab/`, never `data/`. Spike on t-9086: the fork resumed, $3.52, 90s, its own test passed, the shipped test failed on import because it fixed the same thing under a different helper name (`scripts/test_replay_ab.py`).
+
 ### Fixed
 - **Run costs are recorded.** The parser read `cost_usd`, but the Claude CLI's result event names it `total_cost_usd`, so all 259 instances in `state.json` were stored at $0, and the daily total, the control room's "today" figure and every dollar gate saw nothing. It now reads `total_cost_usd` first and falls back to `cost_usd`; the parser golden harness names the field so a `--regen` cannot quietly bless a regression (`scripts/test_parser_golden.py`). The global cost counter no longer rewrites the multi-megabyte state file on every run now that it is non-zero; it rides the 60s auto-save.
 
