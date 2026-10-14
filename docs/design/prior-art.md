@@ -23,8 +23,8 @@ Why the bot fetches rather than telling the session to: **the plan reviewer
 cannot run git.** It runs behind the read-only floor, and
 `_enforce_readonly_floor` closes Bash along with the write tools because Bash
 is a write backdoor. It keeps Read and Grep, which is why the review prompt
-also sends it to CHANGELOG.md, CLAUDE.md and docs/design/ for the idea under
-another name.
+also sends it to CHANGELOG.md, CLAUDE.md and docs/ for the idea under another
+name.
 An instruction to "check the history" would also be the soft guard, skipped
 exactly when the session is confident.
 

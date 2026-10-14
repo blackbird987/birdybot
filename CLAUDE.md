@@ -95,7 +95,7 @@ Build tasks use git worktrees for parallel isolation:
 ## Cross-cutting rules that bite from unrelated edits
 
 - **Failure wording is load-bearing.** `parser.is_account_agnostic_error`
-  matches on the phrases "lifetime limit" (watchdog reap), "killed by the
+  matches, among others, the phrases "lifetime limit" (watchdog reap), "killed by the
   system's out-of-memory protection" (outside OOM kill) and the context
   overflow wording ("Prompt is too long · automatic compaction failed"). Each of
   those failures has no output and no turns, which is the account-failover
@@ -126,20 +126,20 @@ the incident that made each one necessary. They are not loaded automatically.
 - **Control Room blurb** (`docs/design/control-room-description.md`): `bot/engine/repo_desc.py`, `/repo desc`, `.claude/repo.json`; stat-only cache signature, first prose paragraph of CLAUDE.md is this repo's blurb. `scripts/test_repo_desc.py`
 - **TL;DR** (`docs/design/tldr.md`): `steps.on_tldr`, `config.TLDR_PROMPT`, `InstanceOrigin.TLDR`; resumes, read-only, no own button row, leaves the source card's buttons, no directives. `scripts/test_tldr.py`
 - **Repo hide** (`docs/design/repo-hide.md`): `/repo hide|unhide`, `forums._move_repo_forum`, `wake_repo_if_dormant`, `list_active_repos`; moved not permission-hidden, `list_repos()` stays unfiltered. `scripts/test_repo_hide.py`
-- **Release ancestry** (`docs/design/release-ancestry.md`): `_release_containment_warning`, `RELEASE_ORPHANED_MARKER`, `_discard_branch_sync`, `execute_deploy`, `runner._is_ancestor`; gate walks back one release, a git read that cannot answer is `None`. `scripts/test_release_ancestry.py`
-- **Orphan safety-net** (`docs/design/orphan-safety-net.md`): `bot/claude/runner/watchdog.py`, `_reaped_result_base`, `MAX_PROCESS_*`; kill on silence not age, "lifetime limit" wording, notify before terminate. `scripts/test_lifetime_cap.py`
-- **systemd watchdog** (`docs/design/sd-watchdog.md`): `bot/sd_watchdog.py`, `_discord_is_down`, `DownGate`, unit `WatchdogSec`; inert unless the unit asks, never widen "down" to "not ready". `scripts/test_sd_watchdog.py`
+- **Release ancestry** (`docs/design/release-ancestry.md`): `bot/claude/runner/git_release.py` (`_release_containment_warning`, `_is_ancestor`, `RELEASE_ORPHANED_MARKER`), `git_merge._discard_branch_sync`, `deploy_flow.execute_deploy`; gate walks back one release, a git read that cannot answer is `None`. `scripts/test_release_ancestry.py`
+- **Orphan safety-net** (`docs/design/orphan-safety-net.md`): `bot/claude/runner/watchdog.py`, `reaping._reaped_result_base`, `MAX_PROCESS_*`; kill on silence not age, "lifetime limit" wording, notify before terminate. `scripts/test_lifetime_cap.py`
+- **systemd watchdog** (`docs/design/sd-watchdog.md`): `bot/sd_watchdog.py` (`DownGate`), `app._discord_is_down`, unit `WatchdogSec`; inert unless the unit asks, never widen "down" to "not ready". `scripts/test_sd_watchdog.py`
 - **Thread session binding** (`docs/design/thread-session-binding.md`): `should_bind_session`, `backfill_thread_session`, every `lifecycle.run_instance` caller, `on_self_wake`; bind before the cooldown return, backfill fills a gap and never rebinds. `scripts/test_cooldown_session_bind.py`
 - **Context overflow** (`docs/design/context-overflow.md`): `parser.is_context_overflow_error`, `CONTEXT_OVERFLOW_*` rungs in `_run_impl`, `on_context_reset`, `config.prime_preamble`, `/reset`; fresh session must be adopted, briefing framed and built once. `scripts/test_context_overflow.py`
 - **Context thrash bloat** (`docs/design/context-thrash-bloat.md`): `bot/claude/context_bloat.py`, `CONTEXT_THRASH_BLOAT_NOTE`; diagnoses only, cause line after the CLI's text, paths relative to the repo. `scripts/test_context_bloat.py`
-- **Kill / Steer** (`docs/design/kill-steer.md`): `commands.perform_kill`, `kill_and_wait(reason=, owns_card=)`, `runner.is_kill_shape` (143 and negative codes). `scripts/test_kill_shape.py`
+- **Kill / Steer** (`docs/design/kill-steer.md`): `instance_cmds.perform_kill`, `core.kill_and_wait(reason=, owns_card=)`, `reaping.is_kill_shape` (143 and negative codes), `killed_intentionally`. `scripts/test_kill_shape.py`
 - **Spawn-wave join** (`docs/design/spawn-wave-join.md`): `bot/discord/orchestrator.py`, `spawn_dispatched_thread_ids`, `release_wave`, `_deliver_late_child`, `/reply`; sealed before joinable, timeout only for a dead child. `scripts/test_orchestrator_join.py`
 - **Watches, promise nudge, nested directives** (`docs/design/watches.md`): `bot/engine/watches.py`, `/watch`, `/wake`, `lifecycle.check_wake_request`, `WAKE_PROMISE_RE`, `bot/textutil.py` duration grammar and tilde blocks; only an explicit directive arms anything. `scripts/test_watch.py`, `scripts/test_wake_promise_nudge.py`, `scripts/test_nested_directives.py`
 - **Weekly prompt review** (`docs/design/prompt-review.md`): `bot/engine/prompt_review.py`, `EDITABLE_CLASSES`, `_NO_DIRECTIVE_ORIGINS`, `_RETIRED_CATEGORIES`; proposes and never applies, frequency is not correctness. `scripts/test_prompt_review.py`
 - **Prior art** (`docs/design/prior-art.md`): `bot/engine/prior_art.py`, `PLAN_REVIEW_PROMPT`, `CHAIN_CONTEXT`, `_extract_latest_plan_text`; `PRIOR_ATTEMPTS:` stays above `DEFERRED:`, fails open. `scripts/test_prior_art.py`
 - **Computational sensors** (`docs/design/sensors.md`): `bot/engine/sensors.py`, `.claude/sensors.json` format and policy.
-- **CPU and IO weights** (`docs/design/cpu-io-weights.md`): `CPUWeight`/`IOWeight` on `app-claudesessions.slice`, `SESSION_CPU_NICE`, `runner._lower_priority` (not a `preexec_fn`), `cgroups.check_weights`, CPU/IO PSI readers. `scripts/test_memory_guard.py`
-- **oomd and session scopes** (`docs/design/oomd-session-scopes.md`): `bot/claude/cgroups.py`, `memory.read_pressure(own_cgroup=)`, `adopt_session`, `_classify_oom_kill`, admission hold, `SESSION_MEM_*`, slice units; ceilings via `systemd-run -p`, the rungs must add up. `scripts/test_session_cgroups.py`, `scripts/test_oom_resume.py`, `scripts/test_memory_guard.py`
+- **CPU and IO weights** (`docs/design/cpu-io-weights.md`): `CPUWeight`/`IOWeight` on `app-claudesessions.slice`, `SESSION_CPU_NICE`, `core._lower_priority` (not a `preexec_fn`), `cgroups.check_weights`, CPU/IO PSI readers. `scripts/test_memory_guard.py`
+- **oomd and session scopes** (`docs/design/oomd-session-scopes.md`): `bot/claude/cgroups.py`, `memory.read_pressure(own_cgroup=)`, `adopt_session`, `reaping._classify_oom_kill`, admission hold, `SESSION_MEM_*`, slice units; ceilings via `systemd-run -p`, the rungs must add up. `scripts/test_session_cgroups.py`, `scripts/test_oom_resume.py`, `scripts/test_memory_guard.py`
 - **app.slice ceiling, supervisor footprint** (`docs/design/app-slice-ceiling.md`): `scripts/app.slice.d/50-memory.conf`, `cgroups.check_app_slice_ceiling`, `memory.supervisor_footprint` (a recorder, never a kill). `scripts/test_memory_guard.py`
 - **Plan usage figures** (`docs/design/plan-usage.md`): `bot/engine/plan_usage.py`; never refresh a token, every key optional, per account, failures cached as states. `scripts/test_plan_usage.py`
 - **Cost gates** (`docs/design/cost-gates.md`): `total_cost_usd`, `COST_GATES_ENFORCE`, `cmd_state.within_dollar_budget`. `scripts/test_cost_gates.py`
@@ -153,7 +153,7 @@ Version source: `pyproject.toml`
 
 ## Testing
 
-Every design note above names its harness: `python scripts/test_<name>.py`.
+Most design notes above name their harness (`python scripts/test_<name>.py`).
 
 ### Discord integration test tool
 
@@ -188,6 +188,7 @@ python scripts/discord_read.py [channel_id] [limit]   # default: The Ark, 10
 
 ### Log monitoring
 
+Always tail logs when debugging or testing:
 ```bash
 tail -f data/logs/bot.log        # real-time (run in background)
 tail -n 50 data/logs/bot.log     # recent entries
