@@ -57,4 +57,13 @@ re-registered later cannot come back invisible with nothing on screen to
 explain why. `hide` and `unhide` are reserved repo names, and both take
 several names at once.
 
-Harness: `python scripts/test_repo_hide.py`
+Hidden repos are deliberately **included** in the "Your Repos" block every
+session's system prompt carries (`prompt_build._build_repo_catalog_block`,
+reading the unfiltered `list_repos()`), marked `(hidden)`. Hiding takes a repo
+out of the user's sight, which is exactly when they are most likely to forget
+it exists and ask for it to be built again; the catalog is what lets a session
+say "that is `smarthome`, it is hidden" instead of running `/repo create`.
+`/repo create` refuses a near-duplicate of a hidden repo for the same reason,
+and sessions may emit `[BOT_CMD: /repo hide|unhide ...]` themselves.
+
+Harness: `python scripts/test_repo_hide.py`, `python scripts/test_repo_catalog.py`
