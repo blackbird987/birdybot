@@ -16,7 +16,9 @@ Two pieces fix it:
   (`AdmissionMixin._await_usage_headroom`, called first inside the
   concurrency semaphore in `ClaudeRunner.run`). How many is enough comes from
   `bot/claude/usage_pacing.py:pace_limit`, from the real figures
-  (`bot/engine/plan_usage.py`) of the account the next spawn would land on:
+  (`bot/engine/plan_usage.py`) of the account the spawn would land on (`_pacing_account`, the same
+  `_pick_account` arguments `_run_impl` uses, so a resume is read on its
+  session's account):
   session-% tiers (`USAGE_PACE_SESSION_TIERS`), weekly pace (used more than
   the share of the week gone plus `USAGE_PACE_WEEK_SLACK_PCT`), a weekly
   ceiling, and a peak-hour cap. The tightest cap wins.

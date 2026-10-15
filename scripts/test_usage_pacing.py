@@ -203,6 +203,33 @@ async def test_runner_hold() -> None:
 
         runner.set_usage_reader(boom)
         check((await runner.usage_pace()).limit == 6, "a failing reader must fail open")
+
+        # With accounts, the reading is for the account the spawn would use:
+        # a resume asks for its session's account, like _run_impl does.
+        config.CLAUDE_ACCOUNTS = ["/acct/a", "/acct/b"]
+        picks: list[dict] = []
+        asked: list[str | None] = []
+
+        def pick(**kw):
+            picks.append(kw)
+            return kw.get("prefer") or "/acct/a"
+
+        async def record(account):
+            asked.append(account)
+            return None
+
+        runner._pick_account = pick
+        runner.set_usage_reader(record)
+        resume = _inst("t-resume")
+        resume.session_id = "s-1"
+        resume.session_account = "/acct/b"
+        await runner.usage_pace(resume)
+        check(asked == ["/acct/b"], f"a resume must be read on its session's account, got {asked}")
+        check(picks and picks[-1].get("prefer") == "/acct/b"
+              and "avoid_model_cooldown" in picks[-1],
+              f"the pacing pick must mirror the spawn's, got {picks}")
+        await runner.usage_pace()
+        check(asked[-1] == "/acct/a", "with no instance it is plain rotation order")
     except asyncio.TimeoutError:
         failures.append("a usage hold did not end when it should have")
     finally:
@@ -246,7 +273,7 @@ def test_rank() -> None:
           "a typed message must go first")
     check(lifecycle.cooldown_retry_rank(inst("build it", InstanceOrigin.BUILD)) == 1,
           "a workflow step must come after typed messages")
-    check(lifecycle.cooldown_retry_rank(inst('Late report — child "x" finished')) == 2,
+    check(lifecycle.cooldown_retry_rank(inst('Late report: child "x" finished')) == 2,
           "a late child report must go last")
     check(lifecycle.cooldown_retry_rank(
         inst("[Background context only]\nSYSTEM NUDGE: quoted earlier")) == 0,

@@ -12,6 +12,7 @@ from bot import config
 from bot.claude import cgroups, memory, usage_pacing
 from bot.claude.types import Instance
 from bot.claude.runner.common import ProgressCallback, _notify
+from bot.claude.runner.recovery import _is_primary_model
 
 log = logging.getLogger(__name__)
 
@@ -520,18 +521,34 @@ class AdmissionMixin:
         """
         self._usage_reader = reader
 
-    async def usage_pace(self) -> usage_pacing.PaceDecision:
+    def _pacing_account(self, instance: Instance | None) -> str | None:
+        """The account a spawn of ``instance`` would land on, as ``_run_impl`` picks it.
+
+        Same arguments as the spawn's own ``_pick_account`` call, so a resume
+        is read against the account its session is pinned to. Without an
+        instance it is the plain rotation order, the account a fresh start
+        would get.
+        """
+        if instance is None:
+            return self._pick_account()
+        return self._pick_account(
+            exclude=instance._accounts_tried,
+            prefer=instance.session_account if instance.session_id else None,
+            avoid_model_cooldown=_is_primary_model(instance.model),
+        )
+
+    async def usage_pace(self, instance: Instance | None = None) -> usage_pacing.PaceDecision:
         """How many sessions may run at once right now, and why. Never raises.
 
-        Read for the account the next spawn would land on, the same
-        ``_pick_account()`` the spawn itself calls: with two accounts the
-        backup's figures say nothing about the one about to be used.
+        Read for the account the spawn would land on (``_pacing_account``):
+        with two accounts the backup's figures say nothing about the one
+        about to be used.
         """
         reading = None
         reader = getattr(self, "_usage_reader", None)
         if reader is not None and config.USAGE_PACE_ENABLED:
             try:
-                account = self._pick_account() if config.CLAUDE_ACCOUNTS else None
+                account = self._pacing_account(instance) if config.CLAUDE_ACCOUNTS else None
                 if config.CLAUDE_ACCOUNTS and account is None:
                     # Every account is cooling: the spawn is refused anyway,
                     # and holding it here would only delay the refusal.
@@ -543,9 +560,9 @@ class AdmissionMixin:
                 log.debug("Usage reading for pacing failed", exc_info=True)
         return usage_pacing.pace_limit(reading)
 
-    async def usage_slot_free(self) -> bool:
-        """Would a session starting now go straight through the usage hold?"""
-        decision = await self.usage_pace()
+    async def usage_slot_free(self, instance: Instance | None = None) -> bool:
+        """Would ``instance``, starting now, go straight through the usage hold?"""
+        decision = await self.usage_pace(instance)
         return getattr(self, "_paced_running", 0) < decision.limit
 
     async def _await_usage_headroom(
@@ -567,7 +584,7 @@ class AdmissionMixin:
         """
         if not config.USAGE_PACE_ENABLED:
             return
-        decision = await self.usage_pace()
+        decision = await self.usage_pace(instance)
         if self._paced_running < decision.limit:
             return
         from bot.platform.formatting import format_delay_secs
@@ -614,7 +631,7 @@ class AdmissionMixin:
             if instance.id in self._intentional_kills:
                 log.info("Usage hold for %s abandoned: stop requested", instance.id)
                 return
-            decision = await self.usage_pace()
+            decision = await self.usage_pace(instance)
             if self._paced_running < decision.limit:
                 log.info(
                     "Starting %s after %ds of usage pacing",

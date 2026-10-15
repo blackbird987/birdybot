@@ -529,7 +529,7 @@ async def run() -> None:
 
     # Cooldown retry loop — auto-retries instances that hit usage limits
     _cooldown_retrying: set[str] = set()
-    # Loop time of the last release, boxed so the nested loop can rebind it.
+    # Monotonic time of the last release, boxed so the nested loop can rebind it.
     _cooldown_last_release: list[float] = [float("-inf")]
     _cooldown_pull_logged: set[str] = set()
 
@@ -565,9 +565,11 @@ async def run() -> None:
                 # started in the minute each window reopened, and the window
                 # was gone 3 to 9 minutes later. See cooldown_retry_rank.
                 due: list[tuple[int, str, object]] = []
+                parked: set[str] = set()
                 for inst in all_instances:
                     if not inst.cooldown_retry_at or not inst.cooldown_channel_id:
                         continue
+                    parked.add(inst.id)
                     if inst.id in _cooldown_retrying:
                         continue
                     if lifecycle.cooldown_retry_is_due(
@@ -607,11 +609,14 @@ async def run() -> None:
                             continue
                         due.append((rank, inst.created_at or "", inst))
 
+                # Forget retries that left the queue some other way (dropped,
+                # stale, killed, answered by hand).
+                _cooldown_pull_logged.intersection_update(parked)
+                due.sort(key=lambda d: (d[0], d[1]))
                 if due and (
-                    asyncio.get_event_loop().time() - _cooldown_last_release[0]
+                    time.monotonic() - _cooldown_last_release[0]
                     >= config.COOLDOWN_RETRY_STAGGER_SECS
-                ) and await runner.usage_slot_free():
-                    due.sort(key=lambda d: (d[0], d[1]))
+                ) and await runner.usage_slot_free(due[0][2]):
                     inst = due[0][2]
                     if len(due) > 1:
                         log.info(
@@ -619,7 +624,7 @@ async def run() -> None:
                             "one every %ds", inst.id, len(due) - 1,
                             config.COOLDOWN_RETRY_STAGGER_SECS,
                         )
-                    _cooldown_last_release[0] = asyncio.get_event_loop().time()
+                    _cooldown_last_release[0] = time.monotonic()
                     _cooldown_retrying.add(inst.id)
                     _cooldown_pull_logged.discard(inst.id)
                     asyncio.create_task(
@@ -778,8 +783,9 @@ async def _drop_cooldown_retry(store, inst, discord_bot):
         ch = discord_bot.get_channel(int(channel_id))
         if ch:
             await ch.send(
-                f"Skipped re-running the automatic nudge {inst.id} after the "
-                f"usage limit, to save usage. Reply here to continue.",
+                "This thread was waiting to re-run an automatic follow-up "
+                "after the usage limit. I skipped it to save usage; reply "
+                "here if you want it to continue.",
                 silent=True,
             )
     except Exception:

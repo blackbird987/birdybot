@@ -8,7 +8,7 @@ wait, so each paid for re-reading its entire history before doing any work.
 The limit is not exponential; starting everything at once is.
 
 This module only decides the number. The runner holds a starting session while
-that many are already running (``RunnerUsagePaceMixin``) and the cooldown loop
+that many are already running (``AdmissionMixin._await_usage_headroom``) and the cooldown loop
 in ``app.py`` will not release a parked retry into a full house.
 
 Rules that must not drift:
