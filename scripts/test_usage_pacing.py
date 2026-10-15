@@ -313,31 +313,41 @@ async def test_runner_hold() -> None:
 
 
 def test_run_counts_slots() -> None:
-    """run() takes the slot right after the hold and gives it back in finally."""
+    """run() holds before the semaphore, counts right after, gives back in finally."""
     src = Path(__file__).resolve().parents[1] / "bot" / "claude" / "runner" / "core.py"
     tree = ast.parse(src.read_text(encoding="utf-8"))
     run = next(n for n in ast.walk(tree)
                if isinstance(n, ast.AsyncFunctionDef) and n.name == "run")
-    with_ = next(n for n in ast.walk(run) if isinstance(n, ast.AsyncWith))
-    body = with_.body
+
     def counts_slot(node) -> bool:
         """``self._paced_running[<account>] += / -= 1``."""
         return (isinstance(node, ast.AugAssign)
                 and isinstance(node.target, ast.Subscript)
                 and getattr(node.target.value, "attr", "") == "_paced_running")
 
-    hold = body[0]
-    check(isinstance(hold, ast.Assign) and isinstance(hold.value, ast.Await)
-          and getattr(hold.value.value.func, "attr", "") == "_await_usage_headroom",
-          "run() must start with the usage hold inside the semaphore, keeping its account")
-    incr = body[1]
+    body = run.body
+    at = next((i for i, n in enumerate(body)
+               if isinstance(n, ast.Assign) and isinstance(n.value, ast.Await)
+               and getattr(n.value.value.func, "attr", "") == "_await_usage_headroom"),
+              None)
+    check(at is not None,
+          "run() must call the usage hold at its top level, keeping its account")
+    if at is None:
+        return
+    hold = body[at]
+    check(not any(isinstance(n, ast.AsyncWith) for n in body[:at]),
+          "the usage hold must come before the concurrency semaphore, not inside it")
+    incr = body[at + 1] if at + 1 < len(body) else None
     check(counts_slot(incr)
           and ast.dump(incr.target.slice) == ast.dump(ast.Name(hold.targets[0].id)),
           "run() must count the slot, on the account the hold returned, on the "
           "statement right after the hold")
-    tries = [n for n in body if isinstance(n, ast.Try)]
-    check(any(any(counts_slot(f) for f in t.finalbody) for t in tries),
-          "run() must give the slot back in a finally")
+    guard = body[at + 2] if at + 2 < len(body) else None
+    check(isinstance(guard, ast.Try)
+          and any(isinstance(n, ast.AsyncWith) for n in guard.body)
+          and any(counts_slot(f) for f in guard.finalbody),
+          "run() must take the semaphore inside a try that gives the slot back "
+          "in its finally")
 
 
 def test_rank() -> None:

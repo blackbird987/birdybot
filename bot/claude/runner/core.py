@@ -440,16 +440,20 @@ class ClaudeRunner(
         self._kill_reasons.pop(instance.id, None)
         self._kill_card_owners.discard(instance.id)
         self._bot_signalled.discard(instance.id)
-        async with self._semaphore:
-            # Usage first, then memory. Usage can hold for as long as a running
-            # session takes to finish, and a memory reading taken before that
-            # wait would be stale by the time it ended.
-            paced_account = await self._await_usage_headroom(instance, on_progress)
-            # Counted with no await between the hold's last check and here, so
-            # two waiters cannot both see the same free slot. Counted against
-            # the account it was admitted on even if recovery later moves it.
-            self._paced_running[paced_account] += 1
-            try:
+        # Usage first, and outside the concurrency slot: a session held for
+        # its account's usage must not sit in one of the MAX_CONCURRENT slots,
+        # or a backlog for a nearly spent account locks out work the other
+        # account could run. Before memory too, because usage can hold for as
+        # long as a running session takes to finish, and a memory reading
+        # taken before that wait would be stale by the time it ended.
+        paced_account = await self._await_usage_headroom(instance, on_progress)
+        # Counted with no await between the hold's last check and here, so
+        # two waiters cannot both see the same free slot. Counted from here,
+        # through any wait for a concurrency slot, against the account it was
+        # admitted on, even if recovery later moves it to another account.
+        self._paced_running[paced_account] += 1
+        try:
+            async with self._semaphore:
                 # Inside the slot, before the spawn. Holding the slot while
                 # waiting is the point: this session has been admitted by
                 # concurrency and is now being admitted by memory, and nothing
@@ -462,8 +466,8 @@ class ClaudeRunner(
                     on_recovery=on_recovery,
                     on_context_reset=on_context_reset,
                 )
-            finally:
-                self._paced_running[paced_account] -= 1
+        finally:
+            self._paced_running[paced_account] -= 1
 
     def _stopped_before_spawning(self, instance: Instance) -> RunResult | None:
         """The run was killed at a moment when there was no process to kill.

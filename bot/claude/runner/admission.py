@@ -526,11 +526,11 @@ class AdmissionMixin:
     ) -> tuple[str | None, usage_pacing.PaceDecision]:
         """The account a start would land on, and how many may run there. Never raises.
 
-        The account is ``_spawn_account``'s (plain rotation order without an
-        instance), so the figures read and the running count compared are the
-        account's the spawn then uses: with two accounts the backup's figures
-        say nothing about the one about to be used. ``None`` is the account
-        when no rotation is configured.
+        The account is the one ``_spawn_account`` picks (plain rotation order
+        without an instance), the same one the spawn then uses, so the figures
+        read and the running count compared are that account's: with two
+        accounts the backup's figures say nothing about the one about to be
+        used. ``None`` is the account when no rotation is configured.
         """
         account: str | None = None
         reading = None

@@ -13,8 +13,9 @@ weekday peak hours (5-11 Pacific), when session limits drain faster.
 Two pieces fix it:
 
 - **The runner holds a starting session while enough are running**
-  (`AdmissionMixin._await_usage_headroom`, called first inside the
-  concurrency semaphore in `ClaudeRunner.run`). How many is enough comes from
+  (`AdmissionMixin._await_usage_headroom`, called in `ClaudeRunner.run`
+  before the concurrency semaphore, so a held session does not occupy one
+  of the `MAX_CONCURRENT` slots and lock out work for the other account). How many is enough comes from
   `bot/claude/usage_pacing.py:pace_limit`, from the real figures
   (`bot/engine/plan_usage.py`) of the account the spawn would land on
   (`AccountsMixin._spawn_account`, the one helper `_run_impl` also picks
