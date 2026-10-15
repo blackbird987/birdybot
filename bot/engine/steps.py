@@ -832,7 +832,8 @@ async def merge_from_user(ctx: RequestContext, inst: Instance) -> tuple[str, str
 
     The card text is the runner's message escaped, plus the unescaped
     merge-failed banner when it did not land (its **bold** and `code` are
-    intentional). A merge that landed applies the "merged" tag.
+    intentional). A merge that landed applies the "merged" tag, and one that
+    may ship leads with the same check mark ``_finalize_merge`` posts.
     """
     msg = await merge_and_record(ctx, inst)
     text = ctx.messenger.escape(msg)
@@ -841,6 +842,8 @@ async def merge_from_user(ctx: RequestContext, inst: Instance) -> tuple[str, str
         return f"{text}\n\n{merge_failed_banner(kind)}", msg
     if ctx.on_merged:
         await ctx.on_merged()
+    if not merge_blocks_ship(msg):
+        text = f"✅ {text}"
     return text, msg
 
 

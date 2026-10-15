@@ -17,12 +17,17 @@ from bot.platform.formatting import (
     expanded_button_specs,
     format_expanded_result_chunks,
     format_result_md,
+    merge_failed_button_specs,
     mode_label,
 )
 from bot.engine.branch_actions import (
     _finish_branch_action,
     _finish_resolved_branch,
+    branch_action_slot,
+    discard_progress_text,
+    merge_progress_text,
     perform_discard,
+    show_branch_progress,
 )
 from bot.engine.cmd_state import _clear_chain_on_manual_finalize
 from bot.engine.instance_cmds import (
@@ -106,30 +111,42 @@ async def _on_merge(ctx: RequestContext, inst: Instance, source_msg_id: str | No
             "Cannot retry merge while the resolver is running. Tap **Cancel** first.",
         )
         return
-    _clear_chain_on_manual_finalize(ctx.store, inst.session_id, "Merge button")
-    # Early guard: branch already cleared by a prior merge/discard
-    if not inst.branch:
-        msg = await ctx.runner.merge_branch(inst)  # returns "Already merged (...)"
-        await _finish_resolved_branch(ctx, inst, msg, source_msg_id)
-        return
-    # The "merged" tag lands inside merge_from_user, before the close.
-    escaped, msg = await workflows.merge_from_user(ctx, inst)
-    await _finish_branch_action(
-        ctx, inst, escaped, source_msg_id,
-        keep_open=workflows.merge_blocks_ship(msg),
-    )
+    with branch_action_slot(inst.id) as claimed:
+        if not claimed:
+            # The first tap's progress line is already on the card.
+            log.info("Merge tap on %s ignored: one is already running", inst.id)
+            return
+        _clear_chain_on_manual_finalize(ctx.store, inst.session_id, "Merge button")
+        # Early guard: branch already cleared by a prior merge/discard
+        if not inst.branch:
+            msg = await ctx.runner.merge_branch(inst)  # returns "Already merged (...)"
+            await _finish_resolved_branch(ctx, inst, msg, source_msg_id)
+            return
+        await show_branch_progress(ctx, source_msg_id, merge_progress_text(inst))
+        # The "merged" tag lands inside merge_from_user, before the close.
+        escaped, msg = await workflows.merge_from_user(ctx, inst)
+        await _finish_branch_action(
+            ctx, inst, escaped, source_msg_id,
+            keep_open=workflows.merge_blocks_ship(msg),
+            kept_buttons=merge_failed_button_specs(inst.id),
+        )
 
 
 async def _on_discard(ctx: RequestContext, inst: Instance, source_msg_id: str | None) -> None:
-    # Early guard: branch already cleared by a prior merge/discard
-    if not inst.branch:
-        _clear_chain_on_manual_finalize(ctx.store, inst.session_id, "Discard button")
-        outcome = await ctx.runner.discard_branch(inst)  # returns "Already discarded (...)"
-        await _finish_resolved_branch(ctx, inst, outcome.message, source_msg_id)
-        return
-    outcome = await perform_discard(ctx, inst, "Discard button")
-    escaped = ctx.messenger.escape(outcome.message)
-    await _finish_branch_action(ctx, inst, escaped, source_msg_id)
+    with branch_action_slot(inst.id) as claimed:
+        if not claimed:
+            log.info("Discard tap on %s ignored: a merge or discard is running", inst.id)
+            return
+        # Early guard: branch already cleared by a prior merge/discard
+        if not inst.branch:
+            _clear_chain_on_manual_finalize(ctx.store, inst.session_id, "Discard button")
+            outcome = await ctx.runner.discard_branch(inst)  # returns "Already discarded (...)"
+            await _finish_resolved_branch(ctx, inst, outcome.message, source_msg_id)
+            return
+        await show_branch_progress(ctx, source_msg_id, discard_progress_text(inst))
+        outcome = await perform_discard(ctx, inst, "Discard button")
+        escaped = ctx.messenger.escape(outcome.message)
+        await _finish_branch_action(ctx, inst, escaped, source_msg_id)
 
 
 async def _on_expand(ctx: RequestContext, inst: Instance, source_msg_id: str | None) -> None:
