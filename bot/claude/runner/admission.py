@@ -546,10 +546,23 @@ class AdmissionMixin:
                 log.debug("Usage reading for pacing failed", exc_info=True)
         return usage_pacing.pace_limit(reading)
 
+    def _usage_turn(self, instance_id: str | None, decision) -> bool:
+        """May ``instance_id`` start now: first in line, and under the cap?
+
+        First come, first served. A newcomer (or the cooldown loop, asking
+        with no id) only gets a slot when nobody is queued, so a held session
+        cannot be overtaken forever by sessions that happened to arrive just
+        as a slot freed.
+        """
+        waiters = self._usage_waiters
+        return (
+            (not waiters or waiters[0] == instance_id)
+            and self._paced_running < decision.limit
+        )
+
     async def usage_slot_free(self, instance: Instance | None = None) -> bool:
         """Would ``instance``, starting now, go straight through the usage hold?"""
-        decision = await self.usage_pace(instance)
-        return getattr(self, "_paced_running", 0) < decision.limit
+        return self._usage_turn(None, await self.usage_pace(instance))
 
     async def _await_usage_headroom(
         self,
@@ -563,74 +576,90 @@ class AdmissionMixin:
         count are atomic with respect to every other waiter. Keep it that way:
         an await after the final check lets two sessions take one slot.
 
-        Bounded, but per queue rather than per waiter: a session starts anyway
-        only once nobody has gone through the hold for USAGE_PACE_MAX_WAIT_SECS,
-        and starting stamps that clock for the rest. So a queue stuck behind a
-        session that never ends lets one more through per interval, never its
-        whole backlog in the same minute, which is the stampede this exists to
-        stop. The cap never drops below one, so the wait is only ever for a
-        running session to finish.
+        Held sessions queue in arrival order (``_usage_waiters``) and only the
+        first in line may start.
+
+        Bounded, but per queue rather than per waiter: the first in line
+        starts anyway once nobody has gone through the hold for
+        USAGE_PACE_MAX_WAIT_SECS, and starting stamps that clock for the rest.
+        So a queue stuck behind a session that never ends lets one more
+        through per interval, never its whole backlog in the same minute,
+        which is the stampede this exists to stop. The cap never drops below
+        one, so the wait is only ever for a running session to finish.
         """
         if not config.USAGE_PACE_ENABLED:
             return
         loop = asyncio.get_event_loop()
         decision = await self.usage_pace(instance)
-        if self._paced_running < decision.limit:
+        if self._usage_turn(instance.id, decision):
             self._usage_hold_passed_at = loop.time()
             return
         from bot.platform.formatting import format_delay_secs
 
         log.info(
-            "Holding %s for usage pacing: %d running, limit %d (%s)",
-            instance.id, self._paced_running, decision.limit, decision.reason,
+            "Holding %s for usage pacing: %d running, limit %d, %d already "
+            "waiting (%s)",
+            instance.id, self._paced_running, decision.limit,
+            len(self._usage_waiters), decision.reason,
         )
-        started = loop.time()
-        last_told: float | None = None
-        while True:
-            now = loop.time()
-            if (
-                now - max(started, self._usage_hold_passed_at)
-                >= config.USAGE_PACE_MAX_WAIT_SECS
-            ):
-                log.warning(
-                    "Starting %s anyway: nothing has started for %s of usage "
-                    "pacing (%s)",
-                    instance.id, format_delay_secs(int(config.USAGE_PACE_MAX_WAIT_SECS)),
-                    decision.reason,
-                )
-                self._usage_hold_passed_at = now
-                return
-            if on_progress and (
-                last_told is None or now - last_told >= max(
-                    config.USAGE_PACE_POLL_SECS, config.USAGE_PACE_NOTIFY_SECS,
-                )
-            ):
-                running = self._paced_running
-                body = (
-                    f"Waiting to start: {decision.reason or 'pacing usage'}, so "
-                    f"at most {decision.limit} session"
-                    f"{'' if decision.limit == 1 else 's'} run at once and "
-                    f"{running} already {'is' if running == 1 else 'are'}. "
-                    f"Starting more now is how the whole window gets used up in "
-                    f"minutes. This starts as soon as one finishes."
-                )
-                if last_told is not None:
-                    body = (
-                        f"Still waiting after {format_delay_secs(int(now - started))}: "
-                        + body
+        self._usage_waiters.append(instance.id)
+        try:
+            started = loop.time()
+            last_told: float | None = None
+            while True:
+                now = loop.time()
+                ahead = self._usage_waiters.index(instance.id)
+                if not ahead and (
+                    now - max(started, self._usage_hold_passed_at)
+                    >= config.USAGE_PACE_MAX_WAIT_SECS
+                ):
+                    log.warning(
+                        "Starting %s anyway: nothing has started for %s of "
+                        "usage pacing (%s)",
+                        instance.id,
+                        format_delay_secs(int(config.USAGE_PACE_MAX_WAIT_SECS)),
+                        decision.reason,
                     )
-                last_told = now
-                await _notify(on_progress, "Waiting for usage headroom", body,
-                              "on usage hold")
-            await asyncio.sleep(config.USAGE_PACE_POLL_SECS)
-            if instance.id in self._intentional_kills:
-                log.info("Usage hold for %s abandoned: stop requested", instance.id)
-                return
-            decision = await self.usage_pace(instance)
-            if self._paced_running < decision.limit:
-                self._usage_hold_passed_at = loop.time()
-                log.info(
-                    "Starting %s after %ds of usage pacing",
-                    instance.id, int(self._usage_hold_passed_at - started),
-                )
-                return
+                    self._usage_hold_passed_at = now
+                    return
+                if on_progress and (
+                    last_told is None or now - last_told >= max(
+                        config.USAGE_PACE_POLL_SECS, config.USAGE_PACE_NOTIFY_SECS,
+                    )
+                ):
+                    running = self._paced_running
+                    body = (
+                        f"Waiting to start: {decision.reason or 'pacing usage'}, "
+                        f"so at most {decision.limit} session"
+                        f"{'' if decision.limit == 1 else 's'} run at once and "
+                        f"{running} already {'is' if running == 1 else 'are'}"
+                        + (f", with {ahead} more waiting ahead of this one"
+                           if ahead else "")
+                        + ". Starting more now is how the whole window gets "
+                        "used up in minutes. This starts as soon as its turn "
+                        "comes."
+                    )
+                    if last_told is not None:
+                        body = (
+                            f"Still waiting after {format_delay_secs(int(now - started))}: "
+                            + body
+                        )
+                    last_told = now
+                    await _notify(on_progress, "Waiting for usage headroom", body,
+                                  "on usage hold")
+                await asyncio.sleep(config.USAGE_PACE_POLL_SECS)
+                if instance.id in self._intentional_kills:
+                    log.info("Usage hold for %s abandoned: stop requested", instance.id)
+                    return
+                decision = await self.usage_pace(instance)
+                if self._usage_turn(instance.id, decision):
+                    self._usage_hold_passed_at = loop.time()
+                    log.info(
+                        "Starting %s after %ds of usage pacing",
+                        instance.id, int(self._usage_hold_passed_at - started),
+                    )
+                    return
+        finally:
+            # Synchronous, so leaving the line and the caller's count of the
+            # slot still happen with no await in between.
+            self._usage_waiters.remove(instance.id)

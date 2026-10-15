@@ -190,6 +190,40 @@ async def test_runner_hold() -> None:
         t = _inst("t-timeout")
         await asyncio.wait_for(runner._await_usage_headroom(t, None), 1)
 
+        # First come, first served: held sessions start in arrival order, and
+        # neither a newcomer nor the cooldown loop jumps a non-empty line.
+        config.USAGE_PACE_MAX_WAIT_SECS = 3600
+        runner._paced_running = 1
+        order: list[str] = []
+
+        async def queued(name):
+            await runner._await_usage_headroom(_inst(name), None)
+            runner._paced_running += 1
+            order.append(name)
+
+        line = []
+        for name in ("x", "y", "z"):
+            line.append(asyncio.create_task(queued(name)))
+            await asyncio.sleep(0.02)
+        check(runner._usage_waiters == ["x", "y", "z"],
+              f"waiters must queue in arrival order, got {runner._usage_waiters}")
+        runner._paced_running -= 1
+        check(not await runner.usage_slot_free(),
+              "a free slot with a queue must not read as free to the cooldown loop")
+        await asyncio.sleep(0.05)
+        check(order == ["x"], f"the head of the line must start first, got {order}")
+        runner._paced_running -= 1  # x finishes
+        line.append(asyncio.create_task(queued("newcomer")))
+        await asyncio.sleep(0.05)
+        check(order == ["x", "y"], f"a newcomer must not jump the line, got {order}")
+        for _ in range(2):
+            runner._paced_running -= 1
+            await asyncio.sleep(0.05)
+        check(order == ["x", "y", "z", "newcomer"], f"arrival order, got {order}")
+        await asyncio.wait_for(asyncio.gather(*line), 1)
+        check(not runner._usage_waiters, "every waiter must leave the line")
+        runner._paced_running = 5
+
         # The time limit is per queue: three waiters that time out together
         # must start one per interval, not all at once (the stampede again).
         config.USAGE_PACE_MAX_WAIT_SECS = 0.2

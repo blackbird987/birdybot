@@ -214,6 +214,8 @@ class ClaudeRunner(
         # time limit runs from here, so a stalled queue lets one through per
         # interval instead of all its waiters at once.
         self._usage_hold_passed_at = float("-inf")
+        # Ids of sessions held by usage pacing, in arrival order (FIFO).
+        self._usage_waiters: list[str] = []
         self._usage_reader: Callable[[str | None], Awaitable[object]] | None = None
         # Task-level tracking: covers the full lifecycle of a query/workflow,
         # not just the subprocess.  Prevents reboot from slipping through
