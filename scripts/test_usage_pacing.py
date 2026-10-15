@@ -156,20 +156,20 @@ async def test_runner_hold() -> None:
         check(not notes, "an empty house must not hold anyone")
 
         # One running at the 1-cap: two waiters, one slot frees, one goes.
-        runner._paced_running = 1
+        runner._paced_running[None] = 1
         released: list[str] = []
 
         async def waiter(name):
             i = _inst(name)
             await runner._await_usage_headroom(i, progress)
-            runner._paced_running += 1  # what run() does, with no await between
+            runner._paced_running[None] += 1  # what run() does, with no await between
             released.append(name)
 
         tasks = [asyncio.create_task(waiter("a")), asyncio.create_task(waiter("b"))]
         await asyncio.sleep(0.05)
         check(not released, "nobody may pass while the 1-cap is full")
         check("Waiting for usage headroom" in notes, "a held session must say why")
-        runner._paced_running -= 1
+        runner._paced_running[None] -= 1
         await asyncio.sleep(0.05)
         check(len(released) == 1, f"one freed slot must release exactly one, got {released}")
         reading[0] = None  # figures gone: no usage cap at all
@@ -178,7 +178,7 @@ async def test_runner_hold() -> None:
 
         # Kill while held.
         reading[0] = Reading(session_pct=99)
-        runner._paced_running = 5
+        runner._paced_running[None] = 5
         k = _inst("t-kill")
         task = asyncio.create_task(runner._await_usage_headroom(k, None))
         await asyncio.sleep(0.03)
@@ -193,41 +193,41 @@ async def test_runner_hold() -> None:
         # First come, first served: held sessions start in arrival order, and
         # neither a newcomer nor the cooldown loop jumps a non-empty line.
         config.USAGE_PACE_MAX_WAIT_SECS = 3600
-        runner._paced_running = 1
+        runner._paced_running[None] = 1
         order: list[str] = []
 
         async def queued(name):
             await runner._await_usage_headroom(_inst(name), None)
-            runner._paced_running += 1
+            runner._paced_running[None] += 1
             order.append(name)
 
         line = []
         for name in ("x", "y", "z"):
             line.append(asyncio.create_task(queued(name)))
             await asyncio.sleep(0.02)
-        check(runner._usage_waiters == ["x", "y", "z"],
+        check(list(runner._usage_waiters) == ["x", "y", "z"],
               f"waiters must queue in arrival order, got {runner._usage_waiters}")
-        runner._paced_running -= 1
+        runner._paced_running[None] -= 1
         check(not await runner.usage_slot_free(),
               "a free slot with a queue must not read as free to the cooldown loop")
         await asyncio.sleep(0.05)
         check(order == ["x"], f"the head of the line must start first, got {order}")
-        runner._paced_running -= 1  # x finishes
+        runner._paced_running[None] -= 1  # x finishes
         line.append(asyncio.create_task(queued("newcomer")))
         await asyncio.sleep(0.05)
         check(order == ["x", "y"], f"a newcomer must not jump the line, got {order}")
         for _ in range(2):
-            runner._paced_running -= 1
+            runner._paced_running[None] -= 1
             await asyncio.sleep(0.05)
         check(order == ["x", "y", "z", "newcomer"], f"arrival order, got {order}")
         await asyncio.wait_for(asyncio.gather(*line), 1)
         check(not runner._usage_waiters, "every waiter must leave the line")
-        runner._paced_running = 5
+        runner._paced_running[None] = 5
 
         # The time limit is per queue: three waiters that time out together
         # must start one per interval, not all at once (the stampede again).
         config.USAGE_PACE_MAX_WAIT_SECS = 0.2
-        runner._usage_hold_passed_at = float("-inf")
+        runner._usage_hold_passed_at.clear()
         timed_out: list[str] = []
 
         async def stuck(name):
@@ -243,9 +243,9 @@ async def test_runner_hold() -> None:
 
         # usage_slot_free mirrors the hold.
         config.USAGE_PACE_MAX_WAIT_SECS = 3600
-        runner._paced_running = 0
+        runner._paced_running[None] = 0
         check(await runner.usage_slot_free(), "an empty house must have a free slot")
-        runner._paced_running = 1
+        runner._paced_running[None] = 1
         check(not await runner.usage_slot_free(), "a full 1-cap must report no slot")
 
         # A reader that raises is no reading, not a crash.
@@ -253,7 +253,7 @@ async def test_runner_hold() -> None:
             raise RuntimeError("endpoint down")
 
         runner.set_usage_reader(boom)
-        check((await runner.usage_pace()).limit == 6, "a failing reader must fail open")
+        check((await runner._usage_check())[1].limit == 6, "a failing reader must fail open")
 
         # With accounts, the reading is for the account the spawn would use:
         # a resume asks for its session's account, like _run_impl does.
@@ -274,13 +274,36 @@ async def test_runner_hold() -> None:
         resume = _inst("t-resume")
         resume.session_id = "s-1"
         resume.session_account = "/acct/b"
-        await runner.usage_pace(resume)
+        await runner._usage_check(resume)
         check(asked == ["/acct/b"], f"a resume must be read on its session's account, got {asked}")
         check(picks and picks[-1].get("prefer") == "/acct/b"
               and "avoid_model_cooldown" in picks[-1],
               f"the pacing pick must mirror the spawn's, got {picks}")
-        await runner.usage_pace()
+        await runner._usage_check()
         check(asked[-1] == "/acct/a", "with no instance it is plain rotation order")
+
+        # Per account: account a is nearly spent (cap 1, one running) and has
+        # a session held at the front of the line. A session for account b,
+        # queued behind it, must not wait on a's line or a's count.
+        async def by_account(account):
+            return Reading(session_pct=99) if account == "/acct/a" else None
+
+        runner.set_usage_reader(by_account)
+        runner._paced_running.clear()
+        runner._paced_running["/acct/a"] = 1
+        held_a = asyncio.create_task(runner._await_usage_headroom(_inst("t-a"), None))
+        await asyncio.sleep(0.03)
+        check(list(runner._usage_waiters.values()) == ["/acct/a"],
+              f"the session for the spent account must be held, got {runner._usage_waiters}")
+        on_b = _inst("t-b")
+        on_b.session_id = "s-b"
+        on_b.session_account = "/acct/b"
+        got = await asyncio.wait_for(runner._await_usage_headroom(on_b, None), 1)
+        check(got == "/acct/b", f"a session for the free account must start at once, got {got}")
+        check(not held_a.done(), "the spent account's session must still be held")
+        runner._intentional_kills.add("t-a")
+        await asyncio.wait_for(held_a, 1)
+        check(not runner._usage_waiters, "a killed waiter must leave the line")
     except asyncio.TimeoutError:
         failures.append("a usage hold did not end when it should have")
     finally:
@@ -297,16 +320,23 @@ def test_run_counts_slots() -> None:
                if isinstance(n, ast.AsyncFunctionDef) and n.name == "run")
     with_ = next(n for n in ast.walk(run) if isinstance(n, ast.AsyncWith))
     body = with_.body
+    def counts_slot(node) -> bool:
+        """``self._paced_running[<account>] += / -= 1``."""
+        return (isinstance(node, ast.AugAssign)
+                and isinstance(node.target, ast.Subscript)
+                and getattr(node.target.value, "attr", "") == "_paced_running")
+
     hold = body[0]
-    check(isinstance(hold, ast.Expr) and isinstance(hold.value, ast.Await)
+    check(isinstance(hold, ast.Assign) and isinstance(hold.value, ast.Await)
           and getattr(hold.value.value.func, "attr", "") == "_await_usage_headroom",
-          "run() must start with the usage hold inside the semaphore")
+          "run() must start with the usage hold inside the semaphore, keeping its account")
     incr = body[1]
-    check(isinstance(incr, ast.AugAssign) and getattr(incr.target, "attr", "") == "_paced_running",
-          "run() must count the slot on the statement right after the hold")
+    check(counts_slot(incr)
+          and ast.dump(incr.target.slice) == ast.dump(ast.Name(hold.targets[0].id)),
+          "run() must count the slot, on the account the hold returned, on the "
+          "statement right after the hold")
     tries = [n for n in body if isinstance(n, ast.Try)]
-    check(any(any(isinstance(f, ast.AugAssign) and getattr(f.target, "attr", "") == "_paced_running"
-                  for f in t.finalbody) for t in tries),
+    check(any(any(counts_slot(f) for f in t.finalbody) for t in tries),
           "run() must give the slot back in a finally")
 
 

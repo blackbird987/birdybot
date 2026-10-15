@@ -10,6 +10,7 @@ from typing import NamedTuple
 
 from bot import config
 from bot.claude import cgroups, memory, usage_pacing
+from bot.claude.auth_health import account_label
 from bot.claude.types import Instance
 from bot.claude.runner.common import ProgressCallback, _notify
 
@@ -520,119 +521,142 @@ class AdmissionMixin:
         """
         self._usage_reader = reader
 
-    async def usage_pace(self, instance: Instance | None = None) -> usage_pacing.PaceDecision:
-        """How many sessions may run at once right now, and why. Never raises.
+    async def _usage_check(
+        self, instance: Instance | None = None,
+    ) -> tuple[str | None, usage_pacing.PaceDecision]:
+        """The account a start would land on, and how many may run there. Never raises.
 
-        Read for the account the spawn would land on (``_spawn_account``;
-        plain rotation order without an instance): with two accounts the
-        backup's figures say nothing about the one about to be used.
+        The account is ``_spawn_account``'s (plain rotation order without an
+        instance), so the figures read and the running count compared are the
+        account's the spawn then uses: with two accounts the backup's figures
+        say nothing about the one about to be used. ``None`` is the account
+        when no rotation is configured.
         """
+        account: str | None = None
         reading = None
-        reader = getattr(self, "_usage_reader", None)
-        if reader is not None and config.USAGE_PACE_ENABLED:
-            try:
-                account = (
-                    (self._spawn_account(instance) if instance else self._pick_account())
-                    if config.CLAUDE_ACCOUNTS else None
-                )
-                if config.CLAUDE_ACCOUNTS and account is None:
+        try:
+            if config.CLAUDE_ACCOUNTS:
+                account = (self._spawn_account(instance) if instance
+                           else self._pick_account())
+                if account is None:
                     # Every account is cooling: the spawn is refused anyway,
                     # and holding it here would only delay the refusal.
-                    return usage_pacing.PaceDecision(config.MAX_CONCURRENT)
+                    return None, usage_pacing.PaceDecision(config.MAX_CONCURRENT)
+            reader = getattr(self, "_usage_reader", None)
+            if reader is not None:
                 got = await reader(account)
                 if got is not None and getattr(got, "has_data", True):
                     reading = got
-            except Exception:
-                log.debug("Usage reading for pacing failed", exc_info=True)
-        return usage_pacing.pace_limit(reading)
+        except Exception:
+            log.debug("Usage reading for pacing failed", exc_info=True)
+        return account, usage_pacing.pace_limit(reading)
 
-    def _usage_turn(self, instance_id: str | None, decision) -> bool:
-        """May ``instance_id`` start now: first in line, and under the cap?
+    def _usage_ahead(self, instance_id: str | None, account: str | None) -> int:
+        """How many held sessions for ``account`` are in line before ``instance_id``.
 
-        First come, first served. A newcomer (or the cooldown loop, asking
-        with no id) only gets a slot when nobody is queued, so a held session
-        cannot be overtaken forever by sessions that happened to arrive just
-        as a slot freed.
+        A session not in line (a newcomer, or the cooldown loop asking with no
+        id) counts everyone queued for that account.
         """
-        waiters = self._usage_waiters
+        ahead = 0
+        for waiter, waiter_account in self._usage_waiters.items():
+            if waiter == instance_id:
+                break
+            if waiter_account == account:
+                ahead += 1
+        return ahead
+
+    def _usage_turn(self, instance_id: str | None, account: str | None, decision) -> bool:
+        """May ``instance_id`` start now on ``account``: first in its line, and under the cap?
+
+        First come, first served per account, so a held session cannot be
+        overtaken forever by sessions that happened to arrive just as a slot
+        freed. Per account, so a session for a nearly spent account at the
+        front never blocks one behind it that the other account could take.
+        """
         return (
-            (not waiters or waiters[0] == instance_id)
-            and self._paced_running < decision.limit
+            not self._usage_ahead(instance_id, account)
+            and self._paced_running[account] < decision.limit
         )
 
     async def usage_slot_free(self, instance: Instance | None = None) -> bool:
         """Would ``instance``, starting now, go straight through the usage hold?"""
-        return self._usage_turn(None, await self.usage_pace(instance))
+        account, decision = await self._usage_check(instance)
+        return self._usage_turn(None, account, decision)
 
     async def _await_usage_headroom(
         self,
         instance: Instance,
         on_progress: ProgressCallback | None,
-    ) -> None:
+    ) -> str | None:
         """Hold a starting session while the plan's usage says enough are running.
 
-        The caller counts the session as running immediately after this
-        returns, with no await in between, so the last check here and that
-        count are atomic with respect to every other waiter. Keep it that way:
-        an await after the final check lets two sessions take one slot.
+        Returns the account the session was admitted on, which the caller
+        counts it against (``_paced_running``) immediately, with no await in
+        between, so the last check here and that count are atomic with
+        respect to every other waiter. Keep it that way: an await after the
+        final check lets two sessions take one slot.
 
         Held sessions queue in arrival order (``_usage_waiters``) and only the
-        first in line may start.
+        first in line for its account may start. The account is re-read on
+        every check, so a session whose account went on cooldown moves to the
+        other account's line and keeps its place in the order.
 
-        Bounded, but per queue rather than per waiter: the first in line
-        starts anyway once nobody has gone through the hold for
-        USAGE_PACE_MAX_WAIT_SECS, and starting stamps that clock for the rest.
-        So a queue stuck behind a session that never ends lets one more
+        Bounded, but per account rather than per waiter: the first in line
+        starts anyway once nobody has gone through the hold on that account
+        for USAGE_PACE_MAX_WAIT_SECS, and starting stamps that clock for the
+        rest. So a line stuck behind a session that never ends lets one more
         through per interval, never its whole backlog in the same minute,
         which is the stampede this exists to stop. The cap never drops below
         one, so the wait is only ever for a running session to finish.
         """
         if not config.USAGE_PACE_ENABLED:
-            return
+            return None
         loop = asyncio.get_event_loop()
-        decision = await self.usage_pace(instance)
-        if self._usage_turn(instance.id, decision):
-            self._usage_hold_passed_at = loop.time()
-            return
+        account, decision = await self._usage_check(instance)
+        if self._usage_turn(instance.id, account, decision):
+            self._usage_hold_passed_at[account] = loop.time()
+            return account
         from bot.platform.formatting import format_delay_secs
 
         log.info(
-            "Holding %s for usage pacing: %d running, limit %d, %d already "
-            "waiting (%s)",
-            instance.id, self._paced_running, decision.limit,
-            len(self._usage_waiters), decision.reason,
+            "Holding %s for usage pacing on %s: %d running there, limit %d, "
+            "%d already waiting (%s)",
+            instance.id, account_label(account) if account else "the default account",
+            self._paced_running[account], decision.limit,
+            self._usage_ahead(instance.id, account), decision.reason,
         )
-        self._usage_waiters.append(instance.id)
+        self._usage_waiters[instance.id] = account
         try:
             started = loop.time()
             last_told: float | None = None
             while True:
                 now = loop.time()
-                ahead = self._usage_waiters.index(instance.id)
+                ahead = self._usage_ahead(instance.id, account)
+                passed_at = self._usage_hold_passed_at.get(account, float("-inf"))
                 if not ahead and (
-                    now - max(started, self._usage_hold_passed_at)
-                    >= config.USAGE_PACE_MAX_WAIT_SECS
+                    now - max(started, passed_at) >= config.USAGE_PACE_MAX_WAIT_SECS
                 ):
                     log.warning(
-                        "Starting %s anyway: nothing has started for %s of "
-                        "usage pacing (%s)",
+                        "Starting %s anyway: nothing has started on its account "
+                        "for %s of usage pacing (%s)",
                         instance.id,
                         format_delay_secs(int(config.USAGE_PACE_MAX_WAIT_SECS)),
                         decision.reason,
                     )
-                    self._usage_hold_passed_at = now
-                    return
+                    self._usage_hold_passed_at[account] = now
+                    return account
                 if on_progress and (
                     last_told is None or now - last_told >= max(
                         config.USAGE_PACE_POLL_SECS, config.USAGE_PACE_NOTIFY_SECS,
                     )
                 ):
-                    running = self._paced_running
+                    running = self._paced_running[account]
                     body = (
                         f"Waiting to start: {decision.reason or 'pacing usage'}, "
                         f"so at most {decision.limit} session"
-                        f"{'' if decision.limit == 1 else 's'} run at once and "
-                        f"{running} already {'is' if running == 1 else 'are'}"
+                        f"{'' if decision.limit == 1 else 's'} run at once on "
+                        f"this account and {running} already "
+                        f"{'is' if running == 1 else 'are'}"
                         + (f", with {ahead} more waiting ahead of this one"
                            if ahead else "")
                         + ". Starting more now is how the whole window gets "
@@ -650,16 +674,18 @@ class AdmissionMixin:
                 await asyncio.sleep(config.USAGE_PACE_POLL_SECS)
                 if instance.id in self._intentional_kills:
                     log.info("Usage hold for %s abandoned: stop requested", instance.id)
-                    return
-                decision = await self.usage_pace(instance)
-                if self._usage_turn(instance.id, decision):
-                    self._usage_hold_passed_at = loop.time()
+                    return account
+                account, decision = await self._usage_check(instance)
+                # Assigning an existing key keeps its place in the order.
+                self._usage_waiters[instance.id] = account
+                if self._usage_turn(instance.id, account, decision):
+                    self._usage_hold_passed_at[account] = loop.time()
                     log.info(
                         "Starting %s after %ds of usage pacing",
-                        instance.id, int(self._usage_hold_passed_at - started),
+                        instance.id, int(loop.time() - started),
                     )
-                    return
+                    return account
         finally:
             # Synchronous, so leaving the line and the caller's count of the
             # slot still happen with no await in between.
-            self._usage_waiters.remove(instance.id)
+            self._usage_waiters.pop(instance.id, None)

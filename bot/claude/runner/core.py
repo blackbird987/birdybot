@@ -8,6 +8,7 @@ import json as _json_mod
 import logging
 import os
 import time
+from collections import Counter
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -205,17 +206,17 @@ class ClaudeRunner(
         # reap itself too. Without this the whole fleet unwinds in one minute
         # over a spike that one kill already fixed.
         self._fleet_last_reap = 0.0
-        # Usage pacing (admission.py): how many runs are past the usage hold
-        # right now, and where plan-usage readings come from. The reader is
-        # wired by app.py because the figures live in bot.engine.plan_usage,
-        # which this package does not import. None means no pacing on usage.
-        self._paced_running = 0
-        # Loop time a session last went through the usage hold: the hold's
-        # time limit runs from here, so a stalled queue lets one through per
-        # interval instead of all its waiters at once.
-        self._usage_hold_passed_at = float("-inf")
-        # Ids of sessions held by usage pacing, in arrival order (FIFO).
-        self._usage_waiters: list[str] = []
+        # Usage pacing (admission.py), all keyed by the account a run was
+        # admitted on (None without rotation): how many runs are past the
+        # usage hold, the loop time one last went through it (the hold's
+        # time limit runs from there, so a stalled line lets one through per
+        # interval instead of all its waiters at once), and the held
+        # sessions in arrival order. The reader is wired by app.py because
+        # the figures live in bot.engine.plan_usage, which this package does
+        # not import. None means no reading, so only the peak-hour cap.
+        self._paced_running: Counter[str | None] = Counter()
+        self._usage_hold_passed_at: dict[str | None, float] = {}
+        self._usage_waiters: dict[str, str | None] = {}
         self._usage_reader: Callable[[str | None], Awaitable[object]] | None = None
         # Task-level tracking: covers the full lifecycle of a query/workflow,
         # not just the subprocess.  Prevents reboot from slipping through
@@ -443,10 +444,11 @@ class ClaudeRunner(
             # Usage first, then memory. Usage can hold for as long as a running
             # session takes to finish, and a memory reading taken before that
             # wait would be stale by the time it ended.
-            await self._await_usage_headroom(instance, on_progress)
+            paced_account = await self._await_usage_headroom(instance, on_progress)
             # Counted with no await between the hold's last check and here, so
-            # two waiters cannot both see the same free slot.
-            self._paced_running += 1
+            # two waiters cannot both see the same free slot. Counted against
+            # the account it was admitted on even if recovery later moves it.
+            self._paced_running[paced_account] += 1
             try:
                 # Inside the slot, before the spawn. Holding the slot while
                 # waiting is the point: this session has been admitted by
@@ -461,7 +463,7 @@ class ClaudeRunner(
                     on_context_reset=on_context_reset,
                 )
             finally:
-                self._paced_running -= 1
+                self._paced_running[paced_account] -= 1
 
     def _stopped_before_spawning(self, instance: Instance) -> RunResult | None:
         """The run was killed at a moment when there was no process to kill.

@@ -21,12 +21,14 @@ Two pieces fix it:
   with, so a resume is read on its session's account):
   session-% tiers (`USAGE_PACE_SESSION_TIERS`), weekly pace (used more than
   the share of the week gone plus `USAGE_PACE_WEEK_SLACK_PCT`), a weekly
-  ceiling, and a peak-hour cap. The tightest cap wins. Held sessions queue
-  in arrival order (`_usage_waiters`, `_usage_turn`): only the first in line
-  may start, and a newcomer or the cooldown loop gets a slot only when nobody
-  is queued. The running count is fleet-wide, not per account, which can hold
-  a session that a second, idle account could have taken: conservative, and
-  routing to the account with more headroom is a separate change.
+  ceiling, and a peak-hour cap. The tightest cap wins. Everything is per
+  account (`_paced_running`, `_usage_waiters`, `_usage_hold_passed_at`, all
+  keyed by the account the hold admitted the run on, `None` without
+  rotation): a nearly spent account caps only its own sessions. Held sessions
+  queue in arrival order and only the first in line for its account may
+  start (`_usage_turn`); a newcomer or the cooldown loop gets a slot only
+  when nobody is queued for that account. A run stays counted against the
+  account it was admitted on even if recovery moves it to another one.
 - **The cooldown loop releases parked retries one at a time**, at most one
   per `COOLDOWN_RETRY_STAGGER_SECS`, only when the runner has a usage slot
   free, ranked by `lifecycle.cooldown_retry_rank`: typed messages, then
@@ -39,9 +41,10 @@ Rules that must not drift:
   session to finish, so it cannot deadlock. It is also bounded, per queue
   and not per waiter: a session starts anyway only when nobody has gone
   through the hold for `USAGE_PACE_MAX_WAIT_SECS` (`_usage_hold_passed_at`),
-  and that start resets the clock. Only the first in line times out, so this
-  is safe only together with the queue: without it, sessions arriving as a
-  slot frees could keep resetting the clock and overtake a waiter forever. A per-waiter limit releases every session
+  and that start resets the clock, per account. Only the first in line times
+  out, so this is safe only together with the queue: without it, sessions
+  arriving as a slot frees could keep resetting the clock and overtake a
+  waiter forever. A per-waiter limit releases every session
   that began waiting together in the same minute, which is the stampede again.
 - **No reading is no usage cap.** The endpoint is undocumented and the access
   token is often expired between runs (the bot never refreshes it). Missing
