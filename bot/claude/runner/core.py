@@ -8,6 +8,7 @@ import json as _json_mod
 import logging
 import os
 import time
+from collections import Counter
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -205,6 +206,18 @@ class ClaudeRunner(
         # reap itself too. Without this the whole fleet unwinds in one minute
         # over a spike that one kill already fixed.
         self._fleet_last_reap = 0.0
+        # Usage pacing (admission.py), all keyed by the account a run was
+        # admitted on (None without rotation): how many runs are past the
+        # usage hold, the loop time one last went through it (the hold's
+        # time limit runs from there, so a stalled line lets one through per
+        # interval instead of all its waiters at once), and the held
+        # sessions in arrival order. The reader is wired by app.py because
+        # the figures live in bot.engine.plan_usage, which this package does
+        # not import. None means no reading, so only the peak-hour cap.
+        self._paced_running: Counter[str | None] = Counter()
+        self._usage_hold_passed_at: dict[str | None, float] = {}
+        self._usage_waiters: dict[str, str | None] = {}
+        self._usage_reader: Callable[[str | None], Awaitable[object]] | None = None
         # Task-level tracking: covers the full lifecycle of a query/workflow,
         # not just the subprocess.  Prevents reboot from slipping through
         # gaps between autopilot chain steps.
@@ -427,18 +440,34 @@ class ClaudeRunner(
         self._kill_reasons.pop(instance.id, None)
         self._kill_card_owners.discard(instance.id)
         self._bot_signalled.discard(instance.id)
-        async with self._semaphore:
-            # Inside the slot, before the spawn. Holding the slot while waiting
-            # is the point: this session has been admitted by concurrency and
-            # is now being admitted by memory, and nothing behind it in the
-            # queue should slip past into a machine that is already out.
-            await self._await_memory_headroom(instance, on_progress)
-            return await self._run_impl(
-                instance, on_progress, on_stall, context, sibling_context,
-                api_fallback=instance.api_fallback,
-                on_recovery=on_recovery,
-                on_context_reset=on_context_reset,
-            )
+        # Usage first, and outside the concurrency slot: a session held for
+        # its account's usage must not sit in one of the MAX_CONCURRENT slots,
+        # or a backlog for a nearly spent account locks out work the other
+        # account could run. Before memory too, because usage can hold for as
+        # long as a running session takes to finish, and a memory reading
+        # taken before that wait would be stale by the time it ended.
+        paced_account = await self._await_usage_headroom(instance, on_progress)
+        # Counted with no await between the hold's last check and here, so
+        # two waiters cannot both see the same free slot. Counted from here,
+        # through any wait for a concurrency slot, against the account it was
+        # admitted on, even if recovery later moves it to another account.
+        self._paced_running[paced_account] += 1
+        try:
+            async with self._semaphore:
+                # Inside the slot, before the spawn. Holding the slot while
+                # waiting is the point: this session has been admitted by
+                # concurrency and is now being admitted by memory, and nothing
+                # behind it in the queue should slip past into a machine that
+                # is already out.
+                await self._await_memory_headroom(instance, on_progress)
+                return await self._run_impl(
+                    instance, on_progress, on_stall, context, sibling_context,
+                    api_fallback=instance.api_fallback,
+                    on_recovery=on_recovery,
+                    on_context_reset=on_context_reset,
+                )
+        finally:
+            self._paced_running[paced_account] -= 1
 
     def _stopped_before_spawning(self, instance: Instance) -> RunResult | None:
         """The run was killed at a moment when there was no process to kill.
@@ -618,11 +647,7 @@ class ClaudeRunner(
         # cleaned up in the spawn try/finally block further down.
         account_dir: str | None = None
         if provider.supports_account_failover:
-            account_dir = self._pick_account(
-                exclude=instance._accounts_tried,
-                prefer=instance.session_account if instance.session_id else None,
-                avoid_model_cooldown=_is_primary_model(instance.model),
-            )
+            account_dir = self._spawn_account(instance)
             if not account_dir and config.CLAUDE_ACCOUNTS:
                 # A kill that landed while the worktree was being built (the
                 # longest of the no-process windows — it takes a per-repo git

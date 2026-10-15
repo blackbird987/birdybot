@@ -16,6 +16,7 @@ from bot.claude.auth_health import (
 )
 from bot.claude.parser import RunResult
 from bot.claude.types import Instance
+from bot.claude.runner.recovery import _is_primary_model
 
 log = logging.getLogger(__name__)
 
@@ -92,6 +93,19 @@ class AccountsMixin:
                     self._store.set_account_cooldown(acct, None)
                 except Exception:
                     log.debug("Failed to clear stale cooldown", exc_info=True)
+
+    def _spawn_account(self, instance: Instance) -> str | None:
+        """The account a spawn of ``instance`` lands on.
+
+        One place for the arguments, because usage pacing must read the same
+        account the spawn then uses: a resume prefers its session's account,
+        and a run on the primary model avoids an account where it is cooling.
+        """
+        return self._pick_account(
+            exclude=instance._accounts_tried,
+            prefer=instance.session_account if instance.session_id else None,
+            avoid_model_cooldown=_is_primary_model(instance.model),
+        )
 
     def _pick_account(
         self,

@@ -297,6 +297,9 @@ async def run() -> None:
 
     # Initialize shared runner
     runner = ClaudeRunner(store=store)
+    # Usage pacing reads the plan's real figures, which live in bot.engine.
+    from bot.engine import plan_usage
+    runner.set_usage_reader(plan_usage.reading_for_pacing)
 
     # Bring the account alert table in line with what's actually on disk right
     # now: announce accounts that went out while we were down, and retire
@@ -526,6 +529,9 @@ async def run() -> None:
 
     # Cooldown retry loop — auto-retries instances that hit usage limits
     _cooldown_retrying: set[str] = set()
+    # Monotonic time of the last release, boxed so the nested loop can rebind it.
+    _cooldown_last_release: list[float] = [float("-inf")]
+    _cooldown_pull_logged: set[str] = set()
 
     async def cooldown_loop():
         from datetime import datetime as dt, timezone as tz_mod
@@ -554,17 +560,27 @@ async def run() -> None:
                 # same answer at eighteen times the cost.
                 accounts_free = runner.has_spawnable_account()
 
+                # Due retries are collected, ranked and released one at a
+                # time, never all at once: on 2026-10-15 the whole backlog
+                # started in the minute each window reopened, and the window
+                # was gone 3 to 9 minutes later. See cooldown_retry_rank.
+                due: list[tuple[int, str, object]] = []
+                parked: set[str] = set()
                 for inst in all_instances:
                     if not inst.cooldown_retry_at or not inst.cooldown_channel_id:
                         continue
+                    parked.add(inst.id)
                     if inst.id in _cooldown_retrying:
                         continue
                     if lifecycle.cooldown_retry_is_due(
                         inst.cooldown_retry_at, now, accounts_free,
                     ):
-                        if not lifecycle.cooldown_retry_is_due(
+                        if inst.id not in _cooldown_pull_logged and not lifecycle.cooldown_retry_is_due(
                             inst.cooldown_retry_at, now, accounts_free=False,
                         ):
+                            # Once per instance: a retry now waits its turn
+                            # behind the stagger and is seen every pass.
+                            _cooldown_pull_logged.add(inst.id)
                             log.info(
                                 "Pulling cooldown retry for %s forward from %s "
                                 "(an account is available again)",
@@ -587,10 +603,33 @@ async def run() -> None:
                             store.update_instance(inst)
                             continue
 
-                        _cooldown_retrying.add(inst.id)
-                        asyncio.create_task(
-                            _do_cooldown_retry(store, runner, inst, discord_bot, _cooldown_retrying)
+                        rank = lifecycle.cooldown_retry_rank(inst)
+                        if rank is None:
+                            await _drop_cooldown_retry(store, inst, discord_bot)
+                            continue
+                        due.append((rank, inst.created_at or "", inst))
+
+                # Forget retries that left the queue some other way (dropped,
+                # stale, killed, answered by hand).
+                _cooldown_pull_logged.intersection_update(parked)
+                due.sort(key=lambda d: (d[0], d[1]))
+                if due and (
+                    time.monotonic() - _cooldown_last_release[0]
+                    >= config.COOLDOWN_RETRY_STAGGER_SECS
+                ) and await runner.usage_slot_free(due[0][2]):
+                    inst = due[0][2]
+                    if len(due) > 1:
+                        log.info(
+                            "Releasing cooldown retry %s; %d more waiting, "
+                            "one every %ds", inst.id, len(due) - 1,
+                            config.COOLDOWN_RETRY_STAGGER_SECS,
                         )
+                    _cooldown_last_release[0] = time.monotonic()
+                    _cooldown_retrying.add(inst.id)
+                    _cooldown_pull_logged.discard(inst.id)
+                    asyncio.create_task(
+                        _do_cooldown_retry(store, runner, inst, discord_bot, _cooldown_retrying)
+                    )
             except Exception:
                 log.exception("Cooldown loop error")
 
@@ -728,6 +767,31 @@ async def run() -> None:
     log.info("Shutdown complete")
 
 
+async def _drop_cooldown_retry(store, inst, discord_bot):
+    """Unpark a retry that is not worth a resume (lifecycle.cooldown_retry_rank).
+
+    The thread is told, in one line, so it does not just sit there asleep.
+    """
+    channel_id = inst.cooldown_channel_id
+    inst.cooldown_retry_at = None
+    inst.cooldown_channel_id = None
+    store.update_instance(inst)
+    log.info("Dropped cooldown retry %s (automatic nudge, not worth a resume)", inst.id)
+    if not channel_id or not discord_bot:
+        return
+    try:
+        ch = discord_bot.get_channel(int(channel_id))
+        if ch:
+            await ch.send(
+                "This thread was waiting to re-run an automatic follow-up "
+                "after the usage limit. I skipped it to save usage; reply "
+                "here if you want it to continue.",
+                silent=True,
+            )
+    except Exception:
+        log.debug("Could not post the dropped-retry note for %s", inst.id, exc_info=True)
+
+
 async def _do_cooldown_retry(store, runner, inst, discord_bot, retrying_set):
     """Auto-retry an instance after usage-limit cooldown expires.
 
@@ -807,7 +871,9 @@ async def _do_cooldown_retry_locked(store, runner, inst, discord_bot, channel_id
     # the task is already done — leaving uncommitted edits stranded. Nudge
     # it to check git state first so the autopilot's no-commits guard never
     # has to fire.
-    if inst.worktree_path:
+    if inst.worktree_path and "[Cooldown retry note]" in (inst.prompt or ""):
+        new_inst.prompt = inst.prompt  # already carries the note
+    elif inst.worktree_path:
         new_inst.prompt = (
             (inst.prompt or "") +
             "\n\n[Cooldown retry note] Your prior turn was interrupted "
@@ -822,7 +888,12 @@ async def _do_cooldown_retry_locked(store, runner, inst, discord_bot, channel_id
         # wake). Worktree retries are excluded — they can't self-wake and get
         # the commit-focused note above instead; they're also excluded from the
         # nudge path by the instance.branch gate in check_wake_request.
-        new_inst.prompt = (inst.prompt or "") + config.UNATTENDED_TURN_PROTOCOL
+        # Once: a retry that hits the limit again is cloned from a prompt
+        # that already carries it.
+        prompt = inst.prompt or ""
+        if config.UNATTENDED_TURN_PROTOCOL not in prompt:
+            prompt += config.UNATTENDED_TURN_PROTOCOL
+        new_inst.prompt = prompt
     store.update_instance(new_inst)
 
     # Clear cooldown on the original instance
