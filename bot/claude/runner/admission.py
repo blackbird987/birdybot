@@ -1,4 +1,4 @@
-"""Memory admission: the hold before a spawn and fleet arbitration."""
+"""Admission: the memory and usage holds before a spawn, and fleet arbitration."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from bot import config
-from bot.claude import cgroups, memory
+from bot.claude import cgroups, memory, usage_pacing
 from bot.claude.types import Instance
 from bot.claude.runner.common import ProgressCallback, _notify
 
@@ -506,3 +506,118 @@ class AdmissionMixin:
                 f"something.",
                 "on memory hold timeout",
             )
+
+    # -- Usage pacing ---------------------------------------------------------
+
+    def set_usage_reader(self, reader) -> None:
+        """Wire where plan-usage readings come from.
+
+        ``reader(account_dir)`` is awaited and returns a reading with
+        ``session_pct``, ``session_resets_at``, ``week_pct`` and
+        ``week_resets_at`` (``plan_usage.AccountUsage``), or None. app.py wires
+        it, because those figures live in bot.engine, which this package does
+        not import. Unwired, usage pacing still applies the peak-hour cap.
+        """
+        self._usage_reader = reader
+
+    async def usage_pace(self) -> usage_pacing.PaceDecision:
+        """How many sessions may run at once right now, and why. Never raises.
+
+        Read for the account the next spawn would land on, the same
+        ``_pick_account()`` the spawn itself calls: with two accounts the
+        backup's figures say nothing about the one about to be used.
+        """
+        reading = None
+        reader = getattr(self, "_usage_reader", None)
+        if reader is not None and config.USAGE_PACE_ENABLED:
+            try:
+                account = self._pick_account() if config.CLAUDE_ACCOUNTS else None
+                if config.CLAUDE_ACCOUNTS and account is None:
+                    # Every account is cooling: the spawn is refused anyway,
+                    # and holding it here would only delay the refusal.
+                    return usage_pacing.PaceDecision(config.MAX_CONCURRENT)
+                got = await reader(account)
+                if got is not None and getattr(got, "has_data", True):
+                    reading = got
+            except Exception:
+                log.debug("Usage reading for pacing failed", exc_info=True)
+        return usage_pacing.pace_limit(reading)
+
+    async def usage_slot_free(self) -> bool:
+        """Would a session starting now go straight through the usage hold?"""
+        decision = await self.usage_pace()
+        return getattr(self, "_paced_running", 0) < decision.limit
+
+    async def _await_usage_headroom(
+        self,
+        instance: Instance,
+        on_progress: ProgressCallback | None,
+    ) -> None:
+        """Hold a starting session while the plan's usage says enough are running.
+
+        The caller counts the session as running immediately after this
+        returns, with no await in between, so the last check here and that
+        count are atomic with respect to every other waiter. Keep it that way:
+        an await after the final check lets two sessions take one slot.
+
+        Bounded like the memory hold: after USAGE_PACE_MAX_WAIT_SECS it starts
+        anyway, because a session stuck forever is worse than one more run.
+        The cap never drops below one, so the wait is only ever for a running
+        session to finish.
+        """
+        if not config.USAGE_PACE_ENABLED:
+            return
+        decision = await self.usage_pace()
+        if self._paced_running < decision.limit:
+            return
+        from bot.platform.formatting import format_delay_secs
+
+        log.info(
+            "Holding %s for usage pacing: %d running, limit %d (%s)",
+            instance.id, self._paced_running, decision.limit, decision.reason,
+        )
+        loop = asyncio.get_event_loop()
+        started = loop.time()
+        last_told: float | None = None
+        while True:
+            now = loop.time()
+            if now - started >= config.USAGE_PACE_MAX_WAIT_SECS:
+                log.warning(
+                    "Starting %s anyway after %s of usage pacing (%s)",
+                    instance.id, format_delay_secs(int(now - started)),
+                    decision.reason,
+                )
+                return
+            if on_progress and (
+                last_told is None or now - last_told >= max(
+                    config.USAGE_PACE_POLL_SECS, config.USAGE_PACE_NOTIFY_SECS,
+                )
+            ):
+                running = self._paced_running
+                body = (
+                    f"Waiting to start: {decision.reason or 'pacing usage'}, so "
+                    f"at most {decision.limit} session"
+                    f"{'' if decision.limit == 1 else 's'} run at once and "
+                    f"{running} already {'is' if running == 1 else 'are'}. "
+                    f"Starting more now is how the whole window gets used up in "
+                    f"minutes. This starts as soon as one finishes."
+                )
+                if last_told is not None:
+                    body = (
+                        f"Still waiting after {format_delay_secs(int(now - started))}: "
+                        + body
+                    )
+                last_told = now
+                await _notify(on_progress, "Waiting for usage headroom", body,
+                              "on usage hold")
+            await asyncio.sleep(config.USAGE_PACE_POLL_SECS)
+            if instance.id in self._intentional_kills:
+                log.info("Usage hold for %s abandoned: stop requested", instance.id)
+                return
+            decision = await self.usage_pace()
+            if self._paced_running < decision.limit:
+                log.info(
+                    "Starting %s after %ds of usage pacing",
+                    instance.id, int(loop.time() - started),
+                )
+                return

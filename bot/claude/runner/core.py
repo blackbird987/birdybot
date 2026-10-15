@@ -205,6 +205,12 @@ class ClaudeRunner(
         # reap itself too. Without this the whole fleet unwinds in one minute
         # over a spike that one kill already fixed.
         self._fleet_last_reap = 0.0
+        # Usage pacing (admission.py): how many runs are past the usage hold
+        # right now, and where plan-usage readings come from. The reader is
+        # wired by app.py because the figures live in bot.engine.plan_usage,
+        # which this package does not import. None means no pacing on usage.
+        self._paced_running = 0
+        self._usage_reader: Callable[[str | None], Awaitable[object]] | None = None
         # Task-level tracking: covers the full lifecycle of a query/workflow,
         # not just the subprocess.  Prevents reboot from slipping through
         # gaps between autopilot chain steps.
@@ -428,17 +434,28 @@ class ClaudeRunner(
         self._kill_card_owners.discard(instance.id)
         self._bot_signalled.discard(instance.id)
         async with self._semaphore:
-            # Inside the slot, before the spawn. Holding the slot while waiting
-            # is the point: this session has been admitted by concurrency and
-            # is now being admitted by memory, and nothing behind it in the
-            # queue should slip past into a machine that is already out.
-            await self._await_memory_headroom(instance, on_progress)
-            return await self._run_impl(
-                instance, on_progress, on_stall, context, sibling_context,
-                api_fallback=instance.api_fallback,
-                on_recovery=on_recovery,
-                on_context_reset=on_context_reset,
-            )
+            # Usage first, then memory. Usage can hold for as long as a running
+            # session takes to finish, and a memory reading taken before that
+            # wait would be stale by the time it ended.
+            await self._await_usage_headroom(instance, on_progress)
+            # Counted with no await between the hold's last check and here, so
+            # two waiters cannot both see the same free slot.
+            self._paced_running += 1
+            try:
+                # Inside the slot, before the spawn. Holding the slot while
+                # waiting is the point: this session has been admitted by
+                # concurrency and is now being admitted by memory, and nothing
+                # behind it in the queue should slip past into a machine that
+                # is already out.
+                await self._await_memory_headroom(instance, on_progress)
+                return await self._run_impl(
+                    instance, on_progress, on_stall, context, sibling_context,
+                    api_fallback=instance.api_fallback,
+                    on_recovery=on_recovery,
+                    on_context_reset=on_context_reset,
+                )
+            finally:
+                self._paced_running -= 1
 
     def _stopped_before_spawning(self, instance: Instance) -> RunResult | None:
         """The run was killed at a moment when there was no process to kill.

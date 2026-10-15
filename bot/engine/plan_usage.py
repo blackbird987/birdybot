@@ -304,6 +304,24 @@ async def get_plan_usage(*, force: bool = False) -> list[AccountUsage]:
     ))
 
 
+async def reading_for_pacing(account_dir: str | None) -> AccountUsage | None:
+    """The reading usage pacing should go by, for the account about to be used.
+
+    ``None`` for the account means no rotation is configured, so the one
+    account the CLI would use unpinned. Returns None when there are no figures,
+    which pacing treats as "no usage cap" (see bot/claude/usage_pacing.py).
+    """
+    if account_dir is None:
+        dirs = account_dirs()
+        if not dirs:
+            return None
+        account_dir = dirs[0]
+    elif not config.PLAN_USAGE_API_ENABLED or config.PROVIDER != "claude":
+        return None
+    reading = await fetch_account_usage(account_dir)
+    return reading if reading.has_data else None
+
+
 # ---------------------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------------------

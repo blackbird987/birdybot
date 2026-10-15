@@ -234,6 +234,37 @@ def cooldown_retry_is_due(
     return due is not None and now >= due
 
 
+# Prompts the bot wrote itself to prod a session, not work anyone asked for.
+_NUDGE_PREFIX = "SYSTEM NUDGE:"
+# A spawned child's result delivered after its wave closed (orchestrator).
+_LATE_REPORT_PREFIX = "Late report"
+
+
+def cooldown_retry_rank(inst) -> int | None:
+    """Order in which parked cooldown retries are released; None drops it.
+
+    The cooldown loop releases one retry at a time (COOLDOWN_RETRY_STAGGER_SECS
+    apart), so the order decides what the reopened window is spent on:
+
+    0. what the user typed, which is what they are waiting on;
+    1. workflow steps (build, review, verify ...), work the user approved;
+    2. late child reports, which only inform a parent.
+
+    A nudge is dropped. It prods a turn that ended without signalling how it
+    ended; hours later, behind a usage limit, re-running it means resuming a
+    whole conversation from a cold cache to tell it something it can no
+    longer act on. Dropping it costs one "reply to continue" from the user.
+    """
+    prompt = (inst.prompt or "").lstrip()
+    if prompt.startswith(_NUDGE_PREFIX):
+        return None
+    if prompt.startswith(_LATE_REPORT_PREFIX):
+        return 2
+    if inst.origin != InstanceOrigin.DIRECT:
+        return 1
+    return 0
+
+
 # Labels that don't auto-derive well from InstanceOrigin.value
 _ORIGIN_LABEL_OVERRIDES: dict[InstanceOrigin, str] = {
     InstanceOrigin.DIRECT: "",
