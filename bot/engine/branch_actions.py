@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -24,6 +26,55 @@ from bot.engine.resolver import _resolver_in_flight
 log = logging.getLogger(__name__)
 
 
+# --- One merge or discard per instance at a time ---
+
+# A merge takes seconds (stash, merge, tag, two pushes) and the card showed
+# nothing meanwhile, so the user tapped Merge again. Each extra tap queued on
+# the repo lock and then merged, deployed and rewrote the card a second time.
+_BRANCH_ACTIONS_IN_FLIGHT: set[str] = set()
+
+
+@contextlib.contextmanager
+def branch_action_slot(instance_id: str) -> Iterator[bool]:
+    """Claim the instance's one merge/discard slot; yields False if it is taken."""
+    if instance_id in _BRANCH_ACTIONS_IN_FLIGHT:
+        yield False
+        return
+    _BRANCH_ACTIONS_IN_FLIGHT.add(instance_id)
+    try:
+        yield True
+    finally:
+        _BRANCH_ACTIONS_IN_FLIGHT.discard(instance_id)
+
+
+async def show_branch_progress(
+    ctx: RequestContext, source_msg_id: str | None, text: str,
+) -> None:
+    """Swap the tapped card for a progress line and take its buttons away.
+
+    The buttons going is what stops a second tap; the line is what tells the
+    user the first one landed. The outcome replaces it when the action ends.
+    """
+    if not source_msg_id:
+        return
+    try:
+        await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, text, None)
+    except Exception:
+        log.debug("Could not show branch progress on %s", source_msg_id, exc_info=True)
+
+
+def merge_progress_text(inst: Instance) -> str:
+    return f"⏳ Merging `{inst.branch}` into `{inst.original_branch}`…"
+
+
+def discard_progress_text(inst: Instance) -> str:
+    return f"⏳ Discarding `{inst.branch}`…"
+
+
+def already_running_text(inst: Instance) -> str:
+    return f"A merge or discard of {inst.display_id()} is already running."
+
+
 # --- /merge ---
 
 async def on_merge(ctx: RequestContext, text: str) -> None:
@@ -37,7 +88,11 @@ async def on_merge(ctx: RequestContext, text: str) -> None:
         await ctx.messenger.send_text(ctx.channel_id, f"Instance '{text}' not found.")
         return
 
-    text, _ = await workflows.merge_from_user(ctx, inst)
+    with branch_action_slot(inst.id) as claimed:
+        if not claimed:
+            await ctx.messenger.send_text(ctx.channel_id, already_running_text(inst))
+            return
+        text, _ = await workflows.merge_from_user(ctx, inst)
     await ctx.messenger.send_text(ctx.channel_id, text)
 
 
@@ -54,11 +109,15 @@ async def on_discard(ctx: RequestContext, text: str) -> None:
         await ctx.messenger.send_text(ctx.channel_id, f"Instance '{text}' not found.")
         return
 
-    if not inst.branch:
-        outcome = await ctx.runner.discard_branch(inst)  # "Already discarded (...)"
-        await _finish_resolved_branch(ctx, inst, outcome.message, None)
-        return
-    outcome = await perform_discard(ctx, inst, "/discard")
+    with branch_action_slot(inst.id) as claimed:
+        if not claimed:
+            await ctx.messenger.send_text(ctx.channel_id, already_running_text(inst))
+            return
+        if not inst.branch:
+            outcome = await ctx.runner.discard_branch(inst)  # "Already discarded (...)"
+            await _finish_resolved_branch(ctx, inst, outcome.message, None)
+            return
+        outcome = await perform_discard(ctx, inst, "/discard")
     await ctx.messenger.send_text(ctx.channel_id, outcome.message)
 
 
@@ -217,7 +276,7 @@ async def _finish_resolved_branch(
 
 async def _finish_branch_action(
     ctx: RequestContext, inst: Instance, escaped: str, source_msg_id: str | None,
-    *, keep_open: bool = False,
+    *, keep_open: bool = False, kept_buttons: list | None = None,
 ) -> None:
     """Post the outcome of a merge/discard and tidy up if the branch is gone.
 
@@ -225,10 +284,12 @@ async def _finish_branch_action(
     banner to it and Discard does not; everything after that point was the same
     thirteen lines in both branches. `keep_open` holds a post-Done thread open
     when the merge landed on a tree that must not ship (``merge_blocks_ship``):
-    closing it would archive the only notice the user gets.
+    closing it would archive the only notice the user gets. `kept_buttons` go
+    on the card when the branch survived: a failed merge's banner names Try
+    Merge Again and Resolve, and the progress line took the old buttons away.
     """
     # Pass updated buttons when branch was resolved (strips Merge/Discard)
-    buttons = action_button_specs(inst) if not inst.branch else None
+    buttons = action_button_specs(inst) if not inst.branch else kept_buttons
     if source_msg_id:
         await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, escaped, buttons)
     else:

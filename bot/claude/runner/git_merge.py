@@ -340,8 +340,14 @@ class MergeMixin:
             return "No branch to merge"
         if not instance.repo_path:
             return "No repo path"
+        branch = instance.branch  # A merge ahead of us on the lock clears it
         repo_lock = self._get_repo_lock(instance.repo_path)
         async with repo_lock:
+            # A second merge of the same instance that queued behind the first
+            # used to run on with the branch the first had cleared, and report
+            # "Already merged (None → main)" over the first one's result.
+            if not instance.branch:
+                return f"Already merged ({branch} → {instance.original_branch})"
             return await asyncio.to_thread(self._merge_branch_sync, instance)
 
     def _merge_branch_sync(self, instance: Instance) -> str:

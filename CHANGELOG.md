@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Tapping Merge shows it is working, and a second tap no longer merges again** (`bot/engine/callbacks.py`, `bot/engine/branch_actions.py`). A merge takes seconds (stash, merge, release tag, two pushes) and the card showed nothing meanwhile, so it looked like the tap did nothing: one merge got five taps in nine seconds, and each extra tap queued, merged again, redid the deploy bookkeeping and rewrote the card, ending on "Already merged (None → main)". The card now turns into "⏳ Merging `branch` into `main`…" with its buttons removed the moment it is tapped, one merge or discard runs per instance at a time (a repeat tap is ignored, a repeat `/merge` or `/discard` says one is already running), and a landed merge ends on "✅ Merged into …". A failed button merge puts Resolve / Try Merge Again / Discard back on the card, which its banner names but which used to be stripped. Discard shows a progress line the same way. Harness: `scripts/test_merge_button_feedback.py`.
+- A merge that queued behind another merge of the same instance reports "Already merged" with the real branch name instead of `None`, and no longer runs a second merge on a branch the first had already cleared (`bot/claude/runner/git_merge.py`).
+
 ## v0.102.5, A new /chain replaces a stuck one instead of being refused (2026-10-14)
 
 ### Fixed
