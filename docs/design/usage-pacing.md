@@ -16,9 +16,9 @@ Two pieces fix it:
   (`AdmissionMixin._await_usage_headroom`, called first inside the
   concurrency semaphore in `ClaudeRunner.run`). How many is enough comes from
   `bot/claude/usage_pacing.py:pace_limit`, from the real figures
-  (`bot/engine/plan_usage.py`) of the account the spawn would land on (`_pacing_account`, the same
-  `_pick_account` arguments `_run_impl` uses, so a resume is read on its
-  session's account):
+  (`bot/engine/plan_usage.py`) of the account the spawn would land on
+  (`AccountsMixin._spawn_account`, the one helper `_run_impl` also picks
+  with, so a resume is read on its session's account):
   session-% tiers (`USAGE_PACE_SESSION_TIERS`), weekly pace (used more than
   the share of the week gone plus `USAGE_PACE_WEEK_SLACK_PCT`), a weekly
   ceiling, and a peak-hour cap. The tightest cap wins.
@@ -31,8 +31,11 @@ Two pieces fix it:
 Rules that must not drift:
 
 - **The cap never drops below one.** A hold only ever waits for a running
-  session to finish, so it cannot deadlock. It is also bounded
-  (`USAGE_PACE_MAX_WAIT_SECS`), then starts anyway, like the memory hold.
+  session to finish, so it cannot deadlock. It is also bounded, per queue
+  and not per waiter: a session starts anyway only when nobody has gone
+  through the hold for `USAGE_PACE_MAX_WAIT_SECS` (`_usage_hold_passed_at`),
+  and that start resets the clock. A per-waiter limit releases every session
+  that began waiting together in the same minute, which is the stampede again.
 - **No reading is no usage cap.** The endpoint is undocumented and the access
   token is often expired between runs (the bot never refreshes it). Missing
   figures must not stop work; only the peak-hour cap still applies.

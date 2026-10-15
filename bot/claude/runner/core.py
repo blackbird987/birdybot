@@ -210,6 +210,10 @@ class ClaudeRunner(
         # wired by app.py because the figures live in bot.engine.plan_usage,
         # which this package does not import. None means no pacing on usage.
         self._paced_running = 0
+        # Loop time a session last went through the usage hold: the hold's
+        # time limit runs from here, so a stalled queue lets one through per
+        # interval instead of all its waiters at once.
+        self._usage_hold_passed_at = float("-inf")
         self._usage_reader: Callable[[str | None], Awaitable[object]] | None = None
         # Task-level tracking: covers the full lifecycle of a query/workflow,
         # not just the subprocess.  Prevents reboot from slipping through
@@ -635,11 +639,7 @@ class ClaudeRunner(
         # cleaned up in the spawn try/finally block further down.
         account_dir: str | None = None
         if provider.supports_account_failover:
-            account_dir = self._pick_account(
-                exclude=instance._accounts_tried,
-                prefer=instance.session_account if instance.session_id else None,
-                avoid_model_cooldown=_is_primary_model(instance.model),
-            )
+            account_dir = self._spawn_account(instance)
             if not account_dir and config.CLAUDE_ACCOUNTS:
                 # A kill that landed while the worktree was being built (the
                 # longest of the no-process windows — it takes a per-repo git

@@ -1183,8 +1183,9 @@ USAGE_PACE_PEAK_HOURS_PT: str = os.getenv("USAGE_PACE_PEAK_HOURS_PT", "5-11")
 USAGE_PACE_PEAK_CAP: int = int(os.getenv("USAGE_PACE_PEAK_CAP", "3"))
 USAGE_PACE_POLL_SECS: int = max(5, int(os.getenv("USAGE_PACE_POLL_SECS", "30")))
 USAGE_PACE_NOTIFY_SECS: int = int(os.getenv("USAGE_PACE_NOTIFY_SECS", "600"))
-# A held session starts anyway after this long, like the memory hold: a hold
-# that can never end is worse than one more session.
+# When no session has got through the usage hold for this long, one held
+# session starts anyway (one per interval, not the whole queue): a hold that
+# can never end is worse than one more session.
 USAGE_PACE_MAX_WAIT_SECS: int = int(os.getenv("USAGE_PACE_MAX_WAIT_SECS", "3600"))
 # Parked cooldown retries are released one at a time, this far apart, instead
 # of all in the minute the window reopens.

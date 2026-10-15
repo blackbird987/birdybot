@@ -12,7 +12,6 @@ from bot import config
 from bot.claude import cgroups, memory, usage_pacing
 from bot.claude.types import Instance
 from bot.claude.runner.common import ProgressCallback, _notify
-from bot.claude.runner.recovery import _is_primary_model
 
 log = logging.getLogger(__name__)
 
@@ -521,34 +520,21 @@ class AdmissionMixin:
         """
         self._usage_reader = reader
 
-    def _pacing_account(self, instance: Instance | None) -> str | None:
-        """The account a spawn of ``instance`` would land on, as ``_run_impl`` picks it.
-
-        Same arguments as the spawn's own ``_pick_account`` call, so a resume
-        is read against the account its session is pinned to. Without an
-        instance it is the plain rotation order, the account a fresh start
-        would get.
-        """
-        if instance is None:
-            return self._pick_account()
-        return self._pick_account(
-            exclude=instance._accounts_tried,
-            prefer=instance.session_account if instance.session_id else None,
-            avoid_model_cooldown=_is_primary_model(instance.model),
-        )
-
     async def usage_pace(self, instance: Instance | None = None) -> usage_pacing.PaceDecision:
         """How many sessions may run at once right now, and why. Never raises.
 
-        Read for the account the spawn would land on (``_pacing_account``):
-        with two accounts the backup's figures say nothing about the one
-        about to be used.
+        Read for the account the spawn would land on (``_spawn_account``;
+        plain rotation order without an instance): with two accounts the
+        backup's figures say nothing about the one about to be used.
         """
         reading = None
         reader = getattr(self, "_usage_reader", None)
         if reader is not None and config.USAGE_PACE_ENABLED:
             try:
-                account = self._pacing_account(instance) if config.CLAUDE_ACCOUNTS else None
+                account = (
+                    (self._spawn_account(instance) if instance else self._pick_account())
+                    if config.CLAUDE_ACCOUNTS else None
+                )
                 if config.CLAUDE_ACCOUNTS and account is None:
                     # Every account is cooling: the spawn is refused anyway,
                     # and holding it here would only delay the refusal.
@@ -577,15 +563,20 @@ class AdmissionMixin:
         count are atomic with respect to every other waiter. Keep it that way:
         an await after the final check lets two sessions take one slot.
 
-        Bounded like the memory hold: after USAGE_PACE_MAX_WAIT_SECS it starts
-        anyway, because a session stuck forever is worse than one more run.
-        The cap never drops below one, so the wait is only ever for a running
-        session to finish.
+        Bounded, but per queue rather than per waiter: a session starts anyway
+        only once nobody has gone through the hold for USAGE_PACE_MAX_WAIT_SECS,
+        and starting stamps that clock for the rest. So a queue stuck behind a
+        session that never ends lets one more through per interval, never its
+        whole backlog in the same minute, which is the stampede this exists to
+        stop. The cap never drops below one, so the wait is only ever for a
+        running session to finish.
         """
         if not config.USAGE_PACE_ENABLED:
             return
+        loop = asyncio.get_event_loop()
         decision = await self.usage_pace(instance)
         if self._paced_running < decision.limit:
+            self._usage_hold_passed_at = loop.time()
             return
         from bot.platform.formatting import format_delay_secs
 
@@ -593,17 +584,21 @@ class AdmissionMixin:
             "Holding %s for usage pacing: %d running, limit %d (%s)",
             instance.id, self._paced_running, decision.limit, decision.reason,
         )
-        loop = asyncio.get_event_loop()
         started = loop.time()
         last_told: float | None = None
         while True:
             now = loop.time()
-            if now - started >= config.USAGE_PACE_MAX_WAIT_SECS:
+            if (
+                now - max(started, self._usage_hold_passed_at)
+                >= config.USAGE_PACE_MAX_WAIT_SECS
+            ):
                 log.warning(
-                    "Starting %s anyway after %s of usage pacing (%s)",
-                    instance.id, format_delay_secs(int(now - started)),
+                    "Starting %s anyway: nothing has started for %s of usage "
+                    "pacing (%s)",
+                    instance.id, format_delay_secs(int(config.USAGE_PACE_MAX_WAIT_SECS)),
                     decision.reason,
                 )
+                self._usage_hold_passed_at = now
                 return
             if on_progress and (
                 last_told is None or now - last_told >= max(
@@ -633,8 +628,9 @@ class AdmissionMixin:
                 return
             decision = await self.usage_pace(instance)
             if self._paced_running < decision.limit:
+                self._usage_hold_passed_at = loop.time()
                 log.info(
                     "Starting %s after %ds of usage pacing",
-                    instance.id, int(loop.time() - started),
+                    instance.id, int(self._usage_hold_passed_at - started),
                 )
                 return

@@ -190,6 +190,23 @@ async def test_runner_hold() -> None:
         t = _inst("t-timeout")
         await asyncio.wait_for(runner._await_usage_headroom(t, None), 1)
 
+        # The time limit is per queue: three waiters that time out together
+        # must start one per interval, not all at once (the stampede again).
+        config.USAGE_PACE_MAX_WAIT_SECS = 0.2
+        runner._usage_hold_passed_at = float("-inf")
+        timed_out: list[str] = []
+
+        async def stuck(name):
+            await runner._await_usage_headroom(_inst(name), None)
+            timed_out.append(name)
+
+        stuck_tasks = [asyncio.create_task(stuck(f"s{i}")) for i in range(3)]
+        await asyncio.sleep(0.3)
+        check(len(timed_out) == 1,
+              f"a stalled queue must let one through per interval, got {timed_out}")
+        await asyncio.wait_for(asyncio.gather(*stuck_tasks), 2)
+        check(len(timed_out) == 3, "every waiter must still start eventually")
+
         # usage_slot_free mirrors the hold.
         config.USAGE_PACE_MAX_WAIT_SECS = 3600
         runner._paced_running = 0
