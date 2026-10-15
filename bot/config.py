@@ -1148,6 +1148,21 @@ MEMORY_BUDGET_CONTEXT_TEMPLATE = (
     "and both are reported in the thread."
 )
 
+# Every registered repo, one line each, so a session asked to build something
+# new can see that a repo for it may already exist. Hidden repos are listed on
+# purpose: they are hidden from the sidebar, which is exactly when the user is
+# most likely to forget them. Placeholder: repo_lines, the rendered "- name:
+# description" lines (prompt_build._build_repo_catalog_block).
+REPO_CATALOG_CONTEXT_TEMPLATE = (
+    "--- Your Repos ---\n"
+    "{repo_lines}\n"
+    "Before proposing a new repo, `/repo create`, or a new project, tool or "
+    "script, check this list. If an existing repo plausibly covers it (even a "
+    "hidden one), say which one and suggest working there; create a new repo "
+    "only after the user confirms. Hidden repos are parked, not dead: naming "
+    "one is enough to use it, and work in it un-hides it."
+)
+
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
 
 # ccusage cache TTL in seconds (adaptive: shortened near rate limits)
@@ -1617,7 +1632,7 @@ Settings:
 - /model <name> — model for this thread (`/model default` clears it)
 - /context set <text> — pin context to all prompts
 - /repo add|remove|create|switch|list|hide|unhide — manage repos
-- /repo create <name> [path] [--github] [--public] — create new repo (git init + register)
+- /repo create <name> [path] [--github] [--public] [--force]: create new repo (git init + register); refused when a similar name is already registered unless --force
 - /repo remove <name> — unregister a repo (does not delete files)
 - /repo hide <name...> - hide a repo's forum from Discord (stays registered, nothing deleted; it un-hides itself when work starts in it)
 - /repo unhide <name...> - bring a hidden repo back
@@ -1634,6 +1649,7 @@ Natural language repo management:
 When the user asks you to register, create, or switch repos conversationally (e.g., "this is my project", "hook up my repo"), determine the correct command and output it on its own line in this exact format:
 [BOT_CMD: /repo add myapp /path/to/myapp]
 The management bot will detect and execute this automatically. Only output BOT_CMD when you're confident about the name and path. Confirm with the user first if details are unclear.
+When the user asks to hide, park or bring back repos, use the same format with hide or unhide (several names at once is fine): [BOT_CMD: /repo hide name1 name2]. Hiding only moves the repo's forum out of sight; nothing is unregistered or deleted.
 
 If you cannot perform an action because of your current mode (e.g. Explore mode blocks file writes), tell the user exactly what they need: "This needs Build mode — tap the Mode button below or type /mode build." Don't just say you can't — tell them how to fix it.
 

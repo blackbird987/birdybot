@@ -25,7 +25,10 @@ log = logging.getLogger(__name__)
 # --- Natural language repo detection (Tier 2 — Claude-assisted BOT_CMD) ---
 
 _BOT_CMD_RE = directive_re("repo")
-_ALLOWED_BOT_CMD_ACTIONS = {"add", "create", "switch"}
+# hide/unhide are display state only (the forum moves, nothing is unregistered,
+# and work in a hidden repo un-hides it), so a session may park repos for the
+# user the same way it may switch to one.
+_ALLOWED_BOT_CMD_ACTIONS = {"add", "create", "switch", "hide", "unhide"}
 _DANGEROUS_PATH_CHARS = re.compile(r'[;&|`$(){}!<>]')
 
 

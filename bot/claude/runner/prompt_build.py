@@ -18,6 +18,23 @@ from bot.store import history as history_mod
 
 log = logging.getLogger(__name__)
 
+# Per-repo description cap in the repo catalog block. The Control Room cache
+# holds up to ~120 characters; 25 repos at that length is most of the 3 KB the
+# block is allowed, so it is cut a little shorter here.
+_CATALOG_DESC_MAX = 100
+
+
+def _cap_description(text: str) -> str:
+    """Collapse whitespace and cut ``text`` to the catalog cap on a word."""
+    text = " ".join(text.split())
+    if len(text) <= _CATALOG_DESC_MAX:
+        return text
+    cut = text[: _CATALOG_DESC_MAX - 1]
+    space = cut.rfind(" ")
+    if space > _CATALOG_DESC_MAX // 2:
+        cut = cut[:space]
+    return cut.rstrip(" ,;:.-") + "…"
+
 
 class PromptMixin:
     """The CLI command line and the system prompt it carries. Mixed into ClaudeRunner."""
@@ -268,6 +285,36 @@ class PromptMixin:
         # No repo, no file or a malformed one: default on.
         cfg = read_repo_config(instance.repo_path, "test.json")
         return (cfg or {}).get("diagnostics", True)
+
+    def _build_repo_catalog_block(self, instance: Instance) -> str:
+        """List every registered repo with its cached one-line description.
+
+        Reads only the store: descriptions come from the Control Room cache
+        (``repo_desc`` fills it), so building a prompt never touches 25 repos
+        on disk. ``list_repos()`` is unfiltered, which is the point: a hidden
+        repo is the one most likely to be forgotten and rebuilt. Fails open,
+        because a run must never be blocked by a listing it can do without.
+        """
+        store = getattr(self, "_store", None)
+        if store is None:
+            return ""
+        try:
+            repos = store.list_repos()
+            if not repos:
+                return ""
+            lines = []
+            for name in repos:
+                entry = store.get_repo_description_entry(name) or {}
+                desc = _cap_description(str(entry.get("text") or ""))
+                hidden = " (hidden)" if store.is_repo_dormant(name) else ""
+                lines.append(f"- {name}{hidden}: {desc}" if desc
+                             else f"- {name}{hidden}")
+            return config.REPO_CATALOG_CONTEXT_TEMPLATE.format(
+                repo_lines="\n".join(lines))
+        except Exception:
+            log.debug("Repo catalog block skipped for %s", instance.id,
+                      exc_info=True)
+            return ""
 
     @staticmethod
     def _build_master_context_block(instance: Instance) -> str:
@@ -527,6 +574,12 @@ class PromptMixin:
 
         # Bot capability context so Claude knows what the user can do
         parts.append(config.BOT_CONTEXT)
+
+        # Every registered repo, so "build me X" is checked against what
+        # already exists before anyone reaches for /repo create.
+        catalog_block = self._build_repo_catalog_block(instance)
+        if catalog_block:
+            parts.append(catalog_block)
 
         # The memory budget, stated before it is enforced. Until now the first
         # thing an agent ever heard about memory was that its run had just been

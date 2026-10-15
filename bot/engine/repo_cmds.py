@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import logging
 import re
 import subprocess
@@ -99,18 +100,47 @@ def _resolve_default_path(name: str, store) -> tuple[Path, str] | None:
     return None
 
 
+def _normalize_repo_name(name: str) -> str:
+    return re.sub(r"[-_. ]", "", name.lower())
+
+
+def _similar_repo_names(name: str, repos: dict[str, str]) -> list[str]:
+    """Registered repo names close enough to ``name`` to be the same project.
+
+    Case-insensitive equality, one name containing the other once separators
+    are dropped (`smart-home` vs `smarthome`, shorter name 4+ characters), or
+    a difflib ratio of 0.8+.
+    Hidden repos count: forgetting one is the reason this check exists.
+    """
+    want = _normalize_repo_name(name)
+    out = []
+    for existing in repos:
+        have = _normalize_repo_name(existing)
+        if not want or not have:
+            continue
+        # Containment needs a few letters to mean anything: "ai" sits inside
+        # half the names on any machine.
+        contains = min(len(want), len(have)) >= 4 and (want in have or have in want)
+        if (want == have or contains
+                or difflib.SequenceMatcher(None, want, have).ratio() >= 0.8):
+            out.append(existing)
+    return out
+
+
 async def _create_repo(ctx: RequestContext, text: str) -> None:
-    """Handle /repo create <name> [path] [--github] [--public]."""
+    """Handle /repo create <name> [path] [--github] [--public] [--force]."""
     # --- Parse flags and positional args ---
     tokens = text.split()
     flags = {t for t in tokens if t.startswith("--")}
     positional = [t for t in tokens if not t.startswith("--")]
     github = bool(flags & {"--github", "--gh"})
     public = "--public" in flags
+    force = "--force" in flags
 
     if not positional:
         await ctx.messenger.send_text(
-            ctx.channel_id, "Usage: /repo create <name> [path] [--github] [--public]"
+            ctx.channel_id,
+            "Usage: /repo create <name> [path] [--github] [--public] [--force]",
         )
         return
     name = positional[0]
@@ -123,6 +153,18 @@ async def _create_repo(ctx: RequestContext, text: str) -> None:
     if name in ctx.store.list_repos():
         await ctx.messenger.send_text(
             ctx.channel_id, f"Repo '{name}' already exists. Use /repo switch {name}"
+        )
+        return
+    if not force and (similar := _similar_repo_names(name, ctx.store.list_repos())):
+        labels = ", ".join(
+            f"{n} (hidden)" if ctx.store.is_repo_dormant(n) else n
+            for n in similar
+        )
+        await ctx.messenger.send_text(
+            ctx.channel_id,
+            f"Similar repo(s) already registered: {labels}. "
+            f"Use `/repo switch {similar[0]}`, or re-run with --force to "
+            f"create '{name}' anyway.",
         )
         return
 
