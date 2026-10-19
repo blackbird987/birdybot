@@ -286,6 +286,11 @@ def _check_other_worktrees(tmp: Path) -> None:
     check("refusal says where it looked and asks for an absolute path",
           "worktrees" in why and "absolute" in why, why)
 
+    build = FakeInstance(str(repo), str(repo / ".worktrees" / "side2"))
+    p, why = resolve_image("out/r.png", build)
+    check("a build never picks up a sibling worktree's file",
+          p is None and why == "file not found", f"{p} {why}")
+
     p, why = resolve_image(str(repo / "nope.png"), inst)
     check("absolute miss keeps the plain reason", why == "file not found", why)
 

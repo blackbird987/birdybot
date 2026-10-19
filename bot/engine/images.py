@@ -30,6 +30,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from bot import config
+from bot.claude.gitpaths import git_toplevel
+from bot.procutil import run_capture
 from bot.textutil import DIRECTIVE_ARGS, DIRECTIVE_KV_RE, directive_kv, is_quoted_example, mask_tilde_bodies
 
 if TYPE_CHECKING:
@@ -118,7 +120,8 @@ def resolve_image(raw: str, inst: "Instance") -> tuple[Path | None, str]:
 
     Relative paths resolve against the run's own working root — the worktree
     for a build, the repo otherwise — so a build can share a file it just
-    created without knowing its absolute location.
+    created without knowing its absolute location. Outside a build, a miss
+    also checks the repo's other git worktrees.
     """
     try:
         cand = Path(raw.strip().strip("\"'")).expanduser()
@@ -144,16 +147,23 @@ def resolve_image(raw: str, inst: "Instance") -> tuple[Path | None, str]:
             if cand.is_file():
                 break
             cand = Path(base) / rel
-        if not cand.is_file():
-            # A session that made its own git worktree (or cd'd into one)
-            # writes paths relative to THAT tree, which the bot can't see.
+        if (
+            not cand.is_file()
+            and cand.suffix.lower() in IMAGE_EXTS
+            and not getattr(inst, "worktree_path", None)
+        ):
+            # A session working in the repo may have made its own git worktree
+            # (or cd'd into one) and written the path relative to THAT tree.
+            # Not for a bot build: its own worktree is where its relative
+            # paths live, and a sibling build's same-named file is not its
+            # result.
             other = _find_in_other_worktrees(rel, inst)
             if other is not None:
                 cand = other
             else:
                 missing = (
-                    "file not found in the repo or any of its worktrees, "
-                    "use the absolute path"
+                    "file not found in the repo or its worktrees, "
+                    "give the absolute path"
                 )
 
     try:
@@ -249,64 +259,52 @@ async def deliver_images(
     return sent
 
 
-def _git_lines(cwd: str, *args: str) -> list[str] | None:
-    """stdout lines of a short git read, or None if git can't answer."""
-    try:
-        out = subprocess.run(
-            ["git", "-C", cwd, *args],
-            capture_output=True, text=True, timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if out.returncode != 0:
-        return None
-    return out.stdout.splitlines()
-
-
 def _find_in_other_worktrees(rel: Path, inst: "Instance") -> Path | None:
     """Find a relative path in one of the repo's other git worktrees.
 
     Sessions in a direct thread often create their own worktree (under the
     repo's ``.worktrees/``) and render images there, then hand back a path
-    relative to that tree. Each worktree is tried at the repo's own offset
-    inside its git root (a repo registered as a subfolder of its git root has
-    the same subfolder in every worktree) and at the worktree root. When
-    several match, the most recently written one wins: it is the image the
-    turn just made.
+    relative to that tree. Each worktree is tried at the repo's offset inside
+    its git root (a repo registered as a subfolder of its git root has the
+    same subfolder in every worktree) and at the worktree root. When several
+    match, the most recently written one wins: it is the image the turn just
+    made.
 
     Only paths inside this run's allowed roots count, so this widens where a
     relative path is looked for, never what may be published.
     """
-    anchor = getattr(inst, "repo_path", None) or getattr(inst, "worktree_path", None)
-    if not anchor:
+    repo = getattr(inst, "repo_path", None)
+    if not repo:
         return None
-    listing = _git_lines(anchor, "worktree", "list", "--porcelain")
-    if not listing:
+    top = git_toplevel(repo)
+    if not top:
         return None
-    prefix_lines = _git_lines(anchor, "rev-parse", "--show-prefix") or []
-    prefix = prefix_lines[0].strip() if prefix_lines else ""
+    try:
+        offset = Path(repo).resolve().relative_to(Path(top).resolve())
+    except (OSError, ValueError):
+        offset = Path()
+    try:
+        r = run_capture(
+            ["git", "-C", repo, "worktree", "list", "--porcelain"],
+            timeout=10, encoding="utf-8", errors="replace",
+        )
+    except (OSError, subprocess.SubprocessError):
+        log.debug("/image: git worktree list failed in %s", repo, exc_info=True)
+        return None
+    if r.returncode != 0:
+        return None
 
     roots = _allowed_roots(inst)
     best: Path | None = None
     best_mtime = -1.0
-    seen: set[Path] = set()
-    for line in listing:
+    for line in (r.stdout or "").splitlines():
         if not line.startswith("worktree "):
             continue
         tree = Path(line[len("worktree "):])
-        bases = [tree / prefix, tree] if prefix else [tree]
-        for base in bases:
+        for base in dict.fromkeys((tree / offset, tree)):
             try:
                 cand = (base / rel).resolve()
-            except OSError:
-                continue
-            if cand in seen:
-                continue
-            seen.add(cand)
-            if not any(_under(cand, r) for r in roots):
-                continue
-            try:
-                if not cand.is_file():
+                if not any(_under(cand, root) for root in roots) or not cand.is_file():
                     continue
                 mtime = cand.stat().st_mtime
             except OSError:
@@ -314,7 +312,7 @@ def _find_in_other_worktrees(rel: Path, inst: "Instance") -> Path | None:
             if mtime > best_mtime:
                 best, best_mtime = cand, mtime
     if best is not None:
-        log.info("/image — %s found in another worktree: %s", rel, best)
+        log.info("/image: found %s in another worktree (%s)", rel, best)
     return best
 
 
