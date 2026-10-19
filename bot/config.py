@@ -1202,6 +1202,15 @@ USAGE_PACE_NOTIFY_SECS: int = int(os.getenv("USAGE_PACE_NOTIFY_SECS", "600"))
 # session starts anyway (one per interval, not the whole queue): a hold that
 # can never end is worse than one more session.
 USAGE_PACE_MAX_WAIT_SECS: int = int(os.getenv("USAGE_PACE_MAX_WAIT_SECS", "3600"))
+# The fast lane: a session that is not a known-heavy step (build, /bg, sensor
+# fix, merge resolver) skips the usage hold and is counted outside the cap,
+# while fewer than USAGE_PACE_LIGHT_SLOTS run that way on its account. Half of
+# all runs end within ten turns and spend 15% of the usage between them, so a
+# quick reply should not queue for hours behind builds. Once a fast-lane run passes
+# USAGE_PACE_LIGHT_TURNS turns it counts against the cap like any other.
+# 0 slots turns the fast lane off.
+USAGE_PACE_LIGHT_SLOTS: int = max(0, int(os.getenv("USAGE_PACE_LIGHT_SLOTS", "3")))
+USAGE_PACE_LIGHT_TURNS: int = max(1, int(os.getenv("USAGE_PACE_LIGHT_TURNS", "10")))
 # Parked cooldown retries are released one at a time, this far apart, instead
 # of all in the minute the window reopens.
 COOLDOWN_RETRY_STAGGER_SECS: int = int(os.getenv("COOLDOWN_RETRY_STAGGER_SECS", "180"))

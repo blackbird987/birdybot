@@ -13,6 +13,10 @@ Locks:
   2. The runner holds a starting session while the pace limit is reached,
      lets exactly one waiter through per freed slot, abandons on Kill, and
      gives up after USAGE_PACE_MAX_WAIT_SECS.
+  2b. The fast lane: a non-build run starts at once outside the cap while a
+     fast-lane slot is free, in arrival order when it is full, and moves into
+     the capped count after USAGE_PACE_LIGHT_TURNS assistant turns. Builds
+     always queue for the cap.
   3. cooldown_retry_rank: nudges are dropped, typed messages go first, then
      workflow steps, then late child reports; the prefixes it keys on are the
      ones the bot actually writes.
@@ -138,7 +142,9 @@ def _runner(reading):
 async def test_runner_hold() -> None:
     saved = (config.CLAUDE_ACCOUNTS, config.MAX_CONCURRENT,
              config.USAGE_PACE_POLL_SECS, config.USAGE_PACE_MAX_WAIT_SECS,
-             config.USAGE_PACE_PEAK_HOURS_PT)
+             config.USAGE_PACE_PEAK_HOURS_PT, config.USAGE_PACE_LIGHT_SLOTS)
+    # The capped lane on its own; test_fast_lane covers the other one.
+    config.USAGE_PACE_LIGHT_SLOTS = 0
     config.CLAUDE_ACCOUNTS = []
     config.MAX_CONCURRENT = 6
     config.USAGE_PACE_POLL_SECS = 0.01
@@ -299,7 +305,8 @@ async def test_runner_hold() -> None:
         on_b.session_id = "s-b"
         on_b.session_account = "/acct/b"
         got = await asyncio.wait_for(runner._await_usage_headroom(on_b, None), 1)
-        check(got == "/acct/b", f"a session for the free account must start at once, got {got}")
+        check(got.account == "/acct/b" and not got.light,
+              f"a session for the free account must start at once, got {got}")
         check(not held_a.done(), "the spent account's session must still be held")
         runner._intentional_kills.add("t-a")
         await asyncio.wait_for(held_a, 1)
@@ -309,21 +316,124 @@ async def test_runner_hold() -> None:
     finally:
         (config.CLAUDE_ACCOUNTS, config.MAX_CONCURRENT,
          config.USAGE_PACE_POLL_SECS, config.USAGE_PACE_MAX_WAIT_SECS,
-         config.USAGE_PACE_PEAK_HOURS_PT) = saved
+         config.USAGE_PACE_PEAK_HOURS_PT, config.USAGE_PACE_LIGHT_SLOTS) = saved
+
+
+async def test_fast_lane() -> None:
+    saved = (config.CLAUDE_ACCOUNTS, config.MAX_CONCURRENT,
+             config.USAGE_PACE_POLL_SECS, config.USAGE_PACE_MAX_WAIT_SECS,
+             config.USAGE_PACE_PEAK_HOURS_PT, config.USAGE_PACE_LIGHT_SLOTS,
+             config.USAGE_PACE_LIGHT_TURNS)
+    config.CLAUDE_ACCOUNTS = []
+    config.MAX_CONCURRENT = 6
+    config.USAGE_PACE_POLL_SECS = 0.01
+    config.USAGE_PACE_MAX_WAIT_SECS = 3600
+    config.USAGE_PACE_PEAK_HOURS_PT = ""
+    config.USAGE_PACE_LIGHT_SLOTS = 2
+    config.USAGE_PACE_LIGHT_TURNS = 3
+    try:
+        check(usage_pacing.fast_lane_eligible(InstanceOrigin.DIRECT),
+              "a typed message must be fast-lane eligible")
+        check(usage_pacing.fast_lane_eligible(InstanceOrigin.PLAN),
+              "a plan step must be fast-lane eligible")
+        check(not usage_pacing.fast_lane_eligible(InstanceOrigin.BUILD),
+              "a build step must queue for the cap")
+        check(not usage_pacing.fast_lane_eligible(InstanceOrigin.BG),
+              "a /bg task must queue for the cap")
+
+        # The 1-cap is full (a build running) and a build is held behind it:
+        # a typed message must still start at once, in the fast lane.
+        runner = _runner([Reading(session_pct=99)])
+        runner._paced_running[None] = 1
+        held_build = asyncio.create_task(runner._await_usage_headroom(
+            _inst("t-build", origin=InstanceOrigin.BUILD), None))
+        await asyncio.sleep(0.03)
+        check(list(runner._usage_waiters) == ["t-build"], "the build must be held")
+        quick = await asyncio.wait_for(runner._await_usage_headroom(_inst("q-1"), None), 1)
+        check(quick.light, f"a typed message must take the fast lane, got {quick}")
+        check(None not in runner._usage_hold_passed_at,
+              "a fast-lane start must not stamp the capped line's clock, or a "
+              "stalled line would never time out")
+        runner._take_usage_slot("q-1", quick)
+        check(runner._light_running[None] == 1 and runner._paced_running[None] == 1,
+              "a fast-lane run must not count against the cap")
+        check(not held_build.done(), "a fast-lane start must not release the held build")
+        check(await runner.usage_slot_free(_inst("q-retry")),
+              "the cooldown loop must see a free fast-lane slot for a typed retry")
+        check(not await runner.usage_slot_free(_inst("t-retry", origin=InstanceOrigin.BUILD)),
+              "the cooldown loop must not see a fast-lane slot for a build retry")
+
+        # Turns: one message arriving as several events is one turn, and the
+        # third turn moves the run into the capped count.
+        for msg in ("m1", "m1", "m2"):
+            runner._count_usage_turn("q-1", msg)
+        check(quick.light and quick.turns == 2,
+              f"two distinct messages are two turns, got {quick.turns}")
+        runner._count_usage_turn("q-1", "m3")
+        check(not quick.light, "the run must leave the fast lane at the turn limit")
+        check(runner._light_running[None] == 0 and runner._paced_running[None] == 2,
+              "leaving the fast lane must move its count into the capped lane")
+        runner._count_usage_turn("q-1", "m4")
+        check(runner._paced_running[None] == 2, "a capped run is counted once")
+        runner._release_usage_slot("q-1", quick)
+        check(runner._paced_running[None] == 1 and "q-1" not in runner._usage_slots,
+              "a promoted run must give back its capped count")
+
+        # Full fast lane: the third typed message waits, in arrival order
+        # with the next, and starts when a fast-lane run finishes.
+        a = await runner._await_usage_headroom(_inst("q-a"), None)
+        runner._take_usage_slot("q-a", a)
+        b = await runner._await_usage_headroom(_inst("q-b"), None)
+        runner._take_usage_slot("q-b", b)
+        order: list[str] = []
+
+        async def typed(name):
+            slot = await runner._await_usage_headroom(_inst(name), None)
+            runner._take_usage_slot(name, slot)
+            order.append(name)
+
+        line = [asyncio.create_task(typed("q-c"))]
+        await asyncio.sleep(0.02)
+        line.append(asyncio.create_task(typed("q-d")))
+        await asyncio.sleep(0.03)
+        check(not order, f"a full fast lane must hold the next typed message, got {order}")
+        check(runner._light_waiters == {"q-c", "q-d"}, "held typed messages wait for the fast lane")
+        check(not await runner.usage_slot_free(_inst("q-new")),
+              "a newcomer must not jump typed messages held for the fast lane")
+        runner._release_usage_slot("q-a", a)
+        await asyncio.sleep(0.05)
+        check(order == ["q-c"], f"one freed fast-lane slot releases the head, got {order}")
+        runner._release_usage_slot("q-b", b)
+        await asyncio.wait_for(asyncio.gather(*line), 1)
+        check(order == ["q-c", "q-d"], f"arrival order, got {order}")
+        check(not runner._light_waiters, "every fast-lane waiter must leave the line")
+        check(not held_build.done(), "the build must still be held behind the cap")
+        runner._intentional_kills.add("t-build")
+        await asyncio.wait_for(held_build, 1)
+
+        # Off: zero slots sends everything through the cap.
+        config.USAGE_PACE_LIGHT_SLOTS = 0
+        check(not usage_pacing.fast_lane_eligible(InstanceOrigin.DIRECT),
+              "zero fast-lane slots must turn the fast lane off")
+    except asyncio.TimeoutError:
+        failures.append("a fast-lane hold did not end when it should have")
+    finally:
+        (config.CLAUDE_ACCOUNTS, config.MAX_CONCURRENT,
+         config.USAGE_PACE_POLL_SECS, config.USAGE_PACE_MAX_WAIT_SECS,
+         config.USAGE_PACE_PEAK_HOURS_PT, config.USAGE_PACE_LIGHT_SLOTS,
+         config.USAGE_PACE_LIGHT_TURNS) = saved
 
 
 def test_run_counts_slots() -> None:
     """run() holds before the semaphore, counts right after, gives back in finally."""
-    src = Path(__file__).resolve().parents[1] / "bot" / "claude" / "runner" / "core.py"
-    tree = ast.parse(src.read_text(encoding="utf-8"))
+    root = Path(__file__).resolve().parents[1] / "bot" / "claude" / "runner"
+    tree = ast.parse((root / "core.py").read_text(encoding="utf-8"))
     run = next(n for n in ast.walk(tree)
                if isinstance(n, ast.AsyncFunctionDef) and n.name == "run")
 
-    def counts_slot(node) -> bool:
-        """``self._paced_running[<account>] += / -= 1``."""
-        return (isinstance(node, ast.AugAssign)
-                and isinstance(node.target, ast.Subscript)
-                and getattr(node.target.value, "attr", "") == "_paced_running")
+    def calls(node, name) -> bool:
+        return (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+                and getattr(node.value.func, "attr", "") == name)
 
     body = run.body
     at = next((i for i, n in enumerate(body)
@@ -331,23 +441,36 @@ def test_run_counts_slots() -> None:
                and getattr(n.value.value.func, "attr", "") == "_await_usage_headroom"),
               None)
     check(at is not None,
-          "run() must call the usage hold at its top level, keeping its account")
+          "run() must call the usage hold at its top level, keeping its slot")
     if at is None:
         return
     hold = body[at]
     check(not any(isinstance(n, ast.AsyncWith) for n in body[:at]),
           "the usage hold must come before the concurrency semaphore, not inside it")
     incr = body[at + 1] if at + 1 < len(body) else None
-    check(counts_slot(incr)
-          and ast.dump(incr.target.slice) == ast.dump(ast.Name(hold.targets[0].id)),
-          "run() must count the slot, on the account the hold returned, on the "
-          "statement right after the hold")
+    check(calls(incr, "_take_usage_slot")
+          and ast.dump(incr.value.args[1]) == ast.dump(ast.Name(hold.targets[0].id)),
+          "run() must count the slot the hold returned on the statement right "
+          "after the hold")
     guard = body[at + 2] if at + 2 < len(body) else None
     check(isinstance(guard, ast.Try)
           and any(isinstance(n, ast.AsyncWith) for n in guard.body)
-          and any(counts_slot(f) for f in guard.finalbody),
+          and any(calls(f, "_release_usage_slot") for f in guard.finalbody),
           "run() must take the semaphore inside a try that gives the slot back "
           "in its finally")
+
+    # The take is synchronous: an await inside it would let two waiters
+    # take one slot.
+    adm = ast.parse((root / "admission.py").read_text(encoding="utf-8"))
+    for name in ("_take_usage_slot", "_release_usage_slot", "_count_usage_turn"):
+        fn = next((n for n in ast.walk(adm)
+                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name),
+                  None)
+        check(isinstance(fn, ast.FunctionDef), f"{name} must exist and be synchronous")
+
+    # The stream counts assistant turns, or nothing ever leaves the fast lane.
+    check("_count_usage_turn" in (root / "core.py").read_text(encoding="utf-8"),
+          "the stream no longer counts turns for the fast lane")
 
 
 def test_rank() -> None:
@@ -411,6 +534,7 @@ async def test_reader() -> None:
 def main() -> int:
     test_pace_limit()
     asyncio.run(test_runner_hold())
+    asyncio.run(test_fast_lane())
     test_run_counts_slots()
     test_rank()
     test_loop_staggers()
