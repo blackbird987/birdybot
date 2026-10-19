@@ -551,17 +551,19 @@ class AdmissionMixin:
             log.debug("Usage reading for pacing failed", exc_info=True)
         return account, usage_pacing.pace_limit(reading)
 
-    def _usage_ahead(self, instance_id: str | None, account: str | None) -> int:
+    def _usage_ahead(self, instance_id: str | None, account: str | None,
+                     among: set[str] | None = None) -> int:
         """How many held sessions for ``account`` are in line before ``instance_id``.
 
         A session not in line (a newcomer, or the cooldown loop asking with no
-        id) counts everyone queued for that account.
+        id) counts everyone queued for that account. ``among`` narrows the
+        count to those waiters (the fast lane's line is ``_light_waiters``).
         """
         ahead = 0
         for waiter, waiter_account in self._usage_waiters.items():
             if waiter == instance_id:
                 break
-            if waiter_account == account:
+            if waiter_account == account and (among is None or waiter in among):
                 ahead += 1
         return ahead
 
@@ -586,21 +588,30 @@ class AdmissionMixin:
         run that way on the account, and only when no eligible run is held
         ahead of it, so the fast lane is first come, first served too.
         """
-        if not eligible or self._light_running[account] >= config.USAGE_PACE_LIGHT_SLOTS:
-            return False
-        for waiter, waiter_account in self._usage_waiters.items():
-            if waiter == instance_id:
-                break
-            if waiter_account == account and waiter in self._light_waiters:
-                return False
-        return True
+        return (
+            eligible
+            and self._light_running[account] < config.USAGE_PACE_LIGHT_SLOTS
+            and not self._usage_ahead(instance_id, account, among=self._light_waiters)
+        )
+
+    def _admit(self, instance_id: str | None, account: str | None, decision,
+               eligible: bool) -> usage_pacing.UsageSlot | None:
+        """The slot ``instance_id`` would start in right now, or None to keep waiting.
+
+        The fast lane first, so a quick run does not use up a capped slot a
+        build is waiting for. Pure: the caller stamps the hold's clock.
+        """
+        if self._light_turn(instance_id, account, eligible):
+            return usage_pacing.UsageSlot(account, light=True)
+        if self._usage_turn(instance_id, account, decision):
+            return usage_pacing.UsageSlot(account)
+        return None
 
     async def usage_slot_free(self, instance: Instance | None = None) -> bool:
         """Would ``instance``, starting now, go straight through the usage hold?"""
         account, decision = await self._usage_check(instance)
         eligible = instance is not None and usage_pacing.fast_lane_eligible(instance.origin)
-        return (self._light_turn(None, account, eligible)
-                or self._usage_turn(None, account, decision))
+        return self._admit(None, account, decision, eligible) is not None
 
     def _take_usage_slot(self, instance_id: str, slot: usage_pacing.UsageSlot) -> None:
         """Count a run admitted by the usage hold in its lane. Synchronous on purpose."""
@@ -682,17 +693,16 @@ class AdmissionMixin:
         which is the stampede this exists to stop. The cap never drops below
         one, so the wait is only ever for a running session to finish.
         """
-        Slot = usage_pacing.UsageSlot
         if not config.USAGE_PACE_ENABLED:
-            return Slot(None)
+            return usage_pacing.UsageSlot(None)
         loop = asyncio.get_event_loop()
         eligible = usage_pacing.fast_lane_eligible(instance.origin)
         account, decision = await self._usage_check(instance)
-        if self._light_turn(instance.id, account, eligible):
-            return Slot(account, light=True)
-        if self._usage_turn(instance.id, account, decision):
-            self._usage_hold_passed_at[account] = loop.time()
-            return Slot(account)
+        slot = self._admit(instance.id, account, decision, eligible)
+        if slot is not None:
+            if not slot.light:
+                self._usage_hold_passed_at[account] = loop.time()
+            return slot
         from bot.platform.formatting import format_delay_secs
 
         log.info(
@@ -724,7 +734,7 @@ class AdmissionMixin:
                         decision.reason,
                     )
                     self._usage_hold_passed_at[account] = now
-                    return Slot(account)
+                    return usage_pacing.UsageSlot(account)
                 if on_progress and (
                     last_told is None or now - last_told >= max(
                         config.USAGE_PACE_POLL_SECS, config.USAGE_PACE_NOTIFY_SECS,
@@ -756,23 +766,20 @@ class AdmissionMixin:
                 await asyncio.sleep(config.USAGE_PACE_POLL_SECS)
                 if instance.id in self._intentional_kills:
                     log.info("Usage hold for %s abandoned: stop requested", instance.id)
-                    return Slot(account)
+                    return usage_pacing.UsageSlot(account)
                 account, decision = await self._usage_check(instance)
                 # Assigning an existing key keeps its place in the order.
                 self._usage_waiters[instance.id] = account
-                if self._light_turn(instance.id, account, eligible):
+                slot = self._admit(instance.id, account, decision, eligible)
+                if slot is not None:
+                    if not slot.light:
+                        self._usage_hold_passed_at[account] = loop.time()
                     log.info(
-                        "Starting %s in the fast lane after %ds of usage pacing",
-                        instance.id, int(loop.time() - started),
+                        "Starting %s%s after %ds of usage pacing", instance.id,
+                        " in the fast lane" if slot.light else "",
+                        int(loop.time() - started),
                     )
-                    return Slot(account, light=True)
-                if self._usage_turn(instance.id, account, decision):
-                    self._usage_hold_passed_at[account] = loop.time()
-                    log.info(
-                        "Starting %s after %ds of usage pacing",
-                        instance.id, int(loop.time() - started),
-                    )
-                    return Slot(account)
+                    return slot
         finally:
             # Synchronous, so leaving the line and the caller's count of the
             # slot still happen with no await in between.

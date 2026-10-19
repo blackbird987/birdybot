@@ -351,6 +351,9 @@ async def test_fast_lane() -> None:
         check(list(runner._usage_waiters) == ["t-build"], "the build must be held")
         quick = await asyncio.wait_for(runner._await_usage_headroom(_inst("q-1"), None), 1)
         check(quick.light, f"a typed message must take the fast lane, got {quick}")
+        check(None not in runner._usage_hold_passed_at,
+              "a fast-lane start must not stamp the capped line's clock, or a "
+              "stalled line would never time out")
         runner._take_usage_slot("q-1", quick)
         check(runner._light_running[None] == 1 and runner._paced_running[None] == 1,
               "a fast-lane run must not count against the cap")

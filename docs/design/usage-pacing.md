@@ -31,18 +31,19 @@ Two pieces fix it:
   when nobody is queued for that account. A run stays counted against the
   account it was admitted on even if recovery moves it to another one.
 - **A fast lane for runs that may be quick.** On 2026-10-19, with the week
-  ahead of pace, the main account allowed 2 at once and a one-line typed
-  message waited over two hours behind 10 others. Nothing tells a quick reply
-  from a long job before it starts: prompt length, the session's size and the
-  thread's last run all failed on the history. Turns do: half of all runs end
-  within 10 turns and spend 15% of the usage between them, while 16 runs past
-  100 turns spent 55%. So any run that is not a known-heavy step
+  ahead of pace, the main account allowed 2 at once and a typed message
+  waited over two hours with 8 sessions queued ahead of it. Nothing tells a
+  quick reply from a long job before it starts: prompt length, the session's
+  size and the thread's last run all failed on the history. Turns tell them
+  apart while it runs: half of all runs end within 10 turns and spend 15% of
+  the usage between them, while among typed messages the 16 runs past 100
+  turns spent 55%. So any run that is not a known-heavy step
   (`usage_pacing.FULL_QUEUE_ORIGINS`: build, /bg, sensor fix, merge resolver)
-  starts in the fast lane when one of its account's
-  `USAGE_PACE_LIGHT_SLOTS` is free, counted in `_light_running` and not
-  against the cap. The stream counts its assistant turns
-  (`_count_usage_turn`, one per message id, since one message arrives as
-  several events), and at `USAGE_PACE_LIGHT_TURNS` its count moves into
+  skips the hold when one of its account's `USAGE_PACE_LIGHT_SLOTS` is free,
+  counted in `_light_running` and not against the cap (`_admit` tries the
+  fast lane first, then the capped one). The stream counts its assistant
+  turns (`_count_usage_turn`, one per message id, since one message arrives
+  as several events), and at `USAGE_PACE_LIGHT_TURNS` its count moves into
   `_paced_running`. Each run's lane lives in a `UsageSlot` in `_usage_slots`
   so the `finally` gives back whichever count it ended in. Held fast-lane
   runs (`_light_waiters`) take freed fast-lane slots in arrival order.

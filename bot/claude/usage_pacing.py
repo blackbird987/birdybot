@@ -57,12 +57,13 @@ FULL_QUEUE_ORIGINS: frozenset[InstanceOrigin] = frozenset({
 })
 
 
-def fast_lane_eligible(origin) -> bool:
+def fast_lane_eligible(origin: InstanceOrigin) -> bool:
     """May a run of this origin start in the fast lane, outside the usage cap?
 
-    Nothing can tell a quick reply from a long job before it starts: prompt
-    length, the session's size and the thread's last run all failed to on
-    the 2026-10 history. So every run that is not a known-heavy step gets the
+    Nothing tells a quick reply from a long job before it starts: prompt
+    length, the session's size and the thread's last run all failed to
+    predict it on the October 2026 history. So every run that is not a
+    known-heavy step gets the
     benefit of the doubt, and the runner moves it into the capped count once
     it has used USAGE_PACE_LIGHT_TURNS turns.
     """
