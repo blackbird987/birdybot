@@ -13,6 +13,7 @@ import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
 
 import asyncio
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -165,6 +166,9 @@ def main() -> int:
     p, why = resolve_image("docs/diagram.png", wt_inst)
     check("build can still share from the main repo", p == good.resolve(), why)
 
+    print("\nother git worktrees")
+    _check_other_worktrees(tmp)
+
     print("\ndata dir root")
     data_img = Path(config.DATA_DIR) / "imgtest_chart.png"
     data_img.write_bytes(png_bytes())
@@ -233,6 +237,57 @@ def main() -> int:
 
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
+
+
+def _git(cwd: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", "-C", str(cwd), "-c", "user.name=t", "-c", "user.email=t@t", *args],
+        check=True, capture_output=True,
+    )
+
+
+def _check_other_worktrees(tmp: Path) -> None:
+    """A session-made worktree's relative path still resolves (2026-10-19:
+    a thread rendered into ``.worktrees/liq-design`` and shared
+    ``Docs/design/...``, which the bot looked for in the repo root)."""
+    root = tmp / "gitroot"
+    repo = root / "sub"                # registered repo is a subfolder of its git root
+    repo.mkdir(parents=True)
+    (repo / "keep").write_text("x")
+    _git(root, "init", "-q")
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "init")
+    _git(root, "worktree", "add", "-q", str(repo / ".worktrees" / "side"))
+    _git(root, "worktree", "add", "-q", str(repo / ".worktrees" / "side2"))
+    _git(root, "worktree", "add", "-q", str(tmp / "elsewhere"))
+    inst = FakeInstance(str(repo))
+
+    at_offset = repo / ".worktrees" / "side" / "sub" / "out" / "r.png"
+    at_offset.parent.mkdir(parents=True)
+    at_offset.write_bytes(png_bytes())
+    p, why = resolve_image("out/r.png", inst)
+    check("relative path found at the repo's offset in another worktree",
+          p == at_offset.resolve(), why)
+
+    old = repo / ".worktrees" / "side" / ".render" / "a.png"
+    new = repo / ".worktrees" / "side2" / ".render" / "a.png"
+    for f, mtime in ((old, 1_000_000), (new, 2_000_000)):
+        f.parent.mkdir(parents=True)
+        f.write_bytes(png_bytes())
+        os.utime(f, (mtime, mtime))
+    p, why = resolve_image(".render/a.png", inst)
+    check("worktree-root match found, newest copy wins", p == new.resolve(), why)
+
+    far = tmp / "elsewhere" / "sub" / "far.png"
+    far.parent.mkdir(parents=True, exist_ok=True)
+    far.write_bytes(png_bytes())
+    p, why = resolve_image("far.png", inst)
+    check("worktree outside the allowed roots still refused", p is None, f"accepted {p}")
+    check("refusal says where it looked and asks for an absolute path",
+          "worktrees" in why and "absolute" in why, why)
+
+    p, why = resolve_image(str(repo / "nope.png"), inst)
+    check("absolute miss keeps the plain reason", why == "file not found", why)
 
 
 def _can_symlink(base: Path) -> bool:

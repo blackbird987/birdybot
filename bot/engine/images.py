@@ -22,8 +22,10 @@ promising a diagram with no diagram attached is worse than no feature at all.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -122,6 +124,7 @@ def resolve_image(raw: str, inst: "Instance") -> tuple[Path | None, str]:
         cand = Path(raw.strip().strip("\"'")).expanduser()
     except (OSError, ValueError):
         return None, "unreadable path"
+    missing = "file not found"
 
     if not cand.is_absolute():
         # Worktree first (a build's own files win), then the main repo — a
@@ -141,6 +144,17 @@ def resolve_image(raw: str, inst: "Instance") -> tuple[Path | None, str]:
             if cand.is_file():
                 break
             cand = Path(base) / rel
+        if not cand.is_file():
+            # A session that made its own git worktree (or cd'd into one)
+            # writes paths relative to THAT tree, which the bot can't see.
+            other = _find_in_other_worktrees(rel, inst)
+            if other is not None:
+                cand = other
+            else:
+                missing = (
+                    "file not found in the repo or any of its worktrees, "
+                    "use the absolute path"
+                )
 
     try:
         # resolve() collapses `..` and follows symlinks — both checks below
@@ -155,7 +169,7 @@ def resolve_image(raw: str, inst: "Instance") -> tuple[Path | None, str]:
     if cand.suffix.lower() not in IMAGE_EXTS:
         return None, f"not a shareable image type ({cand.suffix or 'no extension'})"
     if not cand.is_file():
-        return None, "file not found"
+        return None, missing
     try:
         size = cand.stat().st_size
     except OSError:
@@ -191,7 +205,8 @@ async def deliver_images(
     problems: list[str] = []
     batch_bytes = 0
     for raw, caption in directives:
-        resolved, reason = resolve_image(raw, inst)
+        # Off the event loop: the worktree fallback shells out to git.
+        resolved, reason = await asyncio.to_thread(resolve_image, raw, inst)
         if resolved is None:
             log.warning("/image refused %r — %s", raw, reason)
             problems.append(f"`{Path(raw).name or raw}` — {reason}")
@@ -232,6 +247,75 @@ async def deliver_images(
             log.debug("/image — failed to post refusal notice", exc_info=True)
 
     return sent
+
+
+def _git_lines(cwd: str, *args: str) -> list[str] | None:
+    """stdout lines of a short git read, or None if git can't answer."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", cwd, *args],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    return out.stdout.splitlines()
+
+
+def _find_in_other_worktrees(rel: Path, inst: "Instance") -> Path | None:
+    """Find a relative path in one of the repo's other git worktrees.
+
+    Sessions in a direct thread often create their own worktree (under the
+    repo's ``.worktrees/``) and render images there, then hand back a path
+    relative to that tree. Each worktree is tried at the repo's own offset
+    inside its git root (a repo registered as a subfolder of its git root has
+    the same subfolder in every worktree) and at the worktree root. When
+    several match, the most recently written one wins: it is the image the
+    turn just made.
+
+    Only paths inside this run's allowed roots count, so this widens where a
+    relative path is looked for, never what may be published.
+    """
+    anchor = getattr(inst, "repo_path", None) or getattr(inst, "worktree_path", None)
+    if not anchor:
+        return None
+    listing = _git_lines(anchor, "worktree", "list", "--porcelain")
+    if not listing:
+        return None
+    prefix_lines = _git_lines(anchor, "rev-parse", "--show-prefix") or []
+    prefix = prefix_lines[0].strip() if prefix_lines else ""
+
+    roots = _allowed_roots(inst)
+    best: Path | None = None
+    best_mtime = -1.0
+    seen: set[Path] = set()
+    for line in listing:
+        if not line.startswith("worktree "):
+            continue
+        tree = Path(line[len("worktree "):])
+        bases = [tree / prefix, tree] if prefix else [tree]
+        for base in bases:
+            try:
+                cand = (base / rel).resolve()
+            except OSError:
+                continue
+            if cand in seen:
+                continue
+            seen.add(cand)
+            if not any(_under(cand, r) for r in roots):
+                continue
+            try:
+                if not cand.is_file():
+                    continue
+                mtime = cand.stat().st_mtime
+            except OSError:
+                continue
+            if mtime > best_mtime:
+                best, best_mtime = cand, mtime
+    if best is not None:
+        log.info("/image — %s found in another worktree: %s", rel, best)
+    return best
 
 
 def _under(path: Path, root: Path) -> bool:
