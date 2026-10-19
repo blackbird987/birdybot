@@ -12,6 +12,9 @@
 - **`/repo create` refuses a name close to an existing repo** (`bot/engine/repo_cmds.py`): same name ignoring case and separators, one containing the other (4+ characters), or a 0.8 similarity ratio. The refusal names the match, marks it if hidden, and `--force` creates the repo anyway.
 - **Sessions can hide and unhide repos for you** (`bot/engine/directives/dispatch.py`): `[BOT_CMD: /repo hide ...]` and `unhide` join add, create and switch on the allow-list. Both only move a forum and are reversible; remove stays blocked.
 
+### Fixed
+- **A shared image saved in a session's own git worktree no longer fails with "file not found"** (`bot/engine/images.py`). Sessions in a direct thread often create their own worktree under the repo's `.worktrees/` and render images there, then share a path relative to that tree. The bot only looked in the repo root and a bot build's worktree, so on 2026-10-19 two renders in `.worktrees/liq-design` were refused, as were two `.mb-render` charts on 2026-10-16. For a session working in the repo (not a bot build, which keeps resolving against its own worktree), a relative path that misses now also checks the repo's other git worktrees, both at the repo's offset inside its git root and at the worktree root, and shares the newest match. Only files inside the folders a share was already allowed from count, so nothing new can be published. The refusal now says where it looked and asks for an absolute path, and the prompt tells sessions to give one when they saved outside the repo root. Harness: `scripts/test_image_directive.py`.
+
 ## v0.102.6, Session starts paced to real plan usage (2026-10-15)
 
 ### Changed

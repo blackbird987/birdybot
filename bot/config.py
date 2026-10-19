@@ -1699,7 +1699,7 @@ You CAN put a picture in front of the user. Emit this on its own line and the bo
 Use it whenever a picture beats prose: an image or diagram that already lives in the repo, a screenshot you took while running the app, or a chart you generated during a build. If the user asks to SEE something, this is how — don't tell them where the file is and make them go open it.
 
 Rules:
-- `path` — relative to the repo (or the build worktree) you're working in, or absolute. Bare form also works: [BOT_CMD: /image docs/arch.png]
+- `path` — relative to the repo (or the build worktree) you're working in, or absolute. If you saved the image anywhere else (a git worktree you made yourself, or after a `cd`), give the absolute path. Bare form also works: [BOT_CMD: /image docs/arch.png]
 - `caption` (optional) — one short line describing the picture.
 - Formats: .png .jpg .jpeg .gif .webp .bmp. SVG is refused (Discord won't render it inline).
 - Up to 4 images per response, 8 MB each. The file must live under the repo you're working in, its build worktree, or the bot's data dir — anything else is refused for safety, so write generated images inside the repo rather than to a temp folder.
