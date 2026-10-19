@@ -7,7 +7,8 @@ them resumed a long conversation whose prompt cache had expired during the
 wait, so each paid for re-reading its entire history before doing any work.
 The limit is not exponential; starting everything at once is.
 
-This module only decides the number, for one account. The runner holds a
+This module only decides the number, for one account, and which runs may
+start in the fast lane outside it (``fast_lane_eligible``). The runner holds a
 starting session while that many are already running on its account
 (``AdmissionMixin._await_usage_headroom``) and the cooldown loop in ``app.py``
 will not release a parked retry into a full house.
@@ -33,6 +34,7 @@ from typing import Protocol
 from zoneinfo import ZoneInfo
 
 from bot import config
+from bot.claude.types import InstanceOrigin
 
 _PACIFIC = ZoneInfo("America/Los_Angeles")
 _WEEK = timedelta(days=7)
@@ -45,6 +47,42 @@ class UsageReading(Protocol):
     session_resets_at: datetime | None
     week_pct: float | None
     week_resets_at: datetime | None
+
+
+# Steps that are heavy by nature (a build's median is 89 turns), so they queue
+# for the capped lane from the start instead of borrowing a fast-lane slot.
+FULL_QUEUE_ORIGINS: frozenset[InstanceOrigin] = frozenset({
+    InstanceOrigin.BUILD, InstanceOrigin.BG,
+    InstanceOrigin.SENSOR_FIX, InstanceOrigin.RESOLVE_MERGE,
+})
+
+
+def fast_lane_eligible(origin) -> bool:
+    """May a run of this origin start in the fast lane, outside the usage cap?
+
+    Nothing can tell a quick reply from a long job before it starts: prompt
+    length, the session's size and the thread's last run all failed to on
+    the 2026-10 history. So every run that is not a known-heavy step gets the
+    benefit of the doubt, and the runner moves it into the capped count once
+    it has used USAGE_PACE_LIGHT_TURNS turns.
+    """
+    return config.USAGE_PACE_LIGHT_SLOTS > 0 and origin not in FULL_QUEUE_ORIGINS
+
+
+@dataclass
+class UsageSlot:
+    """Where a run is counted for usage pacing: its account, and which lane.
+
+    ``light`` runs are counted in ``_light_running`` and not against the cap
+    until ``turns`` reaches USAGE_PACE_LIGHT_TURNS, when the runner moves the
+    count to ``_paced_running``. ``last_message`` dedupes the stream: one
+    assistant message arrives as several events, one per content block.
+    """
+
+    account: str | None
+    light: bool = False
+    turns: int = 0
+    last_message: str | None = None
 
 
 @dataclass(frozen=True)

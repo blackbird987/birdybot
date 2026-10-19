@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 from bot import config
 from bot.textutil import parse_iso_utc
 from bot.claude.auth_health import account_label
-from bot.claude import cgroups, memory
+from bot.claude import cgroups, memory, usage_pacing
 from bot.claude.parser import (
     RunResult,
     detect_path_poisoning,
@@ -217,6 +217,13 @@ class ClaudeRunner(
         self._paced_running: Counter[str | None] = Counter()
         self._usage_hold_passed_at: dict[str | None, float] = {}
         self._usage_waiters: dict[str, str | None] = {}
+        # The fast lane (usage_pacing.fast_lane_eligible): runs counted
+        # outside the cap per account, the held runs that may use it, and
+        # every admitted run's slot by instance id, which the stream's turn
+        # count moves into the capped lane once a run stops being quick.
+        self._light_running: Counter[str | None] = Counter()
+        self._light_waiters: set[str] = set()
+        self._usage_slots: dict[str, usage_pacing.UsageSlot] = {}
         self._usage_reader: Callable[[str | None], Awaitable[object]] | None = None
         # Task-level tracking: covers the full lifecycle of a query/workflow,
         # not just the subprocess.  Prevents reboot from slipping through
@@ -446,12 +453,12 @@ class ClaudeRunner(
         # account could run. Before memory too, because usage can hold for as
         # long as a running session takes to finish, and a memory reading
         # taken before that wait would be stale by the time it ended.
-        paced_account = await self._await_usage_headroom(instance, on_progress)
+        usage_slot = await self._await_usage_headroom(instance, on_progress)
         # Counted with no await between the hold's last check and here, so
         # two waiters cannot both see the same free slot. Counted from here,
         # through any wait for a concurrency slot, against the account it was
         # admitted on, even if recovery later moves it to another account.
-        self._paced_running[paced_account] += 1
+        self._take_usage_slot(instance.id, usage_slot)
         try:
             async with self._semaphore:
                 # Inside the slot, before the spawn. Holding the slot while
@@ -467,7 +474,7 @@ class ClaudeRunner(
                     on_context_reset=on_context_reset,
                 )
         finally:
-            self._paced_running[paced_account] -= 1
+            self._release_usage_slot(instance.id, usage_slot)
 
     def _stopped_before_spawning(self, instance: Instance) -> RunResult | None:
         """The run was killed at a moment when there was no process to kill.
@@ -1166,6 +1173,10 @@ class ClaudeRunner(
                     # no tool_use blocks (nothing left for the CLI to do).
                     if event.get("type") == "assistant":
                         _msg = event.get("message") or event
+                        self._count_usage_turn(
+                            instance.id,
+                            _msg.get("id") if isinstance(_msg, dict) else None,
+                        )
                         if isinstance(_msg, dict) and _msg.get("stop_reason") == "end_turn":
                             _content = _msg.get("content") or event.get("content") or []
                             _has_tool = any(

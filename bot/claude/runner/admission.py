@@ -578,23 +578,96 @@ class AdmissionMixin:
             and self._paced_running[account] < decision.limit
         )
 
+    def _light_turn(self, instance_id: str | None, account: str | None,
+                    eligible: bool) -> bool:
+        """May ``instance_id`` start now in ``account``'s fast lane?
+
+        Only a fast-lane-eligible run, while fewer than USAGE_PACE_LIGHT_SLOTS
+        run that way on the account, and only when no eligible run is held
+        ahead of it, so the fast lane is first come, first served too.
+        """
+        if not eligible or self._light_running[account] >= config.USAGE_PACE_LIGHT_SLOTS:
+            return False
+        for waiter, waiter_account in self._usage_waiters.items():
+            if waiter == instance_id:
+                break
+            if waiter_account == account and waiter in self._light_waiters:
+                return False
+        return True
+
     async def usage_slot_free(self, instance: Instance | None = None) -> bool:
         """Would ``instance``, starting now, go straight through the usage hold?"""
         account, decision = await self._usage_check(instance)
-        return self._usage_turn(None, account, decision)
+        eligible = instance is not None and usage_pacing.fast_lane_eligible(instance.origin)
+        return (self._light_turn(None, account, eligible)
+                or self._usage_turn(None, account, decision))
+
+    def _take_usage_slot(self, instance_id: str, slot: usage_pacing.UsageSlot) -> None:
+        """Count a run admitted by the usage hold in its lane. Synchronous on purpose."""
+        if slot.light:
+            self._light_running[slot.account] += 1
+        else:
+            self._paced_running[slot.account] += 1
+        self._usage_slots[instance_id] = slot
+
+    def _release_usage_slot(self, instance_id: str, slot: usage_pacing.UsageSlot) -> None:
+        """Give back a run's count from whichever lane it ended in."""
+        if slot.light:
+            self._light_running[slot.account] -= 1
+        else:
+            self._paced_running[slot.account] -= 1
+        if self._usage_slots.get(instance_id) is slot:
+            del self._usage_slots[instance_id]
+
+    def _count_usage_turn(self, instance_id: str, message_id: str | None) -> None:
+        """Count one assistant turn of a running session, from its stream.
+
+        A fast-lane run that reaches USAGE_PACE_LIGHT_TURNS stops being quick:
+        its count moves to the capped lane, which frees its fast-lane slot and
+        holds back the next capped start until it finishes. It may take the
+        capped count past the limit for a while; that only means the queue
+        behind it waits longer, never that it is stopped.
+        """
+        slot = self._usage_slots.get(instance_id)
+        if slot is None or not slot.light:
+            return
+        if message_id is not None:
+            if message_id == slot.last_message:
+                return
+            slot.last_message = message_id
+        slot.turns += 1
+        if slot.turns < config.USAGE_PACE_LIGHT_TURNS:
+            return
+        self._light_running[slot.account] -= 1
+        self._paced_running[slot.account] += 1
+        slot.light = False
+        log.info(
+            "%s left the fast lane after %d turns; it now counts against the "
+            "usage cap on %s (%d counted there)",
+            instance_id, slot.turns,
+            account_label(slot.account) if slot.account else "the default account",
+            self._paced_running[slot.account],
+        )
 
     async def _await_usage_headroom(
         self,
         instance: Instance,
         on_progress: ProgressCallback | None,
-    ) -> str | None:
+    ) -> usage_pacing.UsageSlot:
         """Hold a starting session while the plan's usage says enough are running.
 
-        Returns the account the session was admitted on, which the caller
-        counts it against (``_paced_running``) immediately, with no await in
-        between, so the last check here and that count are atomic with
+        Returns the account and lane the session was admitted on, which the
+        caller counts it in (``_take_usage_slot``) immediately, with no await
+        in between, so the last check here and that count are atomic with
         respect to every other waiter. Keep it that way: an await after the
         final check lets two sessions take one slot.
+
+        A run that is not a known-heavy step goes through the fast lane when
+        it has a free slot (``_light_turn``), whatever the cap says, and
+        becomes a capped run once it has used USAGE_PACE_LIGHT_TURNS turns
+        (``_count_usage_turn``). A quick reply no longer queues for hours
+        behind builds. A fast-lane start does not stamp the hold's clock: it
+        says nothing about whether the capped line is moving.
 
         Held sessions queue in arrival order (``_usage_waiters``) and only the
         first in line for its account may start. The account is re-read on
@@ -609,23 +682,30 @@ class AdmissionMixin:
         which is the stampede this exists to stop. The cap never drops below
         one, so the wait is only ever for a running session to finish.
         """
+        Slot = usage_pacing.UsageSlot
         if not config.USAGE_PACE_ENABLED:
-            return None
+            return Slot(None)
         loop = asyncio.get_event_loop()
+        eligible = usage_pacing.fast_lane_eligible(instance.origin)
         account, decision = await self._usage_check(instance)
+        if self._light_turn(instance.id, account, eligible):
+            return Slot(account, light=True)
         if self._usage_turn(instance.id, account, decision):
             self._usage_hold_passed_at[account] = loop.time()
-            return account
+            return Slot(account)
         from bot.platform.formatting import format_delay_secs
 
         log.info(
             "Holding %s for usage pacing on %s: %d running there, limit %d, "
-            "%d already waiting (%s)",
+            "%d already waiting%s (%s)",
             instance.id, account_label(account) if account else "the default account",
             self._paced_running[account], decision.limit,
-            self._usage_ahead(instance.id, account), decision.reason,
+            self._usage_ahead(instance.id, account),
+            ", fast lane full" if eligible else "", decision.reason,
         )
         self._usage_waiters[instance.id] = account
+        if eligible:
+            self._light_waiters.add(instance.id)
         try:
             started = loop.time()
             last_told: float | None = None
@@ -644,7 +724,7 @@ class AdmissionMixin:
                         decision.reason,
                     )
                     self._usage_hold_passed_at[account] = now
-                    return account
+                    return Slot(account)
                 if on_progress and (
                     last_told is None or now - last_told >= max(
                         config.USAGE_PACE_POLL_SECS, config.USAGE_PACE_NOTIFY_SECS,
@@ -659,6 +739,8 @@ class AdmissionMixin:
                         f"{'is' if running == 1 else 'are'}"
                         + (f", with {ahead} more waiting ahead of this one"
                            if ahead else "")
+                        + (f", and all {config.USAGE_PACE_LIGHT_SLOTS} quick-reply "
+                           f"slots are taken" if eligible else "")
                         + ". Starting more now is how the whole window gets "
                         "used up in minutes. This starts as soon as its turn "
                         "comes."
@@ -674,18 +756,25 @@ class AdmissionMixin:
                 await asyncio.sleep(config.USAGE_PACE_POLL_SECS)
                 if instance.id in self._intentional_kills:
                     log.info("Usage hold for %s abandoned: stop requested", instance.id)
-                    return account
+                    return Slot(account)
                 account, decision = await self._usage_check(instance)
                 # Assigning an existing key keeps its place in the order.
                 self._usage_waiters[instance.id] = account
+                if self._light_turn(instance.id, account, eligible):
+                    log.info(
+                        "Starting %s in the fast lane after %ds of usage pacing",
+                        instance.id, int(loop.time() - started),
+                    )
+                    return Slot(account, light=True)
                 if self._usage_turn(instance.id, account, decision):
                     self._usage_hold_passed_at[account] = loop.time()
                     log.info(
                         "Starting %s after %ds of usage pacing",
                         instance.id, int(loop.time() - started),
                     )
-                    return account
+                    return Slot(account)
         finally:
             # Synchronous, so leaving the line and the caller's count of the
             # slot still happen with no await in between.
             self._usage_waiters.pop(instance.id, None)
+            self._light_waiters.discard(instance.id)

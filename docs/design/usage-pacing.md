@@ -30,6 +30,22 @@ Two pieces fix it:
   start (`_usage_turn`); a newcomer or the cooldown loop gets a slot only
   when nobody is queued for that account. A run stays counted against the
   account it was admitted on even if recovery moves it to another one.
+- **A fast lane for runs that may be quick.** On 2026-10-19, with the week
+  ahead of pace, the main account allowed 2 at once and a one-line typed
+  message waited over two hours behind 10 others. Nothing tells a quick reply
+  from a long job before it starts: prompt length, the session's size and the
+  thread's last run all failed on the history. Turns do: half of all runs end
+  within 10 turns and spend 15% of the usage between them, while 16 runs past
+  100 turns spent 55%. So any run that is not a known-heavy step
+  (`usage_pacing.FULL_QUEUE_ORIGINS`: build, /bg, sensor fix, merge resolver)
+  starts in the fast lane when one of its account's
+  `USAGE_PACE_LIGHT_SLOTS` is free, counted in `_light_running` and not
+  against the cap. The stream counts its assistant turns
+  (`_count_usage_turn`, one per message id, since one message arrives as
+  several events), and at `USAGE_PACE_LIGHT_TURNS` its count moves into
+  `_paced_running`. Each run's lane lives in a `UsageSlot` in `_usage_slots`
+  so the `finally` gives back whichever count it ended in. Held fast-lane
+  runs (`_light_waiters`) take freed fast-lane slots in arrival order.
 - **The cooldown loop releases parked retries one at a time**, at most one
   per `COOLDOWN_RETRY_STAGGER_SECS`, only when the runner has a usage slot
   free, ranked by `lifecycle.cooldown_retry_rank`: typed messages, then
@@ -52,14 +68,23 @@ Rules that must not drift:
   figures must not stop work; only the peak-hour cap still applies.
 - **A figure whose window already reset counts as zero.** plan_usage serves
   the last good reading for up to three hours.
-- **The slot is counted on the statement right after the hold**, with no
-  await between the hold's last check and the increment, and given back in a
-  `finally`. An await there lets two waiters take one slot.
+- **The slot is counted on the statement right after the hold**
+  (`_take_usage_slot`, synchronous), with no await between the hold's last
+  check and the increment, and given back in a `finally`
+  (`_release_usage_slot`). An await there lets two waiters take one slot.
+- **Promotion never stops a run.** A fast-lane run that reaches the turn limit
+  may push the capped count past the cap. That only makes the line behind it
+  wait longer; the cap still only gates starts.
+- **A fast-lane start does not stamp the hold's clock**
+  (`_usage_hold_passed_at`). It says nothing about whether the capped line is
+  moving, and stamping it would keep a stalled line from ever timing out.
 - **bot.claude does not import bot.engine.** The reader is wired by `app.py`
   (`runner.set_usage_reader(plan_usage.reading_for_pacing)`).
 - **Only a prompt that starts with the nudge text is dropped.** A typed
   message that quotes a nudge in its background briefing is still the user's.
 
-Knobs: `USAGE_PACE_*` and `COOLDOWN_RETRY_STAGGER_SECS` in `bot/config.py`.
+Knobs: `USAGE_PACE_*` (the fast lane: `USAGE_PACE_LIGHT_SLOTS`, 0 turns it
+off, and `USAGE_PACE_LIGHT_TURNS`) and `COOLDOWN_RETRY_STAGGER_SECS` in
+`bot/config.py`.
 
 Harness: `python scripts/test_usage_pacing.py`.
