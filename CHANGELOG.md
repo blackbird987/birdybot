@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.102.7, Quick replies skip the usage queue, sessions see the repo list (2026-10-19)
+
 ### Changed
 - **Quick replies no longer queue behind builds for usage pacing** (`bot/claude/usage_pacing.py`, `bot/claude/runner/admission.py`, `bot/claude/runner/core.py`). With the week ahead of pace the main account allowed 2 sessions at once and every start queued in one line, so a typed message in vin-coach waited over 2 hours with 8 sessions queued ahead of it. Any run that is not a build, `/bg`, sensor fix or merge resolver now skips the usage hold in a fast lane counted outside the cap, up to 3 per account (the concurrency limit and the memory hold still apply). A fast-lane run that reaches 10 assistant turns, counted live from the stream, moves into the capped count, so a long job that started as a question still holds the queue behind it. Nothing predicts a run's usage before it starts (prompt length, session size and the thread's last run all failed on the 2026-10 history), but turns tell them apart while it runs: half of all runs end within 10 turns and use 15% of the usage between them. Held typed messages take freed fast-lane slots in arrival order, and the cooldown loop's one-at-a-time stagger is unchanged. Knobs: `USAGE_PACE_LIGHT_SLOTS` (0 turns it off), `USAGE_PACE_LIGHT_TURNS`. Harness: `scripts/test_usage_pacing.py`.
 
