@@ -18,6 +18,9 @@ Covers:
     than nagging forever about something the user deleted on purpose
   - the /auth panel the notice links to reporting the same account as signed
     out, even though its credentials file still reads as valid
+  - the login end date: read from the file the CLI wrote, an expired one
+    sidelining the account, exactly one heads-up a few days ahead, and one
+    confirmation when a fresh login moves the date
 
 No Discord connection — the channel is a stub that records what was sent.
 
@@ -29,19 +32,24 @@ from __future__ import annotations
 import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
 
 import asyncio
+import json
 import shutil
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from bot import config
 from bot.claude.auth_health import (
+    REASON_LOGIN_EXPIRED,
     REASON_NO_TOKEN,
     REASON_ORG_DISABLED,
     REASON_RUNTIME_401,
     account_label,
+    login_expiry,
+    unusable_reason,
 )
 from bot.claude.auth_health import clear_cache as auth_clear_cache
 from bot.discord import account_alerts as alerts_mod
@@ -641,6 +649,162 @@ async def _test_auth_panel_agrees_with_the_ark() -> list[str]:
     return failures
 
 
+def _write_creds(account_dir: Path, expires: datetime | None, **extra) -> None:
+    """A credentials file shaped like the CLI's, with a given login end date."""
+    oauth = {"accessToken": "a", "refreshToken": "r", "expiresAt": 1}
+    if expires is not None:
+        oauth["refreshTokenExpiresAt"] = int(expires.timestamp() * 1000)
+    oauth.update(extra)
+    account_dir.mkdir(parents=True, exist_ok=True)
+    (account_dir / ".credentials.json").write_text(
+        json.dumps({"claudeAiOauth": oauth}), encoding="utf-8",
+    )
+    auth_clear_cache()
+
+
+def _test_login_expiry_probe() -> list[str]:
+    failures: list[str] = []
+    tmp = Path(tempfile.mkdtemp(prefix="acct_expiry_probe_"))
+    try:
+        acct = tmp / ".claude-a"
+        now = datetime.now(timezone.utc)
+        ends = (now + timedelta(days=10)).replace(microsecond=0)
+        _write_creds(acct, ends)
+        got = login_expiry(acct)
+        if got is None or abs((got - ends).total_seconds()) > 1:
+            failures.append(f"probe: login end date read as {got}, want {ends}")
+        if unusable_reason(acct) is not None:
+            failures.append("probe: a login 10 days from its end read as unusable")
+
+        # The verdict depends on the clock, so it must not be cached with
+        # the file: the same untouched file has to flip once the date passes.
+        if unusable_reason(acct, now=ends + timedelta(minutes=1)) != REASON_LOGIN_EXPIRED:
+            failures.append(
+                "probe: a login past its end date still read as usable - the "
+                "picker would hand tasks to an account the CLI calls signed out"
+            )
+
+        # An older CLI never wrote the field; garbage must not read as expired.
+        for raw in (None, "soon", True, -5):
+            _write_creds(acct, None, **({} if raw is None else
+                                         {"refreshTokenExpiresAt": raw}))
+            if login_expiry(acct) is not None or unusable_reason(acct) is not None:
+                failures.append(
+                    f"probe: refreshTokenExpiresAt={raw!r} was not treated as "
+                    "'unknown'"
+                )
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+        auth_clear_cache()
+    return failures
+
+
+async def _test_login_expiry_warning(store: StateStore) -> list[str]:
+    failures: list[str] = []
+    tmp = Path(tempfile.mkdtemp(prefix="acct_expiry_warn_"))
+    channel = _StubChannel()
+    bot = _StubBot(store, channel)
+    saved = list(config.CLAUDE_ACCOUNTS)
+    soon_dir, later_dir = tmp / ".claude-soon", tmp / ".claude-later"
+    config.CLAUDE_ACCOUNTS[:] = [str(later_dir), str(soon_dir)]
+    try:
+        now = datetime.now(timezone.utc)
+        _write_creds(soon_dir, now + timedelta(days=2))
+        _write_creds(later_dir, now + timedelta(days=20))
+
+        await alerts_mod._check_login_expiry(bot)
+        if len(channel.sent) != 1:
+            failures.append(
+                f"expiry: expected one heads-up (only one login ends within "
+                f"{alerts_mod.LOGIN_EXPIRY_WARN_DAYS}d), got {len(channel.sent)}"
+            )
+        else:
+            embed = channel.sent[0][1]
+            body = (getattr(embed, "description", "") or "")
+            if "`soon`" not in body or "<t:" not in body:
+                failures.append(
+                    "expiry: heads-up didn't name the account and its end date"
+                )
+            fields = " ".join(f.value for f in getattr(embed, "fields", []))
+            if "CLAUDE_CONFIG_DIR" not in fields:
+                failures.append("expiry: heads-up carried no sign-in command")
+            if "\u2014" in body or "\u2014" in fields:
+                failures.append("expiry: heads-up copy contains an em dash")
+
+        await alerts_mod._check_login_expiry(bot)
+        if len(channel.sent) != 1:
+            failures.append(
+                "expiry: the heads-up repeated on the next tick - The Ark "
+                "would get one a minute for three days"
+            )
+
+        # A token refresh rewrites the file with the SAME end date. That is
+        # not a renewal, so it must stay quiet.
+        _write_creds(soon_dir, now + timedelta(days=2))
+        await alerts_mod._check_login_expiry(bot)
+        if len(channel.sent) != 1:
+            failures.append("expiry: a routine refresh was announced as a re-login")
+
+        # A fresh /login moves the date weeks out: one confirmation, then quiet.
+        _write_creds(soon_dir, now + timedelta(days=28))
+        await alerts_mod._check_login_expiry(bot)
+        if len(channel.sent) != 2 or not (channel.sent[-1][0] or "").startswith("✅"):
+            failures.append("expiry: no confirmation after the login was renewed")
+        if store.get_login_expiry_warnings():
+            failures.append("expiry: warning record survived the renewal")
+        await alerts_mod._check_login_expiry(bot)
+        if len(channel.sent) != 2:
+            failures.append("expiry: posted again after the renewal was confirmed")
+
+        # An account already sidelined has its own notice; no second one.
+        _write_creds(soon_dir, now + timedelta(days=1))
+        store.set_account_alert(str(soon_dir), REASON_ORG_DISABLED,
+                                now.isoformat())
+        await alerts_mod._check_login_expiry(bot)
+        if len(channel.sent) != 2:
+            failures.append(
+                "expiry: warned about an account that already has an outage "
+                "notice open"
+            )
+        store.drop_account_alert(str(soon_dir))
+
+        # Warned, then let it lapse, then signed in again: the outage notice
+        # and its all-clear covered that, so the renewal is dropped silently.
+        store.set_login_expiry_warned(
+            str(soon_dir), (now - timedelta(hours=2)).isoformat(),
+        )
+        _write_creds(soon_dir, now + timedelta(days=28))
+        await alerts_mod._check_login_expiry(bot)
+        if len(channel.sent) != 2:
+            failures.append(
+                "expiry: a renewal after the login had lapsed got a second "
+                "all-clear on top of the outage notice's"
+            )
+        if store.get_login_expiry_warnings():
+            failures.append("expiry: lapsed warning record was never dropped")
+
+        # An account taken out of rotation takes its record with it.
+        store.set_login_expiry_warned("/gone/.claude-x", now.isoformat())
+        await alerts_mod._check_login_expiry(bot)
+        if "/gone/.claude-x" in store.get_login_expiry_warnings():
+            failures.append("expiry: kept a record for an unconfigured account")
+
+        # The auth panel shows the end date, flagged when it is close.
+        _write_creds(soon_dir, now + timedelta(days=2))
+        statuses = await collect_account_statuses(list(config.CLAUDE_ACCOUNTS))
+        from bot.discord.wizard import _build_auth_panel_embed
+        desc = _build_auth_panel_embed(statuses, True).description or ""
+        if desc.count("login ends") != 2 or "⚠️ login ends" not in desc:
+            failures.append(
+                f"panel: login end dates missing or unflagged: {desc!r}"
+            )
+    finally:
+        config.CLAUDE_ACCOUNTS[:] = saved
+        shutil.rmtree(tmp, ignore_errors=True)
+        auth_clear_cache()
+    return failures
+
+
 async def _amain() -> int:
     tmp = tempfile.mkdtemp(prefix="acct_alerts_")
     try:
@@ -654,6 +818,8 @@ async def _amain() -> int:
              _test_org_disabled_notice_gives_the_right_advice()),
             ("unconfigured-dropped", await _test_unconfigured_account_is_dropped(store)),
             ("auth-panel-agrees", await _test_auth_panel_agrees_with_the_ark()),
+            ("login-expiry-probe", _test_login_expiry_probe()),
+            ("login-expiry-warning", await _test_login_expiry_warning(store)),
         ]
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

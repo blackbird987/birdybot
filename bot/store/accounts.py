@@ -214,3 +214,21 @@ class AccountsMixin:
         record["notified"] = True
         self.save()
         return True
+
+    # --- Login expiry heads-up (one Ark warning per login end date) ---
+
+    def get_login_expiry_warnings(self) -> dict[str, str]:
+        """Return a copy of {account_dir -> ISO expiry already warned about}."""
+        return dict(self._login_expiry_warnings)
+
+    def set_login_expiry_warned(self, account_dir: str, expiry_iso: str) -> None:
+        """Record that The Ark was told this login ends at *expiry_iso*."""
+        if self._login_expiry_warnings.get(account_dir) == expiry_iso:
+            return
+        self._login_expiry_warnings[account_dir] = expiry_iso
+        self.save()
+
+    def drop_login_expiry_warning(self, account_dir: str) -> None:
+        """Forget a warning: the account signed in again, or left rotation."""
+        if self._login_expiry_warnings.pop(account_dir, None) is not None:
+            self.save()

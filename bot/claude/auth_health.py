@@ -26,17 +26,27 @@ import json
 import logging
 import sys
 from collections.abc import Container, Iterable
+from datetime import datetime, timezone
 from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-# path_str -> ((mtime_ns, size), reason_or_None)
-_cache: dict[str, tuple[tuple[int, int], str | None]] = {}
+# path_str -> ((mtime_ns, size), reason_or_None, login_expiry_or_None)
+_cache: dict[str, tuple[tuple[int, int], str | None, datetime | None]] = {}
 
 REASON_NO_DIR = "dir does not exist"
 REASON_NO_FILE = "no .credentials.json — not logged in"
 REASON_NO_TOKEN = "no refresh token — not logged in"
 REASON_UNREADABLE = "credentials file unreadable"
+# The login itself has a hard end date. The CLI renews the 8-hour access token
+# from the refresh token on its own, but the refresh token carries a
+# ``refreshTokenExpiresAt`` the server sets at sign-in (about four weeks out)
+# and does NOT move on a refresh: klerk renewed on 2026-10-25 and its date
+# stayed on 2026-11-12. Past it the CLI treats the account as signed out, so a
+# spawn on it is doomed. Unlike the other probe verdicts this one depends on
+# the clock, not just the file, which is why it is applied on read rather
+# than cached.
+REASON_LOGIN_EXPIRED = "login expired: refresh token past its expiry date"
 
 # Not produced by the probe — recorded by the runner when the CLI itself
 # rejects a token that *looks* fine on disk.  Kept here so both the writer and
@@ -77,44 +87,83 @@ def account_label(account_dir: str | Path) -> str:
     return stripped or name
 
 
-def _probe(cred_path: Path) -> str | None:
-    """Parse the credentials file. Returns a reason string, or None if usable."""
+def _parse_expiry(raw: object) -> datetime | None:
+    """``refreshTokenExpiresAt`` (epoch milliseconds) as an aware datetime.
+
+    None for anything that is not a plausible number: an older CLI never
+    wrote the field, and a malformed one must read as "unknown", never as
+    "already expired".
+    """
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or raw <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp(raw / 1000, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _probe(cred_path: Path) -> tuple[str | None, datetime | None]:
+    """Parse the credentials file into (reason or None, login expiry or None)."""
     try:
         data = json.loads(cred_path.read_text(encoding="utf-8"))
     except Exception:
         log.debug("Unreadable credentials at %s", cred_path, exc_info=True)
-        return REASON_UNREADABLE
+        return REASON_UNREADABLE, None
     if not isinstance(data, dict):
-        return REASON_UNREADABLE
+        return REASON_UNREADABLE, None
     oauth = data.get("claudeAiOauth")
     if not isinstance(oauth, dict):
         oauth = {}
     token = oauth.get("refreshToken") or data.get("refreshToken")
     if not (isinstance(token, str) and token.strip()):
-        return REASON_NO_TOKEN
-    return None
+        return REASON_NO_TOKEN, None
+    return None, _parse_expiry(oauth.get("refreshTokenExpiresAt"))
 
 
-def unusable_reason(account_dir: str | Path) -> str | None:
-    """Why this account can't authenticate, or None when it looks usable."""
+def _read(account_dir: str | Path) -> tuple[str | None, datetime | None]:
+    """(file-level reason, login expiry), memoized on the file's stat."""
     p = Path(str(account_dir)).expanduser()
     key_path = str(p)
     if not p.is_dir():
         _cache.pop(key_path, None)
-        return REASON_NO_DIR
+        return REASON_NO_DIR, None
     cred = p / ".credentials.json"
     try:
         st = cred.stat()
     except OSError:
         _cache.pop(key_path, None)
-        return REASON_NO_FILE
+        return REASON_NO_FILE, None
     stat_key = (st.st_mtime_ns, st.st_size)
     cached = _cache.get(key_path)
     if cached and cached[0] == stat_key:
-        return cached[1]
-    reason = _probe(cred)
-    _cache[key_path] = (stat_key, reason)
-    return reason
+        return cached[1], cached[2]
+    reason, expiry = _probe(cred)
+    _cache[key_path] = (stat_key, reason, expiry)
+    return reason, expiry
+
+
+def unusable_reason(
+    account_dir: str | Path, *, now: datetime | None = None,
+) -> str | None:
+    """Why this account can't authenticate, or None when it looks usable."""
+    reason, expiry = _read(account_dir)
+    if reason:
+        return reason
+    if expiry is not None and expiry <= (now or datetime.now(timezone.utc)):
+        return REASON_LOGIN_EXPIRED
+    return None
+
+
+def login_expiry(account_dir: str | Path) -> datetime | None:
+    """When this account's saved login runs out, or None if unknown.
+
+    Read straight from the file the CLI wrote; nothing here refreshes or
+    contacts anything (see docs/design/plan-usage.md for why the bot must
+    never touch the refresh token). None for an account with no usable login
+    at all, since there is nothing left to expire.
+    """
+    reason, expiry = _read(account_dir)
+    return None if reason else expiry
 
 
 def credentials_usable(account_dir: str | Path) -> bool:

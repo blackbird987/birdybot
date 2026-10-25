@@ -264,9 +264,9 @@ async def _render_auth_panel(
 
 def _build_auth_panel_embed(statuses: list, can_console: bool) -> discord.Embed:
     """Render account statuses + hint lines as an ephemeral embed."""
-    from datetime import datetime as _dt, timezone as _tz
+    from datetime import datetime as _dt, timedelta, timezone as _tz
 
-    from bot.discord.account_alerts import describe_reason
+    from bot.discord.account_alerts import LOGIN_EXPIRY_WARN_DAYS, describe_reason
 
     title = f"Claude Auth — {config.PC_NAME}"
     embed = discord.Embed(title=title, color=discord.Color.blurple())
@@ -292,6 +292,13 @@ def _build_auth_panel_embed(statuses: list, can_console: bool) -> discord.Embed:
         if st.cooldown_until and st.cooldown_until > now:
             mins = max(1, int((st.cooldown_until - now).total_seconds() // 60))
             line += f"  · cooldown {mins}m (UTC)"
+        expires = getattr(st, "login_expires", None)
+        if st.logged_in and expires and expires > now:
+            soon = expires - now <= timedelta(days=LOGIN_EXPIRY_WARN_DAYS)
+            line += (
+                f"  · {'⚠️ ' if soon else ''}login ends "
+                f"<t:{int(expires.timestamp())}:{'R' if soon else 'D'}>"
+            )
         if st.error:
             line += f"  · error: {st.error[:60]}"
         lines.append(line)

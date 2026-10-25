@@ -46,6 +46,7 @@ _INSTANCE_PATH_FIELDS = (
 # Maps whose KEYS are account directories.
 _ACCOUNT_KEYED = (
     "account_cooldowns", "account_cooldown_fps", "model_cooldowns", "account_alerts",
+    "login_expiry_warnings",
 )
 
 
@@ -210,6 +211,10 @@ class StateStore(ReposMixin, AccountsMixin, SchedulesMixin, ChainsMixin):
         # post; "cred_fp" fingerprints the credentials file the verdict was
         # reached against, so a later login is recognisable across a restart.
         self._account_alerts: dict[str, dict] = {}
+        # {account_dir -> ISO expiry}: the login end date The Ark has already
+        # warned about, so the heads-up fires once per login rather than once
+        # a minute, and a fresh /login (a later date) can be told apart.
+        self._login_expiry_warnings: dict[str, str] = {}
         self._dirty: bool = False  # Dirty flag — mark_dirty() defers save to auto-save loop
         self._last_mtime: float = 0.0  # Track file mtime for external change detection
 
@@ -303,6 +308,7 @@ class StateStore(ReposMixin, AccountsMixin, SchedulesMixin, ChainsMixin):
         self._account_cooldown_fps = data.get("account_cooldown_fps", {})
         self._model_cooldowns = data.get("model_cooldowns", {})
         self._account_alerts = data.get("account_alerts", {})
+        self._login_expiry_warnings = data.get("login_expiry_warnings", {})
         for d in data.get("schedules", []):
             sched = Schedule.from_dict(d)
             self._schedules[sched.id] = sched
@@ -414,6 +420,7 @@ class StateStore(ReposMixin, AccountsMixin, SchedulesMixin, ChainsMixin):
             "account_cooldown_fps": self._account_cooldown_fps,
             "model_cooldowns": self._model_cooldowns,
             "account_alerts": self._account_alerts,
+            "login_expiry_warnings": self._login_expiry_warnings,
             "schedules": [s.to_dict() for s in self._schedules.values()],
             "watches": [w.to_dict() for w in self._watches.values()],
             "watch_counter": self._watch_counter,

@@ -148,6 +148,7 @@ EXPECTED_KEYS = frozenset({
     "account_cooldown_fps",
     "model_cooldowns",
     "account_alerts",
+    "login_expiry_warnings",
     "schedules",
     "watches",
     "watch_counter",
@@ -446,6 +447,8 @@ def fixture_state() -> dict:
             "reason": "logged_out", "since": "2026-10-10T00:00:00+00:00",
             "notified": True, "resolved": False,
             "snooze_until": "2026-10-17T00:00:00+00:00", "cred_fp": "fp-work-2"}},
+        "login_expiry_warnings": {
+            f"{R}/accounts/main": "2026-11-12T14:10:01+00:00"},
         "schedules": [sched_full.to_dict(), sched_wake.to_dict()],
         "watches": [watch.to_dict()],
         "watch_counter": 9,
@@ -554,6 +557,8 @@ def _check_fixture_getters(store: StateStore) -> None:
         fx["account_cooldown_fps"])
     _eq("model cooldowns", store.get_model_cooldowns(), fx["model_cooldowns"])
     _eq("account alerts", store.get_account_alerts(), fx["account_alerts"])
+    _eq("login expiry warnings", store.get_login_expiry_warnings(),
+        fx["login_expiry_warnings"])
     _eq("sidelined accounts", store.sidelined_accounts(),
         {f"{R}/accounts/work"})
 
@@ -697,6 +702,7 @@ def _populate_through_api(store: StateStore) -> None:
     store.set_account_alert(work, "logged_out", "2026-10-10T00:00:00+00:00",
                             "fp-work-2")
     store.snooze_account_alert(work, "2026-10-17T00:00:00+00:00")
+    store.set_login_expiry_warned(work, "2026-11-12T14:10:01+00:00")
 
     store.set_platform_state("discord", {
         "forum_projects": {"alpha": {"forum_channel_id": "f-1"}},

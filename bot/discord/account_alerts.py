@@ -8,6 +8,11 @@ drain: it posts exactly one notice per outage to The Ark, with buttons to fix
 it, and a one-line all-clear when the account comes back.
 
 Deliberately quiet by design: one notice per outage, not one per failed run.
+
+It also posts the one warning that comes *before* an outage: a login has a
+hard end date about four weeks after sign-in that using the account does not
+push back, so a few days ahead of it The Ark gets a single heads-up to sign in
+again (``_check_login_expiry``).
 """
 
 from __future__ import annotations
@@ -24,11 +29,13 @@ from bot import config
 from bot.claude.auth_health import (
     REASON_NO_DIR,
     REASON_NO_FILE,
+    REASON_LOGIN_EXPIRED,
     REASON_NO_TOKEN,
     REASON_ORG_DISABLED,
     REASON_RUNTIME_401,
     REASON_UNREADABLE,
     account_label,
+    login_expiry,
     relogin_command,
 )
 
@@ -42,6 +49,12 @@ SNOOZE_DAYS = 7
 # Discord caps custom_id at 100 chars; the label suffix is a safety check, not
 # data, so truncating it on both sides keeps the comparison honest.
 LABEL_ID_MAX = 40
+# How far ahead of a login's end date The Ark warns. Long enough to catch it
+# across a weekend away, short enough that it is still news when it arrives.
+LOGIN_EXPIRY_WARN_DAYS = 3
+# A fresh login moves the end date by weeks. Anything smaller is the server
+# re-stating the same date with jitter, not the user signing in again.
+LOGIN_RENEWED_MIN_SHIFT = timedelta(hours=1)
 
 
 def snooze_deadline() -> str:
@@ -82,6 +95,10 @@ _REASON_COPY = {
     REASON_NO_FILE: "it has never been signed in on this machine",
     REASON_NO_DIR: "its config folder is missing",
     REASON_UNREADABLE: "its saved login can't be read",
+    REASON_LOGIN_EXPIRED: (
+        "its login reached its end date (logins last about four weeks from "
+        "sign-in, however much the account is used)"
+    ),
 }
 
 
@@ -232,6 +249,62 @@ def build_clear_message(account_dir: str) -> str:
     return f"✅ Account `{account_label(account_dir)}` is back in rotation."
 
 
+def _discord_time(dt: datetime, style: str) -> str:
+    """Discord timestamp markup, rendered in the reader's own timezone."""
+    return f"<t:{int(dt.timestamp())}:{style}>"
+
+
+def build_expiry_embed(account_dir: str, expires: datetime) -> discord.Embed:
+    """Yellow 'sign in again before this date' heads-up for The Ark."""
+    label = account_label(account_dir)
+    embed = discord.Embed(
+        title="Login expiring soon",
+        color=discord.Color.gold(),
+    )
+    embed.description = (
+        f"**`{label}`** stays signed in until "
+        f"**{_discord_time(expires, 'f')}** ({_discord_time(expires, 'R')}).\n\n"
+        "Logins last about four weeks from sign-in, and using the account "
+        "doesn't extend that, so there's no way to keep it alive. Sign in "
+        "again before then and it carries on without a gap. Let it lapse and "
+        f"`{label}` drops out of rotation until you do."
+    )
+    embed.add_field(
+        name=f"Sign in on {config.PC_NAME}",
+        value=f"```\n{relogin_command(account_dir)}\n```\nthen `/login` inside.",
+        inline=False,
+    )
+    return embed
+
+
+def build_expiry_view(account_dir: str, can_console: bool) -> discord.ui.View:
+    """Auth panel, plus a login terminal when this host can show one."""
+    view = discord.ui.View(timeout=None)
+    view.add_item(discord.ui.Button(
+        label="Auth panel",
+        style=discord.ButtonStyle.primary,
+        custom_id="ark:claude_login",
+        row=0,
+    ))
+    idx = _account_index(account_dir)
+    if can_console and idx is not None:
+        view.add_item(discord.ui.Button(
+            label=f"Log in {account_label(account_dir)} on this PC"[:80],
+            style=discord.ButtonStyle.secondary,
+            custom_id=button_id("login", account_dir, idx),
+            row=0,
+        ))
+    return view
+
+
+def build_renewed_message(account_dir: str, expires: datetime) -> str:
+    """One-line confirmation that the warned-about login was renewed."""
+    return (
+        f"✅ `{account_label(account_dir)}` is signed in again, good until "
+        f"{_discord_time(expires, 'D')}."
+    )
+
+
 async def _ark_channel(bot: ClaudeBot):
     """The Ark, or None if it isn't resolvable yet (cache cold, bot starting).
 
@@ -316,6 +389,92 @@ async def _drain_once(bot: ClaudeBot) -> None:
             log.exception("Account alert drain error for %s", account_dir)
 
 
+async def _check_login_expiry(bot: ClaudeBot) -> None:
+    """Warn once per login before it runs out; confirm once when renewed.
+
+    Keyed on the end date itself: the warned date is stored, so the warning
+    fires once per login, and a later date on the file is the evidence of a
+    fresh sign-in. Accounts already carrying an open sideline are skipped,
+    because they have a notice of their own and a login reminder on top of
+    "this account is down" is noise. Once the date has passed the probe
+    sidelines the account (``REASON_LOGIN_EXPIRED``) and that notice takes
+    over, so this never says "expired" itself.
+    """
+    store = bot._store
+    warned = store.get_login_expiry_warnings()
+    accounts = list(config.CLAUDE_ACCOUNTS)
+    if not accounts and not warned:
+        return
+
+    channel = None
+    can_console: bool | None = None
+    now = datetime.now(timezone.utc)
+    try:
+        open_alerts = store.sidelined_accounts()
+    except Exception:
+        open_alerts = set()
+
+    # Same guard as the outage drain: a non-empty rotation, so a misread env
+    # can't wipe the record of what was already said.
+    if accounts:
+        for account_dir in list(warned):
+            if account_dir not in accounts:
+                store.drop_login_expiry_warning(account_dir)
+                warned.pop(account_dir, None)
+
+    for account_dir in accounts:
+        try:
+            expires = login_expiry(account_dir)
+            prior_iso = warned.get(account_dir)
+            prior = parse_iso_utc(prior_iso) if prior_iso else None
+
+            if prior_iso:
+                if prior is not None and prior <= now and (
+                    expires is None or expires > now
+                ):
+                    # The login lapsed before it was renewed, so the outage
+                    # notice already ran and its own all-clear says it's back.
+                    store.drop_login_expiry_warning(account_dir)
+                elif expires is not None and prior is not None and (
+                    expires - prior >= LOGIN_RENEWED_MIN_SHIFT
+                ):
+                    channel = channel or await _ark_channel(bot)
+                    if channel is None:
+                        return
+                    await channel.send(build_renewed_message(account_dir, expires))
+                    store.drop_login_expiry_warning(account_dir)
+                    log.info("Login for %s renewed, now ends %s",
+                             account_label(account_dir), expires.isoformat())
+                elif prior is None:
+                    # Unparseable record: forget it rather than stay mute.
+                    store.drop_login_expiry_warning(account_dir)
+                continue
+
+            if expires is None or account_dir in open_alerts:
+                continue
+            if not (now < expires <= now + timedelta(days=LOGIN_EXPIRY_WARN_DAYS)):
+                continue
+
+            channel = channel or await _ark_channel(bot)
+            if channel is None:
+                return
+            if can_console is None:
+                from bot.services.auth_sync import host_can_show_console
+                can_console = host_can_show_console()
+            await channel.send(
+                embed=build_expiry_embed(account_dir, expires),
+                view=build_expiry_view(account_dir, can_console),
+            )
+            store.set_login_expiry_warned(account_dir, expires.isoformat())
+            log.info("Posted login-expiry warning for %s (ends %s)",
+                     account_label(account_dir), expires.isoformat())
+        except discord.HTTPException:
+            log.warning("Login expiry post failed for %s", account_dir,
+                        exc_info=True)
+        except Exception:
+            log.exception("Login expiry check error for %s", account_dir)
+
+
 async def run_account_alert_notifier(
     bot: ClaudeBot, stop_event: asyncio.Event,
 ) -> None:
@@ -334,3 +493,7 @@ async def run_account_alert_notifier(
             await _drain_once(bot)
         except Exception:
             log.exception("Account alert notifier error")
+        try:
+            await _check_login_expiry(bot)
+        except Exception:
+            log.exception("Login expiry check error")
