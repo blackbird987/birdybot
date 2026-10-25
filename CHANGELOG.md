@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## v0.102.8, Warn before an account's login expires (2026-10-25)
+
+### Added
+- **The Ark warns 3 days before an account's login expires** (`bot/discord/account_alerts.py`, `bot/claude/auth_health.py`). A Claude Code login ends about four weeks after sign-in and using the account does not extend it (klerk renewed on 2026-10-25 and its end date stayed on 2026-11-12), so a daily keep-alive prompt cannot help. The bot now reads that end date from each `CLAUDE_ACCOUNTS` entry's credentials file, posts one heads-up with the sign-in command (plus a login button where this machine can open a terminal), and one confirmation line once a fresh login moves the date. Once the CLI would also call the account signed out (end date passed and its last access token, up to 8 hours old, expired), the account picker skips it instead of spending a task on it, and the usual outage notice goes out. `/auth` shows each account's end date. Nothing is refreshed to learn it. Harness: `scripts/test_account_alerts.py`.
+
 ## v0.102.7, Quick replies skip the usage queue, sessions see the repo list (2026-10-19)
 
 ### Changed

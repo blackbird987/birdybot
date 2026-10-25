@@ -37,7 +37,7 @@ from bot import config
 from bot.procutil import run_capture
 from bot.claude.auth_health import account_label
 from bot.claude.auth_health import clear_cache as clear_auth_cache
-from bot.claude.auth_health import credentials_usable
+from bot.claude.auth_health import credentials_usable, login_expiry
 
 if TYPE_CHECKING:
     from bot.discord.bot import ClaudeBot
@@ -289,6 +289,9 @@ class AccountStatus:
     # action that can actually help.
     sidelined: bool = False
     sideline_reason: str = ""
+    # When the saved login runs out (tz-aware UTC), None when unknown. The
+    # CLI renews the access token on its own, but not past this date.
+    login_expires: datetime | None = None
 
 
 def _read_account_identity(account_dir: Path) -> tuple[str | None, str | None, str | None]:
@@ -366,6 +369,7 @@ async def collect_account_statuses(
                     org=org,
                     account_uuid=uuid_,
                     cooldown_until=cooldowns.get(str(p)) or cooldowns.get(raw),
+                    login_expires=login_expiry(p),
                 ))
             except Exception as exc:
                 out.append(AccountStatus(
