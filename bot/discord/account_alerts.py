@@ -249,7 +249,7 @@ def build_clear_message(account_dir: str) -> str:
     return f"✅ Account `{account_label(account_dir)}` is back in rotation."
 
 
-def _discord_time(dt: datetime, style: str) -> str:
+def discord_time(dt: datetime, style: str) -> str:
     """Discord timestamp markup, rendered in the reader's own timezone."""
     return f"<t:{int(dt.timestamp())}:{style}>"
 
@@ -257,17 +257,23 @@ def _discord_time(dt: datetime, style: str) -> str:
 def build_expiry_embed(account_dir: str, expires: datetime) -> discord.Embed:
     """Yellow 'sign in again before this date' heads-up for The Ark."""
     label = account_label(account_dir)
+    # With nothing to fail over to, "drops out of rotation" undersells it.
+    lapse = (
+        "nothing can run until you do"
+        if len(config.CLAUDE_ACCOUNTS) <= 1
+        else f"`{label}` drops out of rotation until you do"
+    )
     embed = discord.Embed(
         title="Login expiring soon",
         color=discord.Color.gold(),
     )
     embed.description = (
         f"**`{label}`** stays signed in until "
-        f"**{_discord_time(expires, 'f')}** ({_discord_time(expires, 'R')}).\n\n"
+        f"**{discord_time(expires, 'f')}** ({discord_time(expires, 'R')}).\n\n"
         "Logins last about four weeks from sign-in, and using the account "
         "doesn't extend that, so there's no way to keep it alive. Sign in "
-        "again before then and it carries on without a gap. Let it lapse and "
-        f"`{label}` drops out of rotation until you do."
+        f"again before then and it carries on without a gap. Let it lapse and "
+        f"{lapse}."
     )
     embed.add_field(
         name=f"Sign in on {config.PC_NAME}",
@@ -301,7 +307,7 @@ def build_renewed_message(account_dir: str, expires: datetime) -> str:
     """One-line confirmation that the warned-about login was renewed."""
     return (
         f"✅ `{account_label(account_dir)}` is signed in again, good until "
-        f"{_discord_time(expires, 'D')}."
+        f"{discord_time(expires, 'D')}."
     )
 
 
@@ -400,11 +406,13 @@ async def _check_login_expiry(bot: ClaudeBot) -> None:
     sidelines the account (``REASON_LOGIN_EXPIRED``) and that notice takes
     over, so this never says "expired" itself.
     """
+    accounts = list(config.CLAUDE_ACCOUNTS)
+    # Same guard as the outage drain: with no rotation configured there is
+    # nothing to check, and a misread env must not wipe what was already said.
+    if not accounts:
+        return
     store = bot._store
     warned = store.get_login_expiry_warnings()
-    accounts = list(config.CLAUDE_ACCOUNTS)
-    if not accounts and not warned:
-        return
 
     channel = None
     can_console: bool | None = None
@@ -414,13 +422,10 @@ async def _check_login_expiry(bot: ClaudeBot) -> None:
     except Exception:
         open_alerts = set()
 
-    # Same guard as the outage drain: a non-empty rotation, so a misread env
-    # can't wipe the record of what was already said.
-    if accounts:
-        for account_dir in list(warned):
-            if account_dir not in accounts:
-                store.drop_login_expiry_warning(account_dir)
-                warned.pop(account_dir, None)
+    for account_dir in list(warned):
+        if account_dir not in accounts:
+            store.drop_login_expiry_warning(account_dir)
+            warned.pop(account_dir, None)
 
     for account_dir in accounts:
         try:
@@ -432,8 +437,10 @@ async def _check_login_expiry(bot: ClaudeBot) -> None:
                 if prior is not None and prior <= now and (
                     expires is None or expires > now
                 ):
-                    # The login lapsed before it was renewed, so the outage
-                    # notice already ran and its own all-clear says it's back.
+                    # The login lapsed before it was renewed. If the account
+                    # was sidelined in that gap, the outage notice's all-clear
+                    # covers this; if it never was, the user just signed in
+                    # and needs no telling. Either way, nothing to add here.
                     store.drop_login_expiry_warning(account_dir)
                 elif expires is not None and prior is not None and (
                     expires - prior >= LOGIN_RENEWED_MIN_SHIFT

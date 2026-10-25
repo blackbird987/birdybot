@@ -28,11 +28,20 @@ import sys
 from collections.abc import Container, Iterable
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 log = logging.getLogger(__name__)
 
-# path_str -> ((mtime_ns, size), reason_or_None, login_expiry_or_None)
-_cache: dict[str, tuple[tuple[int, int], str | None, datetime | None]] = {}
+
+class _Probe(NamedTuple):
+    """What one read of a credentials file says, before the clock is applied."""
+    reason: str | None                 # file-level verdict, None when usable
+    login_ends: datetime | None = None   # refreshTokenExpiresAt
+    access_ends: datetime | None = None  # expiresAt (the 8-hour access token)
+
+
+# path_str -> ((mtime_ns, size), probe)
+_cache: dict[str, tuple[tuple[int, int], _Probe]] = {}
 
 REASON_NO_DIR = "dir does not exist"
 REASON_NO_FILE = "no .credentials.json — not logged in"
@@ -42,10 +51,11 @@ REASON_UNREADABLE = "credentials file unreadable"
 # from the refresh token on its own, but the refresh token carries a
 # ``refreshTokenExpiresAt`` the server sets at sign-in (about four weeks out)
 # and does NOT move on a refresh: klerk renewed on 2026-10-25 and its date
-# stayed on 2026-11-12. Past it the CLI treats the account as signed out, so a
-# spawn on it is doomed. Unlike the other probe verdicts this one depends on
-# the clock, not just the file, which is why it is applied on read rather
-# than cached.
+# stayed on 2026-11-12. Past it the CLI can no longer renew, and once the
+# access token it holds runs out too it treats the account as signed out (the
+# same two-field rule its own login check uses), so a spawn on it is doomed.
+# Unlike the other probe verdicts this one depends on the clock, not just the
+# file, which is why it is applied on read rather than cached.
 REASON_LOGIN_EXPIRED = "login expired: refresh token past its expiry date"
 
 # Not produced by the probe — recorded by the runner when the CLI itself
@@ -102,54 +112,65 @@ def _parse_expiry(raw: object) -> datetime | None:
         return None
 
 
-def _probe(cred_path: Path) -> tuple[str | None, datetime | None]:
-    """Parse the credentials file into (reason or None, login expiry or None)."""
+def _probe(cred_path: Path) -> _Probe:
+    """Parse the credentials file (no clock involved, so safe to memoize)."""
     try:
         data = json.loads(cred_path.read_text(encoding="utf-8"))
     except Exception:
         log.debug("Unreadable credentials at %s", cred_path, exc_info=True)
-        return REASON_UNREADABLE, None
+        return _Probe(REASON_UNREADABLE)
     if not isinstance(data, dict):
-        return REASON_UNREADABLE, None
+        return _Probe(REASON_UNREADABLE)
     oauth = data.get("claudeAiOauth")
     if not isinstance(oauth, dict):
         oauth = {}
     token = oauth.get("refreshToken") or data.get("refreshToken")
     if not (isinstance(token, str) and token.strip()):
-        return REASON_NO_TOKEN, None
-    return None, _parse_expiry(oauth.get("refreshTokenExpiresAt"))
+        return _Probe(REASON_NO_TOKEN)
+    return _Probe(
+        None,
+        _parse_expiry(oauth.get("refreshTokenExpiresAt")),
+        _parse_expiry(oauth.get("expiresAt")),
+    )
 
 
-def _read(account_dir: str | Path) -> tuple[str | None, datetime | None]:
-    """(file-level reason, login expiry), memoized on the file's stat."""
+def _read(account_dir: str | Path) -> _Probe:
+    """The probe for *account_dir*, memoized on the credentials file's stat."""
     p = Path(str(account_dir)).expanduser()
     key_path = str(p)
     if not p.is_dir():
         _cache.pop(key_path, None)
-        return REASON_NO_DIR, None
+        return _Probe(REASON_NO_DIR)
     cred = p / ".credentials.json"
     try:
         st = cred.stat()
     except OSError:
         _cache.pop(key_path, None)
-        return REASON_NO_FILE, None
+        return _Probe(REASON_NO_FILE)
     stat_key = (st.st_mtime_ns, st.st_size)
     cached = _cache.get(key_path)
     if cached and cached[0] == stat_key:
-        return cached[1], cached[2]
-    reason, expiry = _probe(cred)
-    _cache[key_path] = (stat_key, reason, expiry)
-    return reason, expiry
+        return cached[1]
+    probe = _probe(cred)
+    _cache[key_path] = (stat_key, probe)
+    return probe
 
 
 def unusable_reason(
     account_dir: str | Path, *, now: datetime | None = None,
 ) -> str | None:
     """Why this account can't authenticate, or None when it looks usable."""
-    reason, expiry = _read(account_dir)
-    if reason:
-        return reason
-    if expiry is not None and expiry <= (now or datetime.now(timezone.utc)):
+    probe = _read(account_dir)
+    if probe.reason:
+        return probe.reason
+    now = now or datetime.now(timezone.utc)
+    # Both halves, as the CLI checks them: past the login's end date nothing
+    # can renew the access token, but the one already held still works until
+    # its own expiry (up to 8 hours). An unknown date is never "expired".
+    if (
+        probe.login_ends is not None and probe.login_ends <= now
+        and (probe.access_ends is None or probe.access_ends <= now)
+    ):
         return REASON_LOGIN_EXPIRED
     return None
 
@@ -162,8 +183,8 @@ def login_expiry(account_dir: str | Path) -> datetime | None:
     never touch the refresh token). None for an account with no usable login
     at all, since there is nothing left to expire.
     """
-    reason, expiry = _read(account_dir)
-    return None if reason else expiry
+    probe = _read(account_dir)
+    return None if probe.reason else probe.login_ends
 
 
 def credentials_usable(account_dir: str | Path) -> bool:

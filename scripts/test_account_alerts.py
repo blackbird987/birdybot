@@ -684,6 +684,22 @@ def _test_login_expiry_probe() -> list[str]:
                 "picker would hand tasks to an account the CLI calls signed out"
             )
 
+        # Past the end date the CLI can't renew, but the access token it
+        # already holds keeps working until its own expiry. Calling the
+        # account dead in that window would sideline it hours early.
+        _write_creds(acct, ends, expiresAt=int(
+            (ends + timedelta(hours=8)).timestamp() * 1000))
+        if unusable_reason(acct, now=ends + timedelta(hours=1)) is not None:
+            failures.append(
+                "probe: an account still holding a live access token was "
+                "called expired - the CLI would still run it"
+            )
+        if unusable_reason(acct, now=ends + timedelta(hours=9)) != REASON_LOGIN_EXPIRED:
+            failures.append(
+                "probe: still usable after both the login and its last access "
+                "token ran out"
+            )
+
         # An older CLI never wrote the field; garbage must not read as expired.
         for raw in (None, "soon", True, -5):
             _write_creds(acct, None, **({} if raw is None else

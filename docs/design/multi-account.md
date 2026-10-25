@@ -121,13 +121,18 @@ date unchanged too. So there is no keep-alive: pinging an account every day
 spends tokens and changes nothing. The only fix is signing in again before the
 date, which is what the bot now prompts for.
 
-- **The probe reads the date and sidelines past it.**
-  `auth_health.unusable_reason` returns `REASON_LOGIN_EXPIRED` once the date
-  has passed, because the CLI itself calls such an account signed out (it
-  checks the same field). That verdict is applied on read, not cached with the
-  file, since the same untouched file flips when the clock passes the date. It
-  is a probe reason, so a `/login` (which rewrites the file) retires it like
-  any other. A missing or malformed field reads as "unknown", never "expired".
+- **The probe reads the date and sidelines past it, by the CLI's own rule.**
+  `auth_health.unusable_reason` returns `REASON_LOGIN_EXPIRED` once the
+  login's end date has passed **and** the access token the CLI already holds
+  (`expiresAt`) has run out too. That is the two-field check the CLI's own
+  login test makes: past the end date nothing can renew, but the token in
+  hand keeps working for up to 8 hours, and sidelining on the end date alone
+  would bench a working account for that long. The verdict is applied on
+  read, not cached with the file, since the same untouched file flips when
+  the clock passes. It is a probe reason, so it is reached wherever the probe
+  runs (every account pick, and boot), and a `/login` (which rewrites the
+  file) retires it like any other. A missing or malformed field reads as
+  "unknown", never "expired".
 - **One heads-up, keyed on the date.** `account_alerts._check_login_expiry`
   runs on the notifier's minute tick and posts one warning when a login ends
   within `LOGIN_EXPIRY_WARN_DAYS` (3), with the sign-in command and a login
@@ -136,8 +141,12 @@ date, which is what the bot now prompts for.
   one confirmation line, then the record is dropped. A shift under an hour is
   the server re-stating the date, not a renewal. An account with an open
   sideline is skipped (it has its own notice), and a login that lapsed before
-  it was renewed is dropped silently, because the outage notice's all-clear
-  already said it is back.
+  it was renewed is dropped silently: if the account was sidelined meanwhile,
+  the outage notice's all-clear says it is back, and if it never was, the
+  user has just signed in themselves.
+- **Only `CLAUDE_ACCOUNTS` entries are checked**, the same set the outage
+  drain covers. With no rotation configured the CLI's default directory is
+  not watched.
 - **The bot never refreshes anything to learn the date.** It only reads the
   file the CLI wrote, for the reason in `docs/design/plan-usage.md`.
 - `/auth` shows each account's end date, as a relative time with a warning
