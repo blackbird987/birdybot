@@ -65,6 +65,18 @@
       ],
       "every_days": 7,
       "prompt": "Friday weekly summary. Vin has not written; you are starting this. This is a SUMMARY, not a question, and it does not spend either weekly chase. Build it only from log/ and projects/ for Monday to Friday of this week, never from memory, and leave out anything you cannot source. Write the same content to reports/weekly/YYYY-Www.md (ISO week) and commit it BEFORE sending, because the file is what survives to the October check-in. Follow the section order and the phone formatting rules in CLAUDE.md under 'Friday, 16:00: the weekly summary'. If a week really has nothing in it, say that in two lines rather than padding it. End with one line inviting a correction, not an answer."
+    },
+    {
+      "label": "degenai-weekly-article",
+      "repo": "aiagent",
+      "thread_id": "1562205827228762165",
+      "at": "10:00",
+      "tz": "Europe/Amsterdam",
+      "days": [
+        "mon"
+      ],
+      "every_days": 7,
+      "prompt": "Weekly X Article run for @DegenAI_0x. Nobody asked yet; you are starting this. Load the weekly-article skill (AIAgent/.claude/skills/weekly-article/SKILL.md) and follow it from section 1, working from the AIAgent/ project directory. If nothing user-facing shipped since last_covered_tag, post the one-line skip and stop. Otherwise write the article, save it as an X Article DRAFT (never --publish), and report it here per section 8, then end the turn and wait for review."
     }
   ]
 }
