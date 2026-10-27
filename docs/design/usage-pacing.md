@@ -20,9 +20,9 @@ Two pieces fix it:
   (`bot/engine/plan_usage.py`) of the account the spawn would land on
   (`AccountsMixin._spawn_account`, the one helper `_run_impl` also picks
   with, so a resume is read on its session's account):
-  session-% tiers (`USAGE_PACE_SESSION_TIERS`) and a peak-hour cap. The
-  tightest cap wins. Everything is per
-  account (`_paced_running`, `_usage_waiters`, `_usage_hold_passed_at`, all
+  session-% tiers (`USAGE_PACE_SESSION_TIERS`) and a peak-hour cap, never
+  the weekly figure. The tightest cap wins. Everything is per account
+  (`_paced_running`, `_usage_waiters`, `_usage_hold_passed_at`, all
   keyed by the account the hold admitted the run on, `None` without
   rotation): a nearly spent account caps only its own sessions. Held sessions
   queue in arrival order and only the first in line for its account may
