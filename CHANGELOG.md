@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## v0.102.9, Pacing ignores the weekly limit (2026-10-27)
+
+### Changed
+- **Usage pacing no longer holds sessions back on the weekly limit; only the 5-hour session limit and peak hours pace starts** (`bot/claude/usage_pacing.py`). Being ahead of the week's pace capped an account at 2 sessions even with the session window nearly unused, which only delayed the same work and wasted five-hour capacity that does not carry over. The `USAGE_PACE_WEEK_*` settings are gone. Harness: `scripts/test_usage_pacing.py`.
+
 ## v0.102.8, Warn before an account's login expires (2026-10-25)
 
 ### Added

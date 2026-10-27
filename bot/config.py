@@ -1180,19 +1180,15 @@ PLAN_USAGE_TTL_SECS: int = max(15, int(os.getenv("PLAN_USAGE_TTL_SECS", "60")))
 # Usage pacing: how many sessions may run at once given the plan's real usage
 # figures, on top of MAX_CONCURRENT. On 2026-10-15 every five-hour window ran
 # out 9, 8, 4 and then 3 minutes after it opened, because the whole parked
-# backlog started in the same minute and each resume re-read a cold cache. See
+# backlog started in the same minute and each resume re-read a cold cache. The
+# weekly limit is deliberately not paced: holding back only delays the same
+# work and wastes session-window capacity that does not carry over. See
 # bot/claude/usage_pacing.py and docs/design/usage-pacing.md.
 USAGE_PACE_ENABLED: bool = os.getenv(
     "USAGE_PACE_ENABLED", "1"
 ).lower() in ("1", "true", "yes")
 # "<session %>:<cap>" pairs. At or above the percentage, at most that many run.
 USAGE_PACE_SESSION_TIERS: str = os.getenv("USAGE_PACE_SESSION_TIERS", "40:3,65:2,85:1")
-# Weekly pacing: allowed weekly % is the share of the week elapsed plus this
-# slack. Ahead of that pace, at most USAGE_PACE_WEEK_AHEAD_CAP run; at or above
-# USAGE_PACE_WEEK_HIGH_PCT only one does.
-USAGE_PACE_WEEK_SLACK_PCT: float = float(os.getenv("USAGE_PACE_WEEK_SLACK_PCT", "10"))
-USAGE_PACE_WEEK_AHEAD_CAP: int = int(os.getenv("USAGE_PACE_WEEK_AHEAD_CAP", "2"))
-USAGE_PACE_WEEK_HIGH_PCT: float = float(os.getenv("USAGE_PACE_WEEK_HIGH_PCT", "90"))
 # Anthropic drains session limits faster on weekdays in these Pacific hours.
 USAGE_PACE_PEAK_HOURS_PT: str = os.getenv("USAGE_PACE_PEAK_HOURS_PT", "5-11")
 USAGE_PACE_PEAK_CAP: int = int(os.getenv("USAGE_PACE_PEAK_CAP", "3"))
