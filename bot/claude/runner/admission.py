@@ -514,8 +514,8 @@ class AdmissionMixin:
         """Wire where plan-usage readings come from.
 
         ``reader(account_dir)`` is awaited and returns a reading with
-        ``session_pct``, ``session_resets_at``, ``week_pct`` and
-        ``week_resets_at`` (``plan_usage.AccountUsage``), or None. app.py wires
+        ``session_pct`` and ``session_resets_at``
+        (``plan_usage.AccountUsage``), or None. app.py wires
         it, because those figures live in bot.engine, which this package does
         not import. Unwired, usage pacing still applies the peak-hour cap.
         """

@@ -20,9 +20,8 @@ Two pieces fix it:
   (`bot/engine/plan_usage.py`) of the account the spawn would land on
   (`AccountsMixin._spawn_account`, the one helper `_run_impl` also picks
   with, so a resume is read on its session's account):
-  session-% tiers (`USAGE_PACE_SESSION_TIERS`), weekly pace (used more than
-  the share of the week gone plus `USAGE_PACE_WEEK_SLACK_PCT`), a weekly
-  ceiling, and a peak-hour cap. The tightest cap wins. Everything is per
+  session-% tiers (`USAGE_PACE_SESSION_TIERS`) and a peak-hour cap. The
+  tightest cap wins. Everything is per
   account (`_paced_running`, `_usage_waiters`, `_usage_hold_passed_at`, all
   keyed by the account the hold admitted the run on, `None` without
   rotation): a nearly spent account caps only its own sessions. Held sessions
@@ -64,6 +63,12 @@ Rules that must not drift:
   arriving as a slot frees could keep resetting the clock and overtake a
   waiter forever. A per-waiter limit releases every session
   that began waiting together in the same minute, which is the stampede again.
+- **The weekly limit is not paced** (decided 2026-10-27). A weekly-pace cap
+  used to hold an account to 2 sessions whenever its weekly % ran ahead of
+  the share of the week gone, even with the five-hour window nearly unused.
+  Holding back only delays the same work and wastes session-window capacity
+  that does not carry over. Hitting the weekly cap is handled by the normal
+  account failover and cooldown.
 - **No reading is no usage cap.** The endpoint is undocumented and the access
   token is often expired between runs (the bot never refreshes it). Missing
   figures must not stop work; only the peak-hour cap still applies.

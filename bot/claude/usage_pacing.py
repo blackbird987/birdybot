@@ -24,12 +24,16 @@ Rules that must not drift:
 - **A reading whose window has already reset counts as zero.** plan_usage
   serves the last good reading for up to three hours, and a session figure
   from before the reset says nothing about the window in force now.
+- **The weekly limit is not paced.** Holding sessions back on it only delays
+  the same work and wastes five-hour capacity that does not carry over
+  (decided 2026-10-27). Running out of the week is left to the usual account
+  failover and cooldown.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
@@ -37,7 +41,6 @@ from bot import config
 from bot.claude.types import InstanceOrigin
 
 _PACIFIC = ZoneInfo("America/Los_Angeles")
-_WEEK = timedelta(days=7)
 
 
 class UsageReading(Protocol):
@@ -45,8 +48,6 @@ class UsageReading(Protocol):
 
     session_pct: float | None
     session_resets_at: datetime | None
-    week_pct: float | None
-    week_resets_at: datetime | None
 
 
 # Steps that are heavy by nature (a build's median is 89 turns), so they queue
@@ -130,15 +131,6 @@ def _live_pct(pct: float | None, resets_at: datetime | None, now: datetime) -> f
     return pct
 
 
-def week_allowance_pct(week_resets_at: datetime | None, now: datetime) -> float | None:
-    """Weekly % it is fine to have used by now: the share of the week gone, plus slack."""
-    if week_resets_at is None:
-        return None
-    remaining = (week_resets_at - now) / _WEEK
-    elapsed = min(1.0, max(0.0, 1.0 - remaining))
-    return elapsed * 100 + config.USAGE_PACE_WEEK_SLACK_PCT
-
-
 def pace_limit(
     reading: UsageReading | None,
     now: datetime | None = None,
@@ -160,18 +152,6 @@ def pace_limit(
             for pct, cap in parse_tiers(config.USAGE_PACE_SESSION_TIERS):
                 if session >= pct:
                     caps.append((cap, f"session usage at {session:.0f}%"))
-
-        week = _live_pct(reading.week_pct, reading.week_resets_at, now)
-        if week is not None:
-            if week >= config.USAGE_PACE_WEEK_HIGH_PCT:
-                caps.append((1, f"weekly usage at {week:.0f}%"))
-            allowance = week_allowance_pct(reading.week_resets_at, now)
-            if allowance is not None and week > allowance:
-                caps.append((
-                    config.USAGE_PACE_WEEK_AHEAD_CAP,
-                    f"weekly usage at {week:.0f}%, ahead of the {allowance:.0f}% "
-                    f"the week so far allows",
-                ))
 
     if not caps:
         return PaceDecision(ceiling)

@@ -7,7 +7,7 @@ a long conversation whose prompt cache had expired during the wait, and each
 re-queued itself when it hit the wall again, so the backlog only grew.
 
 Locks:
-  1. pace_limit: session tiers, weekly pace and weekly ceiling, peak hours,
+  1. pace_limit: session tiers, peak hours, the weekly figure never caps,
      never below one, no reading means no usage cap, a reading whose window
      has reset counts as zero, disabled means MAX_CONCURRENT.
   2. The runner holds a starting session while the pace limit is reached,
@@ -75,13 +75,10 @@ WED_OFF = datetime(2026, 10, 14, 22, 0, tzinfo=timezone.utc)
 def test_pace_limit() -> None:
     config.USAGE_PACE_ENABLED = True
     config.USAGE_PACE_SESSION_TIERS = "40:3,65:2,85:1"
-    config.USAGE_PACE_WEEK_SLACK_PCT = 10
-    config.USAGE_PACE_WEEK_AHEAD_CAP = 2
-    config.USAGE_PACE_WEEK_HIGH_PCT = 90
     config.USAGE_PACE_PEAK_HOURS_PT = "5-11"
     config.USAGE_PACE_PEAK_CAP = 3
     later = SAT + timedelta(hours=3)
-    week_end = SAT + timedelta(days=3)  # 4/7 of the week gone, allowance ~67%
+    week_end = SAT + timedelta(days=6)  # 1/7 of the week gone
 
     lim = lambda r, now=SAT: usage_pacing.pace_limit(r, now, 6)  # noqa: E731
 
@@ -98,13 +95,16 @@ def test_pace_limit() -> None:
     check(lim(Reading(session_pct=99, session_resets_at=SAT - timedelta(minutes=1))).limit == 6,
           "a session figure from a window that has already reset must count as zero")
 
-    check(lim(Reading(week_pct=50, week_resets_at=week_end)).limit == 6,
-          "weekly usage on pace must not cap")
-    d = lim(Reading(week_pct=80, week_resets_at=week_end))
-    check(d.limit == 2, f"weekly usage ahead of pace must cap at 2, got {d.limit}")
-    check("ahead" in d.reason, f"ahead-of-pace reason missing, got {d.reason!r}")
-    check(lim(Reading(week_pct=95, week_resets_at=week_end)).limit == 1,
-          "weekly usage at 95% must cap at 1")
+    # The weekly limit is deliberately not paced (2026-10-27): 95% of the week
+    # used a day into it must not hold anything back.
+    d = lim(Reading(session_pct=10, session_resets_at=later,
+                    week_pct=95, week_resets_at=week_end))
+    check(d.limit == 6 and d.reason == "",
+          f"weekly usage must never cap, got {d.limit} {d.reason!r}")
+    d = lim(Reading(session_pct=70, session_resets_at=later,
+                    week_pct=95, week_resets_at=week_end))
+    check(d.limit == 2 and "session usage" in d.reason,
+          f"only the session tier may cap, got {d.limit} {d.reason!r}")
 
     check(usage_pacing.is_peak(WED_PEAK), "Wednesday 08:00 Pacific must be peak")
     check(not usage_pacing.is_peak(WED_OFF), "Wednesday 15:00 Pacific must not be peak")
