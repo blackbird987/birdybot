@@ -83,7 +83,7 @@ for phrase, label in (
     ("Small fixes and UI tweaks skip the reviewer", "small fixes skip the reviewer"),
 ):
     check(f"block carries the {label}", phrase in config.CRITICAL_PASS)
-check("no em dash in the block", "—" not in config.CRITICAL_PASS)
+check("no em dash in the block", "\u2014" not in config.CRITICAL_PASS)
 
 print("the rendered system prompt carries it on direct turns only")
 from bot.claude.runner import ClaudeRunner  # noqa: E402
