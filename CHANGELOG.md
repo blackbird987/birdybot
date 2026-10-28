@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- **Chat sessions run a critical pass before proposing anything** (`config.CRITICAL_PASS`, appended to the direct-turn guidance). Three weeks of sessions held 91 user messages asking "is this the most proper way?" or "are we just patching this one case?", 62 of them right after a proposal, and the second answer was usually better. A proposal is now checked first (whole app or one patch, too specific, what's missing, a cleaner way, and for a retry why the earlier attempts failed), the revised version is shown with one "Checked:" line, and big proposals (research direction, architecture, multi-phase plans, repeat retries) get a fresh-eyes reviewer that sees the proposal but not the reasoning behind it. `/evals` flags a direct reply that asks for approval with no "Checked:" line (category `critical_pass`, owned by `CRITICAL_PASS`); about 14% of past replies would have been flagged. Harness: `scripts/test_critical_pass.py`.
+
 ## v0.102.9, Pacing ignores the weekly limit (2026-10-27)
 
 ### Changed

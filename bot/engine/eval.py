@@ -28,7 +28,7 @@ EVALS_DIR: Path = config.DATA_DIR / "evals"
 class EvalFlag:
     """A single issue detected in a session."""
     category: str       # "tool_hygiene", "narration", "claim_grounding",
-                        # "efficiency", "constraint_violation"
+                        # "efficiency", "constraint_violation", "critical_pass"
     severity: str       # "info", "warning", "issue"
     message: str
     evidence: str = ""
@@ -232,6 +232,7 @@ def evaluate_instance(inst: Instance) -> SessionEval:
         ev.flags.extend(_check_unarmed_promise(inst, text))
         ev.flags.extend(_check_review_prior_attempts(inst, text))
         ev.flags.extend(_check_chain_prior_attempts(inst, text))
+        ev.flags.extend(_check_critical_pass(inst, text))
     ev.flags.extend(_check_efficiency(inst))
 
     _save_eval(ev)
@@ -556,6 +557,61 @@ def _check_chain_prior_attempts(inst: Instance, text: str) -> list[EvalFlag]:
     )]
 
 
+# A reply asking the user to approve what it just proposed. Scanned only near
+# the end of the reply, where the ask lives, so prose that merely discusses a
+# "say go" habit earlier in the reply is not mistaken for one.
+_APPROVAL_ASK_RE = re.compile(
+    r"\bsay\s+[\"'*“‘]*go\b"
+    r"|\bwant me to\s+(?:start|build|do|ship|go)\b"
+    r"|\bshall i\b"
+    r"|\bshould i\s+(?:start|proceed|build|go ahead)\b",
+    re.IGNORECASE,
+)
+# The one line CRITICAL_PASS asks for. Tolerates a bullet, quote or bold wrapper.
+_CHECKED_LINE_RE = re.compile(
+    r"^\s*(?:[-*>]\s+)?(?:\*\*|__)?checked(?:\*\*|__)?\s*:",
+    re.IGNORECASE | re.MULTILINE,
+)
+_ASK_TAIL_PARAGRAPHS = 3
+
+
+def _check_critical_pass(inst: Instance, text: str) -> list[EvalFlag]:
+    """Did a chat reply ask for approval of a proposal it never checked?
+
+    ``CRITICAL_PASS`` asks every proposal to carry one "Checked:" line naming
+    what was tested and dropped. A proposal that asks the user to say go
+    without it skipped the pass, and the user ends up asking "is this the most
+    proper way?" by hand. Direct turns only: that is where the block is
+    injected. Scanned on the masked text so an ask quoted inside a ``~~~``
+    body (a /chain plan, a /spawn brief) is invisible, and directive lines are
+    dropped before the tail is taken so a trailing directive cannot push the
+    ask out of view.
+    """
+    from bot.textutil import mask_tilde_bodies
+
+    if inst.origin != InstanceOrigin.DIRECT:
+        return []
+    masked = mask_tilde_bodies(text)
+    if _CHECKED_LINE_RE.search(masked):
+        return []
+    lines = [ln for ln in masked.splitlines()
+             if not ln.lstrip().startswith(("[BOT_CMD:", "~~~"))]
+    paragraphs = [p for p in re.split(r"\n\s*\n", "\n".join(lines)) if p.strip()]
+    tail = "\n\n".join(paragraphs[-_ASK_TAIL_PARAGRAPHS:])
+    m = _APPROVAL_ASK_RE.search(tail)
+    if not m:
+        return []
+    start = max(0, m.start() - 60)
+    return [EvalFlag(
+        category="critical_pass", severity="warning",
+        message=(
+            "Asked the user to approve a proposal with no 'Checked:' line, "
+            "so the critical pass was skipped"
+        ),
+        evidence=" ".join(tail[start:m.end() + 40].split())[:120],
+    )]
+
+
 def _check_claim_grounding(inst: Instance, text: str) -> list[EvalFlag]:
     """Did Claude make claims it couldn't verify? (HONESTY_CONSTRAINT)"""
     flags: list[EvalFlag] = []
@@ -808,6 +864,7 @@ _ATTRIBUTION: tuple[tuple[str, str, str], ...] = (
     # other owned rules so a later wording change cannot fall through to them.
     ("constraint_violation", "no prior_attempts line", "PLAN_REVIEW_PROMPT"),
     ("constraint_violation", "no 'prior attempts:' line", "CHAIN_CONTEXT"),
+    ("critical_pass", "", "CRITICAL_PASS"),
     ("constraint_violation", "over-long", "CHAT_APP_CONSTRAINT"),
     ("constraint_violation", "mobile", "MOBILE_HINT"),
     ("efficiency", "prompt-cache", "prompt assembly order (harness)"),
