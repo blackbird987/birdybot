@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.102.10, Chat sessions check proposals before presenting them (2026-10-28)
+
 ### Added
 - **Chat sessions run a critical pass before proposing anything** (`config.CRITICAL_PASS`, appended to the direct-turn guidance). Three weeks of sessions held 91 user messages asking "is this the most proper way?" or "are we just patching this one case?", 62 of them right after a proposal, and the second answer was usually better. Chat sessions are now told to check a proposal first (whole app or one patch, too specific, what's missing, a cleaner way, and for a retry why the earlier attempts failed), show the revised version with one "Checked:" line, and get a fresh-eyes reviewer for big proposals (research direction, architecture, multi-phase plans, repeat retries) that sees the proposal but not the reasoning behind it. `/evals` flags a direct reply that asks for approval with no "Checked:" line (category `critical_pass`, owned by `CRITICAL_PASS`); run over 1,972 recent chat replies, it would have flagged about 14%. The check follows the block, so it runs for whichever steps the block is injected into. Harness: `scripts/test_critical_pass.py`.
 
