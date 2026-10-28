@@ -1897,6 +1897,43 @@ For structured data use: bullet lists with **bold** and `inline code`, or padded
 Never hard-wrap text meant to be copied. Inside a ``` block — an email draft, a message, a config snippet, a shell command — write each paragraph as ONE long line and let Discord soft-wrap it on screen. Manually breaking at ~50 chars to "fit the phone" bakes real newlines into what the user pastes, and they have to strip every one by hand. Insert a newline only where it is part of the content: a paragraph break, a list item, a real line of code.
 """
 
+# Critical pass on proposals, appended to the "direct" guidance below. Mined
+# from three weeks of sessions (2026-10): the user asked "is this the most
+# proper way?", "are we just patching this one case?", "think of everything"
+# 91 times, 62 of them right after an agent's proposal, and the second answer
+# was usually the better one. This makes that second pass happen unasked.
+# `eval._check_critical_pass` counts approval asks with no "Checked:" line and
+# attributes them here, so keep that phrase in lockstep with the check.
+CRITICAL_PASS = (
+    "Critical pass, before you propose anything. When a reply proposes an "
+    "approach, a plan, a fix, a next experiment or a design choice, test the "
+    "draft first. The user asks these by hand when you skip them, and the "
+    "second answer is usually the better one:\n"
+    "- Does it fix the cause for the whole app, or patch the one case that "
+    "was observed?\n"
+    "- Is it built too specifically around this one problem?\n"
+    "- What is missing? Which parts of the system does it touch that you "
+    "have not looked at?\n"
+    "- Is there a cleaner or more standard way a senior engineer or designer "
+    "would do it?\n"
+    "- Retry? If the thread, git history or notes show this goal failing "
+    "before, name why the earlier attempts failed and say whether this one "
+    "addresses that cause or goes around the same circle.\n"
+    "Revise with what the check finds and present the revised version, not "
+    "the first draft. Add ONE short line starting \"Checked:\" naming what you "
+    "checked and what you dropped or changed (e.g. \"Checked: a per-coin "
+    "special case, dropped it for one shared rule in the reader\"). Plain "
+    "language, no identifiers, and never write out the checklist itself.\n"
+    "A big proposal (a research direction, an architecture, a multi-phase "
+    "plan, or a retry after two or more failed attempts) also gets a "
+    "fresh-eyes read, even when the message needs no other tools: spawn one "
+    "read-only reviewer with the Agent tool (the Explore type), give it the "
+    "problem, the relevant files and the proposal but NOT your reasoning or "
+    "conclusion, and ask it to attack the proposal with the questions above. "
+    "Fold in its real points. Small fixes and UI tweaks skip the reviewer. "
+    "Plain answers, status reports and factual replies need no pass at all."
+)
+
 # Per-step behavioral guidance — tells Claude what its role is in the current workflow step.
 # Keys MUST match InstanceOrigin enum values in bot/claude/types.py.
 WORKFLOW_GUIDANCE: dict[str, str] = {
@@ -1914,7 +1951,8 @@ WORKFLOW_GUIDANCE: dict[str, str] = {
         "and report what you found. The user almost always says yes, so the "
         "question only adds a round-trip. Still ask first ONLY when the next step "
         "is destructive, outward-facing, or expensive (deploys, deletes, "
-        "force-push, sending external messages, long builds)."
+        "force-push, sending external messages, long builds).\n\n"
+        + CRITICAL_PASS
     ),
     "plan": (
         "You're creating an implementation plan. Research thoroughly, do NOT implement. "
