@@ -14,8 +14,9 @@ This test locks the two halves:
   question, its "Checked:" line and its fresh-eyes reviewer, and no em dash;
 * ``eval._check_critical_pass`` flags a direct reply that asks for approval
   with no "Checked:" line, stays quiet on everything else (a checked
-  proposal, a plain answer, an ask quoted inside a ``~~~`` body, an ask that
-  is only discussed early in a long reply, non-direct origins), is wired into
+  proposal, a plain answer, an ask quoted inside a ``~~~`` body or in code,
+  an ask that is only discussed early in a long reply, non-direct origins),
+  follows the block if it moves to another step, is wired into
   ``evaluate_instance``, and is attributed to CRITICAL_PASS.
 
 Run: python scripts/test_critical_pass.py
@@ -140,8 +141,27 @@ check("a trailing directive does not hide a real ask",
 check("an ask only discussed early in a long reply is quiet",
       flags("Your replies often end in 'say go'.\n\nFirst point.\n\n"
             "Second point.\n\nThird point.\n\nThat is the whole finding.") == [])
+check("an ask inside a code fence is quiet",
+      flags("Here is the draft for your group chat.\n\n```\n"
+            "Shall I book the venue for Friday?\n```") == [])
+check("an ask inside an inline code span is quiet",
+      flags("Done. The nudge now matches `say go` endings.") == [])
 for origin in (InstanceOrigin.BUILD, InstanceOrigin.REVIEW_CODE, InstanceOrigin.PLAN):
     check(f"non-direct origin quiet: {origin.value}", flags(UNCHECKED, origin) == [])
+
+print("the check follows the block, not a hard-coded origin")
+saved_guidance = config.WORKFLOW_GUIDANCE
+try:
+    config.WORKFLOW_GUIDANCE = {
+        **saved_guidance,
+        "direct": saved_guidance["direct"].replace(config.CRITICAL_PASS, ""),
+        "build": saved_guidance.get("build", "") + config.CRITICAL_PASS,
+    }
+    check("block moved off direct: direct goes quiet", flags(UNCHECKED) == [])
+    check("block moved onto build: build is checked",
+          len(flags(UNCHECKED, InstanceOrigin.BUILD)) == 1)
+finally:
+    config.WORKFLOW_GUIDANCE = saved_guidance
 
 print("evaluate_instance runs the check")
 with tempfile.TemporaryDirectory() as tmp:

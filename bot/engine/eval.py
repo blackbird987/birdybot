@@ -573,6 +573,9 @@ _CHECKED_LINE_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 _ASK_TAIL_PARAGRAPHS = 3
+# Code fences and inline code spans: a drafted message or a quoted log line
+# can say "shall I" without the reply asking anything.
+_CODE_SPAN_RE = re.compile(r"```.*?```|`[^`\n]*`", re.DOTALL)
 
 
 def _check_critical_pass(inst: Instance, text: str) -> list[EvalFlag]:
@@ -581,17 +584,19 @@ def _check_critical_pass(inst: Instance, text: str) -> list[EvalFlag]:
     ``CRITICAL_PASS`` asks every proposal to carry one "Checked:" line naming
     what was tested and dropped. A proposal that asks the user to say go
     without it skipped the pass, and the user ends up asking "is this the most
-    proper way?" by hand. Direct turns only: that is where the block is
-    injected. Scanned on the masked text so an ask quoted inside a ``~~~``
-    body (a /chain plan, a /spawn brief) is invisible, and directive lines are
-    dropped before the tail is taken so a trailing directive cannot push the
-    ask out of view.
+    proper way?" by hand. Runs only for the steps whose guidance carries the
+    block, so moving the block moves the check with it. An ask quoted inside a
+    ``~~~`` body (a /chain plan, a /spawn brief), a code fence or an inline
+    code span is invisible, and directive lines are dropped before the tail is
+    taken so a trailing directive cannot push the ask out of view. Quoted
+    phrases are kept: the real ask is usually written ``Say "go"``.
     """
     from bot.textutil import mask_tilde_bodies
 
-    if inst.origin != InstanceOrigin.DIRECT:
+    step = inst.origin.value if inst.origin else "direct"
+    if config.CRITICAL_PASS not in config.WORKFLOW_GUIDANCE.get(step, ""):
         return []
-    masked = mask_tilde_bodies(text)
+    masked = _CODE_SPAN_RE.sub(" ", mask_tilde_bodies(text))
     if _CHECKED_LINE_RE.search(masked):
         return []
     lines = [ln for ln in masked.splitlines()
@@ -864,7 +869,6 @@ _ATTRIBUTION: tuple[tuple[str, str, str], ...] = (
     # other owned rules so a later wording change cannot fall through to them.
     ("constraint_violation", "no prior_attempts line", "PLAN_REVIEW_PROMPT"),
     ("constraint_violation", "no 'prior attempts:' line", "CHAIN_CONTEXT"),
-    ("critical_pass", "", "CRITICAL_PASS"),
     ("constraint_violation", "over-long", "CHAT_APP_CONSTRAINT"),
     ("constraint_violation", "mobile", "MOBILE_HINT"),
     ("efficiency", "prompt-cache", "prompt assembly order (harness)"),
@@ -874,6 +878,7 @@ _ATTRIBUTION: tuple[tuple[str, str, str], ...] = (
     ("efficiency", "code review looped", "CODE_REVIEW_PROMPT"),
     ("efficiency", "chain cost", "chain budget (harness)"),
     ("test_failure", "", "VERIFY_PROMPT"),
+    ("critical_pass", "", "CRITICAL_PASS"),
 )
 
 
