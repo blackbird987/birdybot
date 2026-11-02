@@ -29,6 +29,9 @@ the window.
 - **To re-enable:** set `USAGE_PACE_ENABLED=1` and/or `USAGE_PEAK_GATE_ENABLED=1`
   in `.env`, then reboot. They are independent. The harnesses switch both on
   explicitly, so the disabled code stays covered.
+- **To turn one off again:** set it to `0`, do not comment it out. A reboot
+  inherits the old process environment, so a removed line leaves the previous
+  value live (the stale env item in `TODO.md`).
 
 The rest of this note describes the behaviour with pacing on.
 

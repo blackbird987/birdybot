@@ -54,8 +54,8 @@ class UsageGateMixin:
 
         Returns True when the gate handled the interaction.  Returns False
         to fall through to normal dispatch: used when the gate is switched
-        off, when the window isn't active, when a per-channel bypass is in effect, when the channel
-        isn't a forum thread (no replay path), and as a safety fallback
+        off, when the window isn't active, when a per-channel bypass is in
+        effect, when the channel isn't a forum thread (no replay path), and as a safety fallback
         if the Discord send fails after the entry was persisted.
         """
         if not config.USAGE_PEAK_GATE_ENABLED:

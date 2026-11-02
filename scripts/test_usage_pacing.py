@@ -556,7 +556,9 @@ async def test_shipped_default_never_holds() -> None:
              config.USAGE_PACE_PEAK_HOURS_PT)
     real_is_peak = usage_pacing.is_peak
     capture = _LogCapture()
+    saved_level = admission.log.level
     admission.log.addHandler(capture)
+    admission.log.setLevel(logging.INFO)
     config.USAGE_PACE_ENABLED = enabled
     config.CLAUDE_ACCOUNTS = ["/acct/a", "/acct/b"]
     config.MAX_CONCURRENT = 2
@@ -584,10 +586,23 @@ async def test_shipped_default_never_holds() -> None:
         check(not runner._usage_waiters, "off, nobody may join the usage line")
         check(not any("for usage pacing" in line for line in capture.lines),
               f"off, no holding line may be logged, got {capture.lines}")
+
+        # The same call with pacing on holds and logs, so the checks above can fail.
+        config.USAGE_PACE_ENABLED = True
+        runner._paced_running["/acct/b"] = 50
+        held = asyncio.ensure_future(
+            runner._await_usage_headroom(_inst("t-on", origin=InstanceOrigin.BUILD), None))
+        await asyncio.sleep(0.05)
+        check(not held.done(), "on, the same reading must hold the session")
+        check(any("for usage pacing" in line for line in capture.lines),
+              f"on, the holding line must be logged, got {capture.lines}")
+        held.cancel()
+        await asyncio.gather(held, return_exceptions=True)
     except asyncio.TimeoutError:
         failures.append("the usage hold waited with pacing off")
     finally:
         admission.log.removeHandler(capture)
+        admission.log.setLevel(saved_level)
         usage_pacing.is_peak = real_is_peak
         (config.CLAUDE_ACCOUNTS, config.MAX_CONCURRENT, config.USAGE_PACE_ENABLED,
          config.USAGE_PACE_PEAK_HOURS_PT) = saved
@@ -695,11 +710,10 @@ async def test_retries_stagger_with_defaults() -> None:
             return bool(result)
 
         times: list[float] = []
-        tick = stagger / 6
-        for _ in range(25):
+        for step in range(25):
+            clock[0] = step * stagger / 6
             if await released():
                 times.append(clock[0])
-            clock[0] += tick
         check(times == [i * stagger for i in range(len(times))] and len(times) == 5,
               f"one retry per {stagger}s from the first pass, got {times}")
 

@@ -1186,7 +1186,8 @@ PLAN_USAGE_TTL_SECS: int = max(15, int(os.getenv("PLAN_USAGE_TTL_SECS", "60")))
 # window ran out 9, 8, 4 and then 3 minutes after it opened: the whole parked
 # backlog started in the same minute and each resume re-read a cold cache. The
 # weekly limit was never paced. See bot/claude/usage_pacing.py and
-# docs/design/usage-pacing.md. The settings below only matter while it is on.
+# docs/design/usage-pacing.md. The other USAGE_PACE_* settings only matter while
+# it is on.
 USAGE_PACE_ENABLED: bool = os.getenv(
     "USAGE_PACE_ENABLED", "0"
 ).lower() in ("1", "true", "yes")
