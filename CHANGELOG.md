@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.102.11, Usage pacing and the peak-hour gate are off by default (2026-11-02)
+
 ### Changed
 - **Usage pacing, the peak-hour gate and its DMs are off by default.** Anthropic removed the five-hour limit for verified Ultra accounts starting 2026-10-30, and a live call on 2026-11-02 showed this account's rate limit event listing only the seven-day window, so there is no session window left to protect. `USAGE_PACE_ENABLED` now defaults to off (no session-% tiers, peak-hour cap, hold or fast lane), and a new `USAGE_PEAK_GATE_ENABLED`, also off, stops the Run now / Queue / Cancel prompt on typed messages and button clicks and the 5am/11am PT DMs. The code stays, and setting either to 1 in `.env` and rebooting brings it back. The staggered, ranked release of parked retries stays on, as do limit detection, account failover and parking, account alerts, `MAX_CONCURRENT`, the memory limits, the usage queue's drain and the plan usage figures.
 
