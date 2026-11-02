@@ -1178,14 +1178,25 @@ PLAN_USAGE_API_ENABLED: bool = os.getenv(
 PLAN_USAGE_TTL_SECS: int = max(15, int(os.getenv("PLAN_USAGE_TTL_SECS", "60")))
 
 # Usage pacing: how many sessions may run at once given the plan's real usage
-# figures, on top of MAX_CONCURRENT. On 2026-10-15 every five-hour window ran
-# out 9, 8, 4 and then 3 minutes after it opened, because the whole parked
+# figures, on top of MAX_CONCURRENT. Off by default since 2026-11-02: Anthropic
+# removed the five-hour limit for verified Ultra accounts from 2026-10-30, and
+# this account's rate limit events now list only the seven-day window, so there
+# is no session window left to protect. Set USAGE_PACE_ENABLED=1 in .env and
+# reboot to bring it back. It was built because on 2026-10-15 every five-hour
+# window ran out 9, 8, 4 and then 3 minutes after it opened: the whole parked
 # backlog started in the same minute and each resume re-read a cold cache. The
-# weekly limit is deliberately not paced: holding back only delays the same
-# work and wastes session-window capacity that does not carry over. See
-# bot/claude/usage_pacing.py and docs/design/usage-pacing.md.
+# weekly limit was never paced. See bot/claude/usage_pacing.py and
+# docs/design/usage-pacing.md. The settings below only matter while it is on.
 USAGE_PACE_ENABLED: bool = os.getenv(
-    "USAGE_PACE_ENABLED", "1"
+    "USAGE_PACE_ENABLED", "0"
+).lower() in ("1", "true", "yes")
+# The peak-hour gate (Run now / Queue / Cancel on a turn started in Anthropic's
+# weekday peak hours) and the owner's DMs at the start and end of those hours.
+# Off by default since 2026-11-02, for the same reason as pacing. Set
+# USAGE_PEAK_GATE_ENABLED=1 in .env and reboot to bring both back. Off stops
+# new interceptions only: entries already in the usage queue still drain.
+USAGE_PEAK_GATE_ENABLED: bool = os.getenv(
+    "USAGE_PEAK_GATE_ENABLED", "0"
 ).lower() in ("1", "true", "yes")
 # "<session %>:<cap>" pairs. At or above the percentage, at most that many run.
 USAGE_PACE_SESSION_TIERS: str = os.getenv("USAGE_PACE_SESSION_TIERS", "40:3,65:2,85:1")
@@ -1208,7 +1219,8 @@ USAGE_PACE_MAX_WAIT_SECS: int = int(os.getenv("USAGE_PACE_MAX_WAIT_SECS", "3600"
 USAGE_PACE_LIGHT_SLOTS: int = max(0, int(os.getenv("USAGE_PACE_LIGHT_SLOTS", "3")))
 USAGE_PACE_LIGHT_TURNS: int = max(1, int(os.getenv("USAGE_PACE_LIGHT_TURNS", "10")))
 # Parked cooldown retries are released one at a time, this far apart, instead
-# of all in the minute the window reopens.
+# of all in the minute the window reopens. This stays active with pacing and the
+# gate off: it is the one piece of the usage handling the owner kept.
 COOLDOWN_RETRY_STAGGER_SECS: int = int(os.getenv("COOLDOWN_RETRY_STAGGER_SECS", "180"))
 
 # Claude plan settings (for usage percentage display)

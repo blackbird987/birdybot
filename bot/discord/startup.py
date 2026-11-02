@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from bot import config
 from bot.discord import channels
 
 log = logging.getLogger(__name__)
@@ -17,6 +18,28 @@ log = logging.getLogger(__name__)
 
 class StartupMixin:
     """ClaudeBot methods; see the module docstring."""
+
+    def _start_usage_notifier(self) -> None:
+        """Start the DMs to the owner at 5am/11am PT on weekdays, when the gate is on.
+
+        Off by default with the gate (``USAGE_PEAK_GATE_ENABLED``). on_ready
+        fires on every reconnect, so each outcome is logged or started once.
+        """
+        if not config.USAGE_PEAK_GATE_ENABLED:
+            if not getattr(self, '_notifier_off_logged', False):
+                log.info("Usage limit notifier was not started: USAGE_PEAK_GATE_ENABLED is off")
+                self._notifier_off_logged = True
+            return
+        if self._discord_user_id:
+            existing_notifier = getattr(self, '_usage_notifier_task', None)
+            if not existing_notifier or existing_notifier.done():
+                from bot.discord import usage_notifier as _usage_notifier
+                self._usage_notifier_task = asyncio.create_task(
+                    _usage_notifier.usage_limit_notifier_loop(self, self._discord_user_id)
+                )
+        elif not getattr(self, '_notifier_warning_logged', False):
+            log.warning("Usage limit notifier disabled: DISCORD_USER_ID not set in .env")
+            self._notifier_warning_logged = True
 
     async def on_ready(self) -> None:
         log.info("Discord bot ready as %s", self.user)
@@ -103,17 +126,7 @@ class StartupMixin:
                 )
             )
 
-        # Start usage limit notifier (DMs owner at 5am/11am PT on weekdays)
-        if self._discord_user_id:
-            existing_notifier = getattr(self, '_usage_notifier_task', None)
-            if not existing_notifier or existing_notifier.done():
-                from bot.discord import usage_notifier as _usage_notifier
-                self._usage_notifier_task = asyncio.create_task(
-                    _usage_notifier.usage_limit_notifier_loop(self, self._discord_user_id)
-                )
-        elif not getattr(self, '_notifier_warning_logged', False):
-            log.warning("Usage limit notifier disabled — DISCORD_USER_ID not set in .env")
-            self._notifier_warning_logged = True
+        self._start_usage_notifier()
 
         # Usage-queue startup drain + periodic replay loop.  Startup drain
         # runs first and awaits completion so the periodic loop cannot race
