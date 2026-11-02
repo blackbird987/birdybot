@@ -22,6 +22,10 @@ Locks:
      ones the bot actually writes.
   4. The cooldown loop in app.py releases one retry per pass, behind the
      stagger and the usage slot check, rather than one task per due retry.
+  5. Pacing is off by default since 2026-11-02. With the shipped default the
+     hold never waits, pace_limit returns MAX_CONCURRENT, usage_slot_free
+     reports the real concurrency ceiling, and parked retries still release
+     one per stagger interval. Locks 1 to 2b switch pacing on explicitly.
 
 Run: python scripts/test_usage_pacing.py
 Exit 0 = all pass, exit 1 = failures.
@@ -33,10 +37,13 @@ import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
 
 import ast
 import asyncio
+import logging
+import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 from bot import config
 from bot.claude import usage_pacing
@@ -65,6 +72,14 @@ class Reading:
     has_data: bool = True
 
 
+def _shipped(name: str) -> bool:
+    """A flag's default as written in config.py, whatever .env says on this machine."""
+    src = (Path(__file__).resolve().parents[1] / "bot" / "config.py").read_text(encoding="utf-8")
+    match = re.search(rf'os\.getenv\(\s*"{name}",\s*"([^"]*)"', src)
+    check(match is not None, f"config.py no longer reads {name} with a default")
+    return bool(match) and match.group(1).lower() in ("1", "true", "yes")
+
+
 # A Saturday, so peak hours never apply unless a test asks for them.
 SAT = datetime(2026, 10, 17, 12, 0, tzinfo=timezone.utc)
 # A Wednesday at 08:00 Pacific (15:00 UTC): inside the 5-11 peak.
@@ -73,6 +88,7 @@ WED_OFF = datetime(2026, 10, 14, 22, 0, tzinfo=timezone.utc)
 
 
 def test_pace_limit() -> None:
+    saved_enabled = config.USAGE_PACE_ENABLED
     config.USAGE_PACE_ENABLED = True
     config.USAGE_PACE_SESSION_TIERS = "40:3,65:2,85:1"
     config.USAGE_PACE_PEAK_HOURS_PT = "5-11"
@@ -124,7 +140,7 @@ def test_pace_limit() -> None:
     config.USAGE_PACE_ENABLED = False
     check(lim(Reading(session_pct=99), WED_PEAK).limit == 6,
           "disabled pacing must return MAX_CONCURRENT")
-    config.USAGE_PACE_ENABLED = True
+    config.USAGE_PACE_ENABLED = saved_enabled
 
 
 def _runner(reading):
@@ -142,7 +158,9 @@ def _runner(reading):
 async def test_runner_hold() -> None:
     saved = (config.CLAUDE_ACCOUNTS, config.MAX_CONCURRENT,
              config.USAGE_PACE_POLL_SECS, config.USAGE_PACE_MAX_WAIT_SECS,
-             config.USAGE_PACE_PEAK_HOURS_PT, config.USAGE_PACE_LIGHT_SLOTS)
+             config.USAGE_PACE_PEAK_HOURS_PT, config.USAGE_PACE_LIGHT_SLOTS,
+             config.USAGE_PACE_ENABLED)
+    config.USAGE_PACE_ENABLED = True
     # The capped lane on its own; test_fast_lane covers the other one.
     config.USAGE_PACE_LIGHT_SLOTS = 0
     config.CLAUDE_ACCOUNTS = []
@@ -316,14 +334,16 @@ async def test_runner_hold() -> None:
     finally:
         (config.CLAUDE_ACCOUNTS, config.MAX_CONCURRENT,
          config.USAGE_PACE_POLL_SECS, config.USAGE_PACE_MAX_WAIT_SECS,
-         config.USAGE_PACE_PEAK_HOURS_PT, config.USAGE_PACE_LIGHT_SLOTS) = saved
+         config.USAGE_PACE_PEAK_HOURS_PT, config.USAGE_PACE_LIGHT_SLOTS,
+         config.USAGE_PACE_ENABLED) = saved
 
 
 async def test_fast_lane() -> None:
     saved = (config.CLAUDE_ACCOUNTS, config.MAX_CONCURRENT,
              config.USAGE_PACE_POLL_SECS, config.USAGE_PACE_MAX_WAIT_SECS,
              config.USAGE_PACE_PEAK_HOURS_PT, config.USAGE_PACE_LIGHT_SLOTS,
-             config.USAGE_PACE_LIGHT_TURNS)
+             config.USAGE_PACE_LIGHT_TURNS, config.USAGE_PACE_ENABLED)
+    config.USAGE_PACE_ENABLED = True
     config.CLAUDE_ACCOUNTS = []
     config.MAX_CONCURRENT = 6
     config.USAGE_PACE_POLL_SECS = 0.01
@@ -421,7 +441,7 @@ async def test_fast_lane() -> None:
         (config.CLAUDE_ACCOUNTS, config.MAX_CONCURRENT,
          config.USAGE_PACE_POLL_SECS, config.USAGE_PACE_MAX_WAIT_SECS,
          config.USAGE_PACE_PEAK_HOURS_PT, config.USAGE_PACE_LIGHT_SLOTS,
-         config.USAGE_PACE_LIGHT_TURNS) = saved
+         config.USAGE_PACE_LIGHT_TURNS, config.USAGE_PACE_ENABLED) = saved
 
 
 def test_run_counts_slots() -> None:
@@ -517,6 +537,200 @@ def test_loop_staggers() -> None:
         check(needle in text, f"the cooldown loop no longer consults {needle}")
 
 
+class _LogCapture(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.lines: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.lines.append(record.getMessage())
+
+
+async def test_shipped_default_never_holds() -> None:
+    """Off by default: a 99% reading inside peak hours holds nothing."""
+    from bot.claude.runner import admission
+
+    enabled = _shipped("USAGE_PACE_ENABLED")
+    check(not enabled, "usage pacing must ship off")
+    saved = (config.CLAUDE_ACCOUNTS, config.MAX_CONCURRENT, config.USAGE_PACE_ENABLED,
+             config.USAGE_PACE_PEAK_HOURS_PT)
+    real_is_peak = usage_pacing.is_peak
+    capture = _LogCapture()
+    saved_level = admission.log.level
+    admission.log.addHandler(capture)
+    admission.log.setLevel(logging.INFO)
+    config.USAGE_PACE_ENABLED = enabled
+    config.CLAUDE_ACCOUNTS = ["/acct/a", "/acct/b"]
+    config.MAX_CONCURRENT = 2
+    config.USAGE_PACE_PEAK_HOURS_PT = "5-11"
+    usage_pacing.is_peak = lambda now: True  # whatever the wall clock says
+    try:
+        d = usage_pacing.pace_limit(Reading(session_pct=99), WED_PEAK, 6)
+        check(d.limit == 6 and d.reason == "",
+              f"off, pace_limit must return MAX_CONCURRENT, got {d.limit} {d.reason!r}")
+
+        runner = _runner([Reading(session_pct=99)])
+        notes: list[str] = []
+
+        async def progress(head, body):
+            notes.append(head)
+
+        for origin in (InstanceOrigin.DIRECT, InstanceOrigin.BUILD):
+            runner._paced_running["/acct/a"] = 50
+            runner._paced_running[None] = 50
+            slot = await asyncio.wait_for(
+                runner._await_usage_headroom(_inst("t-off", origin=origin), progress), 1)
+            check(slot.account is None and not slot.light,
+                  f"off, the hold must hand back the empty slot, got {slot}")
+        check(not notes, f"off, a session must not be told it is held, got {notes}")
+        check(not runner._usage_waiters, "off, nobody may join the usage line")
+        check(not any("for usage pacing" in line for line in capture.lines),
+              f"off, no holding line may be logged, got {capture.lines}")
+
+        # The same call with pacing on holds and logs, so the checks above can fail.
+        config.USAGE_PACE_ENABLED = True
+        runner._paced_running["/acct/b"] = 50
+        held = asyncio.ensure_future(
+            runner._await_usage_headroom(_inst("t-on", origin=InstanceOrigin.BUILD), None))
+        await asyncio.sleep(0.05)
+        check(not held.done(), "on, the same reading must hold the session")
+        check(any("for usage pacing" in line for line in capture.lines),
+              f"on, the holding line must be logged, got {capture.lines}")
+        held.cancel()
+        await asyncio.gather(held, return_exceptions=True)
+    except asyncio.TimeoutError:
+        failures.append("the usage hold waited with pacing off")
+    finally:
+        admission.log.removeHandler(capture)
+        admission.log.setLevel(saved_level)
+        usage_pacing.is_peak = real_is_peak
+        (config.CLAUDE_ACCOUNTS, config.MAX_CONCURRENT, config.USAGE_PACE_ENABLED,
+         config.USAGE_PACE_PEAK_HOURS_PT) = saved
+
+
+async def test_slot_check_honours_the_ceiling() -> None:
+    """With pacing off the cooldown loop's slot check is the concurrency ceiling.
+
+    The disabled hold counts sessions under None while the check would look at
+    the real account, so without its own branch it read zero and reported a
+    free slot with every session running.
+    """
+    saved = (config.CLAUDE_ACCOUNTS, config.MAX_CONCURRENT, config.USAGE_PACE_ENABLED)
+    config.USAGE_PACE_ENABLED = _shipped("USAGE_PACE_ENABLED")
+    config.CLAUDE_ACCOUNTS = ["/acct/a", "/acct/b"]
+    config.MAX_CONCURRENT = 2
+    try:
+        runner = _runner([Reading(session_pct=99)])
+        read: list = []
+        picked: list = []
+
+        async def reader(account):
+            read.append(account)
+            return Reading(session_pct=99)
+
+        def pick(**kw):
+            picked.append(kw)
+            return "/acct/a"
+
+        runner.set_usage_reader(reader)
+        runner._pick_account = pick
+        typed = _inst("q-retry")
+        build = _inst("t-retry", origin=InstanceOrigin.BUILD)
+
+        # What run() does: the hold, the count, then the semaphore.
+        started: list = []
+        for name in ("t-1", "t-2"):
+            slot = await runner._await_usage_headroom(_inst(name), None)
+            runner._take_usage_slot(name, slot)
+            started.append((name, slot))
+
+        check(await runner.usage_slot_free(typed) and await runner.usage_slot_free(build),
+              "a free concurrency slot must read as free")
+        await runner._semaphore.acquire()
+        check(await runner.usage_slot_free(typed) and await runner.usage_slot_free(build),
+              "one of two concurrency slots taken must still read as free")
+        await runner._semaphore.acquire()
+        check(not await runner.usage_slot_free(typed),
+              "every concurrency slot taken must read as full for a typed retry")
+        check(not await runner.usage_slot_free(build),
+              "every concurrency slot taken must read as full for a build retry")
+        runner._semaphore.release()
+        check(await runner.usage_slot_free(typed) and await runner.usage_slot_free(build),
+              "a released concurrency slot must read as free again")
+        runner._semaphore.release()
+        check(not read and not picked,
+              f"off, the check must not read usage or pick an account, got {read} {picked}")
+        for name, slot in started:
+            runner._release_usage_slot(name, slot)
+    finally:
+        (config.CLAUDE_ACCOUNTS, config.MAX_CONCURRENT, config.USAGE_PACE_ENABLED) = saved
+
+
+async def test_retries_stagger_with_defaults() -> None:
+    """Parked retries still release one per stagger interval with pacing off.
+
+    cooldown_loop is a closure inside run() with the whole bot around it, so it
+    cannot be driven on its own. This evaluates the loop's real release
+    condition, lifted out of app.py, on a simulated clock and a real runner.
+    """
+    src = (Path(__file__).resolve().parents[1] / "bot" / "app.py").read_text(encoding="utf-8")
+    loop = next(n for n in ast.walk(ast.parse(src))
+                if isinstance(n, ast.AsyncFunctionDef) and n.name == "cooldown_loop")
+    gate = next((n for n in ast.walk(loop) if isinstance(n, ast.If)
+                 and "COOLDOWN_RETRY_STAGGER_SECS" in ast.unparse(n.test)), None)
+    check(gate is not None, "the cooldown loop no longer has a stagger condition")
+    if gate is None:
+        return
+    condition = compile(ast.Expression(gate.test), "cooldown_loop", "eval",
+                        flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
+
+    saved = (config.CLAUDE_ACCOUNTS, config.MAX_CONCURRENT, config.USAGE_PACE_ENABLED)
+    config.USAGE_PACE_ENABLED = _shipped("USAGE_PACE_ENABLED")
+    config.CLAUDE_ACCOUNTS = ["/acct/a", "/acct/b"]
+    config.MAX_CONCURRENT = 2
+    try:
+        runner = _runner([Reading(session_pct=99)])
+        clock = [0.0]
+        last_release = [float("-inf")]
+        due = [(0, str(i), _inst(f"q-{i}")) for i in range(50)]
+        namespace = {
+            "due": due, "config": config, "runner": runner,
+            "time": SimpleNamespace(monotonic=lambda: clock[0]),
+            "_cooldown_last_release": last_release,
+        }
+        stagger = config.COOLDOWN_RETRY_STAGGER_SECS
+        check(stagger > 0, "the stagger must stay on")
+
+        async def released() -> bool:
+            result = eval(condition, namespace)
+            result = await result if asyncio.iscoroutine(result) else result
+            if result:
+                last_release[0] = clock[0]
+                due.pop(0)
+            return bool(result)
+
+        times: list[float] = []
+        for step in range(25):
+            clock[0] = step * stagger / 6
+            if await released():
+                times.append(clock[0])
+        check(times == [i * stagger for i in range(len(times))] and len(times) == 5,
+              f"one retry per {stagger}s from the first pass, got {times}")
+
+        # A full house holds the release even with the stagger long since up,
+        # and it goes as soon as a slot frees.
+        clock[0] += stagger * 10
+        await runner._semaphore.acquire()
+        await runner._semaphore.acquire()
+        check(not await released(), "no retry may be released into a full house")
+        runner._semaphore.release()
+        check(await released(), "a freed slot must release the next retry")
+        runner._semaphore.release()
+        check(not await released(), "the stagger must still space the next one")
+    finally:
+        (config.CLAUDE_ACCOUNTS, config.MAX_CONCURRENT, config.USAGE_PACE_ENABLED) = saved
+
+
 async def test_reader() -> None:
     from bot.engine import plan_usage
 
@@ -538,6 +752,9 @@ def main() -> int:
     test_run_counts_slots()
     test_rank()
     test_loop_staggers()
+    asyncio.run(test_shipped_default_never_holds())
+    asyncio.run(test_slot_check_honours_the_ceiling())
+    asyncio.run(test_retries_stagger_with_defaults())
     asyncio.run(test_reader())
     if failures:
         print("FAIL: usage pacing")

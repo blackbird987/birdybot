@@ -608,7 +608,15 @@ class AdmissionMixin:
         return None
 
     async def usage_slot_free(self, instance: Instance | None = None) -> bool:
-        """Would ``instance``, starting now, go straight through the usage hold?"""
+        """Would ``instance``, starting now, go straight through the usage hold?
+
+        With pacing off the hold always passes and counts nothing per account,
+        so the only real limit left is MAX_CONCURRENT itself. Reporting that
+        keeps the cooldown loop from stacking retries behind the semaphore,
+        where several would start together as slots free.
+        """
+        if not config.USAGE_PACE_ENABLED:
+            return not self._semaphore.locked()
         account, decision = await self._usage_check(instance)
         eligible = instance is not None and usage_pacing.fast_lane_eligible(instance.origin)
         return self._admit(None, account, decision, eligible) is not None

@@ -6,13 +6,18 @@ and replays work during Anthropic's throttle window.  Written ahead of a
 refactor that extracts this into a ``UsageGate`` class, so that any change of
 behaviour, rather than of location, fails here.
 
+The gate is off by default since 2026-11-02 (``USAGE_PEAK_GATE_ENABLED``, see
+docs/design/usage-pacing.md).  ``main`` switches it on explicitly so the code
+stays covered; ``case_shipped_defaults`` pins what the shipped default does,
+and also the notifier start in ``bot/discord/startup.py``.
+
 What the gate actually is (read from the code, not assumed)
 -----------------------------------------------------------
 * It is a TIME WINDOW gate, not a per-account one.  ``is_usage_limit_active()``
   in ``bot/discord/usage_notifier.py`` is true on weekdays 5am-11am PT.  Account
   state (``has_spawnable_account`` and friends) plays no part in it.
-* Admission: ``_offer_gate`` returns False (work proceeds) when the window is
-  not active, when the channel has a live Run-now bypass, or when the channel
+* Admission: ``_offer_gate`` returns False (work proceeds) when the gate is
+  switched off, when the window is not active, when the channel has a live Run-now bypass, or when the channel
   is not a forum thread.  Otherwise it persists a queue entry, posts a
   Run now / Queue for 11am PT / Cancel prompt and returns True (work held).
 * Persistence is a JSON list at ``config.USAGE_QUEUE_FILE`` (NOT the
@@ -64,6 +69,7 @@ import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
 
 import asyncio
 import json
+import logging
 import os
 import re
 import sys
@@ -80,6 +86,7 @@ from bot import config
 from bot.discord import attachments
 from bot.discord import interactions as interactions_mod
 from bot.discord import usage_notifier
+from bot.discord import startup as startup_mod
 from bot.discord.bot import ClaudeBot
 from bot.engine import commands as commands_mod
 
@@ -775,6 +782,112 @@ async def case_startup_and_loop() -> None:
            all(c.tzinfo is not None for c in calls))
 
 
+def _shipped_gate_flag() -> bool:
+    """The flag's default as written in config.py, whatever .env says on this machine."""
+    src = (Path(__file__).resolve().parents[1] / "bot" / "config.py").read_text(encoding="utf-8")
+    match = re.search(r'os\.getenv\(\s*"USAGE_PEAK_GATE_ENABLED",\s*"([^"]*)"', src)
+    _check("config.py reads USAGE_PEAK_GATE_ENABLED with a default", match is not None)
+    return bool(match) and match.group(1).lower() in ("1", "true", "yes")
+
+
+class _LogCapture(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+    def lines(self, level: int) -> list[str]:
+        return [r.getMessage() for r in self.records if r.levelno == level]
+
+
+class _NotifierBot:
+    _start_usage_notifier = startup_mod.StartupMixin._start_usage_notifier
+
+    def __init__(self, user_id) -> None:
+        self._discord_user_id = user_id
+
+
+async def case_shipped_defaults() -> None:
+    print("\n== Shipped default: the gate does not intercept ==")
+    enabled = _shipped_gate_flag()
+    _check("the gate ships off", enabled is False)
+    saved_flag = config.USAGE_PEAK_GATE_ENABLED
+    real_loop = usage_notifier.usage_limit_notifier_loop
+    capture = _LogCapture()
+    startup_mod.log.addHandler(capture)
+    previous_level = startup_mod.log.level
+    startup_mod.log.setLevel(logging.INFO)
+    config.USAGE_PEAK_GATE_ENABLED = enabled
+    started: list = []
+
+    async def fake_loop(bot, user_id):
+        started.append(user_id)
+
+    usage_notifier.usage_limit_notifier_loop = fake_loop
+    try:
+        # Inside the window as far as the gate can tell, in a forum thread.
+        _patch_window(True)
+        bot = _Bot()
+        out = await bot._offer_usage_limit_choice(_Ctx("100", images=["/x/a.png"]), "hello")
+        _check("typed prompt inside the window: not intercepted", out is False)
+        out = await bot._offer_usage_limit_choice_for_callback(_Ctx("100"), "plan", "i-1", "m-1")
+        _check("button click inside the window: not intercepted", out is False)
+        _check("nothing sent", not bot.channels[100].sent)
+        _check("nothing queued", _qfile_entries() == [])
+
+        print("\n== Shipped default: an old queue entry still drains ==")
+        bot = _Bot().use_recorders()
+        _write_q([_entry("old", prompt="left-over")])
+        await bot._fire_due_entries(NOW)
+        _check("an entry queued before the switch is still replayed",
+               [r[2] for r in bot.replayed] == ["left-over"] and _qfile_entries() == [])
+
+        print("\n== Shipped default: the notifier does not start ==")
+        for user_id in (42, None):
+            capture.records.clear()
+            bot = _NotifierBot(user_id)
+            bot._start_usage_notifier()
+            bot._start_usage_notifier()  # on_ready again, on a reconnect
+            await _settle()
+            _check(f"user_id={user_id}: no notifier task",
+                   not started and getattr(bot, "_usage_notifier_task", None) is None)
+            _check(f"user_id={user_id}: no DISCORD_USER_ID warning",
+                   not capture.lines(logging.WARNING))
+            _check(f"user_id={user_id}: one INFO line saying it was not started",
+                   len(capture.lines(logging.INFO)) == 1
+                   and "notifier was not started" in capture.lines(logging.INFO)[0])
+
+        print("\n== Switched on: the notifier behaves as it did ==")
+        config.USAGE_PEAK_GATE_ENABLED = True
+        capture.records.clear()
+        bot = _NotifierBot(42)
+        bot._start_usage_notifier()
+        first = bot._usage_notifier_task
+        bot._start_usage_notifier()
+        _check("a running notifier is not started twice", bot._usage_notifier_task is first)
+        await _settle()
+        _check("the notifier starts for the owner", started == [42])
+        _check("nothing logged about it being off", not capture.records)
+        bot = _NotifierBot(None)
+        bot._start_usage_notifier()
+        bot._start_usage_notifier()
+        warnings = capture.lines(logging.WARNING)
+        _check("no owner id: the warning is logged once",
+               len(warnings) == 1 and "DISCORD_USER_ID" in warnings[0])
+
+        src = Path(startup_mod.__file__).read_text(encoding="utf-8")
+        _check("on_ready still calls the notifier start",
+               "self._start_usage_notifier()" in src)
+    finally:
+        usage_notifier.usage_limit_notifier_loop = real_loop
+        startup_mod.log.removeHandler(capture)
+        startup_mod.log.setLevel(previous_level)
+        config.USAGE_PEAK_GATE_ENABLED = saved_flag
+        _patch_window(True)
+
+
 class _Interaction:
     def __init__(self, msg: _Msg | None) -> None:
         self.message = msg
@@ -957,12 +1070,13 @@ _REAL_END = usage_notifier.next_window_end_utc
 
 
 async def main() -> int:
+    config.USAGE_PEAK_GATE_ENABLED = True  # off by default; these cases exercise it on
     case_window_functions()
     for case in (
         case_admission, case_persist_before_send, case_send_failures,
         case_bypass, case_callback_gate, case_store_primitives, case_drain,
         case_drain_images, case_startup_and_loop, case_buttons,
-        case_replay_handoff,
+        case_replay_handoff, case_shipped_defaults,
     ):
         await case()
     print()

@@ -4,6 +4,11 @@ When a subscription is near its limit a turn is offered Run now / Queue /
 Cancel instead of starting. A queued prompt is written to a lock-serialized
 JSON file and replayed when its slot comes due. Moved out of bot.py
 unchanged; the methods still read ClaudeBot's own attributes.
+
+The gate is off by default since 2026-11-02 (``USAGE_PEAK_GATE_ENABLED``), when
+the five-hour limit it protected no longer existed on this account. The queue
+half stays live either way, so an entry written before the switch still drains
+and the buttons on an old prompt still answer.
 """
 
 from __future__ import annotations
@@ -48,11 +53,13 @@ class UsageGateMixin:
         name shown in the gate UI ("Autopilot", "this prompt", etc.).
 
         Returns True when the gate handled the interaction.  Returns False
-        to fall through to normal dispatch — used when the window isn't
-        active, when a per-channel bypass is in effect, when the channel
-        isn't a forum thread (no replay path), and as a safety fallback
+        to fall through to normal dispatch: used when the gate is switched
+        off, when the window isn't active, when a per-channel bypass is in
+        effect, when the channel isn't a forum thread (no replay path), and as a safety fallback
         if the Discord send fails after the entry was persisted.
         """
+        if not config.USAGE_PEAK_GATE_ENABLED:
+            return False
         from bot.discord.usage_notifier import (
             is_usage_limit_active, next_window_end_utc,
         )

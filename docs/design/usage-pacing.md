@@ -1,5 +1,40 @@
 # Usage pacing: start sessions at a pace the plan can afford
 
+**Off by default since 2026-11-02, along with the peak-hour gate and its DMs.**
+Anthropic removed the five-hour limit for verified Ultra accounts starting
+2026-10-30. Confirmed live on 2026-11-02: a minimal CLI call on `~/.claude-main`
+returned a `rate_limit_event` whose `unifiedWindows` holds only `seven_day`, with
+no `five_hour`. The session-window reasoning below no longer applies to this
+account; it stays here because the code stays, and for any account that still has
+the window.
+
+- **Off:** the session-% tiers, the peak-hour cap, the hold and the fast lane
+  (`USAGE_PACE_ENABLED`), and the Run now / Queue / Cancel gate and the 5am/11am
+  PT DMs (`USAGE_PEAK_GATE_ENABLED`, read in `_offer_gate` and
+  `StartupMixin._start_usage_notifier`).
+- **Still on:** the staggered, ranked release of parked retries
+  (`COOLDOWN_RETRY_STAGGER_SECS`, `lifecycle.cooldown_retry_rank`), which the
+  owner kept on purpose. Also limit detection, account failover and parking,
+  account alerts, `MAX_CONCURRENT`, the memory limits, the usage queue's drain
+  (an old entry and its buttons still work) and the plan usage figures.
+- **The cooldown loop's slot check needs its own off branch.** With pacing off
+  the hold returns `UsageSlot(None)`, so running sessions are counted under the
+  `None` key while `usage_slot_free` would look at the real account, see zero and
+  report a slot with `MAX_CONCURRENT` sessions running. Retries would then stack
+  behind the semaphore and several could start together as slots free, which
+  defeats the stagger. So with pacing off `usage_slot_free` reports whether the
+  semaphore has a slot, and does not read usage or pick an account. The rule "only
+  when the runner has a usage slot free" below therefore means "only when the
+  concurrency ceiling has room" while pacing is off.
+- **To re-enable:** set `USAGE_PACE_ENABLED=1` and/or `USAGE_PEAK_GATE_ENABLED=1`
+  in `.env`, then reboot. They are independent. The harnesses switch both on
+  explicitly, so the disabled code stays covered.
+- **To turn one off again:** set it to `0`, do not comment it out. A reboot
+  inherits the old process environment, so a removed line leaves the previous
+  value live (the stale env item in `TODO.md`).
+
+The rest of this note describes the behaviour with pacing on.
+
 On 2026-10-15 every five-hour window ran out 9, 8, 4 and then 3 minutes after
 it opened (resets at 02:50, 07:50, 12:50 and 17:50 local), and one account hit
 its weekly cap. The limit was not exponential. The cooldown loop released the
@@ -89,8 +124,9 @@ Rules that must not drift:
 - **Only a prompt that starts with the nudge text is dropped.** A typed
   message that quotes a nudge in its background briefing is still the user's.
 
-Knobs: `USAGE_PACE_*` (the fast lane: `USAGE_PACE_LIGHT_SLOTS`, 0 turns it
+Knobs: `USAGE_PACE_ENABLED` and `USAGE_PEAK_GATE_ENABLED` (both off by default),
+`USAGE_PACE_*` (the fast lane: `USAGE_PACE_LIGHT_SLOTS`, 0 turns it
 off, and `USAGE_PACE_LIGHT_TURNS`) and `COOLDOWN_RETRY_STAGGER_SECS` in
 `bot/config.py`.
 
-Harness: `python scripts/test_usage_pacing.py`.
+Harnesses: `python scripts/test_usage_pacing.py`, `python scripts/test_usage_gate.py`.

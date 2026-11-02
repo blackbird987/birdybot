@@ -1,5 +1,12 @@
 """How many sessions may run at once, given the plan's real usage figures.
 
+Off by default since 2026-11-02 (``USAGE_PACE_ENABLED``): Anthropic removed the
+five-hour limit for verified Ultra accounts, so the session window this module
+protects no longer exists on this account. While it is off ``pace_limit``
+returns the MAX_CONCURRENT ceiling and the runner's hold returns at once. The
+rest of this docstring describes the behaviour with it on. See
+docs/design/usage-pacing.md.
+
 MAX_CONCURRENT is a count and knows nothing about the subscription. On
 2026-10-15 every five-hour window ran out 9, 8, 4 and then 3 minutes after it
 opened: the whole parked backlog started in the same minute, and every one of
