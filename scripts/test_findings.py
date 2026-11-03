@@ -36,9 +36,11 @@ sys.path.insert(0, str(ROOT))
 
 from bot import config  # noqa: E402
 from bot.engine import findings, prior_art, sensors, step_parse, steps  # noqa: E402
+from bot.procutil import install_root  # noqa: E402
 
 TOOL = ROOT / "scripts" / "study" / "study.py"
-PROGRAMMING = Path("/home/quincy/Programming")
+# The repos sit beside the install, wherever this checkout is.
+PROGRAMMING = install_root(ROOT).parent
 
 _passed = 0
 _failed = 0
