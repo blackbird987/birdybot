@@ -418,6 +418,7 @@ async def on_help(ctx: RequestContext) -> None:
         "`/discard` — delete branch\n"
         "`/branches` — list orphaned branches\n"
         "`/cost` — spending breakdown\n"
+        "`/secret`: keys pasted into chat (list, add, forget, rename, grant)\n"
         "`/evals` — recurring session-quality flags\n"
         "`/status` — health dashboard\n"
         "`/auth` — Claude account status / re-login\n"

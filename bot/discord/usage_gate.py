@@ -112,6 +112,7 @@ class UsageGateMixin:
             "repo_name": ctx.repo_name,
             "user_id": ctx.user_id,
             "user_name": ctx.user_name,
+            "is_owner": ctx.is_owner,
         }
         entry.update(entry_extras)
         # Persist before send so a reboot between render and click cannot
@@ -313,6 +314,8 @@ class UsageGateMixin:
                     await self._replay_to_thread(
                         entry["channel_id"], prompt,
                         repo_name=entry.get("repo_name"),
+                        is_owner=entry.get("is_owner"), user_id=entry.get("user_id"),
+                        user_name=entry.get("user_name"),
                     )
             except Exception:
                 log.exception(

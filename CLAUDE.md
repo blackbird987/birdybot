@@ -145,6 +145,7 @@ the incident that made each one necessary. They are not loaded automatically.
 - **Usage pacing** (`docs/design/usage-pacing.md`): off by default since 2026-11-02 with the peak-hour gate (`USAGE_PACE_ENABLED`, `USAGE_PEAK_GATE_ENABLED`), the staggered retry release stays on; `bot/claude/usage_pacing.py`, `AdmissionMixin._await_usage_headroom`, `_paced_running` in `ClaudeRunner.run`, `lifecycle.cooldown_retry_rank`, the staggered `cooldown_loop` in `app.py`; cap never below one, no reading is no cap, count the slot with no await after the hold. `scripts/test_usage_pacing.py`, `scripts/test_usage_gate.py`
 - **Cost gates** (`docs/design/cost-gates.md`): `total_cost_usd`, `COST_GATES_ENFORCE`, `cmd_state.within_dollar_budget`. `scripts/test_cost_gates.py`
 - **Multi-account** (`docs/design/multi-account.md`): `CLAUDE_ACCOUNTS` setup, `_pick_account`, sidelining, `REASON_ORG_DISABLED`, `retry_account_now`, `wizard._render_auth_panel`. `scripts/test_account_failover.py`, `scripts/test_account_alerts.py`
+- **Secret intake** (`docs/design/secret-intake.md`): `bot/discord/secret_door.py`, `bot/secret_detect.py`, `bot/vault.py`, `bot/engine/secret_scan.py`, `Instance.vault_eligible`, `SecretDoorTree`; the door runs first and fails closed, only an owner's turn with no guest gets keys, not a containment boundary. `scripts/test_secret_intake.py`
 - **Discord test setup** (`docs/design/discord-testing.md`): webhook setup for `scripts/discord_test.py`, plus the full testing notes.
 
 ## Versioning

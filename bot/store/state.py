@@ -554,6 +554,14 @@ class StateStore(ReposMixin, AccountsMixin, SchedulesMixin, ChainsMixin):
         new_inst.parent_id = inst.id
         new_inst.repo_name = inst.repo_name
         new_inst.repo_path = inst.repo_path
+        # A re-run is the same person's turn. Without these, retrying a guest's
+        # failed run started it as the owner (the field defaults say so).
+        new_inst.is_owner_session = inst.is_owner_session
+        new_inst.vault_eligible = inst.vault_eligible
+        new_inst.user_id = inst.user_id
+        new_inst.user_name = inst.user_name
+        new_inst.bash_policy = inst.bash_policy
+        new_inst.bash_policy_baseline = inst.bash_policy_baseline
         if inst.session_id:
             new_inst.session_id = inst.session_id
         if inst.branch:

@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 import discord
 
-from bot import config
+from bot import config, secret_detect
 from bot.engine import commands
 
 if TYPE_CHECKING:
@@ -85,6 +85,12 @@ class RepoNameModal(discord.ui.Modal, title="Repo Name"):
             return
 
         repo_name = self.name.value.strip().replace(" ", "-")
+        if secret_detect.scan(repo_name):
+            await interaction.response.send_message(
+                "That looks like it holds a secret, so I did not use it as a repo name.",
+                ephemeral=True,
+            )
+            return
         if not repo_name:
             await interaction.response.send_message("Name cannot be empty.", ephemeral=True)
             return

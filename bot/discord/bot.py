@@ -45,6 +45,7 @@ from bot.discord.thread_ctx import ThreadContextMixin
 from bot.discord.titles import generate_title_text, read_ai_title
 from bot.discord.usage_gate import UsageGateMixin
 from bot.discord import memes
+from bot.discord import secret_door
 from bot.engine import commands
 from bot.platform.base import RequestContext, delete_after
 from bot.services.twitter import enrich_with_tweets
@@ -55,6 +56,13 @@ if TYPE_CHECKING:
     from bot.store.state import StateStore
 
 log = logging.getLogger(__name__)
+
+
+class SecretDoorTree(app_commands.CommandTree):
+    """Slash command options go through the door before a command reads them."""
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await secret_door.screen_slash(self.client, interaction)
 
 
 class _AutoDeleteMessenger:
@@ -107,7 +115,7 @@ class ClaudeBot(StartupMixin, ThreadContextMixin, UsageGateMixin, PendingImagesM
         self._owner_unset_warned = False
         self._ready_event = asyncio.Event()
 
-        self.tree = app_commands.CommandTree(self)
+        self.tree = SecretDoorTree(self)
         self._messenger: DiscordMessenger | None = None
 
         # Forum manager — owns all forum/thread data and operations
@@ -530,16 +538,92 @@ class ClaudeBot(StartupMixin, ThreadContextMixin, UsageGateMixin, PendingImagesM
         else:
             msg_access = AccessResult(allowed=True, is_owner=True)
 
+        # The door comes before everything that reads the message. Failing
+        # closed on a bug here is deliberate: the alternative is that a key goes
+        # to the session because the thing that stops keys threw.
+        try:
+            door = await secret_door.screen_message(self, message, msg_access)
+        except Exception:
+            log.exception("Secret door failed on a message in %s", message.channel.id)
+            try:
+                await message.channel.send(
+                    "I couldn't screen that message for secrets, so I did not "
+                    "send it to the session. Try again.",
+                )
+            except Exception:
+                pass
+            return
+        if not door.proceed:
+            return
+        await self._route_screened(message, msg_access, door)
+
+    async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent) -> None:
+        """Screen an edit: a key added after the fact never reaches a session,
+        but it stays visible in the channel otherwise.
+
+        Same guards as on_message, because raw edits fire for the bot's own
+        cards too, and no fetch until something is found, because edits are
+        constant. Nothing here ever re-runs a prompt.
+        """
+        data = payload.data
+        content = data.get("content")
+        if not content:
+            return
+        author = data.get("author") or {}
+        webhook_id = data.get("webhook_id")
+        is_test_webhook = bool(
+            config.TEST_WEBHOOK_IDS and webhook_id
+            and str(webhook_id) in config.TEST_WEBHOOK_IDS
+        )
+        if self.user and str(author.get("id")) == str(self.user.id):
+            return
+        if (webhook_id or author.get("bot")) and not is_test_webhook:
+            return
+        if secret_door.is_held(payload.message_id):
+            return
+        if not secret_door.edit_needs_door(content):
+            return
+        try:
+            channel = self.get_channel(payload.channel_id) or await self.fetch_channel(payload.channel_id)
+            if not self._in_scope(getattr(channel, "guild", None), channel):
+                return
+            if is_test_webhook:
+                access = AccessResult(allowed=True, is_owner=True)
+            else:
+                access = self._check_access(int(author.get("id") or 0), channel_id=str(channel.id))
+                if not access.allowed:
+                    return
+            message = await channel.fetch_message(payload.message_id)
+            await secret_door.screen_edit(self, message, access)
+        except Exception:
+            log.exception("Secret door failed on an edit in %s", payload.channel_id)
+
+    async def _route_screened(
+        self, message: discord.Message, msg_access: AccessResult,
+        door: secret_door.DoorResult,
+    ) -> None:
+        """Everything after the door. A resolved hold re-enters here."""
+        if door.text is not None:
+            message.content = door.text
+
+        # A meme reacts to and replies on the message, so a deleted one cannot
+        # be handled, and that channel has no session to send it to instead.
+        if door.deleted:
+            if message.channel.id == memes._channel_id():
+                return
         # Meme drop: handled inline and returned before any session routing,
         # so a pasted link costs no tokens and spawns no thread. Claims every
         # message in that channel, links or not - it is not a session channel.
-        if await memes.handle(message):
+        elif await memes.handle(message):
             return
 
         text = message.content.strip()
         text, _image_paths, _go_on = await attachments.ingest_attachments(
             message, text, voice_enabled=self._voice_enabled,
             quiet=message.channel.id in self._forums.archive_channel_ids,
+            prefetched=door.prefetched, sanitized=door.sanitized,
+            consumed=door.consumed,
+            transcript_screen=secret_door.transcript_screen(self, message, door),
         )
         if not _go_on:
             return
@@ -651,7 +735,13 @@ class ClaudeBot(StartupMixin, ThreadContextMixin, UsageGateMixin, PendingImagesM
                             log.debug("Wake-on-work check failed for %s",
                                       proj.repo_name, exc_info=True)
                         # Track interacting user for close mentions
-                        info.user_ids.add(str(message.author.id))
+                        # Saved at once when it grows: a guest in this set is
+                        # what keeps the vault out of the thread's runs, and
+                        # that must survive a restart.
+                        author_id = str(message.author.id)
+                        if author_id not in info.user_ids:
+                            info.user_ids.add(author_id)
+                            self._forums.save_forum_map()
                         session_id = info.session_id or None
                         repo_name = proj.repo_name if proj.repo_name != "_default" else None
                         origin = info.origin
@@ -700,6 +790,8 @@ class ClaudeBot(StartupMixin, ThreadContextMixin, UsageGateMixin, PendingImagesM
                         ctx.pending_image_paths = list(_image_paths)
                         self._forums.attach_session_callbacks(ctx, info, channel_id)
                         user_text = text  # preserve before tweet enrichment for title/topic
+                        if door.deleted:
+                            self._forums.current_message_gone.add(channel_id)
                         try:
                             try:
                                 text = await enrich_with_tweets(text)
@@ -707,6 +799,7 @@ class ClaudeBot(StartupMixin, ThreadContextMixin, UsageGateMixin, PendingImagesM
                                 log.warning("Tweet enrichment failed, continuing with original text", exc_info=True)
                             await commands.on_text(ctx, text)
                         finally:
+                            self._forums.current_message_gone.discard(channel_id)
                             if was_pending:
                                 await self._forums.finalize_pending_thread(channel_id, message.channel, user_text)
                             if not info._title_generated:

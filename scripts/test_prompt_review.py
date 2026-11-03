@@ -487,6 +487,8 @@ class _Forums:
 
 
 class _Bot(ThreadContextMixin):
+    _discord_user_id = None
+
     def __init__(self, store, runner, messenger, forums) -> None:
         self._store = store
         self._runner = runner

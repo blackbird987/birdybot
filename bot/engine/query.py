@@ -6,7 +6,7 @@ import asyncio
 import logging
 import secrets
 
-from bot import config
+from bot import config, vault
 from bot.claude.types import InstanceStatus, InstanceType
 from bot.engine import (
     lifecycle,
@@ -353,6 +353,9 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
             prime_mode, ctx.channel_id, len(prime_briefing),
         )
 
+    # Backstop behind the door: state.json must never hold a stored value, even
+    # one a primed briefing or a queued replay carried in from somewhere else.
+    prompt = vault.strip_literals(prompt)
     inst = ctx.store.create_instance(
         instance_type=InstanceType.QUERY,
         prompt=prompt,
@@ -370,6 +373,7 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
     inst.user_id = ctx.user_id or ""
     inst.user_name = ctx.user_name or ""
     inst.is_owner_session = ctx.is_owner
+    inst.vault_eligible = ctx.is_owner and not ctx.thread_has_guest
     if not ctx.is_owner and ctx.bash_policy:
         inst.bash_policy = ctx.bash_policy
         inst.bash_policy_baseline = ctx.bash_policy

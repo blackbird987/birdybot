@@ -152,6 +152,8 @@ class Scheduler:
         instance.repo_name = sched.repo_name
         instance.repo_path = sched.repo_path
         instance.effort = self._store.effort
+        # /schedule is owner only, so what runs here is the owner's.
+        instance.vault_eligible = True
 
         instance.status = InstanceStatus.RUNNING
         self._store.update_instance(instance)

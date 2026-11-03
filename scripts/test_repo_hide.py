@@ -270,7 +270,7 @@ check("every unattended resume (self-wake, watch, --here schedule, spawn "
       "join, reboot replay) wakes the repo",
       "wake_repo_if_dormant" in replay)
 
-on_msg = inspect.getsource(discord_bot_mod.ClaudeBot.on_message)
+on_msg = inspect.getsource(discord_bot_mod.ClaudeBot._route_screened)
 check("and so does a user message in an existing forum thread",
       "wake_repo_if_dormant" in on_msg)
 
