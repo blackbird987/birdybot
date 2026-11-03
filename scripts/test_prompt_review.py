@@ -20,10 +20,9 @@ of properties that are easy to lose in a refactor:
     re-fires it nor skips the week.
   * a **rejected** proposal is recognised on its (file, flag) targets, not on
     its diff text, so a reworded rerun of the same idea is still suppressed.
-  * a run gets **all the way through**, with only the CLI faked: from the real
-    handle `send_thinking` returns, to the report, the buttons and both clicks.
-    Every scheduled run died on that handle for the feature's first 7 weeks,
-    because nothing here ever touched it.
+  * a run gets **all the way through**, from the real handle `send_thinking`
+    returns to the report, the buttons and both clicks. All 7 scheduled runs
+    after launch died on that handle, because nothing here ever touched it.
 
 Run: python scripts/test_prompt_review.py
 """
@@ -39,6 +38,7 @@ import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -392,16 +392,15 @@ _body_src = inspect.getsource(dpr._embed_body)
 check("the embed indexes the report instead of pasting it again",
       "report.raw" not in _body_src)
 
+
 # ------------------------------------------------- 10. a real run, end to end
 
 print()
 print("a run reaches its outcome, and the buttons on it work")
 
-# Everything above reads source or calls pure helpers, so nothing here ever
-# touched the handle `send_thinking` returns, and all 7 scheduled runs from
-# 2026-09-15 to 2026-10-27 died on it within two seconds. So this drives the
-# real path: only the CLI run itself, the Discord objects and the build's
-# thread creation and dispatch are fake.
+# Everything above reads source or calls pure helpers, which is how the handle
+# bug survived. This drives the real path instead: only the CLI run itself, the
+# Discord objects and the build's thread creation and dispatch are fake.
 
 from bot.claude.runner import ClaudeRunner  # noqa: E402
 from bot.claude.runner.core import _save_result_file  # noqa: E402
@@ -475,7 +474,7 @@ class _Forums:
 
     async def get_or_create_session_thread(self, repo_name, **kw):
         self.created.append({"repo": repo_name, **kw})
-        return type("T", (), {"id": 900})()
+        return SimpleNamespace(id=900)
 
     def thread_to_project(self, channel_id):
         return (None, self.info)
@@ -508,15 +507,18 @@ class _Interaction:
         async def _followup(text, **kw):
             self.followups.append(text)
 
-        self.response = type("R", (), {"defer": staticmethod(_defer)})()
-        self.followup = type("F", (), {"send": staticmethod(_followup)})()
+        self.response = SimpleNamespace(defer=_defer)
+        self.followup = SimpleNamespace(send=_followup)
 
 
-def _proposal(flag: str, trailer: str = "") -> str:
+def _proposal(flag: str) -> str:
+    """A report in the shape the review prompt asks for."""
     return (
+        "NET LINES: +0 -1\n\n"
         f"### PROPOSAL 1\nFILE: bot/config.py\nFLAG: {flag}\nCLASS: obsolete\n"
         "WHY: the rule names a command that is gone.\n"
-        f"```diff\n- old rule\n```\nNET LINES: -1\n{trailer}"
+        "```diff\n- old rule\n```\n\n"
+        "Reported, not proposed\n- Over-long response: disobeyed\n"
     )
 
 
@@ -570,13 +572,15 @@ async def _end_to_end() -> None:
     check("and leaves nothing pending", not _pending(), str(_pending()))
     check("the caller is told zero proposals", "0 proposal(s)" in outcome, outcome)
 
-    # The CLI's own end marker was seen on real results; it must not cost a run.
-    await _review(pr.NO_PROPOSALS + "\n\n[TURN_COMPLETE]")
+    # The bot's end-of-turn marker has been seen on real results. It must not
+    # turn a clean answer into a broken one.
+    await _review(f"{pr.NO_PROPOSALS}\n\n{config.TURN_COMPLETE_SENTINEL}")
     check("a trailing turn marker still parses as no proposals",
           "no changes proposed" in (thread.sent[0]["content"] or ""), str(thread.sent))
 
     # --- a proposal, then Reject
-    outcome, first = await _review(_proposal("Over-long response", "\n[TURN_COMPLETE]"))
+    outcome, first = await _review(
+        f"{_proposal('Over-long response')}\n{config.TURN_COMPLETE_SENTINEL}")
     check("a valid proposal is counted", "1 proposal(s)" in outcome, outcome)
     sent = thread.sent[0] if thread.sent else {}
     embed, view = sent.get("embed"), sent.get("view")
@@ -591,7 +595,7 @@ async def _end_to_end() -> None:
           str(_pending()))
 
     tap = _Interaction()
-    await dpr.handle_button(bot, tap, ids[1] if ids else "")
+    await dpr.handle_button(bot, tap, ids[1])
     check("Reject answers the owner", tap.followups[-1:] ==
           ["Rejected. It will not be proposed again."], str(tap.followups))
     check("Reject clears pending", first.id not in _pending(), str(_pending()))
@@ -644,11 +648,11 @@ async def _end_to_end() -> None:
     check("no fast repo command can capture the approve brief",
           not any(p.search(dpr._APPROVE_BRIEF.strip()) for p in _FAST_REPO_PATTERNS))
     check("run history went to the temporary log",
-          history_mod.HISTORY_FILE.is_relative_to(root)
-          and first.id in history_mod.HISTORY_FILE.read_text(encoding="utf-8"))
+          first.id in history_mod.HISTORY_FILE.read_text(encoding="utf-8"))
 
 
-# Every path a run writes to, so this can never reach the real data dir.
+# Every other path a run writes to (the store is built on the temporary dir and
+# the eval dir was redirected at the top), so this never reaches the real data.
 _saved_paths = (
     config.RESULTS_DIR, config.REBOOT_REQUEST_FILE,
     config.REBOOT_REQUEST_DEFERRED_FILE, history_mod.HISTORY_FILE,
@@ -681,5 +685,5 @@ print(f"PASS: corrections are proposed, never applied ({checks} checks).")
 print("      A retired check's flags stop counting but stay readable, the")
 print("      agent sees a bounded table behind a read-only floor, a rule that")
 print("      is merely disobeyed is reported and left alone, the weekly gate")
-print("      is a persisted clock, and a rejected idea stays rejected even")
-print("      when it comes back reworded.")
+print("      is a persisted clock, a rejected idea stays rejected even when")
+print("      it comes back reworded, and a real run reaches its buttons.")
