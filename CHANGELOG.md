@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **The weekly prompt review can finish a run.** It had never completed one since it launched on 2026-09-08: all 7 scheduled runs (2026-09-15 to 2026-10-27) died within two seconds with `TypeError: 'MessageHandle' object is not subscriptable`, because `bot/discord/prompt_review.py` read the thinking card's message ID with `handle["message_id"]`, and that handle only has `.get()`. The harness never touched the handle, so it stayed green. It now drives a real run with only the CLI and the Discord objects faked, through the report, the buttons, Reject and Approve, and it fails with this error on the old line. Harness: `scripts/test_prompt_review.py`.
+
 ## v0.102.11, Usage pacing and the peak-hour gate are off by default (2026-11-02)
 
 ### Changed

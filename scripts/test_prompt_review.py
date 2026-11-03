@@ -20,6 +20,10 @@ of properties that are easy to lose in a refactor:
     re-fires it nor skips the week.
   * a **rejected** proposal is recognised on its (file, flag) targets, not on
     its diff text, so a reworded rerun of the same idea is still suppressed.
+  * a run gets **all the way through**, with only the CLI faked: from the real
+    handle `send_thinking` returns, to the report, the buttons and both clicks.
+    Every scheduled run died on that handle for the feature's first 7 weeks,
+    because nothing here ever touched it.
 
 Run: python scripts/test_prompt_review.py
 """
@@ -28,6 +32,7 @@ from __future__ import annotations
 
 import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
 
+import asyncio
 import inspect
 import json
 import sys
@@ -386,6 +391,282 @@ check("and it is the oldest that is evicted",
 _body_src = inspect.getsource(dpr._embed_body)
 check("the embed indexes the report instead of pasting it again",
       "report.raw" not in _body_src)
+
+# ------------------------------------------------- 10. a real run, end to end
+
+print()
+print("a run reaches its outcome, and the buttons on it work")
+
+# Everything above reads source or calls pure helpers, so nothing here ever
+# touched the handle `send_thinking` returns, and all 7 scheduled runs from
+# 2026-09-15 to 2026-10-27 died on it within two seconds. So this drives the
+# real path: only the CLI run itself, the Discord objects and the build's
+# thread creation and dispatch are fake.
+
+from bot.claude.runner import ClaudeRunner  # noqa: E402
+from bot.claude.runner.core import _save_result_file  # noqa: E402
+from bot.claude.types import RunResult  # noqa: E402
+from bot.discord.forums import ThreadInfo  # noqa: E402
+from bot.discord.thread_ctx import ThreadContextMixin  # noqa: E402
+from bot.engine import commands  # noqa: E402
+from bot.engine.repo_cmds import _FAST_REPO_PATTERNS  # noqa: E402
+from bot.platform.base import MessageHandle  # noqa: E402
+from bot.store import history as history_mod  # noqa: E402
+from bot.store.state import StateStore  # noqa: E402
+
+
+class _Messenger:
+    platform_name = "discord"
+
+    def __init__(self) -> None:
+        self.reports: list[str] = []
+
+    def escape(self, text):
+        return text
+
+    def markdown_to_markup(self, md):
+        return md
+
+    def chunk_message(self, text):
+        return [text]
+
+    def format_mention(self, user_id):
+        return None
+
+    async def send_thinking(self, channel_id, text, buttons=None, **kw):
+        # The real type, which is the whole point: a dict here would hide the bug.
+        return MessageHandle(platform="discord", _data={"message_id": "123"})
+
+    async def edit_thinking(self, *a, **kw):
+        return True
+
+    async def send_text(self, channel_id, text, *a, **kw):
+        self.reports.append(text)
+        return "msg-text"
+
+    async def send_result(self, channel_id, markup, *a, **kw):
+        self.reports.append(markup)
+        return "msg-result"
+
+    async def edit_text(self, *a, **kw):
+        return True
+
+    async def delete_message(self, *a, **kw):
+        return None
+
+    async def set_near_limit(self, *a, **kw):
+        return None
+
+
+class _Thread:
+    id = 700
+
+    def __init__(self) -> None:
+        self.sent: list[dict] = []
+
+    async def send(self, content=None, **kw):
+        self.sent.append({"content": content, **kw})
+
+
+class _Forums:
+    def __init__(self) -> None:
+        self.created: list[dict] = []
+        self.info = ThreadInfo(thread_id="900")
+
+    async def get_or_create_session_thread(self, repo_name, **kw):
+        self.created.append({"repo": repo_name, **kw})
+        return type("T", (), {"id": 900})()
+
+    def thread_to_project(self, channel_id):
+        return (None, self.info)
+
+    def attach_session_callbacks(self, ctx, info, channel_id):
+        return None
+
+    def persist_ctx_settings(self, ctx):
+        return None
+
+
+class _Bot(ThreadContextMixin):
+    def __init__(self, store, runner, messenger, forums) -> None:
+        self._store = store
+        self._runner = runner
+        self.messenger = messenger
+        self._forums = forums
+
+    async def _offer_usage_limit_choice(self, *a, **kw):
+        return False
+
+
+class _Interaction:
+    def __init__(self) -> None:
+        self.followups: list[str] = []
+
+        async def _defer(**kw):
+            return None
+
+        async def _followup(text, **kw):
+            self.followups.append(text)
+
+        self.response = type("R", (), {"defer": staticmethod(_defer)})()
+        self.followup = type("F", (), {"send": staticmethod(_followup)})()
+
+
+def _proposal(flag: str, trailer: str = "") -> str:
+    return (
+        f"### PROPOSAL 1\nFILE: bot/config.py\nFLAG: {flag}\nCLASS: obsolete\n"
+        "WHY: the rule names a command that is gone.\n"
+        f"```diff\n- old rule\n```\nNET LINES: -1\n{trailer}"
+    )
+
+
+async def _end_to_end() -> None:
+    root = Path(tmpdir.name)
+    store = StateStore(root / "state.json", config.RESULTS_DIR)
+    store.add_repo("bot", str(config._PROJECT_ROOT))
+    runner = ClaudeRunner(store)
+    messenger = _Messenger()
+    forums = _Forums()
+    bot = _Bot(store, runner, messenger, forums)
+    thread = _Thread()
+
+    answer = {"text": ""}
+    seen: list = []
+
+    async def _fake_cli(inst, **kw):
+        seen.append((inst.mode, inst.bash_policy, inst.origin))
+        _save_result_file(inst, answer["text"])
+        return RunResult(session_id="sess-review", result_text=answer["text"])
+
+    runner.run = _fake_cli
+
+    async def _review(text: str):
+        answer["text"] = text
+        thread.sent.clear()
+        before = {i.id for i in store.list_instances()}
+        outcome = await dpr._run_review_locked(
+            bot, 7, "bot", str(config._PROJECT_ROOT), thread)
+        inst = next(i for i in store.list_instances() if i.id not in before)
+        return outcome, inst
+
+    def _pending() -> dict:
+        return dpr._state(bot).get(dpr._STATE_PENDING) or {}
+
+    # --- nothing to propose
+    outcome, inst = await _review(pr.NO_PROPOSALS)
+    check("a run gets past the thinking card and completes",
+          inst.status == InstanceStatus.COMPLETED, inst.status.value)
+    check("the card's message id is recorded on the instance",
+          inst.message_ids.get("discord", [None])[0] == "123", str(inst.message_ids))
+    check("the CLI run really happened behind the read-only floor",
+          seen == [("explore", "none", InstanceOrigin.PROMPT_REVIEW)], str(seen))
+    check("the result file is in the temporary results dir",
+          Path(inst.result_file).parent == config.RESULTS_DIR, str(inst.result_file))
+    check("the review's report is posted into the thread",
+          any(pr.NO_PROPOSALS in r for r in messenger.reports), str(messenger.reports))
+    check("NO PROPOSALS posts the quiet no-change line, no buttons",
+          len(thread.sent) == 1 and "no changes proposed" in thread.sent[0]["content"]
+          and "view" not in thread.sent[0], str(thread.sent))
+    check("and leaves nothing pending", not _pending(), str(_pending()))
+    check("the caller is told zero proposals", "0 proposal(s)" in outcome, outcome)
+
+    # The CLI's own end marker was seen on real results; it must not cost a run.
+    await _review(pr.NO_PROPOSALS + "\n\n[TURN_COMPLETE]")
+    check("a trailing turn marker still parses as no proposals",
+          "no changes proposed" in (thread.sent[0]["content"] or ""), str(thread.sent))
+
+    # --- a proposal, then Reject
+    outcome, first = await _review(_proposal("Over-long response", "\n[TURN_COMPLETE]"))
+    check("a valid proposal is counted", "1 proposal(s)" in outcome, outcome)
+    sent = thread.sent[0] if thread.sent else {}
+    embed, view = sent.get("embed"), sent.get("view")
+    check("a valid proposal posts the embed", embed is not None
+          and "bot/config.py" in (embed.description or ""), str(sent))
+    ids = [c.custom_id for c in view.children] if view else []
+    check("with Approve and Reject buttons",
+          ids == [f"ark:promptreview:approve:{first.id}",
+                  f"ark:promptreview:reject:{first.id}"], str(ids))
+    check("and the pending entry is recorded", first.id in _pending()
+          and _pending()[first.id]["targets"] == ["bot/config.py :: Over-long response"],
+          str(_pending()))
+
+    tap = _Interaction()
+    await dpr.handle_button(bot, tap, ids[1] if ids else "")
+    check("Reject answers the owner", tap.followups[-1:] ==
+          ["Rejected. It will not be proposed again."], str(tap.followups))
+    check("Reject clears pending", first.id not in _pending(), str(_pending()))
+    check("Reject records the fingerprint",
+          pr.fingerprint(pr.parse_review(_proposal("Over-long response")).proposals)
+          in dpr.rejected_fingerprints(bot))
+
+    await _review(_proposal("Over-long response"))
+    check("the same idea next week is suppressed, without buttons",
+          len(thread.sent) == 1 and "suppressed" in thread.sent[0]["content"],
+          str(thread.sent))
+
+    # --- a proposal, then Approve
+    report_text = _proposal("Stale command name")
+    _, second = await _review(report_text)
+    approve_id = thread.sent[0]["view"].children[0].custom_id
+    dispatched: list = []
+
+    async def _fake_on_text(ctx, prompt):
+        dispatched.append((ctx, prompt))
+
+    real_on_text = commands.on_text
+    commands.on_text = _fake_on_text
+    try:
+        tap = _Interaction()
+        await dpr.handle_button(bot, tap, approve_id)
+        for _ in range(3):
+            await asyncio.sleep(0)
+    finally:
+        commands.on_text = real_on_text
+
+    check("Approve opens one build thread on the bot's own repo",
+          [c["repo"] for c in forums.created] == ["bot"], str(forums.created))
+    check("the build thread is a build", forums.info.mode == "build"
+          and len(dispatched) == 1 and dispatched[0][0].mode == "build",
+          str(forums.info.mode))
+    prompt = dispatched[0][1] if dispatched else ""
+    check("the brief carries the rules and the full report",
+          prompt.startswith(dpr._APPROVE_BRIEF) and report_text in prompt)
+    check("Approve clears pending", second.id not in _pending(), str(_pending()))
+    check("Approve links the build", tap.followups[-1:] == ["Build opened: <#900>"],
+          str(tap.followups))
+
+    tap = _Interaction()
+    await dpr.handle_button(bot, tap, approve_id)
+    check("a later tap on a resolved proposal opens nothing",
+          len(forums.created) == 1 and "no longer pending" in tap.followups[-1],
+          str(tap.followups))
+
+    check("no fast repo command can capture the approve brief",
+          not any(p.search(dpr._APPROVE_BRIEF.strip()) for p in _FAST_REPO_PATTERNS))
+    check("run history went to the temporary log",
+          history_mod.HISTORY_FILE.is_relative_to(root)
+          and first.id in history_mod.HISTORY_FILE.read_text(encoding="utf-8"))
+
+
+# Every path a run writes to, so this can never reach the real data dir.
+_saved_paths = (
+    config.RESULTS_DIR, config.REBOOT_REQUEST_FILE,
+    config.REBOOT_REQUEST_DEFERRED_FILE, history_mod.HISTORY_FILE,
+)
+config.RESULTS_DIR = Path(tmpdir.name) / "results"
+config.RESULTS_DIR.mkdir()
+config.REBOOT_REQUEST_FILE = Path(tmpdir.name) / "reboot_request.json"
+config.REBOOT_REQUEST_DEFERRED_FILE = Path(tmpdir.name) / "reboot_request.deferred.json"
+history_mod.HISTORY_FILE = Path(tmpdir.name) / "history.jsonl"
+try:
+    asyncio.run(_end_to_end())
+except Exception as exc:
+    check("the end-to-end run finished", False, f"{type(exc).__name__}: {exc}")
+finally:
+    (
+        config.RESULTS_DIR, config.REBOOT_REQUEST_FILE,
+        config.REBOOT_REQUEST_DEFERRED_FILE, history_mod.HISTORY_FILE,
+    ) = _saved_paths
 
 tmpdir.cleanup()
 

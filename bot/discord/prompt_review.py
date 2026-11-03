@@ -195,7 +195,7 @@ async def _run_review_locked(bot, days, repo_name, repo_path, thread) -> str:
         buttons=running_button_specs(inst.id),
     )
     if handle.get("message_id"):
-        inst.message_ids.setdefault("discord", []).append(handle["message_id"])
+        inst.message_ids.setdefault("discord", []).append(handle.get("message_id"))
         store.update_instance(inst)
 
     await lifecycle.run_instance(ctx, inst, handle=handle)
