@@ -38,7 +38,8 @@ log = logging.getLogger(__name__)
 class _Watchdog:
     """Age, memory and silence checks for one running CLI process.
 
-    The reader loop owns ``last_output_time``, ``end_of_turn_seen`` and
+    The reader loop owns ``last_output_time``, ``end_of_turn_seen``,
+    ``background_tasks`` and
     ``stall_warned`` (it refreshes the first two from stdout and clears the
     third on output); the tick reads them. Everything named ``lifetime_*`` or
     ``memory_kill*`` is the verdict, written only by a tick that reaped.
@@ -59,6 +60,10 @@ class _Watchdog:
         # End-of-turn watchdog: set when the LLM signals stop_reason="end_turn"
         # with no tool_use blocks (genuinely done). The reader loop acts on it.
         self.end_of_turn_seen = False
+        # What the CLI says is still running in the background. While it lists
+        # anything, a quiet session after its turn ended is waiting, not hung:
+        # the CLI wakes the model when the job ends.
+        self.background_tasks: list[str] = []
 
         self.lifetime_exceeded = False
         # Set alongside lifetime_exceeded so the failure the user reads can say
@@ -350,6 +355,11 @@ class _Watchdog:
 
     async def _check_stall(self, now: float, elapsed_since_start: float,
                            elapsed_since_output: float) -> None:
+        # Waiting on a background job is the expected silence, and the card says
+        # what it is waiting on. The reader's limit and the lifetime check still
+        # bound it.
+        if self.end_of_turn_seen and self.background_tasks:
+            return
         # Stall warning (no auto-kill)
         if elapsed_since_output > config.STALL_TIMEOUT_SECS:
             is_first = not self.stall_warned

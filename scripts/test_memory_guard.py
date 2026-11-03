@@ -897,10 +897,10 @@ def _check_guard_messages(failures: list[str]) -> None:
             "that is the normal shape of a killed run, so no memory kill would "
             "ever be reported"
         )
-    # Two result events can only come from a stream that contradicts itself, and
-    # the tie has to break the same way extract_result breaks it (the last one
-    # wins). Breaking it the other way would stand the reap down on a run that
-    # is then reported as an ordinary failure — no explanation, no resume.
+    # A run that waited on a background job has two result events, and the tie
+    # has to break the same way extract_result breaks it (the last one wins).
+    # Breaking it the other way would stand the reap down on a run that is then
+    # reported as an ordinary failure, with no explanation and no resume.
     if runner_mod._turn_completed_successfully([
         {"type": "result", "is_error": False},
         {"type": "result", "is_error": True},
@@ -908,6 +908,28 @@ def _check_guard_messages(failures: list[str]) -> None:
         failures.append(
             "an early success result outvoted the final failure result, which "
             "is not how extract_result reads the same stream"
+        )
+    # A result written before a background job finished is not the end of the
+    # run: the job can be what blew the ceiling, and the model has not seen it.
+    job = {"type": "system", "subtype": "background_tasks_changed",
+           "tasks": [{"task_id": "b1", "description": "Run the tests"}]}
+    job_ended = {"type": "system", "subtype": "background_tasks_changed", "tasks": []}
+    started = {"type": "result", "is_error": False}
+    if runner_mod._turn_completed_successfully([job, started]):
+        failures.append(
+            "a reap was cancelled while a background job was still open, so a job "
+            "that hit the memory ceiling is reported as the message written when "
+            "it started"
+        )
+    if runner_mod._turn_completed_successfully([job, started, job_ended]):
+        failures.append(
+            "a reap was cancelled in the gap after a background job ended, before "
+            "the model had been woken to read its outcome"
+        )
+    if not runner_mod._turn_completed_successfully([job, started, job_ended, started]):
+        failures.append(
+            "the result that follows a background job was not recognised as "
+            "completing the run"
         )
 
 

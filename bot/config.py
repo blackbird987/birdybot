@@ -715,6 +715,12 @@ SENSOR_TOTAL_BUDGET_SECS: int = int(os.getenv("SENSOR_TOTAL_BUDGET_SECS", "900")
 # bug where stdout stays open after end_turn.  30s gives any post-stop
 # hook (default 30s timeout) room to fire.
 END_OF_TURN_GRACE_SECS: int = int(os.getenv("END_OF_TURN_GRACE_SECS", "30"))
+# The same silence with a background task open is a healthy CLI waiting to wake
+# the model when the job ends, so the grace does not apply. This bounds a job
+# that never ends (a dev server) holding the session's slot.
+END_OF_TURN_BACKGROUND_MAX_SECS: int = int(
+    os.getenv("END_OF_TURN_BACKGROUND_MAX_SECS", "3600")
+)
 REBOOT_DRAIN_TIMEOUT_SECS: int = int(os.getenv("REBOOT_DRAIN_TIMEOUT_SECS", "600"))
 # Deferred-reboot retention TTL: when an assistant- or auto-update-initiated
 # reboot defers because another session was active, the deferred file is

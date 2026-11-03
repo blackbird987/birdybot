@@ -50,3 +50,51 @@ the memory guard. It exists so the harness can scale the whole watchdog down
 instead of sleeping through real hours.
 
 Harness: `python scripts/test_lifetime_cap.py`
+
+## The end-of-turn watchdog is not this net
+
+A separate, much shorter check lives in the reader loop in `core.py`: it ends a
+CLI that stays silent for `END_OF_TURN_GRACE_SECS` (30s) after its turn ended,
+because `claude -p` can fail to close stdout and sit there for hours (q-8396).
+It reports success, built from what the stream already carried.
+
+`result` is not always the last event. With a background task open, the CLI
+stays alive on purpose, wakes the model when the task ends, emits a second
+`result` and exits 0. Until 2026-11-04 the watchdog took that wait for the hang:
+it terminated the CLI at 30s, which killed the job, and reported the "started"
+message as the outcome. Seven runs in one day of logs, some merged. A live probe
+on CLI 2.1.310 gives this order for a background `sleep`:
+
+```
+background_tasks_changed [task]   tool_result "running in background"
+assistant "started"   result (num_turns 2, cost .00397)
+task_updated   task_notification   background_tasks_changed []
+system init (again)   assistant "done"   result (num_turns 1, cost .00433)
+```
+
+What follows from that, and must not drift:
+
+- **`background_tasks_changed` is the authority**, kept in
+  `_Watchdog.background_tasks`. While it lists anything, the silence limit is
+  `END_OF_TURN_BACKGROUND_MAX_SECS` (1h) instead of the grace. If a future CLI
+  stops sending it, behaviour falls back to the old kill, not to a hang.
+- **The last task ending disarms the watchdog.** The model is about to take a
+  turn, and that call or a compaction can run past 30s (94-126s seen). Its own
+  `result` re-arms it. A CLI that hangs in that gap falls to the stall warning
+  and to the lifetime net above.
+- **The wait is not a stall.** No "quiet, /kill if stuck" card while it lasts;
+  the card names the job. Both limits still bound it.
+- **A `result` is not final while a task is open or just ended.**
+  `_turn_completed_successfully` says so, or a job that hits the memory ceiling
+  stands the reap down and is reported as its own "started" message.
+- **Passing the ceiling adds a line to the report** naming the job, because the
+  last message was written expecting to hear back and terminating the CLI stops
+  the job. A job meant to outlive the session belongs in `/watch`. The ceiling
+  is the only bound short of the lifetime net: the CLI's 10-minute limit applies
+  to a command it moved to the background itself, and a `run_in_background` job
+  with no timeout ran its full 23 minutes and woke the model in a probe.
+
+The last `result` wins in `extract_result`: its cost is already cumulative, while
+`num_turns` is per `result` and is summed.
+
+Harness: `python scripts/test_runner_watchdog.py`
