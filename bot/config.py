@@ -1254,7 +1254,7 @@ PRIOR_ART_ENABLED: bool = os.getenv(
 PRIOR_ART_MAX_CHARS: int = int(os.getenv("PRIOR_ART_MAX_CHARS", "2500"))
 # The repo's recorded dead ends, on top of the history's cap: a long history must
 # not squeeze out the list of what is already known not to work.
-PRIOR_ART_DEAD_ENDS_MAX_CHARS: int = int(os.getenv("PRIOR_ART_DEAD_ENDS_MAX_CHARS", "4000"))
+PRIOR_ART_DEAD_ENDS_MAX_CHARS: int = int(os.getenv("PRIOR_ART_DEAD_ENDS_MAX_CHARS", "8000"))
 
 # Recent-session history injected into every system prompt.
 # SESSION_HISTORY_RANKING="relevance" keeps the entries most related to the

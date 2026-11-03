@@ -67,7 +67,7 @@ the history, and three things about that are deliberate:
 - They are read ahead of `_read_history`'s early returns, because the list is
   about the repo and not the plan: a plan naming no file or code name used to get
   nothing at all. They also come outside a git repo.
-- They have their own budget (`PRIOR_ART_DEAD_ENDS_MAX_CHARS`, default 4000, newest
+- They have their own budget (`PRIOR_ART_DEAD_ENDS_MAX_CHARS`, default 8000, newest
   first, a counted clip note saying where to Grep), so a long history cannot squeeze
   them out, and `_PRIOR_ART_INJECT_MAX` in `step_parse.py` holds both caps. The
   reviewer has Bash closed and cannot print the state itself.
