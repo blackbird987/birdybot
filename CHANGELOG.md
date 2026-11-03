@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.102.13, One way of recording findings, available to every repo (2026-11-03)
+
 ### Added
 - **One way of recording findings, available to every repo** (`scripts/study/study.py`, `docs/design/findings.md`). A standard-library tool called by absolute path from any repo or worktree, with no install: `init`, `new`, `supersede`, `state` and `check`. One markdown record per question, ids that parallel branches cannot collide on, and a state that is printed rather than committed. It replaces nothing yet: the three repos with their own copy keep it, and the tool refuses to run in them and names theirs.
 - **A warn-only findings check on chains** (`sensors._study_sensor`). A worktree with `study/config.toml` runs the repo's own checker or the shared one. A failure is reported and the chain moves on, with no fix session and no halt.
