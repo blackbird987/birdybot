@@ -39,9 +39,8 @@ class _Watchdog:
     """Age, memory and silence checks for one running CLI process.
 
     The reader loop owns ``last_output_time``, ``end_of_turn_seen``,
-    ``background_tasks`` and
-    ``stall_warned`` (it refreshes the first two from stdout and clears the
-    third on output); the tick reads them. Everything named ``lifetime_*`` or
+    ``background_tasks`` and ``stall_warned`` (it refreshes the first three from
+    stdout and clears the last on output); the tick reads them. Everything named ``lifetime_*`` or
     ``memory_kill*`` is the verdict, written only by a tick that reaped.
     """
 
@@ -57,8 +56,8 @@ class _Watchdog:
         self.last_output_time = asyncio.get_event_loop().time()
         self.start_time = self.last_output_time
         self.stall_warned = False
-        # End-of-turn watchdog: set when the LLM signals stop_reason="end_turn"
-        # with no tool_use blocks (genuinely done). The reader loop acts on it.
+        # End-of-turn watchdog: set on a `result`, or on stop_reason="end_turn"
+        # with no tool_use blocks. The reader loop acts on it.
         self.end_of_turn_seen = False
         # What the CLI says is still running in the background. While it lists
         # anything, a quiet session after its turn ended is waiting, not hung:

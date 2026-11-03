@@ -62,8 +62,9 @@ It reports success, built from what the stream already carried.
 stays alive on purpose, wakes the model when the task ends, emits a second
 `result` and exits 0. Until 2026-11-04 the watchdog took that wait for the hang:
 it terminated the CLI at 30s, which killed the job, and reported the "started"
-message as the outcome. Seven runs in one day of logs, some merged. A live probe
-on CLI 2.1.310 gives this order for a background `sleep`:
+message as the outcome. Seven runs between 19:30 and 23:06 on 2026-11-03, all
+recorded as completed, each with a job killed in the same second. A live probe on
+CLI 2.1.310 gives this order for a background `sleep`:
 
 ```
 background_tasks_changed [task]   tool_result "running in background"
@@ -71,6 +72,9 @@ assistant "started"   result (num_turns 2, cost .00397)
 task_updated   task_notification   background_tasks_changed []
 system init (again)   assistant "done"   result (num_turns 1, cost .00433)
 ```
+
+A background agent differs: its first `result` is held back until the agent has
+finished, so nothing arms while it runs and its own events keep the stream live.
 
 What follows from that, and must not drift:
 
@@ -92,9 +96,13 @@ What follows from that, and must not drift:
   the job. A job meant to outlive the session belongs in `/watch`. The ceiling
   is the only bound short of the lifetime net: the CLI's 10-minute limit applies
   to a command it moved to the background itself, and a `run_in_background` job
-  with no timeout ran its full 23 minutes and woke the model in a probe.
+  with no timeout ran its full 23 minutes and woke the model in a probe. A dev
+  server left running after a finished report therefore holds the session for the
+  full hour, where it used to be cut off at 30s. The card names it, and Kill or
+  Steer ends the wait.
 
-The last `result` wins in `extract_result`: its cost is already cumulative, while
-`num_turns` is per `result` and is summed.
+The last `result` wins in `extract_result`: its cost and `duration_api_ms` are
+already cumulative, while `num_turns` and `duration_ms` are per `result` and are
+summed. The wait is in neither, so a run's duration is its working time.
 
 Harness: `python scripts/test_runner_watchdog.py`

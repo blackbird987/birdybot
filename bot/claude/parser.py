@@ -168,6 +168,22 @@ def _is_subagent_event(event: dict) -> bool:
     return event.get("isSidechain") is True or bool(event.get("parent_tool_use_id"))
 
 
+def open_background_tasks(event: dict) -> list[str] | None:
+    """What a ``background_tasks_changed`` event says is still running.
+
+    None for any other event, so an empty list always means "the last one just
+    ended".
+    """
+    if event.get("type") != "system" or event.get("subtype") != "background_tasks_changed":
+        return None
+    tasks = event.get("tasks")
+    return [
+        t.get("description") or "background job"
+        for t in (tasks if isinstance(tasks, list) else [])
+        if isinstance(t, dict)
+    ]
+
+
 def last_assistant_text(events: list[dict]) -> str:
     """Return concatenated text of the most recent main-agent assistant message.
 
@@ -355,15 +371,15 @@ def extract_result(events: list[dict]) -> RunResult:
     text is only a sign-off after it (``_with_earlier_answer``).
 
     A run that waited on a background job has one ``result`` per time the model
-    stopped. The last one wins: its cost is already cumulative, but each counts
-    only its own turns, so those are added up.
+    stopped. The last one wins: its cost and API time are already cumulative, but
+    each counts only its own turns and working time, so those are added up. The
+    wait itself is in neither.
     """
     result = RunResult()
 
     # Single-pass: collect tools, per-turn text, and the result event
     tools_seen: set[str] = set()
-    result_event: dict | None = None
-    earlier_result_turns = 0
+    result_events: list[dict] = []
     latest_usage: dict | None = None
     # Session-total cache accounting — each assistant event reports per-call
     # usage, so summing gives the true session total. Without this, only the
@@ -405,9 +421,7 @@ def extract_result(events: list[dict]) -> RunResult:
             if cb.get("type") == "tool_use":
                 _record_tool_use(result, cb, tools_seen)
         elif etype == "result":
-            if result_event:
-                earlier_result_turns += result_event.get("num_turns") or 0
-            result_event = event
+            result_events.append(event)
 
     # Save final turn
     if current_turn:
@@ -424,9 +438,10 @@ def extract_result(events: list[dict]) -> RunResult:
         if isinstance(model, str):
             result.model = model
 
-    if result_event:
-        _apply_result_event(result, result_event, assistant_turns)
-        result.num_turns += earlier_result_turns
+    if result_events:
+        _apply_result_event(result, result_events[-1], assistant_turns)
+        result.num_turns = sum(ev.get("num_turns") or 0 for ev in result_events)
+        result.duration_ms = sum(ev.get("duration_ms") or 0 for ev in result_events)
 
     if not result.result_text and assistant_turns:
         result.result_text = _fallback_turn_text(assistant_turns)

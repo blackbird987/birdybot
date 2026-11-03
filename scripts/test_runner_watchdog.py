@@ -17,7 +17,7 @@ RunResult from the captured events.
 `result` is not always the last word. With a background task open the CLI stays
 alive on purpose and wakes the model when the job ends, then emits a second
 `result`. Terminating it 30s in killed the job and reported the "started"
-message as the outcome: seven runs in one day of logs on 2026-11-03.
+message as the outcome: seven runs on the evening of 2026-11-03.
 
 This test pins these contracts:
 

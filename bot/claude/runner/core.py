@@ -33,6 +33,7 @@ from bot.claude.parser import (
     format_ask_question,
     iter_tool_blocks,
     last_assistant_text,
+    open_background_tasks,
     parse_stream_line,
 )
 from bot.claude.provider import ProviderConfig, get_provider
@@ -1122,8 +1123,8 @@ class ClaudeRunner(
                         )
 
         watchdog = _Watchdog(self, instance, proc, events, on_progress, on_stall)
-        # End-of-turn watchdog: set by the reader loop once the turn has been
-        # silent past END_OF_TURN_GRACE_SECS after a genuine end_turn.
+        # End-of-turn watchdog: set by the reader loop once the session has been
+        # silent past its limit after the turn ended.
         end_of_turn_done = False
         stall_check_task = asyncio.create_task(watchdog.run())
 
@@ -1203,16 +1204,7 @@ class ClaudeRunner(
                         # open, the CLI stays alive for it on purpose and wakes
                         # the model when it ends, so the longer limit applies.
                         watchdog.end_of_turn_seen = True
-                    elif (
-                        event.get("type") == "system"
-                        and event.get("subtype") == "background_tasks_changed"
-                    ):
-                        _tasks = event.get("tasks")
-                        _still_open = [
-                            t.get("description") or "background job"
-                            for t in (_tasks if isinstance(_tasks, list) else [])
-                            if isinstance(t, dict)
-                        ]
+                    elif (_still_open := open_background_tasks(event)) is not None:
                         # The last one just ended, so the CLI is about to wake
                         # the model. That call (or a compaction) can outlast the
                         # grace; its own `result` re-arms the watchdog.
@@ -1311,8 +1303,9 @@ class ClaudeRunner(
                 instance.summary = extract_summary(result.result_text)
             return result
 
-        # End-of-turn watchdog tripped: the CLI hung after stop_reason=end_turn.
-        # Synthesise a successful result from the events we captured.
+        # End-of-turn watchdog tripped: the CLI hung after its turn ended, or a
+        # background job outlasted the limit. Synthesise a successful result from
+        # the events we captured.
         if end_of_turn_done:
             result = extract_result(events)
             result.is_error = False
@@ -1327,7 +1320,8 @@ class ClaudeRunner(
                 result.result_text = (
                     f"{result.result_text}\n\n"
                     f"The bot stopped waiting after "
-                    f"{config.END_OF_TURN_BACKGROUND_MAX_SECS // 60} minutes, which "
+                    f"{config.END_OF_TURN_BACKGROUND_MAX_SECS // 60} minutes of "
+                    f"silence, which "
                     f"ended this background job before it finished: "
                     f"{', '.join(watchdog.background_tasks)}."
                 ).strip()
