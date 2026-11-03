@@ -38,6 +38,9 @@ _DEFAULT_TIMEOUT_S = 180
 # a second or two; anything past this is killed and forgotten, and the general
 # orphan reaper picks up whatever survives.
 _CLEANUP_TIMEOUT_S = 30
+_WARNING_TEXT_CAP = 900
+_STUDY_TIMEOUT_S = 60
+_SHARED_STUDY_TOOL = Path(__file__).resolve().parents[2] / "scripts" / "study" / "study.py"
 
 
 @dataclass
@@ -85,6 +88,26 @@ class SensorReport:
         if skipped:
             line += " (" + ", ".join(f"{r.name} skipped" for r in skipped) + ")"
         return line
+
+    def warning_text(self) -> str:
+        """What non-blocking sensors reported, for the line the user sees, or "".
+
+        `failures()` leaves these out on purpose, since a failure starts a fix
+        session and can halt the chain. Without this they would be a bare mark.
+        """
+        blocks: list[str] = []
+        for r in self.results:
+            if r.blocking or r.status not in ("fail", "timeout", "error"):
+                continue
+            body = r.output.strip() or "(no output captured)"
+            if len(body) > _WARNING_TEXT_CAP:
+                body = "…\n" + body[-_WARNING_TEXT_CAP:]
+            blocks.append(f"`{r.name}` warned, not blocking:\n```\n{body}\n```")
+        return "\n" + "\n".join(blocks) if blocks else ""
+
+    def notice(self) -> str:
+        """The summary line plus anything non-blocking sensors had to say."""
+        return self.summary_line() + self.warning_text()
 
     def failure_text(self) -> str:
         """LLM-consumable failure block: command run + raw captured output."""
@@ -180,6 +203,39 @@ def _default_sensors(stacks: list[str]) -> list[dict]:
             "auto": True,
         })
     return sensors
+
+
+def _study_sensor(cwd: str | Path) -> dict | None:
+    """The warn-only findings check for this worktree, or None.
+
+    Looks in ``cwd``, not the main repo: a worktree forked before the repo had
+    a study folder has nothing to check. Prefers the repo's own copy of the
+    tool, since its records follow that copy's rules. ``-B``: a check must not
+    leave bytecode in somebody's tree. Never blocking: a check that can stop
+    work gets switched off. See docs/design/findings.md.
+    """
+    try:
+        root = Path(cwd)
+        if not (root / "study" / "config.toml").is_file():
+            return None
+        if (root / "tools" / "study").is_dir():
+            if not (root / "tools" / "study" / "check.py").is_file():
+                return None
+            command = "python3 -B tools/study/check.py"
+        elif _SHARED_STUDY_TOOL.is_file():
+            command = f"python3 -B {shlex.quote(str(_SHARED_STUDY_TOOL))} check"
+        else:
+            return None
+    except OSError:
+        log.debug("Study sensor lookup failed in %s", cwd, exc_info=True)
+        return None
+    return {
+        "name": "study check",
+        "command": command,
+        "timeout_s": _STUDY_TIMEOUT_S,
+        "auto": True,
+        "blocking": False,
+    }
 
 
 def _safe_pos_int(value, default: int) -> int:
@@ -403,6 +459,11 @@ async def run_sensors(
     specs = cfg["sensors"]
     if specs is None:
         specs = _default_sensors(detect_stacks(cwd))
+    # Outside that branch: a repo's sensors.json replaces the auto-detected
+    # sensors, and has no reason to know about this one.
+    study = _study_sensor(cwd)
+    if study:
+        specs = [*specs, study]
 
     report = SensorReport()
     deadline = time.monotonic() + total_budget_s

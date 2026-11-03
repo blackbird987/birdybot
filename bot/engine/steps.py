@@ -374,7 +374,8 @@ async def on_sensors(
     build session with the raw tool output (max_fix_rounds), re-running the
     sensors after each fix turn. Persistent failure halts under the default
     ``block`` policy (via needs_input, same as verify) or warns+advances
-    under ``warn`` (.claude/sensors.json).
+    under ``warn`` (.claude/sensors.json). A non-blocking sensor never does any
+    of that: its output goes in the notice and the chain moves on.
     """
     from bot.engine.sensors import load_sensor_config, run_sensors
 
@@ -400,7 +401,7 @@ async def on_sensors(
         return inst
 
     if report.passed:
-        await _notify(report.summary_line())
+        await _notify(report.notice())
         return inst
 
     current_source = source_id
@@ -432,7 +433,7 @@ async def on_sensors(
         fix_cwd = result.worktree_path or result.repo_path or cwd
         report = await run_sensors(fix_cwd, inst.repo_path)
         if report.passed:
-            await _notify(report.summary_line())
+            await _notify(report.notice())
             return result
 
         current_source = result.id
@@ -445,13 +446,13 @@ async def on_sensors(
     if cfg["policy"] == "warn":
         await _notify(
             f"{report.summary_line()} — proceeding under warn policy. "
-            f"Latest failures:\n{tail}"
+            f"Latest failures:\n{tail}{report.warning_text()}"
         )
         return result
     # block (default): halt the chain via needs_input, same as verify-fail.
     await _notify(
         f"{report.summary_line()} — halting (sensor failures persist after "
-        f"{cfg['max_fix_rounds']} fix rounds):\n{tail}"
+        f"{cfg['max_fix_rounds']} fix rounds):\n{tail}{report.warning_text()}"
     )
     if result and result.status == InstanceStatus.COMPLETED:
         result.needs_input = True

@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+- **One way of recording findings, available to every repo** (`scripts/study/study.py`, `docs/design/findings.md`). A standard-library tool called by absolute path from any repo or worktree, with no install: `init`, `new`, `supersede`, `state` and `check`. One markdown record per question, ids that parallel branches cannot collide on, and a state that is printed rather than committed. It replaces nothing yet: the three repos with their own copy keep it, and the tool refuses to run in them and names theirs.
+- **A warn-only findings check on chains** (`sensors._study_sensor`). A worktree with `study/config.toml` runs the repo's own checker or the shared one. A failure is reported and the chain moves on, with no fix session and no halt.
+- **Plan reviewers see what a repo already recorded as not working** (`bot/engine/findings.py`, `prior_art._dead_end_section`). The list rides in the prior-history block under its own budget (`PRIOR_ART_DEAD_ENDS_MAX_CHARS`), and comes even when a plan names no file. It reads all three registry layouts.
+- **The commit step asks whether the work established anything** a later session would need, and to record it in the same commit (`COMMIT_PROMPT`).
+
+### Fixed
+- **A non-blocking sensor's output reaches the user.** It used to leave a bare mark on the summary line, with the text dropped (`SensorReport.warning_text`).
+
 ## v0.102.12, The weekly prompt review runs for the first time (2026-11-03)
 
 ### Fixed
