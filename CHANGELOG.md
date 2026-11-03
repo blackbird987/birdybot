@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.102.13, Pasted keys are caught before anything reads them (2026-11-04)
+
 ### Added
 - **Paste a key into any thread and the bot takes it out of the text first.** A vendor-shaped key is stored, the message is deleted, and the session sees `[secret NAME stored, ending abcd]`. It never reaches the prompt, the transcript, logs, `state.json`, a thread title or Anthropic. An uncertain value holds the message with Secret and Not a secret buttons. A seed phrase, PEM or xprv is deleted and stored nowhere, with a warning to move the funds. A guest's paste is deleted and replaced with `[secret removed]`. This covers messages, edits, thread titles, attachments and their filenames, `.env` files, voice transcripts, slash options and modals. A key in a voice transcript is removed but never stored, since OpenAI has already heard it and it is rarely spelled right. A slash command refuses an uncertain value instead of holding it, because an interaction cannot wait for an answer.
 - **Sessions use keys by name.** A vault at `~/.config/claude-bot/vault.json`, outside the repo, granted per repo, injected only on an owner's turn in a thread with no guest. Sessions can ask for a key another repo holds with `[BOT_CMD: /secret request NAME reason="..."]`, which posts Allow and Deny. `/secret list|add|forget|rename|grant` manage it. A pasted `sk-ant-` can't become `ANTHROPIC_API_KEY`, because the denylist prefixes those names with `PASTED_`.
