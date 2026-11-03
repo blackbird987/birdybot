@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from bot import config
+from bot.secret_detect import REMOVED
 
 log = logging.getLogger(__name__)
 
@@ -37,8 +38,9 @@ NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,63}$")
 LITERAL_MIN_LEN = 8
 # Last characters are only quoted back when they give away little of the value.
 TAIL_MIN_LEN = 12
-
-REMOVED = "[secret removed]"
+# Door state nobody may ever answer. Oldest goes first.
+_REQUESTS_MAX = 64
+_FLAGGED_SESSIONS_MAX = 512
 
 _DENIED_EXACT = frozenset({
     "PATH", "HOME", "USER", "SHELL", "TMPDIR", "BASH_ENV", "ENV", "IFS",
@@ -50,6 +52,9 @@ _DENIED_GLOBS = (
     "CLAUDECODE*", "ANTHROPIC_*", "CURSOR_*", "XDG_*",
 )
 
+# Guards read-modify-write. Plain reads do not need it, because a write replaces
+# the file whole, and literal_values must not take it: it runs inside the log
+# formatter, so a line logged under this lock would wait on itself.
 _lock = threading.Lock()
 _literal_cache: tuple[tuple[str, int, int], tuple[str, ...]] | None = None
 _denied_cache: frozenset[str] | None = None
@@ -65,7 +70,6 @@ class AddResult:
     # "new", "existing" (same value again) or "conflict" (name taken, stored as NAME_2).
     status: str
     conflict_with: str | None
-    granted_repo: str | None
     tail: str
 
 
@@ -77,26 +81,47 @@ def _empty() -> dict:
     return {"entries": [], "requests": {}, "hold_markers": [], "flagged": {}}
 
 
-def _read_unlocked() -> dict:
+def _check_shape(data: object) -> None:
+    """A hand edit can leave valid JSON that the code below cannot walk."""
+    if not isinstance(data, dict):
+        raise ValueError("not a vault")
+    entries = data.get("entries", [])
+    if not isinstance(entries, list) or not all(
+        isinstance(e, dict) and isinstance(e.get("name"), str) for e in entries
+    ):
+        raise ValueError("bad entries")
+    if not isinstance(data.get("requests", {}), dict) or not isinstance(data.get("flagged", {}), dict):
+        raise ValueError("bad door state")
+    if not isinstance(data.get("hold_markers", []), list):
+        raise ValueError("bad door state")
+
+
+def _load() -> dict:
+    """Read the file without logging, for the one caller inside the log formatter."""
     path = _path()
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return _empty()
     except OSError as exc:
-        log.error("Vault file could not be read: %s", type(exc).__name__)
-        raise VaultUnavailable(str(path)) from exc
+        raise VaultUnavailable(f"could not be read: {type(exc).__name__}") from exc
     try:
         data = json.loads(raw)
-        if not isinstance(data, dict) or not isinstance(data.get("entries", []), list):
-            raise ValueError("not a vault")
+        _check_shape(data)
     except ValueError as exc:
-        # The parse error can quote the file, so its text stays out of the log.
-        log.error("Vault file at %s is corrupt; leaving it untouched", path)
-        raise VaultUnavailable(str(path)) from exc
+        # The parse error can quote the file, so its text stays out of the message.
+        raise VaultUnavailable("is corrupt") from exc
     base = _empty()
     base.update(data)
     return base
+
+
+def _read_unlocked() -> dict:
+    try:
+        return _load()
+    except VaultUnavailable as exc:
+        log.error("Vault file at %s %s; leaving it untouched", _path(), exc)
+        raise
 
 
 def _write_unlocked(data: dict) -> None:
@@ -130,8 +155,6 @@ def _write_unlocked(data: dict) -> None:
 def _changed() -> None:
     global _literal_cache
     _literal_cache = None
-    from bot.platform import redact
-    redact.invalidate_env_secret_cache()
 
 
 def is_available() -> bool:
@@ -220,13 +243,11 @@ def add(
         data = _read_unlocked()
         for entry in data["entries"]:
             if entry.get("value") == value:
-                granted = None
                 repos = entry.setdefault("repos", [])
                 if repo and repo not in repos:
                     repos.append(repo)
-                    granted = repo
                     _write_unlocked(data)
-                result = AddResult(entry["name"], "existing", None, granted or (repo if repo in repos else None), _entry_tail(entry))
+                result = AddResult(entry["name"], "existing", None, _entry_tail(entry))
                 break
         else:
             final = base
@@ -249,7 +270,7 @@ def add(
                 "last4": tail_of(value),
             })
             _write_unlocked(data)
-            result = AddResult(final, "conflict" if conflict else "new", conflict, repo, tail_of(value))
+            result = AddResult(final, "conflict" if conflict else "new", conflict, tail_of(value))
     _changed()
     return result
 
@@ -375,8 +396,10 @@ def names_elsewhere(repo: str) -> list[str]:
 def literal_values() -> tuple[str, ...]:
     """Every stored value long enough to strip, longest first.
 
-    Cached on the file's identity. This sits under ``redact_secrets``, the
-    display hot path, and a hand edit should still take effect.
+    Cached on the file's identity, so a hand edit takes effect. This sits under
+    every log line and every message the bot renders, so it takes no lock and
+    logs nothing (see ``_lock``). A file that stops parsing keeps the last good
+    list: losing it would put known keys back into what the bot prints.
     """
     global _literal_cache
     path = _path()
@@ -385,14 +408,20 @@ def literal_values() -> tuple[str, ...]:
         key = (str(path), st.st_mtime_ns, st.st_size)
     except OSError:
         return ()
-    if _literal_cache is not None and _literal_cache[0] == key:
-        return _literal_cache[1]
-    values = [
-        e["value"] for e in _safe_read()["entries"]
-        if isinstance(e.get("value"), str) and len(e["value"]) >= LITERAL_MIN_LEN
-    ]
-    values.sort(key=len, reverse=True)
-    result = tuple(dict.fromkeys(values))
+    cached = _literal_cache
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    try:
+        entries = _load()["entries"]
+    except VaultUnavailable:
+        result = cached[1] if cached is not None else ()
+    else:
+        values = [
+            e["value"] for e in entries
+            if isinstance(e.get("value"), str) and len(e["value"]) >= LITERAL_MIN_LEN
+        ]
+        values.sort(key=len, reverse=True)
+        result = tuple(dict.fromkeys(values))
     _literal_cache = (key, result)
     return result
 
@@ -421,6 +450,8 @@ def add_request(name: str, repo: str, channel_id: str, session_id: str | None) -
         data["requests"][token] = {
             "name": name, "repo": repo, "channel_id": channel_id, "session_id": session_id,
         }
+        while len(data["requests"]) > _REQUESTS_MAX:
+            data["requests"].pop(next(iter(data["requests"])))
         _write_unlocked(data)
     return token
 
@@ -479,6 +510,8 @@ def flag_once(session_id: str, name: str) -> bool:
         if name in names:
             return False
         names.append(name)
+        while len(data["flagged"]) > _FLAGGED_SESSIONS_MAX:
+            data["flagged"].pop(next(iter(data["flagged"])))
         _write_unlocked(data)
     return True
 

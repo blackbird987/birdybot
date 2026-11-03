@@ -49,6 +49,23 @@ class ThreadContextMixin:
                 return uid
         return None
 
+    def _family_has_guest(self, info: ThreadInfo | None) -> bool:
+        """Whether this thread or one that spawned it has a guest.
+
+        A child reports back to its parent, so a guest there reads what the child
+        did with a key. Only the keys go by this: the child's own runs keep the
+        rights its own thread has, or a build would come back from a reboot unable
+        to edit anything.
+        """
+        seen: set[str] = set()
+        while info is not None and info.thread_id not in seen:
+            seen.add(info.thread_id)
+            if self._thread_guest_id(info) is not None:
+                return True
+            lookup = self._forums.thread_to_project(info.parent_thread_id) if info.parent_thread_id else None
+            info = lookup[1] if lookup else None
+        return False
+
     def _guest_access(self, user_id: str | None, channel_id: str) -> AccessResult:
         """A guest's grant, for running their prompt when they are not the one tapping.
 
@@ -95,7 +112,7 @@ class ThreadContextMixin:
         if known is None:
             lookup = self._forums.thread_to_project(channel_id)
             known = lookup[1] if lookup else None
-        ctx.thread_has_guest = self._thread_guest_id(known) is not None
+        ctx.thread_has_guest = self._family_has_guest(known)
         if access_result:
             ctx.is_owner = access_result.is_owner
             if not access_result.is_owner and access_result.mode_ceiling:

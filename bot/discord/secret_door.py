@@ -60,6 +60,9 @@ _NOT_ENV_EXTS = ATTACH_TEXT_EXTS | {".py", ".js", ".ts", ".sh", ".rb", ".go", ".
 _ENV_LINE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$")
 
 _EXPOSED = "Treat it as exposed, Discord already has it."
+# An extension worth putting back on a scrubbed file name. Shorter than any part
+# of a JWT, so this never restores a piece of one.
+_REAL_EXT = re.compile(r"\.[A-Za-z0-9]{1,8}")
 
 
 @dataclass
@@ -430,14 +433,15 @@ async def _screen_env_file(
     stored: list[str] = []
     burned: list[str] = []
     skipped: list[str] = []
+    # Over the whole file and before the lines are split: a quoted PEM runs across
+    # lines, and read line by line its header is a value and its body lines are names.
+    findings = await asyncio.to_thread(secret_detect.scan, body, attachment=True)
+    body = secret_detect.replace_findings(body, [f for f in findings if f.tier == BURN])
     for key, value in parse_env(body):
         if not value:
             skipped.append(key)
             continue
-        burns = secret_detect.name_burns(key) or any(
-            f.tier == BURN for f in secret_detect.scan(value, attachment=True)
-        )
-        if burns:
+        if secret_detect.name_burns(key) or REMOVED in value:
             burned.append(key)
             if is_owner:
                 report.burned += 1
@@ -470,14 +474,17 @@ async def _screen_filename(
     file name is not worth holding a whole message for.
     """
     filename = att.filename or ""
-    path = Path(filename)
-    stem, suffix = path.stem, path.suffix
-    findings = _without_dismissed(secret_detect.scan(stem, attachment=True))
+    findings = _without_dismissed(secret_detect.scan(filename, attachment=True))
     if not findings:
         return False
     certain = _is_certain(findings, is_owner)
-    await _take_certain(stem, findings, is_owner, report, source_thread, as_removed=True)
-    att.filename = secret_detect.replace_findings(stem, findings) + suffix
+    await _take_certain(filename, findings, is_owner, report, source_thread, as_removed=True)
+    clean = secret_detect.replace_findings(filename, findings)
+    # Ingest routes on the extension, so a value that swallowed it gives it back.
+    suffix = Path(filename).suffix
+    if findings[-1].end == len(filename) and _REAL_EXT.fullmatch(suffix):
+        clean += suffix
+    att.filename = clean
     return certain
 
 
@@ -702,25 +709,32 @@ async def _open_hold(
         "secret. Nothing has gone to the session yet."
     )
     rows = _hold_rows(hold_id, asks)
-    if interaction is not None:
-        from bot.discord.adapter import _buttons_to_view
-        hold.ephemeral_msg = await interaction.followup.send(
-            prompt, view=_buttons_to_view(rows), ephemeral=True, wait=True,
-        )
-    else:
-        try:
-            hold.hold_msg_id = await bot.messenger.send_text(channel_id, prompt, buttons=rows)
-        except Exception:
-            log.warning("Could not post a hold in %s; dropping it", channel_id, exc_info=True)
-            return
-        if hold.hold_msg_id:
-            try:
-                await asyncio.to_thread(vault.add_hold_marker, channel_id, hold.hold_msg_id)
-            except vault.VaultUnavailable:
-                log.warning("Hold marker not written: the vault file is unreadable")
+    # Registered before the buttons exist, so a fast tap finds it.
     _holds[hold_id] = hold
     if message is not None:
         _held_message_ids.add(message.id)
+    try:
+        if interaction is not None:
+            from bot.discord.adapter import _buttons_to_view
+            hold.ephemeral_msg = await interaction.followup.send(
+                prompt, view=_buttons_to_view(rows), ephemeral=True, wait=True,
+            )
+        else:
+            hold.hold_msg_id = await bot.messenger.send_text(channel_id, prompt, buttons=rows)
+    except Exception:
+        log.warning("Could not post a hold in %s; dropping it", channel_id, exc_info=True)
+        _holds.pop(hold_id, None)
+        if message is not None:
+            _held_message_ids.discard(message.id)
+        return
+    # A hold answered while the post was returning has nothing left to mark or time.
+    if hold_id not in _holds:
+        return
+    if hold.hold_msg_id:
+        try:
+            await asyncio.to_thread(vault.add_hold_marker, channel_id, hold.hold_msg_id)
+        except vault.VaultUnavailable:
+            log.warning("Hold marker not written: the vault file is unreadable")
     hold.timeout_task = _spawn(_expire_later(bot, hold_id))
 
 
@@ -854,7 +868,7 @@ async def screen_slash(bot: ClaudeBot, interaction: discord.Interaction) -> bool
     if not access.allowed:
         return True
     try:
-        scans = [(opt, secret_detect.scan(opt["value"])) for opt in options]
+        scans = [(opt, _without_dismissed(secret_detect.scan(opt["value"]))) for opt in options]
         if not any(found for _, found in scans):
             return True
         if access.is_owner and any(

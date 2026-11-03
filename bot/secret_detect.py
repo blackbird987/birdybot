@@ -49,45 +49,46 @@ class Finding:
     suggested_name: str
 
 
-# (shape, pattern, name). The body group is what the placeholder check reads,
+# (shape, pattern, name, hint). The body group is what the placeholder check reads,
 # so "sk-ant-xxxxxxxx" is judged on its x's and not on the vendor prefix. A None
-# name means the prefix says nothing about the vendor.
-_SURE_TABLE: list[tuple[str, re.Pattern, str | None]] = [
-    ("anthropic", re.compile(_LB + r"sk-ant-(?:api\d\d-)?(?P<body>[A-Za-z0-9_-]{20,})"), "PASTED_ANTHROPIC_KEY"),
-    ("openai_project", re.compile(_LB + r"sk-proj-(?P<body>[A-Za-z0-9_-]{20,})"), "OPENAI_API_KEY"),
-    ("sk", re.compile(_LB + r"sk-(?P<body>[A-Za-z0-9_-]{20,})"), None),
-    ("github", re.compile(_LB + r"gh[pos]_(?P<body>[A-Za-z0-9]{20,})"), "GITHUB_TOKEN"),
-    ("github_pat", re.compile(_LB + r"github_pat_(?P<body>[A-Za-z0-9_]{20,})"), "GITHUB_TOKEN"),
-    ("aws", re.compile(_LB + r"AKIA(?P<body>[A-Z0-9]{16})" + _RB), "AWS_ACCESS_KEY_ID"),
-    ("jwt", re.compile(_LB + r"eyJ(?P<body>[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})"), None),
-    ("stripe", re.compile(_LB + r"sk_live_(?P<body>[A-Za-z0-9]{16,})"), "STRIPE_SECRET_KEY"),
-    ("stripe_restricted", re.compile(_LB + r"rk_live_(?P<body>[A-Za-z0-9]{16,})"), "STRIPE_RESTRICTED_KEY"),
-    ("slack_bot", re.compile(_LB + r"xoxb-(?P<body>[A-Za-z0-9-]{20,})"), "SLACK_BOT_TOKEN"),
-    ("slack_user", re.compile(_LB + r"xoxp-(?P<body>[A-Za-z0-9-]{20,})"), "SLACK_USER_TOKEN"),
-    ("huggingface", re.compile(_LB + r"hf_(?P<body>[A-Za-z0-9]{20,})"), "HF_TOKEN"),
-    ("runpod", re.compile(_LB + r"rpa_(?P<body>[A-Za-z0-9]{20,})"), "RUNPOD_API_KEY"),
-    ("gitlab", re.compile(_LB + r"glpat-(?P<body>[A-Za-z0-9_-]{20,})"), "GITLAB_TOKEN"),
-    ("google", re.compile(_LB + r"AIza(?P<body>[A-Za-z0-9_-]{35})" + _RB), "GOOGLE_API_KEY"),
-    ("groq", re.compile(_LB + r"gsk_(?P<body>[A-Za-z0-9]{20,})"), "GROQ_API_KEY"),
-    ("tavily", re.compile(_LB + r"tvly-(?P<body>[A-Za-z0-9_-]{20,})"), "TAVILY_API_KEY"),
-    ("perplexity", re.compile(_LB + r"pplx-(?P<body>[A-Za-z0-9]{20,})"), "PERPLEXITY_API_KEY"),
-    ("telegram", re.compile(_LB + r"\d{8,10}:(?P<body>[A-Za-z0-9_-]{35})" + _RB), "TELEGRAM_BOT_TOKEN"),
-    ("discord_bot", re.compile(_LB + r"[MNO][A-Za-z0-9_-]{23,27}\.[A-Za-z0-9_-]{6,7}\.(?P<body>[A-Za-z0-9_-]{27,})"), "PASTED_DISCORD_BOT_TOKEN"),
-    ("discord_webhook", re.compile(r"https://(?:ptb\.|canary\.)?discord(?:app)?\.com/api(?:/v\d+)?/webhooks/\d{17,20}/(?P<body>[A-Za-z0-9_-]{50,})"), "DISCORD_WEBHOOK_URL"),
+# name means the prefix says nothing about the vendor. The hint is a substring
+# every match holds: testing it first keeps the door cheap, since most messages
+# carry none of them.
+_SURE_TABLE: list[tuple[str, re.Pattern, str | None, str]] = [
+    ("anthropic", re.compile(_LB + r"sk-ant-(?:api\d\d-)?(?P<body>[A-Za-z0-9_-]{20,})"), "PASTED_ANTHROPIC_KEY", "sk-ant-"),
+    ("openai_project", re.compile(_LB + r"sk-proj-(?P<body>[A-Za-z0-9_-]{20,})"), "OPENAI_API_KEY", "sk-proj-"),
+    ("sk", re.compile(_LB + r"sk-(?P<body>[A-Za-z0-9_-]{20,})"), None, "sk-"),
+    ("github", re.compile(_LB + r"gh[pos]_(?P<body>[A-Za-z0-9]{20,})"), "GITHUB_TOKEN", "_"),
+    ("github_pat", re.compile(_LB + r"github_pat_(?P<body>[A-Za-z0-9_]{20,})"), "GITHUB_TOKEN", "github_pat_"),
+    ("aws", re.compile(_LB + r"AKIA(?P<body>[A-Z0-9]{16})" + _RB), "AWS_ACCESS_KEY_ID", "AKIA"),
+    ("jwt", re.compile(_LB + r"eyJ(?P<body>[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})"), None, "eyJ"),
+    ("stripe", re.compile(_LB + r"sk_live_(?P<body>[A-Za-z0-9]{16,})"), "STRIPE_SECRET_KEY", "sk_live_"),
+    ("stripe_restricted", re.compile(_LB + r"rk_live_(?P<body>[A-Za-z0-9]{16,})"), "STRIPE_RESTRICTED_KEY", "rk_live_"),
+    ("slack_bot", re.compile(_LB + r"xoxb-(?P<body>[A-Za-z0-9-]{20,})"), "SLACK_BOT_TOKEN", "xoxb-"),
+    ("slack_user", re.compile(_LB + r"xoxp-(?P<body>[A-Za-z0-9-]{20,})"), "SLACK_USER_TOKEN", "xoxp-"),
+    ("huggingface", re.compile(_LB + r"hf_(?P<body>[A-Za-z0-9]{20,})"), "HF_TOKEN", "hf_"),
+    ("runpod", re.compile(_LB + r"rpa_(?P<body>[A-Za-z0-9]{20,})"), "RUNPOD_API_KEY", "rpa_"),
+    ("gitlab", re.compile(_LB + r"glpat-(?P<body>[A-Za-z0-9_-]{20,})"), "GITLAB_TOKEN", "glpat-"),
+    ("google", re.compile(_LB + r"AIza(?P<body>[A-Za-z0-9_-]{35})" + _RB), "GOOGLE_API_KEY", "AIza"),
+    ("groq", re.compile(_LB + r"gsk_(?P<body>[A-Za-z0-9]{20,})"), "GROQ_API_KEY", "gsk_"),
+    ("tavily", re.compile(_LB + r"tvly-(?P<body>[A-Za-z0-9_-]{20,})"), "TAVILY_API_KEY", "tvly-"),
+    ("perplexity", re.compile(_LB + r"pplx-(?P<body>[A-Za-z0-9]{20,})"), "PERPLEXITY_API_KEY", "pplx-"),
+    ("telegram", re.compile(_LB + r"\d{8,10}:(?P<body>[A-Za-z0-9_-]{35})" + _RB), "TELEGRAM_BOT_TOKEN", ":"),
+    ("discord_bot", re.compile(_LB + r"[MNO][A-Za-z0-9_-]{23,27}\.[A-Za-z0-9_-]{6,7}\.(?P<body>[A-Za-z0-9_-]{27,})"), "PASTED_DISCORD_BOT_TOKEN", "."),
+    ("discord_webhook", re.compile(r"https://(?:ptb\.|canary\.)?discord(?:app)?\.com/api(?:/v\d+)?/webhooks/\d{17,20}/(?P<body>[A-Za-z0-9_-]{50,})"), "DISCORD_WEBHOOK_URL", "/webhooks/"),
 ]
 
-SURE_PATTERNS: list[re.Pattern] = [row[1] for row in _SURE_TABLE]
+# Output gives up a word rather than a key, so redaction also matches a key glued
+# to what comes before it. The generic row keeps its boundary past plain
+# alphanumerics, or "task-fix-the-login-bug" would lose its tail in every log line.
+REDACT_PATTERNS: list[re.Pattern] = [
+    *(re.compile(row[1].pattern.removeprefix(_LB)) for row in _SURE_TABLE if row[0] != "sk"),
+    *(row[1] for row in _SURE_TABLE if row[0] == "sk"),
+    re.compile(r"sk-[A-Za-z0-9]{20,}"),
+]
 
-# A substring every match of the pattern in the same position must hold. Testing
-# it first keeps the door cheap: most messages carry none of them.
-_SURE_HINTS = (
-    "sk-ant-", "sk-proj-", "sk-", "_", "github_pat_", "AKIA", "eyJ", "sk_live_",
-    "rk_live_", "xoxb-", "xoxp-", "hf_", "rpa_", "glpat-", "AIza", "gsk_",
-    "tvly-", "pplx-", ":", ".", "/webhooks/",
-)
-
-HEX64_0X_PATTERN = re.compile(_LB + r"0x[0-9a-fA-F]{64}" + _RB)
-BEARER_PATTERN = re.compile(r"(?i)(?<![A-Za-z0-9_-])Bearer\s+([A-Za-z0-9_./+=-]{20,})")
+_HEX64_0X_PATTERN = re.compile(_LB + r"0x[0-9a-fA-F]{64}" + _RB)
+_BEARER_PATTERN = re.compile(r"(?i)(?<![A-Za-z0-9_-])Bearer\s+([A-Za-z0-9_./+=-]{20,})")
 
 _HEX64_PATTERN = re.compile(_LB + r"[0-9a-fA-F]{64}" + _RB)
 _URL_CRED_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9+.-]{0,30}://[^/\s:@]{1,256}:([^/\s@]{3,512})@")
@@ -132,19 +133,35 @@ _NAME_STOPWORDS = frozenset({
     "foreign", "unique", "sort", "dict", "map", "cache", "lookup", "hot",
     "ssh", "session", "user", "bot", "test", "input", "next", "last", "first",
 })
+# The word before "key" when the id after it is a row or a request, not a credential.
+_ID_KEY_WORDS = frozenset({
+    "primary", "foreign", "unique", "composite", "partition", "sort", "hash",
+    "idempotency", "cache", "lookup", "dedup", "object", "item", "record", "row",
+    "map", "dict", "session", "user", "public", "test",
+})
 
-_MASK_PATTERNS = [
+# Where something is rather than what it unlocks. Only a value that reads as
+# random gets past these, however it is labelled.
+_LOCATION_PATTERNS = [
     re.compile(r"[A-Za-z][A-Za-z0-9+.-]{0,30}://[^\s<>\"'`)\]]+"),
-    re.compile(r"(?<![A-Za-z0-9_])(?:~|\.{1,2})?/[\w.@+-]+(?:/[\w.@+-]*)+"),
+    # A path starts at a boundary. After "+" or "/" this is the middle of base64.
+    re.compile(r"(?<![A-Za-z0-9_+/])(?:~|\.{1,2})?/[\w.@+-]+(?:/[\w.@+-]*)+"),
     re.compile(r"(?<![A-Za-z0-9_])[A-Za-z]:\\[^\s\"'`]+"),
-    re.compile(r"(?i)(?<![0-9a-f-])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9a-f-])"),
     re.compile(r"(?i)\bsha(?:1|224|256|384|512)[:-][A-Za-z0-9+/=_-]+"),
+]
+# An id, a commit or an address on its own. Under a label it can be a real key:
+# RunPod and others hand out UUIDs, and old GitHub tokens are 40 hex.
+_ID_PATTERNS = [
+    re.compile(r"(?i)(?<![0-9a-f-])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9a-f-])"),
     re.compile(_LB + r"0x[0-9a-fA-F]{40}" + _RB),
     re.compile(_LB + r"[0-9a-fA-F]{40}" + _RB),
     re.compile(_LB + r"\d{17,20}" + _RB),
 ]
 
 _ENTROPY_TOKEN = re.compile(r"(?<![A-Za-z0-9_+/=.-])[A-Za-z0-9_+/=.-]{24,}")
+_ENTROPY_TOKEN_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_+/=.-"
+)
 _ENTROPY_MIN = 3.5
 _NAMED_FINDINGS_MAX = 50
 _ENTROPY_TOKEN_MIN = 24
@@ -274,9 +291,7 @@ def _value_is_secretish(value: str) -> bool:
     """A labelled value worth asking about: not a placeholder, not a plain word."""
     if value.lower() in _PLACEHOLDER_VALUES:
         return False
-    if value[:1] in "[<${(%" or value.startswith("/") or value.startswith("./"):
-        return False
-    if "://" in value or is_low_variety(value):
+    if value[:1] in "[<${(%" or "://" in value or is_low_variety(value):
         return False
     if value.isdigit():
         return False
@@ -306,16 +321,16 @@ def _name_from_context(text: str, start: int) -> str | None:
     return None
 
 
-def _mask(text: str) -> str:
-    """Blank what is never a secret, keeping every offset where it was."""
-    for pattern in _MASK_PATTERNS:
+def _blank(text: str, patterns: list[re.Pattern]) -> str:
+    """Blank what these patterns match, keeping every offset where it was."""
+    for pattern in patterns:
         text = pattern.sub(lambda m: " " * len(m.group()), text)
     return text
 
 
 def _scan_sure(text: str) -> list[Finding]:
     out: list[Finding] = []
-    for (shape, pattern, name), hint in zip(_SURE_TABLE, _SURE_HINTS):
+    for shape, pattern, name, hint in _SURE_TABLE:
         if hint not in text:
             continue
         for m in pattern.finditer(text):
@@ -411,7 +426,20 @@ def _scan_burn(text: str) -> list[Finding]:
     return out
 
 
-def _scan_ask(text: str, masked: str, *, attachment: bool) -> list[Finding]:
+def _scan_ask(text: str, *, attachment: bool) -> list[Finding]:
+    """Everything worth a question.
+
+    A label says what to look at, so labelled values are read from the raw text:
+    reading them from masked text would cut ``API_KEY=abc+/def/ghi`` at the path
+    and leave the rest of the key in the prompt. The masks then only decide
+    whether a value that starts inside a location or an id still counts.
+    """
+    locations = _blank(text, _LOCATION_PATTERNS)
+    masked = _blank(locations, _ID_PATTERNS)
+
+    def is_location(start: int, value: str) -> bool:
+        return locations[start] == " " and not is_high_entropy(value)
+
     out: list[Finding] = []
     # Credentials inside a URL are read from the raw text: the mask removes URLs.
     for pattern, shape in ((_URL_CRED_PATTERN, "url_userinfo"), (_URL_QUERY_CRED_PATTERN, "url_query")):
@@ -419,40 +447,55 @@ def _scan_ask(text: str, masked: str, *, attachment: bool) -> list[Finding]:
             value = m.group(1)
             if _value_is_secretish(value) or (shape == "url_userinfo" and value.lower() not in _PLACEHOLDER_VALUES):
                 out.append(Finding(ASK, m.start(1), m.end(1), value, shape, _last4_name(value)))
-    for m in HEX64_0X_PATTERN.finditer(masked):
-        out.append(Finding(ASK, m.start(), m.end(), text[m.start():m.end()], "hex64", ""))
-    for m in _HEX64_PATTERN.finditer(masked):
-        out.append(Finding(ASK, m.start(), m.end(), text[m.start():m.end()], "hex64", ""))
-    for m in BEARER_PATTERN.finditer(masked):
+    for pattern in (_HEX64_0X_PATTERN, _HEX64_PATTERN):
+        for m in pattern.finditer(masked):
+            out.append(Finding(ASK, m.start(), m.end(), m.group(), "hex64", ""))
+    for m in _BEARER_PATTERN.finditer(text):
         value = m.group(1)
-        if not is_low_variety(value) and not _looks_like_identifier(value):
+        if not is_location(m.start(1), value) and not is_low_variety(value) and not _looks_like_identifier(value):
             out.append(Finding(ASK, m.start(1), m.end(1), value, "bearer", ""))
-    for m in _ENV_ASSIGN_PATTERN.finditer(masked):
+    for m in _ENV_ASSIGN_PATTERN.finditer(text):
         name, value = m.group(1), m.group(3)
-        if name_looks_secret(name) and _value_is_secretish(value):
+        if name_looks_secret(name) and not is_location(m.start(3), value) and _value_is_secretish(value):
             out.append(Finding(ASK, m.start(3), m.end(3), value, "labelled", name))
-    for m in _PROSE_LABEL_PATTERN.finditer(masked):
-        value = m.group(2)
-        if m.group(1).lower() in ("is", "the", "a", "an"):
+    for m in _PROSE_LABEL_PATTERN.finditer(text):
+        word, value = m.group(1).lower(), m.group(2)
+        if word in ("is", "the", "a", "an") or is_location(m.start(2), value):
+            continue
+        # "primary key <uuid>" is a row, "runpod key <uuid>" is a credential.
+        if masked[m.start(2)] == " " and word in _ID_KEY_WORDS:
             continue
         has_alpha = any(ch.isalpha() for ch in value)
         has_digit = any(ch.isdigit() for ch in value)
         if has_alpha and has_digit and _value_is_secretish(value):
             out.append(Finding(ASK, m.start(2), m.end(2), value, "labelled", ""))
-    for m in _PASSWORD_LABEL_PATTERN.finditer(masked):
+    for m in _PASSWORD_LABEL_PATTERN.finditer(text):
         value = m.group(1)
-        if _value_is_secretish(value):
+        if not is_location(m.start(1), value) and _value_is_secretish(value):
             out.append(Finding(ASK, m.start(1), m.end(1), value, "password", _last4_name(value)))
     if attachment:
-        for m in _LOOSE_ASSIGN_PATTERN.finditer(masked):
+        for m in _LOOSE_ASSIGN_PATTERN.finditer(text):
             name, value = m.group(1), m.group(2)
             if name_looks_secret(name.replace("-", "_")) and is_high_entropy(value):
                 out.append(Finding(ASK, m.start(2), m.end(2), value, "labelled", name.upper().replace("-", "_")))
     else:
         for m in _ENTROPY_TOKEN.finditer(masked):
-            token = m.group().rstrip(".,;:=/")
+            # A mask can blank part of a token. Take the whole token, or what the
+            # mask cut off would stay in the prompt.
+            start, end = m.start(), m.end()
+            while start and text[start - 1] in _ENTROPY_TOKEN_CHARS:
+                start -= 1
+            while end < len(text) and text[end] in _ENTROPY_TOKEN_CHARS:
+                end += 1
+            # Sentence punctuation goes. "=" stays, it can be base64 padding.
+            token = text[start:end].rstrip(".,;:")
+            # FOO=value is a label and a value, not one long value.
+            label_end = token.rstrip("=").rfind("=")
+            if label_end >= 0:
+                start += label_end + 1
+                token = token[label_end + 1:]
             if len(token) >= _ENTROPY_TOKEN_MIN and is_high_entropy(token):
-                out.append(Finding(ASK, m.start(), m.start() + len(token), token, "entropy", ""))
+                out.append(Finding(ASK, start, start + len(token), token, "entropy", ""))
     return out
 
 
@@ -496,7 +539,7 @@ def scan(text: str, *, attachment: bool = False) -> list[Finding]:
     if not text:
         return []
     found = _scan_burn(text) + _scan_sure(text)
-    found += _scan_ask(text, _mask(text), attachment=attachment)
+    found += _scan_ask(text, attachment=attachment)
     return _with_names(text, _settle(found))
 
 

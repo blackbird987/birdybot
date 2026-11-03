@@ -6,6 +6,7 @@ Allow and Deny buttons, and Allow grants the repo and resumes the thread.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from bot import secret_detect, vault
@@ -57,7 +58,8 @@ async def _handle_secret_directives(
         reason = (parse_kv(kv) or {}).get("reason", "") if kv.strip() else ""
         reason = secret_detect.scrub(vault.strip_literals(reason))[:_REASON_MAX]
         try:
-            token = vault.add_request(
+            token = await asyncio.to_thread(
+                vault.add_request,
                 name, source_inst.repo_name, ctx.channel_id, source_inst.session_id,
             )
         except vault.VaultUnavailable:
@@ -65,7 +67,6 @@ async def _handle_secret_directives(
             return
         if token is None:
             continue
-        posted += 1
         why = f" Reason: {reason}" if reason else ""
         try:
             await ctx.messenger.send_text(
@@ -76,5 +77,9 @@ async def _handle_secret_directives(
                     ButtonSpec("Deny", f"secret_deny:{token}"),
                 ]],
             )
+            posted += 1
         except Exception:
+            # Nobody saw the buttons, so it must not count as pending or the
+            # session could never ask again.
             log.warning("Could not post a /secret request", exc_info=True)
+            await asyncio.to_thread(vault.pop_request, token)

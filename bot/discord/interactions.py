@@ -149,18 +149,23 @@ async def _settle_secret_row(
     )
 
 
+# What _secret_vault_call returns once it has told the owner the file is broken.
+# Not None: pop_request answers None for a request that is simply gone.
+_VAULT_FAILED = object()
+
+
 async def _secret_vault_call(interaction: discord.Interaction, fn, *args):
-    """Run a vault call off the loop. A broken file is reported, and returns None."""
+    """Run a vault call off the loop. A broken file is reported, and returns _VAULT_FAILED."""
     try:
         return await asyncio.to_thread(fn, *args)
     except vault.VaultUnavailable:
         await settle(interaction, "The secret vault file can't be read, so nothing changed.")
-        return None
+        return _VAULT_FAILED
 
 
 async def _handle_secret_forget(bot: ClaudeBot, interaction: discord.Interaction, name: str) -> None:
     gone = await _secret_vault_call(interaction, vault.forget, name)
-    if gone is None:
+    if gone is _VAULT_FAILED:
         return
     line = f"Forgot `{name}`." if gone else f"`{name}` was already gone."
     await _settle_secret_row(interaction, f"secret_forget:{name}", line)
@@ -169,7 +174,7 @@ async def _handle_secret_forget(bot: ClaudeBot, interaction: discord.Interaction
 async def _handle_secret_replace(bot: ClaudeBot, interaction: discord.Interaction, arg: str) -> None:
     old, _, new = arg.partition("|")
     done = await _secret_vault_call(interaction, vault.replace, old, new)
-    if done is None:
+    if done is _VAULT_FAILED:
         return
     line = f"`{old}` now holds the new value." if done else f"`{old}` or `{new}` is gone, so nothing changed."
     await _settle_secret_row(interaction, f"secret_replace:{arg}", line)
@@ -194,6 +199,8 @@ async def _handle_secret_request(
 ) -> None:
     """Allow or Deny a session's /secret request. The token outlives a restart."""
     req = await _secret_vault_call(interaction, vault.pop_request, token)
+    if req is _VAULT_FAILED:
+        return
     if req is None:
         await interaction.edit_original_response(content="That request is gone.", view=None)
         return
@@ -204,6 +211,8 @@ async def _handle_secret_request(
         )
         return
     granted = await _secret_vault_call(interaction, vault.grant, name, repo)
+    if granted is _VAULT_FAILED:
+        return
     if not granted:
         await interaction.edit_original_response(content=f"`{name}` no longer exists.", view=None)
         return

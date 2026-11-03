@@ -403,6 +403,7 @@ async def _start_retry(
         effort=ctx.effective_effort,
         model=None if pay_per_use else inst.model,
     )
+    new_inst.vault_eligible = inst.vault_eligible and not ctx.thread_has_guest
     if pay_per_use:
         new_inst.api_fallback = True
         new_inst.cooldown_retries = 0

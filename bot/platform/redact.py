@@ -9,16 +9,16 @@ import logging
 import os
 import re
 
-from bot import config, secret_detect
+from bot import config, secret_detect, vault
 
 # --- Secret Redaction ---
 
 # Well-known token prefixes (match standalone, no key name needed). The door
 # and this file share the vendor list, so a new key shape only goes in one place.
 _TOKEN_PATTERNS = [
-    *secret_detect.SURE_PATTERNS,
-    secret_detect.HEX64_0X_PATTERN,
-    secret_detect.BEARER_PATTERN,
+    *secret_detect.REDACT_PATTERNS,
+    re.compile(r'0x[0-9a-fA-F]{64}\b'),
+    re.compile(r'(?i)Bearer\s+[a-zA-Z0-9_./+=-]{20,}'),
 ]
 
 # Anything sitting between the colon and the @ of a URL is, by definition of
@@ -90,43 +90,40 @@ _ENV_SECRET_NAMES = (
 # and blanket-replacing a 3-character string would gut unrelated text.
 _ENV_SECRET_MIN_LEN = 8
 
-_env_secrets_cache: tuple[str, ...] | None = None
+# (the vault's values this was built from, the full list).
+_env_secrets_cache: tuple[tuple[str, ...], tuple[str, ...]] | None = None
 
 
 def _env_secret_values() -> tuple[str, ...]:
-    """The literal secret strings to strip, collected once.
+    """The literal secret strings to strip.
 
     redact_secrets sits on the display hot path, so this must not re-read
-    config per call. A failure here degrades to regex-only redaction rather
-    than taking down every message the bot renders.
+    config per call. Asking the vault costs one stat, and is what makes a key
+    stored a moment ago, or a file repaired by hand, count at once. A failure
+    here degrades to regex-only redaction rather than taking down every message
+    the bot renders.
     """
     global _env_secrets_cache
-    if _env_secrets_cache is not None:
-        return _env_secrets_cache
-    values: list[str] = []
+    try:
+        literals = vault.literal_values()
+    except Exception:  # pragma: no cover - defensive
+        literals = ()
+    if _env_secrets_cache is not None and _env_secrets_cache[0] == literals:
+        return _env_secrets_cache[1]
+    values: list[str] = list(literals)
     try:
         for name in _ENV_SECRET_NAMES:
             v = getattr(config, name, None) or os.getenv(name, "")
             if v and isinstance(v, str) and len(v) >= _ENV_SECRET_MIN_LEN:
                 values.append(v)
     except Exception:  # pragma: no cover - defensive
-        values = []
-    try:
-        from bot import vault
-        values.extend(vault.literal_values())
-    except Exception:  # pragma: no cover - defensive
-        pass
+        values = list(literals)
     # Longest first: a webhook URL contains its own id/token substrings, and
     # replacing the whole thing before its parts keeps the output readable.
     values.sort(key=len, reverse=True)
-    _env_secrets_cache = tuple(dict.fromkeys(values))
-    return _env_secrets_cache
-
-
-def invalidate_env_secret_cache() -> None:
-    """Forget the literal list. The vault calls this on every change."""
-    global _env_secrets_cache
-    _env_secrets_cache = None
+    result = tuple(dict.fromkeys(values))
+    _env_secrets_cache = (literals, result)
+    return result
 
 
 def scrub_known(text: str) -> str:
@@ -138,7 +135,7 @@ def scrub_known(text: str) -> str:
     for secret in _env_secret_values():
         if secret in text:
             text = text.replace(secret, '[REDACTED]')
-    for pattern in secret_detect.SURE_PATTERNS:
+    for pattern in secret_detect.REDACT_PATTERNS:
         text = pattern.sub('[REDACTED]', text)
     return text
 

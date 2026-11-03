@@ -17,7 +17,6 @@ import _bootstrap  # noqa: F401
 
 import asyncio
 import base64
-import inspect
 import io
 import json
 import logging
@@ -28,7 +27,9 @@ import sys
 import tempfile
 import time
 import traceback
+import threading
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -48,7 +49,7 @@ from bot.claude.types import Instance, InstanceOrigin, InstanceStatus, InstanceT
 from bot.discord import attachments, interactions, modals, secret_door, wizard  # noqa: E402
 from bot.discord.access import AccessResult  # noqa: E402
 from bot.discord.bot import ClaudeBot, SecretDoorTree  # noqa: E402
-from bot.discord.forums import ForumManager  # noqa: E402
+from bot.discord.forums import ForumManager, ThreadInfo  # noqa: E402
 from bot.engine import secret_scan, sessions  # noqa: E402
 from bot.engine.directives.secret import _handle_secret_directives  # noqa: E402
 from bot.platform import redact  # noqa: E402
@@ -78,7 +79,7 @@ def check(cond: bool, label: str) -> None:
 def reset_vault() -> None:
     shutil.rmtree(config.VAULT_DIR, ignore_errors=True)
     vault._literal_cache = None
-    redact.invalidate_env_secret_cache()
+    redact._env_secrets_cache = None
     secret_door._holds.clear()
     secret_door._held_message_ids.clear()
     secret_door._not_secret.clear()
@@ -220,7 +221,7 @@ def test_detector() -> None:
     check(not tiers("task-" + "abc123" * 3), "task-... does not match sk-")
     check(not tiers("password: changeme"), "placeholder password passes")
     check(not tiers("sk-ant-" + "x" * 30), "x'd out vendor key passes")
-    check(not tiers("/home/quincy/Programming/claude-telegram-bot/.worktrees/t-10147/bot/vault.py"), "path passes")
+    check(not tiers("/srv/shared/Programming/claude-telegram-bot/.worktrees/t-10147/bot/vault.py"), "path passes")
     check(not tiers(ENTROPIC, attachment=True), "entropy tier skipped in bodies")
     check(ASK in tiers(f"api_key = \"{ENTROPIC}\"", attachment=True), "lowercase labelled value in a body goes to ASK")
     check(ASK in tiers(f'{{"client-secret": "{ENTROPIC}"}}', attachment=True), "quoted JSON label in a body goes to ASK")
@@ -823,7 +824,6 @@ async def test_modals() -> None:
     await modal.on_submit(_slash([]))
     check(named and OPENAI not in named[0] and OPENAI[:12] not in named[0], "thread title never sees the key")
     check(vault.has_name("OPENAI_API_KEY"), "QuickTask stored it")
-    del prompts
 
     bot = FakeBot()
     m = wizard.RepoNameModal(bot, "create")
@@ -869,12 +869,10 @@ async def test_modals() -> None:
 # --- on_message plumbing ---------------------------------------------------
 
 
-def _route_self(memes_channel=None):
-    calls: list[dict] = []
+def _route_self():
     return SimpleNamespace(
         _voice_enabled=False,
         _forums=SimpleNamespace(archive_channel_ids=set()),
-        calls=calls,
     )
 
 
@@ -1053,7 +1051,6 @@ async def test_priming() -> None:
                 yield m
         return gen()
 
-    thread.history = None  # slot-free subclass attribute
     fm = ForumManager.__new__(ForumManager)
     fm._client = SimpleNamespace(user=SimpleNamespace(id=999))
     fm._store = SimpleNamespace(get_autopilot_chain=lambda _s: None)
@@ -1069,16 +1066,12 @@ async def test_priming() -> None:
         return Hist(id=300)
 
     fm._get_or_fetch = get
-    method = next(
-        getattr(ForumManager, n) for n in dir(ForumManager)
-        if "prime" in n.lower() and "cache" not in n.lower() and inspect.iscoroutinefunction(getattr(ForumManager, n))
-    )
     fm.current_message_gone.add("300")
-    out = await method(fm, "300", use_cache=False)
+    out = await ForumManager.build_prime_briefing(fm, "300", use_cache=False)
     check(out and "earlier question" in out, "deleted current message: the earlier one is kept")
     check(OPENAI not in out and literal not in out, "history is scrubbed, both roles")
     fm.current_message_gone.clear()
-    out = await method(fm, "300", use_cache=False)
+    out = await ForumManager.build_prime_briefing(fm, "300", use_cache=False)
     check(not out or "earlier question" not in out, "normal turn still drops the newest message")
 
     ref = ForumManager.build_ref_context(
@@ -1208,7 +1201,6 @@ async def test_env_injection() -> None:
     finally:
         asyncio.create_subprocess_exec = saved_spawn
         config.CLAUDE_ACCOUNTS[:] = saved_accounts
-    del stdin_seen
 
 
 async def test_guest_routes() -> None:
@@ -1235,6 +1227,29 @@ async def test_guest_routes() -> None:
     )
     check(owner_only is None, "the owner's thread has none")
 
+    # A child reports back to its parent, so the parent's guest counts for keys.
+    guest_parent = ThreadInfo(thread_id="10", user_id="2")
+    clean_parent = ThreadInfo(thread_id="20", user_id="1")
+    child = ThreadInfo(thread_id="11", user_id="1", parent_thread_id="10")
+    grandchild = ThreadInfo(thread_id="12", user_id="1", parent_thread_id="11")
+    clean_child = ThreadInfo(thread_id="21", user_id="1", parent_thread_id="20")
+    loop_a = ThreadInfo(thread_id="30", user_id="1", parent_thread_id="31")
+    loop_b = ThreadInfo(thread_id="31", user_id="1", parent_thread_id="30")
+    orphan = ThreadInfo(thread_id="40", user_id="1", parent_thread_id="999")
+    family = {t.thread_id: (None, t) for t in (guest_parent, clean_parent, child, grandchild, clean_child, loop_a, loop_b, orphan)}
+    fam = SimpleNamespace(_discord_user_id=1, _forums=SimpleNamespace(thread_to_project=family.get))
+    fam._thread_guest_id = lambda i: ThreadContextMixin._thread_guest_id(fam, i)
+    has_guest = lambda i: ThreadContextMixin._family_has_guest(fam, i)  # noqa: E731
+    check(has_guest(child), "an owner's child of a guest's thread gets no keys")
+    check(has_guest(grandchild), "nor does its child")
+    check(fam._thread_guest_id(child) is None, "but the child's own runs keep its own rights")
+    check(not has_guest(clean_child), "an owner's family with no guest is clean")
+    check(not has_guest(loop_a), "a parent loop ends")
+    check(not has_guest(orphan), "a forgotten parent is not a guest")
+    check(has_guest(None) is False, "no thread at all has no family")
+    interactive = ClaudeBot._ctx.__code__.co_names
+    check("_family_has_guest" in interactive, "every context asks about the family")
+
     with tempfile.TemporaryDirectory() as tmp:
         store = StateStore(Path(tmp) / "state.json", Path(tmp) / "results")
         inst = store.create_instance(InstanceType.QUERY, "hi")
@@ -1248,6 +1263,11 @@ async def test_guest_routes() -> None:
         check(clone.vault_eligible, "an owner's retry keeps eligibility")
 
     root = Path(__file__).resolve().parents[1] / "bot"
+    # A guest can arrive after the first turn, so every handoff asks again.
+    guarded = "vault_eligible = {} and not ctx.thread_has_guest"
+    check((root / "engine/step_spawn.py").read_text().count(guarded.format("source.vault_eligible")) == 2, "chain steps and resolvers re-check for a guest")
+    check(guarded.format("inst.vault_eligible") in (root / "engine/instance_cmds.py").read_text(), "/retry re-checks for a guest")
+    check(guarded.format("inst.vault_eligible") in (root / "app.py").read_text(), "a cooldown retry re-checks for a guest")
     interactions_src = (root / "discord/interactions.py").read_text()
     check("bot._guest_access(pending.user_id, channel_id)" in interactions_src, "Steer on a guest's prompt keeps the guest's access")
     usage = (root / "discord/usage_gate.py").read_text()
@@ -1257,6 +1277,10 @@ async def test_guest_routes() -> None:
 
 
 # --- Persisted files -------------------------------------------------------
+
+
+async def _gate_send(**_kw):
+    return SimpleNamespace(id=5)
 
 
 async def test_persistence() -> None:
@@ -1279,6 +1303,28 @@ async def test_persistence() -> None:
         files = "\n".join(p.read_text(errors="replace") for p in Path(tmp).rglob("*") if p.is_file())
         check(OPENAI not in files, "nothing else in the data dir holds it")
     # Everything else that queues a prompt is fed `text`, which comes after the door.
+    from bot.discord import usage_notifier
+    from bot.discord.usage_gate import UsageGateMixin
+    with tempfile.TemporaryDirectory() as tmp:
+        queue_file = Path(tmp) / "usage_queue.json"
+        saved_file, saved_gate = config.USAGE_QUEUE_FILE, config.USAGE_PEAK_GATE_ENABLED
+        saved_active, saved_end = usage_notifier.is_usage_limit_active, usage_notifier.next_window_end_utc
+        config.USAGE_QUEUE_FILE, config.USAGE_PEAK_GATE_ENABLED = queue_file, True
+        usage_notifier.is_usage_limit_active = lambda: True
+        usage_notifier.next_window_end_utc = lambda: datetime.now(timezone.utc)
+        try:
+            gate = UsageGateMixin()
+            gate._usage_gate_bypass = {}
+            gate._usage_queue_lock = asyncio.Lock()
+            gate._forums = FakeForums()
+            gate.get_channel = lambda _id: SimpleNamespace(send=_gate_send)
+            ctx = SimpleNamespace(channel_id="100", repo_name="myrepo", user_id="1", user_name="o", is_owner=True, pending_image_paths=[])
+            check(await gate._offer_usage_limit_choice(ctx, clean), "the usage gate queues the prompt")
+        finally:
+            config.USAGE_QUEUE_FILE, config.USAGE_PEAK_GATE_ENABLED = saved_file, saved_gate
+            usage_notifier.is_usage_limit_active, usage_notifier.next_window_end_utc = saved_active, saved_end
+        queued = queue_file.read_text()
+        check("[secret " in queued and OPENAI not in queued, "the usage queue file holds the placeholder")
     bot_src = (Path(__file__).resolve().parents[1] / "bot/discord/bot.py").read_text()
     route = bot_src[bot_src.index("async def _route_screened"):]
     check("message.content = door.text" in route[:400], "routing starts from the door's text")
@@ -1607,13 +1653,228 @@ def test_scan() -> None:
     check(secret_scan.scan_session("s1") == [], "empty vault is a no-op")
 
 
+# --- What the fresh-eyes review found --------------------------------------
+
+
+def _log_with_formatter(*lines: str) -> str | None:
+    """Log through the redacting formatter. None means the call never came back."""
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(redact.RedactingFormatter("%(message)s"))
+    logger = vault.log
+    saved = logger.propagate
+    logger.propagate = False
+    logger.addHandler(handler)
+
+    def work():
+        for line in lines:
+            logger.error(line)
+        vault.has_name("ANY")  # logs from under the vault's own lock when the file is bad
+
+    worker = threading.Thread(target=work, daemon=True)
+    try:
+        worker.start()
+        worker.join(5)
+        return None if worker.is_alive() else stream.getvalue()
+    finally:
+        logger.removeHandler(handler)
+        logger.propagate = saved
+
+
+def _test_broken_vault_file() -> None:
+    print("a broken vault file")
+    literal = "plainliteralvalue12345"
+    reset_vault()
+    vault.add(literal, "LIT_KEY", "r")
+    check(literal not in redact.scrub_known(f"x {literal}"), "a stored value is stripped")
+    vault._path().write_text("{not json " + literal)
+    out = _log_with_formatter(f"line {literal}")
+    check(out is not None, "a corrupt file does not hang the first log line")
+    check(out is not None and "line" in out and literal not in out, "the last good values are still stripped")
+    other = "anotherliteralvalue99"
+    vault._path().write_text(json.dumps({"entries": [{"name": "O_KEY", "value": other, "repos": []}]}))
+    check(other not in redact.scrub_known(f"x {other}"), "a repaired or hand-edited file counts at once")
+    check(literal in redact.scrub_known(f"x {literal}"), "and what it no longer holds stops counting")
+    for label, bad in (
+        ("not an object", "[]"),
+        ("entries not a list", '{"entries": {"a": 1}}'),
+        ("an entry with no name", '{"entries": [{"value": "x"}]}'),
+        ("requests not an object", '{"requests": []}'),
+        ("hold markers not a list", '{"hold_markers": {}}'),
+    ):
+        vault._path().write_text(bad)
+        try:
+            vault.add(OPENAI, "X_KEY", "r")
+            check(False, f"valid JSON, {label}: refused")
+        except vault.VaultUnavailable as exc:
+            check(bad not in str(exc), f"valid JSON, {label}: refused")
+        check(vault._path().read_text() == bad, f"valid JSON, {label}: left untouched")
+
+
+def _test_door_state_bounds() -> None:
+    print("door state stays small")
+    reset_vault()
+    tokens = [vault.add_request(f"K{i}_KEY", "r", "1", f"s{i}") for i in range(vault._REQUESTS_MAX + 5)]
+    requests = vault._safe_read()["requests"]
+    check(len(requests) == vault._REQUESTS_MAX, "requests are bounded")
+    check(tokens[-1] in requests and tokens[0] not in requests, "the oldest request goes first")
+    for i in range(vault._FLAGGED_SESSIONS_MAX + 5):
+        vault.flag_once(f"session{i}", "A_KEY")
+    flagged = vault._safe_read()["flagged"]
+    check(len(flagged) == vault._FLAGGED_SESSIONS_MAX and "session0" not in flagged, "flagged sessions are bounded")
+
+
+def _test_cut_values() -> None:
+    print("a value is read whole")
+    b64 = "Ab3dE5gH9jK+/mN0pQ/rS2tU4vW6xY8zA1cE3gI5"
+    hex40 = "3f9a1c7e5b2d8046" + "c1e7a94f02b6d358" + "7d10e6f4"
+    uuid = "7f3a9c1e-5b2d-4e8f-a046-c1e7a94f02b6"
+
+    def values(text, **kw):
+        return [f.value for f in secret_detect.scan(text, **kw)]
+
+    check(values(f"API_KEY={b64}") == [b64], "base64 with slashes under an env label")
+    check(values(f"API_KEY=/{b64}") == [f"/{b64}"], "and one that starts with a slash")
+    check(values("password: lo9ngpa$$/w1/rd") == ["lo9ngpa$$/w1/rd"], "a password with slashes")
+    dotted = f"prefix1.{hex40}.tail9"
+    check(values(f"API_KEY={dotted}") == [dotted], "a value holding an id shape")
+    check(values(f"Authorization: Bearer {b64}") == [b64], "a bearer token with slashes")
+    check(values(f"glued {b64}") == [b64], "an unlabelled token the path mask would have cut")
+    check(values(f"FOO={ENTROPIC}") == [ENTROPIC], "a label is not part of the value")
+    check(values(f"--token={ENTROPIC}") == [ENTROPIC], "nor is a flag")
+    check(values(f"try {ENTROPIC}==") == [f"{ENTROPIC}=="], "base64 padding is kept")
+    check(values(f"try {ENTROPIC}.") == [ENTROPIC], "a full stop is not")
+    check(values(f"RUNPOD_API_KEY={uuid}") == [uuid], "a UUID under an env label")
+    check(values(f"my runpod key is {uuid}") == [uuid], "a UUID named as a key")
+    check(values(f"API_KEY={hex40}") == [hex40], "40 hex under a label")
+    for text in (
+        f"session {uuid}", f"primary key {uuid}", f"session key {uuid}",
+        f"cache key sha256:{hex40}", "API_BASE_KEY=https://example.com/v1/models",
+        "TOKEN_PATH=/etc/app/tokens.txt", "password: /etc/app/pw.txt", f"commit {hex40}",
+    ):
+        check(not values(text), f"left alone: {text[:30]}")
+
+
+async def test_review_fixes() -> None:
+    _test_broken_vault_file()
+    _test_door_state_bounds()
+    _test_cut_values()
+
+    print("a file name")
+    reset_vault()
+    jwt = "eyJ" + "a1B2c3D4e5F6" + "." + "g7H8i9J0k1L2" + "." + "m3N4o5P6q7R8"
+    named = FakeAtt(20, jwt, b"hello")
+    await secret_door.screen_message(FakeBot(), FakeMessage("x", attachments=[named]), OWNER)
+    check("m3N4o5P6q7R8" not in named.filename, "no part of a JWT comes back as an extension")
+    reset_vault()
+    named = FakeAtt(21, f"key.{ANTHROPIC}", b"hello")
+    await secret_door.screen_message(FakeBot(), FakeMessage("x", attachments=[named]), OWNER)
+    check(ANTHROPIC not in named.filename, "a key after a dot is found")
+
+    print("posting a hold")
+    reset_vault()
+    bot = FakeBot()
+
+    async def no_post(*_a, **_kw):
+        raise RuntimeError("discord down")
+    bot.messenger.send_text = no_post
+    msg = FakeMessage(f"try {ENTROPIC} now")
+    door = await secret_door.screen_message(bot, msg, OWNER)
+    check(not door.proceed and not secret_door._holds and not secret_door.is_held(msg.id), "a failed post leaves no hold behind")
+
+    reset_vault()
+    bot = FakeBot()
+
+    async def tapped_at_once(channel_id, text, buttons=None, silent=False):
+        await secret_door.resolve_hold(bot, next(iter(secret_door._holds)), "no")
+        return "m1"
+    bot.messenger.send_text = tapped_at_once
+    await secret_door.screen_message(bot, FakeMessage(f"try {ENTROPIC} now"), OWNER)
+    check(not vault._safe_read()["hold_markers"], "a hold answered during its post writes no marker")
+    check(not [t for t in secret_door._background if t.get_coro().__name__.startswith("_expire")], "and starts no timer")
+
+    print("a value already called not a secret")
+    reset_vault()
+    bot = FakeBot()
+    await secret_door.screen_message(bot, FakeMessage(f"try {ENTROPIC} now"), OWNER)
+    await secret_door.resolve_hold(bot, next(iter(secret_door._holds)), "no")
+    await settle_tasks()
+    opts = [{"type": 3, "name": "p", "value": f"try {ENTROPIC}"}]
+    check(await secret_door.screen_slash(bot, _slash(opts)) and ENTROPIC in opts[0]["value"], "a slash command does not refuse it again")
+
+    print(".env with a value across lines")
+    reset_vault()
+    bot = FakeBot()
+    wrapped = PEM.replace("-----\n", "-----\n" + "QUJDREVGR0hJSktM=\n", 1)
+    body = f'SIGNING="{wrapped}"\nZ_TOKEN={OPENAI}\nPORT=8080\n'.encode()
+    door = await secret_door.screen_message(bot, FakeMessage("", attachments=[FakeAtt(22, ".env", body)]), OWNER)
+    names = {e["name"] for e in vault.list_entries()}
+    check("SIGNING" not in names and "Z_TOKEN" in names, "a quoted PEM is burned, the next line still stored")
+    check("SIGNING" in door.text and "MIIE" not in door.text and "QUJD" not in door.text, "its lines never read as names")
+    check("PRIVATE" not in json.dumps(vault._safe_read()), "not even its header is stored")
+
+    print("a /secret request nobody saw")
+    reset_vault()
+    vault.add(OPENAI, "STRIPE_KEY", "elsewhere")
+    ctx = _ctx()
+
+    async def unsent(*_a, **_kw):
+        raise RuntimeError("discord down")
+    ctx.messenger.send_text = unsent
+    good = "[BOT_CMD: /secret request STRIPE_KEY]"
+    await _handle_secret_directives(ctx, good, _instance(vault_eligible=True))
+    check(not vault._safe_read()["requests"], "a failed post leaves no pending request")
+    ctx = _ctx()
+    await _handle_secret_directives(ctx, good, _instance(vault_eligible=True))
+    check(len(ctx.messenger.sent) == 1, "so the session can ask again")
+
+    print("a broken vault against a gone request")
+    reset_vault()
+    edits: list = []
+
+    async def edit(**kw):
+        edits.append(kw)
+    settled: list = []
+
+    async def fake_settle(_i, text):
+        settled.append(text)
+    saved = interactions.settle
+    interactions.settle = fake_settle
+    try:
+        i = SimpleNamespace(edit_original_response=edit)
+        await interactions._handle_secret_request(FakeBot(), i, "secret_allow", "nosuchtoken")
+        check("gone" in edits[-1]["content"] and not settled, "a gone request says so")
+        edits.clear()
+        vault.add(OPENAI, "GONE_KEY", "elsewhere")
+        token = vault.add_request("GONE_KEY", "myrepo", "1", "s")
+        vault.forget("GONE_KEY")
+        await interactions._handle_secret_request(FakeBot(), i, "secret_allow", token)
+        check(edits and "no longer" in edits[-1]["content"] and not settled, "a forgotten key says so")
+        edits.clear()
+        vault._path().write_text("{nope")
+        await interactions._handle_secret_request(FakeBot(), i, "secret_allow", "anytoken")
+        check(settled and "can't be read" in settled[0] and not edits, "a broken file says that, once")
+    finally:
+        interactions.settle = saved
+
+    print("output redaction")
+    reset_vault()
+    check(ANTHROPIC not in redact.scrub_known(f"x-{ANTHROPIC}"), "a key glued to a word is still redacted in a log")
+    check(GITHUB not in redact.redact_secrets(f"prefix{GITHUB}"), "and on screen")
+    long_sk = "sk-" + "a1B2c3D4" * 3
+    check(long_sk not in redact.redact_secrets(f"mask{long_sk}"), "a glued alphanumeric sk- key is redacted")
+    slug = "task-fix-the-login-bug-right-now-please"
+    check(slug in redact.scrub_known(slug) and slug in redact.redact_secrets(slug), "a hyphenated slug is left alone")
+    check(vault.REMOVED is secret_detect.REMOVED, "one removed marker")
+
+
 async def main() -> None:
     tests = (
         test_detector, test_vault, test_owner_sure, test_holds, test_burn_and_guest,
         test_title, test_attachments, test_voice, test_slash, test_modals, test_routing,
         test_edits, test_priming, test_block_and_flags, test_env_injection,
         test_guest_routes, test_persistence, test_formatter, test_directive,
-        test_row_buttons, test_commands, test_scan,
+        test_row_buttons, test_commands, test_scan, test_review_fixes,
     )
     for test in tests:
         # One crash should not hide what the later groups would have found.

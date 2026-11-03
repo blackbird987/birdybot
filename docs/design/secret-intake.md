@@ -28,9 +28,13 @@ wave handles the real boundary.
 - Rejected attachment types, oversize attachments, images and PDFs are not read.
 - Output a session prints can reach the transcript and the results. The scan
   after each run flags this by name. It does not prevent it.
-- A command that does not go through `_run_slash` can leave the option text
-  visible on the invocation, since Discord shows it there. The tree rewrites what
-  the bot reads, not what Discord displays.
+- A slash command's option text stays visible on the invocation, since Discord
+  shows it there. The tree rewrites what the bot reads on every command, not what
+  Discord displays.
+- A key stored after the scan has passed that part of a transcript is not searched
+  for there. The scan keeps its place per file and only reads forward.
+- A token with an id shape in its middle and no label (`abc.<40 hex>.def`) is not
+  asked about: each piece is too short on its own, and 40 hex alone is a commit.
 
 ## Tiers
 
@@ -71,8 +75,28 @@ guest cannot store anything and gets no hold.
   `is_owner_session and vault_eligible and repo_name` in `core.py`. `vault_eligible`
   defaults to False and has to be set by the route that knows who asked, because
   `is_owner_session` defaults to True (it fails open). `thread_has_guest` defaults
-  to True for the same reason. Retry, Steer, replay, chain steps and the usage
-  queue all carry the flag rather than recompute it.
+  to True for the same reason. Chain steps, resolvers, `/retry` and a cooldown retry
+  copy the flag and check again for a guest, who may have arrived since. The usage
+  queue stores `is_owner`, replay computes through `_ctx`, and Steer on a guest's
+  prompt uses `_guest_access`.
+- **A guest anywhere above a thread counts.** `_family_has_guest` walks the parent
+  links, because a child reports back to its parent and a guest there reads what the
+  child did with a key. Only keys go by this: `_thread_guest_id` still decides a
+  thread's own replay rights, or a build would come back from a reboot unable to
+  edit anything.
+- **`literal_values` takes no lock and logs nothing.** It runs inside the log
+  formatter, so a line logged under the vault's lock would wait on itself: a corrupt
+  file used to hang the first log line for good. A file that stops parsing keeps the
+  last good values, because losing them would put known keys back into what the bot
+  prints.
+- **A label decides what to read, the masks decide whether it counts.** Labelled
+  values are read from the raw text, or a mask would cut `API_KEY=abc+/def/ghi` at
+  the path and leave the rest in the prompt. A location is dropped unless it reads as
+  random. A UUID or 40 hex under a label is asked about, because some vendors issue
+  keys in those shapes, except after a word like "primary" or "session".
+- **Output redaction is wider than the door.** The door needs a boundary before a
+  key, so `task-...` is not a key. Redaction also matches a key glued to a word, and
+  gives up the word.
 - **Vault literals are stripped twice.** Once before the instance is created and
   again in the runner just before the prompt goes out. A value re-pasted in some
   form the door passed still comes out.
