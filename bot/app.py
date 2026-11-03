@@ -20,8 +20,10 @@ from bot.claude import memory as claude_memory
 from bot.claude.runner import ClaudeRunner
 from bot.claude.types import InstanceStatus
 from bot.engine import commands as engine_commands
+from bot.engine import secret_scan
 from bot.platform.base import NotificationService
 from bot.platform.formatting import redact_secrets
+from bot.platform.redact import RedactingFormatter
 from bot.procutil import (
     clear_stop_request,
     detached_kwargs,
@@ -41,7 +43,7 @@ def setup_logging() -> None:
     root = logging.getLogger()
     root.setLevel(getattr(logging, config.LOG_LEVEL, logging.INFO))
 
-    fmt = logging.Formatter(
+    fmt = RedactingFormatter(
         "%(asctime)s %(levelname)-7s %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
@@ -406,6 +408,7 @@ async def run() -> None:
 
     # Schedule result callback
     async def on_schedule_result(instance, result, changed):
+        secret_scan.schedule(instance.session_id, None, notifier)
         if instance.status == InstanceStatus.FAILED:
             escaped = redact_secrets(instance.error or 'Unknown error')
             await notifier.broadcast(

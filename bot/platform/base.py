@@ -255,6 +255,7 @@ class RequestContext:
     user_id: str | None = None
     user_name: str | None = None
     is_owner: bool = True             # True = bot owner (full access)
+    thread_has_guest: bool = True     # Fails closed: only a platform that checked the thread may clear this. Decides vault_eligible
     mode_ceiling: str | None = None   # Max mode for non-owners (None = no limit)
     # Access policy (populated by platform layer — engine never imports access module)
     bash_policy: str | None = None           # "allowlist", "full", "none" (None = default)

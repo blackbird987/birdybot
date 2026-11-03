@@ -5,23 +5,20 @@ Add a new secret-bearing env var to ``_ENV_SECRET_NAMES``.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 
-from bot import config
+from bot import config, secret_detect
 
 # --- Secret Redaction ---
 
-# Well-known token prefixes (match standalone, no key name needed)
+# Well-known token prefixes (match standalone, no key name needed). The door
+# and this file share the vendor list, so a new key shape only goes in one place.
 _TOKEN_PATTERNS = [
-    re.compile(r'sk-ant-[a-zA-Z0-9_-]{20,}'),
-    re.compile(r'sk-[a-zA-Z0-9]{20,}'),
-    re.compile(r'gh[pos]_[a-zA-Z0-9]{20,}'),
-    re.compile(r'github_pat_[a-zA-Z0-9_]{20,}'),
-    re.compile(r'AKIA[A-Z0-9]{16}'),
-    re.compile(r'eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}'),
-    re.compile(r'0x[0-9a-fA-F]{64}\b'),
-    re.compile(r'(?i)Bearer\s+[a-zA-Z0-9_./-]{20,}'),
+    *secret_detect.SURE_PATTERNS,
+    secret_detect.HEX64_0X_PATTERN,
+    secret_detect.BEARER_PATTERN,
 ]
 
 # Anything sitting between the colon and the @ of a URL is, by definition of
@@ -114,11 +111,43 @@ def _env_secret_values() -> tuple[str, ...]:
                 values.append(v)
     except Exception:  # pragma: no cover - defensive
         values = []
+    try:
+        from bot import vault
+        values.extend(vault.literal_values())
+    except Exception:  # pragma: no cover - defensive
+        pass
     # Longest first: a webhook URL contains its own id/token substrings, and
     # replacing the whole thing before its parts keeps the output readable.
     values.sort(key=len, reverse=True)
     _env_secrets_cache = tuple(dict.fromkeys(values))
     return _env_secrets_cache
+
+
+def invalidate_env_secret_cache() -> None:
+    """Forget the literal list. The vault calls this on every change."""
+    global _env_secrets_cache
+    _env_secrets_cache = None
+
+
+def scrub_known(text: str) -> str:
+    """Only what is certainly a secret: known values and vendor prefixes.
+
+    For log lines, where the prose-shaped patterns below would eat ordinary
+    words such as "token: limit" and make the log harder to read.
+    """
+    for secret in _env_secret_values():
+        if secret in text:
+            text = text.replace(secret, '[REDACTED]')
+    for pattern in secret_detect.SURE_PATTERNS:
+        text = pattern.sub('[REDACTED]', text)
+    return text
+
+
+class RedactingFormatter(logging.Formatter):
+    """Scrubs the finished line, so a traceback or a logged exception is covered too."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return scrub_known(super().format(record))
 
 
 def redact_secrets(text: str) -> str:

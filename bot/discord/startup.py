@@ -96,6 +96,13 @@ class StartupMixin:
 
         self._ready_event.set()
 
+        # Holds the last process died with. Once: on_ready fires on every
+        # reconnect, and this one's live holds have markers too.
+        if not getattr(self, '_leftover_holds_checked', False):
+            self._leftover_holds_checked = True
+            from bot.discord import secret_door
+            asyncio.create_task(secret_door.notify_leftover_holds(self))
+
         # Start monitor service if there are enabled monitors
         if not self._monitor_started:
             state = self._store.get_platform_state("discord")

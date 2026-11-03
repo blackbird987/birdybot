@@ -138,6 +138,7 @@ async def _release(final_status: InstanceStatus) -> tuple[_Runner, _Messenger]:
     ctx = SimpleNamespace(
         store=store, runner=runner, messenger=messenger, channel_id="c",
         platform="discord", effective_model=None, effective_effort=None,
+        is_owner=True, thread_has_guest=False,
     )
     tasks: list[asyncio.Task] = []
 

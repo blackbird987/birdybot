@@ -18,6 +18,7 @@ import uuid
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
+from typing import Awaitable, Callable
 
 import discord
 
@@ -368,6 +369,10 @@ def _extract_docx_text(data: bytes) -> str:
 
 async def ingest_attachments(
     message: discord.Message, text: str, *, voice_enabled: bool, quiet: bool,
+    prefetched: dict[int, bytes] | None = None,
+    sanitized: dict[int, str] | None = None,
+    consumed: set[int] | None = None,
+    transcript_screen: Callable[[str], Awaitable[str]] | None = None,
 ) -> tuple[str, list[str], bool]:
     """Turn a message's attachments into prompt text and parked files.
 
@@ -375,7 +380,22 @@ async def ingest_attachments(
     note could not be transcribed: the message is not dispatched at all. Every
     attachment turned away is reported in the channel before this returns,
     unless ``quiet`` (an archive channel, which stays read-only).
+
+    The rest come from the secret door. ``sanitized`` is a body it read and
+    cleaned, used instead of the original so a raw body is never read twice.
+    ``prefetched`` is what it fetched because the message was about to be
+    deleted, ``consumed`` is what it took whole (a .env file), and
+    ``transcript_screen`` sees a voice note's words before anything else does.
     """
+    # Not ``or {}``: the transcript screen can still add to the door's own dict.
+    prefetched = {} if prefetched is None else prefetched
+    sanitized = {} if sanitized is None else sanitized
+    consumed = set() if consumed is None else consumed
+
+    async def _read(att: discord.Attachment) -> bytes:
+        cached = prefetched.get(att.id)
+        return cached if cached is not None else await att.read()
+
     _image_paths: list[str] = []
     # Anything we couldn't take, phrased for the user.  Sent even when the
     # message carried no text of its own, so an upload can never vanish.
@@ -436,18 +456,20 @@ async def ingest_attachments(
             len(message.embeds),
         )
     for idx, att in enumerate(message.attachments):
-        if not att.filename:
+        if not att.filename or att.id in consumed:
             continue
         ext = Path(att.filename).suffix.lower()
 
         if (ext in ATTACH_AUDIO_EXTS and voice_enabled
                 and att.size <= ATTACH_AUDIO_MAX):
             try:
-                file_bytes = await att.read()
+                file_bytes = await _read(att)
                 from bot.services.audio import transcribe
                 transcription = await transcribe(file_bytes, filename=att.filename)
                 cleaned = transcription.strip() if transcription else ""
                 if cleaned:
+                    if transcript_screen is not None:
+                        cleaned = await transcript_screen(cleaned)
                     # Appended, not assigned: a caption typed alongside the
                     # voice note used to be overwritten by the
                     # transcription and never reached the session.  Same
@@ -487,10 +509,12 @@ async def ingest_attachments(
 
         if ext in ATTACH_TEXT_EXTS and att.size <= ATTACH_TEXT_MAX:
             try:
-                file_bytes = await att.read()
-                # errors="replace" — a mis-encoded file degrades to
-                # readable text with substitutions rather than raising.
-                file_text = file_bytes.decode("utf-8", errors="replace")
+                if att.id in sanitized:
+                    file_text = sanitized[att.id]
+                else:
+                    # errors="replace": a mis-encoded file degrades to
+                    # readable text with substitutions rather than raising.
+                    file_text = (await att.read()).decode("utf-8", errors="replace")
                 text = _append_attachment_text(text, att.filename, file_text)
                 log.info("Read text attachment %s (%d bytes)", att.filename, att.size)
             except Exception:
@@ -503,7 +527,7 @@ async def ingest_attachments(
         elif ext in ATTACH_IMAGE_EXTS and att.size <= ATTACH_IMAGE_MAX:
             try:
                 img_path = config.PENDING_IMAGES_DIR / f"{uuid.uuid4().hex}{ext}"
-                file_bytes = await att.read()
+                file_bytes = await _read(att)
                 img_path.write_bytes(file_bytes)
                 _image_paths.append(str(img_path))
                 img_prompt = f"[Image: {att.filename} saved at `{img_path}`]"
@@ -527,7 +551,7 @@ async def ingest_attachments(
             # documents inherit the identical lifecycle.
             try:
                 doc_path = config.PENDING_IMAGES_DIR / f"{uuid.uuid4().hex}{ext}"
-                file_bytes = await att.read()
+                file_bytes = await _read(att)
                 doc_path.write_bytes(file_bytes)
                 _image_paths.append(str(doc_path))
                 doc_prompt = f"[File: {att.filename} saved at `{doc_path}`]"
@@ -549,10 +573,12 @@ async def ingest_attachments(
 
         elif ext in ATTACH_WORD_EXTS and att.size <= ATTACH_DOC_MAX:
             try:
-                file_bytes = await att.read()
-                doc_text = _extract_docx_text(file_bytes)
-                if len(doc_text) > ATTACH_TEXT_MAX:
-                    doc_text = doc_text[:ATTACH_TEXT_MAX] + "\n\n[document truncated]"
+                if att.id in sanitized:
+                    doc_text = sanitized[att.id]
+                else:
+                    doc_text = _extract_docx_text(await att.read())
+                    if len(doc_text) > ATTACH_TEXT_MAX:
+                        doc_text = doc_text[:ATTACH_TEXT_MAX] + "\n\n[document truncated]"
                 if doc_text.strip():
                     block = f"[Word document: {att.filename}]\n{doc_text}"
                     text = f"{text}\n\n{block}" if text else block

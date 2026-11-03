@@ -29,6 +29,41 @@ log = logging.getLogger(__name__)
 class ThreadContextMixin:
     """ClaudeBot methods; see the module docstring."""
 
+    def _thread_guest_id(self, info: ThreadInfo | None) -> str | None:
+        """The first non-owner this thread belongs to or has heard from, if any.
+
+        A test webhook counts as the owner, the same way on_message treats it.
+        """
+        if info is None:
+            return None
+        owner_id = str(self._discord_user_id) if self._discord_user_id else None
+        test_ids = set(config.TEST_WEBHOOK_IDS or ())
+
+        def is_guest(uid: str | None) -> bool:
+            return bool(uid) and uid != owner_id and uid not in test_ids
+
+        if is_guest(info.user_id):
+            return info.user_id
+        for uid in sorted(info.user_ids):
+            if is_guest(uid):
+                return uid
+        return None
+
+    def _guest_access(self, user_id: str | None, channel_id: str) -> AccessResult:
+        """A guest's grant, for running their prompt when they are not the one tapping.
+
+        A guest whose grant has since gone still gets a run, as narrow as there
+        is: this path resumes something that was already accepted from them.
+        """
+        access = None
+        if user_id and user_id.isdigit():
+            access = self._check_access(int(user_id), channel_id=channel_id)
+        if access is None or not access.allowed or access.is_owner:
+            return AccessResult(
+                allowed=True, is_owner=False, mode_ceiling="explore", bash_policy="none",
+            )
+        return access
+
     def _ctx(
         self, channel_id: str,
         session_id: str | None = None,
@@ -54,6 +89,13 @@ class ThreadContextMixin:
             ctx.effort = thread_info.effort
             ctx.model = thread_info.model
             ctx.spawn_depth_inherit = thread_info.spawn_depth
+        # Asked of the channel and not of the thread_info argument: several
+        # callers build a context in a mapped thread without passing it.
+        known = thread_info
+        if known is None:
+            lookup = self._forums.thread_to_project(channel_id)
+            known = lookup[1] if lookup else None
+        ctx.thread_has_guest = self._thread_guest_id(known) is not None
         if access_result:
             ctx.is_owner = access_result.is_owner
             if not access_result.is_owner and access_result.mode_ceiling:
@@ -337,6 +379,8 @@ class ThreadContextMixin:
     async def _replay_to_thread(
         self, channel_id: str, prompt: str, repo_name: str | None = None,
         *, source: str = "replay",
+        is_owner: bool | None = None, user_id: str | None = None,
+        user_name: str | None = None,
     ) -> bool:
         """Look up a thread, build context, and dispatch a prompt through on_text.
 
@@ -345,6 +389,11 @@ class ThreadContextMixin:
         *source* tags the RequestContext so the engine can distinguish
         callback-resume replays from normal replays for the orchestrator
         wave-cap reset. Defaults to "replay" (non-resetting).
+
+        *is_owner*, *user_id* and *user_name* come from a queue entry that
+        recorded who asked. Either that entry or a guest in the thread makes
+        this a guest's run: a wake or a retry in their thread has no person
+        behind it, and running it as the owner hands them the owner's reach.
         """
         lookup = self._forums.thread_to_project(channel_id)
         if not lookup:
@@ -368,8 +417,15 @@ class ThreadContextMixin:
             proj.repo_name if proj.repo_name != "_default" else None
         )
         self._cancel_sleep(channel_id)
+        guest_id = user_id if is_owner is False else self._thread_guest_id(info)
+        access = None
+        if is_owner is False or guest_id:
+            access = self._guest_access(guest_id, channel_id)
         ctx = self._ctx(channel_id, session_id=session_id, repo_name=resolved_repo,
-                        thread_info=info, source=source)
+                        thread_info=info, access_result=access, source=source)
+        if access is not None:
+            ctx.user_id = guest_id or ""
+            ctx.user_name = user_name or (info.user_name if info.user_id == guest_id else "") or ""
         # Wire on_session_resolved so the session_id this replay produces
         # gets registered to info.session_id. Without it, the replay's
         # session lives only on disk (query.py only fires the
@@ -443,6 +499,8 @@ class ThreadContextMixin:
                              channel_id, prompt[:60])
                     await self._replay_to_thread(
                         channel_id, prompt, repo_name=entry.get("repo_name"),
+                        is_owner=entry.get("is_owner"), user_id=entry.get("user_id"),
+                        user_name=entry.get("user_name"),
                     )
                 except Exception:
                     log.exception("Failed to replay queued message in thread %s", channel_id)
@@ -463,8 +521,12 @@ class ThreadContextMixin:
             return
 
         proj, info = lookup
+        guest_id = entry.get("user_id") if entry.get("is_owner") is False else self._thread_guest_id(info)
+        access = None
+        if entry.get("is_owner") is False or guest_id:
+            access = self._guest_access(guest_id, channel_id)
         ctx = self._ctx(channel_id, session_id=info.session_id,
-                        thread_info=info, source="replay")
+                        thread_info=info, access_result=access, source="replay")
         ctx.user_id = entry.get("user_id", "")
         ctx.user_name = entry.get("user_name", "")
         self._forums.attach_session_callbacks(ctx, info, channel_id)

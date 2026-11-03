@@ -22,6 +22,7 @@ import sys
 import tempfile
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -109,7 +110,11 @@ def make_docx(paragraphs: list[str]) -> bytes:
 # --- Discord stand-ins -----------------------------------------------------
 
 class FakeAttachment:
+    _next_id = 0
+
     def __init__(self, filename: str, data: bytes, size: int | None = None):
+        FakeAttachment._next_id += 1
+        self.id = FakeAttachment._next_id
         self.filename = filename
         self._data = data
         self.size = len(data) if size is None else size
@@ -160,6 +165,12 @@ class FakeForums:
     forum_projects: dict = {}
     user_control_thread_ids: set[str] = set()
 
+    def thread_to_project(self, _thread_id):
+        return None
+
+    def forum_by_channel_id(self, _channel_id):
+        return None
+
 
 class FakeCtx:
     def __init__(self):
@@ -186,6 +197,9 @@ class Harness:
         # scripts/test_pending_image_lifecycle.py.
         self.sweeps += 1
 
+    async def _route_screened(self, message, access, door):
+        await ClaudeBot._route_screened(self, message, access, door)
+
     def _in_scope(self, guild, channel):
         return True
 
@@ -207,6 +221,12 @@ async def run_uploads(attachments: list[FakeAttachment], text: str = "",
     """
     harness = Harness(voice_enabled=voice)
     msg = FakeMessage(text, attachments)
+
+    # The door reports through the messenger, not the channel. Both reach the user.
+    async def door_reply(_channel_id, reply, **_kw):
+        msg.channel.sent.append(reply)
+
+    harness.messenger = SimpleNamespace(send_text=door_reply)
 
     captured: list[str] = []
 

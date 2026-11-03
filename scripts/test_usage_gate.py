@@ -146,7 +146,7 @@ class _Channel:
 class _Forums:
     def __init__(self, threads: set[str]) -> None:
         self.threads = threads
-        self.info = SimpleNamespace(session_id="sess-1")
+        self.info = SimpleNamespace(session_id="sess-1", user_id=None, user_ids=set())
         self.proj = SimpleNamespace(repo_name="Repo")
         self.woken: list[str] = []
         self.attached: list[str] = []
@@ -173,6 +173,7 @@ class _Ctx:
         self.repo_name = repo_name
         self.user_id = "u1"
         self.user_name = "owner"
+        self.is_owner = True
         self.pending_image_paths = list(images or [])
         self.offer_usage_limit_choice = "hook-still-set"
         self.source = None
@@ -185,13 +186,15 @@ _REAL = (
     "_usage_queue_remove", "_usage_queue_promote_expired",
     "_usage_queue_pop_due", "_fire_due_entries", "_retire_gate_message",
     "_migrate_relative_image_paths", "_usage_queue_startup_drain",
-    "_usage_queue_replay_loop", "_replay_to_thread", "_replay_callback",
+    "_usage_queue_replay_loop", "_replay_to_thread", "_thread_guest_id", "_replay_callback",
     "_after_turn",
 )
 
 
 class _Bot:
     """Stand-in for ClaudeBot carrying only what the gate touches."""
+
+    _discord_user_id = None
 
     def __init__(self, threads=("100", "200")) -> None:
         # Every bot starts with an empty queue file.
@@ -224,7 +227,7 @@ class _Bot:
         return ch
 
     # --- Replay seams (replaced by recorders for drain / Run-now cases) -------
-    async def _rec_replay_to_thread(self, channel_id, prompt, repo_name=None, *, source="replay"):
+    async def _rec_replay_to_thread(self, channel_id, prompt, repo_name=None, *, source="replay", **_who):
         self.events.append(f"replay:{prompt}")
         self.lock_free_at_replay.append(not self._usage_queue_lock.locked())
         self.replayed.append(("text", channel_id, prompt, repo_name))
@@ -680,7 +683,7 @@ async def case_drain_images() -> None:
         b_mtime_at_first_replay: list[float] = []
         orig = bot._rec_replay_to_thread
 
-        async def spy(ch, prompt, repo_name=None, *, source="replay"):
+        async def spy(ch, prompt, repo_name=None, *, source="replay", **_who):
             if not b_mtime_at_first_replay:
                 b_mtime_at_first_replay.append(os.stat(b).st_mtime)
             return await orig(ch, prompt, repo_name, source=source)

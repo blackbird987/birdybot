@@ -45,6 +45,7 @@ def _fake_bot(info):
         messenger=None, _store=_Store(), _runner=None,
         _forums=SimpleNamespace(thread_to_project=threads.get),
         _offer_usage_limit_choice=None,
+        _thread_guest_id=lambda _info: None,
     )
 
 

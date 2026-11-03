@@ -237,6 +237,7 @@ def full_instance() -> Instance:
         expand_msg_ids=["333", "444"],
         result_collapsed=True,
         is_owner_session=False,
+        vault_eligible=True,
         bash_policy="allowlist",
         bash_policy_baseline="none",
         effort="max",

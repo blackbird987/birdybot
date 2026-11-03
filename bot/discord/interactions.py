@@ -12,7 +12,10 @@ import discord
 from bot.discord import channels
 from bot.discord.deploy_flow import _handle_approve_deploy, _handle_reboot_repo
 from bot.discord.access import AccessResult, load_access_config
-from bot.discord.modals import QuickTaskModal
+from bot import vault
+from bot.discord import secret_door
+from bot.discord.adapter import _buttons_to_view
+from bot.discord.modals import QuickTaskModal, SecretRenameModal, _message_without_row
 from bot.engine import commands
 from bot.engine import sessions as sessions_mod
 from bot.platform.formatting import MODE_COLOR, VALID_EFFORTS, VALID_MODES, effort_name, mode_name
@@ -117,12 +120,106 @@ _ACTIONS = {
     "sess_resume": lambda b, i, a, arg, acc: _handle_sess_resume(b, i, arg, acc),
     "new": lambda b, i, a, arg, acc: _handle_new_session(b, i, acc),
     "branch": lambda b, i, a, arg, acc: _handle_branch(b, i, arg, acc),
+    "secret_forget": lambda b, i, a, arg, acc: _handle_secret_forget(b, i, arg),
+    "secret_replace": lambda b, i, a, arg, acc: _handle_secret_replace(b, i, arg),
+    "secret_keep": lambda b, i, a, arg, acc: _handle_secret_keep(b, i, arg),
+    "secret_hold_yes": lambda b, i, a, arg, acc: _handle_secret_hold(b, i, a, arg),
+    "secret_hold_no": lambda b, i, a, arg, acc: _handle_secret_hold(b, i, a, arg),
+    "secret_hold_pk": lambda b, i, a, arg, acc: _handle_secret_hold(b, i, a, arg),
+    "secret_allow": lambda b, i, a, arg, acc: _handle_secret_request(b, i, a, arg),
+    "secret_deny": lambda b, i, a, arg, acc: _handle_secret_request(b, i, a, arg),
 }
 
 # Actions in ``_ACTIONS`` that only the owner may use.
 _OWNER_ONLY_ACTIONS: frozenset[str] = frozenset({
     "sync_repo", "sync_git", "reboot_repo", "approve_deploy",
+    "secret_forget", "secret_replace", "secret_keep", "secret_hold_yes",
+    "secret_hold_no", "secret_hold_pk", "secret_allow", "secret_deny",
 })
+
+
+async def _settle_secret_row(
+    interaction: discord.Interaction, custom_id: str, line: str,
+) -> None:
+    """Note what a button did and take its row away, leaving the report's other rows."""
+    message = interaction.message
+    await interaction.edit_original_response(
+        content=f"{message.content}\n{line}"[:2000],
+        view=_message_without_row(message, custom_id),
+    )
+
+
+async def _secret_vault_call(interaction: discord.Interaction, fn, *args):
+    """Run a vault call off the loop. A broken file is reported, and returns None."""
+    try:
+        return await asyncio.to_thread(fn, *args)
+    except vault.VaultUnavailable:
+        await settle(interaction, "The secret vault file can't be read, so nothing changed.")
+        return None
+
+
+async def _handle_secret_forget(bot: ClaudeBot, interaction: discord.Interaction, name: str) -> None:
+    gone = await _secret_vault_call(interaction, vault.forget, name)
+    if gone is None:
+        return
+    line = f"Forgot `{name}`." if gone else f"`{name}` was already gone."
+    await _settle_secret_row(interaction, f"secret_forget:{name}", line)
+
+
+async def _handle_secret_replace(bot: ClaudeBot, interaction: discord.Interaction, arg: str) -> None:
+    old, _, new = arg.partition("|")
+    done = await _secret_vault_call(interaction, vault.replace, old, new)
+    if done is None:
+        return
+    line = f"`{old}` now holds the new value." if done else f"`{old}` or `{new}` is gone, so nothing changed."
+    await _settle_secret_row(interaction, f"secret_replace:{arg}", line)
+
+
+async def _handle_secret_keep(bot: ClaudeBot, interaction: discord.Interaction, name: str) -> None:
+    await _settle_secret_row(interaction, f"secret_keep:{name}", f"Kept both, the new one as `{name}`.")
+
+
+_HOLD_CHOICES = {"secret_hold_yes": "yes", "secret_hold_no": "no", "secret_hold_pk": "pk"}
+
+
+async def _handle_secret_hold(
+    bot: ClaudeBot, interaction: discord.Interaction, action: str, hold_id: str,
+) -> None:
+    text, rows = await secret_door.resolve_hold(bot, hold_id, _HOLD_CHOICES[action])
+    await interaction.edit_original_response(content=text, view=_buttons_to_view(rows))
+
+
+async def _handle_secret_request(
+    bot: ClaudeBot, interaction: discord.Interaction, action: str, token: str,
+) -> None:
+    """Allow or Deny a session's /secret request. The token outlives a restart."""
+    req = await _secret_vault_call(interaction, vault.pop_request, token)
+    if req is None:
+        await interaction.edit_original_response(content="That request is gone.", view=None)
+        return
+    name, repo, channel_id = req["name"], req["repo"], req["channel_id"]
+    if action == "secret_deny":
+        await interaction.edit_original_response(
+            content=f"Denied: {repo} does not get `{name}`.", view=None,
+        )
+        return
+    granted = await _secret_vault_call(interaction, vault.grant, name, repo)
+    if not granted:
+        await interaction.edit_original_response(content=f"`{name}` no longer exists.", view=None)
+        return
+    chain = bot._store.get_autopilot_chain_meta(req.get("session_id"))
+    if chain and chain.get("status") in ("running", "paused"):
+        await interaction.edit_original_response(
+            content=f"Allowed: {repo} can use `{name}`, from its next session on.", view=None,
+        )
+        return
+    await interaction.edit_original_response(content=f"Allowed: {repo} can use `{name}`.", view=None)
+    await bot._replay_to_thread(
+        channel_id,
+        f"The owner allowed your request: ${name} is now in your environment. Carry on.",
+        repo_name=repo, source="secret_allow", is_owner=True,
+        user_id=str(interaction.user.id), user_name=interaction.user.display_name,
+    )
 
 
 async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
@@ -209,6 +306,14 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
             return
         modal = QuickTaskModal(bot, instance_id, btn_access)
         await interaction.response.send_modal(modal)
+        return
+
+    # --- Rename a stored secret (a modal must be the initial response too) ---
+    if action == "secret_rename":
+        if not btn_access.is_owner:
+            await interaction.response.send_message("Owner only.", ephemeral=True)
+            return
+        await interaction.response.send_modal(SecretRenameModal(bot, instance_id, custom_id))
         return
 
     # --- Mode selection in new thread welcome embed ---
@@ -552,10 +657,13 @@ async def _handle_pending_action(
     # bot.engine.commands._run_query: when ctx.repo_name is None on a forum
     # thread, the rebind guard refuses the query with an explicit error.
     repo_name = lookup[0].repo_name if lookup else None
+    # A guest's queued prompt runs as the guest even when the owner taps Steer:
+    # the words are theirs, whoever pressed the button.
+    run_access = btn_access if pending.is_owner else bot._guest_access(pending.user_id, channel_id)
     ctx = bot._ctx(channel_id,
                    session_id=t_info.session_id if t_info else pending.session_id,
                    repo_name=repo_name,
-                   thread_info=t_info, access_result=btn_access)
+                   thread_info=t_info, access_result=run_access)
     ctx.user_id = pending.user_id or str(interaction.user.id)
     ctx.user_name = pending.user_name or interaction.user.display_name
     if t_info:
@@ -692,7 +800,11 @@ async def _handle_usage_action(
         async def _run_replay() -> None:
             cleaned = prepare_replayed_prompt(prompt, image_paths)
             try:
-                await bot._replay_to_thread(channel_id, cleaned, repo_name=repo_name)
+                await bot._replay_to_thread(
+                    channel_id, cleaned, repo_name=repo_name,
+                    is_owner=removed.get("is_owner"), user_id=removed.get("user_id"),
+                    user_name=removed.get("user_name"),
+                )
             except Exception:
                 # Fire-and-forget: without this the traceback is swallowed as
                 # an unretrieved task exception and Run Now just does nothing.
@@ -925,8 +1037,11 @@ async def _handle_sess_resume(
             break
 
     repo_name = repo_name or "_default"
+    # Stamped so a guest's thread is recognised as theirs from its first run.
+    creator = None if btn_access.is_owner else str(interaction.user.id)
     thread = await bot._forums.get_or_create_session_thread(
         repo_name, session_id, topic,
+        user_id=creator, user_name=interaction.user.display_name if creator else None,
     )
     if thread:
         try:
@@ -1032,8 +1147,10 @@ async def _handle_branch(
     topic = f"\U0001f33f {first_line[:60]}"
 
     forum_repo_name = repo_name or "_default"
+    creator = None if btn_access.is_owner else str(interaction.user.id)
     thread = await bot._forums.get_or_create_session_thread(
         forum_repo_name, new_session_id, topic, origin="branch",
+        user_id=creator, user_name=interaction.user.display_name if creator else None,
     )
     if not thread:
         await interaction.followup.send(

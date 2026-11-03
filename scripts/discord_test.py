@@ -3,6 +3,9 @@
 Commands:
   setup-webhook <channel_id>     Create a test webhook, print ID + URL
   send <channel_or_thread_id> <message>   Send via appropriate webhook
+  send-file <channel_or_thread_id> <path> [text]   Send a file via webhook
+  edit <channel_or_thread_id> <msg_id> <text>      Edit a webhook message
+  new-post <forum_id> <title> <text>      Start a forum post via webhook
   read <channel_or_thread_id> [limit]     Read messages
   list-channels                  List all channels in bot category
   list-threads <forum_id>        List active + archived threads
@@ -33,6 +36,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -206,6 +210,55 @@ def cmd_send(target_id, message):
     if "id" in result:
         dest = f"thread {target_id}" if thread_id else f"channel {target_id}"
         print(f"Sent message {result['id']} to {dest}")
+    else:
+        print(f"Error: {json.dumps(result, indent=2)}")
+
+
+def cmd_send_file(target_id, path, message=""):
+    """Send a file via the appropriate webhook, with optional text."""
+    wh_url, thread_id = _resolve_webhook_for_target(target_id)
+    if not wh_url:
+        print(f"Error: {thread_id}")
+        return
+    url = wh_url + "?wait=true" + (f"&thread_id={thread_id}" if thread_id else "")
+    boundary = uuid.uuid4().hex
+    with open(path, "rb") as f:
+        data = f.read()
+    name = os.path.basename(path)
+    body = (
+        f'--{boundary}\r\nContent-Disposition: form-data; name="payload_json"\r\n'
+        f"Content-Type: application/json\r\n\r\n{json.dumps({'content': message})}\r\n"
+        f'--{boundary}\r\nContent-Disposition: form-data; name="files[0]"; filename="{name}"\r\n'
+        "Content-Type: application/octet-stream\r\n\r\n"
+    ).encode() + data + f"\r\n--{boundary}--\r\n".encode()
+    req = urllib.request.Request(url, data=body, method="POST", headers={
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+        "User-Agent": "discord-test (claude-bot)",
+    })
+    with urllib.request.urlopen(req, timeout=60, context=_ssl_ctx) as resp:
+        result = json.loads(resp.read())
+    print(f"Sent message {result.get('id')} with {name}")
+
+
+def cmd_edit(target_id, message_id, text):
+    """Edit a message this webhook sent."""
+    wh_url, thread_id = _resolve_webhook_for_target(target_id)
+    if not wh_url:
+        print(f"Error: {thread_id}")
+        return
+    url = f"{wh_url}/messages/{message_id}" + (f"?thread_id={thread_id}" if thread_id else "")
+    result = _http("PATCH", url, body={"content": text})
+    print(f"Edited message {result.get('id')}" if "id" in result else f"Error: {json.dumps(result, indent=2)}")
+
+
+def cmd_new_post(forum_id, title, text):
+    """Start a new forum post via the test webhook."""
+    if not WEBHOOK_URL:
+        print("Error: no webhook URL configured")
+        return
+    result = _http("POST", WEBHOOK_URL + "?wait=true", body={"content": text, "thread_name": title})
+    if "id" in result:
+        print(f"Created post {result.get('channel_id')} in forum {forum_id}, message {result['id']}")
     else:
         print(f"Error: {json.dumps(result, indent=2)}")
 
@@ -616,6 +669,21 @@ def main():
             print("Usage: send <channel_id> <message>")
             return
         cmd_send(sys.argv[2], " ".join(sys.argv[3:]))
+    elif cmd == "send-file":
+        if len(sys.argv) < 4:
+            print("Usage: send-file <channel_id> <path> [text]")
+            return
+        cmd_send_file(sys.argv[2], sys.argv[3], " ".join(sys.argv[4:]))
+    elif cmd == "edit":
+        if len(sys.argv) < 5:
+            print("Usage: edit <channel_id> <message_id> <text>")
+            return
+        cmd_edit(sys.argv[2], sys.argv[3], " ".join(sys.argv[4:]))
+    elif cmd == "new-post":
+        if len(sys.argv) < 5:
+            print("Usage: new-post <forum_id> <title> <text>")
+            return
+        cmd_new_post(sys.argv[2], sys.argv[3], " ".join(sys.argv[4:]))
     elif cmd == "read":
         channel_id = sys.argv[2] if len(sys.argv) > 2 else LOBBY_ID
         limit = int(sys.argv[3]) if len(sys.argv) > 3 else 10

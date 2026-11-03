@@ -21,3 +21,6 @@ claude-bot = "bot.__main__:main"
 
 [tool.setuptools.packages.find]
 include = ["bot*"]
+
+[tool.setuptools.package-data]
+bot = ["bip39_english.txt"]
