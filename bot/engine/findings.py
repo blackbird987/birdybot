@@ -49,7 +49,7 @@ def layout(repo_path: str | Path) -> Layout | None:
                 return _read_layout(d, config)
             if (d / ".git").exists():
                 return None
-    except (OSError, ValueError, tomllib.TOMLDecodeError):
+    except (OSError, ValueError):  # ValueError: bad TOML, or not UTF-8
         log.debug("findings: no usable config for %s", repo_path, exc_info=True)
     return None
 

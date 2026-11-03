@@ -76,8 +76,9 @@ def parse_text(text):
 
 
 def toml_str(value):
-    """One TOML basic string. JSON's escapes are all valid TOML ones."""
-    return json.dumps(value, ensure_ascii=False)
+    """One TOML basic string. JSON's escapes are all valid TOML ones, and DEL is
+    the one control character TOML forbids raw that JSON leaves alone."""
+    return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
 
 
 def field_problems(meta):
@@ -90,6 +91,8 @@ def field_problems(meta):
     for field in REQUIRED:
         if field not in meta:
             failures.append("missing required field %r" % field)
+        elif isinstance(meta[field], str) and not meta[field].strip():
+            failures.append("required field %r is empty" % field)
     for field, value in meta.items():
         if field.startswith("_"):
             continue

@@ -128,7 +128,7 @@ def load_config(root):
     try:
         with open(os.path.join(root, CONFIG_PATH), "rb") as fh:
             return tomllib.load(fh), None
-    except (OSError, tomllib.TOMLDecodeError) as exc:
+    except (OSError, ValueError) as exc:  # ValueError: bad TOML, or not UTF-8
         return {}, "%s does not read: %s" % (CONFIG_PATH, exc)
 
 
@@ -197,6 +197,8 @@ def slugify(title):
 
 def cmd_new(args):
     root = require_project(os.getcwd())
+    if not (args.title.strip() and args.question.strip()):
+        die("nothing written: --title and --question have to say something")
     status = args.status or ("stands" if args.kind == "decision" else "open")
     date = datetime.date.today().isoformat()
     record_id = "%s-%s" % (date, slugify(args.title))
@@ -216,6 +218,13 @@ def cmd_new(args):
         lines.append('# verdict = ""  # one line, required once the status is not open')
     lines.append(schema.FENCE)
     text = "\n".join(lines) + "\n" + SCAFFOLD_BODY
+    # Whatever a title held (bytes that are not UTF-8 arrive as lone surrogates),
+    # never leave a file that `check` and the bot's reader cannot read.
+    try:
+        schema.parse_text(text)
+        text.encode("utf-8")
+    except (schema.RecordError, UnicodeError) as exc:
+        die("nothing written: %s" % exc)
 
     if args.kind == "decision" and status not in schema.DECISION_STATUSES:
         die("nothing written: a decision record must be %s"
@@ -247,8 +256,17 @@ def _set_field(text, field, rendered):
     return "\n".join(lines)
 
 
+def _link_list(text, field):
+    """A link field to edit. A mistyped one is refused, not rewritten: a string
+    would otherwise come back as a list of its characters."""
+    value = schema.parse_text(text).get(field, [])
+    if not (isinstance(value, list) and all(isinstance(v, str) for v in value)):
+        raise schema.RecordError("field %r must be a list of strings" % field)
+    return value
+
+
 def _add_to_list(text, field, value):
-    values = sorted(set(schema.parse_text(text).get(field, [])) | {value})
+    values = sorted(set(_link_list(text, field)) | {value})
     rendered = ", ".join(schema.toml_str(v) for v in values)
     return _set_field(text, field, "%s = [%s]" % (field, rendered))
 
@@ -265,7 +283,7 @@ def cmd_supersede(args):
     try:
         new_text = read_text(new_path)
         old_text = read_text(old_path)
-        if args.new in schema.parse_text(old_text).get("supersedes", []):
+        if args.new in _link_list(old_text, "supersedes"):
             die("nothing written: %s already supersedes %s" % (args.old, args.new))
         new_text = _add_to_list(new_text, "supersedes", args.old)
         old_text = _add_to_list(old_text, "superseded_by", args.new)
@@ -273,7 +291,7 @@ def cmd_supersede(args):
         # A hand-edited header can defeat the line edit (a list over several
         # lines): read both back, and write neither unless both came out right.
         new_meta, old_meta = schema.parse_text(new_text), schema.parse_text(old_text)
-    except (schema.RecordError, TypeError) as exc:
+    except (schema.RecordError, UnicodeDecodeError) as exc:
         die("nothing written: %s" % exc)
     if (args.old not in new_meta.get("supersedes", [])
             or args.new not in old_meta.get("superseded_by", [])
@@ -312,6 +330,7 @@ def _section(title, lines, clipped, clipped_label):
 
 def render_state(records, broken, sources, max_bytes):
     newest_first = sorted(records, key=_sort_key, reverse=True)
+
     def of(status, decision):
         return [m for m in newest_first if m.get("status") == status
                 and (m.get("kind") == "decision") == decision]
@@ -385,6 +404,9 @@ def _config_problems(root, cfg):
     for key in ("body_max_words", "state_max_bytes"):
         if key in cfg and positive_int(cfg, key, None) is None:
             failures.append("%s: %s must be a positive integer" % (CONFIG_PATH, key))
+    entries = cfg.get("unread_source", [])
+    if not (isinstance(entries, list) and all(isinstance(e, dict) for e in entries)):
+        failures.append("%s: unread_source must be written [[unread_source]]" % CONFIG_PATH)
     for entry in unread_sources(cfg):
         path = entry.get("path")
         if not isinstance(path, str) or not path:
@@ -394,19 +416,23 @@ def _config_problems(root, cfg):
     return failures, warnings
 
 
+def _usable_links(meta, field):
+    """The ids in a link field. Mistyped ones are `field_problems`' to report, on
+    the record that holds them, and must not stop the check of any other."""
+    links = meta.get(field, [])
+    return [v for v in links if isinstance(v, str)] if isinstance(links, list) else []
+
+
 def _link_problems(meta, by_id):
     """Supersede links resolve, are symmetric, and agree with the status."""
     failures = []
     this = meta.get("id")
     for field, back in (("supersedes", "superseded_by"), ("superseded_by", "supersedes")):
-        links = meta.get(field, [])
-        if not isinstance(links, list):
-            continue
-        for other_id in links:
+        for other_id in _usable_links(meta, field):
             other = by_id.get(other_id)
             if other is None:
                 failures.append("%s %s does not resolve" % (field, other_id))
-            elif this not in other.get(back, []):
+            elif this not in _usable_links(other, back):
                 failures.append("%s %s, but %s has no %s link back"
                                 % (field, other_id, other_id, back))
     if (meta.get("status") == "superseded") != bool(meta.get("superseded_by")):
@@ -469,7 +495,17 @@ def main(argv=None):
     sub.add_parser("state", help="print the state, write no file").set_defaults(func=cmd_state)
     sub.add_parser("check", help="report every failure").set_defaults(func=cmd_check)
     args = parser.parse_args(argv)
-    return args.func(args)
+    try:
+        code = args.func(args)
+        sys.stdout.flush()
+        return code
+    except BrokenPipeError:
+        # `state | head`: no traceback, and stdout must not raise again at exit.
+        # Not 0, because a `check` nobody finished reading has not passed.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return 1
+    except OSError as exc:
+        die(str(exc))
 
 
 if __name__ == "__main__":

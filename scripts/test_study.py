@@ -14,6 +14,7 @@ docs/design/findings.md.
 Run: python scripts/test_study.py
 """
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -157,6 +158,40 @@ expect_failure("a file with no header", "first line must be",
                    "just notes\n", encoding="utf-8"))
 expect_failure("a config format from the future", "format must be 1",
                lambda p: (Path(p) / "study/config.toml").write_text("format = 2\n", encoding="utf-8"))
+expect_failure("a config that is not UTF-8", "config.toml does not read",
+               lambda p: (Path(p) / "study/config.toml").write_bytes(b"format = 1\n# \xff\n"))
+expect_failure("an unread source written as one table", "must be written [[unread_source]]",
+               lambda p: set_config(p, '\n[unread_source]\npath = "docs/x.md"\n'))
+expect_failure("an empty required field", "required field 'title' is empty",
+               lambda p: (Path(p) / "study/findings/2026-11-03-blank.md").write_text(
+                   RECORD.format(id="2026-11-03-blank", status="stands", extra='verdict = "v"',
+                                 body="b").replace('"A title"', '"  "'), encoding="utf-8"))
+expect_failure("a link field that is a number", "field 'supersedes' has the wrong type",
+               lambda p: write_record(p, "2026-11-04-num", extra='verdict = "v"\nsupersedes = 7'))
+
+
+def _linked_at_a_mistyped_back_link(project, back_field):
+    """A record linking to one whose matching link field is not a list of strings:
+    the check of the first must not fall over on the second."""
+    write_record(project, "2026-11-04-a", extra='verdict = "v"\nsupersedes = ["2026-11-04-b"]')
+    write_record(project, "2026-11-04-b", extra=f'verdict = "v"\n{back_field}')
+
+
+for back in ("superseded_by = 7", 'superseded_by = "x"', 'superseded_by = [["x"]]'):
+    with Project() as p:
+        _linked_at_a_mistyped_back_link(p.path, back)
+        out = study(p.path, "check")
+        check(f"check reports and survives a mistyped link ({back})",
+              out.returncode == 1 and "Traceback" not in out.stderr
+              and "2026-11-04-b.md: field 'superseded_by'" in out.stdout
+              and "has no superseded_by link back" in out.stdout,
+              out.stdout + out.stderr)
+with Project() as p:
+    write_record(p.path, "2026-11-04-nested", extra='verdict = "v"\nsupersedes = [["x"]]')
+    out = study(p.path, "check")
+    check("check survives a link that is not hashable",
+          out.returncode == 1 and "Traceback" not in out.stderr and "list of strings" in out.stdout,
+          out.stdout + out.stderr)
 
 print("\n[check: what must not fail]")
 with Project() as p:
@@ -234,6 +269,27 @@ with tempfile.TemporaryDirectory() as tmp:
     check("new --status superseded is not offered",
           study(repo, "new", "--title", "S", "--question", "Q", "--status", "superseded").returncode == 2)
 
+with Project() as p:
+    findings = p.path / "study" / "findings"
+    before = sorted(f.name for f in findings.iterdir())
+    for args in (("--title", "   ", "--question", "Q"), ("--title", "T", "--question", "")):
+        check(f"new refuses an empty field {args}",
+              study(p.path, "new", *args).returncode == 2)
+    bad_bytes = subprocess.run(
+        [sys.executable, str(TOOL), "new", "--title", b"bad \xff".decode("utf-8", "surrogateescape"),
+         "--question", "Q"], cwd=p.path, capture_output=True, text=True, encoding="utf-8",
+    )
+    check("new refuses a title that cannot be written, with no traceback",
+          bad_bytes.returncode == 2 and "Traceback" not in bad_bytes.stderr, bad_bytes.stderr)
+    check("the refusals wrote nothing", before == sorted(f.name for f in findings.iterdir()))
+    out = study(p.path, "new", "--title", "Odd \x7f\t\"title\" \\ \n+++", "--question", "Q\x7f")
+    check("control characters and a fence in a title still make a readable record",
+          out.returncode == 0 and study(p.path, "check").returncode == 0,
+          out.stderr + study(p.path, "check").stdout)
+    written = next(findings.glob("*-odd-*.md"))
+    title = tomllib.loads(written.read_text(encoding="utf-8").split("+++\n")[1])["title"]
+    check("and the title reads back exactly", title == "Odd \x7f\t\"title\" \\ \n+++", repr(title))
+
 print("\n[supersede]")
 with Project() as p:
     write_record(p.path, "2026-11-04-better")
@@ -262,6 +318,32 @@ with Project() as p:
           out.returncode == 2 and "superseded_by" not in untouched
           and (p.path / "study/findings/2026-11-04-listy.md").read_text(encoding="utf-8") == before,
           out.stdout + out.stderr)
+
+for name, side, field in (("new", "2026-11-04-mistyped", "supersedes"),
+                         ("old", "2026-11-03-baseline", "superseded_by"),
+                         ("old", "2026-11-03-baseline", "supersedes")):
+    with Project() as p:
+        write_record(p.path, "2026-11-04-mistyped")
+        target = p.path / "study/findings" / f"{side}.md"
+        target.write_text(target.read_text(encoding="utf-8").replace(
+            'verdict = "It holds."', f'verdict = "It holds."\n{field} = "abc"'), encoding="utf-8")
+        files = sorted((p.path / "study/findings").glob("*.md"))
+        before = [f.read_text(encoding="utf-8") for f in files]
+        out = study(p.path, "supersede", "2026-11-04-mistyped", "2026-11-03-baseline")
+        check(f"a string in {field} on the {name} record is refused, not split into letters",
+              out.returncode == 2 and "list of strings" in out.stderr
+              and before == [f.read_text(encoding="utf-8") for f in files],
+              out.stdout + out.stderr)
+with Project() as p:
+    write_record(p.path, "2026-11-04-better")
+    (p.path / "study/findings/2026-11-03-baseline.md").write_bytes(b"+++\n\xff\n+++\n")
+    out = study(p.path, "supersede", "2026-11-04-better", "2026-11-03-baseline")
+    check("a record that is not UTF-8 is refused, with no traceback",
+          out.returncode == 2 and "Traceback" not in out.stderr, out.stderr)
+    (p.path / "study/findings/2026-11-03-baseline.md").unlink()
+    (p.path / "study/findings/2026-11-03-baseline.md").mkdir()
+    out = study(p.path, "supersede", "2026-11-04-better", "2026-11-03-baseline")
+    check("a path that is not a file is refused", out.returncode == 2, out.stderr)
 
 print("\n[state]")
 with Project() as p:
@@ -320,6 +402,16 @@ with Project() as p:
     out = study(p.path, "state")
     check("state prints through a broken record and says so",
           out.returncode == 0 and "could not be read" in out.stdout, out.stdout + out.stderr)
+
+with Project() as p:
+    write_record(p.path, "2026-11-04-pad", body="x")
+    r, w = os.pipe()
+    os.close(r)
+    closed = subprocess.run([sys.executable, str(TOOL), "state"], cwd=p.path, stdout=w,
+                            stderr=subprocess.PIPE, text=True)
+    os.close(w)
+    check("a reader that hangs up gets no traceback, and no success claim",
+          closed.returncode == 1 and closed.stderr == "", closed.stderr)
 
 print("\n[finding its footing]")
 with Project() as p:
