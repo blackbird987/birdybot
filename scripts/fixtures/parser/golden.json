@@ -58,6 +58,18 @@
   3
  ],
  "raw_line_08": null,
+ "stream_background_wait_two_results": {
+  "last_assistant_text": "Fixture finished.",
+  "per_event": [],
+  "result": {
+   "cost_usd": 0.2,
+   "duration_api_ms": 900,
+   "duration_ms": 2000,
+   "num_turns": 3,
+   "result_text": "Fixture finished.",
+   "session_id": "00000000-0000-4000-8000-00000000f001"
+  }
+ },
  "stream_content_block_start_and_flat_content": {
   "last_assistant_text": "",
   "per_event": [
@@ -754,6 +766,54 @@
    "session_id": "00000000-0000-4000-8000-00000000f001"
   }
  },
+ "stream_result_null_counts": {
+  "last_assistant_text": "",
+  "per_event": [],
+  "result": {
+   "cost_usd": 0.2,
+   "duration_api_ms": 4210,
+   "duration_ms": 1304,
+   "num_turns": 1,
+   "result_text": "second",
+   "session_id": "00000000-0000-4000-8000-00000000f001"
+  }
+ },
+ "stream_short_final_after_notes_only": {
+  "last_assistant_text": "Fixture done.",
+  "per_event": [],
+  "result": {
+   "cost_usd": 0.1,
+   "duration_api_ms": 900,
+   "duration_ms": 1000,
+   "num_turns": 13,
+   "result_text": "Fixture done.",
+   "session_id": "00000000-0000-4000-8000-00000000f001"
+  }
+ },
+ "stream_short_final_ignores_subagent_report": {
+  "last_assistant_text": "Fixture done.",
+  "per_event": [],
+  "result": {
+   "cost_usd": 0.1,
+   "duration_api_ms": 900,
+   "duration_ms": 1000,
+   "num_turns": 2,
+   "result_text": "Fixture done.",
+   "session_id": "00000000-0000-4000-8000-00000000f001"
+  }
+ },
+ "stream_short_final_keeps_one_earlier_answer": {
+  "last_assistant_text": "Fixture committed.",
+  "per_event": [],
+  "result": {
+   "cost_usd": 0.1,
+   "duration_api_ms": 900,
+   "duration_ms": 1000,
+   "num_turns": 4,
+   "result_text": "Fixture answer sentence about a harmless refactor. Fixture answer sentence about a harmless refactor. Fixture answer sentence about a harmless refactor. Fixture answer sentence about a harmless refactor. Fixture answer sentence about a harmless refactor. Fixture answer sentence about a harmless refactor. Fixture answer sentence about a harmless refactor. Fixture answer sentence about a harmless refactor. Fixture answer sentence about a harmless refactor. Fixture answer sentence about a harmless refactor. Fixture answer sentence about a harmless refactor. Fixture answer sentence about a harmless refactor. Fixture answer sentence about a harmless refactor. Fixture answer sentence about a harmless refactor. Fixture answer sentence about a harmless refactor. Fixture answer sentence about a harmless refactor. Fixture answer sentence about a harmless refactor. Fixture answer sentence about a harmless refactor. Fixture answer sentence about a harmless refactor. Fixture answer sentence about a harmless refactor. \n\nFixture committed.",
+   "session_id": "00000000-0000-4000-8000-00000000f001"
+  }
+ },
  "stream_short_final_prepends_intermediate": {
   "last_assistant_text": "Fixture end sentence about a h",
   "per_event": [
@@ -822,7 +882,7 @@
    "model": "claude-fixture-model",
    "num_turns": 7,
    "output_tokens": 2310,
-   "result_text": "Fixture mid1 sentence about a harmless refactor. Fixture mid1 sentence about a harmless refactor. Fixture mid1 sentence about a harmless refactor. Fixture mid1 sentence about a harmless refactor. Fixture mid1 sentence about a harmless refactor. Fixture mid1 sentence about a harmless refactor. Fixture mid1 sentence about a harmless refactor. Fixture mid1 sentence about a harmless refactor. Fixture mid1 sentence about a harmless refactor. Fixture mid1 sentence about a harmless refactor. Fixture mid1 sentence about a harmless refactor. Fixture mid1 sentence about a harmless refactor. Fixture mid1 sentence about a harmless refactor. Fixture mid1 sentence about a harmless refactor. Fixture mid1 sentence about a harmless refactor. Fixture mid1 sentence about a harmless refactor. Fixture mid1 sentence about a harmless refactor. Fixture mid1 sentence about a harmless refactor. Fixture mid1 sente\n\n---\n\nFixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 s\n\n---\n\nok",
+   "result_text": "Fixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 sentence about a harmless refactor. Fixture mid2 s\n\nok",
    "session_id": "00000000-0000-4000-8000-00000000f001",
    "tools_used": [
     "Bash"
@@ -860,7 +920,7 @@
    "cache_read_tokens": 19786,
    "context_tokens": 79552,
    "model": "claude-fixture-model",
-   "result_text": "Fixture side sentence about a harmless refactor. Fixture side sentence about a harmless refactor. Fixture side sentence about a harmless refactor. Fixture side sentence about a harmless refactor. Fixture side sentence ab"
+   "result_text": "Fixture main sentence about a harmless refactor. Fixture main sentence about a harmless refactor. Fixture main sentence about a harmless refactor. Fixture main sentence about a harmless refactor. Fixture main sentence ab"
   }
  },
  "stream_tokens_top_level": {
@@ -1128,9 +1188,9 @@
   "result": {
    "cost_usd": 0.4213,
    "duration_api_ms": 38100,
-   "duration_ms": 41230,
+   "duration_ms": 82460,
    "input_tokens": 41,
-   "num_turns": 7,
+   "num_turns": 14,
    "output_tokens": 2310,
    "result_text": "second",
    "session_id": "00000000-0000-4000-8000-00000000f001"
@@ -1182,7 +1242,7 @@
    "duration_ms": 41230,
    "model": "claude-fixture-b",
    "num_turns": 7,
-   "result_text": "Fixture a \n\n---\n\nFixture b \n\n---\n\nok",
+   "result_text": "ok",
    "session_id": "00000000-0000-4000-8000-00000000f001"
   }
  },

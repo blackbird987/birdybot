@@ -15,6 +15,7 @@ from bot.claude.parser import (
     extract_result,
     iter_tool_blocks,
     looks_like_fatal_auth_error,
+    open_background_tasks,
 )
 
 log = logging.getLogger(__name__)
@@ -298,12 +299,22 @@ def _turn_completed_successfully(events: list[dict]) -> bool:
     reads the LAST ``result`` event, exactly as ``extract_result`` does, rather
     than asking whether *any* of them looks successful. And it reads the same
     default: a ``result`` event that omits ``is_error`` is a completed turn.
+
+    A ``result`` is not final while a background task is open or just ended: the
+    CLI wakes the model for it, so a kill then is not moot. A test job that blew
+    the memory ceiling would otherwise be reported as the "started" message that
+    came before it.
     """
     verdict: dict | None = None
+    tasks_open = False
     for ev in events:
         if ev.get("type") == "result":
             verdict = ev
-    return verdict is not None and not verdict.get("is_error", False)
+        elif (still_open := open_background_tasks(ev)) is not None:
+            tasks_open = bool(still_open)
+            if not tasks_open:
+                verdict = None
+    return verdict is not None and not tasks_open and not verdict.get("is_error", False)
 
 
 def _memory_kill_detail(tree: memory.TreeMemory, kill_mb: int) -> str:

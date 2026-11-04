@@ -14,7 +14,12 @@ and no `tool_use`.  If stdout stays silent for END_OF_TURN_GRACE_SECS,
 the runner terminates the process and synthesises a successful
 RunResult from the captured events.
 
-This test pins four contracts:
+`result` is not always the last word. With a background task open the CLI stays
+alive on purpose and wakes the model when the job ends, then emits a second
+`result`. Terminating it 30s in killed the job and reported the "started"
+message as the outcome: seven runs on the evening of 2026-11-03.
+
+This test pins these contracts:
 
   1. **Trips on silence** — events ending with end_turn + no tools and a
      simulated silent stdout cause terminate + success result with the
@@ -27,6 +32,14 @@ This test pins four contracts:
   4. **Sidechain filtered in fallback text** — `last_assistant_text`
      skips events with `isSidechain: true` so a Task sub-agent's trailing
      text can't shadow the main agent's last reply.
+  5. **Waits for a background task**: no terminate and no stall warning while
+     one is open, none during the model's next turn after it ends, and the second
+     `result` is what the run reports. Event shapes are from a live CLI 2.1.310
+     probe.
+  6. **Re-arms after the wake**: a CLI that hangs after that second `result` is
+     still terminated.
+  7. **Bounds a job that never ends**: past END_OF_TURN_BACKGROUND_MAX_SECS the
+     run is ended, and the report says the job did not finish.
 
 Run: ``python scripts/test_runner_watchdog.py``  (exit 0 on pass).
 """
@@ -345,6 +358,215 @@ async def test_watchdog_skips_when_tool_pending(tmp: str, store: StateStore) -> 
 
 
 # ---------------------------------------------------------------------------
+# Contracts 5-7: background tasks
+# ---------------------------------------------------------------------------
+JOB = "Run the full test suite"
+
+
+def _tasks_changed(*descriptions: str) -> dict:
+    return {
+        "type": "system",
+        "subtype": "background_tasks_changed",
+        "tasks": [
+            {"task_id": f"b{i}", "run_id": "r1", "task_type": "local_bash", "description": d}
+            for i, d in enumerate(descriptions)
+        ],
+        "session_id": SESSION_ID,
+    }
+
+
+def _result(text: str, num_turns: int, cost: float) -> dict:
+    return {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "result": text,
+        "num_turns": num_turns,
+        "total_cost_usd": cost,
+        "session_id": SESSION_ID,
+    }
+
+
+def _assistant_text(text: str) -> dict:
+    # Live streams carry stop_reason null here, so only `result` arms the watchdog.
+    return {
+        "type": "assistant",
+        "session_id": SESSION_ID,
+        "message": {"role": "assistant", "content": [{"type": "text", "text": text}],
+                    "stop_reason": None},
+    }
+
+
+def _push(proc: _FakeProc, *events: dict) -> None:
+    for event in events:
+        proc.stdout.push_line(json.dumps(event).encode())
+
+
+def _push_started_job(proc: _FakeProc) -> None:
+    _push(
+        proc,
+        _tasks_changed(JOB),
+        _assistant_text("Started the tests."),
+        _result("Started the tests.", 2, 0.01),
+    )
+
+
+async def test_waits_for_background_task(tmp: str, store: StateStore) -> list[str]:
+    failures: list[str] = []
+    repo_dir = os.path.join(tmp, "wd_bg")
+    os.makedirs(repo_dir, exist_ok=True)
+    runner = ClaudeRunner(store=store)
+    instance = _make_instance(repo_dir)
+    proc = _FakeProc()
+    _push_started_job(proc)
+
+    progress: list[str] = []
+    terminated_at: dict[str, bool] = {}
+
+    async def on_progress(message, detail="", *, usage=None):
+        progress.append(message)
+
+    saved = config.END_OF_TURN_GRACE_SECS
+    config.END_OF_TURN_GRACE_SECS = 1
+    try:
+        async def job_runs_then_model_wakes():
+            # Past the grace and past the reader's 5s poll, so the branch runs.
+            await asyncio.sleep(6.5)
+            terminated_at["during_job"] = proc.terminated
+            # The job ends and the model takes longer than the grace to answer,
+            # as it does for a slow API call or a compaction.
+            _push(proc, _tasks_changed())
+            await asyncio.sleep(6.5)
+            terminated_at["during_wake"] = proc.terminated
+            _push(proc, _assistant_text("All tests passed."),
+                  _result("All tests passed.", 1, 0.02))
+            proc.stdout.push_eof()
+            proc.returncode = 0
+
+        driver = asyncio.create_task(job_runs_then_model_wakes())
+        result = await asyncio.wait_for(
+            runner._stream_output(proc, instance, on_progress, None),  # type: ignore[arg-type]
+            timeout=30,
+        )
+        await driver
+    finally:
+        config.END_OF_TURN_GRACE_SECS = saved
+
+    if terminated_at.get("during_job"):
+        failures.append("terminated a healthy CLI waiting on a background task")
+    if terminated_at.get("during_wake"):
+        failures.append("terminated the CLI while the model was being woken after the job ended")
+    if result.is_error or result.result_text != "All tests passed.":
+        failures.append(
+            f"run should report the second result; got is_error={result.is_error} "
+            f"text={result.result_text!r}"
+        )
+    if result.num_turns != 3:
+        failures.append(f"turns of both results should add up to 3, got {result.num_turns}")
+    if result.cost_usd != 0.02:
+        failures.append(f"cost is already cumulative, expected 0.02, got {result.cost_usd}")
+    if f"Waiting on background job: {JOB}" not in progress:
+        failures.append(f"the card was never told what it is waiting on: {progress!r}")
+    return failures
+
+
+async def test_no_stall_warning_during_wait(tmp: str, store: StateStore) -> list[str]:
+    failures: list[str] = []
+    repo_dir = os.path.join(tmp, "wd_bg_stall")
+    os.makedirs(repo_dir, exist_ok=True)
+    runner = ClaudeRunner(store=store)
+    instance = _make_instance(repo_dir)
+    proc = _FakeProc()
+    _push_started_job(proc)
+
+    stalls: list[str] = []
+
+    async def on_stall(instance_id, snapshot=None):
+        stalls.append(instance_id)
+
+    saved = (config.STALL_TIMEOUT_SECS, config.WATCHDOG_TICK_SECS)
+    config.STALL_TIMEOUT_SECS = 1
+    config.WATCHDOG_TICK_SECS = 0.2
+    try:
+        async def job_runs_then_exit():
+            await asyncio.sleep(2.5)
+            proc.stdout.push_eof()
+            proc.returncode = 0
+
+        driver = asyncio.create_task(job_runs_then_exit())
+        await asyncio.wait_for(
+            runner._stream_output(proc, instance, None, on_stall),  # type: ignore[arg-type]
+            timeout=20,
+        )
+        await driver
+    finally:
+        config.STALL_TIMEOUT_SECS, config.WATCHDOG_TICK_SECS = saved
+
+    if stalls:
+        failures.append("told the user a session waiting on its job looks stuck")
+    return failures
+
+
+async def test_rearms_after_wake(tmp: str, store: StateStore) -> list[str]:
+    failures: list[str] = []
+    repo_dir = os.path.join(tmp, "wd_bg_rearm")
+    os.makedirs(repo_dir, exist_ok=True)
+    runner = ClaudeRunner(store=store)
+    instance = _make_instance(repo_dir)
+    proc = _FakeProc()
+    _push_started_job(proc)
+    _push(proc, _tasks_changed(), _assistant_text("All tests passed."),
+          _result("All tests passed.", 1, 0.02))
+
+    saved = config.END_OF_TURN_GRACE_SECS
+    config.END_OF_TURN_GRACE_SECS = 1
+    try:
+        result = await asyncio.wait_for(
+            runner._stream_output(proc, instance, None, None),  # type: ignore[arg-type]
+            timeout=20,
+        )
+    finally:
+        config.END_OF_TURN_GRACE_SECS = saved
+
+    if not proc.terminated:
+        failures.append("a CLI hung after its final result was never terminated")
+    if result.is_error or result.result_text != "All tests passed.":
+        failures.append(f"expected the final result, got {result.result_text!r}")
+    return failures
+
+
+async def test_background_ceiling(tmp: str, store: StateStore) -> list[str]:
+    failures: list[str] = []
+    repo_dir = os.path.join(tmp, "wd_bg_ceiling")
+    os.makedirs(repo_dir, exist_ok=True)
+    runner = ClaudeRunner(store=store)
+    instance = _make_instance(repo_dir)
+    proc = _FakeProc()
+    _push_started_job(proc)
+
+    saved = config.END_OF_TURN_BACKGROUND_MAX_SECS
+    config.END_OF_TURN_BACKGROUND_MAX_SECS = 1
+    try:
+        result = await asyncio.wait_for(
+            runner._stream_output(proc, instance, None, None),  # type: ignore[arg-type]
+            timeout=20,
+        )
+    finally:
+        config.END_OF_TURN_BACKGROUND_MAX_SECS = saved
+
+    if not proc.terminated:
+        failures.append("a job that never ends held the session past the ceiling")
+    if result.is_error:
+        failures.append("the ceiling should end the run, not fail it")
+    if JOB not in result.result_text or "Started the tests." not in result.result_text:
+        failures.append(
+            "the report should keep the last message and name the unfinished job; "
+            f"got {result.result_text!r}"
+        )
+    return failures
+
+
+# ---------------------------------------------------------------------------
 # Suite runner
 # ---------------------------------------------------------------------------
 async def _amain() -> int:
@@ -369,6 +591,10 @@ async def _amain() -> int:
             ("quiet_during_hook", test_watchdog_quiet_during_hook(tmp, store)),
             ("skips_when_tool_pending",
              test_watchdog_skips_when_tool_pending(tmp, store)),
+            ("waits_for_background_task", test_waits_for_background_task(tmp, store)),
+            ("no_stall_warning_during_wait", test_no_stall_warning_during_wait(tmp, store)),
+            ("rearms_after_wake", test_rearms_after_wake(tmp, store)),
+            ("background_ceiling", test_background_ceiling(tmp, store)),
         ):
             fails = await coro
             if fails:
@@ -388,7 +614,7 @@ async def _amain() -> int:
                 print(f"    - {f}")
         return 1
 
-    print("PASS: end-of-turn watchdog regression suite (4 cases)")
+    print("PASS: end-of-turn watchdog regression suite (8 cases)")
     return 0
 
 

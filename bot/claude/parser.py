@@ -159,16 +159,41 @@ def extract_usage(event: dict) -> dict | None:
     return out
 
 
+def _is_subagent_event(event: dict) -> bool:
+    """True for an event a Task sub-agent wrote rather than the main agent.
+
+    Transcripts mark these ``isSidechain``, the live stream names the tool call
+    that spawned them in ``parent_tool_use_id``.
+    """
+    return event.get("isSidechain") is True or bool(event.get("parent_tool_use_id"))
+
+
+def open_background_tasks(event: dict) -> list[str] | None:
+    """What a ``background_tasks_changed`` event says is still running.
+
+    None for any other event, so an empty list always means "the last one just
+    ended".
+    """
+    if event.get("type") != "system" or event.get("subtype") != "background_tasks_changed":
+        return None
+    tasks = event.get("tasks")
+    return [
+        t.get("description") or "background job"
+        for t in (tasks if isinstance(tasks, list) else [])
+        if isinstance(t, dict)
+    ]
+
+
 def last_assistant_text(events: list[dict]) -> str:
     """Return concatenated text of the most recent main-agent assistant message.
 
-    Skips events where ``isSidechain`` is true — those belong to Task
-    sub-agents and would otherwise mask the main agent's last text.
+    Skips sub-agent events, which would otherwise mask the main agent's last
+    text.
     """
     for event in reversed(events):
         if event.get("type") != "assistant":
             continue
-        if event.get("isSidechain") is True:
+        if _is_subagent_event(event):
             continue
         msg = event.get("message") or event
         content = msg.get("content") if isinstance(msg, dict) else None
@@ -252,24 +277,35 @@ def _result_text_from(result_data: object) -> str | None:
     return None
 
 
-def _with_intermediate_turns(result_text: str, assistant_turns: list[list[str]]) -> str:
-    """Prepend earlier turns' text when the final turn is suspiciously short.
+# An earlier turn this long reads as an answer. Progress notes between tool calls
+# stay well under it: the longest in the seven saved reports built from them was
+# 344 characters.
+_EARLIER_ANSWER_MIN_CHARS = 500
+# The final message is only a sign-off next to the answer below this share of
+# its length.
+_SIGN_OFF_MAX_SHARE = 0.15
 
-    A short final result suggests the real answer was in an earlier turn.
-    Uses a proportional gate so it scales with session length.
+
+def _turn_text(turn: list[str]) -> str:
+    return "\n".join(t for t in turn if t.strip())
+
+
+def _with_earlier_answer(result_text: str, assistant_turns: list[list[str]]) -> str:
+    """Keep an earlier answer when the final message only signs off after it.
+
+    The CLI's ``result`` carries only the last message, so "Committed." after a
+    long report would lose the report. Only the most recent long turn is kept:
+    gluing every earlier turn on turned the progress notes of a session into its
+    final message.
     """
-    if not result_text or len(assistant_turns) <= 1:
+    if not result_text:
         return result_text
-    intermediate_parts: list[str] = []
-    for turn in assistant_turns[:-1]:
-        text = "\n".join(t for t in turn if t.strip())
-        if text.strip():
-            intermediate_parts.append(text)
-    if not intermediate_parts:
-        return result_text
-    intermediate = "\n\n---\n\n".join(intermediate_parts)
-    if len(result_text) < len(intermediate) * 0.15:
-        return intermediate + "\n\n---\n\n" + result_text
+    for turn in reversed(assistant_turns[:-1]):
+        text = _turn_text(turn)
+        if len(text) >= _EARLIER_ANSWER_MIN_CHARS:
+            if len(result_text) < len(text) * _SIGN_OFF_MAX_SHARE:
+                return text + "\n\n" + result_text
+            break
     return result_text
 
 
@@ -304,7 +340,7 @@ def _apply_result_event(
     text = _result_text_from(result_event.get("result", ""))
     if text is not None:
         result.result_text = text
-    result.result_text = _with_intermediate_turns(result.result_text, assistant_turns)
+    result.result_text = _with_earlier_answer(result.result_text, assistant_turns)
 
     if result.is_error and not result.result_text:
         errors_list = result_event.get("errors", [])
@@ -321,7 +357,7 @@ def _fallback_turn_text(assistant_turns: list[list[str]]) -> str:
     a wall of text built from narration turns.
     """
     for turn in reversed(assistant_turns):
-        text = "\n".join(t for t in turn if t.strip())
+        text = _turn_text(turn)
         if len(text) >= 100:
             return text
     return "\n".join(t for turn in assistant_turns for t in turn if t.strip())
@@ -330,16 +366,20 @@ def _fallback_turn_text(assistant_turns: list[list[str]]) -> str:
 def extract_result(events: list[dict]) -> RunResult:
     """Extract the final result from accumulated stream-json events.
 
-    Tracks text per assistant turn.  The CLI ``result`` event only carries
-    the *last* turn's text — earlier turns are prepended only when the
-    final result is suspiciously short (suggesting the real answer was
-    delivered in an earlier turn).
+    Tracks the main agent's text per assistant turn.  The CLI ``result`` event
+    only carries the *last* turn's text, so an earlier answer is kept when that
+    text is only a sign-off after it (``_with_earlier_answer``).
+
+    A run that waited on a background job has one ``result`` per time the model
+    stopped. The last one wins: its cost and API time are already cumulative, but
+    each counts only its own turns and working time, so those are added up. The
+    wait itself is in neither.
     """
     result = RunResult()
 
     # Single-pass: collect tools, per-turn text, and the result event
     tools_seen: set[str] = set()
-    result_event: dict | None = None
+    result_events: list[dict] = []
     latest_usage: dict | None = None
     # Session-total cache accounting — each assistant event reports per-call
     # usage, so summing gives the true session total. Without this, only the
@@ -373,7 +413,7 @@ def extract_result(events: list[dict]) -> RunResult:
                 if isinstance(block, dict):
                     if block.get("type") == "tool_use":
                         _record_tool_use(result, block, tools_seen)
-                    elif block.get("type") == "text":
+                    elif block.get("type") == "text" and not _is_subagent_event(event):
                         current_turn.append(block.get("text", ""))
         # content_block_start: tool/bash tracking only — no turn text
         elif etype == "content_block_start":
@@ -381,7 +421,7 @@ def extract_result(events: list[dict]) -> RunResult:
             if cb.get("type") == "tool_use":
                 _record_tool_use(result, cb, tools_seen)
         elif etype == "result":
-            result_event = event
+            result_events.append(event)
 
     # Save final turn
     if current_turn:
@@ -398,8 +438,10 @@ def extract_result(events: list[dict]) -> RunResult:
         if isinstance(model, str):
             result.model = model
 
-    if result_event:
-        _apply_result_event(result, result_event, assistant_turns)
+    if result_events:
+        _apply_result_event(result, result_events[-1], assistant_turns)
+        result.num_turns = sum(ev.get("num_turns") or 0 for ev in result_events)
+        result.duration_ms = sum(ev.get("duration_ms") or 0 for ev in result_events)
 
     if not result.result_text and assistant_turns:
         result.result_text = _fallback_turn_text(assistant_turns)

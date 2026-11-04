@@ -23,6 +23,7 @@ from bot.textutil import parse_iso_utc
 from bot.claude.auth_health import account_label
 from bot.claude import cgroups, memory, usage_pacing
 from bot.claude.parser import (
+    ProgressEvent,
     RunResult,
     detect_path_poisoning,
     extract_progress,
@@ -32,6 +33,7 @@ from bot.claude.parser import (
     format_ask_question,
     iter_tool_blocks,
     last_assistant_text,
+    open_background_tasks,
     parse_stream_line,
 )
 from bot.claude.provider import ProviderConfig, get_provider
@@ -1128,8 +1130,8 @@ class ClaudeRunner(
                         )
 
         watchdog = _Watchdog(self, instance, proc, events, on_progress, on_stall)
-        # End-of-turn watchdog: set by the reader loop once the turn has been
-        # silent past END_OF_TURN_GRACE_SECS after a genuine end_turn.
+        # End-of-turn watchdog: set by the reader loop once the session has been
+        # silent past its limit after the turn ended.
         end_of_turn_done = False
         stall_check_task = asyncio.create_task(watchdog.run())
 
@@ -1145,13 +1147,20 @@ class ClaudeRunner(
                         break
                     if watchdog.end_of_turn_seen:
                         idle = asyncio.get_event_loop().time() - watchdog.last_output_time
-                        if idle > config.END_OF_TURN_GRACE_SECS:
+                        limit = (
+                            config.END_OF_TURN_BACKGROUND_MAX_SECS
+                            if watchdog.background_tasks
+                            else config.END_OF_TURN_GRACE_SECS
+                        )
+                        if idle > limit:
                             recovered_text = last_assistant_text(events)
                             log.warning(
                                 "End-of-turn watchdog: %s idle %ds after end_turn "
-                                "(session=%s, recovered_text=%d chars) — terminating",
+                                "(session=%s, recovered_text=%d chars, "
+                                "background_tasks=%d), terminating",
                                 instance.id, int(idle),
                                 captured_session_id or "?", len(recovered_text),
+                                len(watchdog.background_tasks),
                             )
                             end_of_turn_done = True
                             proc.terminate()
@@ -1194,18 +1203,33 @@ class ClaudeRunner(
                         else:
                             watchdog.end_of_turn_seen = False
                     elif event.get("type") == "result":
-                        # `result` is Claude CLI's terminal event — nothing
-                        # follows. If the subprocess fails to close stdout
-                        # (orphan child holding the pipe, etc.), arm the
+                        # With no background task open, `result` is the CLI's
+                        # terminal event. If the subprocess fails to close
+                        # stdout (orphan child holding the pipe, etc.), arm the
                         # watchdog so the post-result grace fires a forced
-                        # terminate instead of hanging indefinitely.
+                        # terminate instead of hanging indefinitely. With one
+                        # open, the CLI stays alive for it on purpose and wakes
+                        # the model when it ends, so the longer limit applies.
                         watchdog.end_of_turn_seen = True
+                    elif (_still_open := open_background_tasks(event)) is not None:
+                        # The last one just ended, so the CLI is about to wake
+                        # the model. That call (or a compaction) can outlast the
+                        # grace; its own `result` re-arms the watchdog.
+                        if watchdog.background_tasks and not _still_open:
+                            watchdog.end_of_turn_seen = False
+                        watchdog.background_tasks = _still_open
                     # Per-turn usage (Claude only) — fed to progress callback
                     # so the lifecycle layer can keep the context footer live.
                     usage = extract_usage(event) if supports_live_usage else None
 
                     if on_progress:
                         progress = extract_progress(event)
+                        # The card's only news for as long as the wait lasts.
+                        if event.get("type") == "result" and watchdog.background_tasks:
+                            progress = ProgressEvent(message=(
+                                "Waiting on background job: "
+                                + ", ".join(watchdog.background_tasks)
+                            ))
                         if progress and progress.message:
                             try:
                                 if usage is not None:
@@ -1286,8 +1310,9 @@ class ClaudeRunner(
                 instance.summary = extract_summary(result.result_text)
             return result
 
-        # End-of-turn watchdog tripped: the CLI hung after stop_reason=end_turn.
-        # Synthesise a successful result from the events we captured.
+        # End-of-turn watchdog tripped: the CLI hung after its turn ended, or a
+        # background job outlasted the limit. Synthesise a successful result from
+        # the events we captured.
         if end_of_turn_done:
             result = extract_result(events)
             result.is_error = False
@@ -1296,6 +1321,17 @@ class ClaudeRunner(
                 result.session_id = captured_session_id
             if not result.result_text:
                 result.result_text = last_assistant_text(events) or ""
+            if watchdog.background_tasks:
+                # The last message was written expecting to hear back. It never
+                # will, and terminating the CLI took the job down with it.
+                result.result_text = (
+                    f"{result.result_text}\n\n"
+                    f"The bot stopped waiting after "
+                    f"{config.END_OF_TURN_BACKGROUND_MAX_SECS // 60} minutes of "
+                    f"silence, which "
+                    f"ended this background job before it finished: "
+                    f"{', '.join(watchdog.background_tasks)}."
+                ).strip()
             if poisoning_hits:
                 result.path_poisoning = list(poisoning_hits)
             if result.result_text:

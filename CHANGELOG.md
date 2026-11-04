@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## v0.102.14, Sessions can wait on background jobs, final messages stay clean (2026-11-04)
+
+### Fixed
+- **A session waiting on its own background job is no longer killed.** The end-of-turn watchdog terminated a healthy CLI 30 seconds after its turn ended, because it took `result` for the last event. With a background task open the CLI stays alive and wakes the model when the job ends. The kill took the job with it and reported "started" as the outcome: seven runs in the log on the evening of 2026-11-03, all recorded as completed. The bot now waits, shows what it is waiting on instead of a "quiet, /kill if stuck" warning, and reports the second message. A job that leaves the session silent for an hour (`END_OF_TURN_BACKGROUND_MAX_SECS`, for a dev server that never ends) is stopped and the report says so.
+- **A kill during that wait is no longer reported as success.** A memory or lifetime reap used to stand down on any successful `result`, which would have turned a job that blew the ceiling into its "started" message.
+- **Turn counts and durations add up across a background wait.** Each `result` counts only its own turns and working time, so a long session reported 1 turn and a few seconds.
+- **Final messages no longer come out as a wall of progress notes joined by `---`.** When the last message was short, every earlier note was glued on above it. Now only one earlier turn is kept, and only if it is long enough to be an answer (500 characters) and the last message is a sign-off next to it. A sub-agent's report no longer counts as the main agent's answer.
 ## v0.102.13, Pasted keys are caught before anything reads them (2026-11-04)
 
 ### Added
