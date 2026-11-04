@@ -94,7 +94,7 @@ def _child(spec_path: str, out_path: str) -> int:
     if spec.get("verify_text"):
         blocks = step_parse._VERIFY_BLOCK_RE.findall(spec["verify_text"])
         verify = blocks[-1].strip() if blocks else ""
-    goal = judge.repo_goal(spec["clone"])
+    goal = judge.repo_goal(spec.get("goal_dir") or spec["clone"])
     text = judge.build_input([redact_secrets(m) for m in spec["owner"]], goal, spec["diff"], verify)
 
     class _Builder(PromptMixin):
@@ -259,7 +259,12 @@ def run_case(case: dict, rev: str, replicates: int, state: dict, lock: threading
     todo = [k for k in range(replicates) if not (case_dir / f"r{k}" / "score.json").exists()]
     if not todo:
         return
-    clone = shallow_clone(case["repo_path"], case["head"], CLONES / "clones" / rev / case["id"])
+    # A registered repo can be a folder inside its git tree (aiagent is). Fetch from the
+    # tree, and read the goal from the folder, which is where the bot reads it.
+    source = git(Path(case["repo_path"]), "rev-parse", "--show-toplevel").strip()
+    prefix = git(Path(case["repo_path"]), "rev-parse", "--show-prefix").strip()
+    clone = shallow_clone(source, case["head"], CLONES / "clones" / rev / case["id"])
+    goal_dir = clone / prefix
     try:
         for k in todo:
             with lock:
@@ -270,7 +275,7 @@ def run_case(case: dict, rev: str, replicates: int, state: dict, lock: threading
                     return
                 state["reserved"] += JUDGE_BUDGET + SCORER_BUDGET
             try:
-                _run_replicate(case, clone, case_dir / f"r{k}", rev, k, state, lock)
+                _run_replicate(case, clone, goal_dir, case_dir / f"r{k}", rev, k, state, lock)
             finally:
                 with lock:
                     state["reserved"] -= JUDGE_BUDGET + SCORER_BUDGET
@@ -278,7 +283,8 @@ def run_case(case: dict, rev: str, replicates: int, state: dict, lock: threading
         shutil.rmtree(clone, ignore_errors=True)
 
 
-def _run_replicate(case: dict, clone: Path, rdir: Path, rev: str, k: int, state: dict, lock: threading.Lock) -> None:
+def _run_replicate(case: dict, clone: Path, goal_dir: Path, rdir: Path, rev: str, k: int, state: dict,
+                   lock: threading.Lock) -> None:
     rdir.mkdir(parents=True, exist_ok=True)
     verify_text = ""
     if case.get("verify_id"):
@@ -287,6 +293,7 @@ def _run_replicate(case: dict, clone: Path, rdir: Path, rev: str, k: int, state:
             verify_text = result.read_text(encoding="utf-8", errors="replace")
     sp_file = rdir / "system_prompt.txt"
     built = call_child({"op": "build", "id": case["id"], "repo": case["repo"], "clone": str(clone),
+                        "goal_dir": str(goal_dir),
                         "owner": case["owner"], "diff": case["diff"], "verify_text": verify_text,
                         "system_prompt_file": str(sp_file)})
     sp_file.write_text(built["system_prompt"], encoding="utf-8")
