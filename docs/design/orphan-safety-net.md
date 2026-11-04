@@ -74,7 +74,9 @@ system init (again)   assistant "done"   result (num_turns 1, cost .00433)
 ```
 
 A background agent differs: its first `result` is held back until the agent has
-finished, so nothing arms while it runs and its own events keep the stream live.
+finished, so nothing arms while it runs. Its events keep the stream live, and if
+it goes quiet the ordinary stall warning still appears, because the wait has not
+started as far as the watchdog can tell.
 
 What follows from that, and must not drift:
 
