@@ -19,18 +19,19 @@ import re
 import subprocess
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from bot import config
 from bot.claude.sandbox import GIT_SAFE
 from bot.claude.types import Instance, InstanceOrigin, InstanceStatus, InstanceType
 from bot.engine import lifecycle, step_parse
+from bot.engine.commit_calls import LOG_FORMAT, match_commits, parse_log, read_commit_calls
 from bot.engine.sessions import find_session_file
 from bot.engine.step_policy import resolve_spawn_model
 from bot.engine.step_spawn import SpawnConfig, spawn_from
 from bot.engine.steps import on_verify
-from bot.engine.transcript import _collect_tool_results, _iter_jsonl
+from bot.engine.transcript import _iter_jsonl
 from bot.fsutil import read_contained_text
 from bot.platform.base import ButtonSpec, RequestContext
 from bot.platform.redact import redact_secrets
@@ -401,42 +402,23 @@ def repair_prompt(verdict: Verdict) -> str:
 
 # --- Chat ---
 
-_GIT_COMMIT_RE = re.compile(r"(?:^|[;&|\n(]\s*)git(?:\s+-[cC]\s+\S+)*\s+commit\b")
-_COMMIT_OUTPUT_RE = re.compile(r"^\[[^\]\n]*?\b([0-9a-f]{7,40})\]", re.MULTILINE)
-_NOT_A_COMMIT_RE = re.compile(r"nothing to commit|no changes added to commit|nothing added to commit")
-
-
-def attributed_commits(session_file: Path) -> tuple[list[str], list[str]]:
-    """The commits this session's own `git commit` calls reported.
-
-    Master is shared by parallel sessions, so a head-to-head range would sweep up
-    their work. Returns (hashes, ids of commit calls whose output named no hash).
-    """
-    results = _collect_tool_results(session_file)
-    hashes: list[str] = []
-    unattributed: list[str] = []
-    for rec in _iter_jsonl(session_file):
-        if rec.get("type") != "assistant":
-            continue
-        content = rec.get("message", {}).get("content")
-        if not isinstance(content, list):
-            continue
-        for block in content:
-            if not isinstance(block, dict) or block.get("type") != "tool_use" or block.get("name") != "Bash":
-                continue
-            command = (block.get("input") or {}).get("command") or ""
-            if not _GIT_COMMIT_RE.search(command) or "--dry-run" in command:
-                continue
-            output = results.get(block.get("id") or "")
-            if output is None:
-                unattributed.append(block.get("id") or "")
-                continue
-            found = _COMMIT_OUTPUT_RE.findall(output)
-            if found:
-                hashes.extend(found)
-            elif not _NOT_A_COMMIT_RE.search(output) and "error" not in output.lower():
-                unattributed.append(block.get("id") or "")
-    return hashes, unattributed
+async def attributed_commits(repo_path: str, session_file: Path) -> tuple[list[str], list[str]]:
+    """This session's commits as full hashes, plus the calls that could not be pinned down."""
+    calls = await asyncio.to_thread(read_commit_calls, session_file)
+    if not calls:
+        return [], []
+    args = ["log", "--all", LOG_FORMAT]
+    times = [c.ts for c in calls if c.ts is not None]
+    if len(times) == len(calls):
+        slack = timedelta(hours=3)
+        for flag, edge in (("--since", min(times)), ("--until", max(times))):
+            when = datetime.fromtimestamp(edge, timezone.utc)
+            when = when - slack if flag == "--since" else when + slack
+            args.append(f"{flag}={when.isoformat()}")
+    log_text = await _git(repo_path, *args)
+    if log_text is None:
+        return [], [c.tool_id for c in calls]
+    return match_commits(calls, parse_log(log_text))
 
 
 async def _commit_diffs(repo_path: str, shas: list[str]) -> str | None:
@@ -497,18 +479,9 @@ async def _judge_idle_thread(
     session_file = await asyncio.to_thread(find_session_file, session_id)
     if not session_file:
         return None
-    hashes, unattributed = await asyncio.to_thread(attributed_commits, session_file)
-    if not hashes and not unattributed:
+    resolved, unattributed = await attributed_commits(repo_path, session_file)
+    if not resolved and not unattributed:
         return None
-
-    resolved: list[str] = []
-    for short in dict.fromkeys(hashes):
-        full = await _git(repo_path, "rev-parse", "--verify", f"{short}^{{commit}}")
-        if full and full.strip():
-            resolved.append(full.strip())
-        else:
-            # Kept with the unidentified calls, so it is reported once and not guessed at.
-            unattributed.append(f"hash:{short}")
 
     records = await asyncio.to_thread(_load_records, channel)
     seen_commits = {c for r in records for c in r.get("commits") or []}

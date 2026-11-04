@@ -61,9 +61,12 @@ hand-off. Continue resumes at the next step, not the judge. With nothing after
 verify there is no Continue, because resuming would re-run verify.
 
 **Chat path.** On idle, after the thread's own session committed code. Master is
-shared by parallel sessions, so commits are taken from the hashes in that session's
-own `git commit` tool results, never a head-to-head range. A commit whose hash
-cannot be read or resolved is `could_not_check`, reported once. The work is
+shared by parallel sessions, so commits are taken from that session's own
+`git commit` tool calls (`bot/engine/commit_calls.py`), never a head-to-head range.
+95% of those calls are `git commit -q`, which prints no hash, so a call with no hash
+is matched by the exact subject it passed against the repo's log within a few
+hours. A call that does not match exactly one commit is `could_not_check`, reported
+once. The work is
 already committed, so these only report. `fix` gets one repair turn, whose commits
 close the round rather than opening another. It does not fire while a task, watch
 or pending prompt is live (`idle._apply_sleep` guards).

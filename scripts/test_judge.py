@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -283,36 +284,74 @@ for bad in (None, instance(id="v-q", needs_input=True), instance(id="v-f", statu
 
 
 # --- attribution ---
-def session(tmp, *turns):
-    """turns: (command, output)"""
-    path = Path(tmp) / "s.jsonl"
+from bot.engine.commit_calls import commit_subject, match_commits, read_commit_calls  # noqa: E402
+
+
+def session(tmp, *turns, ts="2026-11-04T10:00:00Z", name="s.jsonl"):
+    """turns: (command, output), in the transcript's real shape."""
+    path = Path(tmp) / name
     with path.open("w") as f:
         for i, (cmd, output) in enumerate(turns):
-            f.write(json.dumps({"type": "assistant", "message": {"content": [
+            f.write(json.dumps({"type": "assistant", "timestamp": ts, "message": {"content": [
+                {"type": "tool_use", "id": f"u{i}", "name": "Bash", "input": {"command": cmd}},
+            ]}}) + "\n")
+            # The same blocks come round again under another row type.
+            f.write(json.dumps({"type": "api-request-blob", "message": {"content": [
                 {"type": "tool_use", "id": f"u{i}", "name": "Bash", "input": {"command": cmd}},
             ]}}) + "\n")
             if output is not None:
-                f.write(json.dumps({"type": "user", "message": {"content": [
+                f.write(json.dumps({"type": "user", "timestamp": ts, "message": {"content": [
                     {"type": "tool_result", "tool_use_id": f"u{i}", "content": output},
                 ]}}) + "\n")
     return path
 
 
+for cmd, want in {
+    'git commit -m "plain one"': "plain one",
+    'git add -A && git commit -qm "quiet one\n\nbody"': "quiet one",
+    "git commit -q -m 'single quoted'": "single quoted",
+    'git commit -q -m "esc \\"aped\\" \\$x"': 'esc "aped" $x',
+    "git add -A && git commit -q -F - <<'EOF'\nfrom a heredoc\n\nbody\nEOF": "from a heredoc",
+    "git commit -q -m \"$(cat <<'EOF'\nfrom cat\n\nbody\nEOF\n)\"": "from cat",
+    "git -C /r commit -qm 'with dash c'": "with dash c",
+    "GIT_AUTHOR_NAME=x git commit -qm 'with env'": "with env",
+    "git commit --amend --no-edit": None,
+    "git commit -F msg.txt": None,
+}.items():
+    check(f"subject of {cmd[:30]!r}", commit_subject(cmd) == want, commit_subject(cmd))
+
 with tempfile.TemporaryDirectory() as td:
     f = session(td,
                 ('git add -A && git commit -m "x"', "[master abc1234] x\n 1 file changed"),
-                ('cd w; git -C /r commit -m "y"', "[claude-bot/t-1 def5678] y"),
+                ('git -C /r commit -qm "quiet one"', ""),
                 ("git log --grep commit", "commit deadbee"),
                 ("echo git commit", "git commit"),
-                ('git commit -m "z"', "nothing to commit, working tree clean"),
-                ('git commit --dry-run', "[master 1111111] no"),
-                ('git commit -m "bad"', "error: pre-commit hook failed"))
-    hashes, un = judge.attributed_commits(f)
-    check("own commits found", hashes == ["abc1234", "def5678"], hashes)
-    check("not counted as unattributed", un == [], un)
-    f = session(td, ('git commit -qm "x"', ""), ('git commit -m "y"', None))
-    hashes, un = judge.attributed_commits(f)
-    check("a commit with no hash is unattributed", hashes == [] and un == ["u0", "u1"], (hashes, un))
+                ('git commit -m "nope"', "nothing to commit, working tree clean"),
+                ("git commit --dry-run", "[master 1111111] no"),
+                ('git commit -qm "hook said no"', "error: pre-commit hook failed"),
+                ('git commit -qm "never answered"', None))
+    calls = read_commit_calls(f)
+    check("calls found, duplicates dropped", [c.tool_id for c in calls] == ["u0", "u1", "u4", "u6", "u7"], calls)
+    now = calls[0].ts
+    log = [("abc1234" + "0" * 33, "x", now), ("b" * 40, "quiet one", now + 5), ("c" * 40, "other session", now)]
+    shas, un = match_commits(calls, log)
+    check("hash and quiet subject both pinned", shas == [log[0][0], log[1][0]], shas)
+    check("a refusal is no commit, an unanswered call is unknown", un == ["u7"], un)
+    check("another session's commit is not taken", log[2][0] not in shas)
+    quiet = [c for c in calls if c.tool_id == "u1"]
+    check("same subject twice is not guessed", match_commits(quiet, [("a" * 40, "quiet one", now), ("b" * 40, "quiet one", now)]) == ([], ["u1"]))
+    check("same subject long ago does not count", match_commits(quiet, [("a" * 40, "quiet one", now - 86400)]) == ([], ["u1"]))
+    check("nothing matching is unattributed", match_commits(quiet, []) == ([], ["u1"]))
+    f = session(td, ("git commit -q -F /tmp/m.txt && git log --oneline -3", "M  a.py\nb" + "b" * 6 + " file subject\nc" + "c" * 6 + " older work"), name="printed.jsonl")
+    printed = read_commit_calls(f)
+    rows = [("b" * 40, "file subject", now), ("c" * 40, "older work", now)]
+    check("a printed line pins a quiet commit, and only the newest", match_commits(printed, rows) == ([rows[0][0]], []), printed)
+    check("a printed line naming no real commit does not count", match_commits(printed, [("d" * 40, "x", now)]) == ([], ["u0"]))
+    f = session(td, ("git commit --amend --no-edit", ""), name="amend.jsonl")
+    check("no subject and no hash is unattributed", match_commits(read_commit_calls(f), []) == ([], ["u0"]))
+
+
+NOW_TS = datetime.now(timezone.utc).isoformat()
 
 
 def idle_repo(td):
@@ -361,8 +400,9 @@ def run_idle(td, repo, sess, *, verdict=PASS_B, idle=True, chain=False, closed=F
 
 with tempfile.TemporaryDirectory() as td:
     repo, short, full = idle_repo(td)
-    sess = session(td, ('git commit -m "two"', f"[master {short}] two"))
+    sess = session(td, ('git commit -qm "AUTHOR-SUBJECT-MARKER two"', ""), ts=NOW_TS)
     out, ctx, seen = run_idle(td, repo, sess)
+    check("a quiet commit is found by its subject", len(seen["prompts"]) == 1)
     check("idle pass", out.kind == judge.PASS and len(seen["prompts"]) == 1)
     check("idle pass says nothing", ctx.messenger.send_text.await_count == 0)
     check("idle input has the change", "x = 1" in seen["prompts"][0])
@@ -372,7 +412,7 @@ with tempfile.TemporaryDirectory() as td:
 
 with tempfile.TemporaryDirectory() as td:
     repo, short, full = idle_repo(td)
-    sess = session(td, ('git commit -m "two"', f"[master {short}] two"))
+    sess = session(td, ('git commit -m "two"', f"[master {short}] two"), ts=NOW_TS)
     out, _, seen = run_idle(td, repo, sess, chain=True)
     check("a live chain owns its thread", out is None and seen["prompts"] == [])
     out, _, seen = run_idle(td, repo, sess, closed=True)
@@ -389,7 +429,7 @@ with tempfile.TemporaryDirectory() as td:
 
 with tempfile.TemporaryDirectory() as td:
     repo, short, full = idle_repo(td)
-    sess = session(td, ('git commit -qm "two"', ""))
+    sess = session(td, ('git commit -qm "no such subject"', ""), ts=NOW_TS)
     out, ctx, seen = run_idle(td, repo, sess)
     check("unattributed reports could_not_check and does not guess", out.kind == judge.COULD_NOT_CHECK and seen["prompts"] == [])
     check("and says so", ctx.messenger.send_text.await_count == 1)
@@ -398,19 +438,19 @@ with tempfile.TemporaryDirectory() as td:
 
 with tempfile.TemporaryDirectory() as td:
     repo, short, full = idle_repo(td)
-    sess = session(td, ('git commit -m "x"', "[master 0badc0d] gone"))
+    sess = session(td, ('git commit -m "x"', "[master 0badc0d] gone"), ts=NOW_TS)
     out, _, seen = run_idle(td, repo, sess)
     check("a hash that resolves to nothing is could_not_check", out.kind == judge.COULD_NOT_CHECK and seen["prompts"] == [])
 
 with tempfile.TemporaryDirectory() as td:
     repo, short, full = idle_repo(td)
-    sess = session(td, ('git commit -m "two"', f"[master {short}] two"))
+    sess = session(td, ('git commit -m "two"', f"[master {short}] two"), ts=NOW_TS)
     out, ctx, seen = run_idle(td, repo, sess, owner=())
     check("no owner words, no run", out.kind == judge.COULD_NOT_CHECK and seen["prompts"] == [])
 
 with tempfile.TemporaryDirectory() as td:
     repo, short, full = idle_repo(td)
-    sess = session(td, ('git commit -m "two"', f"[master {short}] two"))
+    sess = session(td, ('git commit -m "two"', f"[master {short}] two"), ts=NOW_TS)
     out, ctx, seen = run_idle(td, repo, sess, verdict=FIX_B)
     check("idle fix starts one repair", len(seen["repairs"]) == 1 and "a.py: wrong" in seen["repairs"][0])
     check("idle fix is surfaced", "a.py: wrong" in ctx.messenger.send_text.await_args.args[1])
@@ -418,20 +458,20 @@ with tempfile.TemporaryDirectory() as td:
     subprocess.run(["git", "add", "."], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-qm", "fix"], cwd=repo, check=True)
     short2 = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=repo, capture_output=True, text=True).stdout.strip()
-    sess = session(td, ('git commit -m "two"', f"[master {short}] two"), ('git commit -m "fix"', f"[master {short2}] fix"))
+    sess = session(td, ('git commit -m "two"', f"[master {short}] two"), ('git commit -m "fix"', f"[master {short2}] fix"), ts=NOW_TS)
     out, ctx, seen = run_idle(td, repo, sess, verdict=FIX_B)
     check("the repair's commits close the round", out is None and seen["prompts"] == [] and seen["repairs"] == [])
 
 with tempfile.TemporaryDirectory() as td:
     repo, short, full = idle_repo(td)
-    sess = session(td, ('git commit -m "two"', f"[master {short}] two"))
+    sess = session(td, ('git commit -m "two"', f"[master {short}] two"), ts=NOW_TS)
     out, ctx, seen = run_idle(td, repo, sess, verdict=FIX_B, idle=False)
     check("a busy thread gets no repair", seen["repairs"] == [] and out.kind == judge.FIX)
     check("but still hears about it", "a.py: wrong" in ctx.messenger.send_text.await_args.args[1])
 
 with tempfile.TemporaryDirectory() as td:
     repo, short, full = idle_repo(td)
-    sess = session(td, ('git commit -m "two"', f"[master {short}] two"))
+    sess = session(td, ('git commit -m "two"', f"[master {short}] two"), ts=NOW_TS)
     out, ctx, seen = run_idle(td, repo, sess, verdict=ONLY_B)
     check("idle only_you shows its line", "look at the ship" in ctx.messenger.send_text.await_args.args[1])
 
