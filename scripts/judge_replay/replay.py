@@ -288,9 +288,11 @@ def _run_replicate(case: dict, clone: Path, goal_dir: Path, rdir: Path, rev: str
     rdir.mkdir(parents=True, exist_ok=True)
     verify_text = ""
     if case.get("verify_id"):
-        result = LIVE_DATA / "results" / f"{case['verify_id']}.md"
-        if result.exists():
-            verify_text = result.read_text(encoding="utf-8", errors="replace")
+        # The bot prunes its result files, so most of these come from recover_verify.py.
+        for result in (LIVE_DATA / "results" / f"{case['verify_id']}.md", RAW / "verify" / f"{case['verify_id']}.txt"):
+            if result.exists():
+                verify_text = result.read_text(encoding="utf-8", errors="replace")
+                break
     sp_file = rdir / "system_prompt.txt"
     built = call_child({"op": "build", "id": case["id"], "repo": case["repo"], "clone": str(clone),
                         "goal_dir": str(goal_dir),
