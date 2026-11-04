@@ -49,7 +49,7 @@ from sandbox import check_clone_path  # noqa: E402
 
 RAW = LIVE_DATA / "judge_replay"
 RUNS = RAW / "runs"
-CLONES = CACHE_ROOT / "judge_replay"
+CLONES = CACHE_ROOT / "judge-replay"
 ACCOUNT = str(Path.home() / ".claude-main")
 JUDGE_BUDGET = 5.0
 SCORER_BUDGET = 0.5
