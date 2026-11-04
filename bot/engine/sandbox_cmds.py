@@ -9,14 +9,20 @@ from __future__ import annotations
 
 import logging
 import os
-import shutil
 
 from bot.claude import sandbox
 
 log = logging.getLogger(__name__)
 
+_CORRUPT = (
+    "The stored sandbox settings can't be read, so runs in sandboxed repos are refused. "
+    "Fix `sandboxed_repos` in `data/state.json` first."
+)
+
 
 def _repo(store, name: str) -> tuple[str | None, str | None]:
+    if "__corrupt__" in store.sandbox_entries():
+        return None, _CORRUPT
     path = store.list_repos().get(name)
     if not path:
         return None, f"No repo called `{name}`."
@@ -30,7 +36,7 @@ def turn_on(store, name: str, provider_name: str) -> str:
     problem = sandbox.check_repo_allowed(real, provider_name)
     if problem:
         return f"Not sandboxing `{name}`: {problem}."
-    missing = [tool for tool in ("bwrap", "socat") if not shutil.which(tool)]
+    missing = sandbox.missing_tools()
     if missing:
         return f"Not sandboxing `{name}`: {' and '.join(missing)} not installed."
     try:
@@ -90,7 +96,7 @@ def set_hosts(store, name: str, hosts: list[str]) -> str:
 def status(store, provider_name: str) -> str:
     entries = store.sandbox_entries()
     if "__corrupt__" in entries:
-        return "The stored sandbox settings can't be read, so runs in sandboxed repos are refused."
+        return _CORRUPT
     names = {os.path.realpath(p): n for n, p in store.list_repos().items()}
     lines = []
     for real, entry in sorted(entries.items()):
@@ -99,7 +105,6 @@ def status(store, provider_name: str) -> str:
         shown = "unreadable, runs refused" if not isinstance(hosts, list) else (", ".join(hosts) or "no hosts")
         lines.append(f"**{label}**: {shown}")
     head = "\n".join(lines) if lines else "No repo is sandboxed."
-    tools = ", ".join(
-        f"{tool} {'ok' if shutil.which(tool) else 'MISSING'}" for tool in ("bwrap", "socat")
-    )
+    missing = sandbox.missing_tools()
+    tools = ", ".join(f"{tool} {'MISSING' if tool in missing else 'ok'}" for tool in sandbox.REQUIRED_TOOLS)
     return f"{head}\nProvider: {provider_name}. {tools}."

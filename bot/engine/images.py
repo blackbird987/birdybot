@@ -185,6 +185,8 @@ def resolve_image(
 
     roots = _allowed_roots(inst, sandboxed)
     if not any(_under(cand, r) for r in roots):
+        if sandboxed:
+            return None, "outside this session's working directory"
         return None, "outside this repo, the worktree, and the bot's data dir"
     if cand.suffix.lower() not in IMAGE_EXTS:
         return None, f"not a shareable image type ({cand.suffix or 'no extension'})"

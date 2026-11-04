@@ -23,9 +23,11 @@ import os
 import stat
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 log = logging.getLogger(__name__)
+
+_ENV_EXAMPLE_SUFFIXES = (".example", ".sample", ".template")
 
 
 def atomic_write_text(path: Path | str, text: str, *, encoding: str = "utf-8") -> None:
@@ -67,26 +69,63 @@ def atomic_write_json(
     atomic_write_text(path, text)
 
 
+def is_within(path: str | Path, root: str | Path) -> bool:
+    """Is ``path`` at or under ``root``, once both are resolved?"""
+    path, root = os.path.realpath(path), os.path.realpath(root)
+    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
+
+
+def is_env_file(name: str) -> bool:
+    """Does this file name hold a repo's secrets? ``.env`` and ``.env.*``, not the examples."""
+    return name == ".env" or (name.startswith(".env.") and not name.endswith(_ENV_EXAMPLE_SUFFIXES))
+
+
+def open_contained(path: str | Path, root: str | Path) -> BinaryIO | None:
+    """``path`` open for reading, if it is a plain file under ``root``, or None.
+
+    Checked on the descriptor that was opened, because a path check alone loses a
+    race to a job still running in the session that owns these files. Non-blocking,
+    so a FIFO is refused rather than hanging the reader. An env file counts as not
+    there, so a contained `CLAUDE.md -> .env` cannot put one in a prompt or a post.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        fh = os.fdopen(os.open(path, flags), "rb")
+    except OSError:
+        return None
+    try:
+        link = f"/proc/self/fd/{fh.fileno()}"
+        real = os.readlink(link) if os.path.exists(link) else os.path.realpath(path)
+        if (
+            stat.S_ISREG(os.fstat(fh.fileno()).st_mode)
+            and is_within(real, root)
+            and not is_env_file(os.path.basename(real))
+        ):
+            return fh
+    except OSError:
+        pass
+    fh.close()
+    return None
+
+
 def read_contained_text(
     root: str | Path, rel: str, *, max_bytes: int | None = None,
 ) -> str | None:
     """Text of a regular file under ``root``, or None.
 
-    None for a missing file, a link that resolves out of ``root``, a FIFO (which
-    would hang the reader) or anything else that is not a plain file. These files
-    are repo content: a session can plant `.claude/test.json -> ~/.ssh/id_rsa`.
+    None for a missing file, anything ``open_contained`` refuses, or a read that
+    fails. These files are repo content: a session can plant
+    `.claude/test.json -> ~/.ssh/id_rsa`.
     """
-    real_root = os.path.realpath(root)
-    real = os.path.realpath(os.path.join(real_root, rel))
-    if not real.startswith(real_root.rstrip(os.sep) + os.sep):
+    fh = open_contained(os.path.join(root, rel), root)
+    if fh is None:
         return None
     try:
-        if not stat.S_ISREG(os.stat(real).st_mode):
-            return None
-        with open(real, encoding="utf-8", errors="replace") as fh:
-            return fh.read(max_bytes) if max_bytes else fh.read()
+        with fh:
+            data = fh.read(max_bytes) if max_bytes else fh.read()
     except OSError:
         return None
+    return data.decode("utf-8", errors="replace")
 
 
 def read_repo_config(repo_path: str | Path | None, name: str) -> dict | None:

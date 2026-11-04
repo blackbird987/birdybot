@@ -75,9 +75,10 @@ def check(tool: str, tool_input: dict, cfg: dict) -> str | None:
 
     for raw in paths:
         path = _resolve(raw, cwd)
+        # Every tool: Edit answers with a snippet of the file, and Write replaces it.
+        if any(_under(path, d) for d in deny_read):
+            return f"{raw} is off limits in this session"
         if tool in READ_TOOLS:
-            if any(_under(path, d) for d in deny_read):
-                return f"{raw} is off limits in this session"
             if not any(_under(path, r) for r in read_roots):
                 return f"{raw} is outside this session's directories"
             continue

@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 from bot import vault
 from bot.claude import sandbox
+from bot.claude.runner.git_merge import MERGE_FAIL_SANDBOX_PROTECTED
 from bot.claude.types import RunResult
 
 if TYPE_CHECKING:
@@ -100,7 +101,7 @@ class SandboxMixin:
         changes = sandbox.protected_changes(repo, instance.original_branch, instance.branch)
         if changes == []:
             return None
-        self._last_merge_failure_kind[instance.id] = "sandbox_protected"
+        self._last_merge_failure_kind[instance.id] = MERGE_FAIL_SANDBOX_PROTECTED
         if changes is None:
             return "Merge failed: sandboxed repo, and git could not list what this branch changes."
         listed = ", ".join(f"`{p}`" for p in changes[:8])

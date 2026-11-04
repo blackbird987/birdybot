@@ -1158,8 +1158,7 @@ class MergeMixin:
         # The files here are a session's, and these calls run outside its sandbox.
         git = ["git"]
         if sandbox.is_sandboxed(getattr(self, "_store", None), instance.repo_path):
-            git += ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
-                    "-c", "diff.ignoreSubmodules=all"]
+            git += sandbox.GIT_SAFE
         # Transient-race guard: retry once after a short pause when status
         # fails or reports clean — t-5592's rescue bailed on exactly one of
         # these previously-silent exits while the worktree was demonstrably

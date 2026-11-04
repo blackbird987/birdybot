@@ -18,14 +18,16 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import stat
 import sys
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from bot import config
-from bot.fsutil import read_contained_text
+from bot.fsutil import is_env_file, is_within, read_contained_text
 from bot.platform.redact import _ENV_SECRET_NAMES
 from bot.procutil import run_capture
 
@@ -52,13 +54,18 @@ STUB_FILES = (
 _STUB_EXCLUDES = tuple(f"/{name}" for name in STUB_FILES)
 _EXCLUDE_MARKER = "# session sandbox stubs (bot)"
 
-# Every tool the sandbox does not reach, or that talks past it.
+# Every tool the sandbox does not reach, or that talks past it. Grep is not offered
+# by this CLI yet. It would run outside bwrap and search a directory by content,
+# past any env file in it that the path hook can only refuse by name. Bash grep
+# stays inside the sandbox and sees those files empty.
 _DENIED_TOOLS = [
     "WebFetch", "WebSearch", "SendMessage", "RemoteTrigger", "CronCreate",
     "CronList", "CronDelete", "ListAgents", "Monitor", "Workflow", "Skill",
     "EnterWorktree", "ExitWorktree", "PushNotification", "DesignSync",
-    "ScheduleWakeup", "Edit(~/.*)", "Edit(~/.*/**)",
+    "ScheduleWakeup", "Grep", "Edit(~/.*)", "Edit(~/.*/**)",
 ]
+
+REQUIRED_TOOLS = ("bwrap", "socat")
 
 # Relative to home. Named one by one: ~/.local as a whole holds keyrings and
 # chat data. Only the ones that exist on this machine go in the settings.
@@ -81,6 +88,7 @@ _SCOPE_NEEDS = {"DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"}
 _ALWAYS_STRIP = {"SSH_AUTH_SOCK", "GPG_AGENT_INFO", "GNOME_KEYRING_CONTROL"}
 
 _HOST_RE = re.compile(r"^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*\.[a-z]{2,}$")
+_URL_USERINFO_RE = re.compile(r"https?://[^/@\s]+@")
 _ENV_NAME_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
 
 _MAX_INSTRUCTIONS_BYTES = 64 * 1024
@@ -178,14 +186,13 @@ def validate_hosts(hosts: list[str]) -> list[str]:
     return cleaned
 
 
-def _is_within(path: str, root: str) -> bool:
-    path, root = os.path.realpath(path), os.path.realpath(root)
-    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
-
-
 def _bot_roots() -> list[str]:
     roots = {str(config._PROJECT_ROOT), str(config._ENV_ROOT), str(config.DATA_DIR)}
     return sorted(roots)
+
+
+def missing_tools() -> list[str]:
+    return [tool for tool in REQUIRED_TOOLS if not shutil.which(tool)]
 
 
 def _hooks_path_problem(repo_path: str) -> str | None:
@@ -197,29 +204,56 @@ def _hooks_path_problem(repo_path: str) -> str | None:
     expanded = os.path.expanduser(value)
     if not os.path.isabs(expanded):
         return f"its core.hooksPath (`{value}`) is relative, so a session could supply the hooks"
-    if _is_within(expanded, repo_path):
+    if is_within(expanded, repo_path):
         return f"its core.hooksPath (`{value}`) is inside the repo, so a session could supply the hooks"
     return None
+
+
+def _git_credentials_problem(repo_path: str) -> str | None:
+    """A credential in git's config, which a session here can read. Never printed."""
+    r = run_capture(
+        ["git", "config", "--get-regexp",
+         r"^(remote\..*\.(url|pushurl)|url\..*\.insteadof|http\..*extraheader)$"],
+        cwd=repo_path, timeout=30,
+    )
+    # 1 is git's "no such key".
+    if r.returncode not in (0, 1):
+        return "git could not read its config"
+    for line in (r.stdout or "").splitlines():
+        key = line.partition(" ")[0]
+        if key.startswith("http.") or _URL_USERINFO_RE.search(line):
+            return (
+                f"its git config has a credential in it ({key.rsplit('.', 1)[-1]}), and a "
+                "session can read that. Use a credential helper instead"
+            )
+    return None
+
+
+def _git_config_problem(repo_path: str) -> str | None:
+    return _hooks_path_problem(repo_path) or _git_credentials_problem(repo_path)
 
 
 def check_repo_allowed(repo_path: str, provider_name: str = "claude") -> str | None:
     """Why this repo cannot be sandboxed, or None when it can."""
     real = os.path.realpath(repo_path)
     for root in _bot_roots():
-        if _is_within(real, root) or _is_within(root, real):
+        if is_within(real, root) or is_within(root, real):
             return (
                 "this path overlaps the bot itself. A session here could edit "
                 "code that later runs outside any sandbox"
             )
-    if not _is_within(real, str(Path.home())):
+    home = str(Path.home())
+    if not is_within(real, home):
         return "only repos under the home directory have been tested"
+    if os.path.relpath(real, os.path.realpath(home)).startswith("."):
+        return "it sits in a dot directory in home, where the `~/.*` deny would stop every edit"
     if not os.path.isdir(real):
         return "the path is not a directory"
     if not os.path.isdir(os.path.join(real, ".git")):
         return "it has no .git directory (a worktree or a non-git folder cannot be sandboxed)"
     if provider_name != "claude":
         return f"provider `{provider_name}` has no sandbox settings. It works with Claude only"
-    return _hooks_path_problem(real)
+    return _git_config_problem(real)
 
 
 def harden_repo_git(repo_path: str) -> None:
@@ -335,11 +369,7 @@ def _env_files(working_dir: str) -> list[str]:
         dirs[:] = [d for d in dirs if d not in skip]
         if root.count(os.sep) - base_depth >= 4:
             dirs[:] = []
-        for name in files:
-            if name == ".env" or (name.startswith(".env.") and not name.endswith(
-                (".example", ".sample", ".template")
-            )):
-                found.append(os.path.join(root, name))
+        found += [os.path.join(root, name) for name in files if is_env_file(name)]
         if len(found) >= 100:
             break
     return found
@@ -420,6 +450,7 @@ def build_settings(
     deny_env: list[str],
     hook_cfg: str,
     attachments_dir: str | None,
+    env_files: list[str],
     other_repos: list[str],
     memory_dir: str | None = None,
 ) -> dict:
@@ -427,12 +458,14 @@ def build_settings(
     home = str(Path.home())
     deny_read = ["~/", "/tmp", f"/tmp/claude-{os.getuid()}", f"/run/user/{os.getuid()}"]
     deny_read += [p for p in _HOST_DENY if os.path.exists(p)]
-    deny_read += _env_files(working_dir)
+    deny_read += env_files
+    # The deny on home covers a repo under it, unless the working dir (which is
+    # allowed) holds it. A repo that holds the working dir would hide it if denied.
     for other in other_repos:
-        if not _is_within(other, home) or _is_within(other, working_dir):
-            if not _is_within(working_dir, other):
+        if not is_within(other, home) or is_within(other, working_dir):
+            if not is_within(working_dir, other):
                 deny_read.append(other)
-    if not _is_within(str(config.DATA_DIR), home):
+    if not is_within(str(config.DATA_DIR), home):
         deny_read.append(str(config.DATA_DIR))
 
     allow_read = [working_dir, tmp_dir, cache_dir]
@@ -468,9 +501,11 @@ def build_settings(
         path = os.path.join(home, rel)
         if os.path.exists(path):
             allow_read.append(path)
+    # A query session can write here, so `.venv -> ~/.ssh` would open that to its
+    # next run, and `.venv -> .env` would reopen the file over its deny.
     for rel in _REPO_TOOL_DIRS:
         path = os.path.join(repo_path, rel)
-        if os.path.exists(path):
+        if os.path.isdir(path) and is_within(path, repo_path):
             allow_read.append(path)
     if attachments_dir:
         allow_read.append(attachments_dir)
@@ -511,10 +546,10 @@ def preflight(provider_name: str, api_fallback: bool, repo_path: str) -> None:
         )
     if not _HOOK_SCRIPT.is_file():
         raise SandboxRefused("the path check hook is missing")
-    for tool in ("bwrap", "socat"):
-        if not shutil.which(tool):
-            raise SandboxRefused(f"`{tool}` is not installed")
-    problem = _hooks_path_problem(repo_path)
+    missing = missing_tools()
+    if missing:
+        raise SandboxRefused(f"`{missing[0]}` is not installed")
+    problem = _git_config_problem(repo_path)
     if problem:
         raise SandboxRefused(problem)
 
@@ -565,7 +600,7 @@ def prepare_run(
         working_dir=working_dir, repo_path=repo_path, is_worktree=is_worktree,
         tmp_dir=str(tmp_dir), cache_dir=str(cache_dir), hosts=hosts,
         deny_env=deny, hook_cfg=str(hook_cfg), attachments_dir=attachments_dir,
-        other_repos=other_repos, memory_dir=memory_dir,
+        env_files=env_files, other_repos=other_repos, memory_dir=memory_dir,
     )
     settings_file = private_dir / "settings.json"
     settings_file.write_text(json.dumps(settings, indent=1), encoding="utf-8")
@@ -649,7 +684,7 @@ def clean_stubs(working_dir: str) -> int:
         if not stat.S_ISREG(st.st_mode) or st.st_size != 0:
             continue
         tracked = run_capture(
-            ["git", *_GIT_SAFE, "ls-files", "--error-unmatch", "--", name],
+            ["git", *GIT_SAFE, "ls-files", "--error-unmatch", "--", name],
             cwd=working_dir, timeout=30,
         )
         if tracked.returncode == 0:
@@ -680,14 +715,14 @@ def finish_run(run: SandboxRun) -> None:
 # sandboxed worktree points at a private gitdir for the length of the run, and
 # the one branch comes back through a checked fetch when it ends. See the doc.
 
-_GIT_SAFE = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+GIT_SAFE = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
              "-c", "diff.ignoreSubmodules=all"]
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
 _MERGE_STATE = ("MERGE_HEAD", "MERGE_MSG", "MERGE_MODE")
 
 
 def _git(args: list[str], cwd: str, timeout: int = 120):
-    return run_capture(["git", *_GIT_SAFE, *args], cwd=cwd, timeout=timeout)
+    return run_capture(["git", *GIT_SAFE, *args], cwd=cwd, timeout=timeout)
 
 
 def _replace_file(path: str, text: str) -> None:
@@ -713,7 +748,7 @@ def _real_gitdir(worktree: str, repo_path: str) -> str:
     if not text.startswith("gitdir: "):
         raise SandboxRefused("the worktree's .git file is not a gitdir pointer")
     real = os.path.realpath(text[len("gitdir: "):])
-    if not _is_within(real, os.path.join(repo_path, ".git", "worktrees")):
+    if not is_within(real, os.path.join(repo_path, ".git", "worktrees")):
         raise SandboxRefused("the worktree's .git points outside this repo")
     with open(os.path.join(real, "gitdir"), encoding="utf-8") as fh:
         back = fh.read(4096).strip()
@@ -731,7 +766,10 @@ def checkout_worktree(worktree: str, repo_path: str, instance_id: str) -> None:
     state = state_dir_for(worktree)
     meta_path = state / "meta.json"
     if meta_path.exists():
-        checkin_worktree(worktree)
+        # Going on would wipe the only copy of commits that did not come home.
+        problem = checkin_worktree(worktree)
+        if problem:
+            raise SandboxRefused(_failed_import_message(problem))
     real = _real_gitdir(worktree, repo_path)
     with open(os.path.join(real, "HEAD"), encoding="utf-8") as fh:
         head = fh.read(4096).strip()
@@ -820,6 +858,13 @@ def _gitdir_problem(gitdir: str, config_hash: str) -> str | None:
     return None
 
 
+def _failed_import_message(reason: str) -> str:
+    return (
+        f"an earlier run's commits could not be brought back ({reason}). "
+        "Discard this branch, or turn the sandbox off and on again, to clear it"
+    )
+
+
 def checkin_worktree(worktree: str) -> str | None:
     """Put the worktree back on its real gitdir and bring its branch home.
 
@@ -834,10 +879,7 @@ def checkin_worktree(worktree: str) -> str | None:
     except FileNotFoundError:
         return None
     if meta.get("import_failed"):
-        raise SandboxRefused(
-            f"an earlier run's commits could not be brought back ({meta['import_failed']}). "
-            "Discard this branch, or turn the sandbox off and on again, to clear it"
-        )
+        raise SandboxRefused(_failed_import_message(meta["import_failed"]))
     if not os.path.isdir(worktree):
         shutil.rmtree(state, ignore_errors=True)
         return None
@@ -845,7 +887,12 @@ def checkin_worktree(worktree: str) -> str | None:
     gitdir = private_gitdir(worktree)
     _replace_file(os.path.join(worktree, ".git"), f"gitdir: {real}\n")
 
-    problem = _import_branch(worktree, gitdir, repo, real, branch, meta)
+    try:
+        problem = _import_branch(worktree, gitdir, repo, real, branch, meta)
+    except Exception as exc:
+        # Recorded like any other, or `/sandbox off` could not clear the worktree.
+        log.exception("Sandbox: import of %s failed", worktree)
+        problem = f"the import failed ({type(exc).__name__})"
     if problem:
         meta["import_failed"] = problem
         _replace_file(str(meta_path), json.dumps(meta))
@@ -895,7 +942,9 @@ def _import_branch(
         log.warning("Sandbox: %s left no refs/heads/%s; nothing imported", worktree, branch)
 
     # The private index is never trusted: rebuild from what was just imported.
-    _git(["reset", "-q"], cwd=worktree)
+    reset = _git(["reset", "-q"], cwd=worktree)
+    if reset.returncode != 0:
+        log.warning("Sandbox: could not rebuild the index of %s: %s", worktree, reset.stderr.strip()[:200])
     for name in _MERGE_STATE:
         target = os.path.join(real, name)
         src = os.path.join(gitdir, name)
@@ -943,10 +992,46 @@ def clear_failed_imports(repo_path: str) -> int:
             meta = json.loads((state / "meta.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        if meta.get("repo") == repo_path and meta.get("import_failed"):
+        if os.path.realpath(meta.get("repo", "")) == os.path.realpath(repo_path) and meta.get("import_failed"):
             shutil.rmtree(state, ignore_errors=True)
             cleared += 1
     return cleared
+
+
+def _run_process_ids(runs: Path) -> list[int]:
+    """Processes started with a path in this run directory, which every session is."""
+    prefix = os.fsencode(str(runs) + os.sep)
+    pids: list[int] = []
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return pids
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/cmdline", "rb") as fh:
+                args = fh.read().split(b"\0")
+        except OSError:
+            continue
+        if any(arg.startswith(prefix) for arg in args):
+            pids.append(int(entry))
+    return pids
+
+
+def _kill_leftover_runs(runs: Path, wait_secs: float = 5.0) -> int:
+    """Kill a session a hard crash left running. Its session scope outlives the bot,
+    and it must be dead before its git directory is trusted."""
+    pids = _run_process_ids(runs)
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            log.debug("Could not kill leftover sandbox process %s", pid, exc_info=True)
+    deadline = time.monotonic() + wait_secs
+    while pids and _run_process_ids(runs) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    return len(pids)
 
 
 def recover_after_restart() -> list[str]:
@@ -954,6 +1039,9 @@ def recover_after_restart() -> list[str]:
     problems: list[str] = []
     root = sandbox_root()
     runs = root / "runs"
+    killed = _kill_leftover_runs(runs)
+    if killed:
+        log.warning("Sandbox: killed %d process(es) left over from before the restart", killed)
     if runs.is_dir():
         shutil.rmtree(runs, ignore_errors=True)
     worktrees = root / "worktrees"
@@ -1028,18 +1116,20 @@ def deploy_fingerprint(repo_path: str, deploy_config: dict) -> str:
     settings = {k: v for k, v in deploy_config.items()
                 if k not in ("approved", "approved_fingerprint")}
     digest = hashlib.sha256(json.dumps(settings, sort_keys=True, default=str).encode())
-    base = os.path.realpath(os.path.join(repo_path, cwd))
+    repo_real = os.path.realpath(repo_path)
+    base = os.path.realpath(os.path.join(repo_real, cwd))
     try:
         tokens = shlex.split(command)
     except ValueError:
         tokens = command.split()
     names = sorted({*tokens, *_DEPLOY_WELL_KNOWN})
     for token in names:
-        for root in {base, os.path.realpath(repo_path)}:
+        # Sorted: this hash is compared across restarts, so no set order in it.
+        for root in sorted({base, repo_real}):
             path = os.path.realpath(os.path.join(root, token))
-            if not _is_within(path, repo_path) or not os.path.isfile(path):
+            if not is_within(path, repo_real) or not os.path.isfile(path):
                 continue
             with open(path, "rb") as fh:
-                digest.update(f"{os.path.relpath(path, repo_path)}\0".encode())
+                digest.update(f"{os.path.relpath(path, repo_real)}\0".encode())
                 digest.update(hashlib.sha256(fh.read()).digest())
     return digest.hexdigest()

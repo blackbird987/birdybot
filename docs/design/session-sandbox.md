@@ -25,9 +25,16 @@ Harnesses: `scripts/test_session_sandbox.py` (fast, no session),
   anything unreadable, and `_sandbox_prepare` refuses the run.
 - `/sandbox on|off|hosts <repo> [hosts...]|status` is owner-only. `on` refuses a
   path equal to, inside or containing the bot repo, a cursor repo, a repo outside
-  home, and a `core.hooksPath` inside the repo or relative. A provider switch on a
-  sandboxed repo refuses the run rather than turning the sandbox off.
+  home, a repo in a dot directory directly in home (the `Edit(~/.*)` deny would stop
+  every edit), a `core.hooksPath` inside the repo or relative, and a credential in
+  git's config: userinfo in a remote or `insteadOf` URL, or an `http.*.extraHeader`.
+  A session reads `.git/config`, so a token there is its to take. The git checks run
+  again before each run, in case one was added since. The refusal names the kind of
+  setting and never its value. A provider switch on a sandboxed repo refuses the run
+  rather than turning the sandbox off.
 - `/sandbox off` undoes the git hardening and clears failed check-ins for the repo.
+- With the store corrupt, `on`, `off` and `hosts` refuse and point at `state.json`,
+  rather than writing into it or saying a repo is not sandboxed.
 - A repo moved to a new path reads as off, because the key is the path.
 
 ## What a sandboxed run gets
@@ -49,20 +56,25 @@ into the system prompt file, skipping links. API fallback is refused, because
 used: it does not work with the bot's `bypassPermissions`.
 
 Settings in force: `sandbox.enabled`, `failIfUnavailable`,
-`allowUnsandboxedCommands: false`, `denyRead` on home, `/tmp` and every env file,
-`allowRead` on the working dir and toolchains, `denyWrite` on `.claude/` and the
-git internals, a strict host list, the path hook, `blockReadsOutsideWorkingDirectories`,
-and `WebFetch`, `WebSearch`, `SendMessage`, `RemoteTrigger`, the cron tools, `Monitor`,
-`Skill`, `Workflow`, `ListAgents` and friends denied. The session is told about
-all this in a prompt note, so it stops and asks instead of flailing.
+`allowUnsandboxedCommands: false`, `denyRead` on home, `/tmp` and the env files it
+finds (`.env` and `.env.*`, not the examples, by exact path, down 4 levels, skipping
+`.worktrees`, `node_modules`, `.venv`, `venv`, `dist` and `build`, at most 100),
+`allowRead` on the working dir, toolchains and a real `.venv`, `venv` or
+`node_modules` directory in the repo, `denyWrite` on `.claude/` and the git internals,
+a strict host list, the path hook, `blockReadsOutsideWorkingDirectories`, and
+`WebFetch`, `WebSearch`, `SendMessage`, `RemoteTrigger`, the cron tools, `Monitor`,
+`Skill`, `Workflow`, `ListAgents`, `Grep` and friends denied. This CLI offers no `Grep`.
+One that did would run it outside bubblewrap, searching a directory past the env files
+in it, so Bash grep is the only grep. The session is told about all this in a prompt
+note, so it stops and asks instead of flailing.
 
 The environment loses every name in the bot's `.env`, the secret-looking names in
 `redact.py`, and agent sockets. What the CLI itself needs stays in its env and is
 hidden from Bash through `credentials.envVars`. Vault keys granted to the repo stay
 available to Bash, or the feature would be useless.
 
-Shared cache per repo for npm, pip and dotnet, not per run, plus the dotnet flags
-from the trial.
+Shared cache per repo for npm, pip, uv, XDG, NuGet, dotnet, cargo and go, not per
+run, plus the MSBuild source link flags from the trial.
 
 ### The path hook
 
@@ -70,7 +82,9 @@ from the trial.
 Edit, Write, MultiEdit and NotebookEdit, because those run in the CLI process
 outside bubblewrap. It exits 2 on any exception, and the settings command adds
 `|| exit 2` so that a crash of the interpreter blocks too. Writes under the working
-dir are refused for any `.git` or `.claude` path component and any `.mcp.json`.
+dir are refused for any `.git` or `.claude` path component and any `.mcp.json`. The
+env files found at the start of the run are refused to every tool, resolved through
+links: Edit answers with a snippet of the file.
 
 `worktree_guard` and the test mutex live in `settings.local.json`, which a
 sandboxed run does not load, so a worktree run's generated settings carry them.
@@ -89,13 +103,19 @@ an alternate. `checkin_worktree` then:
 - takes `MERGE_HEAD` back only if each line is a real object id.
 
 A refused check-in marks the worktree: the next run on it is refused too, until
-the owner looks at it and `/sandbox off` clears it. `recover_after_restart` finishes
-any check-in a bot restart interrupted, and removes dead run dirs.
+the owner looks at it and `/sandbox off` clears it. An exception during the import
+counts as a refusal. A check-out that finds a check-in still owing tries it first and
+refuses on failure, because its private dir holds the only copy of those commits.
+
+`recover_after_restart` runs at boot, before anything can start a session. It kills
+what a hard crash left running (found by a run dir path in the command line, since
+session scopes outlive the bot), finishes any check-in that was interrupted, and
+removes dead run dirs.
 
 Query runs have no worktree and use the main checkout, with `.git` and `.worktrees`
 read-only. They cannot commit.
 
-The bot's own git in those worktrees runs with `_GIT_SAFE`: hooks and fsmonitor off,
+The bot's own git in those worktrees runs with `GIT_SAFE`: hooks and fsmonitor off,
 submodule diffs ignored. It reads the real git dir's config, which a session cannot
 write, so nothing else a config could run is in a session's hands.
 
@@ -117,9 +137,10 @@ All keyed on the originating repo being sandboxed.
 
 - `/spawn`: only into a repo that is also sandboxed. Refused in the thread, logged.
 - `/repo add|create|switch|hide|unhide`: ignored, logged, thread told.
-- `/watch`: `log=` must stay inside the working dir, read with no link following
-  and no blocking on a FIFO, re-checked at read time (`Watch.log_root`). `pid=` is
-  refused, because a session's pids are not host pids.
+- `/watch`: `log=` must stay inside the working dir and not be an env file, read with
+  no link out and no blocking on a FIFO, re-checked at read time (`Watch.log_root`),
+  because the log's last line is posted and `done_re` runs over it. `pid=` is refused,
+  because a session's pids are not host pids.
 - Sensors: skipped with a note. They would run with the bot's full environment.
 - Auto-merge: `.claude/workflow.json` and the verify policy in `.claude/test.json`
   are ignored. A branch touching `.claude/**`, `.github/**`, `.mcp.json`,
@@ -131,8 +152,11 @@ All keyed on the originating repo being sandboxed.
 - `/image`: narrowed to the working dir; the data dir is not a source.
 - `TODO.md`: the bot reads and writes it for deferred items, and skips it if it is
   not a plain file in a sandboxed repo. The blurb's own reader
-  (`repo_desc._candidate`) already refused a link out of the repo. `.claude/*.json`
-  and project instructions go through `fsutil.read_contained_text`, for every repo.
+  (`repo_desc._candidate`) already refused a link out of the repo, and now one onto an
+  env file. `.claude/*.json` and project instructions go through
+  `fsutil.read_contained_text`, for every repo. `fsutil.open_contained` is the check
+  under that and `/watch`: on the opened descriptor, plain file, inside the root, not
+  an env file. A contained `CLAUDE.md -> .env` would otherwise reach the prompt.
 
 Checked and needing no gate:
 
@@ -181,11 +205,14 @@ anything.
 - **The Write symlink race** rests on the CLI's own guards plus the hook. 40
   concurrent attempts against a swapping link landed nothing, which is a test and
   not a proof.
+- **Env files are found by name.** One the search above misses (deeper, a skipped
+  directory, past the cap, or another name such as `secrets.json`) reads like any file.
+- **The deploy fingerprint covers what the command names** and a few well-known files.
+  A helper that a script calls is not in it, so a change there is not refused.
 - `TODO.md` and blurb reads have small check-then-use windows if a job is running.
   Background jobs die with the CLI (tested), so there is rarely anything to race.
 - `diff.ignoreSubmodules=all` is set while on, so submodule changes do not show.
 - `/watch` runs a session's regex in the bot, an availability risk and not a read.
-- A repo under a dot directory in home hits the `Edit(~/.*)` deny and cannot edit.
 - A prompt naming another upload's unguessable path gets a copy of it. Those names
   are random uuid4s and reach only the thread they were posted in.
 
@@ -208,7 +235,13 @@ anything.
   only hold for what exists. A session that creates `.claude/workflow.json` writes
   into its next run's config and the merge gate.
 - **Check the run back in before trusting its git.** The session must be dead first
-  (`_sandbox_after_attempt`), and it survives cancellation through a shield.
+  (`_sandbox_after_attempt`, or `_kill_leftover_runs` at boot), and it survives
+  cancellation through a shield.
+- **Never go on past a failed check-in.** `checkout_worktree` wipes the private dir, and
+  that dir holds the only copy of commits that did not come home.
+- **Boot recovery runs before anything can start a session.** It deletes run dirs and
+  moves worktrees, which a run started during startup would still be using.
+- **The deploy fingerprint is compared across restarts**, so no set order goes in it.
 - **Hook failure means block.** Never let an exception or a missing interpreter read
   as allow.
 - **Every new directive that makes the bot act checks `origin_is_sandboxed`.** The

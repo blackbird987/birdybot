@@ -337,8 +337,17 @@ async def resume_interrupted_chains(
 
 
 def recover_sandboxed_worktrees() -> None:
-    """Put back any worktree a dead process left on its private git directory."""
-    for problem in sandbox.recover_after_restart():
+    """Put back any worktree a dead process left on its private git directory.
+
+    Runs before anything can start a session: it deletes run directories and
+    moves worktrees, which a run started during startup would still be using.
+    """
+    try:
+        problems = sandbox.recover_after_restart()
+    except Exception:
+        log.exception("Sandbox recovery failed")
+        return
+    for problem in problems:
         log.error("Sandbox recovery: %s", problem)
 
 

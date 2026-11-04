@@ -25,13 +25,13 @@ import errno
 import logging
 import os
 import re
-import stat
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from bot import config
 from bot.claude.types import Watch
+from bot.fsutil import is_env_file, is_within, open_contained
 from bot.platform.base import ButtonSpec
 from bot.platform.formatting import format_delay_secs
 from bot.textutil import directive_kv, directive_re, find_tilde_block, is_quoted_example, mask_tilde_bodies, parse_duration, parse_iso_utc, text_bar
@@ -189,14 +189,11 @@ def process_alive(pid: int, start_token: str = "") -> bool:
 # --- Log reading ------------------------------------------------------------
 
 def _contained_regular(path: Path, root: str) -> bool:
-    try:
-        real = os.path.realpath(path)
-        real_root = os.path.realpath(root)
-        if not real.startswith(real_root.rstrip(os.sep) + os.sep):
-            return False
-        return stat.S_ISREG(os.stat(real).st_mode)
-    except OSError:
+    fh = open_contained(path, root)
+    if fh is None:
         return False
+    fh.close()
+    return True
 
 
 def sandbox_refusal(data: dict, working_dir: str) -> str | None:
@@ -212,9 +209,8 @@ def sandbox_refusal(data: dict, working_dir: str) -> str | None:
         p = Path(log_path)
         if not p.is_absolute():
             p = Path(working_dir) / p
-        real, root = os.path.realpath(p), os.path.realpath(working_dir)
-        if not real.startswith(root.rstrip(os.sep) + os.sep):
-            return "(Can't watch that log: a sandboxed session only watches files inside its directory.)"
+        if not is_within(p, working_dir) or is_env_file(os.path.basename(os.path.realpath(p))):
+            return "(Can't watch that log: a sandboxed session only watches files inside its directory, and no env file.)"
     return None
 
 
@@ -233,19 +229,14 @@ def _resolve_log(watch: Watch) -> Path | None:
 
 
 def _read_tail_contained(path: Path, root: str) -> str:
-    """The tail of a session's log, checked on the descriptor that was opened.
-
-    A path check alone loses a race to a job still running in that session.
-    """
-    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
-    with os.fdopen(fd, "rb") as fh:
-        st = os.fstat(fh.fileno())
-        real = os.readlink(f"/proc/self/fd/{fh.fileno()}")
-        real_root = os.path.realpath(root)
-        if not stat.S_ISREG(st.st_mode) or not real.startswith(real_root.rstrip(os.sep) + os.sep):
-            return ""
-        if st.st_size > config.WATCH_LOG_TAIL_BYTES:
-            fh.seek(st.st_size - config.WATCH_LOG_TAIL_BYTES)
+    """The tail of a session's log, checked on the descriptor that was opened."""
+    fh = open_contained(path, root)
+    if fh is None:
+        return ""
+    with fh:
+        size = os.fstat(fh.fileno()).st_size
+        if size > config.WATCH_LOG_TAIL_BYTES:
+            fh.seek(size - config.WATCH_LOG_TAIL_BYTES)
         return fh.read(config.WATCH_LOG_TAIL_BYTES).decode("utf-8", errors="replace")
 
 

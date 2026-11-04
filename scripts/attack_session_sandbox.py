@@ -460,6 +460,7 @@ def worktree_steps(wt: Path, attachment: Path, memory_file: Path) -> list[tuple[
         bash(f"ln -sf {HOME_CANARY} read-link.txt"),
         ("Read", {"file_path": str(wt / "read-link.txt")}),
         ("Read", {"file_path": str(wt / ".env")}),
+        ("Edit", {"file_path": str(wt / ".env"), "old_string": "FAKE", "new_string": "REAL"}),
         ("Read", {"file_path": str(TMP_CANARY)}),
         ("Read", {"file_path": str(DATA_CANARY)}),
         ("Read", {"file_path": str(OTHER_REPO / "secret.txt")}),
@@ -753,6 +754,7 @@ def judge_tools(calls: list[dict], *, offered: set[str]) -> None:
     must_block("read_canary", "Read", HOME_CANARY.name)
     must_block("read_via_link", "Read", "read-link.txt")
     must_block("read_dotenv", "Read", "/.env")
+    must_block("edit_dotenv", "Edit", "/.env")
     must_block("read_tmp", "Read", TMP_CANARY.name)
     must_block("read_data", "Read", DATA_CANARY.name)
     must_block("read_other_repo", "Read", "secret.txt")
@@ -836,13 +838,13 @@ async def main() -> None:
     plain.mkdir()
     subprocess.run(["git", "init", "-q", "-b", "master"], cwd=plain, check=True)
     store.add_repo("plain", str(plain))
-    store.set_active_repo("atk") if hasattr(store, "set_active_repo") else None
 
     print(sandbox_cmds.turn_on(store, "atk", "claude"))
     check("setup/sandbox_on", sandbox.is_sandboxed(store, str(REPO)))
     print(sandbox_cmds.turn_on(store, "plain", "codex"))
     check("setup/other_provider_refused", not sandbox.is_sandboxed(store, str(plain)))
     bot_repo = sandbox_cmds.turn_on(SimpleNamespace(
+        sandbox_entries=lambda: {},
         list_repos=lambda: {"bot": str(config._PROJECT_ROOT)},
     ), "bot", "claude")
     check("setup/bot_repo_refused", "overlaps the bot" in bot_repo, bot_repo[:80])

@@ -48,9 +48,11 @@ from bot.claude.provider import get_provider  # noqa: E402
 from bot.claude.runner import ClaudeRunner  # noqa: E402
 from bot.claude.runner.sandboxing import refused_result  # noqa: E402
 from bot.claude.types import Instance, InstanceStatus, InstanceType  # noqa: E402
-from bot.engine import images, sandbox_cmds, watches  # noqa: E402
+from bot.discord import deploy_flow  # noqa: E402
+from bot.engine import images, repo_desc, sandbox_cmds, watches  # noqa: E402
 from bot.engine.directives.dispatch import _execute_bot_commands  # noqa: E402
 from bot.engine.step_policy import _load_verify_policy, load_workflow_policy  # noqa: E402
+from bot.fsutil import is_env_file, read_contained_text  # noqa: E402
 from bot.platform.base import RequestContext  # noqa: E402
 from bot.store.state import StateStore  # noqa: E402
 
@@ -198,6 +200,42 @@ def test_repo_allowed() -> None:
     git(hooked, "config", "core.hooksPath", "/usr/share/hooks")
     check("a hooks path outside the repo is fine", sandbox.check_repo_allowed(str(hooked)) is None)
 
+    dotted = TMP / ".config" / "dotted"
+    dotted.mkdir(parents=True)
+    git(dotted, "init", "-q")
+    check("a dot directory in home is refused", "dot directory" in (sandbox.check_repo_allowed(str(dotted)) or ""))
+    deep = TMP / "work" / ".hidden" / "deep"
+    deep.mkdir(parents=True)
+    git(deep, "init", "-q")
+    check("a dot directory further down is fine", sandbox.check_repo_allowed(str(deep)) is None)
+
+    creds = new_repo("creds")
+    git(creds, "remote", "add", "origin", "https://github.com/a/b.git")
+    check("a plain remote is fine", sandbox.check_repo_allowed(str(creds)) is None)
+    git(creds, "remote", "set-url", "origin", "git@github.com:a/b.git")
+    check("an ssh remote is fine", sandbox.check_repo_allowed(str(creds)) is None)
+    git(creds, "remote", "set-url", "origin", "https://canarytoken@github.com/a/b.git")
+    problem = sandbox.check_repo_allowed(str(creds))
+    check("a token in the remote refuses", "credential" in (problem or ""), problem)
+    check("the refusal does not print it", "canarytoken" not in (problem or ""), problem)
+    with mock.patch.object(shutil, "which", lambda name: f"/usr/bin/{name}"):
+        try:
+            sandbox.preflight("claude", False, str(creds))
+            check("a token added later refuses the run", False)
+        except sandbox.SandboxRefused as exc:
+            check("a token added later refuses the run", "canarytoken" not in str(exc))
+    git(creds, "remote", "set-url", "origin", "https://github.com/a/b.git")
+    git(creds, "remote", "set-url", "--add", "--push", "origin", "https://canarytoken@github.com/a/b.git")
+    check("a token in a push url refuses", sandbox.check_repo_allowed(str(creds)))
+    git(creds, "config", "--unset", "remote.origin.pushurl")
+    git(creds, "config", "http.https://github.com/.extraHeader", "AUTHORIZATION: basic canary")
+    check("an auth header refuses", "credential" in (sandbox.check_repo_allowed(str(creds)) or ""))
+    git(creds, "config", "--unset", "http.https://github.com/.extraHeader")
+    git(creds, "config", "url.https://canarytoken@github.com/.insteadOf", "https://github.com/")
+    check("a token in insteadOf refuses", sandbox.check_repo_allowed(str(creds)))
+    git(creds, "config", "--remove-section", "url.https://canarytoken@github.com/")
+    check("clean again", sandbox.check_repo_allowed(str(creds)) is None)
+
 
 def test_hosts() -> None:
     check("hosts are normalized", sandbox.validate_hosts([" GitHub.com ", "*.npmjs.org", "github.com"])
@@ -242,6 +280,15 @@ def test_commands() -> None:
     r = subprocess.run(["git", "config", "--get", "core.fsmonitor"], cwd=repo, capture_output=True)
     check("off undoes the hardening", r.returncode != 0)
 
+    broken = new_store("cmds3")
+    broken.add_repo("cmds", str(repo))
+    broken.set_sandbox_entry("__corrupt__", "junk")
+    before = dict(broken.sandbox_entries())
+    for reply in (sandbox_cmds.turn_on(broken, "cmds", "claude"), sandbox_cmds.turn_off(broken, "cmds"),
+                  sandbox_cmds.set_hosts(broken, "cmds", ["x.dev"]), sandbox_cmds.status(broken, "claude")):
+        check("unreadable settings say so", "state.json" in reply, reply)
+    check("and nothing is written over them", broken.sandbox_entries() == before)
+
 
 # --- The generated settings -------------------------------------------------
 
@@ -260,6 +307,7 @@ def test_settings() -> None:
     check("home is denied", "~/" in fs["denyRead"])
     check("/tmp is denied", "/tmp" in fs["denyRead"])
     check("the repo's .env is denied by path", str(repo / ".env") in fs["denyRead"])
+    check("Grep is denied", "Grep" in settings["permissions"]["deny"])
     check("the working dir can be read", str(repo) in fs["allowRead"])
     check(".claude is denied to Bash", str(repo / ".claude") in fs["denyWrite"])
     check("a query run has .git read-only", str(repo / ".git") in fs["denyWrite"])
@@ -296,6 +344,22 @@ def test_settings() -> None:
     check("the gitfile is pinned", str(wt / ".git") in fs["denyWrite"])
     check("the private gitdir is writable", gitdir in fs["allowWrite"])
     check("the real common dir is not", str(repo / ".git") not in fs["allowWrite"])
+    sandbox.finish_run(run)
+
+
+def test_planted_tool_dirs() -> None:
+    repo = new_repo("tooldirs")
+    (repo / ".env").write_text("X=1\n")
+    outside = TMP / "tooldirs-outside"
+    outside.mkdir()
+    (repo / ".venv").symlink_to(outside)
+    (repo / "venv").symlink_to(repo / ".env")
+    (repo / "node_modules").mkdir()
+    run = prepare(repo)
+    allow = json.loads(Path(run.settings_file).read_text())["sandbox"]["filesystem"]["allowRead"]
+    check("a real tool dir is readable", str(repo / "node_modules") in allow)
+    check("a link out of the repo opens nothing", str(repo / ".venv") not in allow)
+    check("a link onto .env does not reopen it", str(repo / "venv") not in allow)
     sandbox.finish_run(run)
 
 
@@ -387,6 +451,34 @@ def test_instructions() -> None:
     (repo / "CLAUDE.md").unlink()
     (repo / "CLAUDE.md").symlink_to(canary)
     check("a planted link is not followed", "canary text" not in sandbox.project_instructions(str(repo)))
+
+
+def test_env_files_never_read() -> None:
+    for name in (".env", ".env.local", ".env.production"):
+        check(f"{name} is an env file", is_env_file(name))
+    for name in (".env.example", ".env.sample", ".env.template", "env", ".envrc", ".environment"):
+        check(f"{name} is not", not is_env_file(name))
+
+    repo = new_repo("envreads")
+    (repo / ".env").write_text("CANARY=envcanary\n")
+    (repo / ".env.example").write_text("CANARY=shown\n")
+    (repo / "CLAUDE.md").symlink_to(repo / ".env")
+    (repo / "README.md").symlink_to(repo / ".env")
+    (repo / ".claude").mkdir()
+    (repo / ".claude" / "test.json").symlink_to(repo / ".env")
+    check("not as project instructions", "envcanary" not in sandbox.project_instructions(str(repo)))
+    check("not straight", read_contained_text(repo, ".env") is None)
+    check("not through a link", read_contained_text(repo, ".claude/test.json") is None)
+    check("an example is fine", "shown" in (read_contained_text(repo, ".env.example") or ""))
+    found = repo_desc.resolve_repo_description_with_source(str(repo))
+    check("not as the blurb", "envcanary" not in str(found), found)
+    (repo / "README.md").unlink()
+    (repo / "README.md").write_text("# Readme\n\nA real blurb for this repo.\n")
+    found = repo_desc.resolve_repo_description_with_source(str(repo))
+    check("a real readme still is", "real blurb" in str(found), found)
+    (repo / "fifo").unlink(missing_ok=True)
+    os.mkfifo(repo / "fifo")
+    check("a FIFO does not hang the reader", read_contained_text(repo, "fifo") is None)
 
 
 # --- Provider and preflight -------------------------------------------------
@@ -497,6 +589,10 @@ def test_hook() -> None:
     check("read climbing", allow("Read", {"file_path": str(wd / ".." / "hook-secret.txt")}, cfg))
     check("read home", allow("Read", {"file_path": "~/.ssh/id_rsa"}, cfg))
     check("read .env", allow("Read", {"file_path": str(wd / ".env")}, cfg))
+    check("edit .env", allow("Edit", {"file_path": str(wd / ".env")}, cfg))
+    check("write .env", allow("Write", {"file_path": str(wd / ".env")}, cfg))
+    (wd / "envlink").symlink_to(wd / ".env")
+    check("edit .env through a link", allow("Edit", {"file_path": str(wd / "envlink")}, cfg))
     check("grep with no path", allow("Grep", {"pattern": "x"}, cfg) is None)
     check("grep outside", allow("Grep", {"pattern": "x", "path": "/etc"}, cfg))
     check("grep glob climbing", allow("Grep", {"pattern": "x", "glob": "../../**"}, cfg))
@@ -682,6 +778,28 @@ def test_private_gitdir_attacks() -> None:
     (wt / ".git").write_text(text)
 
 
+def test_failed_checkin_keeps_the_commits() -> None:
+    repo = new_repo("keep")
+    wt = add_worktree(repo, "t-k", "k/branch")
+    sandbox.checkout_worktree(str(wt), str(repo), "t-k")
+    (wt / "k.txt").write_text("k\n")
+    git(wt, "add", "k.txt")
+    git(wt, "commit", "-qm", "only copy")
+    work = git(wt, "rev-parse", "HEAD")
+    gitdir = Path(sandbox.private_gitdir(str(wt)))
+    (gitdir / "planted").symlink_to("/etc/passwd")
+    # What a crash leaves: nothing checked it in, so the next run is the first to try.
+    try:
+        sandbox.checkout_worktree(str(wt), str(repo), "t-k")
+        check("a next run on a bad gitdir refuses", False)
+    except sandbox.SandboxRefused as exc:
+        check("a next run on a bad gitdir refuses", "planted" in str(exc), exc)
+    check("the private gitdir is not wiped", git(gitdir, "cat-file", "-t", work) == "commit")
+    state = json.loads((sandbox.state_dir_for(str(wt)) / "meta.json").read_text())
+    check("the failure stays recorded", state.get("import_failed"), state)
+    check("/sandbox off clears it", sandbox.clear_failed_imports(str(repo)) == 1)
+
+
 def test_recovery_and_clearing() -> None:
     repo = new_repo("recover")
     wt = add_worktree(repo, "t-r", "r/branch")
@@ -711,6 +829,52 @@ def test_recovery_and_clearing() -> None:
     sandbox.checkout_worktree(str(wt2), str(repo), "t-r2")
     check("then it runs again", sandbox.private_gitdir(str(wt2)) in (wt2 / ".git").read_text())
     sandbox.checkin_worktree(str(wt2))
+
+    # The setting's key is the real path, and a registered path need not be.
+    linked = TMP / "recover-link"
+    linked.symlink_to(repo)
+    wt3 = add_worktree(repo, "t-r3", "r/branch3")
+    sandbox.checkout_worktree(str(wt3), str(linked), "t-r3")
+    (Path(sandbox.private_gitdir(str(wt3))) / "planted").symlink_to("/etc/passwd")
+    check("a linked repo's import fails too", sandbox.checkin_worktree(str(wt3)))
+    check("/sandbox off finds it by real path", sandbox.clear_failed_imports(os.path.realpath(linked)) == 1)
+
+    # An exception in the import is recorded too, or nothing could clear it.
+    wt4 = add_worktree(repo, "t-r4", "r/branch4")
+    sandbox.checkout_worktree(str(wt4), str(repo), "t-r4")
+    (Path(sandbox.private_gitdir(str(wt4))) / "config").unlink()
+    check("an exception comes back as a problem", sandbox.checkin_worktree(str(wt4)))
+    check("the gitfile is back", str(repo) in (wt4 / ".git").read_text())
+    try:
+        sandbox.checkout_worktree(str(wt4), str(repo), "t-r4")
+        check("it blocks the next run", False)
+    except sandbox.SandboxRefused:
+        check("it blocks the next run", True)
+    check("/sandbox off clears that as well", sandbox.clear_failed_imports(str(repo)) == 1)
+
+
+def test_boot_kills_leftover_sessions() -> None:
+    runs = sandbox.sandbox_root() / "runs"
+    (runs / "alive" / "private").mkdir(parents=True)
+    sleeper = [sys.executable, "-c", "import time; time.sleep(60)"]
+    alive = subprocess.Popen([*sleeper, str(runs / "alive" / "private" / "settings.json")])
+    bystander = subprocess.Popen([*sleeper, str(runs) + "-other/x", "mentions data/sandbox/runs"])
+    try:
+        check("no problem", sandbox.recover_after_restart() == [])
+        check("a leftover session is killed", alive.wait(timeout=10) == -9)
+        check("nothing else is", bystander.poll() is None)
+        check("its run dir is gone", not (runs / "alive").exists())
+    finally:
+        for proc in (alive, bystander):
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+
+    # A run started during startup would have its directory deleted under it.
+    source = (Path(config._PROJECT_ROOT) / "bot" / "app.py").read_text()
+    recover = source.index("boot_recovery.recover_sandboxed_worktrees()")
+    check("recovery runs before Discord starts", recover < source.index("await _start_discord("))
+    check("right after orphans are marked", source.index("store.mark_orphans()") < recover)
 
 
 # --- Bot-side gates ---------------------------------------------------------
@@ -752,6 +916,10 @@ def test_merge_gate() -> None:
     block = runner._sandbox_merge_block(inst)
     check("a sandboxed repo's branch is held", block and ".mcp.json" in block, block)
     check("the failure kind reaches the buttons", runner._last_merge_failure_kind.get(inst.id) == "sandbox_protected")
+    with mock.patch.object(runner, "_merge_branch_sync", lambda instance: "merged"):
+        check("an unattended merge is held", ".mcp.json" in asyncio.run(runner.merge_branch(inst)))
+        check("the owner's own merge goes through",
+              asyncio.run(runner.merge_branch(inst, owner_approved=True)) == "merged")
 
 
 def test_policy() -> None:
@@ -781,6 +949,48 @@ def test_deploy_fingerprint() -> None:
     (repo / "deploy.sh").write_text("echo one\n")
     (repo / "Makefile").write_text("all:\n")
     check("a changed well-known file changes it", first != sandbox.deploy_fingerprint(str(repo), cfg))
+
+    linked = TMP / "deploy-link"
+    linked.symlink_to(repo)
+    check("the same through a link", sandbox.deploy_fingerprint(str(linked), cfg) == sandbox.deploy_fingerprint(str(repo), cfg))
+    (repo / "sub").mkdir()
+    (repo / "sub" / "deploy.sh").write_text("echo sub\n")
+    with_cwd = {**cfg, "cwd": "sub"}
+    check("cwd through a link", sandbox.deploy_fingerprint(str(linked), with_cwd) == sandbox.deploy_fingerprint(str(repo), with_cwd))
+    # Compared across restarts, and each process hashes strings differently.
+    code = (
+        "import json, sys; from bot.claude import sandbox; "
+        "print(sandbox.deploy_fingerprint(sys.argv[1], json.loads(sys.argv[2])))"
+    )
+    seen = {
+        subprocess.run(
+            [sys.executable, "-c", code, str(repo), json.dumps(with_cwd)],
+            cwd=config._PROJECT_ROOT, capture_output=True, text=True, check=True,
+            env={**os.environ, "PYTHONHASHSEED": str(seed)},
+        ).stdout.strip()
+        for seed in range(1, 7)
+    }
+    check("stable across restarts", len(seen) == 1, seen)
+
+
+def test_deploy_refusal() -> None:
+    repo = new_repo("deployrun")
+    (repo / "deploy.sh").write_text("echo one\n")
+    store = new_store("deployrun")
+    sandbox_on(store, repo)
+    cfg = {"command": "./deploy.sh", "approved": True}
+    cfg["approved_fingerprint"] = sandbox.deploy_fingerprint(str(repo), cfg)
+    store.set_deploy_config(repo.name, cfg)
+
+    async def refresh(name) -> None:
+        return None
+
+    bot = SimpleNamespace(_store=store, _forums=SimpleNamespace(refresh_control_room=refresh))
+    (repo / "deploy.sh").write_text("echo changed\n")
+    ok, _, message = asyncio.run(deploy_flow.execute_deploy(bot, repo.name, store.get_deploy_config(repo.name)))
+    check("a changed script is refused", not ok and "refused" in message, message)
+    stored = store.get_deploy_config(repo.name)
+    check("the approval is gone", not stored.get("approved") and "approved_fingerprint" not in stored, stored)
 
 
 def test_directives() -> None:
@@ -815,9 +1025,9 @@ def test_directives() -> None:
         return messenger
 
     for action in (f"add evil {TMP}", "create evil", "switch direct-plain", "hide direct", "unhide direct"):
-        before = (dict(store.list_repos()), store.get_active_repo() if hasattr(store, "get_active_repo") else None)
+        before = (dict(store.list_repos()), store.get_active_repo())
         m = asyncio.run(run(f"[BOT_CMD: /repo {action}]"))
-        after = (dict(store.list_repos()), store.get_active_repo() if hasattr(store, "get_active_repo") else None)
+        after = (dict(store.list_repos()), store.get_active_repo())
         check(f"/repo {action} changes nothing", before == after)
         check(f"/repo {action} says so", any("sandboxed" in p for p in m.posts), m.posts)
 
@@ -875,6 +1085,10 @@ def test_watch() -> None:
     check("a climbing log is refused", watches.sandbox_refusal({"log": "../watch-canary.txt"}, str(repo)))
     check("a log inside is fine", watches.sandbox_refusal({"log": "out.log"}, str(repo)) is None)
     check("no log and no pid is fine", watches.sandbox_refusal({}, str(repo)) is None)
+    (repo / ".env").write_text("CANARY=envcanary\n")
+    (repo / "env.log").symlink_to(repo / ".env")
+    check("an env file is refused", watches.sandbox_refusal({"log": ".env"}, str(repo)))
+    check("a link onto one is refused", watches.sandbox_refusal({"log": "env.log"}, str(repo)))
 
     watch = SimpleNamespace(log_path="out.log", repo_path=str(repo), log_root=str(repo))
     (repo / "out.log").write_text("line\n")
@@ -882,6 +1096,9 @@ def test_watch() -> None:
     (repo / "out.log").unlink()
     (repo / "out.log").symlink_to(canary)
     check("a log swapped for a link is not read", watches.read_log_tail(watch) == "")
+    (repo / "out.log").unlink()
+    (repo / "out.log").symlink_to(repo / ".env")
+    check("a log swapped for a link to .env is not read", watches.read_log_tail(watch) == "")
     (repo / "out.log").unlink()
     os.mkfifo(repo / "out.log")
     check("a FIFO does not hang", watches.read_log_tail(watch) == "")
@@ -901,6 +1118,7 @@ def test_image() -> None:
     check("its own image goes", path is not None)
     path, reason = images.resolve_image(str(uploaded), inst, sandboxed=True)
     check("the data dir is refused when sandboxed", path is None, reason)
+    check("and the reason does not offer it", "data dir" not in (reason or ""), reason)
     path, _ = images.resolve_image(str(uploaded), inst)
     check("the data dir is allowed otherwise", path is not None)
     uploaded.unlink()
@@ -917,7 +1135,7 @@ def test_todo() -> None:
     check("a planted link is not read", store.get_deferred_items("todo") == [])
     store.append_deferred("todo", ["new item"])
     check("a planted link is not written through", canary.read_text() == before)
-    store.clear_deferred("todo") if hasattr(store, "clear_deferred") else None
+    store.clear_deferred("todo")
     check("nor cleared through", canary.read_text() == before)
     (repo / "TODO.md").unlink()
     os.mkfifo(repo / "TODO.md")
@@ -930,11 +1148,13 @@ def test_todo() -> None:
 def main() -> int:
     tests = [
         test_setting, test_repo_allowed, test_hosts, test_commands, test_settings,
-        test_attachments_and_memory, test_env, test_instructions, test_provider_flags,
+        test_planted_tool_dirs, test_attachments_and_memory, test_env, test_instructions,
+        test_env_files_never_read, test_provider_flags,
         test_preflight, test_failure_wording, test_run_refused, test_hook, test_stubs,
         test_cleanup_waits_for_other_sessions, test_private_gitdir, test_private_gitdir_attacks,
-        test_recovery_and_clearing, test_merge_gate, test_policy, test_deploy_fingerprint,
-        test_directives, test_sensors_skipped, test_watch, test_image, test_todo,
+        test_failed_checkin_keeps_the_commits, test_recovery_and_clearing,
+        test_boot_kills_leftover_sessions, test_merge_gate, test_policy, test_deploy_fingerprint,
+        test_deploy_refusal, test_directives, test_sensors_skipped, test_watch, test_image, test_todo,
     ]
     global FAILED
     try:
