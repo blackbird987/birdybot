@@ -111,6 +111,14 @@ _EXPECTED = {
     "sess_resume": ("_handle_sess_resume", 2),
     "new": ("_handle_new_session", None),
     "branch": ("_handle_branch", 2),
+    "secret_forget": ("_handle_secret_forget", 2),
+    "secret_replace": ("_handle_secret_replace", 2),
+    "secret_keep": ("_handle_secret_keep", 2),
+    "secret_hold_yes": ("_handle_secret_hold", 3),
+    "secret_hold_no": ("_handle_secret_hold", 3),
+    "secret_hold_pk": ("_handle_secret_hold", 3),
+    "secret_allow": ("_handle_secret_request", 3),
+    "secret_deny": ("_handle_secret_request", 3),
 }
 
 

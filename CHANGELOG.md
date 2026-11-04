@@ -7,6 +7,15 @@
 - **A kill during that wait is no longer reported as success.** A memory or lifetime reap used to stand down on any successful `result`, which would have turned a job that blew the ceiling into its "started" message.
 - **Turn counts and durations add up across a background wait.** Each `result` counts only its own turns and working time, so a long session reported 1 turn and a few seconds.
 - **Final messages no longer come out as a wall of progress notes joined by `---`.** When the last message was short, every earlier note was glued on above it. Now only one earlier turn is kept, and only if it is long enough to be an answer (500 characters) and the last message is a sign-off next to it. A sub-agent's report no longer counts as the main agent's answer.
+## v0.102.13, Pasted keys are caught before anything reads them (2026-11-04)
+
+### Added
+- **Paste a key into any thread and the bot takes it out of the text first.** A vendor-shaped key is stored, the message is deleted, and the session sees `[secret NAME stored, ending abcd]`. It never reaches the prompt, the transcript, logs, `state.json`, a thread title or Anthropic. An uncertain value holds the message with Secret and Not a secret buttons. A seed phrase, PEM or xprv is deleted and stored nowhere, with a warning to move the funds. A guest's paste is deleted and replaced with `[secret removed]`. This covers messages, edits, thread titles, attachments and their filenames, `.env` files, voice transcripts, slash options and modals. A key in a voice transcript is removed but never stored, since OpenAI has already heard it and it is rarely spelled right. A slash command refuses an uncertain value instead of holding it, because an interaction cannot wait for an answer.
+- **Sessions use keys by name.** A vault at `~/.config/claude-bot/vault.json`, outside the repo, granted per repo, injected only on an owner's turn in a thread with no guest. Sessions can ask for a key another repo holds with `[BOT_CMD: /secret request NAME reason="..."]`, which posts Allow and Deny. `/secret list|add|forget|rename|grant` manage it. A pasted `sk-ant-` can't become `ANTHROPIC_API_KEY`, because the denylist prefixes those names with `PASTED_`.
+- **A session that prints a stored key gets flagged.** After each run the transcript is scanned for each value, literal, JSON-escaped and base64, and the owner is told which key to rotate. This flags, it does not prevent.
+- **Log lines are scrubbed** of stored values and vendor-shaped keys, tracebacks included.
+
+This is not a containment boundary: sessions share the bot's uid and can read the vault and every `.env`. See `docs/design/secret-intake.md`, which also lists what changed from the brief. Harness: `scripts/test_secret_intake.py`.
 
 ## v0.102.12, The weekly prompt review runs for the first time (2026-11-03)
 

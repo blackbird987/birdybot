@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Awaitable, Callable
 if TYPE_CHECKING:
     from bot.store.state import StateStore
 
-from bot import config
+from bot import config, vault
 from bot.textutil import parse_iso_utc
 from bot.claude.auth_health import account_label
 from bot.claude import cgroups, memory, usage_pacing
@@ -764,6 +764,8 @@ class ClaudeRunner(
                 model_override=model_override,
             )
         )
+        # Backstop: whatever path built this prompt, a stored value does not go out.
+        prompt_text = vault.strip_literals(prompt_text)
 
         # Strip provider-specific env vars to prevent nested-session errors.
         # Strip ANTHROPIC_API_KEY on non-PPU runs so the CLI can never
@@ -792,6 +794,11 @@ class ClaudeRunner(
         # unit, so keep them together.
         for var in SESSION_STRIPPED_ENV_VARS:
             env.pop(var, None)
+        # After the strips, so a stored name can never bring back what they
+        # remove, and before the config dir, so it can never replace that.
+        # Never log env: from here it holds pasted keys.
+        if instance.is_owner_session and instance.vault_eligible and instance.repo_name:
+            env.update(vault.env_for_repo(instance.repo_name))
         if account_dir:
             env[provider.config_dir_env] = account_dir
 

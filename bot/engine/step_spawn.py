@@ -228,6 +228,7 @@ async def spawn_from(
     new_inst.user_id = source.user_id or (ctx.user_id or "")
     new_inst.user_name = source.user_name or (ctx.user_name or "")
     new_inst.is_owner_session = source.is_owner_session
+    new_inst.vault_eligible = source.vault_eligible and not ctx.thread_has_guest
     new_inst.bash_policy = inherited_bash_policy
     new_inst.bash_policy_baseline = inherited_baseline
     new_inst.deferred_revisions = source.deferred_revisions
@@ -378,6 +379,7 @@ async def spawn_resolver_detached(
     new_inst.user_id = source.user_id or (ctx.user_id or "")
     new_inst.user_name = source.user_name or (ctx.user_name or "")
     new_inst.is_owner_session = source.is_owner_session
+    new_inst.vault_eligible = source.vault_eligible and not ctx.thread_has_guest
     # Resolver always spawns build mode (no floor), so the effective policy
     # is the un-clamped baseline — restoring Bash if the source had been
     # clamped by an upstream triage floor.

@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Awaitable, Callable
 
 import discord
 
-from bot import config
+from bot import config, secret_detect, vault
 from bot.procutil import run_capture
 from bot.discord import channels
 from bot.discord import spawn_colors
@@ -267,6 +267,9 @@ class ForumManager:
         # Per-thread cached priming digest (raw user text — kept in-memory only,
         # never serialized to state.json; cleared on session rebind or failed run).
         self._prime_cache: dict[str, str] = {}
+        # Threads whose current message the secret door deleted: priming's "drop
+        # the newest user message" would otherwise drop an earlier one.
+        self.current_message_gone: set[str] = set()
 
     @property
     def forum_projects(self) -> dict[str, ForumProject]:
@@ -1973,6 +1976,9 @@ class ForumManager:
                 text = re.sub(
                     r"~~~(?:spawn|wake|watch)\s*\n.*?\n~~~", "", text, flags=re.DOTALL,
                 ).strip()
+                # History can predate the door, or quote a value back. Off the
+                # loop, since this runs for every message on the way to a prompt.
+                text = await asyncio.to_thread(_scrub_history, text)
                 if not text:
                     continue
                 role = "user" if _is_user_msg(m) else "bot"
@@ -1991,10 +1997,11 @@ class ForumManager:
         # any bot messages that came after it — notably the "Reconstructing
         # context…" status sent moments before this read, but also any idle
         # probes or autopilot pings that may have landed in between.
-        for i in range(len(msgs) - 1, -1, -1):
-            if msgs[i][0] == "user":
-                msgs = msgs[:i]
-                break
+        if thread_id not in self.current_message_gone:
+            for i in range(len(msgs) - 1, -1, -1):
+                if msgs[i][0] == "user":
+                    msgs = msgs[:i]
+                    break
 
         # Cold: ~500 token budget. Resume: ~12K token budget — the resumed
         # session was compacted so the model lost the actual exchange and
@@ -2245,10 +2252,15 @@ class ForumManager:
         lines = [f"--- Referenced conversation from [{proj.repo_name}] \"{topic}\" ---"]
         for m in msgs:
             role = "You" if m["role"] == "user" else "Claude"
-            text = m["text"][:2000]
+            text = _scrub_history(m["text"])[:2000]
             lines.append(f"{role}: {text}")
         lines.append("--- End reference ---")
         return "\n".join(lines)
+
+
+def _scrub_history(text: str) -> str:
+    """A message read back from Discord, safe to put in a prompt."""
+    return secret_detect.scrub(vault.strip_literals(text))
 
 
 def pick_archive_summary(

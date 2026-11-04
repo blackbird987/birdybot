@@ -87,6 +87,8 @@ async def on_bg(ctx: RequestContext, text: str) -> None:
         mode="build",
     )
     inst.origin = InstanceOrigin.BG
+    inst.is_owner_session = ctx.is_owner
+    inst.vault_eligible = ctx.is_owner and not ctx.thread_has_guest
     # Manual spawn (bypasses spawn_from) — route through the plan-vs-build
     # split so a background build lands on the strong model, not the default.
     inst.model = workflows.resolve_spawn_model(inst.origin, ctx.effective_model)
@@ -151,6 +153,8 @@ async def on_release(ctx: RequestContext, text: str) -> None:
         mode="build",
     )
     inst.origin = InstanceOrigin.RELEASE
+    inst.is_owner_session = ctx.is_owner
+    inst.vault_eligible = ctx.is_owner and not ctx.thread_has_guest
     # Manual spawn (bypasses spawn_from) — route through the plan-vs-build
     # split so release surgery (changelog/version edits) runs on the strong model.
     inst.model = workflows.resolve_spawn_model(inst.origin, ctx.effective_model)
@@ -399,6 +403,7 @@ async def _start_retry(
         effort=ctx.effective_effort,
         model=None if pay_per_use else inst.model,
     )
+    new_inst.vault_eligible = inst.vault_eligible and not ctx.thread_has_guest
     if pay_per_use:
         new_inst.api_fallback = True
         new_inst.cooldown_retries = 0

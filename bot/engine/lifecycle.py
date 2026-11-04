@@ -39,7 +39,7 @@ from bot.platform.formatting import (
     strip_summary_block,
     strip_verify_blocks,
 )
-from bot.engine import watches
+from bot.engine import secret_scan, watches
 from bot.store import history as history_mod
 from bot.textutil import directive_kv, directive_re, find_tilde_block, is_quoted_example, mask_tilde_bodies, parse_duration, parse_iso_utc
 
@@ -520,6 +520,8 @@ async def run_instance(
         # settled non-result. Wrapped so a post failure (parent archived or
         # deleted, Discord error) never aborts child finalize.
         await notify_parent(ctx, inst, result, display_text)
+
+        secret_scan.schedule(inst.session_id, ctx.channel_id, ctx.messenger)
 
         # Track API fallback spending for daily budget cap
         if result.api_fallback_used and result.cost_usd:

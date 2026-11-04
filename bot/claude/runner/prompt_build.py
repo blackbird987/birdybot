@@ -8,7 +8,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from bot import config
+from bot import config, vault
 from bot.fsutil import atomic_write_text, read_repo_config
 from bot.procutil import run_capture
 from bot.claude import context_bloat
@@ -34,6 +34,36 @@ def _cap_description(text: str) -> str:
     if space > _CATALOG_DESC_MAX // 2:
         cut = cut[:space]
     return cut.rstrip(" ,;:.-") + "…"
+
+
+def _build_secrets_block(instance: Instance) -> str:
+    """Tell a session which pasted keys it has. Same condition as the env injection."""
+    if not (instance.is_owner_session and instance.vault_eligible and instance.repo_name):
+        return ""
+    if not vault.has_entries():
+        return ""
+    here = vault.names_for_repo(instance.repo_name)
+    elsewhere = vault.names_elsewhere(instance.repo_name)
+    lines = ["\n\n--- Stored Secrets ---"]
+    if here:
+        lines.append(f"In your environment, by name: {', '.join(here)}.")
+    else:
+        lines.append("None of the stored secrets are granted to this repo.")
+    if elsewhere:
+        lines.append(f"Stored but not granted here: {', '.join(elsewhere)}.")
+    lines.append(
+        "Use them by name ($NAME), and never print, echo or log a value. If a project "
+        "needs one in its .env, write it from the variable without showing it, for "
+        "example `printf 'NAME=%s\\n' \"$NAME\" >> .env`. Do not ask the user to paste a "
+        "key again if it is listed here."
+    )
+    if elsewhere:
+        lines.append(
+            "To ask for one that is not granted, put this on its own line in your final "
+            'response: [BOT_CMD: /secret request NAME reason="why you need it"]. The owner '
+            "gets Allow and Deny buttons."
+        )
+    return "\n".join(lines)
 
 
 class PromptMixin:
@@ -693,6 +723,10 @@ class PromptMixin:
                     f"\n\nCLI session history and plans for this repo "
                     f"are stored in: {projects_dir}"
                 )
+
+        secrets_block = _build_secrets_block(instance)
+        if secrets_block:
+            parts.append(secrets_block)
 
         # Non-owner user context: scope awareness + bash policy
         if not instance.is_owner_session:

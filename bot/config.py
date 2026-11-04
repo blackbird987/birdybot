@@ -1303,6 +1303,12 @@ LOGS_DIR: Path = DATA_DIR / "logs"
 STATE_FILE: Path = DATA_DIR / "state.json"
 LOG_FILE: Path = LOGS_DIR / "bot.log"
 
+# Where pasted secrets live (bot/vault.py). Per machine and outside data/, which
+# gets backed up, read by diagnostics and copied around far more freely.
+VAULT_DIR: Path = Path(
+    os.getenv("CLAUDE_BOT_VAULT_DIR") or str(Path.home() / ".config" / "claude-bot")
+).expanduser()
+
 # Declared nudges (bot/engine/nudges.py): recurring messages the bot sends into
 # a thread unprompted. Deliberately in the repo, not in DATA_DIR: data/ is
 # gitignored runtime state, and a habit engine that disappears on a state reset
@@ -1693,6 +1699,7 @@ Settings:
 - /alias set|list|delete — saved command shortcuts
 - /new — start a fresh conversation
 - /cost — spending breakdown
+- /secret list|add|forget|rename|grant: keys pasted into chat, stored and used by name
 - /evals — recurring session-quality flags and which prompt block owns each
 - /status — health dashboard
 

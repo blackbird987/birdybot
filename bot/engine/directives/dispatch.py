@@ -11,6 +11,7 @@ from bot.claude.types import Instance
 from bot.platform.base import RequestContext
 from bot.engine.directives.chain import _handle_chain_directive
 from bot.engine.directives.reply import _handle_reply_directives
+from bot.engine.directives.secret import _handle_secret_directives
 from bot.engine.directives.spawn import (
     _MAX_SPAWNS_PER_RESPONSE,
     _handle_spawn_directive,
@@ -152,6 +153,8 @@ async def _execute_bot_commands(
     # a response that both replies to one child and spawns another keeps its
     # written order.
     await _handle_reply_directives(ctx, result_text)
+
+    await _handle_secret_directives(ctx, result_text, source_inst)
 
     # /chain — assistant-issued handoff into the build→ship chain, carrying a
     # plan the agent wrote from the conversation. Only one per response.

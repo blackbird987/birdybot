@@ -11,13 +11,16 @@ from typing import TYPE_CHECKING
 import discord
 from discord import app_commands
 
+from bot import vault
 from bot.discord import access as access_mod
 from bot.discord import channels
+from bot.discord import secret_door
 from bot.discord.access import (
     load_access_config, check_user_access,
     effective_mode as access_effective_mode,
 )
 from bot.claude.types import InstanceStatus
+from bot.discord.modals import SecretAddModal
 from bot.discord.monitoring import monitor_setup
 from bot.engine import commands
 from bot.engine import sessions as sessions_mod
@@ -969,6 +972,94 @@ def setup(bot: ClaudeBot) -> None:
         await interaction.followup.send("\n".join(lines), ephemeral=True)
 
     bot.tree.add_command(monitor_group)
+
+    # --- Secret command group ---
+    secret_group = app_commands.Group(
+        name="secret", description="Keys pasted into chat, stored and used by name",
+        guild_ids=[bot._guild_id],
+    )
+
+    async def _secret_reply(interaction: discord.Interaction, fn, *args, done: str, missing: str):
+        """Run a vault call and answer ephemerally. Nothing here ever shows a value."""
+        await interaction.response.defer(ephemeral=True)
+        try:
+            ok = await asyncio.to_thread(fn, *args)
+        except vault.VaultUnavailable:
+            await interaction.followup.send(
+                "The secret vault file can't be read, so nothing changed.", ephemeral=True,
+            )
+            return
+        await interaction.followup.send(done if ok else missing, ephemeral=True)
+
+    @secret_group.command(name="list", description="Names, repos and last 4 characters, never values")
+    async def cmd_secret_list(interaction: discord.Interaction):
+        if await _refused(interaction, owner_only=True):
+            return
+        await interaction.response.defer(ephemeral=True)
+        entries = await asyncio.to_thread(vault.list_entries)
+        if not entries:
+            await interaction.followup.send("No secrets stored.", ephemeral=True)
+            return
+        lines = []
+        for e in entries:
+            where = ", ".join(e["repos"]) or "no repo"
+            ending = f", ending {e['tail']}" if e["tail"] else ""
+            lines.append(f"`{e['name']}`: {where}{ending}")
+        await interaction.followup.send("\n".join(lines)[:2000], ephemeral=True)
+
+    @secret_group.command(name="add", description="Store a value through a form, with nothing in chat")
+    async def cmd_secret_add(interaction: discord.Interaction):
+        if await _refused(interaction, owner_only=True):
+            return
+        repo = secret_door.door_repo(bot, interaction.channel) if interaction.channel else None
+        await interaction.response.send_modal(SecretAddModal(bot, repo))
+
+    @secret_group.command(name="forget", description="Delete a stored secret")
+    @app_commands.describe(name="Secret name")
+    async def cmd_secret_forget(interaction: discord.Interaction, name: str):
+        if await _refused(interaction, owner_only=True):
+            return
+        await _secret_reply(
+            interaction, vault.forget, name,
+            done=f"Forgot `{name}`.", missing=f"No secret called `{name}`.",
+        )
+
+    @secret_group.command(name="rename", description="Rename a stored secret")
+    @app_commands.describe(name="Current name", new_name="New name")
+    async def cmd_secret_rename(interaction: discord.Interaction, name: str, new_name: str):
+        if await _refused(interaction, owner_only=True):
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            final = await asyncio.to_thread(vault.rename, name, new_name)
+        except ValueError as exc:
+            await interaction.followup.send(str(exc), ephemeral=True)
+            return
+        except vault.VaultUnavailable:
+            await interaction.followup.send(
+                "The secret vault file can't be read, so nothing changed.", ephemeral=True,
+            )
+            return
+        await interaction.followup.send(f"Renamed `{name}` to `{final}`.", ephemeral=True)
+
+    @secret_group.command(name="grant", description="Let a repo's sessions use a stored secret")
+    @app_commands.describe(name="Secret name", repo="Repo (defaults to this thread's)")
+    async def cmd_secret_grant(interaction: discord.Interaction, name: str, repo: str | None = None):
+        if await _refused(interaction, owner_only=True):
+            return
+        target = repo or (secret_door.door_repo(bot, interaction.channel) if interaction.channel else None)
+        if not target or target not in bot._store.list_repos():
+            await interaction.response.send_message(
+                "Name a registered repo, or run this inside one of its threads.", ephemeral=True,
+            )
+            return
+        await _secret_reply(
+            interaction, vault.grant, name, target,
+            done=f"{target} can now use `{name}`, from its next run on.",
+            missing=f"No secret called `{name}`.",
+        )
+
+    bot.tree.add_command(secret_group)
 
     # --- /access command group (owner-only) ---
     access_group = app_commands.Group(

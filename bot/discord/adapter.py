@@ -40,6 +40,12 @@ _STYLE_MAP = {
     "continue_ppu:": discord.ButtonStyle.danger,           # Red — signals cost
     "resolve_merge:": discord.ButtonStyle.primary,         # Blue — primary action on merge-failed
     "resolve_cancel:": discord.ButtonStyle.danger,         # Red — cancels in-flight resolver
+    "secret_forget:": discord.ButtonStyle.danger,
+    "secret_replace:": discord.ButtonStyle.primary,
+    "secret_hold_yes:": discord.ButtonStyle.primary,
+    "secret_hold_pk:": discord.ButtonStyle.danger,
+    "secret_allow:": discord.ButtonStyle.success,
+    "secret_deny:": discord.ButtonStyle.danger,
 }
 
 
