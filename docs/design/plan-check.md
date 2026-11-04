@@ -101,4 +101,5 @@ and both costs. The thread id is what joins it to `data/missed.jsonl`.
 The bar is in `study/findings/2026-11-04-does-a-fresh-one-pass-plan-check-catch-real.md`,
 written before the first run: read 30 days of rows, confirm each accepted revision
 against the code at that commit, and if fewer than 1 in 5 checked chains has a real
-defect, set `PLAN_CHECK_ENABLED` off.
+defect, put `PLAN_CHECK_ENABLED=0` in `.env` and restart the bot. With the switch off
+the chain goes straight to the build and each chain still writes a `skipped` row.

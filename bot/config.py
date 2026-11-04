@@ -2520,8 +2520,8 @@ SENSOR_FIX_PROMPT = (
 
 # --- The plan check (docs/design/plan-check.md) ---
 # The first step of every /chain and of Build & Ship. On by default, off with
-# PLAN_CHECK_ENABLED=0. The kill bar that decides whether it stays on is in
-# study/findings. Read when the step runs.
+# PLAN_CHECK_ENABLED=0 in .env and a restart. The kill bar that decides whether
+# it stays on is in study/findings.
 PLAN_CHECK_ENABLED: bool = os.getenv("PLAN_CHECK_ENABLED", "1").strip().lower() not in ("0", "false", "no")
 
 PLAN_CHECK_SYSTEM_PROMPT = (
