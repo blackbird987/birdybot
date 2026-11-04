@@ -722,6 +722,7 @@ class Watch:
     # instead of reporting a job that may never have run as finished.
     pid_dead_at_arm: bool = False
     log_path: str = ""
+    log_root: str = ""           # Set for a sandboxed session: the log stays under here
     progress_re: str = ""        # 1 group -> percent, 2 groups -> cur/total
     done_re: str = ""            # alternative trigger: marker in the log tail
     armed_at: str = ""

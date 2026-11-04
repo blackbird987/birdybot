@@ -93,6 +93,7 @@ class _ClaudeProvider(ProviderConfig):
         api_fallback: bool,
         api_key_file: str | None,
         model_override: str | None = None,
+        sandbox_settings_file: str | None = None,
     ) -> list[str]:
         import json as _json
         import sys
@@ -109,7 +110,13 @@ class _ClaudeProvider(ProviderConfig):
         # bot writes the worktree-guard hook there, so opt all three scopes
         # in. Not applied to --bare runs (api_fallback) since --bare
         # explicitly disables the user settings cascade.
-        if not api_fallback:
+        # A sandboxed run reads no settings or MCP config from the repo: a session
+        # could write those, and they would load on its next run. Its hooks are in
+        # the one generated file instead.
+        if sandbox_settings_file:
+            cmd.extend(["--setting-sources", "user", "--strict-mcp-config"])
+            cmd.extend(["--settings", sandbox_settings_file])
+        elif not api_fallback:
             cmd.extend(["--setting-sources", "user,project,local"])
 
         if self.supports_effort:

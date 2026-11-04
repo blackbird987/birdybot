@@ -6,6 +6,7 @@ import logging
 import re
 
 from bot.textutil import directive_re, match_name
+from bot.claude.sandbox import is_sandboxed, origin_is_sandboxed
 from bot.claude.types import Instance
 from bot.platform.base import RequestContext, SpawnArgs
 from bot.engine.cmd_state import check_budget
@@ -177,6 +178,16 @@ async def _handle_spawn_directive(
             pass
         return True
     repo = canonical
+
+    # A sandboxed session's brief must not run somewhere with fewer walls.
+    if origin_is_sandboxed(ctx.store, _resolve_parent_instance(ctx)) and not is_sandboxed(
+        ctx.store, ctx.store.list_repos().get(repo),
+    ):
+        await _reject(
+            f"sandboxed session asked to spawn into unsandboxed repo {repo}",
+            f"/spawn refused: this session is sandboxed and `{repo}` is not.",
+        )
+        return True
 
     # Body checks.
     if not body:

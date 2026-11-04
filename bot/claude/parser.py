@@ -861,6 +861,12 @@ def is_account_agnostic_error(error_text: str) -> bool:
         # ever said anything still has that exact shape.
         # runner._lifetime_kill_result is required to keep the phrase.
         "lifetime limit",
+        # A sandboxed repo's run that could not be contained, and the CLI's own
+        # words when its sandbox will not start. Both end with no output and no
+        # turns, and neither depends on the account. sandbox.REFUSAL_PHRASE and
+        # scripts/test_session_sandbox.py pin the first.
+        "session sandbox refused this run",
+        "sandbox required but unavailable",
         # An un-compactable session (see is_context_overflow_error). Same
         # shape and the same trap: the CLI aborts before the turn does
         # anything, so no output and no completed turns — "this account fell

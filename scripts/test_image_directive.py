@@ -66,6 +66,7 @@ class FakeCtx:
     def __init__(self, messenger):
         self.messenger = messenger
         self.channel_id = "chan"
+        self.store = None
 
 
 def png_bytes() -> bytes:

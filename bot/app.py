@@ -255,6 +255,7 @@ async def run() -> None:
     boot_recovery.audit_repo_portability(store)
 
     orphans = store.mark_orphans()
+    boot_recovery.recover_sandboxed_worktrees()
     # Stays None on a clean restart and on every non-Linux host — read much
     # later, when the orphan messages go out, so it must always be bound.
     oom_reason: str | None = None

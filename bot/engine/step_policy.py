@@ -53,7 +53,7 @@ def resolve_spawn_model(
     return None
 
 
-def _load_verify_policy(source_inst: Instance | None) -> str:
+def _load_verify_policy(source_inst: Instance | None, *, sandboxed: bool = False) -> str:
     """Read verify_policy from .claude/test.json. Default: 'block_fail'.
 
     Three-value model:
@@ -63,7 +63,11 @@ def _load_verify_policy(source_inst: Instance | None) -> str:
                     halts the chain; `manual`/`crashed` (couldn't verify) still
                     warn+advance so unconfigured repos aren't hard-stopped.
       block       — strictest; halt on any of fail/manual/crashed.
+
+    A sandboxed repo keeps the default: a session could write itself a `warn`.
     """
+    if sandboxed:
+        return "block_fail"
     cfg = read_repo_config(source_inst.repo_path if source_inst else None, "test.json")
     return (cfg or {}).get("verify_policy", "block_fail")
 
@@ -83,7 +87,7 @@ def _safe_pos_int(value, default: int) -> int:
         return default
 
 
-def load_workflow_policy(repo_path: str | None) -> dict:
+def load_workflow_policy(repo_path: str | None, *, sandboxed: bool = False) -> dict:
     """Read per-repo autonomy policy from ``.claude/workflow.json``.
 
     Returns a dict with keys ``autonomy`` ("hold" | "merge" | "ship"),
@@ -96,7 +100,12 @@ def load_workflow_policy(repo_path: str | None) -> dict:
               (Hold to stop). Deploy rides along as it does today.
       ship  — like merge, plus the autonomy sweep fleet-ships any stragglers
               (deploy + verify-back) for this repo.
+
+    A sandboxed repo always holds: this file is one a session could write, and it
+    would be granting itself a merge with no one looking.
     """
+    if sandboxed:
+        return dict(_WORKFLOW_POLICY_DEFAULT)
     cfg = read_repo_config(repo_path, "workflow.json")
     if cfg is None:
         return dict(_WORKFLOW_POLICY_DEFAULT)

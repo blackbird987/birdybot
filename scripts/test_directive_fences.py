@@ -24,6 +24,7 @@ import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
 import asyncio
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -135,6 +136,9 @@ async def check_repo() -> None:
     class _Ctx:
         messenger = _Messenger()
         channel_id = "c1"
+        session_id = None
+        store = None
+        runner = SimpleNamespace(active_instance_for_session=lambda _s: None, active_instance_for_channel=lambda _c: None)
 
     # The dispatcher reads on_repo from its own module, so patch it there.
     saved = dispatch.on_repo

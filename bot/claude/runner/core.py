@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 from bot import config, vault
 from bot.textutil import parse_iso_utc
 from bot.claude.auth_health import account_label
-from bot.claude import cgroups, memory, usage_pacing
+from bot.claude import cgroups, memory, sandbox, usage_pacing
 from bot.claude.parser import (
     ProgressEvent,
     RunResult,
@@ -45,6 +45,7 @@ from bot.claude.runner.admission import AdmissionMixin
 from bot.claude.runner.git_merge import MergeMixin
 from bot.claude.runner.git_release import ReleaseMixin
 from bot.claude.runner.prompt_build import PromptMixin
+from bot.claude.runner.sandboxing import SandboxMixin
 from bot.claude.runner.session_files import SessionFilesMixin
 from bot.claude.runner.worktrees import WorktreeMixin
 from bot.claude.runner.common import (
@@ -133,6 +134,7 @@ class _SpawnSpec:
     rules_file: str | None
     proc: asyncio.subprocess.Process | None = None
     adopt_task: asyncio.Task | None = None
+    sandbox_run: sandbox.SandboxRun | None = None
 
 
 class RebootResult(enum.Enum):
@@ -173,6 +175,7 @@ class ClaudeRunner(
     MergeMixin,
     ReleaseMixin,
     RecoveryMixin,
+    SandboxMixin,
 ):
     """Manages coding CLI subprocesses (Claude Code, Cursor, etc.)."""
 
@@ -185,6 +188,9 @@ class ClaudeRunner(
         self._store = store
         self._semaphore = asyncio.Semaphore(config.MAX_CONCURRENT)
         self._processes: dict[str, asyncio.subprocess.Process] = {}
+        # Live sandboxed runs per worktree: the first checks its private git
+        # directory out, the last checks it back in.
+        self._sandbox_wt_users: dict[str, int] = {}
         # Latest memory reading for each LIVE session, written by that session's
         # own watchdog every SESSION_MEM_CHECK_SECS. Shared state because the
         # question "which of the running sessions is the largest" cannot be
@@ -549,7 +555,20 @@ class ClaudeRunner(
             return prepared
         spawn = prepared
         try:
-            result, streamed = await self._spawn_and_stream(run, spawn)
+            sandbox_problem: str | None = None
+            try:
+                result, streamed = await self._spawn_and_stream(run, spawn)
+            finally:
+                # Here and not in the outer finally: a recovery step below spawns
+                # again, and that attempt must start from a checked-in worktree.
+                sandbox_problem = await self._sandbox_after_attempt(spawn)
+            if sandbox_problem:
+                result.is_error = True
+                result.error_message = (
+                    f"{sandbox.REFUSAL_PHRASE}: this run's commits could not be "
+                    f"brought back ({sandbox_problem})"
+                )
+                return result
             if not streamed:
                 return result
 
@@ -748,6 +767,14 @@ class ClaudeRunner(
                         "during model downgrade",
                     )
 
+        # The one enforcement point for the session sandbox. Resumes, chain steps
+        # and every recovery re-entry come through here.
+        sandbox_run = await self._sandbox_prepare(
+            instance, provider, api_fallback, working_dir,
+        )
+        if isinstance(sandbox_run, RunResult):
+            return sandbox_run
+
         # Run the whole prompt-build off the event loop: _build_command makes
         # several synchronous `git` subprocess calls via _build_master_context_block
         # (invoked up to twice on the resume path) plus file reads/writes.  On the
@@ -761,11 +788,13 @@ class ClaudeRunner(
                 self._build_command,
                 instance, run.context, run.sibling_context,
                 api_fallback=api_fallback, provider=provider, binary=run.binary,
-                model_override=model_override,
+                model_override=model_override, sandbox_run=sandbox_run,
             )
         )
         # Backstop: whatever path built this prompt, a stored value does not go out.
         prompt_text = vault.strip_literals(prompt_text)
+        if sandbox_run:
+            prompt_text = sandbox_run.localize_prompt(prompt_text)
 
         # Strip provider-specific env vars to prevent nested-session errors.
         # Strip ANTHROPIC_API_KEY on non-PPU runs so the CLI can never
@@ -799,6 +828,8 @@ class ClaudeRunner(
         # Never log env: from here it holds pasted keys.
         if instance.is_owner_session and instance.vault_eligible and instance.repo_name:
             env.update(vault.env_for_repo(instance.repo_name))
+        if sandbox_run:
+            sandbox.apply_env(env, sandbox_run)
         if account_dir:
             env[provider.config_dir_env] = account_dir
 
@@ -833,13 +864,19 @@ class ClaudeRunner(
         log.info("Running %s%s (prompt: %d chars via stdin): %s",
                  instance.id, acct_tag, len(prompt_text), " ".join(cmd)[:500])
 
+        # Last, so nothing above can fail and leave a worktree on its private gitdir.
+        if sandbox_run:
+            refused = await self._sandbox_enter(instance, sandbox_run)
+            if refused:
+                return refused
+
         run.account_dir = account_dir
         run.model_override = model_override
         return _SpawnSpec(
             cmd=cmd, prompt_text=prompt_text, env=env, working_dir=working_dir,
             scope_unit=scope_unit, scoped=scoped,
             system_prompt_file=system_prompt_file, api_key_file=api_key_file,
-            rules_file=rules_file,
+            rules_file=rules_file, sandbox_run=sandbox_run,
         )
 
     async def _spawn_and_stream(

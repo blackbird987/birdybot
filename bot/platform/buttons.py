@@ -36,6 +36,12 @@ def merge_failed_banner(failure_kind: str | None) -> str:
     without importing runner). Empty / unknown kinds fall back to the
     generic conflict copy — same as before the t-4114 work landed.
     """
+    if failure_kind == "sandbox_protected":
+        return (
+            "This repo is sandboxed, and these files change what later sessions "
+            "load or what runs outside the sandbox. Read them with `/diff`, then "
+            "tap **Try Merge Again** yourself to approve. **Discard** drops the branch."
+        )
     if failure_kind == "orphaned_index":
         return (
             "Auto-merge failed because the main repo has an orphaned "

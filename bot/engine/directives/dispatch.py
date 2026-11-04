@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 
 from bot.textutil import directive_re, is_quoted_example, mask_tilde_bodies
+from bot.claude.sandbox import origin_is_sandboxed
 from bot.claude.types import Instance
 from bot.platform.base import RequestContext
 from bot.engine.directives.chain import _handle_chain_directive
@@ -54,6 +55,19 @@ async def _execute_bot_commands(
             continue
 
         repo_args = m.group(1).strip()
+        # A session must not register a repo: it would be pointing the bot at a
+        # path of its choosing, and the next session there is not sandboxed.
+        if origin_is_sandboxed(ctx.store, source_inst or _resolve_parent_instance(ctx)):
+            log.warning("BOT_CMD /repo ignored from a sandboxed session: %s", repo_args)
+            try:
+                await ctx.messenger.send_text(
+                    ctx.channel_id,
+                    "Ignored a `/repo` command: this session is sandboxed.",
+                    silent=True,
+                )
+            except Exception:
+                pass
+            continue
         action = repo_args.split()[0] if repo_args else ""
         if action not in _ALLOWED_BOT_CMD_ACTIONS:
             log.warning("BOT_CMD blocked — disallowed action: %s", action)

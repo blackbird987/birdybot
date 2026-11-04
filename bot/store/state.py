@@ -138,6 +138,8 @@ class StateStore(ReposMixin, AccountsMixin, SchedulesMixin, ChainsMixin):
         # a dormant repo stays registered and its path stays resolvable, so
         # old threads still resume. See list_active_repos().
         self._dormant_repos: set[str] = set()
+        # Session sandbox settings by resolved repo path (bot/claude/sandbox.py).
+        self._sandboxed_repos: dict = {}
         self._active_repo: str | None = None
         self._task_counter: int = 0
         self._query_counter: int = 0
@@ -254,6 +256,12 @@ class StateStore(ReposMixin, AccountsMixin, SchedulesMixin, ChainsMixin):
         self._repos = data.get("repos", {})
         self._repo_descriptions = data.get("repo_descriptions", {})
         self._dormant_repos = set(data.get("dormant_repos", []) or [])
+        # A value that is not a dict is kept as a marker, not read as "nothing
+        # sandboxed": sandbox.setting_for then refuses runs rather than opening them.
+        raw_sandboxed = data.get("sandboxed_repos", {})
+        self._sandboxed_repos = (
+            raw_sandboxed if isinstance(raw_sandboxed, dict) else {"__corrupt__": raw_sandboxed}
+        )
         self._active_repo = data.get("active_repo")
         self._task_counter = data.get("task_counter", 0)
         self._query_counter = data.get("query_counter", 0)
@@ -387,6 +395,7 @@ class StateStore(ReposMixin, AccountsMixin, SchedulesMixin, ChainsMixin):
             "repos": self._repos,
             "repo_descriptions": self._repo_descriptions,
             "dormant_repos": sorted(self._dormant_repos),
+            "sandboxed_repos": self._sandboxed_repos,
             "active_repo": self._active_repo,
             "task_counter": self._task_counter,
             "query_counter": self._query_counter,

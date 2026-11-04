@@ -113,7 +113,7 @@ class _Runner:
     def active_instance_for_session(self, _sid):  # noqa: ANN001
         return None
 
-    async def merge_branch(self, inst):  # noqa: ANN001
+    async def merge_branch(self, inst, *, owner_approved=False):  # noqa: ANN001
         self.merges += 1
         await asyncio.sleep(0.1)
         if self.merge_msg.startswith("Merge failed"):

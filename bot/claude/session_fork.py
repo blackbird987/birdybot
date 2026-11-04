@@ -23,6 +23,8 @@ import tempfile
 import uuid as uuid_lib
 from pathlib import Path
 
+from bot import config
+
 log = logging.getLogger(__name__)
 
 
@@ -118,7 +120,10 @@ def fork_session(
         return None
 
     # Snapshot first — the source may still be actively streamed by a live run.
-    fd, tmp_name = tempfile.mkstemp(suffix=".jsonl", prefix="fork_src_")
+    # In the bot's data dir, since /tmp is readable by whatever else runs here.
+    private_tmp = Path(config.DATA_DIR) / "tmp"
+    private_tmp.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, tmp_name = tempfile.mkstemp(suffix=".jsonl", prefix="fork_src_", dir=private_tmp)
     os.close(fd)
     snapshot_path = Path(tmp_name)
     try:

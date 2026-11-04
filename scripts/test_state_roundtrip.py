@@ -152,6 +152,7 @@ EXPECTED_KEYS = frozenset({
     "schedules",
     "watches",
     "watch_counter",
+    "sandboxed_repos",
 })
 
 # Instance attributes that are deliberately not persisted (see the Instance
@@ -448,6 +449,7 @@ def fixture_state() -> dict:
             "reason": "logged_out", "since": "2026-10-10T00:00:00+00:00",
             "notified": True, "resolved": False,
             "snooze_until": "2026-10-17T00:00:00+00:00", "cred_fp": "fp-work-2"}},
+        "sandboxed_repos": {f"{R}/repo": {"hosts": ["github.com"]}},
         "login_expiry_warnings": {
             f"{R}/accounts/main": "2026-11-12T14:10:01+00:00"},
         "schedules": [sched_full.to_dict(), sched_wake.to_dict()],
@@ -558,6 +560,7 @@ def _check_fixture_getters(store: StateStore) -> None:
         fx["account_cooldown_fps"])
     _eq("model cooldowns", store.get_model_cooldowns(), fx["model_cooldowns"])
     _eq("account alerts", store.get_account_alerts(), fx["account_alerts"])
+    _eq("sandboxed repos", store.sandbox_entries(), fx["sandboxed_repos"])
     _eq("login expiry warnings", store.get_login_expiry_warnings(),
         fx["login_expiry_warnings"])
     _eq("sidelined accounts", store.sidelined_accounts(),
@@ -700,6 +703,7 @@ def _populate_through_api(store: StateStore) -> None:
     main, work = f"{R}/accounts/main", f"{R}/accounts/work"
     store.set_account_cooldown(main, "2026-10-13T00:00:00+00:00", "fp-main-1")
     store.set_model_cooldown(work, "2026-10-12T22:00:00+00:00")
+    store.set_sandbox_entry(f"{R}/repo", {"hosts": ["github.com"]})
     store.set_account_alert(work, "logged_out", "2026-10-10T00:00:00+00:00",
                             "fp-work-2")
     store.snooze_account_alert(work, "2026-10-17T00:00:00+00:00")

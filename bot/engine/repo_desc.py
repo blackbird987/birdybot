@@ -24,7 +24,7 @@ import re
 from collections.abc import Callable
 from pathlib import Path
 
-from bot.fsutil import atomic_write_json
+from bot.fsutil import atomic_write_json, is_env_file
 
 log = logging.getLogger(__name__)
 
@@ -268,14 +268,16 @@ def _candidate(repo_path: str, rel: str) -> Path | None:
 
     A symlink pointing outside the repo is refused: the blurb is derived from
     files the repo owns, and a control-room refresh must not be a way to read
-    arbitrary paths on the host.
+    arbitrary paths on the host. Nor to one of the repo's env files: the blurb is
+    posted, and goes into the catalog in every session's prompt.
     """
     root = Path(repo_path)
     path = root / rel
     try:
         if not path.is_file():
             return None
-        if root.resolve() not in path.resolve().parents:
+        real = path.resolve()
+        if root.resolve() not in real.parents or is_env_file(real.name):
             return None
     except OSError:
         return None

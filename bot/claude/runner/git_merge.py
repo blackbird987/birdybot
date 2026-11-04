@@ -16,6 +16,7 @@ from typing import NamedTuple
 
 from bot import config
 from bot.procutil import run_capture
+from bot.claude import sandbox
 from bot.claude.gitpaths import git_common_dir, git_dir, git_toplevel, ref_sha
 from bot.claude.types import (
     Instance, REPO_UNUSABLE_MARKER,
@@ -50,6 +51,7 @@ MERGE_FAIL_GENERIC = "generic_failure"
 MERGE_FAIL_ORPHANED_INDEX = "orphaned_index"
 MERGE_FAIL_RECOVERY_FAILED = "recovery_failed"
 MERGE_FAIL_DIVERGED = "diverged"
+MERGE_FAIL_SANDBOX_PROTECTED = "sandbox_protected"
 
 
 class DiscardOutcome(NamedTuple):
@@ -332,8 +334,12 @@ class MergeMixin:
             return MERGE_FAIL_ORPHANED_INDEX
         return MERGE_FAIL_GENERIC
 
-    async def merge_branch(self, instance: Instance) -> str:
-        """Merge worktree branch into master. Returns status message."""
+    async def merge_branch(self, instance: Instance, *, owner_approved: bool = False) -> str:
+        """Merge worktree branch into master. Returns status message.
+
+        ``owner_approved`` is an owner's own typed /merge or button tap. It is what
+        lets a sandboxed repo's branch land files that later runs would trust.
+        """
         if not instance.branch or not instance.original_branch:
             if instance.original_branch and not instance.branch:
                 return f"Already merged ({config.BRANCH_PREFIX}/{instance.id} → {instance.original_branch})"
@@ -348,6 +354,10 @@ class MergeMixin:
             # "Already merged (None → main)" over the first one's result.
             if not instance.branch:
                 return f"Already merged ({branch} → {instance.original_branch})"
+            if not owner_approved:
+                blocked = await asyncio.to_thread(self._sandbox_merge_block, instance)
+                if blocked:
+                    return blocked
             return await asyncio.to_thread(self._merge_branch_sync, instance)
 
     def _merge_branch_sync(self, instance: Instance) -> str:
@@ -375,6 +385,7 @@ class MergeMixin:
                 run_capture(
                     ["git", "worktree", "remove", instance.worktree_path, "--force"], cwd=repo,
                 )
+                sandbox.forget_worktree(instance.worktree_path)
             stale_branch = instance.branch
             instance.branch = None
             instance.worktree_path = None
@@ -682,6 +693,8 @@ class MergeMixin:
                     run_capture(["git", "worktree", "prune"], cwd=repo)
                 except Exception:
                     pass
+        if instance.worktree_path:
+            sandbox.forget_worktree(instance.worktree_path)
 
         # Delete branch (-d safe after merge; -D fallback if -d fails)
         r = run_capture(["git", "branch", "-d", instance.branch], cwd=repo)
@@ -1142,13 +1155,17 @@ class MergeMixin:
 
     def _auto_commit_dirty_worktree_sync(self, instance: Instance) -> str | None:
         wt = instance.worktree_path
+        # The files here are a session's, and these calls run outside its sandbox.
+        git = ["git"]
+        if sandbox.is_sandboxed(getattr(self, "_store", None), instance.repo_path):
+            git += sandbox.GIT_SAFE
         # Transient-race guard: retry once after a short pause when status
         # fails or reports clean — t-5592's rescue bailed on exactly one of
         # these previously-silent exits while the worktree was demonstrably
         # dirty seconds later.
         status = None
         for attempt in (1, 2):
-            status = run_capture(["git", "status", "--porcelain"], cwd=wt)
+            status = run_capture([*git, "status", "--porcelain"], cwd=wt)
             if status.returncode == 0 and status.stdout.strip():
                 break
             log.warning(
@@ -1166,7 +1183,7 @@ class MergeMixin:
                 "clean or status failing after retry", instance.id,
             )
             return None
-        add_r = run_capture(["git", "add", "-A"], cwd=wt)
+        add_r = run_capture([*git, "add", "-A"], cwd=wt)
         if add_r.returncode != 0:
             log.warning(
                 "auto_commit_dirty_worktree: git add failed for %s: %s",
@@ -1179,7 +1196,7 @@ class MergeMixin:
             f"finishing. The autopilot guard committed the changes so the "
             f"chain could continue."
         )
-        commit_r = run_capture(["git", "commit", "-m", commit_msg, "--no-verify"], cwd=wt)
+        commit_r = run_capture([*git, "commit", "-m", commit_msg, "--no-verify"], cwd=wt)
         if commit_r.returncode != 0:
             log.warning(
                 "auto_commit_dirty_worktree: git commit failed for %s: %s",
@@ -1307,6 +1324,8 @@ class MergeMixin:
             if r.returncode != 0:
                 log.warning("Failed to remove worktree %s: %s", worktree_path, r.stderr.strip())
                 errors.append(f"worktree remove: {r.stderr.strip()}")
+            else:
+                sandbox.forget_worktree(worktree_path)
 
         # Skip branch deletion when we just preserved a WIP commit on it —
         # that's the whole point of preservation.
