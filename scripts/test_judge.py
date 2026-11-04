@@ -317,6 +317,8 @@ for cmd, want in {
     "GIT_AUTHOR_NAME=x git commit -qm 'with env'": "with env",
     "git commit --amend --no-edit": None,
     "git commit -F msg.txt": None,
+    "cat > s.py <<'PY'\nrun('git add . && git commit -qm \"inside\"')\nPY\ngit commit -qm 'after a script'": "after a script",
+    "cat > s.sh <<'SH'\ngit commit -qm 'inside'\nSH": None,
 }.items():
     check(f"subject of {cmd[:30]!r}", commit_subject(cmd) == want, commit_subject(cmd))
 
@@ -352,6 +354,12 @@ with tempfile.TemporaryDirectory() as td:
     f = session(td, ('git commit -qm "a" && git add . && git commit -qm "b"', "[master abc1234] a\n[master def5678] b"), name="two.jsonl")
     two = read_commit_calls(f)
     check("two commits in one call are not guessed", match_commits(two, [("abc1234" + "0" * 33, "a", now), ("def5678" + "0" * 33, "b", now)]) == ([], ["u0"]), two)
+    f = session(td, ("cat > s.sh <<'SH'\ngit add . && git commit --dry-run\ngit commit -qm 'inside'\nSH", ""), name="script.jsonl")
+    check("a script that mentions a commit is no commit call", read_commit_calls(f) == [])
+    f = session(td, ("cat > s.sh <<'SH'\ngit commit -qm 'inside'\nSH\ngit commit -qm 'real one'", ""), name="script2.jsonl")
+    after = read_commit_calls(f)
+    check("a real commit after a script is one call, under its own subject",
+          [c.subject for c in after] == ["real one"], after)
     f = session(td, ("git commit --amend --no-edit", ""), name="amend.jsonl")
     check("no subject and no hash is unattributed", match_commits(read_commit_calls(f), []) == ([], ["u0"]))
 

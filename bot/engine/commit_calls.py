@@ -9,7 +9,7 @@ the exact subject it passed. Those last two have to fall within a few hours of t
 call, in the repo's own log. Anything that does not come to exactly one commit stays
 unattributed, and so does one call running `git commit` twice. Nothing here guesses.
 
-Standard library only, so the replay can import it without loading the bot's config.
+Imports nothing that loads the bot's config, so the replay can use it.
 """
 
 from __future__ import annotations
@@ -17,8 +17,9 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
+
+from bot.textutil import parse_iso_utc
 
 # The lookahead leaves out `git commit-graph` and `git commit-tree`.
 _COMMIT_HEAD = r"(?:^|[;&|\n(]\s*)(?:\w+=\S+\s+)*git(?:\s+-[cC]\s+\S+)*\s+commit(?![\w-])"
@@ -31,6 +32,9 @@ _NOT_A_COMMIT_RE = re.compile(
     re.MULTILINE,
 )
 _HEREDOC_RE = re.compile(r"<<-?\s*['\"]?\w+['\"]?[^\n]*\n[ \t]*([^\n]*)")
+_HEREDOC_BODY_RE = re.compile(
+    r"<<-?\s*(['\"]?)(\w+)\1[^\n]*\n(?P<body>.*?)^[ \t]*\2[ \t]*$", re.DOTALL | re.MULTILINE,
+)
 _MESSAGE_RE = re.compile(r"""(?:^|\s)-[a-zA-Z]*m\s*(?:"((?:[^"\\]|\\.)*)"|'([^']*)')""", re.DOTALL)
 _UNESCAPE_RE = re.compile(r"""\\(["\\$`])""")
 
@@ -49,12 +53,23 @@ class CommitCall:
     printed: tuple[tuple[str, str], ...] = ()
 
 
+def _blank_heredocs(command: str) -> str:
+    """Heredoc bodies as spaces, offsets kept. A script that mentions `git commit` commits nothing."""
+    return _HEREDOC_BODY_RE.sub(
+        lambda m: m.group(0)[:m.start("body") - m.start()]
+        + " " * len(m.group("body"))
+        + m.group(0)[m.end("body") - m.start():],
+        command,
+    )
+
+
 def commit_subject(command: str) -> str | None:
     """The first line of the message this command passes, if it passes one."""
-    m = _GIT_COMMIT_RE.search(command)
+    m = _GIT_COMMIT_RE.search(_blank_heredocs(command))
     if not m:
         return None
-    rest = m.group("rest")
+    # From the original: `-m "$(cat <<'EOF'` keeps its message in a heredoc.
+    rest = command[m.start("rest"):]
     msg = _MESSAGE_RE.search(rest)
     if msg:
         text = msg.group(1)
@@ -71,13 +86,8 @@ def commit_subject(command: str) -> str | None:
 
 
 def _epoch(ts: str | None) -> float | None:
-    if not ts:
-        return None
-    try:
-        d = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return (d if d.tzinfo else d.replace(tzinfo=timezone.utc)).timestamp()
+    d = parse_iso_utc(ts)
+    return d.timestamp() if d else None
 
 
 def _result_text(content) -> str:
@@ -112,12 +122,13 @@ def read_commit_calls(session_file: Path) -> list[CommitCall]:
                 if part.get("type") == "tool_use" and part.get("name") == "Bash":
                     command = (part.get("input") or {}).get("command") or ""
                     tool_id = part.get("id") or ""
-                    if "--dry-run" in command or not _GIT_COMMIT_RE.search(command):
+                    outside = _blank_heredocs(command)
+                    if "--dry-run" in outside or not _COMMIT_HEAD_RE.search(outside):
                         continue
                     ts = _epoch(row.get("timestamp"))
                     # One hash or subject cannot speak for two commits, so such a call
                     # never reads its result and stays unattributed.
-                    if len(_COMMIT_HEAD_RE.findall(command)) > 1:
+                    if len(_COMMIT_HEAD_RE.findall(outside)) > 1:
                         calls[tool_id] = CommitCall(tool_id, ts, None, None, False)
                         continue
                     pending[tool_id] = (command, ts)
