@@ -1103,13 +1103,10 @@ def cleanup(keep: bool) -> None:
         print(f"Kept {ROOT}")
         return
     try:
-        projects = ClaudeRunner._get_projects_dir(str(REPO))
-        if projects and f"sbx-attack" in str(projects):
-            shutil.rmtree(projects, ignore_errors=True)
-        parent = Path(projects).parent if projects else None
-        if parent:
-            prefix = Path(projects).name
-            for path in parent.glob(f"{prefix}*"):
+        # From ROOT, not REPO: the unsandboxed session's "plain" repo has its own folder.
+        projects = ClaudeRunner._get_projects_dir(str(ROOT))
+        if projects and "sbx-attack" in str(projects):
+            for path in Path(projects).parent.glob(f"{Path(projects).name}*"):
                 shutil.rmtree(path, ignore_errors=True)
     except Exception as exc:
         print(f"Could not clean session files: {exc}")
