@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.102.17, A Missed marker, a step-back, and a judge that stays off (2026-11-04)
+
 ### Added
 - **One shared question for scope** (`config.SCOPE_QUESTION`). The critical pass, plan review, the judge and `/stepback` all ask what the work is an example of, whether it holds for all of it and later on, and whether a one-off really is one. It also names the reverse failure, a framework built for a true one-off.
 - **A Missed marker** (`bot/engine/missed.py`, `data/missed.jsonl`). One tap on a finished card, or `/missed [note]` for work with no card, records work that got past everything, with an optional kind. This is the count that says whether anything here helps.
