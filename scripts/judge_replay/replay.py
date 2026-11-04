@@ -263,7 +263,7 @@ def run_case(case: dict, rev: str, replicates: int, state: dict, lock: threading
     # tree, and read the goal from the folder, which is where the bot reads it.
     source = git(Path(case["repo_path"]), "rev-parse", "--show-toplevel").strip()
     prefix = git(Path(case["repo_path"]), "rev-parse", "--show-prefix").strip()
-    clone = shallow_clone(source, case["head"], CLONES / "clones" / rev / case["id"])
+    clone = shallow_clone(source, case["head"], CLONES / "clones" / rev / case["id"].replace("_", "-"))
     goal_dir = clone / prefix
     try:
         for k in todo:
