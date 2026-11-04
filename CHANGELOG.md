@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.102.19, Review Code and Commit buttons off new cards (2026-11-04)
+
 ### Removed
 - **The Review Code and Commit buttons from new cards.** From 2026-08-14 to 2026-11-04 they had 0 taps each against 120 for Build & Ship, and chains run review on their own. Their handlers stay, because cards already posted can still press them. Review outside a chain and a commit without a release are now typed requests.
 
