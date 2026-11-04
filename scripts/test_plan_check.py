@@ -258,7 +258,7 @@ for chained in (False, True):
           "Build & Ship" in labels and "Done" in labels, labels)
     check(f"plan card keeps Discord's limits (chain={chained})",
           len(specs) <= 5 and all(len(r) <= 5 for r in specs), specs)
-for action in ("autopilot", "autopilot_hold", "review_plan", "apply_revisions"):
+for action in ("autopilot", "autopilot_hold", "review_plan", "apply_revisions", "review_code", "commit"):
     handler = callbacks._WORKFLOW_ACTIONS.get(action)
     check(f"a card already posted can still press {action}",
           handler and hasattr(workflows, handler), handler)
@@ -280,10 +280,6 @@ for shape, (fields, chained, first_row) in _shapes.items():
     check(f"{shape}: no callback for either",
           not any(c.startswith(("review_code:", "commit:")) for c in callbacks_on_card), callbacks_on_card)
     check(f"{shape}: the row is what is left", [b.label for b in specs[0]] == first_row, labels)
-for action in ("review_code", "commit"):
-    handler = callbacks._WORKFLOW_ACTIONS.get(action)
-    check(f"a card already posted can still press {action}",
-          handler and hasattr(workflows, handler), handler)
 for origin in (InstanceOrigin.PLAN_CHECK, InstanceOrigin.PLAN_CHECK_APPLY):
     inst = Instance(id="r-1", name=None, instance_type=InstanceType.QUERY, prompt="x", repo_name="bot",
                     repo_path="/r", status=InstanceStatus.COMPLETED, origin=origin, session_id=SESSION)

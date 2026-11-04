@@ -98,7 +98,8 @@ def _plan_action_rows(iid: str) -> list[list[ButtonSpec]]:
     """
     # TODO: drop the autopilot, autopilot_hold and review_plan handlers once old cards no longer matter.
     # TODO: the same goes for the commit and review_code entries in callbacks._WORKFLOW_ACTIONS. Only the
-    # button calls on_commit, so it goes with its entry; on_review_code stays, because chain_runner runs it.
+    # button calls on_commit, so it goes with its entry, along with COMMIT_PROMPT and the checks on it in
+    # scripts/test_findings.py; on_review_code stays, because chain_runner runs it.
     return [[
         ButtonSpec("Build & Ship", f"build_and_ship:{iid}"),
         ButtonSpec("Done", f"done:{iid}"),

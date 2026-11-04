@@ -27,13 +27,11 @@ ignoring the old one. A record lands in the same commit as its work. The last
 paragraph of the body says what this does not establish.
 
 Outside research repos no check can notice a missing record, because there is
-nothing to compare it against. So the commit step asks instead of a gate
-pretending to know. `COMMIT_PROMPT` only runs on the Commit button, and new
-cards no longer carry it, so only a card already posted can run it. `sessions.py`
-only strips its text from a thread topic. A `/chain` build commits on its own and
-does not see that line.
-The session-wide rule that closes this goes into the global CLAUDE.md after the
-pilot, not here.
+nothing to compare it against. So a rule asks instead of a gate pretending to
+know: the session-wide one is in the global CLAUDE.md. `COMMIT_PROMPT` asks too,
+but it only runs on the Commit button, and new cards no longer carry it, so only
+a card already posted can run it. `sessions.py` only strips its text from a thread
+topic. A `/chain` build commits on its own and does not see that line.
 
 ## The record
 
