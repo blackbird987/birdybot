@@ -748,6 +748,13 @@ class PromptMixin:
         if secrets_block:
             parts.append(secrets_block)
 
+        # A pointer to the reader only. The directory itself is another
+        # machine's text and never goes in a prompt. docs/design/peer-link.md
+        if config.PEER_ENABLED and instance.is_owner_session and instance.bash_policy != "none":
+            parts.append(config.PEER_LINK_NOTE.format(
+                script=Path(config._PROJECT_ROOT) / "scripts" / "peer.py",
+            ))
+
         # Non-owner user context: scope awareness + bash policy
         if not instance.is_owner_session:
             user_label = instance.user_name or instance.user_id or "a granted user"

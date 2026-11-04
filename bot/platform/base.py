@@ -397,20 +397,26 @@ class NotificationService:
         buttons: list[list[ButtonSpec]] | None = None,
         silent: bool = False,
         ttl: float | None = None,
-    ) -> None:
+    ) -> int:
         """Send to all registered platforms. Best-effort — one failure doesn't block others.
 
         If *ttl* is set (seconds), auto-delete the message after that delay.
+        Returns how many platforms took the message: zero is normal before the
+        messenger has registered, so a caller that needs delivery must check.
         """
+        delivered = 0
         for platform, (messenger, channel_id) in self._messengers.items():
             try:
                 msg_id = await messenger.send_text(channel_id, text, buttons, silent)
+                if msg_id:
+                    delivered += 1
                 if ttl and msg_id:
                     asyncio.create_task(
                         delete_after(messenger, channel_id, msg_id, ttl)
                     )
             except Exception:
                 log.exception("Failed to broadcast to %s", platform)
+        return delivered
 
 
 async def delete_after(

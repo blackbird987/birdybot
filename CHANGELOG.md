@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+- **A read-only project directory between two installs of this bot** (`docs/design/peer-link.md`, `bot/discord/peer_link.py`, `bot/peer_record.py`, `scripts/peer.py`). Each bot keeps one message current in a shared channel: machine, version, last alive time, running count, and per repo the name, short commit, branch, commits ahead and whether anything is uncommitted. `python scripts/peer.py projects` and `status` read the other machine's message, trust only its bot's author id and validate it strictly. Off unless `PEER_CHANNEL_ID`, `PEER_BOT_ID` and `MACHINE_NAME` are all set. No peer message can start anything: `on_message` is unchanged. Questions and tasks between machines are not in this and are written down as later stages.
+- **A permissions check for both bots** (`scripts/peer_perms.py`, read-only). Computes from the live guild what each bot can see, whether it can give itself more access or remove the other bot, and whether it still has what the code uses. `--simulate` shows the state after the proposed role change and prints the steps, including any other holder of a role that the change would affect.
+- **`scripts/peer_setup.py`**: creates the private `machine-link` channel once, safe to re-run.
+
+### Changed
+- **Auto-update now asks first** (`AUTO_UPDATE_APPROVAL`, on by default). With auto-update on, the bot still fetches on schedule but posts one card per new commit, with the subjects and file count, and pulls only on an owner's Apply update tap. Apply lands the exact commit on the card: if origin moved it says so and posts a new card. `AUTO_UPDATE_APPROVAL=0` restores the old behaviour. This is a speed bump, not a boundary: a session with a shell on that machine can still pull by itself.
+- `NotificationService.broadcast` returns how many platforms took the message, so a card that went nowhere is posted again later.
+- Lobby cleanup at startup keeps pinned messages out of its second pass and spares the live update card.
+
 ## v0.102.19, Review Code and Commit buttons off new cards (2026-11-04)
 
 ### Removed

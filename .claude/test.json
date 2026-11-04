@@ -107,6 +107,8 @@
     "halt_text": "python scripts/test_halt_text.py",
     "image_directive": "python scripts/test_image_directive.py",
     "instances": "python scripts/test_instances.py",
+    "peer_link": "python scripts/test_peer_link.py",
+    "auto_update_approval": "python scripts/test_auto_update_approval.py",
     "merge_msg_is_failure": "python scripts/test_merge_msg_is_failure.py",
     "mutex_drill": "python scripts/test_mutex_drill.py",
     "nudges": "python scripts/test_nudges.py",

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 import discord
 
+from bot import auto_update
 from bot.discord import channels
 from bot.discord.deploy_flow import _handle_approve_deploy, _handle_reboot_repo
 from bot.discord.access import AccessResult, load_access_config
@@ -18,6 +19,7 @@ from bot.discord.adapter import _buttons_to_view
 from bot.discord.modals import QuickTaskModal, SecretRenameModal, _message_without_row
 from bot.engine import commands
 from bot.engine import sessions as sessions_mod
+from bot.platform.base import ButtonSpec
 from bot.platform.formatting import MODE_COLOR, VALID_EFFORTS, VALID_MODES, effort_name, mode_name
 from bot.platform.modes import cap_mode
 
@@ -128,6 +130,8 @@ _ACTIONS = {
     "secret_hold_pk": lambda b, i, a, arg, acc: _handle_secret_hold(b, i, a, arg),
     "secret_allow": lambda b, i, a, arg, acc: _handle_secret_request(b, i, a, arg),
     "secret_deny": lambda b, i, a, arg, acc: _handle_secret_request(b, i, a, arg),
+    auto_update.APPLY_ACTION: lambda b, i, a, arg, acc: _handle_update_card(b, i, a, arg),
+    auto_update.LATER_ACTION: lambda b, i, a, arg, acc: _handle_update_card(b, i, a, arg),
 }
 
 # Actions in ``_ACTIONS`` that only the owner may use.
@@ -135,6 +139,7 @@ _OWNER_ONLY_ACTIONS: frozenset[str] = frozenset({
     "sync_repo", "sync_git", "reboot_repo", "approve_deploy",
     "secret_forget", "secret_replace", "secret_keep", "secret_hold_yes",
     "secret_hold_no", "secret_hold_pk", "secret_allow", "secret_deny",
+    auto_update.APPLY_ACTION, auto_update.LATER_ACTION,
 })
 
 
@@ -229,6 +234,44 @@ async def _handle_secret_request(
         repo_name=repo, source="secret_allow", is_owner=True,
         user_id=str(interaction.user.id), user_name=interaction.user.display_name,
     )
+
+
+async def _handle_update_card(
+    bot: ClaudeBot, interaction: discord.Interaction, action: str, sha: str,
+) -> None:
+    """Apply update or Later on an auto-update card. The owner gate is in ``handle``."""
+    card = interaction.message.content if interaction.message else ""
+
+    async def note(line: str, view: discord.ui.View | None = None) -> None:
+        await interaction.edit_original_response(content=f"{card}\n{line}"[:2000], view=view)
+
+    if action == auto_update.LATER_ACTION:
+        await note("Left for later. Apply stays on this card.", _buttons_to_view(
+            [[ButtonSpec("Apply update", f"{auto_update.APPLY_ACTION}:{sha}")]],
+        ))
+        return
+    if bot._notifier is None:
+        await settle(interaction, "The bot is still starting. Try again in a moment.")
+        return
+    try:
+        outcome = await auto_update.apply_update(bot._runner, bot._notifier, sha)
+    except Exception:
+        log.exception("Auto-update: apply failed")
+        await settle(interaction, "The update could not be applied. Check the log.")
+        return
+    if outcome.keep_buttons:
+        await settle(interaction, outcome.message)
+        return
+    try:
+        await note(outcome.message)
+    except Exception:
+        # The commit has landed or the card is settled either way. A failed
+        # edit must not stop the reboot that goes with a landed commit.
+        log.warning("Auto-update: could not edit the card", exc_info=True)
+    if outcome.applied:
+        await auto_update.finish_update(
+            bot._runner, bot._notifier, outcome.n_commits, outcome.latest_msg,
+        )
 
 
 async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
