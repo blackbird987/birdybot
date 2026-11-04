@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.102.20, A read-only link between two machines, and a tap before auto-update (2026-11-04)
+
 ### Added
 - **A read-only project directory between two installs of this bot** (`docs/design/peer-link.md`, `bot/discord/peer_link.py`, `bot/peer_record.py`, `scripts/peer.py`). Each bot keeps one message current in a shared channel: machine, version, last alive time, running count, and per repo the name, short commit, branch, commits ahead and whether anything is uncommitted. `python scripts/peer.py projects` and `status` read the other machine's message, trust only its bot's author id and validate it strictly. Off unless `PEER_CHANNEL_ID`, `PEER_BOT_ID` and `MACHINE_NAME` are all set. No peer message can start anything: `on_message` is unchanged. Questions and tasks between machines are not in this and are written down as later stages.
 - **A permissions check for both bots** (`scripts/peer_perms.py`, read-only). Computes from the live guild what each bot can see, whether it can give itself more access or remove the other bot, and whether it still has what the code uses. `--simulate` shows the state after the proposed role change and prints the steps, including any other holder of a role that the change would affect.
