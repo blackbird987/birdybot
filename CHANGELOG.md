@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+- **One shared question for scope** (`config.SCOPE_QUESTION`). The critical pass, plan review, the judge and `/stepback` all ask what the work is an example of, whether it holds for all of it and later on, and whether a one-off really is one. It also names the reverse failure, a framework built for a true one-off.
+- **A Missed marker** (`bot/engine/missed.py`, `data/missed.jsonl`). One tap on a finished card, or `/missed [note]` for work with no card, records work that got past everything, with an optional kind. This is the count that says whether anything here helps.
+- **A fresh-context judge, off until a repo is listed** (`bot/engine/judge.py`, `JUDGE_REPOS`, `docs/design/judge.md`). A new read-only session with Bash closed sees the owner's own words, the repo goal, the diff and the verify output, never the author's reasoning. It answers pass, fix, only_you or could_not_check, and anything unreadable is could_not_check. In a chain it runs after verify: fix goes back to the author for at most 2 rounds, and only_you or could_not_check hold the merge even under `preset=ship`. In chat it checks a thread's committed work once when the thread goes idle. Commits are attributed from that session's own commit calls, or it says it could not check.
+- **`/stepback <repo>`**, by hand and read-only (`bot/engine/stepback.py`). Up to three items from the last 7 days: patches that keep repeating, one-offs that will need repeating, drift from the goal. It applies nothing.
+- **A replay test for the judge, bars frozen first** (`scripts/judge_replay/`, `study/`). It mines the owner's corrections over the last 30 days and runs the judge on work as it stood before each one.
+
 ## v0.102.16, One way of recording findings, available to every repo (2026-11-04)
 
 ### Added
