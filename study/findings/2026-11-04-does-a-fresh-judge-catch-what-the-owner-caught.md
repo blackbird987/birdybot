@@ -2,9 +2,10 @@
 id = "2026-11-04-does-a-fresh-judge-catch-what-the-owner-caught"
 title = "Does a fresh judge catch what the owner caught later"
 date = "2026-11-04"
-status = "open"
+status = "superseded"
 question = "Given only the owner's words, the repo goal, the diff and the verify output, does a fresh session catch what the owner later caught, without flagging clean work?"
-# verdict = ""  # one line, required once the status is not open
+verdict = "Bars and cases as frozen before any run. It failed them: see the record that replaces this one."
+superseded_by = ["2026-11-04-a-fresh-judge-did-not-catch-what-the-owner"]
 +++
 The author's own check misses what it cannot see. This tests a separate judge on past work before it may hold anything. Bars written before any judge run.
 

@@ -26,6 +26,18 @@ a failure of the judge.
   hand only, applies nothing.
 - `scripts/judge_replay/`: the replay that decided whether the judge is on.
 
+## What the replay showed: off
+
+The judge failed its bars (`study/findings/2026-11-04-a-fresh-judge-did-not-catch-what-the-owner.md`),
+so `JUDGE_REPOS` stays empty and the resumed code review stays. On 29 held-out cases
+it caught 1 of 12 misses against a bar of 50%, 0 of 5 too_narrow, 0 of 21 review-fix
+issues, and flagged 30% of clean work against a bar of 20%. Where it said fix on a
+miss it raised something else: the owner's corrections came from knowledge or from
+use that the input does not hold. Whether its other findings are real was not scored.
+
+Listing a repo by hand still works, with nothing vouching for it. Before anyone does,
+compare against `data/missed.jsonl`, which is what the marker is for.
+
 ## Must not drift
 
 **No author text in its input.** `judge.build_input` takes the owner's messages,
@@ -90,6 +102,8 @@ other.
 ## Follow-ups
 
 - [ ] Run `/stepback` on a timer, or after a third fix to the same area.
+- [ ] Score whether the judge's other findings are real: the replay only asked whether
+  they matched what the owner caught.
 - [ ] Give the judge a way to see the screenshots verify took.
 - [ ] Decide what a thread with no owner words should be judged against, such as the
   parent's message for a spawned child.
