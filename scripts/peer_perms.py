@@ -32,6 +32,8 @@ from pathlib import Path
 _SCRIPT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_SCRIPT_ROOT))
 
+from dotenv import dotenv_values  # noqa: E402
+
 from bot.procutil import install_root  # noqa: E402
 
 API = "https://discord.com/api/v10"
@@ -239,10 +241,13 @@ def simulate(guild_id: str, roles: dict, members: dict, channels: list,
     for role_id in keep:
         roles[role_id]["_had_removal"] = roles[role_id]["perms"] & REMOVES_MEMBERS
         roles[role_id]["perms"] &= ~(ADMINISTRATOR | REMOVES_MEMBERS)
-    lowest_admin = min(r["position"] for rid, r in roles.items()
-                       if r["perms"] & ADMINISTRATOR and rid != guild_id and not r.get("managed"))
+    # None when nothing assignable grants Administrator: nothing to sit below.
+    lowest_admin = min((r["position"] for rid, r in roles.items()
+                        if r["perms"] & ADMINISTRATOR and rid != guild_id and not r.get("managed")),
+                       default=None)
 
     steps = []
+    held_before = {spec.user_id: set(members[spec.user_id]) for spec in BOTS}
     for role_id, people in (losers or {}).items():
         if people:
             steps.append(
@@ -251,8 +256,7 @@ def simulate(guild_id: str, roles: dict, members: dict, channels: list,
                 "take its Administrator away. If it needs that, give it a role of its own placed "
                 f"above {roles[role_id]['name']} (placed below, that role is an escalation again).")
     for spec in BOTS:
-        held = [r for r in members[spec.user_id]
-                if r not in spec.drop_role_ids and r == spec.own_role_id]
+        held = [r for r in members[spec.user_id] if r not in spec.drop_role_ids]
         members[spec.user_id] = held
         role = roles[spec.own_role_id]
         peer = BOTS[1] if spec is BOTS[0] else BOTS[0]
@@ -264,7 +268,7 @@ def simulate(guild_id: str, roles: dict, members: dict, channels: list,
         role["perms"] |= needed
         if needed:
             steps.append(f"On role {role['name']}, turn on: {', '.join(names(needed))}.")
-        if role["position"] >= lowest_admin:
+        if lowest_admin is not None and role["position"] >= lowest_admin:
             lowest = next(r["name"] for r in roles.values()
                           if r["position"] == lowest_admin and not r.get("managed"))
             steps.append(f"Drag role {role['name']} to just below {lowest}, the lowest "
@@ -282,7 +286,8 @@ def simulate(guild_id: str, roles: dict, members: dict, channels: list,
             steps.append(f"Optional, on role {role['name']}: turn off {', '.join(names(unused))}. "
                          "The running bot uses none of them, but other holders of the role may.")
         for role_id in spec.drop_role_ids:
-            steps.append(f"Take role {roles[role_id]['name']} off {spec.label}.")
+            if role_id in held_before[spec.user_id] and role_id in roles:
+                steps.append(f"Take role {roles[role_id]['name']} off {spec.label}.")
     return roles, members, steps
 
 
@@ -303,16 +308,6 @@ class Rest:
                     raise
                 time.sleep(float(exc.headers.get("Retry-After") or 2) + 0.2)
         raise OSError("rate limited")
-
-
-def read_env(root: Path) -> dict:
-    env = {}
-    for line in (root / ".env").read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            key, value = line.split("=", 1)
-            env[key.strip()] = value.strip().strip('"').strip("'")
-    return env
 
 
 def load_guild(rest: Rest, guild_id: str) -> tuple:
@@ -405,7 +400,7 @@ def main() -> int:
     parser.add_argument("--activity", action="store_true")
     parser.add_argument("--json", action="store_true", dest="as_json")
     args = parser.parse_args()
-    env = read_env(install_root(_SCRIPT_ROOT))
+    env = dotenv_values(install_root(_SCRIPT_ROOT) / ".env")
     guild_id, token = env.get("DISCORD_GUILD_ID"), env.get("DISCORD_BOT_TOKEN")
     if not (guild_id and token):
         print("Needs DISCORD_GUILD_ID and DISCORD_BOT_TOKEN in .env.")

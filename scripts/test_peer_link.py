@@ -26,6 +26,7 @@ import discord  # noqa: E402
 
 import peer  # noqa: E402
 import peer_perms  # noqa: E402
+import peer_setup  # noqa: E402
 from bot import config, peer_record  # noqa: E402
 from bot.claude.runner import prompt_build  # noqa: E402
 from bot.discord import peer_link  # noqa: E402
@@ -123,6 +124,12 @@ def test_encode() -> None:
     check("a long branch name is cut and still valid", entry[3].endswith("..."))
     entry = peer_record.repo_entry("x", False, "abc1234", "weird branch", 0, False)
     check("an unusable branch name is dropped", entry[3] is None)
+    entry = peer_record.repo_entry("x", False, "abcdef0123456789abcd", "master", 10**9, False)
+    peer_record.parse(peer_record.encode("m", "1.0", 0, [entry]))
+    check("a long sha and a huge ahead count cannot cost the record",
+          entry[2] == "abcdef012345" and entry[4] == peer_record.MAX_COUNT, entry)
+    entry = peer_record.repo_entry("x", False, "not hex", "master", 0, False)
+    check("an unusable sha is dropped", entry[2] is None)
     record = peer_record.parse(peer_record.encode("m", "not a version!", 0, []))
     check("an unusable version says unknown", record["version"] == "unknown")
     parsed = peer_record.parse(peer_record.encode("m", "1.0", 0, [
@@ -142,6 +149,10 @@ def test_reader() -> None:
 
     check("unset says so", stop_code([], env={}) == peer.EXIT_UNSET)
     check("half set says so too", stop_code([], env={"PEER_BOT_ID": PEER_ID}) == peer.EXIT_UNSET)
+    check("a peer id that is not a number says so",
+          stop_code([], env={**ENV, "PEER_BOT_ID": "abc"}) == peer.EXIT_UNSET)
+    check("a timestamp with no timezone is an unknown age, not a crash",
+          peer.age_secs({"timestamp": "2026-11-04T10:00:00"}, NOW) is None)
     check("nothing published yet is not a crash", stop_code([]) == peer.EXIT_NO_RECORD)
     check("a forged author is ignored",
           stop_code([msg(author=FORGER_ID, content=json.dumps(good(machine="forged")))]) == peer.EXIT_NO_RECORD)
@@ -218,9 +229,9 @@ async def test_publisher() -> None:
     saved_name = config.MACHINE_NAME
     config.MACHINE_NAME = "not a name!"
     bot = MagicMock()
-    bot._wait_for_ready = AsyncMock(return_value=True)
+    bot.fetch_channel = AsyncMock()
     await peer_link.run_peer_publisher(bot, asyncio.Event())
-    check("an unusable machine name starts nothing", not bot._wait_for_ready.await_count)
+    check("an unusable machine name starts nothing", not bot.fetch_channel.await_count)
     config.MACHINE_NAME = "desktop"
 
     # The real loop: it survives a failing tick and stops on the stop event.
@@ -238,12 +249,13 @@ async def test_publisher() -> None:
 
     channel.history = history
     bot = MagicMock()
-    bot._wait_for_ready = AsyncMock(return_value=True)
+    bot._ready_event = asyncio.Event()
+    bot._ready_event.set()
     bot.fetch_channel = AsyncMock(return_value=channel)
     bot.user.id = 5
     saved = (peer_link.PUBLISH_INTERVAL_SECS, config.PEER_CHANNEL_ID, peer_link.collect_message)
     peer_link.PUBLISH_INTERVAL_SECS, config.PEER_CHANNEL_ID = 0.01, 1
-    peer_link.collect_message = lambda _store: "text"
+    peer_link.collect_message = lambda _repos, _running: "text"
     task = asyncio.create_task(peer_link.run_peer_publisher(bot, stop))
     while not channel.send.await_count:
         await asyncio.sleep(0.01)
@@ -255,6 +267,28 @@ async def test_publisher() -> None:
         bot.fetch_channel = AsyncMock(side_effect=error(SimpleNamespace(status=404, reason="x"), "x"))
         await asyncio.wait_for(peer_link.run_peer_publisher(bot, asyncio.Event()), 2)
     check("an unreachable channel starts nothing and fails nothing", True)
+
+    # A slow start must not end the publisher: it waits as long as it takes.
+    saved_poll = peer_link._READY_POLL_SECS
+    peer_link._READY_POLL_SECS = 0.01
+    slow = MagicMock()
+    slow._ready_event = asyncio.Event()
+    slow.fetch_channel = AsyncMock(side_effect=discord.NotFound(
+        SimpleNamespace(status=404, reason="x"), "x"))
+    task = asyncio.create_task(peer_link.run_peer_publisher(slow, asyncio.Event()))
+    await asyncio.sleep(0.05)
+    check("a bot not ready yet keeps the publisher waiting",
+          not task.done() and not slow.fetch_channel.await_count)
+    slow._ready_event.set()
+    await asyncio.wait_for(task, 2)
+    check("it starts once the bot is ready", slow.fetch_channel.await_count == 1)
+    stop = asyncio.Event()
+    stop.set()
+    never = MagicMock()
+    never._ready_event = asyncio.Event()
+    await asyncio.wait_for(peer_link.run_peer_publisher(never, stop), 2)
+    check("the stop event ends the wait for ready", True)
+    peer_link._READY_POLL_SECS = saved_poll
     peer_link.PUBLISH_INTERVAL_SECS, config.PEER_CHANNEL_ID, peer_link.collect_message = saved
     config.MACHINE_NAME = saved_name
 
@@ -282,7 +316,7 @@ def test_collect() -> None:
         )
         saved = config.MACHINE_NAME
         config.MACHINE_NAME = "desktop"
-        text = peer_link.collect_message(store)
+        text = peer_link.collect_message(peer_link.snapshot_repos(store), store.running_count())
         config.MACHINE_NAME = saved
     record = peer_record.parse(text)
     by_name = {r[0]: r for r in record["repos"]}
@@ -321,13 +355,38 @@ def test_inert_and_isolated() -> None:
     check("the permissions check has no write path",
           not any(word in perms for word in ('"POST"', '"PATCH"', '"PUT"', '"DELETE"', "data=")))
     setup = (ROOT / "scripts" / "peer_setup.py").read_text(encoding="utf-8")
-    check("setup grants no Manage Messages", "MANAGE_MESSAGES" not in setup and "1 << 13" not in setup)
+    rows = {r["id"]: r for r in peer_setup.overwrites("1", ["2", "3"], "4")}
+    check("Manage Messages is bit 13", peer_setup.MANAGE_MESSAGES == 1 << 13)
+    check("setup denies both bots Manage Messages",
+          all(int(rows[b]["deny"]) & peer_setup.MANAGE_MESSAGES for b in ("2", "3")))
+    check("setup allows Manage Messages to nobody",
+          not any(int(r["allow"]) & peer_setup.MANAGE_MESSAGES for r in rows.values()))
+    check("setup leaves the owner's own rights alone", rows["4"]["deny"] == "0")
+    check("setup hides the channel from everyone else", int(rows["1"]["deny"]) == peer_setup.VIEW)
+    for name in ("peer.py", "peer_perms.py", "peer_setup.py"):
+        check(f"{name} reads .env with the bot's own parser",
+              "dotenv_values" in (ROOT / "scripts" / name).read_text(encoding="utf-8"))
 
     build = (ROOT / "bot" / "claude" / "runner" / "prompt_build.py").read_text(encoding="utf-8")
-    check("the prompt names the reader for non-guests only",
-          "config.PEER_ENABLED and instance.is_owner_session" in build)
-    check("no prompt reads the directory",
-          "peer_record" not in build and "peer_link" not in build and "peer.py\"" in build)
+    check("no prompt reads the directory", "peer_record" not in build and "bot.discord" not in build)
+    owner = SimpleNamespace(is_owner_session=True, bash_policy="all", repo_path="/r")
+    plain_store = SimpleNamespace(get_sandbox_entry=lambda *_: None)
+    saved_enabled, saved_sandboxed = config.PEER_ENABLED, prompt_build.is_sandboxed
+    prompt_build.is_sandboxed = lambda _store, _path: False
+    config.PEER_ENABLED = True
+    note_text = prompt_build._peer_link_note(plain_store, owner)
+    check("an owner session is pointed at the reader",
+          "peer.py" in note_text and "python " in note_text and "python3" not in note_text, note_text)
+    check("a guest is not", not prompt_build._peer_link_note(
+        plain_store, SimpleNamespace(is_owner_session=False, bash_policy="all", repo_path="/r")))
+    check("a session with no shell is not", not prompt_build._peer_link_note(
+        plain_store, SimpleNamespace(is_owner_session=True, bash_policy="none", repo_path="/r")))
+    prompt_build.is_sandboxed = lambda _store, _path: True
+    check("a sandboxed session is not", not prompt_build._peer_link_note(plain_store, owner))
+    prompt_build.is_sandboxed = lambda _store, _path: False
+    config.PEER_ENABLED = False
+    check("no note when the link is off", not prompt_build._peer_link_note(plain_store, owner))
+    config.PEER_ENABLED, prompt_build.is_sandboxed = saved_enabled, saved_sandboxed
     note = config.PEER_LINK_NOTE
     check("the note is static and says untrusted", "untrusted" in note and note.count("{") == 1)
     check("the module reads config where it is read", hasattr(prompt_build, "config"))
@@ -393,6 +452,17 @@ def test_perms() -> None:
           and office.drop_role_ids[0] in members[office.user_id])
     check("the third holder comes first in the steps", "third bot" in steps[0], steps)
     check("the office bot drops its borrowed roles", held[office.user_id] == [office.own_role_id])
+
+    # Run again after the owner has done it: nothing left to take off.
+    done = {office.user_id: [office.own_role_id], desk.user_id: [desk.own_role_id]}
+    _, _, again = peer_perms.simulate(guild, roles, done, channels)
+    check("a role already gone is not a step", not any(s.startswith("Take role") for s in again), again)
+    no_admin = {rid: {**r, "perms": r["perms"] & ~admin} for rid, r in roles.items()}
+    _, _, plain = peer_perms.simulate(guild, no_admin, members, channels)
+    check("no Administrator role left is not a crash", not any("Drag" in s for s in plain), plain)
+    extra = {**members, desk.user_id: [desk.own_role_id, "extra"]}
+    _, kept, _ = peer_perms.simulate(guild, {**roles, "extra": role("extra", 1)}, extra, channels)
+    check("an unrelated role is kept", "extra" in kept[desk.user_id], kept)
 
     check("a holder with no other Administrator is flagged",
           peer_perms.loses_administrator([desk.own_role_id], desk.own_role_id, roles))

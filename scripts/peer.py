@@ -29,6 +29,8 @@ from pathlib import Path
 _SCRIPT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_SCRIPT_ROOT))
 
+from dotenv import dotenv_values  # noqa: E402
+
 from bot import peer_record  # noqa: E402
 from bot.procutil import install_root  # noqa: E402
 
@@ -43,19 +45,6 @@ class Stop(Exception):
     def __init__(self, code: int, message: str):
         super().__init__(message)
         self.code = code
-
-
-def read_env(root: Path) -> dict:
-    env = {}
-    try:
-        for line in (root / ".env").read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                key, value = line.split("=", 1)
-                env[key.strip()] = value.strip().strip('"').strip("'")
-    except OSError:
-        pass
-    return env
 
 
 def fetch_messages(channel_id: str, token: str) -> list:
@@ -93,16 +82,17 @@ def age_secs(message: dict, now: datetime) -> int | None:
     stamp = message.get("edited_timestamp") or message.get("timestamp")
     try:
         then = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
-    except ValueError:
+        return int((now - then).total_seconds())
+    except (ValueError, TypeError):  # TypeError: a stamp with no timezone
         return None
-    return int((now - then).total_seconds())
 
 
 def load(env: dict, now: datetime, messages: list | None = None) -> dict:
     """The validated record plus its age, or raises Stop saying why not."""
     channel, peer_id = env.get("PEER_CHANNEL_ID"), env.get("PEER_BOT_ID")
     token = env.get("DISCORD_BOT_TOKEN")
-    if not (channel and channel.isdigit() and peer_id and env.get("MACHINE_NAME")):
+    if not (channel and channel.isdigit() and peer_id and peer_id.isdigit()
+            and env.get("MACHINE_NAME")):
         raise Stop(EXIT_UNSET, "The machine link is not configured here "
                                "(PEER_CHANNEL_ID, PEER_BOT_ID and MACHINE_NAME in .env).")
     if messages is None:
@@ -111,7 +101,8 @@ def load(env: dict, now: datetime, messages: list | None = None) -> dict:
         messages = fetch_messages(channel, token)
     message = peer_message(messages, peer_id)
     if message is None:
-        raise Stop(EXIT_NO_RECORD, "The other machine has not published yet.")
+        raise Stop(EXIT_NO_RECORD, "The other machine has no message in the channel's last "
+                                   f"{_HISTORY_LIMIT}: it has not published yet.")
     try:
         record = peer_record.parse(message.get("content"))
     except peer_record.InvalidRecord as exc:
@@ -154,7 +145,7 @@ def render_projects(record: dict) -> str:
         flags = ", uncommitted" if row["uncommitted"] else (
             ", uncommitted unknown" if row["uncommitted"] is None else "")
         hidden = " (hidden)" if row["hidden"] else ""
-        lines.append(f"  {row['name']}{hidden}: {row['head']} on {row['branch'] or 'detached HEAD'}, "
+        lines.append(f"  {row['name']}{hidden}: {row['head']} on {row['branch'] or 'no named branch'}, "
                      f"{ahead} ahead{flags}")
     if record["omitted"]:
         lines.append(f"  ...and {record['omitted']} more that did not fit")
@@ -166,7 +157,7 @@ def main(argv: list | None = None) -> int:
     parser.add_argument("--json", action="store_true", dest="as_json")
     parser.add_argument("command", choices=("projects", "status"))
     args = parser.parse_args(argv)
-    env = read_env(install_root(_SCRIPT_ROOT))
+    env = dotenv_values(install_root(_SCRIPT_ROOT) / ".env")
     try:
         record = load(env, datetime.now(timezone.utc))
     except Stop as stop:

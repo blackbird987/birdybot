@@ -232,7 +232,8 @@ async def finish_update(
 
     # Human-friendly strings, reused in the reboot request and the broadcast
     count_str = f"pulled {n_commits} commit(s)"
-    detail = f"`{_clean_subject(latest_msg)}`"
+    subject = _clean_subject(latest_msg)
+    detail = f": `{subject}`" if subject else ""
 
     runner.request_reboot({
         "message": f"Auto-update: {count_str}",
@@ -241,7 +242,7 @@ async def finish_update(
     # Notify (best-effort: the reboot is already queued)
     try:
         await notifier.broadcast(
-            f"🔄 Auto-update: {count_str}: {detail}\nRebooting...",
+            f"🔄 Auto-update: {count_str}{detail}\nRebooting...",
             ttl=10,
         )
     except Exception:
@@ -311,8 +312,7 @@ async def auto_update_loop(
                 if log_result.returncode == 0 and log_result.stdout.strip():
                     commits = log_result.stdout.strip().splitlines()
                     n_commits = len(commits)
-                    # Strip the short SHA prefix from the first commit message
-                    latest_msg = commits[0].split(" ", 1)[1] if " " in commits[0] else commits[0]
+                    latest_msg = _subject_of(commits[0])
                 else:
                     # No new commits on remote — local is ahead or diverged
                     await _fail(

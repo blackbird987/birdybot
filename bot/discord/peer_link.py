@@ -27,9 +27,10 @@ log = logging.getLogger(__name__)
 
 PUBLISH_INTERVAL_SECS = 300
 _GIT_TIMEOUT = 10
-# How far back to look for our own message. Nothing else posts here in this
-# stage, so this is a margin for the owner's own notes.
-_HISTORY_LIMIT = 200
+_READY_POLL_SECS = 5
+# How far back to look for our own message, the same window the reader has.
+# Nothing else posts here in this stage, so this is a margin for the owner's notes.
+_HISTORY_LIMIT = 100
 
 
 def _git_read(path: str, *args: str) -> str | None:
@@ -60,14 +61,20 @@ def _read_repo(name: str, path: str, hidden: bool) -> list:
     )
 
 
-def collect_message(store) -> str:
-    """The record as message text. Runs git, so call it off the event loop."""
-    repos = store.list_repos()
+def snapshot_repos(store) -> list[tuple[str, str, bool]]:
+    """(name, path, hidden) per repo. Reads the store, so call it on the event loop."""
     # Hidden repos last: if the message has to lose some, they go first.
-    names = sorted(repos, key=lambda n: (store.is_repo_dormant(n), n.lower()))
+    return sorted(
+        ((name, path, store.is_repo_dormant(name)) for name, path in store.list_repos().items()),
+        key=lambda repo: (repo[2], repo[0].lower()),
+    )
+
+
+def collect_message(repos: list[tuple[str, str, bool]], running: int) -> str:
+    """The record as message text. Runs git, so call it off the event loop."""
     return peer_record.encode(
-        config.MACHINE_NAME, _get_version(), store.running_count(),
-        [_read_repo(n, repos[n], store.is_repo_dormant(n)) for n in names],
+        config.MACHINE_NAME, _get_version(), running,
+        [_read_repo(*repo) for repo in repos],
     )
 
 
@@ -95,14 +102,25 @@ async def publish_once(channel, bot_id: int, text: str, known: discord.Message |
         return None
 
 
+async def _stopped_within(stop_event: asyncio.Event, secs: float) -> bool:
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=secs)
+        return True
+    except asyncio.TimeoutError:
+        return False
+
+
 async def run_peer_publisher(bot: ClaudeBot, stop_event: asyncio.Event) -> None:
     """Background task: keep our directory message current. Never fails the bot."""
     if not peer_record.NAME_RE.fullmatch(config.MACHINE_NAME):
         # The reader would reject every record, so say why here rather than there.
         log.warning("Peer link: MACHINE_NAME is not a usable name, not publishing")
         return
-    if not await bot._wait_for_ready("peer_link"):
-        return
+    # Not _wait_for_ready: that gives up after a minute, and a slow start would
+    # then make this machine look offline until the next reboot.
+    while not bot._ready_event.is_set():
+        if await _stopped_within(stop_event, _READY_POLL_SECS):
+            return
     channel = None
     known = None
     while not stop_event.is_set():
@@ -114,7 +132,9 @@ async def run_peer_publisher(bot: ClaudeBot, stop_event: asyncio.Event) -> None:
                                 config.PEER_CHANNEL_ID)
                     return
                 log.info("Peer link: publishing as %s", config.MACHINE_NAME)
-            text = await asyncio.to_thread(collect_message, bot._store)
+            text = await asyncio.to_thread(
+                collect_message, snapshot_repos(bot._store), bot._store.running_count(),
+            )
             known = await publish_once(channel, bot.user.id, text, known)
             log.info("Peer link: published %d chars", len(text))
         except asyncio.CancelledError:
@@ -129,8 +149,5 @@ async def run_peer_publisher(bot: ClaudeBot, stop_event: asyncio.Event) -> None:
         except Exception:
             known = None
             log.warning("Peer link: publish failed, will try again", exc_info=True)
-        try:
-            await asyncio.wait_for(stop_event.wait(), timeout=PUBLISH_INTERVAL_SECS)
+        if await _stopped_within(stop_event, PUBLISH_INTERVAL_SECS):
             return
-        except asyncio.TimeoutError:
-            pass

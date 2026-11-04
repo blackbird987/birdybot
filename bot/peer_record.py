@@ -28,6 +28,7 @@ ALIVE_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 
 _KEYS = {"v", "machine", "version", "alive", "running", "repos", "omitted"}
 _BRANCH_MAX = 40
+_SHA_MAX = 12
 
 
 class InvalidRecord(ValueError):
@@ -43,7 +44,16 @@ def repo_entry(
     An array, not an object: a desktop with thirty repos has to fit in one
     Discord message. A repo that could not be read has ``None`` for the last
     four, which says so without failing the others.
+
+    The reader rejects a whole record for one bad field, so a value it would
+    refuse stops here. ``--short`` runs past the minimum in a large repo.
     """
+    if sha is not None:
+        sha = sha[:_SHA_MAX]
+        if not SHA_RE.fullmatch(sha):
+            sha = None
+    if ahead is not None:
+        ahead = min(ahead, MAX_COUNT)
     if branch is not None:
         if len(branch) > _BRANCH_MAX:
             branch = branch[:_BRANCH_MAX - 3] + "..."

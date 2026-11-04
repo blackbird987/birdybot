@@ -56,8 +56,8 @@ commit count, file count, subjects and the buttons Apply update and Later.
   never whatever origin holds at tap time. If origin moved it says so and posts a
   fresh card. A non-fast-forward is refused as before, and the buttons stay.
 - **One card per remote sha, across restarts.** The sha is recorded in state
-  before the send, so a concurrent poll cannot double post, and the record is put
-  back if nothing was delivered. That second half matters: the messenger registers
+  before the send, so the startup purge cannot catch a card that is out but not yet
+  on record, and the record is put back if nothing was delivered. That second half matters: the messenger registers
   after background tasks start, so the first poll often has nowhere to send, and a
   sha recorded then would never be carded at all.
 - **The live card survives lobby cleanup.** `_cleanup_lobby` deletes unpinned
@@ -116,12 +116,14 @@ Invariants:
 - **Repo names are the injection surface,** so the reader holds them to a tight
   regex and refuses the record otherwise. The publisher drops a name that would
   fail instead of losing the whole record.
-- **Neither bot gets Manage Messages on the channel and nothing deletes there.**
-  The channel is the audit trail.
+- **Nothing deletes in the channel, and setup denies both bots Manage Messages on
+  it,** because after the role change both hold it at server level. The channel is
+  the audit trail. This is a default and not a boundary: a bot with Manage Roles or
+  Manage Channels can change the overwrite.
 
 **Channel.** `scripts/peer_setup.py`, once, with the desktop token: top level,
 outside both categories, `@everyone` denied view, view, send and read history for
-both bots and the owner. Safe to re-run.
+both bots and the owner, Manage Messages denied to both bots. Safe to re-run.
 
 **Windows.** Pathlib, no `os.getuid`, `fcntl` or POSIX-only calls in the new files.
 Importing `bot.claude.sandbox` for `GIT_SAFE` is safe because nothing at its module

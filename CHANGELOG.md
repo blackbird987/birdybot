@@ -10,7 +10,7 @@
 ### Changed
 - **Auto-update now asks first** (`AUTO_UPDATE_APPROVAL`, on by default). With auto-update on, the bot still fetches on schedule but posts one card per new commit, with the subjects and file count, and pulls only on an owner's Apply update tap. Apply lands the exact commit on the card: if origin moved it says so and posts a new card. `AUTO_UPDATE_APPROVAL=0` restores the old behaviour. This is a speed bump, not a boundary: a session with a shell on that machine can still pull by itself.
 - `NotificationService.broadcast` returns how many platforms took the message, so a card that went nowhere is posted again later.
-- Lobby cleanup at startup keeps pinned messages out of its second pass and spares the live update card.
+- Lobby cleanup at startup spares the live update card.
 
 ## v0.102.19, Review Code and Commit buttons off new cards (2026-11-04)
 

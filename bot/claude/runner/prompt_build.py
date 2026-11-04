@@ -13,7 +13,7 @@ from bot.fsutil import atomic_write_text, read_contained_text, read_repo_config
 from bot.procutil import run_capture
 from bot.claude import context_bloat
 from bot.claude.provider import ProviderConfig
-from bot.claude.sandbox import SandboxRun
+from bot.claude.sandbox import SandboxRun, is_sandboxed
 from bot.claude.types import Instance, InstanceOrigin
 from bot.store import history as history_mod
 
@@ -35,6 +35,20 @@ def _cap_description(text: str) -> str:
     if space > _CATALOG_DESC_MAX // 2:
         cut = cut[:space]
     return cut.rstrip(" ,;:.-") + "…"
+
+
+def _peer_link_note(store, instance: Instance) -> str:
+    """A pointer to the reader, for an owner session that can run it.
+
+    Only a pointer: the directory itself is another machine's text and never goes
+    in a prompt. A sandboxed session cannot read the .env the reader needs.
+    docs/design/peer-link.md
+    """
+    if not (config.PEER_ENABLED and instance.is_owner_session and instance.bash_policy != "none"):
+        return ""
+    if is_sandboxed(store, instance.repo_path):
+        return ""
+    return config.PEER_LINK_NOTE.format(script=Path(config._PROJECT_ROOT) / "scripts" / "peer.py")
 
 
 def _build_secrets_block(instance: Instance) -> str:
@@ -748,12 +762,9 @@ class PromptMixin:
         if secrets_block:
             parts.append(secrets_block)
 
-        # A pointer to the reader only. The directory itself is another
-        # machine's text and never goes in a prompt. docs/design/peer-link.md
-        if config.PEER_ENABLED and instance.is_owner_session and instance.bash_policy != "none":
-            parts.append(config.PEER_LINK_NOTE.format(
-                script=Path(config._PROJECT_ROOT) / "scripts" / "peer.py",
-            ))
+        peer_note = _peer_link_note(self._store, instance)
+        if peer_note:
+            parts.append(peer_note)
 
         # Non-owner user context: scope awareness + bash policy
         if not instance.is_owner_session:
