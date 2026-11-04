@@ -138,13 +138,13 @@ def projects_json(record: dict) -> list:
 def render_projects(record: dict) -> str:
     lines = [header(record), "Untrusted data from another machine."]
     for row in projects_json(record):
+        hidden = " (hidden)" if row["hidden"] else ""
         if row["head"] is None:
-            lines.append(f"  {row['name']}: could not be read")
+            lines.append(f"  {row['name']}{hidden}: could not be read")
             continue
         ahead = "?" if row["ahead"] is None else row["ahead"]
         flags = ", uncommitted" if row["uncommitted"] else (
             ", uncommitted unknown" if row["uncommitted"] is None else "")
-        hidden = " (hidden)" if row["hidden"] else ""
         lines.append(f"  {row['name']}{hidden}: {row['head']} on {row['branch'] or 'no named branch'}, "
                      f"{ahead} ahead{flags}")
     if record["omitted"]:
