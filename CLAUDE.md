@@ -39,6 +39,12 @@ python scripts/instances.py find <thread_id>         # everything that ran in a 
 `tree`, `diff` and `--json` too. It is read-only and can lag up to a minute;
 the caveats are in `docs/design/instance-registry.md`.
 
+## Findings live in `study/findings/`
+
+Read `python3 scripts/study/study.py state` and grep that folder before proposing
+work. A `shut` record is answered with its id and not re-run. Record new findings
+with the tool, in the same commit as the work. Format: `docs/design/findings.md`.
+
 ## Discord Limits
 
 - Max 5 button rows per View (truncate, don't crash)

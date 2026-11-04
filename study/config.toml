@@ -5,3 +5,11 @@ format = 1
 # [[unread_source]]
 # path = "docs/old-notes.md"
 # note = "one line on what is in it"
+
+[[unread_source]]
+path = "CHANGELOG.md"
+note = "Grepped for later corrections only, never read in full. May hold findings not moved here."
+
+[[unread_source]]
+path = "TODO.md"
+note = "Only the usage gate and Replay A/B items were read, for later corrections. The rest is unread."
