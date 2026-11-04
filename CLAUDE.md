@@ -86,7 +86,7 @@ Build tasks use git worktrees for parallel isolation:
 - Parallel builds on the same repo work without conflicts
 - Session files are copied between main repo and worktree project directories so `--resume` works
 - Per-repo asyncio lock serializes git admin operations (worktree add/remove, merge, branch delete)
-- After Done/Commit → Merge/Discard buttons appear in the thread
+- After a build or Done → Merge/Discard buttons appear in the thread
 - Autopilot auto-merges after a successful chain completes
 - `/branches` scans for orphaned branches and worktree directories
 - `/branches` also lists release tags that are not reachable from `HEAD`

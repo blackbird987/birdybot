@@ -258,10 +258,28 @@ for chained in (False, True):
           "Build & Ship" in labels and "Done" in labels, labels)
     check(f"plan card keeps Discord's limits (chain={chained})",
           len(specs) <= 5 and all(len(r) <= 5 for r in specs), specs)
-for action in ("autopilot", "autopilot_hold", "review_plan", "apply_revisions"):
+for action in ("autopilot", "autopilot_hold", "review_plan", "apply_revisions", "review_code", "commit"):
     handler = callbacks._WORKFLOW_ACTIONS.get(action)
     check(f"a card already posted can still press {action}",
           handler and hasattr(workflows, handler), handler)
+# Every card that used to carry Review Code or Commit, by what puts it on that card.
+_shapes = {
+    "branch, chain running": ({"branch": "b"}, True, ["Diff", "Done", "Discard"]),
+    "branch, no chain": ({"branch": "b"}, False, ["Diff", "Merge", "Discard", "Done"]),
+    "edited in place": ({"tools_used": ["Edit"]}, False, ["Retry", "Done"]),
+    "uncommitted code in the session": ({"code_active": True}, False, ["Done"]),
+}
+for shape, (fields, chained, first_row) in _shapes.items():
+    card = Instance(id="c-1", name=None, instance_type=InstanceType.TASK, prompt="x", repo_name="bot",
+                    repo_path="/r", status=InstanceStatus.COMPLETED, origin=InstanceOrigin.DIRECT,
+                    session_id=SESSION, **fields)
+    specs = action_button_specs(card, show_expand=False, has_autopilot_chain=chained)
+    labels = [b.label for row in specs for b in row]
+    callbacks_on_card = [b.callback_data for row in specs for b in row]
+    check(f"{shape}: no Review Code or Commit", not {"Review Code", "Commit"} & set(labels), labels)
+    check(f"{shape}: no callback for either",
+          not any(c.startswith(("review_code:", "commit:")) for c in callbacks_on_card), callbacks_on_card)
+    check(f"{shape}: the row is what is left", [b.label for b in specs[0]] == first_row, labels)
 for origin in (InstanceOrigin.PLAN_CHECK, InstanceOrigin.PLAN_CHECK_APPLY):
     inst = Instance(id="r-1", name=None, instance_type=InstanceType.QUERY, prompt="x", repo_name="bot",
                     repo_path="/r", status=InstanceStatus.COMPLETED, origin=origin, session_id=SESSION)
