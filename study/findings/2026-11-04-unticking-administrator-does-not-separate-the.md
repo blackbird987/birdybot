@@ -18,6 +18,6 @@ The proposal that computes clean: move TT-GPT below Signal bot; untick Administr
 
 Missed at first:
 - A third bot, alpha birb (1482820304819720353), holds the TT-GPT role with no other Administrator, so the change reaches it. A new Administrator role for it must sit above TT-GPT.
-- Managed roles (Dyno 58, AIAgent 6) have Administrator but cannot be assigned, per Discord's documentation. Counting them said to drag below 6.
+- Managed roles (Dyno 58, AIAgent 6) have Administrator but cannot be assigned, per Discord's documentation. Counting them was wrong.
 
 What this does not establish. Effective permissions were computed from REST, not exercised: no role changed. Thread-level overwrites and other users of either token are not ruled out, and a process that reads without posting would not show in the activity scan (newest post outside its category: 2025-06-11, last 100 messages per channel). That managed roles cannot be assigned was read, not tried. What alpha birb needs is unknown. After the change TT-GPT can still edit the office bot's role, and nothing stops a session using a token directly.
