@@ -4,7 +4,7 @@ title = "The sandbox attack run drives its attacks with a script, not the real m
 date = "2026-11-04"
 status = "stands"
 question = "Can the real model be the attacker in the session sandbox's attack run?"
-verdict = "Not so far in the harness: Haiku refused in the trial and the real model declined the checks script in the build, so a scripted endpoint issues the attacks and a model finding an attack nobody listed stays untested. Earlier probes in the build did run many of the attacks with the real model."
+verdict = "Not so far in the harness: Haiku refused in the trial and the real model declined the checks script in the build. A scripted endpoint issues the attacks, which the note also prefers on the merits: tool calls are what is tested and a script issues them more reliably. A model finding an attack nobody listed stays untested. Earlier probes in the build did run many of the attacks with the real model."
 tags = ["sandbox"]
 source = { file = "docs/design/session-sandbox.md", section = "Tests" }
 +++
@@ -12,7 +12,7 @@ A later session reading "the attack run passes" could take it for more than it i
 
 Three separate events:
 - The trial: "inner Haiku refused the attacks, so a scripted stub drove the real CLI".
-- The build's `scripts/attack_session_sandbox.py`: the real model read the checks script and declined to run it, saying such an evaluation belongs in a harness outside the agent.
+- The build's `scripts/attack_session_sandbox.py`: the real model read the checks script and declined to run it, saying such an evaluation belongs in a harness outside the agent. The note calls that fair and "also what this does". The script's own docstring adds that "the model chose not to try" proves nothing about the sandbox, so a more willing model would not replace it.
 - Earlier probes in the same build did run many of the same attacks with the real model on near-final settings. So the refusals are not universal, and the note does not say what made the difference.
 
 In the script the attacks come from a scripted Messages endpoint. The real login is used only for a plain functional session and an unsandboxed one. CLI, settings, hooks, bubblewrap, proxy, config dir, worktree layout and memory cgroup are real.
