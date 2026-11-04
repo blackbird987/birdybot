@@ -15,6 +15,11 @@
 
 - [ ] **Replay A/B: run the A/A round, then the first real arm.** `scripts/replay_ab/` works (one spike on t-9086). Next: an A/A round (both arms `current`, k=3, 4-6 cases) to measure the noise floor, then the trimmed-CLAUDE.md arm against it. Still missing: the pairwise judge (`main.py` docstring) and the `--review` code-quality score (`score.py` docstring). Known gap: a replay starts with no project auto-memory (`sandbox.py` docstring). Update 2026-10-14: the slim CLAUDE.md shipped without waiting for the A/B, so that arm is now pre-slim CLAUDE.md (`git show d32927c:CLAUDE.md`) vs current.
 
+## Machine link, later stages (decisions in `docs/design/peer-link.md`)
+
+- [ ] **Stage 2: questions between machines.** A bot directive, a pending-request record and `store.add_wake` when the answer lands, not a background script with /watch. The answering session reads an export of tracked files through an allowlist, with directive dispatch off on both paths. The doc has the reasons; do not re-derive them.
+- [ ] **Stage 3: tasks between machines.** Deferred. One tap would give a remote prompt a full shell on the work laptop.
+
 ## Tech Debt
 
 - [ ] **Reboot inherits stale process env — commenting out an `.env` var doesn't unset it.** The reboot launcher (`bot/app.py:598`) spawns `relaunch.py` via `subprocess.Popen` with no `env=`, so the child inherits the parent's `os.environ`. `config.py` uses `load_dotenv(override=True)`, which only overrides keys *present* in `.env` — a commented-out/removed key keeps whatever value the previous run baked into the environment. Symptom: reverting the post-Fable flip by commenting `DEFAULT_SESSION_MODEL=opus` left Opus stuck live until the var was set to an explicit empty value instead. Fix properly so operators can unset by commenting: either start the relaunch from a sanitized env (only pass through what's needed, drop app-owned keys), or have config explicitly reset its known keys to `None` when absent from `.env`. Until fixed, unset `.env` vars with `KEY=` (empty), never by commenting.

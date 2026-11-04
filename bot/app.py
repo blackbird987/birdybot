@@ -657,6 +657,11 @@ async def run() -> None:
         _bg_tasks.append(asyncio.create_task(
             run_resource_check(discord_bot),
         ))
+        if config.PEER_ENABLED:
+            from bot.discord.peer_link import run_peer_publisher
+            _bg_tasks.append(asyncio.create_task(
+                run_peer_publisher(discord_bot, stop_event),
+            ))
     if config.LOG_TRIAGE_ENABLED and discord_bot:
         from bot.discord.log_triage import run_triage_service
         _bg_tasks.append(asyncio.create_task(

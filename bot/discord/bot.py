@@ -30,6 +30,7 @@ from bot import config
 from bot.discord import channels
 from bot.discord.access import AccessResult, load_access_config, check_user_access, has_any_access, get_most_restrictive_ceiling, get_most_restrictive_bash
 from bot.discord.adapter import DiscordMessenger
+from bot import auto_update
 from bot.discord import attachments
 from bot.discord.attachments import PendingImagesMixin
 from bot.discord import dashboard as dashboard_mod
@@ -971,17 +972,29 @@ class ClaudeBot(StartupMixin, ThreadContextMixin, UsageGateMixin, PendingImagesM
         await self._send_temp_lobby_msg(f"\u2192 <#{thread.id}>")
 
     async def _cleanup_lobby(self) -> None:
-        """Delete all non-pinned messages from lobby on startup."""
+        """Delete all non-pinned messages from lobby on startup.
+
+        The live update card stays too: it goes out once per commit and does
+        not come back, so purging it would strand the update.
+        """
         lobby = self.get_channel(self._lobby_channel_id)
         if not lobby or not isinstance(lobby, discord.TextChannel):
             return
         pinned_ids = {m.id for m in await lobby.pins()}
+        card_id = auto_update.current_card_custom_id(self._store)
+
+        def _keep(m: discord.Message) -> bool:
+            return m.id in pinned_ids or (card_id is not None and any(
+                getattr(item, "custom_id", None) == card_id
+                for row in m.components for item in getattr(row, "children", ())
+            ))
+
         deleted = 0
 
         # Pass 1: bulk-delete recent messages (<14 days) — fast
         try:
             purged = await lobby.purge(
-                limit=100, check=lambda m: m.id not in pinned_ids,
+                limit=100, check=lambda m: not _keep(m),
             )
             deleted += len(purged)
         except Exception:
@@ -991,7 +1004,7 @@ class ClaudeBot(StartupMixin, ThreadContextMixin, UsageGateMixin, PendingImagesM
         batch = 0
         try:
             async for msg in lobby.history(limit=100):
-                if msg.id not in pinned_ids:
+                if not _keep(msg):
                     try:
                         await msg.delete()
                         deleted += 1
