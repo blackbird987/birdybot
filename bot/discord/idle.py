@@ -103,8 +103,52 @@ async def _apply_sleep(bot: ClaudeBot, channel_id: str, gen: int) -> None:
         bot._idle_timers.pop(channel_id, None)
         return
     bot._idle_timers.pop(channel_id, None)
+    _start_idle_judge(bot, channel_id)
     ch = bot.get_channel(int(channel_id))
     await set_thread_sleeping(bot, ch)
+
+
+_idle_judge_tasks: set[asyncio.Task] = set()
+
+
+def _start_idle_judge(bot: ClaudeBot, channel_id: str) -> None:
+    """Judge what this thread's session committed, in repos that have the judge on."""
+    from bot.engine import judge
+
+    lookup = bot._forums.thread_to_project(channel_id)
+    if not lookup:
+        return
+    project, info = lookup
+    if not info.session_id or not judge.enabled_for(project.repo_name):
+        return
+    repo_path = bot._store.list_repos().get(project.repo_name)
+    if not repo_path:
+        return
+
+    def still_idle() -> bool:
+        return not (
+            _channel_has_running_task(bot, channel_id)
+            or _channel_has_armed_watch(bot, channel_id)
+            or _channel_has_pending_prompt(channel_id)
+        )
+
+    async def start_repair(prompt: str) -> bool:
+        return await bot._replay_to_thread(channel_id, prompt)
+
+    ctx = bot._ctx(channel_id, repo_name=project.repo_name, source="judge")
+    ctx.mode = "explore"
+    ctx.bash_policy = "none"
+    ctx.maybe_prime_briefing = None
+    task = asyncio.create_task(judge.judge_idle_thread(
+        ctx,
+        session_id=info.session_id,
+        repo_name=project.repo_name,
+        repo_path=repo_path,
+        still_idle=still_idle,
+        start_repair=start_repair,
+    ))
+    _idle_judge_tasks.add(task)
+    task.add_done_callback(_idle_judge_tasks.discard)
 
 
 async def set_thread_sleeping(

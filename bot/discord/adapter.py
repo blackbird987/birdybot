@@ -12,6 +12,7 @@ from bot.discord import formatter as discord_fmt
 from bot.discord.formatter import apply_discord_safety
 from bot.platform.base import ButtonSpec, MessageHandle
 from bot.platform.formatting import FinalizeInfo
+from bot.platform.redact import redact_secrets
 
 log = logging.getLogger(__name__)
 
@@ -452,6 +453,31 @@ class DiscordMessenger:
         forums = getattr(self._bot, "_forums", None)
         if forums:
             await forums.refresh_control_room(repo_name)
+
+    async def owner_messages(self, channel_id: str) -> list[str] | None:
+        """The owner's own messages in a thread, oldest first. None if unreadable.
+
+        Read from the thread and not from the session, because a session's user
+        turns also hold what the bot injected, including plans its author wrote.
+        """
+        try:
+            ch = await self._resolve_channel(channel_id)
+            if ch is None:
+                return None
+            out: list[str] = []
+            async for m in ch.history(limit=None, oldest_first=True):
+                if m.author.bot or not self._bot._is_owner(m.author.id):
+                    continue
+                text = (m.content or "").strip()
+                names = ", ".join(a.filename for a in m.attachments)
+                if names:
+                    text = f"{text}\n[attached: {names}]".strip()
+                if text:
+                    out.append(redact_secrets(text))
+            return out
+        except discord.HTTPException:
+            log.warning("Could not read the owner's messages in %s", channel_id, exc_info=True)
+            return None
 
     async def is_conversation_closed(self, channel_id: str) -> bool:
         """Return True if the Discord thread is archived (or no longer reachable)."""

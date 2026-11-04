@@ -71,6 +71,7 @@ PLAN_ORIGINS = frozenset({InstanceOrigin.PLAN, InstanceOrigin.REVIEW_PLAN, Insta
 # by resolve_spawn_model — spawn_from and the manual-spawn sites (/bg,
 # /release, the merge resolver) all funnel origin → model through it.
 BUILD_ORIGINS: frozenset[InstanceOrigin] = frozenset({
+    InstanceOrigin.JUDGE,
     InstanceOrigin.BUILD, InstanceOrigin.COMMIT,
     InstanceOrigin.DONE, InstanceOrigin.VERIFY,
     InstanceOrigin.VERIFY_RELEASE, InstanceOrigin.RELEASE,

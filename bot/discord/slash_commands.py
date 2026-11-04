@@ -433,6 +433,17 @@ def setup(bot: ClaudeBot) -> None:
         )
 
     @bot.tree.command(
+        name="stepback",
+        description="Read-only look at where a repo's recent work is heading",
+        guild=guild_obj,
+    )
+    @app_commands.describe(repo="Repo to step back from")
+    async def cmd_stepback(interaction: discord.Interaction, repo: str):
+        if await _refused(interaction, owner_only=True):
+            return
+        await bot._run_slash(interaction, lambda ctx: commands.on_stepback_command(ctx, repo))
+
+    @bot.tree.command(
         name="missed",
         description="Mark finished work as having got past everything",
         guild=guild_obj,

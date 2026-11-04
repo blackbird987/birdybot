@@ -292,10 +292,20 @@ _ORIGIN_LABEL_OVERRIDES: dict[InstanceOrigin, str] = {
 # by refusing to honour one. The prompt forbids it too, but a brief is a soft
 # guard and this is the hard one, the same split the prompt review draws between
 # its brief and EDITABLE_CLASSES.
+#
+# The judge and the step-back are here because their whole input is quoted text:
+# the owner's messages, a diff, commit subjects. Nothing in it may be dispatched.
 _NO_DIRECTIVE_ORIGINS: frozenset[InstanceOrigin] = frozenset({
     InstanceOrigin.PROMPT_REVIEW,
     InstanceOrigin.TLDR,
+    InstanceOrigin.JUDGE,
+    InstanceOrigin.STEPBACK,
 })
+
+# A judge run is a check on a thread's work and not a turn in it (judge.md). It
+# does not occupy the channel, does not retry on a timer (a usage limit means it
+# could not check), posts no card of its own, and is not a child landing.
+_JUDGE_ORIGIN = InstanceOrigin.JUDGE
 
 
 def _origin_label(origin: InstanceOrigin) -> str:
@@ -409,7 +419,10 @@ async def run_instance(
     start_time = asyncio.get_event_loop().time()
     result = None
     finalized = False
-    ctx.runner.begin_task(inst.id, session_id=inst.session_id, channel_id=ctx.channel_id)
+    ctx.runner.begin_task(
+        inst.id, session_id=inst.session_id,
+        channel_id=None if inst.origin is _JUDGE_ORIGIN else ctx.channel_id,
+    )
     try:
         try:
             result = await ctx.runner.run(
@@ -472,6 +485,8 @@ async def run_instance(
             return
 
         # Usage limit: schedule auto-retry instead of showing normal failure
+        if inst.origin is _JUDGE_ORIGIN:
+            return
         if await schedule_cooldown_retry(ctx, inst, result, silent=silent):
             return  # Timer loop in app.py picks this up
 

@@ -134,7 +134,7 @@ def action_button_specs(
     # separately by bot/discord/prompt_review.py. Keep only the controls that
     # mean something here: stopping it, reading its log, and expanding a report
     # too long to render inline.
-    if instance.origin == InstanceOrigin.PROMPT_REVIEW:
+    if instance.origin in (InstanceOrigin.PROMPT_REVIEW, InstanceOrigin.JUDGE, InstanceOrigin.STEPBACK):
         if instance.status in (InstanceStatus.RUNNING, InstanceStatus.QUEUED):
             rows.append([ButtonSpec("Kill", f"kill:{iid}")])
         elif instance.status == InstanceStatus.FAILED:
