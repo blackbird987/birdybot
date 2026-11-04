@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+- **An automatic plan check, first in every /chain and in Build & Ship** (`bot/engine/plan_check.py`, `docs/design/plan-check.md`). A fresh read-only session reads the plan against the repo and raises only what it can show with a file and a line. If it raises something Critical or High, the session that wrote the plan applies or rejects each item, and an accepted revision goes to the build. It runs once and cannot stop a chain: a check that fails leaves the plan as it was and says so in one line. Whether it earns its cost is open, with a kill bar written before the first run (`study/findings/`, `data/plan_checks.jsonl`, `PLAN_CHECK_ENABLED`).
+
+### Removed
+- **The Autopilot, Autopilot (Hold) and Review Plan buttons from new cards.** From 2026-09-13 to 2026-11-04 they had 0, 0 and 1 taps against 40 for Build & Ship. Their handlers stay, because cards already posted can still press them.
+
+### Fixed
+- **A reboot during a chain no longer drops the chain.** A step refused by the reboot drain counted as a failed step and cleared the chain's state, even though the thread had just been told it would resume after the restart. It now stops with its state kept, and boot recovery re-runs that step.
+
 ## v0.102.17, A Missed marker, a step-back, and a judge that stays off (2026-11-04)
 
 ### Added

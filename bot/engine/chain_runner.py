@@ -14,6 +14,7 @@ from bot.claude.types import (
 from bot.platform.base import ButtonSpec, RequestContext
 from bot.engine import judge
 from bot.engine.cmd_state import within_dollar_budget
+from bot.engine.plan_check import run_plan_check
 
 from bot.engine.chain_git import (
     _find_mergeable_instance,
@@ -62,6 +63,16 @@ from bot.engine.steps import (
 )
 
 log = logging.getLogger(__name__)
+
+
+async def _post_deferred(ctx: RequestContext, items: list[str]) -> None:
+    deferred_text = "\n".join(f"• {d}" for d in items[:10])
+    await ctx.messenger.send_result(
+        ctx.channel_id,
+        f"**Deferred Revisions** (Medium/Low)\n\n{deferred_text}",
+        metadata={"_status": "completed", "_mode": "plan", "_deferred": True},
+        silent=True,
+    )
 
 
 async def _exit_chain(
@@ -330,6 +341,9 @@ async def on_conversational_chain(
     on the session (set_chain_plan_override) by the directive handler, so the
     build step injects it via ``_extract_latest_plan_text``. Ships quietly on
     the ``ship`` preset (silent close), mirroring Build & Ship.
+
+    Starts at the plan check: the preset lists it first, and any other start
+    would slice it away.
     """
     steps = _CHAIN_PRESETS.get(preset)
     if steps is None:
@@ -337,7 +351,7 @@ async def on_conversational_chain(
     label = f"Chain ({preset})" if preset in _CHAIN_PRESETS else "Chain"
     return await _launch_chain(
         ctx, source_id, source_msg_id,
-        list(steps), "build",
+        list(steps), "plan_check",
         silent_close=(preset == "ship"),
         chain_label=label,
     )
@@ -736,7 +750,26 @@ async def _run_autopilot_chain(
                     )
                     return result
 
-            if step == "review_loop":
+            if step == "plan_check":
+                check = await run_plan_check(
+                    ctx, current_id, current_msg, session_id, chain_instances,
+                )
+                chain_instances.extend(check.instances)
+                if not check.halted:
+                    if check.deferred:
+                        chain_deferred = check.deferred
+                        ctx.store.set_chain_deferred(session_id, chain_deferred)
+                        await _post_deferred(ctx, chain_deferred)
+                    # Only the author's run moves the chain on. Build resumes
+                    # current_id, and the reviewer's session must not be it.
+                    if check.author:
+                        current_id = check.author.id
+                        current_msg = _last_msg_id(check.author, ctx.platform)
+                    completed_steps.append(step)
+                    continue
+                # A Kill or a reboot drain: the status guard below handles it.
+                result = check.halt_run
+            elif step == "review_loop":
                 result, did_not_converge = await _review_plan_loop(
                     ctx, current_id, current_msg, chain_instances,
                 )
@@ -766,13 +799,7 @@ async def _run_autopilot_chain(
                 if result and result.status == InstanceStatus.COMPLETED and result.deferred_revisions:
                     chain_deferred = result.deferred_revisions
                     ctx.store.set_chain_deferred(session_id, chain_deferred)
-                    deferred_text = "\n".join(f"• {d}" for d in result.deferred_revisions[:10])
-                    await ctx.messenger.send_result(
-                        ctx.channel_id,
-                        f"**Deferred Revisions** (Medium/Low)\n\n{deferred_text}",
-                        metadata={"_status": "completed", "_mode": "plan", "_deferred": True},
-                        silent=True,
-                    )
+                    await _post_deferred(ctx, chain_deferred)
             elif step == "build":
                 source = ctx.store.get_instance(current_id)
                 multi_phase_ran = False
@@ -1232,6 +1259,13 @@ async def _run_autopilot_chain(
                 # This avoids the status guard running on a non-Instance result.
                 break
 
+            # A reboot drain refused this step's spawn. The chain state already
+            # names this step and stays "running", so boot recovery re-runs from
+            # here. Falling through would call it failed and clear that state.
+            if not result and ctx.runner.is_draining:
+                log.info("Chain stopped at %s for the reboot drain", step)
+                return None
+
             if not result or result.status != InstanceStatus.COMPLETED or result.needs_input:
                 # Chain paused/failed/question — notify user, state saved for resume
                 if result and result.needs_input and step == "verify_release":
@@ -1564,9 +1598,9 @@ async def on_build_and_ship(
     ctx: RequestContext,
     source_id: str,
     source_msg_id: str | None = None,
-    start_from: str = "build",
+    start_from: str = "plan_check",
 ) -> Instance | None:
-    """Build → Review Code → Verify → Done → Merge.
+    """Plan Check → Build → Review Code → Verify → Done → Merge.
 
     Ships quietly on success (silent_close=True): the close-conversation
     handshake skips the participant mention, while in-thread summary + tag

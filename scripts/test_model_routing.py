@@ -34,8 +34,11 @@ from bot.engine.workflows import resolve_spawn_model
 # other analysis run. TLDR is there for the same reason and a blunter one: it
 # restates a conversation that already happened, behind the same read-only
 # floor, so it writes no code by construction and is words by definition.
+# PLAN_CHECK_APPLY resumes the session that wrote the plan and rewrites it, so it
+# keeps that session's thinking model and stays behind the same floor.
 _THINKING_ORIGINS = frozenset(
-    {InstanceOrigin.DIRECT, InstanceOrigin.PROMPT_REVIEW, InstanceOrigin.TLDR, InstanceOrigin.STEPBACK}
+    {InstanceOrigin.DIRECT, InstanceOrigin.PROMPT_REVIEW, InstanceOrigin.TLDR, InstanceOrigin.STEPBACK,
+     InstanceOrigin.PLAN_CHECK_APPLY}
     | set(PLAN_ORIGINS)
 )
 

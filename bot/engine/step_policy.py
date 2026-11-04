@@ -126,7 +126,7 @@ _AUTOPILOT_STEPS = [
     "done", "verify_release", "release", "merge",
 ]
 _BUILD_AND_SHIP_STEPS = [
-    "build", "sensors", "review_code", "verify",
+    "plan_check", "build", "sensors", "review_code", "verify",
     "done", "verify_release", "release", "merge",
 ]
 _AUTOPILOT_HOLD_STEPS = [
@@ -134,23 +134,23 @@ _AUTOPILOT_HOLD_STEPS = [
     "done", "verify_release", "release",
 ]
 
-# Conversational-chain presets. The plan already emerged in the chat, so
-# these all START at "build" (no review_loop) and take their plan from the
-# stored override (see _extract_latest_plan_text). Keyed by the `preset=`
-# value on a /chain directive.
+# Conversational-chain presets. The plan already emerged in the chat, so these
+# all start with one independent check of it ("plan_check", not the review_loop
+# autopilot runs) and take their plan from the stored override (see
+# _extract_latest_plan_text). Keyed by the `preset=` value on a /chain directive.
 _CHAIN_PRESETS: dict[str, list[str]] = {
     # Full ship: build → review → verify → done → release → merge (quiet close).
     "ship": [
-        "build", "sensors", "review_code", "verify",
+        "plan_check", "build", "sensors", "review_code", "verify",
         "done", "verify_release", "release", "merge",
     ],
     # Build + release but stop before merge — parks on Merge/Discard (or the
     # auto-merge veto window if the repo opted into merge/ship autonomy).
     "hold": [
-        "build", "sensors", "review_code", "verify",
+        "plan_check", "build", "sensors", "review_code", "verify",
         "done", "verify_release", "release",
     ],
     # Build + verify loop only — the "build and verify" flow. Stops after
     # verify with the branch open.
-    "verify": ["build", "sensors", "review_code", "verify"],
+    "verify": ["plan_check", "build", "sensors", "review_code", "verify"],
 }

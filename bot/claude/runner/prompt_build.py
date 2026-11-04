@@ -588,9 +588,12 @@ class PromptMixin:
         provider = provider or self.provider
         # The judge must not see what the author thought, and everything below
         # can carry it: recent sessions, siblings, master's commit subjects,
-        # pinned context. So these two get their own short prompt and none of it.
+        # pinned context. So these get their own short prompt and none of it. The
+        # same goes for the plan check, which is fresh only if it has none of that.
         if instance.origin is InstanceOrigin.JUDGE:
             return config.JUDGE_SYSTEM_PROMPT
+        if instance.origin is InstanceOrigin.PLAN_CHECK:
+            return config.PLAN_CHECK_SYSTEM_PROMPT
         if instance.origin is InstanceOrigin.STEPBACK:
             return config.STEPBACK_SYSTEM_PROMPT
         # Working Location preamble (t-3541): anchor the LLM's CWD/branch

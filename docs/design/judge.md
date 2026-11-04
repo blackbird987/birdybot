@@ -4,6 +4,9 @@ The goal: what ships does what the owner meant, holds for the whole class of
 thing it is an example of, and the owner's attention goes only to what nobody
 else can judge.
 
+The plan check (`docs/design/plan-check.md`) is a different thing: it reads a plan
+before anything is built, cannot hold a chain, and has its own kill bar.
+
 ## Why the author does not check itself
 
 The code review runs resumed inside the author's session and the critical pass

@@ -147,7 +147,9 @@ async def spawn_from(
     # check_session is read only by the drain branch below.  It used to be
     # computed for check_spawn_allowed as well, and was deleted along with
     # that argument (42907fd), which left the drain branch raising NameError.
-    check_session = source.session_id if cfg.resume_session else None
+    # Not gated on resume_session: the plan check is a fresh session inside a
+    # chain, and queueing it would make boot recovery skip the whole chain.
+    check_session = source.session_id
     spawn_err = ctx.runner.check_spawn_allowed()
     if spawn_err:
         if ctx.runner.is_draining:
