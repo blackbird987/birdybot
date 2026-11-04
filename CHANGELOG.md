@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.102.18, An automatic plan check, fewer buttons, chains that survive a reboot (2026-11-04)
+
 ### Added
 - **An automatic plan check, first in every /chain and in Build & Ship** (`bot/engine/plan_check.py`, `docs/design/plan-check.md`). A fresh read-only session reads the plan against the repo and raises only what it can show with a file and a line. If it raises something Critical or High, the session that wrote the plan applies or rejects each item, and an accepted revision goes to the build. It runs once and a failing check cannot stop a chain: it leaves the plan as it was and says so in one line. Whether it earns its cost is open, with a kill bar written before the first run (`study/findings/`, `data/plan_checks.jsonl`, `PLAN_CHECK_ENABLED`).
 
