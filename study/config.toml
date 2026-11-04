@@ -1,0 +1,7 @@
+# The findings registry of this repo. See `study.py state` for what is in it.
+format = 1
+
+# Files that predate the registry and may hold findings nobody has moved here.
+# [[unread_source]]
+# path = "docs/old-notes.md"
+# note = "one line on what is in it"
