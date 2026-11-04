@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.102.15, Sessions can run in an opt-in sandbox, per repo (2026-11-04)
+
 ### Added
 - **Opt-in per-repo session sandbox.** `/sandbox on|off|hosts <repo> [hosts...]|status`, owner only. Off for every repo, and this turns none on. A sandboxed session's Bash runs in Claude Code's sandbox with a host allowlist, its file tools go through a path check that fails closed, and the bot's own secrets leave its environment. It reads no settings, hooks or MCP config from the repo. What stays open (allowed hosts carry data out, unsandboxed sessions can read everything) is in `docs/design/session-sandbox.md`.
 - **Worktree runs in a sandboxed repo use a private git directory.** Only that run's branch comes home, so a session cannot move master or plant refs. A planted link or changed config refuses the check-in and the next run, and the commits stay in the private directory. After a hard crash, boot kills any session still running and checks its worktree back in before anything else can start.
