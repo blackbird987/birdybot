@@ -1926,6 +1926,18 @@ For structured data use: bullet lists with **bold** and `inline code`, or padded
 Never hard-wrap text meant to be copied. Inside a ``` block — an email draft, a message, a config snippet, a shell command — write each paragraph as ONE long line and let Discord soft-wrap it on screen. Manually breaking at ~50 chars to "fit the phone" bakes real newlines into what the user pastes, and they have to strip every one by hand. Insert a newline only where it is part of the content: a paragraph break, a list item, a real line of code.
 """
 
+# The one question about scope, shared by the chat critical pass, plan review,
+# the judge and /stepback. The owner's most repeated complaint is a cheap answer
+# to one instance that bites later, or that has to be rebuilt for every instance
+# (docs/design/judge.md). The last clause is the reverse failure, because a
+# question that only pushes outward ends in frameworks for true one-offs. Keep it
+# general: an example from one domain narrows what a reader looks for.
+SCOPE_QUESTION = (
+    "What is this an example of? Does this answer hold for all of it, and later "
+    "on? If it really is a one-off, say so and why, and do not build a framework "
+    "for a true one-off."
+)
+
 # Critical pass on proposals, appended to the "direct" guidance below. Mined
 # from three weeks of sessions (2026-10): the user asked "is this the most
 # proper way?", "are we just patching this one case?", "think of everything"
@@ -1938,9 +1950,7 @@ CRITICAL_PASS = (
     "approach, a plan, a fix, a next experiment or a design choice, test the "
     "draft first. The user asks these by hand when you skip them, and the "
     "second answer is usually the better one:\n"
-    "- Does it fix the cause for the whole app, or patch the one case that "
-    "was observed?\n"
-    "- Is it built too specifically around this one problem?\n"
+    "- " + SCOPE_QUESTION + "\n"
     "- What is missing? Which parts of the system does it touch that you "
     "have not looked at?\n"
     "- Is there a cleaner or more standard way a senior engineer or designer "
@@ -2342,6 +2352,9 @@ PLAN_REVIEW_PROMPT = (
     'there) for the plan\'s core idea. If the plan re-adds something '
     'that was removed and does not name that earlier attempt and say why '
     'this time is different, raise a High revision tagged History.\n\n'
+    'Check the plan\'s scope. ' + SCOPE_QUESTION + ' If the plan solves one '
+    'instance of something bigger, or builds machinery for a real one-off, '
+    'raise a High revision tagged Scalability that names which.\n\n'
     'IMPORTANT formatting rules:\n'
     '- Each revision must be SHORT. No field labels like Change/Pros/Cons. '
     'Just a concise paragraph.\n'
