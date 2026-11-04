@@ -12,6 +12,7 @@ from bot.claude.types import (
     InstanceStatus, InstanceType,
 )
 from bot.platform.base import ButtonSpec, RequestContext
+from bot.engine import judge
 from bot.engine.cmd_state import within_dollar_budget
 
 from bot.engine.chain_git import (
@@ -1117,6 +1118,10 @@ async def _run_autopilot_chain(
                 result = await on_review_code(ctx, current_id, current_msg)
             elif step == "verify":
                 result = await on_verify(ctx, current_id, current_msg)
+                if result and judge.enabled_for(result.repo_name):
+                    result = await judge.gate_after_verify(
+                        ctx, result, more_steps=step != steps[-1],
+                    )
             elif step == "done":
                 # Snapshot HEAD before the chain `done` so verify_release has
                 # a stable diff anchor (entry_sha..HEAD).

@@ -421,6 +421,8 @@ async def on_help(ctx: RequestContext) -> None:
         "`/secret`: keys pasted into chat (list, add, forget, rename, grant)\n"
         "`/sandbox`: per-repo session sandbox (on, off, hosts, status)\n"
         "`/evals` — recurring session-quality flags\n"
+        "`/missed`: mark finished work that got past everything\n"
+        "`/stepback`: read-only look at where a repo's work is heading\n"
         "`/status` — health dashboard\n"
         "`/auth` — Claude account status / re-login\n"
         "`/logs` — bot log\n"

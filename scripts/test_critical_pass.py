@@ -73,8 +73,8 @@ check("not injected into other steps",
       all(config.CRITICAL_PASS not in g
           for k, g in config.WORKFLOW_GUIDANCE.items() if k != "direct"))
 for phrase, label in (
-    ("whole app", "whole-app vs one-patch question"),
-    ("too specifically", "too-specific question"),
+    ("What is this an example of", "shared scope question"),
+    ("one-off", "one-off escape from the scope question"),
     ("What is missing", "what's-missing question"),
     ("cleaner or more standard way", "cleaner-way question"),
     ("earlier attempts failed", "retry question"),
@@ -85,6 +85,8 @@ for phrase, label in (
 ):
     check(f"block carries the {label}", phrase in config.CRITICAL_PASS)
 check("no em dash in the block", "\u2014" not in config.CRITICAL_PASS)
+check("scope question is the shared constant", config.SCOPE_QUESTION in config.CRITICAL_PASS)
+check("plan review asks the same question", config.SCOPE_QUESTION in config.PLAN_REVIEW_PROMPT)
 
 print("the rendered system prompt carries it on direct turns only")
 from bot.claude.runner import ClaudeRunner  # noqa: E402

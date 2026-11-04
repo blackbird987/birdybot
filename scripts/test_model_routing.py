@@ -35,7 +35,7 @@ from bot.engine.workflows import resolve_spawn_model
 # restates a conversation that already happened, behind the same read-only
 # floor, so it writes no code by construction and is words by definition.
 _THINKING_ORIGINS = frozenset(
-    {InstanceOrigin.DIRECT, InstanceOrigin.PROMPT_REVIEW, InstanceOrigin.TLDR}
+    {InstanceOrigin.DIRECT, InstanceOrigin.PROMPT_REVIEW, InstanceOrigin.TLDR, InstanceOrigin.STEPBACK}
     | set(PLAN_ORIGINS)
 )
 

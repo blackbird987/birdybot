@@ -7,6 +7,7 @@ from pathlib import Path
 
 from bot import config
 from bot.claude.types import Instance
+from bot.engine import missed
 from bot.engine import (
     lifecycle,
     workflows,
@@ -269,6 +270,7 @@ _INSTANCE_ACTIONS = {
     "collapse": _on_collapse,
     "continue_autopilot": _on_continue_autopilot,
     "continue_ppu": _on_continue_ppu,
+    "missed": missed.on_missed_tap,
 }
 
 # Workflow step buttons: action -> the ``workflows`` facade function it calls,
@@ -321,6 +323,9 @@ async def handle_callback(
 
     elif action in _MODE_ACTIONS:
         await _on_mode(ctx, _MODE_ACTIONS[action], instance_id, source_msg_id)
+
+    elif action == "missed_kind":
+        await missed.on_missed_kind(ctx, instance_id, source_msg_id)
 
     elif action == "share":
         await on_share(ctx, instance_id)

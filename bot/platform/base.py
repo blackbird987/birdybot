@@ -210,6 +210,14 @@ class Messenger(Protocol):
         """
         ...
 
+    async def owner_messages(self, channel_id: str) -> list[str] | None:
+        """Everything the owner typed in this conversation, oldest first.
+
+        None means it could not be read, which is not the same as an empty
+        list. The judge treats both as "could not check". Default: None.
+        """
+        return None
+
     async def is_conversation_closed(self, channel_id: str) -> bool:
         """Return True if the conversation has been archived/closed.
 

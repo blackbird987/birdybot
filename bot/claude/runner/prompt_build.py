@@ -14,7 +14,7 @@ from bot.procutil import run_capture
 from bot.claude import context_bloat
 from bot.claude.provider import ProviderConfig
 from bot.claude.sandbox import SandboxRun
-from bot.claude.types import Instance
+from bot.claude.types import Instance, InstanceOrigin
 from bot.store import history as history_mod
 
 log = logging.getLogger(__name__)
@@ -586,6 +586,13 @@ class PromptMixin:
     ) -> str:
         """Build the system prompt with mobile hint, bot context, pinned context, repo CLAUDE.md, and projects dir."""
         provider = provider or self.provider
+        # The judge must not see what the author thought, and everything below
+        # can carry it: recent sessions, siblings, master's commit subjects,
+        # pinned context. So these two get their own short prompt and none of it.
+        if instance.origin is InstanceOrigin.JUDGE:
+            return config.JUDGE_SYSTEM_PROMPT
+        if instance.origin is InstanceOrigin.STEPBACK:
+            return config.STEPBACK_SYSTEM_PROMPT
         # Working Location preamble (t-3541): anchor the LLM's CWD/branch
         # ground truth at the very top of the system prompt so it can self-
         # correct after a session loss instead of confabulating about
