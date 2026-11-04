@@ -47,6 +47,8 @@ class InstanceOrigin(str, Enum):
     BG = "bg"                       # /bg command — background task
     RESOLVE_MERGE = "resolve_merge" # [Resolve with Claude] — auto-merge conflict resolver
     PROMPT_REVIEW = "prompt_review"  # Weekly eval-driven review of the bot's own prompt blocks
+    JUDGE = "judge"             # Fresh read-only session judging finished work against the owner's words
+    STEPBACK = "stepback"       # /stepback: read-only look at where a repo's work is heading
 
 
 # Origins that belong to the plan workflow (used in lifecycle + button selection)

@@ -37,6 +37,7 @@ from bot.engine.callbacks import (  # noqa: F401
     _clear_expand_overflow,
     handle_callback,
 )
+from bot.engine.missed import on_missed_command  # noqa: F401
 from bot.engine.cmd_state import (  # noqa: F401
     _channel_locks,
     _clear_chain_on_manual_finalize,

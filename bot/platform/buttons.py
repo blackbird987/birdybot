@@ -153,6 +153,7 @@ def action_button_specs(
                 ButtonSpec("Merge", f"merge:{iid}"),
                 ButtonSpec("Discard", f"discard:{iid}"),
             ])
+        rows.append([ButtonSpec("Missed", f"missed:{iid}")])
         return rows
 
     if instance.status == InstanceStatus.COMPLETED:
@@ -309,10 +310,22 @@ def action_button_specs(
     #
     # Never on a TL;DR's own card: re-summarising a summary says nothing, and
     # the recursion has no natural floor.
+    #
+    # Missed: the owner marking finished work as having got past everything
+    # (docs/design/judge.md). It takes the same ride, and otherwise its own row
+    # while one leaves room for the Collapse row an expanded card adds. A card
+    # full of rows drops it, since /missed covers that. Not on a recap or a
+    # judge's card, which are not work.
+    host = expand_row if expand_row is not None else branch_row
+    if (instance.status == InstanceStatus.COMPLETED
+            and instance.origin not in (InstanceOrigin.TLDR, InstanceOrigin.JUDGE)):
+        if host is not None:
+            host.append(ButtonSpec("Missed", f"missed:{iid}"))
+        elif len(rows) < 4:
+            rows.append([ButtonSpec("Missed", f"missed:{iid}")])
     if (instance.status == InstanceStatus.COMPLETED
             and instance.session_id
             and instance.origin != InstanceOrigin.TLDR):
-        host = expand_row if expand_row is not None else branch_row
         if host is not None:
             host.append(ButtonSpec("TL;DR", f"tldr:{iid}"))
 

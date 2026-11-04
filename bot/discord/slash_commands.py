@@ -432,6 +432,17 @@ def setup(bot: ClaudeBot) -> None:
             interaction, lambda ctx: workflows.on_tldr(ctx, inst.id),
         )
 
+    @bot.tree.command(
+        name="missed",
+        description="Mark finished work as having got past everything",
+        guild=guild_obj,
+    )
+    @app_commands.describe(note="What was missed (optional)")
+    async def cmd_missed(interaction: discord.Interaction, note: str = ""):
+        if await _refused(interaction, owner_only=True):
+            return
+        await bot._run_slash(interaction, lambda ctx: commands.on_missed_command(ctx, note))
+
     @bot.tree.command(name="alias", description="Command shortcuts", guild=guild_obj)
     @app_commands.describe(args="set|delete|list ...")
     async def cmd_alias(interaction: discord.Interaction, args: str = ""):
