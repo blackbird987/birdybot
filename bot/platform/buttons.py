@@ -89,24 +89,18 @@ def resolver_running_button_specs(instance_id: str) -> list[list[ButtonSpec]]:
     ]]
 
 
-def _plan_action_rows(iid: str, has_autopilot_chain: bool) -> list[list[ButtonSpec]]:
-    """The button rows offered when a plan is on the table.
+def _plan_action_rows(iid: str) -> list[list[ButtonSpec]]:
+    """The button row offered when a plan is on the table.
 
-    Hide the Autopilot starters when a chain is already paused — Continue
-    Autopilot elsewhere on the card is the correct resumption path.
+    Autopilot, Autopilot (Hold) and Review Plan are gone from new cards: Build &
+    Ship runs the plan check on its own. Cards already posted can still carry
+    them, so their handlers stay.
     """
-    rows: list[list[ButtonSpec]] = []
-    if not has_autopilot_chain:
-        rows.append([
-            ButtonSpec("Autopilot", f"autopilot:{iid}"),
-            ButtonSpec("Autopilot (Hold)", f"autopilot_hold:{iid}"),
-        ])
-    rows.append([
-        ButtonSpec("Review Plan", f"review_plan:{iid}"),
+    # TODO: drop the autopilot, autopilot_hold and review_plan handlers once old cards no longer matter.
+    return [[
         ButtonSpec("Build & Ship", f"build_and_ship:{iid}"),
         ButtonSpec("Done", f"done:{iid}"),
-    ])
-    return rows
+    ]]
 
 
 def action_button_specs(
@@ -134,7 +128,10 @@ def action_button_specs(
     # separately by bot/discord/prompt_review.py. Keep only the controls that
     # mean something here: stopping it, reading its log, and expanding a report
     # too long to render inline.
-    if instance.origin in (InstanceOrigin.PROMPT_REVIEW, InstanceOrigin.JUDGE, InstanceOrigin.STEPBACK):
+    if instance.origin in (
+        InstanceOrigin.PROMPT_REVIEW, InstanceOrigin.JUDGE, InstanceOrigin.STEPBACK,
+        InstanceOrigin.PLAN_CHECK, InstanceOrigin.PLAN_CHECK_APPLY,
+    ):
         if instance.status in (InstanceStatus.RUNNING, InstanceStatus.QUEUED):
             rows.append([ButtonSpec("Kill", f"kill:{iid}")])
         elif instance.status == InstanceStatus.FAILED:
@@ -203,7 +200,7 @@ def action_button_specs(
                 ])
             else:
                 # Plan created or revisions applied
-                rows.extend(_plan_action_rows(iid, has_autopilot_chain))
+                rows.extend(_plan_action_rows(iid))
         elif made_code_changes:
             # Edited/wrote files in-place (no branch)
             rows.append([
@@ -221,7 +218,7 @@ def action_button_specs(
         elif session_has_plan:
             # Fallback: session has a plan from a prior instance, and this
             # instance didn't do anything code-related — offer plan actions.
-            rows.extend(_plan_action_rows(iid, has_autopilot_chain))
+            rows.extend(_plan_action_rows(iid))
         else:
             # Default buttons + workflow row when session exists
             rows.append([
@@ -314,11 +311,14 @@ def action_button_specs(
     # Missed: the owner marking finished work as having got past everything
     # (docs/design/judge.md). It takes the same ride, and otherwise its own row
     # while one leaves room for the Collapse row an expanded card adds. A card
-    # full of rows drops it, since /missed covers that. Not on a recap or a
-    # judge's card, which are not work.
+    # full of rows drops it, since /missed covers that. Not on a recap, a
+    # judge's card or a plan check's, which are not work.
     host = expand_row if expand_row is not None else branch_row
     if (instance.status == InstanceStatus.COMPLETED
-            and instance.origin not in (InstanceOrigin.TLDR, InstanceOrigin.JUDGE)):
+            and instance.origin not in (
+                InstanceOrigin.TLDR, InstanceOrigin.JUDGE,
+                InstanceOrigin.PLAN_CHECK, InstanceOrigin.PLAN_CHECK_APPLY,
+            )):
         if host is not None:
             host.append(ButtonSpec("Missed", f"missed:{iid}"))
         elif len(rows) < 4:

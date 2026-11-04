@@ -37,8 +37,10 @@ never an exception and never a blocked step.
 
 Three consumers:
 
-- **Plan review**, both the Review Plan button (`on_review_plan`) and the
-  autopilot loop (`_review_plan_loop`, read once before round 0 and reused).
+- **Plan review**, both the Review Plan button (`on_review_plan`, gone from new
+  cards, the handler stays for old ones) and the autopilot loop
+  (`_review_plan_loop`, read once before round 0 and reused). The chain's plan
+  check (`docs/design/plan-check.md`) reads the same block.
   `PLAN_REVIEW_PROMPT` asks for a High revision tagged `History` when the plan
   re-adds something a `[reversal]` removed without naming it and saying what
   differs, and for a `PRIOR_ATTEMPTS:` line in the review-status block.

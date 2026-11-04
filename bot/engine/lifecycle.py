@@ -300,12 +300,20 @@ _NO_DIRECTIVE_ORIGINS: frozenset[InstanceOrigin] = frozenset({
     InstanceOrigin.TLDR,
     InstanceOrigin.JUDGE,
     InstanceOrigin.STEPBACK,
+    InstanceOrigin.PLAN_CHECK,
+    InstanceOrigin.PLAN_CHECK_APPLY,
 })
 
-# A judge run is a check on a thread's work and not a turn in it (judge.md). It
-# does not occupy the channel, does not retry on a timer (a usage limit means it
-# could not check), posts no result card, and is not a child landing.
-_JUDGE_ORIGIN = InstanceOrigin.JUDGE
+# A judge or plan check run is a check on a thread's work and not a turn in it
+# (judge.md, plan-check.md). It does not occupy the channel or touch the thread's
+# tag: it is a session of its own, so a message arriving meanwhile cannot collide.
+_NOT_A_TURN_ORIGINS = frozenset({InstanceOrigin.JUDGE, InstanceOrigin.PLAN_CHECK})
+
+# These runs are read by their caller. They do not retry on a timer (a usage limit
+# means it could not check), post no result card, and are not a child landing. The
+# plan check's author run is here too but not above, since it resumes the thread's
+# own session and has to hold the channel while it does.
+_CALLER_READS_ORIGINS = _NOT_A_TURN_ORIGINS | {InstanceOrigin.PLAN_CHECK_APPLY}
 
 
 def _origin_label(origin: InstanceOrigin) -> str:
@@ -398,7 +406,7 @@ async def run_instance(
     # from a previous run in the same thread.  Fire-and-forget on tag clear —
     # the thread may not be a forum thread.
     inst.warning_pinned = False
-    if inst.origin is not _JUDGE_ORIGIN:  # the tag belongs to the thread's own session
+    if inst.origin not in _NOT_A_TURN_ORIGINS:  # the tag belongs to the thread's own session
         asyncio.create_task(_try_apply_near_limit(ctx, inst, False))
     ctx.store.update_instance(inst, critical=True)
 
@@ -422,7 +430,7 @@ async def run_instance(
     finalized = False
     ctx.runner.begin_task(
         inst.id, session_id=inst.session_id,
-        channel_id=None if inst.origin is _JUDGE_ORIGIN else ctx.channel_id,
+        channel_id=None if inst.origin in _NOT_A_TURN_ORIGINS else ctx.channel_id,
     )
     try:
         try:
@@ -485,8 +493,10 @@ async def run_instance(
         if result.killed_intentionally:
             return
 
-        # Its caller reads the verdict from the instance, and fails closed on this one.
-        if inst.origin is _JUDGE_ORIGIN:
+        # Its caller reads the answer from the instance and decides what a failure means.
+        if inst.origin in _CALLER_READS_ORIGINS:
+            if result.api_fallback_used and result.cost_usd:
+                ctx.store.add_fallback_cost(result.cost_usd)
             return
 
         # Usage limit: schedule auto-retry instead of showing normal failure
@@ -864,6 +874,8 @@ def finalize_run(ctx: RequestContext, inst: Instance, result: RunResult) -> None
 _SKIP_HISTORY_ORIGINS = frozenset({
     InstanceOrigin.REVIEW_PLAN,
     InstanceOrigin.APPLY_REVISIONS,
+    InstanceOrigin.PLAN_CHECK,
+    InstanceOrigin.PLAN_CHECK_APPLY,
 })
 
 

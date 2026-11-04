@@ -63,6 +63,7 @@ from bot.claude.types import (  # noqa: E402
     Phase,
 )
 from bot.engine import chain_runner, workflows  # noqa: E402
+from bot.engine.plan_check import CheckOutcome  # noqa: E402
 from bot.platform.base import RequestContext  # noqa: E402
 from bot.store.state import StateStore  # noqa: E402
 
@@ -87,13 +88,17 @@ SOURCE_ID = "q-1"
 SOURCE_MSG = "m-source"
 MENTION = "<@u1>"
 
-SHIP = ["build", "sensors", "review_code", "verify",
-        "done", "verify_release", "release", "merge"]
-HOLD = ["build", "sensors", "review_code", "verify",
-        "done", "verify_release", "release"]
-VERIFY = ["build", "sensors", "review_code", "verify"]
-AUTOPILOT = ["review_loop"] + SHIP
-AUTOPILOT_HOLD = ["review_loop"] + HOLD
+# After the plan: what every entry point runs once its plan is settled.
+SHIP_TAIL = ["build", "sensors", "review_code", "verify",
+             "done", "verify_release", "release", "merge"]
+HOLD_TAIL = ["build", "sensors", "review_code", "verify",
+             "done", "verify_release", "release"]
+VERIFY_TAIL = ["build", "sensors", "review_code", "verify"]
+SHIP = ["plan_check"] + SHIP_TAIL
+HOLD = ["plan_check"] + HOLD_TAIL
+VERIFY = ["plan_check"] + VERIFY_TAIL
+AUTOPILOT = ["review_loop"] + SHIP_TAIL
+AUTOPILOT_HOLD = ["review_loop"] + HOLD_TAIL
 
 
 # --------------------------------------------------------------------------
@@ -135,6 +140,7 @@ class FakeRunner:
         self.rescue_sha: str | None = None
         self.rescued: list[str] = []
         self.discarded: list[str] = []
+        self.is_draining = False
 
     def begin_task(self, task_id: str) -> None:
         self.began.append(task_id)
@@ -291,6 +297,11 @@ class Scenario:
                 return sc._result_for("build")
             raise AssertionError(f"unexpected spawn origin {cfg.origin}")
 
+        async def plan_check(ctx, current_id, current_msg, session_id, chain_instances):
+            sc._record("plan_check", current_id, current_msg)
+            sc.produced["plan_check"] = current_id  # a clean check moves nothing on
+            return CheckOutcome()
+
         async def review_loop(ctx, current_id, current_msg, chain_instances):
             sc._record("review_loop", current_id, current_msg)
             inst = sc._result_for("review_loop")
@@ -345,6 +356,7 @@ class Scenario:
             })
 
         self._patch("spawn_from", spawn_from)
+        self._patch("run_plan_check", plan_check)
         self._patch("on_sensors", step_stub("sensors"))
         self._patch("on_review_code", step_stub("review_code"))
         self._patch("on_verify", step_stub("verify"))
@@ -807,7 +819,7 @@ s.close()
 s = scenario(step_cost=0.1)
 run(workflows.on_autopilot(s.ctx, SOURCE_ID, SOURCE_MSG, start_from="build",
                            cost_budget_usd=100.0))
-check_eq("budget not reached: chain completes", s.order, SHIP)
+check_eq("budget not reached: chain completes", s.order, SHIP_TAIL)
 s.close()
 config.COST_GATES_ENFORCE = _enforce_saved
 
@@ -832,15 +844,15 @@ s.close()
 
 s = scenario(head_mode="parked", rescue_sha=None)
 res = run(_chain("ship")(s))
-check_eq("clean worktree: chain halts right after build", s.order, ["build"])
+check_eq("clean worktree: chain halts right after build", s.order, ["plan_check", "build"])
 check_eq("clean worktree: outcome needs_input", s.final_eval().get("outcome"), "needs_input")
-check_eq("clean worktree: build counts as completed", s.final_eval().get("completed"), ["build"])
+check_eq("clean worktree: build counts as completed", s.final_eval().get("completed"), ["plan_check", "build"])
 check_eq("clean worktree: branch discarded (preserving dirty edits)",
          len(s.runner.discarded), 1)
 check("clean worktree: halt notice posted",
       any("Build stopped before committing" in t["text"] for t in s.messenger.texts))
 check_eq("clean worktree: state kept for resume",
-         (s.queue, s.status), (SHIP, "paused"))
+         (s.queue, s.status), (SHIP_TAIL, "paused"))
 check_eq("clean worktree: exactly one ping", len(s.messenger.mentions()), 1)
 s.close()
 
@@ -858,7 +870,7 @@ P2 = Phase(id="p2", title="Second", gate="mechanical")
 s = scenario(phases=[P1, P2])
 run(_chain("verify")(s))
 check_eq("two mechanical phases: two builds then the normal tail",
-         s.order, ["build", "build", "sensors", "review_code", "verify"])
+         s.order, ["plan_check", "build", "build", "sensors", "review_code", "verify"])
 check_eq("two phases: first branches, second copies the branch",
          [(sp["auto_branch"], sp["copy_branch"]) for sp in s.spawns],
          [(True, False), (False, True)])
@@ -878,11 +890,11 @@ s.close()
 
 s = scenario(phases=[Phase(id="d1", title="Design", gate="design")])
 run(_chain("ship")(s))
-check_eq("design gate: nothing spawned", (s.order, s.spawns), ([], []))
+check_eq("design gate: nothing spawned", (s.order, s.spawns), (["plan_check"], []))
 check_eq("design gate: outcome", s.final_eval().get("outcome"), "phase_gate_design")
 ps = s.store.get_chain_phases(SESSION)
 check_eq("design gate: paused at pre", ps.paused_at if ps else None, "pre")
-check_eq("design gate: chain queue kept and paused", (s.queue, s.status), (SHIP, "paused"))
+check_eq("design gate: chain queue kept and paused", (s.queue, s.status), (SHIP_TAIL, "paused"))
 check_eq("design gate: intervention", s.final_eval().get("intervention"), True)
 check("design gate: mention names the phase",
       len(s.messenger.mentions()) == 1 and "Phase `d1` (Design)" in s.messenger.mentions()[0])
@@ -890,13 +902,13 @@ s.close()
 
 s = scenario(phases=[Phase(id="r1", title="Risky", gate="risk"), P2])
 run(_chain("ship")(s))
-check_eq("risk gate: first phase built, then stop", s.order, ["build"])
+check_eq("risk gate: first phase built, then stop", s.order, ["plan_check", "build"])
 check_eq("risk gate: outcome", s.final_eval().get("outcome"), "phase_gate_risk")
 ps = s.store.get_chain_phases(SESSION)
 check_eq("risk gate: paused at post", ps.paused_at if ps else None, "post")
 check_eq("risk gate: the shipped phase is in the eval list",
          len(s.final_eval().get("instances", [])), 1)
-check_eq("risk gate: chain queue kept and paused", (s.queue, s.status), (SHIP, "paused"))
+check_eq("risk gate: chain queue kept and paused", (s.queue, s.status), (SHIP_TAIL, "paused"))
 s.close()
 
 s = scenario({"build": "failed"}, phases=[P1, P2])
@@ -904,9 +916,9 @@ run(_chain("ship")(s))
 check_eq("phase build failure: stops, paused at pre for re-run",
          (s.order, s.final_eval().get("outcome"),
           (s.store.get_chain_phases(SESSION) or ChainPhaseState()).paused_at),
-         (["build"], "failed", "pre"))
+         (["plan_check", "build"], "failed", "pre"))
 check_eq("phase build failure: queue kept (phase failures are resumable)",
-         (s.queue, s.status), (SHIP, "paused"))
+         (s.queue, s.status), (SHIP_TAIL, "paused"))
 s.close()
 
 

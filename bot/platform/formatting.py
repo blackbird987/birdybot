@@ -100,9 +100,9 @@ _BOT_CMD_BODY_OPEN_RE = re.compile(
 # What each chain preset actually runs, so the one-liner explains itself
 # without the reader having to remember the preset table.
 _CHAIN_PRESET_FLOW = {
-    "ship": "build → review → verify → release → merge",
-    "hold": "build → review → verify → release, then wait on Merge/Discard",
-    "verify": "build → review → verify, then stop",
+    "ship": "plan check → build → review → verify → release → merge",
+    "hold": "plan check → build → review → verify → release, then wait on Merge/Discard",
+    "verify": "plan check → build → review → verify, then stop",
 }
 # Chip budget — one line on a phone. Reasons/titles are trimmed to fit.
 _CHIP_MAX = 180

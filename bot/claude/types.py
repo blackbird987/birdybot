@@ -32,8 +32,8 @@ class InstanceOrigin(str, Enum):
     DIRECT = "direct"           # User typed a message or command
     PLAN = "plan"               # [Plan] button
     BUILD = "build"             # [Build It] button
-    REVIEW_PLAN = "review_plan" # [Review Plan] button
-    APPLY_REVISIONS = "apply_revisions"  # [Apply Revisions] button
+    REVIEW_PLAN = "review_plan" # Autopilot's review loop, and the [Review Plan] button on old cards
+    APPLY_REVISIONS = "apply_revisions"  # Autopilot's review loop, and [Apply Revisions] on old cards
     REVIEW_CODE = "review_code" # [Review Code] button
     TLDR = "tldr"               # [TL;DR] button and /tldr: plain-language recap
     COMMIT = "commit"           # [Commit] button
@@ -49,6 +49,8 @@ class InstanceOrigin(str, Enum):
     PROMPT_REVIEW = "prompt_review"  # Weekly eval-driven review of the bot's own prompt blocks
     JUDGE = "judge"             # Fresh read-only session judging finished work against the owner's words
     STEPBACK = "stepback"       # /stepback: read-only look at where a repo's work is heading
+    PLAN_CHECK = "plan_check"   # Chain step: fresh read-only session checking the plan against the repo
+    PLAN_CHECK_APPLY = "plan_check_apply"  # Chain step: the author deciding on what the plan check raised
 
 
 # Origins that belong to the plan workflow (used in lifecycle + button selection)
@@ -71,7 +73,7 @@ PLAN_ORIGINS = frozenset({InstanceOrigin.PLAN, InstanceOrigin.REVIEW_PLAN, Insta
 # by resolve_spawn_model — spawn_from and the manual-spawn sites (/bg,
 # /release, the merge resolver) all funnel origin → model through it.
 BUILD_ORIGINS: frozenset[InstanceOrigin] = frozenset({
-    InstanceOrigin.JUDGE,
+    InstanceOrigin.JUDGE, InstanceOrigin.PLAN_CHECK,
     InstanceOrigin.BUILD, InstanceOrigin.COMMIT,
     InstanceOrigin.DONE, InstanceOrigin.VERIFY,
     InstanceOrigin.VERIFY_RELEASE, InstanceOrigin.RELEASE,

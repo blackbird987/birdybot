@@ -721,7 +721,10 @@ def evaluate_chain(
     # Count revision/review loops from the store — the instances list only
     # contains one result per top-level step, but _review_plan_loop and
     # on_review_code internally spawn multiple sub-instances.
-    session_id = instances[0].session_id if instances else None
+    # The plan check's reviewer comes first and has a session of its own.
+    session_id = next(
+        (i.session_id for i in instances if i.origin != InstanceOrigin.PLAN_CHECK), None,
+    )
     all_session_insts = (
         [i for i in store.list_instances(all_=True) if i.session_id == session_id]
         if session_id else instances

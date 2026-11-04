@@ -135,25 +135,32 @@ def case_chain_is_not_queued() -> None:
     _check(ctx.runner.replayed == [], "no single-step replay is queued")
 
 
-def case_non_resuming_step_ignores_chain() -> None:
-    # Pins the semantics 64043b8 shipped with: only a step that resumes the
-    # source session is covered by that session's chain.  Every SpawnConfig
-    # in workflows.py sets resume_session=True today, so this guards the
-    # contract for a future fresh-session step rather than a live caller.
-    print("\n[step that does not resume the session: queued even with a chain]")
-    ctx = _press({"sess-1": ["verify"]}, resume_session=False)
+def case_non_resuming_step_is_covered_by_chain() -> None:
+    # 64043b8 shipped this the other way round, guarding a fresh-session step
+    # that did not exist yet. The plan check is that step: it does not resume,
+    # it runs inside a chain, and a replay queued for it would make boot
+    # recovery skip the thread and lose the chain.
+    print("\n[chain step that does not resume the session: chain state covers it]")
+    ctx = _press({"sess-1": ["plan_check", "build"]}, resume_session=False)
+    _check(ctx.runner.replayed == [], "no single-step replay is queued")
+
+
+def case_non_resuming_step_without_chain_is_queued() -> None:
+    print("\n[step that does not resume the session, no chain: queued]")
+    ctx = _press({}, resume_session=False)
     _check(len(ctx.runner.replayed) == 1, "replay queued")
 
 
 if __name__ == "__main__":
     case_no_chain_is_queued()
     case_chain_is_not_queued()
-    case_non_resuming_step_ignores_chain()
+    case_non_resuming_step_is_covered_by_chain()
+    case_non_resuming_step_without_chain_is_queued()
     print()
     if _failures:
         print(f"FAILED: {len(_failures)}")
         for f in _failures:
             print(f"  - {f}")
         sys.exit(1)
-    print("PASS: spawn during drain (3 cases)")
+    print("PASS: spawn during drain (4 cases)")
     sys.exit(0)
