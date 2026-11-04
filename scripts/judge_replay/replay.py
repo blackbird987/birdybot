@@ -2,7 +2,7 @@
 
     replay.py go --split dev --rev 0 --replicates 1
     replay.py go --split held_out --rev 1 --replicates 2
-    replay.py report --rev 1
+    replay.py report --split held_out --rev 1
 
 The judge's prompt, input and command line all come from the bot's own code in a child
 process (see scripts/replay_ab/prompt.py for why a child), so what runs here is what a

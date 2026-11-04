@@ -41,6 +41,7 @@ _KIND_LABELS = {
     KIND_TOO_NARROW: "Too narrow",
     KIND_BUG: "Bug",
 }
+_OWNER_ONLY = "Only the owner can mark work as missed."
 _MAX_NOTE_CHARS = 1000
 _GIT_TIMEOUT_SEC = 5
 
@@ -99,7 +100,7 @@ def amend_kind(event_id: str, kind: str) -> bool:
 def load_events(repo: str | None = None, days: int | None = None) -> list[MissedEvent]:
     """Events oldest first, with amendments applied. A bad line is skipped."""
     try:
-        text = _path().read_text(encoding="utf-8")
+        text = _path().read_text(encoding="utf-8", errors="replace")
     except OSError:
         return []
     fields = set(MissedEvent.__dataclass_fields__)
@@ -161,7 +162,7 @@ async def on_missed_tap(ctx: RequestContext, inst, source_msg_id: str | None = N
     same card reoffers the kind and does not count the same work twice.
     """
     if not ctx.is_owner:
-        await ctx.messenger.send_text(ctx.channel_id, "Only the owner can mark work as missed.", silent=True)
+        await ctx.messenger.send_text(ctx.channel_id, _OWNER_ONLY, silent=True)
         return
     existing = next((e for e in await asyncio.to_thread(load_events) if e.instance_id == inst.id), None)
     if existing is None:
@@ -178,17 +179,18 @@ async def on_missed_tap(ctx: RequestContext, inst, source_msg_id: str | None = N
 async def on_missed_kind(ctx: RequestContext, arg: str, source_msg_id: str | None = None) -> None:
     """A kind button under the note above. It settles that note and its buttons."""
     if not ctx.is_owner:
+        await ctx.messenger.send_text(ctx.channel_id, _OWNER_ONLY, silent=True)
         return
     event_id, _, kind = arg.partition("|")
     done = await asyncio.to_thread(amend_kind, event_id, kind)
-    text = f"Recorded as missed: {kind_label(kind).lower()}." if done else "That record is gone, so nothing changed."
+    text = f"Recorded as missed: {kind_label(kind)}." if done else "That record is gone, so nothing changed."
     await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, text, None)
 
 
 async def on_missed_command(ctx: RequestContext, note: str = "") -> None:
     """`/missed [note]`, for work with no card to tap, such as a chat turn long gone."""
     if not ctx.is_owner:
-        await ctx.messenger.send_text(ctx.channel_id, "Only the owner can mark work as missed.")
+        await ctx.messenger.send_text(ctx.channel_id, _OWNER_ONLY)
         return
     repo = ctx.repo_name or ""
     if not repo:

@@ -25,9 +25,8 @@ sys.path.insert(0, str(ROOT))
 
 from bot import config  # noqa: E402
 from bot.claude.types import Instance, InstanceOrigin, InstanceStatus, InstanceType  # noqa: E402
-from bot.engine import judge, lifecycle, stepback  # noqa: E402
+from bot.engine import cmd_state, judge, lifecycle, stepback  # noqa: E402
 from bot.platform.buttons import action_button_specs  # noqa: E402
-from bot.platform.modes import _WORKFLOW_ORIGINS  # noqa: E402
 
 passed = failed = 0
 
@@ -133,7 +132,6 @@ check("cap holds", sum(len(m) for m in kept) <= judge._MAX_OWNER_CHARS)
 
 # --- wiring ---
 check("no directives", {InstanceOrigin.JUDGE, InstanceOrigin.STEPBACK} <= lifecycle._NO_DIRECTIVE_ORIGINS)
-check("no mode toggle", {InstanceOrigin.JUDGE, InstanceOrigin.STEPBACK} <= _WORKFLOW_ORIGINS)
 for origin in (InstanceOrigin.JUDGE, InstanceOrigin.STEPBACK):
     specs = action_button_specs(instance(origin=origin), show_expand=False)
     check(f"{origin.value} has no workflow buttons", specs == [], specs)
@@ -165,6 +163,8 @@ def gate_ctx(owner=("do the thing",)):
     ctx.platform = "discord"
     ctx.messenger.owner_messages = AsyncMock(return_value=list(owner) if owner is not None else None)
     ctx.messenger.send_text = AsyncMock()
+    ctx.runner.check_spawn_allowed = MagicMock(return_value=None)
+    ctx.runner.active_instance_for_channel = MagicMock(return_value=None)
     return ctx
 
 
@@ -192,7 +192,7 @@ def run_gate(verdicts, *, owner=("do the thing",), diff=("d", ["c1"], ()), more_
         return instance(id=f"v-{calls['verify']}")
 
     with tempfile.TemporaryDirectory() as td, \
-            patch.object(config, "DATA_DIR", td), \
+            patch.object(config, "DATA_DIR", Path(td)), \
             patch.object(judge, "spawn_from", fake_spawn), \
             patch.object(judge, "on_verify", fake_verify), \
             patch.object(judge, "_branch_diff", AsyncMock(return_value=diff)), \
@@ -259,7 +259,7 @@ async def _spawn_none(*a, **k):
     return None
 
 ctx = gate_ctx()
-with tempfile.TemporaryDirectory() as td, patch.object(config, "DATA_DIR", td), \
+with tempfile.TemporaryDirectory() as td, patch.object(config, "DATA_DIR", Path(td)), \
         patch.object(judge, "spawn_from", _spawn_none), \
         patch.object(judge, "_branch_diff", AsyncMock(return_value=("d", [], ()))), \
         patch.object(judge, "repo_goal", lambda p: ""), patch.object(judge, "verify_output_of", lambda i: ""):
@@ -271,7 +271,7 @@ async def _boom(*a, **k):
     raise RuntimeError("boom")
 
 ctx = gate_ctx()
-with tempfile.TemporaryDirectory() as td, patch.object(config, "DATA_DIR", td), \
+with tempfile.TemporaryDirectory() as td, patch.object(config, "DATA_DIR", Path(td)), \
         patch.object(judge, "_branch_diff", _boom):
     out = asyncio.run(judge.gate_after_verify(ctx, instance(id="v-0"), more_steps=True))
 check("an internal error holds", out.needs_input)
@@ -347,6 +347,11 @@ with tempfile.TemporaryDirectory() as td:
     rows = [("b" * 40, "file subject", now), ("c" * 40, "older work", now)]
     check("a printed line pins a quiet commit, and only the newest", match_commits(printed, rows) == ([rows[0][0]], []), printed)
     check("a printed line naming no real commit does not count", match_commits(printed, [("d" * 40, "x", now)]) == ([], ["u0"]))
+    f = session(td, ("git commit-graph write", ""), ("git commit-tree abc", ""), name="plumbing.jsonl")
+    check("plumbing is not a commit", read_commit_calls(f) == [])
+    f = session(td, ('git commit -qm "a" && git add . && git commit -qm "b"', "[master abc1234] a\n[master def5678] b"), name="two.jsonl")
+    two = read_commit_calls(f)
+    check("two commits in one call are not guessed", match_commits(two, [("abc1234" + "0" * 33, "a", now), ("def5678" + "0" * 33, "b", now)]) == ([], ["u0"]), two)
     f = session(td, ("git commit --amend --no-edit", ""), name="amend.jsonl")
     check("no subject and no hash is unattributed", match_commits(read_commit_calls(f), []) == ([], ["u0"]))
 
@@ -371,8 +376,9 @@ def idle_repo(td):
     return repo, g("rev-parse", "--short", "HEAD"), g("rev-parse", "HEAD")
 
 
-def run_idle(td, repo, sess, *, verdict=PASS_B, idle=True, chain=False, closed=False, owner=("ask",), repair_ok=True):
+def run_idle(td, repo, sess, *, verdict=PASS_B, idle=True, chain=False, closed=False, owner=("ask",), repair_ok=True, draining=None, budget=True):
     ctx = gate_ctx(owner)
+    ctx.runner.check_spawn_allowed = MagicMock(return_value=draining)
     ctx.store.get_autopilot_chain = MagicMock(return_value=["verify"] if chain else None)
     ctx.messenger.is_conversation_closed = AsyncMock(return_value=closed)
     seen = {"prompts": [], "repairs": []}
@@ -385,11 +391,17 @@ def run_idle(td, repo, sess, *, verdict=PASS_B, idle=True, chain=False, closed=F
 
     async def start_repair(prompt):
         seen["repairs"].append(prompt)
+        # What must already be true while the whole repair turn is running.
+        seen["said_first"] = ctx.messenger.send_text.await_count
+        seen["rows_first"] = judge._load_records("99")
+        if isinstance(repair_ok, Exception):
+            raise repair_ok
         return repair_ok
 
-    with patch.object(config, "DATA_DIR", td), \
+    with patch.object(config, "DATA_DIR", Path(td)), \
             patch.object(judge, "find_session_file", lambda s: sess), \
             patch.object(judge, "_run_idle_judge", fake_run), \
+            patch.object(cmd_state, "check_budget", lambda c: budget), \
             patch.object(Instance, "read_result_text", lambda self: getattr(self, "_text", "")):
         out = asyncio.run(judge.judge_idle_thread(
             ctx, session_id="s", repo_name="aiagent", repo_path=str(repo),
@@ -462,6 +474,72 @@ with tempfile.TemporaryDirectory() as td:
     out, ctx, seen = run_idle(td, repo, sess, verdict=FIX_B)
     check("the repair's commits close the round", out is None and seen["prompts"] == [] and seen["repairs"] == [])
 
+
+def commit_more(repo, name):
+    (repo / name).write_text("z = 3\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", name], cwd=repo, check=True)
+    return subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=repo, capture_output=True, text=True).stdout.strip()
+
+
+with tempfile.TemporaryDirectory() as td:
+    repo, short, full = idle_repo(td)
+    first = ('git commit -m "two"', f"[master {short}] two")
+    sess = session(td, first, ts=NOW_TS)
+    out, ctx, seen = run_idle(td, repo, sess, verdict=FIX_B)
+    check("the problems are said before the repair runs", seen["said_first"] == 1, seen)
+    check("said while it is starting, not after", "repair turn is starting" in ctx.messenger.send_text.await_args_list[0].args[1])
+    check("recorded before the repair runs", seen["rows_first"][-1].get("repair_started") is True, seen["rows_first"])
+    # The repair turn committed nothing: its idle closes the round anyway.
+    out, ctx, seen = run_idle(td, repo, sess, verdict=FIX_B)
+    check("a repair with no commits still closes", out is None and seen["prompts"] == [] and ctx.messenger.send_text.await_count == 0)
+    short2 = commit_more(repo, "later.py")
+    sess = session(td, first, ('git commit -m "later.py"', f"[master {short2}] later.py"), ts=NOW_TS)
+    out, ctx, seen = run_idle(td, repo, sess)
+    check("a later turn's commits are not swallowed", out is not None and out.kind == judge.PASS and len(seen["prompts"]) == 1)
+    check("and only those are judged", "z = 3" in seen["prompts"][0] and "x = 1" not in seen["prompts"][0])
+
+for name, outcome in (("a refused start", False), ("a raising start", RuntimeError("boom"))):
+    with tempfile.TemporaryDirectory() as td:
+        repo, short, full = idle_repo(td)
+        first = ('git commit -m "two"', f"[master {short}] two")
+        sess = session(td, first, ts=NOW_TS)
+        out, ctx, seen = run_idle(td, repo, sess, verdict=FIX_B, repair_ok=outcome)
+        check(f"{name} returns the verdict", out is not None and out.kind == judge.FIX)
+        check(f"{name} says so", "No repair turn could start" in ctx.messenger.send_text.await_args.args[1])
+        with patch.object(config, "DATA_DIR", Path(td)):
+            check(f"{name} closes the round", not judge._load_records("99")[-1].get("repair_started"))
+        short2 = commit_more(repo, "later.py")
+        sess = session(td, first, ('git commit -m "later.py"', f"[master {short2}] later.py"), ts=NOW_TS)
+        out, _, seen = run_idle(td, repo, sess)
+        check(f"after {name} the next turn is judged", len(seen["prompts"]) == 1 and out.kind == judge.PASS)
+
+with tempfile.TemporaryDirectory() as td:
+    repo, short, full = idle_repo(td)
+    sess = session(td, ('git commit -m "two"', f"[master {short}] two"), ts=NOW_TS)
+    for name, kw in (("draining", {"draining": "Reboot in progress"}), ("over budget", {"budget": False})):
+        out, ctx, seen = run_idle(td, repo, sess, **kw)
+        check(f"{name}: no run", out is None and seen["prompts"] == [])
+        check(f"{name}: nothing recorded", not (Path(td) / "judge.jsonl").exists())
+    out, _, seen = run_idle(td, repo, sess)
+    check("a later idle tries again", len(seen["prompts"]) == 1)
+    (Path(td) / "judge.jsonl").open("a").write("[1, 2]\nnot json\n")
+    out, _, seen = run_idle(td, repo, sess)
+    check("a bad line in the record costs itself", out is None and seen["prompts"] == [])
+
+# A detached task: nothing may escape it, and the thread is free again afterwards.
+ctx = gate_ctx()
+ctx.store.get_autopilot_chain = MagicMock(side_effect=RuntimeError("boom"))
+out = asyncio.run(judge.judge_idle_thread(
+    ctx, session_id="s", repo_name="aiagent", repo_path="/nonexistent",
+    still_idle=lambda: True, start_repair=AsyncMock(),
+))
+check("an internal error stays in the log", out is None and "99" not in judge._idle_running)
+ctx = gate_ctx()
+ctx.messenger.send_text = AsyncMock(side_effect=RuntimeError("down"))
+asyncio.run(judge._report_idle(ctx, judge._could_not_check("x")))
+check("a line that cannot be posted costs only the line", ctx.messenger.send_text.await_count == 1)
+
 with tempfile.TemporaryDirectory() as td:
     repo, short, full = idle_repo(td)
     sess = session(td, ('git commit -m "two"', f"[master {short}] two"), ts=NOW_TS)
@@ -494,9 +572,42 @@ life = ast.parse((ROOT / "bot/engine/judge.py").read_text(encoding="utf-8"))
 names = {n.attr for n in ast.walk(life) if isinstance(n, ast.Attribute)}
 check("judge never binds a session", "backfill_thread_session" not in names and "bind_session" not in names)
 check("no directive parsing", "_execute_bot_commands" not in names)
-idle_prompt = (ROOT / "bot/engine/judge.py").read_text(encoding="utf-8")
-check("floor set on the chat path", 'inst.bash_policy = "none"' in idle_prompt)
-check("stepback floor", 'inst.bash_policy = "none"' in (ROOT / "bot/engine/stepback.py").read_text(encoding="utf-8"))
+ctx = gate_ctx()
+ctx.store.create_instance = MagicMock(return_value=instance(id="f-1"))
+floor = judge.readonly_instance(ctx, InstanceOrigin.JUDGE, "p", "aiagent", "/r")
+check("floor: explore", ctx.store.create_instance.call_args.kwargs["mode"] == "explore")
+check("floor: bash closed", floor.bash_policy == "none" and floor.bash_policy_baseline == "none")
+check("floor: fresh session", floor.session_id is None)
+
+
+def judge_run_instance(origin):
+    """The real run_instance, up to what it does with a finished run."""
+    ctx = gate_ctx()
+    ctx.channel_id = "99"
+    result = MagicMock(killed_intentionally=False, kill_owns_card=False, is_error=False, needs_input=False, result_text="done")
+    ctx.runner.run = AsyncMock(return_value=result)
+    ctx.runner.begin_task = MagicMock()
+    inst = instance(id="j-9", origin=origin)
+    with patch.object(lifecycle, "_try_apply_near_limit", AsyncMock()) as tag, \
+            patch.object(lifecycle, "get_sibling_summary", lambda *a, **k: ""), \
+            patch.object(lifecycle, "finalize_run", MagicMock()), \
+            patch.object(lifecycle, "schedule_cooldown_retry", AsyncMock(return_value=True)) as retry, \
+            patch.object(lifecycle, "send_result", AsyncMock()) as sent:
+        async def go():
+            await lifecycle.run_instance(ctx, inst, silent=True)
+            await asyncio.sleep(0)
+        asyncio.run(go())
+    return ctx, tag, retry, sent
+
+
+ctx, tag, retry, sent = judge_run_instance(InstanceOrigin.JUDGE)
+check("judge run: no channel taken", ctx.runner.begin_task.call_args.kwargs["channel_id"] is None)
+check("judge run: thread's tag left alone", tag.call_count == 0)
+check("judge run: no timer retry", retry.await_count == 0)
+check("judge run: no result card", sent.await_count == 0)
+ctx, tag, retry, sent = judge_run_instance(InstanceOrigin.DIRECT)
+check("any other run: takes its channel and clears the tag", ctx.runner.begin_task.call_args.kwargs["channel_id"] == "99" and tag.call_count == 1)
+check("any other run: reaches the retry", retry.await_count == 1)
 
 # --- the step-back ---
 ev = SimpleNamespace(ts="2026-11-01T10:00", kind="too_narrow", head_sha="abc", note="one ship only")
@@ -508,7 +619,7 @@ cut = stepback.build_input("g", ["s" * 100] * 1000, Counter(), [])
 check("subject cut stated", "commit subjects are shown" in cut)
 with tempfile.TemporaryDirectory() as td:
     repo, short, full = idle_repo(td)
-    subjects, areas = stepback._read_log(str(repo))
+    subjects, areas = asyncio.run(stepback._read_log(str(repo)))
     check("stepback reads the log", len(subjects) == 2 and areas["a.py"] == 1, (subjects, areas))
     ctx = gate_ctx()
     ctx.store.list_repos = MagicMock(return_value={"r": str(repo)})
@@ -517,15 +628,50 @@ with tempfile.TemporaryDirectory() as td:
     ctx.messenger.send_thinking = AsyncMock(return_value={})
     ctx.messenger.escape = lambda t: t
     with patch.object(stepback.lifecycle, "run_instance", AsyncMock()) as ran, \
+            patch.object(stepback.lifecycle, "backfill_thread_session", AsyncMock()), \
+            patch.object(cmd_state, "check_budget", lambda c: True), \
             patch.object(stepback.missed, "load_events", lambda **k: []):
         asyncio.run(stepback.on_stepback_command(ctx, "r"))
-    check("stepback runs read-only", made.mode == "build" or ctx.store.create_instance.call_args.kwargs["mode"] == "explore")
+    check("stepback runs read-only", ctx.store.create_instance.call_args.kwargs["mode"] == "explore")
     check("stepback closes bash", made.bash_policy == "none" and made.origin is InstanceOrigin.STEPBACK)
     check("stepback ran once", ran.await_count == 1)
     ctx = gate_ctx()
     ctx.store.list_repos = MagicMock(return_value={})
     asyncio.run(stepback.on_stepback_command(ctx, "nope"))
     check("unknown repo refused", "No repo" in ctx.messenger.send_text.await_args.args[1])
+
+    def refused(setup, budget=True, log=(["a1 x"], Counter()), events=()):
+        ctx = gate_ctx()
+        ctx.store.list_repos = MagicMock(return_value={"r": str(repo)})
+        setup(ctx)
+        with patch.object(stepback.lifecycle, "run_instance", AsyncMock()) as ran, \
+                patch.object(cmd_state, "check_budget", lambda c: budget), \
+                patch.object(stepback, "_read_log", AsyncMock(return_value=log)), \
+                patch.object(stepback.missed, "load_events", lambda **k: list(events)):
+            asyncio.run(stepback.on_stepback_command(ctx, "r"))
+        return ran.await_count == 0 and ctx.store.create_instance.call_count == 0, ctx.messenger.send_text.await_args.args[1]
+
+    def draining(c):
+        c.runner.check_spawn_allowed = MagicMock(return_value="Reboot in progress")
+
+    def busy(c):
+        c.runner.active_instance_for_channel = MagicMock(return_value="t-9")
+
+    ok, said = refused(draining)
+    check("stepback refused while draining", ok and "Reboot" in said, said)
+    ok, said = refused(busy)
+    check("stepback refused on a busy thread", ok and "already running" in said, said)
+    ok, said = refused(lambda c: None, budget=False)
+    check("stepback refused over budget", ok and "budget" in said, said)
+    ok, said = refused(lambda c: None, log=None)
+    check("stepback says when it cannot read", ok and "Could not read" in said, said)
+    ok, said = refused(lambda c: None, log=([], Counter()))
+    check("nothing to look at costs no run", ok and "Nothing to report" in said, said)
+
+help_src = (ROOT / "bot/engine/admin_cmds.py").read_text(encoding="utf-8")
+for cmd in ("/missed", "/stepback"):
+    check(f"{cmd} is in /help", f"`{cmd}`" in help_src)
+    check(f"{cmd} is in the bot context", f"- {cmd}" in src)
 
 check("no em dashes", all(
     chr(0x2014) not in (ROOT / p).read_text(encoding="utf-8")

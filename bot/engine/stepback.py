@@ -9,35 +9,30 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import subprocess
 from collections import Counter
 
-from bot.claude.sandbox import GIT_SAFE
-from bot.claude.types import InstanceOrigin, InstanceType
-from bot.engine import judge, lifecycle, missed
+from bot.claude.types import InstanceOrigin
+from bot.engine import cmd_state, judge, lifecycle, missed
 from bot.platform.base import RequestContext
 from bot.platform.formatting import running_button_specs
-from bot.procutil import run_capture
 
 log = logging.getLogger(__name__)
 
 WINDOW_DAYS = 7
 _MAX_SUBJECTS_CHARS = 20_000
-_GIT_TIMEOUT_SEC = 30
 
 
-def _read_log(repo_path: str) -> tuple[list[str], Counter]:
-    """(commit subjects newest first, commits per top-level area)."""
-    result = run_capture(
-        ["git", *GIT_SAFE, "log", f"--since={WINDOW_DAYS}.days", "--no-merges",
-         "--format=\x01%h %s", "--name-only"],
-        cwd=repo_path, timeout=_GIT_TIMEOUT_SEC, encoding="utf-8", errors="replace",
+async def _read_log(repo_path: str) -> tuple[list[str], Counter] | None:
+    """(commit subjects newest first, commits per top-level area). None if unreadable."""
+    text = await judge.git_read(
+        repo_path, "log", f"--since={WINDOW_DAYS}.days", "--no-merges",
+        "--format=\x01%h %s", "--name-only",
     )
-    if result.returncode != 0:
-        raise OSError(result.stderr.strip() or "git log failed")
+    if text is None:
+        return None
     subjects: list[str] = []
     areas: Counter = Counter()
-    for chunk in result.stdout.split("\x01"):
+    for chunk in text.split("\x01"):
         lines = [ln for ln in chunk.splitlines() if ln.strip()]
         if not lines:
             continue
@@ -81,26 +76,29 @@ async def on_stepback_command(ctx: RequestContext, repo_name: str) -> None:
     if not repo_path:
         await ctx.messenger.send_text(ctx.channel_id, f"No repo called `{repo_name}`.")
         return
-    try:
-        subjects, areas = await asyncio.to_thread(_read_log, repo_path)
-    except (OSError, subprocess.SubprocessError) as e:
-        await ctx.messenger.send_text(ctx.channel_id, f"Could not read that repo's history: {e}")
+    # A slash command takes no channel lock, and a second run would take over the
+    # running one's Kill button.
+    spawn_err = ctx.runner.check_spawn_allowed()
+    if spawn_err or ctx.runner.active_instance_for_channel(ctx.channel_id):
+        await ctx.messenger.send_text(
+            ctx.channel_id,
+            spawn_err or "Another session is already running on this thread. Wait for it to finish.",
+        )
         return
+    if await cmd_state.refuse_if_over_budget(ctx):
+        return
+    history = await _read_log(repo_path)
+    if history is None:
+        await ctx.messenger.send_text(ctx.channel_id, "Could not read that repo's history.")
+        return
+    subjects, areas = history
     events = await asyncio.to_thread(missed.load_events, repo=repo_name, days=WINDOW_DAYS)
+    if not subjects and not events:
+        await ctx.messenger.send_text(ctx.channel_id, f"Nothing to report: no commits or marks in the last {WINDOW_DAYS} days.")
+        return
     prompt = build_input(judge.repo_goal(repo_path), subjects, areas, events)
 
-    inst = ctx.store.create_instance(
-        instance_type=InstanceType.QUERY, prompt=prompt, mode="explore",
-    )
-    inst.origin = InstanceOrigin.STEPBACK
-    inst.origin_platform = ctx.platform
-    inst.repo_name = repo_name
-    inst.repo_path = repo_path
-    # The same floor as the other reviewers: explore alone leaves Bash as a write
-    # backdoor, and anything it needs from git was fetched above.
-    inst.bash_policy = "none"
-    inst.bash_policy_baseline = "none"
-    ctx.store.update_instance(inst)
+    inst = judge.readonly_instance(ctx, InstanceOrigin.STEPBACK, prompt, repo_name, repo_path)
 
     escaped = ctx.messenger.escape(inst.display_id())
     handle = await ctx.messenger.send_thinking(

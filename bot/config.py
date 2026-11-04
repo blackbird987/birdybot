@@ -1704,6 +1704,8 @@ Settings:
 - /cost — spending breakdown
 - /secret list|add|forget|rename|grant: keys pasted into chat, stored and used by name
 - /evals — recurring session-quality flags and which prompt block owns each
+- /missed [note]: mark finished work that got past everything
+- /stepback <repo>: read-only look at where a repo's recent work is heading
 - /status — health dashboard
 
 If the user asks to do something the bot handles (like scheduling, switching repos, etc.), guide them to the right command rather than saying you can't do it.

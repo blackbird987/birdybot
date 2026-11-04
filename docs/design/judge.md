@@ -8,10 +8,10 @@ else can judge.
 
 The code review runs resumed inside the author's session and the critical pass
 only asks the author to check itself in chat. Both read the author's reasoning
-first. The judge is a separate session that never sees it. The owner's
-corrections in the last 30 days were mostly found by using the thing (looks,
-feel, backtest behaviour), so "only you can judge" is a first-class answer, not
-a failure of the judge.
+first. The judge is a separate session that never sees it. Many of the owner's
+corrections in the last 30 days (10 of 25) were about looks or feel, found by using
+the thing, so "only you can judge" is a first-class answer, not a failure of the
+judge.
 
 ## The pieces
 
@@ -63,8 +63,8 @@ call sites check `enabled_for` before doing anything, and `scripts/test_judge.py
 pins both.
 
 **Not a turn.** It does not occupy the channel, does not bind its session to the
-thread, has no card, no timer retry and no parent notice (`run_instance` returns
-early for its origin). A bound judge session would amputate the thread's history.
+thread, has no result card, no timer retry and no parent notice (`run_instance`
+returns early for its origin), and leaves the thread's near-limit tag alone. A bound judge session would amputate the thread's history.
 
 **Chain path.** After verify. `fix` goes back to the author session to repair,
 re-verify and be judged again, `MAX_REPAIR_ROUNDS` times, then holds. `only_you` and
@@ -76,12 +76,17 @@ verify there is no Continue, because resuming would re-run verify.
 shared by parallel sessions, so commits are taken from that session's own
 `git commit` tool calls (`bot/engine/commit_calls.py`), never a head-to-head range.
 95% of those calls are `git commit -q`, which prints no hash, so a call with no hash
-is matched by the exact subject it passed against the repo's log within a few
-hours. A call that does not match exactly one commit is `could_not_check`, reported
-once. The work is
-already committed, so these only report. `fix` gets one repair turn, whose commits
-close the round rather than opening another. It does not fire while a task, watch
-or pending prompt is live (`idle._apply_sleep` guards).
+is matched by a log line it printed or the exact subject it passed, against the
+repo's log within a few hours. A call that does not match exactly one commit, or
+that runs `git commit` twice, is `could_not_check`, reported once. The work is
+already committed, so these only report. `fix` gets one repair turn, recorded and
+announced before it starts because starting one returns only when its turn is over.
+The first idle after it closes the round, whatever it committed, so later work is
+still judged. A message sent in the five minutes between the repair ending and that
+idle is closed with it, which is the accepted limit of telling them apart by time.
+It does not fire while a task, watch or pending prompt is live (`idle._apply_sleep`
+guards), and skips a bot that is draining or over budget without recording anything,
+so a later idle tries again.
 
 **Sandboxed repos.** Git reads use `sandbox.GIT_SAFE`, files use
 `fsutil.read_contained_text`, and the run goes through `core._prepare_spawn` like any

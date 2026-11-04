@@ -113,6 +113,9 @@ with tempfile.TemporaryDirectory() as tmp:
         f.write("not json\n[1]\n")
     check("bad lines cost themselves", len(missed.load_events()) == 2)
     check("repo filter", missed.load_events(repo="other") == [])
+    with file.open("ab") as f:
+        f.write(b"\xff\xfe not text\n")
+    check("a bad byte costs its own line", len(missed.load_events()) == 2)
 
     print("the button")
     file.unlink()
@@ -135,12 +138,15 @@ with tempfile.TemporaryDirectory() as tmp:
     action, arg = data.split(":", 1)
     asyncio.run(commands.handle_callback(ctx, action, arg, "m-9"))
     check("picking a kind sets it", missed.load_events()[0].kind == "too_narrow")
-    check("picking a kind settles the note", ctx.messenger.edits[-1] == ("Recorded as missed: too narrow.", None))
+    check("picking a kind settles the note", ctx.messenger.edits[-1] == ("Recorded as missed: Too narrow.", None))
 
     guest = _ctx(FakeStore(_inst(id="t-2")), is_owner=False)
     before_lines = len(lines(file))
     asyncio.run(commands.handle_callback(guest, "missed", "t-2", "m-1"))
     check("a guest's tap is not counted", len(lines(file)) == before_lines)
+    asyncio.run(commands.handle_callback(guest, action, arg, "m-9"))
+    check("a guest's kind changes nothing", missed.load_events()[0].kind == "too_narrow")
+    check("and the guest is told", guest.messenger.sent[-1][0] == missed._OWNER_ONLY)
 
     print("/missed")
     ctx = _ctx(FakeStore(inst))

@@ -304,7 +304,7 @@ _NO_DIRECTIVE_ORIGINS: frozenset[InstanceOrigin] = frozenset({
 
 # A judge run is a check on a thread's work and not a turn in it (judge.md). It
 # does not occupy the channel, does not retry on a timer (a usage limit means it
-# could not check), posts no card of its own, and is not a child landing.
+# could not check), posts no result card, and is not a child landing.
 _JUDGE_ORIGIN = InstanceOrigin.JUDGE
 
 
@@ -398,7 +398,8 @@ async def run_instance(
     # from a previous run in the same thread.  Fire-and-forget on tag clear —
     # the thread may not be a forum thread.
     inst.warning_pinned = False
-    asyncio.create_task(_try_apply_near_limit(ctx, inst, False))
+    if inst.origin is not _JUDGE_ORIGIN:  # the tag belongs to the thread's own session
+        asyncio.create_task(_try_apply_near_limit(ctx, inst, False))
     ctx.store.update_instance(inst, critical=True)
 
     on_progress = None
@@ -484,9 +485,11 @@ async def run_instance(
         if result.killed_intentionally:
             return
 
-        # Usage limit: schedule auto-retry instead of showing normal failure
+        # Its caller reads the verdict from the instance, and fails closed on this one.
         if inst.origin is _JUDGE_ORIGIN:
             return
+
+        # Usage limit: schedule auto-retry instead of showing normal failure
         if await schedule_cooldown_retry(ctx, inst, result, silent=silent):
             return  # Timer loop in app.py picks this up
 

@@ -17,7 +17,7 @@ import json
 import logging
 import re
 import subprocess
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -25,7 +25,7 @@ from pathlib import Path
 from bot import config
 from bot.claude.sandbox import GIT_SAFE
 from bot.claude.types import Instance, InstanceOrigin, InstanceStatus, InstanceType
-from bot.engine import lifecycle, step_parse
+from bot.engine import cmd_state, lifecycle, step_parse
 from bot.engine.commit_calls import LOG_FORMAT, match_commits, parse_log, read_commit_calls
 from bot.engine.sessions import find_session_file
 from bot.engine.step_policy import resolve_spawn_model
@@ -53,7 +53,8 @@ _MAX_STATE_CHARS = 4_000
 _MAX_DIFF_CHARS = 80_000
 _GIT_TIMEOUT_SEC = 30
 
-_LOG_NAME = "judge.jsonl"
+# Closes a chat repair round in the record. A marker and not a verdict.
+_REPAIR_CLOSED = "repair_closed"
 
 
 def enabled_for(repo_name: str | None) -> bool:
@@ -77,6 +78,10 @@ _PROBLEM_RE = re.compile(r"^[ \t]*-[ \t]+(.+)$", re.MULTILINE)
 
 def _could_not_check(why: str) -> Verdict:
     return Verdict(COULD_NOT_CHECK, line=why)
+
+
+def _bullets(items: Iterable[str]) -> str:
+    return "\n".join(f"- {item}" for item in items)
 
 
 def parse_verdict(text: str | None) -> Verdict:
@@ -172,7 +177,7 @@ def build_input(
         verify_output.strip() or "(none)",
     ]
     if cuts:
-        parts += ["=== LEFT OUT OF THIS INPUT ===", "\n".join(f"- {c}" for c in cuts)]
+        parts += ["=== LEFT OUT OF THIS INPUT ===", _bullets(cuts)]
     parts += ["Give your verdict."]
     return "\n\n".join(parts)
 
@@ -205,7 +210,7 @@ def verify_output_of(inst: Instance | None) -> str:
     return blocks[-1].strip() if blocks else ""
 
 
-async def _git(cwd: str, *args: str) -> str | None:
+async def git_read(cwd: str, *args: str) -> str | None:
     """A read in a checkout a session can write to: no hooks, no external diff tools."""
     try:
         result = await asyncio.to_thread(
@@ -228,26 +233,26 @@ async def _branch_diff(inst: Instance) -> tuple[str | None, list[str], tuple[str
     if not cwd:
         return None, [], ()
     target = inst.original_branch or "master"
-    base = await _git(cwd, "merge-base", "HEAD", target)
+    base = await git_read(cwd, "merge-base", "HEAD", target)
     if not base:
         return None, [], ()
     base = base.strip()
-    stat = await _git(cwd, "diff", "--no-ext-diff", "--no-textconv", "--stat", base)
-    body = await _git(cwd, "diff", "--no-ext-diff", "--no-textconv", base)
+    stat = await git_read(cwd, "diff", "--no-ext-diff", "--no-textconv", "--stat", base)
+    body = await git_read(cwd, "diff", "--no-ext-diff", "--no-textconv", base)
     if stat is None or body is None:
         return None, [], ()
-    listed = await _git(cwd, "rev-list", f"{base}..HEAD") or ""
-    untracked = await _git(cwd, "ls-files", "--others", "--exclude-standard") or ""
+    listed = await git_read(cwd, "rev-list", f"{base}..HEAD") or ""
+    untracked = await git_read(cwd, "ls-files", "--others", "--exclude-standard") or ""
     notes = ()
     if untracked.strip():
-        notes = (f"Files not yet committed and not shown in the diff: {', '.join(untracked.split())}",)
+        notes = (f"Files not yet committed and not shown in the diff: {', '.join(untracked.splitlines())}",)
     return f"{stat}\n{body}" if body.strip() else "", listed.split(), notes
 
 
 # --- The record ---
 
 def _log_path() -> Path:
-    return Path(config.DATA_DIR) / _LOG_NAME
+    return config.DATA_DIR / "judge.jsonl"
 
 
 def _record(row: dict) -> None:
@@ -264,7 +269,7 @@ def _load_records(thread: str) -> list[dict]:
     rows: list[dict] = []
     try:
         for rec in _iter_jsonl(_log_path()):
-            if rec.get("thread") == thread:
+            if isinstance(rec, dict) and rec.get("thread") == thread:
                 rows.append(rec)
     except OSError:
         pass
@@ -299,7 +304,7 @@ def _hold_text(verdict: Verdict, *, more_steps: bool) -> str:
         detail = verdict.line
     elif verdict.kind == FIX:
         head = f"🔎 Held before merge. Still has problems after {MAX_REPAIR_ROUNDS} repair rounds:"
-        detail = "\n".join(f"- {p}" for p in verdict.problems)
+        detail = _bullets(verdict.problems)
     else:
         head = "🔎 Held before merge. The check could not be done:"
         detail = verdict.line
@@ -397,10 +402,34 @@ async def gate_after_verify(
 
 
 def repair_prompt(verdict: Verdict) -> str:
-    return config.JUDGE_REPAIR_PROMPT + "\n".join(f"- {p}" for p in verdict.problems)
+    return config.JUDGE_REPAIR_PROMPT + _bullets(verdict.problems)
 
 
 # --- Chat ---
+
+def readonly_instance(
+    ctx: RequestContext, origin: InstanceOrigin, prompt: str, repo_name: str, repo_path: str,
+) -> Instance:
+    """A fresh run on the read-only floor, outside any thread's session.
+
+    Explore alone leaves Bash as a write backdoor, and whatever it needs from git the
+    bot fetched already.
+    """
+    inst = ctx.store.create_instance(
+        instance_type=InstanceType.QUERY, prompt=prompt, mode="explore",
+    )
+    inst.origin = origin
+    inst.origin_platform = ctx.platform
+    inst.repo_name = repo_name
+    inst.repo_path = repo_path
+    inst.bash_policy = "none"
+    inst.bash_policy_baseline = "none"
+    routed = resolve_spawn_model(origin)
+    if routed:
+        inst.model = routed
+    ctx.store.update_instance(inst)
+    return inst
+
 
 async def attributed_commits(repo_path: str, session_file: Path) -> tuple[list[str], list[str]]:
     """This session's commits as full hashes, plus the calls that could not be pinned down."""
@@ -415,7 +444,7 @@ async def attributed_commits(repo_path: str, session_file: Path) -> tuple[list[s
             when = datetime.fromtimestamp(edge, timezone.utc)
             when = when - slack if flag == "--since" else when + slack
             args.append(f"{flag}={when.isoformat()}")
-    log_text = await _git(repo_path, *args)
+    log_text = await git_read(repo_path, *args)
     if log_text is None:
         return [], [c.tool_id for c in calls]
     return match_commits(calls, parse_log(log_text))
@@ -425,7 +454,7 @@ async def _commit_diffs(repo_path: str, shas: list[str]) -> str | None:
     """Each commit's change and no commit message, which is the author talking."""
     out: list[str] = []
     for sha in shas:
-        shown = await _git(
+        shown = await git_read(
             repo_path, "show", "--format=", "--stat", "--patch",
             "--no-ext-diff", "--no-textconv", sha,
         )
@@ -450,16 +479,20 @@ async def judge_idle_thread(
     """Judge what a thread's own session committed, once, when the thread goes idle.
 
     Returns None when there was nothing new to judge. The work is already committed,
-    so this reports and never holds anything.
+    so this reports and never holds anything. It runs as a detached task, so a failure
+    stops here, in the log.
     """
     channel = str(ctx.channel_id)
-    if channel in _idle_running or ctx.store.get_autopilot_chain(session_id):
+    if channel in _idle_running:
         return None
     _idle_running.add(channel)
     try:
         return await _judge_idle_thread(
             ctx, channel, session_id, repo_name, repo_path, still_idle, start_repair,
         )
+    except Exception:
+        log.exception("Idle judge failed on thread %s", channel)
+        return None
     finally:
         _idle_running.discard(channel)
 
@@ -473,38 +506,43 @@ async def _judge_idle_thread(
     still_idle: Callable[[], bool],
     start_repair: Callable[[str], Awaitable[bool]],
 ) -> Verdict | None:
-    # A merged chain closes its thread, and its last commits came after its judgement.
-    if await ctx.messenger.is_conversation_closed(channel):
+    # A live chain judges its own work. A merged chain closes its thread, and its
+    # last commits came after its judgement.
+    if ctx.store.get_autopilot_chain(session_id) or await ctx.messenger.is_conversation_closed(channel):
+        return None
+    # The two refusals a spawned step gets. Nothing is recorded, so a later idle tries again.
+    if ctx.runner.check_spawn_allowed() or not cmd_state.check_budget(ctx):
         return None
     session_file = await asyncio.to_thread(find_session_file, session_id)
     if not session_file:
         return None
     resolved, unattributed = await attributed_commits(repo_path, session_file)
-    if not resolved and not unattributed:
-        return None
 
     records = await asyncio.to_thread(_load_records, channel)
     seen_commits = {c for r in records for c in r.get("commits") or []}
     seen_calls = {c for r in records for c in r.get("unattributed") or []}
     new_commits = [c for c in resolved if c not in seen_commits]
     new_calls = [c for c in unattributed if c not in seen_calls]
-    if not new_commits and not new_calls:
-        return None
 
-    common = {"run": None, "session_id": session_id, "repo": repo_name, "path": "chat"}
-
-    # The repair turn's own commits close that one round rather than opening another.
-    if records and records[-1].get("repair_started"):
+    def note(verdict: Verdict, *, run: Instance | None = None, **extra) -> None:
         _record_verdict(
-            ctx, Verdict("repair"), commits=new_commits, attempts=new_calls, **common,
+            ctx, verdict, run=run, session_id=session_id, repo=repo_name,
+            commits=new_commits, path="chat", **extra,
         )
+
+    # The first idle after a repair turn closes that one round, whatever it committed,
+    # so its commits do not open another and a later turn's are still judged.
+    if records and records[-1].get("repair_started"):
+        note(Verdict(_REPAIR_CLOSED), attempts=new_calls)
+        return None
+    if not new_commits and not new_calls:
         return None
 
     if new_calls:
         verdict = _could_not_check(
             "this thread's commits could not all be identified from its session",
         )
-        _record_verdict(ctx, verdict, commits=new_commits, attempts=new_calls, **common)
+        note(verdict, attempts=new_calls)
         await _report_idle(ctx, verdict)
         return verdict
 
@@ -512,7 +550,7 @@ async def _judge_idle_thread(
     diff = await _commit_diffs(repo_path, new_commits)
     if not owner or not diff:
         verdict = _could_not_check("the owner's messages or the commits' diff could not be read")
-        _record_verdict(ctx, verdict, commits=new_commits, **common)
+        note(verdict)
         await _report_idle(ctx, verdict)
         return verdict
 
@@ -521,19 +559,23 @@ async def _judge_idle_thread(
         ("The checkout you can read may have moved on since these commits.",),
     ))
     verdict = verdict_of_run(run)
-    common["run"] = run
     if verdict.kind == FIX and still_idle():
-        started = await start_repair(repair_prompt(verdict))
-        _record_verdict(
-            ctx, verdict, commits=new_commits, repair_started=started, **common,
-        )
-        problems = "\n".join(f"- {p}" for p in verdict.problems)
-        lead = "A repair turn is running now." if started else "No repair turn could start."
-        await ctx.messenger.send_text(
-            ctx.channel_id, f"🔎 A check of what was committed here found problems. {lead}\n{problems}",
-        )
+        # Written and said first: starting one only returns once its whole turn is over.
+        note(verdict, run=run, repair_started=True)
+        await _post(ctx, (
+            "🔎 A check of what was committed here found problems. A repair turn is starting.\n"
+            + _bullets(verdict.problems)
+        ))
+        try:
+            started = await start_repair(repair_prompt(verdict))
+        except Exception:
+            log.exception("Idle repair failed on thread %s", channel)
+            started = False
+        if not started:
+            note(Verdict(_REPAIR_CLOSED))
+            await _post(ctx, "🔎 No repair turn could start.")
         return verdict
-    _record_verdict(ctx, verdict, commits=new_commits, **common)
+    note(verdict, run=run)
     await _report_idle(ctx, verdict)
     return verdict
 
@@ -543,24 +585,19 @@ async def _run_idle_judge(
 ) -> Instance | None:
     """A fresh read-only run outside the thread's session. It never binds to the thread."""
     try:
-        inst = ctx.store.create_instance(
-            instance_type=InstanceType.QUERY, prompt=prompt, mode="explore",
-        )
-        inst.origin = InstanceOrigin.JUDGE
-        inst.origin_platform = ctx.platform
-        inst.repo_name = repo_name
-        inst.repo_path = repo_path
-        inst.bash_policy = "none"
-        inst.bash_policy_baseline = "none"
-        routed = resolve_spawn_model(InstanceOrigin.JUDGE)
-        if routed:
-            inst.model = routed
-        ctx.store.update_instance(inst)
+        inst = readonly_instance(ctx, InstanceOrigin.JUDGE, prompt, repo_name, repo_path)
         await lifecycle.run_instance(ctx, inst, silent=True)
         return inst
     except Exception:
         log.exception("Idle judge failed on thread %s", ctx.channel_id)
         return None
+
+
+async def _post(ctx: RequestContext, text: str) -> None:
+    try:
+        await ctx.messenger.send_text(ctx.channel_id, text)
+    except Exception:
+        log.warning("Could not post the judge's line in %s", ctx.channel_id, exc_info=True)
 
 
 async def _report_idle(ctx: RequestContext, verdict: Verdict) -> None:
@@ -570,11 +607,7 @@ async def _report_idle(ctx: RequestContext, verdict: Verdict) -> None:
     if verdict.kind == ONLY_YOU:
         text = f"🔎 Only you can judge this, on what was committed here:\n{verdict.line}"
     elif verdict.kind == FIX:
-        problems = "\n".join(f"- {p}" for p in verdict.problems)
-        text = f"🔎 A check of what was committed here found problems:\n{problems}"
+        text = f"🔎 A check of what was committed here found problems:\n{_bullets(verdict.problems)}"
     else:
         text = f"🔎 What was committed here could not be checked:\n{verdict.line}"
-    try:
-        await ctx.messenger.send_text(ctx.channel_id, text)
-    except Exception:
-        log.warning("Could not post the judge's line in %s", ctx.channel_id, exc_info=True)
+    await _post(ctx, text)

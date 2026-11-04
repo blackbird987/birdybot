@@ -7,7 +7,7 @@ nothing. So a call is pinned, in this order, by the hash git printed, by a line 
 same command printed afterwards (`git log --oneline -1`) naming a real commit, or by
 the exact subject it passed. Those last two have to fall within a few hours of the
 call, in the repo's own log. Anything that does not come to exactly one commit stays
-unattributed. Nothing here guesses.
+unattributed, and so does one call running `git commit` twice. Nothing here guesses.
 
 Standard library only, so the replay can import it without loading the bot's config.
 """
@@ -20,10 +20,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-_GIT_COMMIT_RE = re.compile(
-    r"(?:^|[;&|\n(]\s*)(?:\w+=\S+\s+)*git(?:\s+-[cC]\s+\S+)*\s+commit\b(?P<rest>.*)",
-    re.DOTALL,
-)
+# The lookahead leaves out `git commit-graph` and `git commit-tree`.
+_COMMIT_HEAD = r"(?:^|[;&|\n(]\s*)(?:\w+=\S+\s+)*git(?:\s+-[cC]\s+\S+)*\s+commit(?![\w-])"
+_COMMIT_HEAD_RE = re.compile(_COMMIT_HEAD)
+_GIT_COMMIT_RE = re.compile(_COMMIT_HEAD + r"(?P<rest>.*)", re.DOTALL)
 _OUTPUT_HASH_RE = re.compile(r"^\[[^\]\n]*?\b([0-9a-f]{7,40})\]", re.MULTILINE)
 _ONELINE_RE = re.compile(r"^([0-9a-f]{7,40}) (.+)$", re.MULTILINE)
 _NOT_A_COMMIT_RE = re.compile(
@@ -115,6 +115,11 @@ def read_commit_calls(session_file: Path) -> list[CommitCall]:
                     if "--dry-run" in command or not _GIT_COMMIT_RE.search(command):
                         continue
                     ts = _epoch(row.get("timestamp"))
+                    # One hash or subject cannot speak for two commits, so such a call
+                    # never reads its result and stays unattributed.
+                    if len(_COMMIT_HEAD_RE.findall(command)) > 1:
+                        calls[tool_id] = CommitCall(tool_id, ts, None, None, False)
+                        continue
                     pending[tool_id] = (command, ts)
                     # No result yet is a call whose outcome is unknown, not a failure.
                     calls[tool_id] = CommitCall(tool_id, ts, None, commit_subject(command), False)

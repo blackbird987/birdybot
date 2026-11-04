@@ -103,7 +103,10 @@ async def _apply_sleep(bot: ClaudeBot, channel_id: str, gen: int) -> None:
         bot._idle_timers.pop(channel_id, None)
         return
     bot._idle_timers.pop(channel_id, None)
-    _start_idle_judge(bot, channel_id)
+    try:
+        _start_idle_judge(bot, channel_id)
+    except Exception:  # never at the cost of the 💤
+        log.exception("Could not start the idle judge in %s", channel_id)
     ch = bot.get_channel(int(channel_id))
     await set_thread_sleeping(bot, ch)
 
@@ -136,8 +139,6 @@ def _start_idle_judge(bot: ClaudeBot, channel_id: str) -> None:
         return await bot._replay_to_thread(channel_id, prompt)
 
     ctx = bot._ctx(channel_id, repo_name=project.repo_name, source="judge")
-    ctx.mode = "explore"
-    ctx.bash_policy = "none"
     ctx.maybe_prime_briefing = None
     task = asyncio.create_task(judge.judge_idle_thread(
         ctx,
