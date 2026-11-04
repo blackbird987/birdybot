@@ -43,6 +43,7 @@ import time
 from pathlib import Path
 
 from bot import config
+from bot.engine import findings
 from bot.procutil import run_capture
 
 log = logging.getLogger(__name__)
@@ -86,6 +87,17 @@ _GIT_TIMEOUT_SECS = 5.0
 _TOTAL_BUDGET_SECS = 10.0
 
 _FMT = "--format=%h%x1f%ad%x1f%s"
+
+# What the repo's own records say does not work. The reviewer behind the
+# read-only floor has Bash closed, so it cannot print the state itself. It keeps
+# Grep, which is why a clipped list can send it there for the rest.
+_DEAD_END_LINE_MAX = 180
+_DEAD_END_HEADER = (
+    "### Dead ends this repo has already recorded\n"
+    "Tried and found not to work, newest first. A plan that re-runs one without "
+    "saying what differs gets a High revision tagged History naming the record "
+    "id. A build session asks the user first."
+)
 
 # A token that could be a path: letters, digits and the usual path
 # punctuation. `:` is excluded so `workflows.py:222` yields the file.
@@ -333,7 +345,8 @@ def _path_entries(
 def collect(repo_path: str, plan_text: str, *, max_chars: int | None = None) -> str:
     """The prior-history block for a plan, or "" when there is nothing to say.
 
-    Returns "" when disabled, outside a git repo, when the plan names no
+    The repo's recorded dead ends come with it whatever the plan names. Without
+    any, returns "" when disabled, outside a git repo, when the plan names no
     existing file and no code identifier, when git finds nothing, and on any
     failure. Never raises. Synchronous: call sites run it in a thread.
     """
@@ -344,11 +357,59 @@ def collect(repo_path: str, plan_text: str, *, max_chars: int | None = None) -> 
         return ""
 
 
+def _dead_end_section(repo_path: str) -> str:
+    """The repo's recorded dead ends, under their own budget, or "". Never raises."""
+    try:
+        records = findings.dead_ends(repo_path)
+        if not records:
+            return ""
+        budget = config.PRIOR_ART_DEAD_ENDS_MAX_CHARS - len(_DEAD_END_HEADER)
+        lines: list[str] = []
+        for record_id, text in records:
+            line = f"- {record_id}: {text}"
+            if len(line) > _DEAD_END_LINE_MAX:
+                line = line[:_DEAD_END_LINE_MAX - 1].rstrip() + "…"
+            if budget < len(line) + 1:
+                break
+            budget -= len(line) + 1
+            lines.append(line)
+        clipped = len(records) - len(lines)
+        if clipped:
+            where = findings.layout(repo_path)
+            hint = f'Grep `status = "{where.dead_status}"` in {where.records_rel}' if where else ""
+            lines.append(f"({clipped} older not shown. {hint})")
+        return "\n".join([_DEAD_END_HEADER, *lines])
+    except Exception:
+        log.warning("prior_art: dead ends failed for %s", repo_path, exc_info=True)
+        return ""
+
+
 def _collect(repo_path: str, plan_text: str, max_chars: int | None) -> str:
     if not config.PRIOR_ART_ENABLED or not plan_text or not repo_path:
         return ""
     if max_chars is None:
         max_chars = config.PRIOR_ART_MAX_CHARS
+    # Ahead of every early return in `_history`: the list is about the repo, not
+    # the plan, so a plan naming no file still needs it. Under the same marker,
+    # so `split_attached` and the two evals treat either half alike.
+    dead_ends = _dead_end_section(repo_path)
+    history = _history(repo_path, plan_text, max_chars)
+    if not dead_ends:
+        return history
+    if not history:
+        return f"{PRIOR_ART_MARKER}\n{dead_ends}"
+    return f"{history}\n\n{dead_ends}"
+
+
+def _history(repo_path: str, plan_text: str, max_chars: int) -> str:
+    try:
+        return _read_history(repo_path, plan_text, max_chars)
+    except Exception:
+        log.warning("prior_art: history failed for %s", repo_path, exc_info=True)
+        return ""
+
+
+def _read_history(repo_path: str, plan_text: str, max_chars: int) -> str:
     if not _is_git_repo(repo_path):
         return ""
     deadline = time.monotonic() + _TOTAL_BUDGET_SECS

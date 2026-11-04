@@ -57,8 +57,10 @@ _REVIEW_LOOP_MAX_ROUNDS = 5
 _BUILD_PLAN_INJECT_MAX = 8000
 
 # Room for the prior-history block a /chain plan carries, on top of the plan's
-# own cap: the block's own cap plus its closing instruction and some slack.
-_PRIOR_ART_INJECT_MAX = config.PRIOR_ART_MAX_CHARS + 600
+# own cap: the block's two caps plus its closing instruction and some slack.
+_PRIOR_ART_INJECT_MAX = (
+    config.PRIOR_ART_MAX_CHARS + config.PRIOR_ART_DEAD_ENDS_MAX_CHARS + 600
+)
 
 # Headings that mark trailing review-metadata sections in APPLY_REVISIONS /
 # TRIAGE result text. Stripped before injection so the build agent doesn't

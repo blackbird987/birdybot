@@ -59,6 +59,26 @@ dispatched `/chain` whose plan has no `Prior attempts:` line (owner
 `CHAIN_CONTEXT`, parsed with the dispatcher's own `_extract_chain_directive`
 so a quoted or nested /chain is as invisible to it as to the bot).
 
+A repo with a study folder also gets its recorded dead ends, from
+`findings.dead_ends` (`docs/design/findings.md`). They sit under a
+`### Dead ends this repo has already recorded` section of the same block, after
+the history, and three things about that are deliberate:
+
+- They are read ahead of `_read_history`'s early returns, because the list is
+  about the repo and not the plan: a plan naming no file or code name used to get
+  nothing at all. They also come outside a git repo.
+- They have their own budget (`PRIOR_ART_DEAD_ENDS_MAX_CHARS`, default 8000, newest
+  first, a counted clip note saying where to Grep), so a long history cannot squeeze
+  them out, and `_PRIOR_ART_INJECT_MAX` in `step_parse.py` holds both caps. The
+  reviewer has Bash closed and cannot print the state itself.
+- A dead-ends-only block still opens with `PRIOR_ART_MARKER`. `split_attached`
+  finds the attached block by that marker and the `PRIOR_ATTEMPTS:` eval keys on
+  it, so a separate marker would have left the list inside the plan half, where
+  the plan cap cuts it.
+
+Each half fails open alone: a reader that raises costs the list, a history that
+raises costs the history.
+
 Three things that must not drift:
 
 - **Never loosen the read-only floor to let the reviewer run git.** The bot
@@ -73,7 +93,9 @@ Three things that must not drift:
   its own allowance. Capping the joined text would drop the history, and its
   instruction, off the end of every long plan.
 
-Knobs: `PRIOR_ART_ENABLED`, `PRIOR_ART_MAX_CHARS` in `bot/config.py`.
+Knobs: `PRIOR_ART_ENABLED`, `PRIOR_ART_MAX_CHARS`,
+`PRIOR_ART_DEAD_ENDS_MAX_CHARS` in `bot/config.py`.
 
 Harness: `python scripts/test_prior_art.py` (replays this repo's own history,
-so a plan re-proposing the auto-armed wake must surface d5f8aa8).
+so a plan re-proposing the auto-armed wake must surface d5f8aa8). The dead-end
+half is in `python scripts/test_findings.py`.

@@ -1258,6 +1258,9 @@ PROMPT_REVIEW_MAX_PROPOSALS: int = int(os.getenv("PROMPT_REVIEW_MAX_PROPOSALS", 
 PRIOR_ART_ENABLED: bool = os.getenv(
     "PRIOR_ART_ENABLED", "1").lower() in ("1", "true", "yes")
 PRIOR_ART_MAX_CHARS: int = int(os.getenv("PRIOR_ART_MAX_CHARS", "2500"))
+# The repo's recorded dead ends, on top of the history's cap: a long history must
+# not squeeze out the list of what is already known not to work.
+PRIOR_ART_DEAD_ENDS_MAX_CHARS: int = int(os.getenv("PRIOR_ART_DEAD_ENDS_MAX_CHARS", "8000"))
 
 # Recent-session history injected into every system prompt.
 # SESSION_HISTORY_RANKING="relevance" keeps the entries most related to the
@@ -2805,6 +2808,11 @@ COMMIT_PROMPT = (
     'Update CHANGELOG.md: add a concise summary of changes under the '
     '## [Unreleased] section. If the file does not exist, create it with '
     'an [Unreleased] header. Do not create version-numbered headers.\n\n'
+    'If this work established or ruled out something a later session would '
+    'waste work without, record it in the same commit: '
+    f'`python3 {_PROJECT_ROOT / "scripts" / "study" / "study.py"} new --title ... '
+    '--question ...`, running `init` first if the repo has no study/config.toml. '
+    'Skip this when it established nothing.\n\n'
     'At the very end of your response, output a structured summary block '
     'in exactly this format (no extra text after the block):\n'
     '```summary\n'
