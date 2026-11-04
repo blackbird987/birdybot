@@ -8,13 +8,30 @@ methods read and the persistence that saves them.
 from __future__ import annotations
 
 import logging
+import os
+import stat
 from pathlib import Path
+
+from bot.claude import sandbox
+from bot.fsutil import atomic_write_text
 
 
 log = logging.getLogger(__name__)
 
 
 class ReposMixin:
+    # --- Session sandbox (read through bot/claude/sandbox.py) ---
+
+    def sandbox_entries(self) -> dict:
+        return self._sandboxed_repos
+
+    def set_sandbox_entry(self, real_path: str, entry: dict | None) -> None:
+        if entry is None:
+            self._sandboxed_repos.pop(real_path, None)
+        else:
+            self._sandboxed_repos[real_path] = entry
+        self.save()
+
     # --- Repo Registry ---
 
     def add_repo(self, name: str, path: str) -> None:
@@ -161,7 +178,9 @@ class ReposMixin:
         if not repo_path or not Path(repo_path).is_dir():
             log.warning("Cannot append deferred items: repo dir missing for %s", repo_name)
             return
-        todo_path = Path(repo_path) / "TODO.md"
+        todo_path = self._todo_path(repo_path)
+        if todo_path is None:
+            return
 
         if todo_path.exists():
             content = todo_path.read_text(encoding="utf-8")
@@ -180,9 +199,35 @@ class ReposMixin:
             return
 
         content = self._update_deferred_section(content, existing_items + new_items)
-        todo_path.write_text(content, encoding="utf-8")
+        self._write_todo(todo_path, content)
         log.info("Appended %d deferred items to %s TODO.md (skipped %d dupes)",
                  len(new_items), repo_name, len(items) - len(new_items))
+
+    def _todo_path(self, repo_path: str) -> Path | None:
+        """The repo's TODO.md, or None when a session could have planted it.
+
+        The bot reads and rewrites this file outside any sandbox, so in a sandboxed
+        repo a link or FIFO there is a way to read, clobber or hang on a host file.
+        """
+        path = Path(repo_path) / "TODO.md"
+        if not sandbox.is_sandboxed(self, repo_path):
+            return path
+        try:
+            if stat.S_ISREG(os.lstat(path).st_mode):
+                return path
+        except FileNotFoundError:
+            return path
+        except OSError:
+            pass
+        log.warning("Skipping %s: not a plain file in a sandboxed repo", path)
+        return None
+
+    def _write_todo(self, path: Path, content: str) -> None:
+        # A rename replaces a link swapped in since the check, and does not follow it.
+        if sandbox.is_sandboxed(self, str(path.parent)):
+            atomic_write_text(path, content)
+        else:
+            path.write_text(content, encoding="utf-8")
 
     def get_deferred(self, repo_name: str) -> str:
         """Get the deferred revisions section from the repo's TODO.md."""
@@ -198,8 +243,8 @@ class ReposMixin:
         repo_path = self._repos.get(repo_name)
         if not repo_path:
             return []
-        todo_path = Path(repo_path) / "TODO.md"
-        if not todo_path.exists():
+        todo_path = self._todo_path(repo_path)
+        if todo_path is None or not todo_path.exists():
             return []
         content = todo_path.read_text(encoding="utf-8")
         return self._parse_deferred_section(content)
@@ -211,15 +256,15 @@ class ReposMixin:
         repo_path = self._repos.get(repo_name)
         if not repo_path:
             return 0
-        todo_path = Path(repo_path) / "TODO.md"
-        if not todo_path.exists():
+        todo_path = self._todo_path(repo_path)
+        if todo_path is None or not todo_path.exists():
             return 0
         content = todo_path.read_text(encoding="utf-8")
         items = self._parse_deferred_section(content)
         if not items:
             return 0
         content = self._update_deferred_section(content, [])
-        todo_path.write_text(content, encoding="utf-8")
+        self._write_todo(todo_path, content)
         log.info("Cleared %d deferred items from %s TODO.md", len(items), repo_name)
         return len(items)
 

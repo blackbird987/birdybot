@@ -22,7 +22,7 @@ from bot.discord.access import (
 from bot.claude.types import InstanceStatus
 from bot.discord.modals import SecretAddModal
 from bot.discord.monitoring import monitor_setup
-from bot.engine import commands
+from bot.engine import commands, sandbox_cmds
 from bot.engine import sessions as sessions_mod
 from bot.platform.formatting import (
     MODE_DISPLAY, VALID_MODES, format_age, model_suggestions,
@@ -1060,6 +1060,42 @@ def setup(bot: ClaudeBot) -> None:
         )
 
     bot.tree.add_command(secret_group)
+
+    # --- Sandbox command group (owner-only) ---
+    sandbox_group = app_commands.Group(
+        name="sandbox", description="Per-repo session sandbox: off unless you turn it on",
+        guild_ids=[bot._guild_id],
+    )
+
+    async def _sandbox_reply(interaction: discord.Interaction, fn, *args):
+        if await _refused(interaction, owner_only=True):
+            return
+        await interaction.response.defer(ephemeral=True)
+        text = await asyncio.to_thread(fn, *args)
+        await interaction.followup.send(text[:1900], ephemeral=True)
+
+    @sandbox_group.command(name="on", description="Sandbox a repo's sessions from their next run on")
+    @app_commands.describe(repo="Registered repo name")
+    async def cmd_sandbox_on(interaction: discord.Interaction, repo: str):
+        await _sandbox_reply(
+            interaction, sandbox_cmds.turn_on, bot._store, repo, bot._runner.provider.name,
+        )
+
+    @sandbox_group.command(name="off", description="Turn a repo's session sandbox off")
+    @app_commands.describe(repo="Registered repo name")
+    async def cmd_sandbox_off(interaction: discord.Interaction, repo: str):
+        await _sandbox_reply(interaction, sandbox_cmds.turn_off, bot._store, repo)
+
+    @sandbox_group.command(name="hosts", description="Replace the network hosts a sandboxed repo can reach")
+    @app_commands.describe(repo="Registered repo name", hosts="Host names, separated by spaces")
+    async def cmd_sandbox_hosts(interaction: discord.Interaction, repo: str, hosts: str = ""):
+        await _sandbox_reply(interaction, sandbox_cmds.set_hosts, bot._store, repo, hosts.split())
+
+    @sandbox_group.command(name="status", description="Which repos are sandboxed, and what they can reach")
+    async def cmd_sandbox_status(interaction: discord.Interaction):
+        await _sandbox_reply(interaction, sandbox_cmds.status, bot._store, bot._runner.provider.name)
+
+    bot.tree.add_command(sandbox_group)
 
     # --- /access command group (owner-only) ---
     access_group = app_commands.Group(

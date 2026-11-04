@@ -12,6 +12,7 @@ import logging
 
 from bot import config
 from bot.textutil import parse_iso_utc
+from bot.claude.sandbox import is_sandboxed
 
 log = logging.getLogger(__name__)
 
@@ -206,7 +207,8 @@ async def ship_sweep(store, discord_bot) -> None:
     now = dt.now(tz_mod.utc)
     ship_ids: list[str] = []
     for t in targets:
-        policy = load_workflow_policy(t.inst.repo_path if t.inst else None)
+        repo_path = t.inst.repo_path if t.inst else None
+        policy = load_workflow_policy(repo_path, sandboxed=is_sandboxed(store, repo_path))
         if policy["autonomy"] != "ship":
             continue
         # A per-build veto already owns this session — let Phase 2 handle it.

@@ -25,6 +25,7 @@ import errno
 import logging
 import os
 import re
+import stat
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -187,13 +188,65 @@ def process_alive(pid: int, start_token: str = "") -> bool:
 
 # --- Log reading ------------------------------------------------------------
 
+def _contained_regular(path: Path, root: str) -> bool:
+    try:
+        real = os.path.realpath(path)
+        real_root = os.path.realpath(root)
+        if not real.startswith(real_root.rstrip(os.sep) + os.sep):
+            return False
+        return stat.S_ISREG(os.stat(real).st_mode)
+    except OSError:
+        return False
+
+
+def sandbox_refusal(data: dict, working_dir: str) -> str | None:
+    """Why a sandboxed session cannot arm this watch, or None."""
+    if data.get("pid"):
+        return (
+            "(Can't watch a pid from a sandboxed session: it has its own process "
+            "numbering, so that number means another process out here. Watch a "
+            "log file inside this directory instead, with a done marker.)"
+        )
+    log_path = data.get("log")
+    if log_path:
+        p = Path(log_path)
+        if not p.is_absolute():
+            p = Path(working_dir) / p
+        real, root = os.path.realpath(p), os.path.realpath(working_dir)
+        if not real.startswith(root.rstrip(os.sep) + os.sep):
+            return "(Can't watch that log: a sandboxed session only watches files inside its directory.)"
+    return None
+
+
 def _resolve_log(watch: Watch) -> Path | None:
     if not watch.log_path:
         return None
     p = Path(watch.log_path)
     if not p.is_absolute() and watch.repo_path:
         p = Path(watch.repo_path) / p
+    # Checked on every read: the session can swap a log for a link after arming,
+    # and a FIFO would hang the poller.
+    if watch.log_root:
+        if not _contained_regular(p, watch.log_root):
+            return None
     return p
+
+
+def _read_tail_contained(path: Path, root: str) -> str:
+    """The tail of a session's log, checked on the descriptor that was opened.
+
+    A path check alone loses a race to a job still running in that session.
+    """
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    with os.fdopen(fd, "rb") as fh:
+        st = os.fstat(fh.fileno())
+        real = os.readlink(f"/proc/self/fd/{fh.fileno()}")
+        real_root = os.path.realpath(root)
+        if not stat.S_ISREG(st.st_mode) or not real.startswith(real_root.rstrip(os.sep) + os.sep):
+            return ""
+        if st.st_size > config.WATCH_LOG_TAIL_BYTES:
+            fh.seek(st.st_size - config.WATCH_LOG_TAIL_BYTES)
+        return fh.read(config.WATCH_LOG_TAIL_BYTES).decode("utf-8", errors="replace")
 
 
 def read_log_tail(watch: Watch) -> str:
@@ -202,6 +255,8 @@ def read_log_tail(watch: Watch) -> str:
     if p is None:
         return ""
     try:
+        if watch.log_root:
+            return _read_tail_contained(p, watch.log_root)
         size = p.stat().st_size
         with p.open("rb") as fh:
             if size > config.WATCH_LOG_TAIL_BYTES:

@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from bot import config
 from bot.procutil import run_capture
 from bot.claude.models import context_tokens_from_usage
+from bot.claude import sandbox
 from bot.claude.parser import is_context_overflow_error, looks_like_fatal_auth_error
 from bot.claude.provider import get_provider
 from bot.claude.runner import RebootResult
@@ -1268,7 +1269,9 @@ async def _maybe_schedule_auto_merge(
         return
 
     from bot.engine.workflows import load_workflow_policy
-    policy = load_workflow_policy(inst.repo_path)
+    policy = load_workflow_policy(
+        inst.repo_path, sandboxed=sandbox.is_sandboxed(ctx.store, inst.repo_path),
+    )
     if policy["autonomy"] not in ("merge", "ship"):
         return
 
@@ -2049,6 +2052,13 @@ async def check_wake_request(
                 "Reply or tap a button when you want me to continue.)"
             )
             return
+        watch_sandboxed = sandbox.is_sandboxed(ctx.store, instance.repo_path)
+        if watch_sandboxed:
+            refusal = watches.sandbox_refusal(watch_data, instance.repo_path or "")
+            if refusal:
+                _reset()
+                await _notice(refusal)
+                return
         count = ctx.bump_wake_count() if ctx.bump_wake_count is not None else 1
         if count > config.MAX_CONSEC_WAKES:
             await _stop_capped()
@@ -2069,6 +2079,8 @@ async def check_wake_request(
             repo_name=instance.repo_name or "",
             repo_path=instance.repo_path or "",
         )
+        if watch_sandboxed:
+            watch.log_root = instance.repo_path or ""
         # Already gone before we even armed? Record it. The poller will fire on
         # its next tick either way, but the resume prompt has to distinguish a
         # job that finished during the turn from a captured WRAPPER pid — they

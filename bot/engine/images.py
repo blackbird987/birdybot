@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING
 
 from bot import config
 from bot.claude.gitpaths import git_toplevel
+from bot.claude.sandbox import is_sandboxed
 from bot.procutil import run_capture
 from bot.textutil import DIRECTIVE_ARGS, DIRECTIVE_KV_RE, directive_kv, is_quoted_example, mask_tilde_bodies
 
@@ -89,7 +90,7 @@ def parse_image_directives(text: str) -> list[tuple[str, str | None]]:
     return out
 
 
-def _allowed_roots(inst: "Instance") -> list[Path]:
+def _allowed_roots(inst: "Instance", sandboxed: bool = False) -> list[Path]:
     """Directories this run is allowed to publish a file from.
 
     Deliberately NOT the system temp dir. That was the first cut, and the test
@@ -98,12 +99,18 @@ def _allowed_roots(inst: "Instance") -> list[Path]:
     machine where the repo itself sits under temp) silently defeats the
     ``..``-escape check. A session that generates a picture writes it into its
     own worktree or ``data/`` instead.
+
+    A sandboxed session gets its own working directory only. The bot's data dir
+    holds images from every other thread.
     """
-    raw = [
-        getattr(inst, "worktree_path", None),
-        getattr(inst, "repo_path", None),
-        str(config.DATA_DIR),
-    ]
+    if sandboxed:
+        raw = [getattr(inst, "worktree_path", None) or getattr(inst, "repo_path", None)]
+    else:
+        raw = [
+            getattr(inst, "worktree_path", None),
+            getattr(inst, "repo_path", None),
+            str(config.DATA_DIR),
+        ]
     roots: list[Path] = []
     for p in raw:
         if not p:
@@ -115,7 +122,9 @@ def _allowed_roots(inst: "Instance") -> list[Path]:
     return roots
 
 
-def resolve_image(raw: str, inst: "Instance") -> tuple[Path | None, str]:
+def resolve_image(
+    raw: str, inst: "Instance", *, sandboxed: bool = False,
+) -> tuple[Path | None, str]:
     """Validate one directive path. Returns ``(path, reason_if_rejected)``.
 
     Relative paths resolve against the run's own working root — the worktree
@@ -151,6 +160,7 @@ def resolve_image(raw: str, inst: "Instance") -> tuple[Path | None, str]:
             not cand.is_file()
             and cand.suffix.lower() in IMAGE_EXTS
             and not getattr(inst, "worktree_path", None)
+            and not sandboxed
         ):
             # A session working in the repo may have made its own git worktree
             # (or cd'd into one) and written the path relative to THAT tree.
@@ -173,7 +183,7 @@ def resolve_image(raw: str, inst: "Instance") -> tuple[Path | None, str]:
     except OSError:
         return None, "unreadable path"
 
-    roots = _allowed_roots(inst)
+    roots = _allowed_roots(inst, sandboxed)
     if not any(_under(cand, r) for r in roots):
         return None, "outside this repo, the worktree, and the bot's data dir"
     if cand.suffix.lower() not in IMAGE_EXTS:
@@ -214,9 +224,12 @@ async def deliver_images(
     captions: list[str] = []
     problems: list[str] = []
     batch_bytes = 0
+    sandboxed = is_sandboxed(ctx.store, getattr(inst, "repo_path", None))
     for raw, caption in directives:
         # Off the event loop: the worktree fallback shells out to git.
-        resolved, reason = await asyncio.to_thread(resolve_image, raw, inst)
+        resolved, reason = await asyncio.to_thread(
+            resolve_image, raw, inst, sandboxed=sandboxed,
+        )
         if resolved is None:
             log.warning("/image refused %r — %s", raw, reason)
             problems.append(f"`{Path(raw).name or raw}` — {reason}")

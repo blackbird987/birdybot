@@ -92,7 +92,7 @@ async def on_merge(ctx: RequestContext, text: str) -> None:
         if not claimed:
             await ctx.messenger.send_text(ctx.channel_id, already_running_text(inst))
             return
-        text, _ = await workflows.merge_from_user(ctx, inst)
+        text, _ = await workflows.merge_from_user(ctx, inst, owner_approved=ctx.is_owner)
     await ctx.messenger.send_text(ctx.channel_id, text)
 
 

@@ -26,6 +26,7 @@ import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -68,6 +69,8 @@ class Ctx:
         self.channel_id = "chan"
         self.platform = "test"
         self.repo_name = None
+        self.session_id = None
+        self.runner = SimpleNamespace(active_instance_for_session=lambda _s: None, active_instance_for_channel=lambda _c: None)
 
 
 def make_instance() -> Instance:

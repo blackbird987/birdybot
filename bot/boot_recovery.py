@@ -13,6 +13,7 @@ from pathlib import Path
 
 from bot import config, paths
 from bot.claude import memory as claude_memory
+from bot.claude import sandbox
 from bot.claude.types import InstanceStatus
 from bot.platform.base import NotificationService
 from bot.store.state import StateStore
@@ -333,6 +334,12 @@ async def resume_interrupted_chains(
                 )
             finally:
                 await discord_bot._after_turn(ctx, thread_id, dashboard=False)
+
+
+def recover_sandboxed_worktrees() -> None:
+    """Put back any worktree a dead process left on its private git directory."""
+    for problem in sandbox.recover_after_restart():
+        log.error("Sandbox recovery: %s", problem)
 
 
 def log_orphan_git(store: StateStore, runner) -> None:

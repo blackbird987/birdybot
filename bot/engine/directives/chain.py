@@ -152,7 +152,11 @@ async def _handle_chain_directive(
     # sensible default (ship repos → ship, else hold), falling back to ship.
     if preset is None:
         from bot.engine.workflows import load_workflow_policy
-        policy = load_workflow_policy(source_inst.repo_path)
+        from bot.claude.sandbox import is_sandboxed
+        policy = load_workflow_policy(
+            source_inst.repo_path,
+            sandboxed=is_sandboxed(ctx.store, source_inst.repo_path),
+        )
         preset = "ship" if policy["autonomy"] in ("merge", "ship") else "hold"
 
     # Newest wins. The override is written by the drain once it holds the

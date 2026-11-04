@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import stat
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -66,6 +67,28 @@ def atomic_write_json(
     atomic_write_text(path, text)
 
 
+def read_contained_text(
+    root: str | Path, rel: str, *, max_bytes: int | None = None,
+) -> str | None:
+    """Text of a regular file under ``root``, or None.
+
+    None for a missing file, a link that resolves out of ``root``, a FIFO (which
+    would hang the reader) or anything else that is not a plain file. These files
+    are repo content: a session can plant `.claude/test.json -> ~/.ssh/id_rsa`.
+    """
+    real_root = os.path.realpath(root)
+    real = os.path.realpath(os.path.join(real_root, rel))
+    if not real.startswith(real_root.rstrip(os.sep) + os.sep):
+        return None
+    try:
+        if not stat.S_ISREG(os.stat(real).st_mode):
+            return None
+        with open(real, encoding="utf-8", errors="replace") as fh:
+            return fh.read(max_bytes) if max_bytes else fh.read()
+    except OSError:
+        return None
+
+
 def read_repo_config(repo_path: str | Path | None, name: str) -> dict | None:
     """The JSON object in ``<repo>/.claude/<name>``, or None.
 
@@ -78,12 +101,12 @@ def read_repo_config(repo_path: str | Path | None, name: str) -> dict | None:
     """
     if not repo_path:
         return None
-    path = Path(repo_path) / ".claude" / name
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
+    text = read_contained_text(repo_path, os.path.join(".claude", name))
+    if text is None:
         return None
-    except (OSError, ValueError):
+    try:
+        raw = json.loads(text)
+    except ValueError:
         log.debug("Malformed .claude/%s at %s", name, repo_path, exc_info=True)
         return None
     return raw if isinstance(raw, dict) else None

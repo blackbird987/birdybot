@@ -124,7 +124,7 @@ async def _on_merge(ctx: RequestContext, inst: Instance, source_msg_id: str | No
             return
         await show_branch_progress(ctx, source_msg_id, merge_progress_text(inst))
         # The "merged" tag lands inside merge_from_user, before the close.
-        escaped, msg = await workflows.merge_from_user(ctx, inst)
+        escaped, msg = await workflows.merge_from_user(ctx, inst, owner_approved=ctx.is_owner)
         await _finish_branch_action(
             ctx, inst, escaped, source_msg_id,
             keep_open=workflows.merge_blocks_ship(msg),

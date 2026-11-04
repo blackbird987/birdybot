@@ -663,6 +663,7 @@ async def run() -> None:
         ))
     scheduler.start()
 
+    boot_recovery.recover_sandboxed_worktrees()
     boot_recovery.log_orphan_git(store, runner)
 
     log.info(

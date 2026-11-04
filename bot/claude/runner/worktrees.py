@@ -17,6 +17,7 @@ from typing import NamedTuple
 from bot import config
 from bot.textutil import parse_iso_utc
 from bot.procutil import run_capture
+from bot.claude import sandbox
 from bot.claude.branch_utils import canonical_branch, clear_stale_branches
 from bot.claude.gitpaths import git_common_dir
 from bot.claude.provider import ProviderConfig
@@ -150,6 +151,7 @@ class WorktreeMixin:
                 f"Cannot create a worktree for {instance.id}: it has no branch"
             )
         default_branch = self._get_default_branch(repo)
+        sandboxed = sandbox.is_sandboxed(getattr(self, "_store", None), repo)
 
         # Idempotent: skip if worktree already exists
         if Path(wt_dir).is_dir():
@@ -184,8 +186,11 @@ class WorktreeMixin:
                 src_cfg_dir = Path(repo) / cfg_dir
                 dst_cfg_dir = Path(wt_dir) / cfg_dir
                 if src_cfg_dir.is_dir() and not dst_cfg_dir.exists():
+                    # A followed link would copy what it points at into a
+                    # sandboxed worktree. Everywhere else stays as it was.
                     shutil.copytree(str(src_cfg_dir), str(dst_cfg_dir),
-                                    ignore=shutil.ignore_patterns("*.jsonl"))
+                                    ignore=shutil.ignore_patterns("*.jsonl"),
+                                    symlinks=sandboxed)
                     log.debug("Copied %s/ into worktree %s", cfg_dir, wt_dir)
             except Exception:
                 log.warning("Failed to copy %s/ into worktree %s", cfg_dir, wt_dir, exc_info=True)
@@ -197,7 +202,8 @@ class WorktreeMixin:
             # Runs inside the per-repo lock already held by the caller
             # (_ensure_worktree), so .git/info/exclude appends are
             # serialized across parallel build creations on the same repo.
-            if config.WORKTREE_HOOK_ENABLED:
+            # A sandboxed run loads no project settings: its hooks are generated.
+            if config.WORKTREE_HOOK_ENABLED and not sandboxed:
                 try:
                     self._install_worktree_hook(repo, wt_dir)
                 except Exception:
@@ -1335,6 +1341,7 @@ class WorktreeMixin:
                     # Do NOT fall through to rmtree — silent destruction of
                     # uncommitted work was exactly the bug we are fixing.
                     continue
+                sandbox.forget_worktree(str(wt_dir))
             r = run_capture(
                 ["git", "branch", "-D", branch], cwd=repo_path, encoding="utf-8", errors="replace",
             )

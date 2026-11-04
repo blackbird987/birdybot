@@ -9,10 +9,11 @@ import tempfile
 from pathlib import Path
 
 from bot import config, vault
-from bot.fsutil import atomic_write_text, read_repo_config
+from bot.fsutil import atomic_write_text, read_contained_text, read_repo_config
 from bot.procutil import run_capture
 from bot.claude import context_bloat
 from bot.claude.provider import ProviderConfig
+from bot.claude.sandbox import SandboxRun
 from bot.claude.types import Instance
 from bot.store import history as history_mod
 
@@ -108,6 +109,7 @@ class PromptMixin:
         provider: ProviderConfig | None = None,
         binary: str | None = None,
         model_override: str | None = None,
+        sandbox_run: "SandboxRun | None" = None,
     ) -> tuple[list[str], str, str | None, str | None, str | None]:
         """Build CLI command and prompt.  Prompt returned separately for stdin piping.
 
@@ -215,6 +217,8 @@ class PromptMixin:
 
         # Build system prompt: mobile hint + bot context + pinned context + repo instruction file + projects dir
         system_prompt = self._build_system_prompt(instance, context, sibling_context, provider=provider)
+        if sandbox_run:
+            system_prompt += sandbox_run.system_prompt_note()
 
         # Dispatch system prompt delivery based on provider method
         sp_file: str | None = None
@@ -241,7 +245,9 @@ class PromptMixin:
             # sp_file and system_prompt_inline stay None — not passed to build_command
         else:
             # Claude path: write to temp file, fall back to inline arg
-            sp_file = self._write_system_prompt_file(system_prompt)
+            sp_file = self._write_system_prompt_file(
+                system_prompt, directory=sandbox_run.private_dir if sandbox_run else None,
+            )
             if not sp_file:
                 max_inline = 30_000
                 if len(system_prompt) > max_inline:
@@ -249,7 +255,9 @@ class PromptMixin:
                     system_prompt = system_prompt[:max_inline]
                 system_prompt_inline = system_prompt
 
-        # Delegate CLI arg assembly to the provider
+        # Delegate CLI arg assembly to the provider. Only the Claude provider takes
+        # the sandbox's file, and only a sandboxed run passes it.
+        sandbox_args = {"sandbox_settings_file": sandbox_run.settings_file} if sandbox_run else {}
         cmd = provider.build_command(
             instance,
             binary=binary,
@@ -258,6 +266,7 @@ class PromptMixin:
             api_fallback=api_fallback,
             api_key_file=api_key_file,
             model_override=model_override,
+            **sandbox_args,
         )
 
         # Prompt piped via stdin (not CLI arg) to avoid Windows command-line
@@ -265,13 +274,13 @@ class PromptMixin:
         return cmd, prompt, sp_file, api_key_file, rules_file
 
     @staticmethod
-    def _write_system_prompt_file(content: str) -> str | None:
+    def _write_system_prompt_file(content: str, directory: str | None = None) -> str | None:
         """Write system prompt to a temp file, return path.  Returns None on failure."""
         path: str | None = None
         try:
             f = tempfile.NamedTemporaryFile(
                 mode="w", suffix=".txt", prefix="claude_sysprompt_",
-                delete=False, encoding="utf-8",
+                delete=False, encoding="utf-8", dir=directory,
             )
             path = f.name
             f.write(content)
@@ -707,13 +716,14 @@ class PromptMixin:
             # Skip if path is a directory (e.g. .cursor/rules — handled via rules_dir)
             instruction_path = Path(repo_path) / provider.instruction_file
             if instruction_path.is_file():
-                try:
-                    content = instruction_path.read_text(encoding="utf-8")
+                # Contained: a session can plant this as a link to any file.
+                content = read_contained_text(repo_path, provider.instruction_file)
+                if content is not None:
                     parts.append(
                         f"\n\n--- Repository Instructions (from {provider.instruction_file}) ---\n"
                         f"{content}"
                     )
-                except Exception:
+                else:
                     log.warning("Failed to read %s from %s", provider.instruction_file, instruction_path)
 
             # Point to the projects directory for plans/sessions

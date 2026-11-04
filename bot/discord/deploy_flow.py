@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 import discord
 
 from bot import config as bot_config
+from bot.claude import sandbox
 from bot.claude.runner import missing_predecessor_release
 
 if TYPE_CHECKING:
@@ -129,6 +130,11 @@ async def _handle_approve_deploy(
         await interaction.followup.send("No deploy config found.", ephemeral=True)
         return
     config["approved"] = True
+    repo_path = bot._store.list_repos().get(repo_name)
+    if repo_path and sandbox.is_sandboxed(bot._store, repo_path):
+        config["approved_fingerprint"] = await asyncio.to_thread(
+            sandbox.deploy_fingerprint, repo_path, config,
+        )
     bot._store.set_deploy_config(repo_name, config)
     await interaction.followup.send(
         f"Deploy approved for **{repo_name}**: `{config.get('command', 'self')}`",
@@ -168,6 +174,21 @@ async def execute_deploy(
     async def _status(msg: str) -> None:
         if status_callback:
             await status_callback(msg)
+
+    # A deploy runs outside the sandbox, and a session there can land a change to
+    # the script it runs, so what the owner approved has to be what is on disk.
+    if sandbox.is_sandboxed(bot._store, repo_path):
+        fingerprint = await asyncio.to_thread(sandbox.deploy_fingerprint, repo_path, deploy_config)
+        if deploy_config.get("approved_fingerprint") != fingerprint:
+            stored = dict(deploy_config, approved=False)
+            stored.pop("approved_fingerprint", None)
+            bot._store.set_deploy_config(repo_name, stored)
+            asyncio.create_task(bot._forums.refresh_control_room(repo_name))
+            return False, "", (
+                f"Deploy refused: **{repo_name}** is sandboxed and its deploy command or "
+                "script changed since you approved it. Read the change, then approve it "
+                "again in the Control Room."
+            )
 
     # Release containment gate. This runs before the push, not after: the
     # push is what publishes the revert, and a deploy that has already gone

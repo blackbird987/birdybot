@@ -32,6 +32,7 @@ from bot.engine.step_parse import (
     _with_plan,
     _verify_why,
 )
+from bot.claude.sandbox import is_sandboxed
 from bot.engine.step_policy import _load_verify_policy
 from bot.engine.step_spawn import (
     SpawnConfig,
@@ -384,6 +385,17 @@ async def on_sensors(
     cwd = inst.worktree_path or inst.repo_path
     if not cwd:
         return inst  # nothing to sense; chain continues
+    # Sensors run with the bot's full environment, on a repo's files and commands.
+    if is_sandboxed(ctx.store, inst.repo_path):
+        try:
+            await ctx.messenger.send_text(
+                ctx.channel_id,
+                "Sensors skipped: this repo is sandboxed and they would run outside it.",
+                silent=True,
+            )
+        except Exception:
+            log.debug("Sensor notice failed for %s", ctx.channel_id, exc_info=True)
+        return inst
 
     cfg = load_sensor_config(inst.repo_path)
     report = await run_sensors(cwd, inst.repo_path)
@@ -483,7 +495,9 @@ async def on_verify(ctx: RequestContext, source_id: str, source_msg_id: str | No
     current_source = source_id
     current_msg = source_msg_id
     source_inst = ctx.store.get_instance(source_id)
-    verify_policy = _load_verify_policy(source_inst)
+    verify_policy = _load_verify_policy(
+        source_inst, sandboxed=is_sandboxed(ctx.store, source_inst.repo_path if source_inst else None),
+    )
 
     result: Instance | None = None
     for round_num in range(MAX_FIX_ROUNDS + 1):
@@ -791,7 +805,9 @@ def merge_blocks_ship(msg: str) -> bool:
     return merge_msg_repo_unusable(msg) or merge_msg_release_orphaned(msg)
 
 
-async def merge_and_record(ctx: RequestContext, inst: Instance) -> str:
+async def merge_and_record(
+    ctx: RequestContext, inst: Instance, *, owner_approved: bool = False,
+) -> str:
     """Merge a build branch and do the bookkeeping every merge path owes.
 
     The one sequence behind /merge, the Merge button, both resolver exits and
@@ -810,7 +826,9 @@ async def merge_and_record(ctx: RequestContext, inst: Instance) -> str:
     if not branch_name:
         from bot.store import history as history_mod
         branch_name = history_mod.get_branch_for_instance(inst.id)
-    msg = await ctx.runner.merge_branch(inst)
+    # Only passed when it is True, so a runner double with the old call shape holds.
+    approved = {"owner_approved": True} if owner_approved else {}
+    msg = await ctx.runner.merge_branch(inst, **approved)
     ctx.store.update_instance(inst)
     if merge_msg_is_failure(msg):
         ctx.store.set_pending_merge_failure_kind(
@@ -827,7 +845,9 @@ async def merge_and_record(ctx: RequestContext, inst: Instance) -> str:
     return msg
 
 
-async def merge_from_user(ctx: RequestContext, inst: Instance) -> tuple[str, str]:
+async def merge_from_user(
+    ctx: RequestContext, inst: Instance, *, owner_approved: bool = False,
+) -> tuple[str, str]:
     """A merge the user asked for: returns ``(card_text, runner_message)``.
 
     The card text is the runner's message escaped, plus the unescaped
@@ -835,7 +855,7 @@ async def merge_from_user(ctx: RequestContext, inst: Instance) -> tuple[str, str
     intentional). A merge that landed applies the "merged" tag, and one that
     may ship leads with the same check mark ``_finalize_merge`` posts.
     """
-    msg = await merge_and_record(ctx, inst)
+    msg = await merge_and_record(ctx, inst, owner_approved=owner_approved)
     text = ctx.messenger.escape(msg)
     if merge_msg_is_failure(msg):
         kind = ctx.runner._last_merge_failure_kind.get(inst.id)

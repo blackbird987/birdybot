@@ -59,6 +59,7 @@
     "_note": "Standalone runners for logic with no live surface. Exit 0 = pass. 'all' runs every scripts/test_*, verify_* and check_portability serially by glob, so a harness missing from this list still runs there. test_session_cgroups is deliberately absent: it creates real systemd scopes and runs daemon-reload.",
     "all": "python scripts/run_harnesses.py",
     "secret_intake": "python scripts/test_secret_intake.py",
+    "session_sandbox": "python scripts/test_session_sandbox.py",
     "portability": "python scripts/check_portability.py",
     "stop_sentinel": "python scripts/test_stop_sentinel.py",
     "smoke_window": "python scripts/test_smoke_window.py",

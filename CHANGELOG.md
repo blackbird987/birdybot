@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+- **Opt-in per-repo session sandbox.** `/sandbox on|off|hosts <repo> [hosts...]|status`, owner only. Off for every repo, and this turns none on. A sandboxed session's Bash runs in Claude Code's sandbox with a host allowlist, its file tools go through a path check that fails closed, and the bot's own secrets leave its environment. It reads no settings, hooks or MCP config from the repo. What stays open (allowed hosts carry data out, unsandboxed sessions can read everything) is in `docs/design/session-sandbox.md`.
+- **Worktree runs in a sandboxed repo use a private git directory.** Only that run's branch comes home, so a session cannot move master or plant refs. A planted link or changed config refuses the check-in and the next run.
+- **The bot stops acting on a sandboxed session's say-so.** `/repo` directives are ignored, `/spawn` only reaches other sandboxed repos, `/watch` logs stay in the working dir, `/watch pid=` is refused, sensors are skipped with a note, a repo's own `.claude/workflow.json` and verify policy are ignored, branches touching `.claude/`, `.github/`, `.mcp.json` and similar need an owner tap, and a deploy whose script changed since approval is refused.
+- A sandbox refusal is account-agnostic, so a doomed run is not handed to the backup subscription.
+- `scripts/test_session_sandbox.py`, and `scripts/attack_session_sandbox.py` for the attack run with the real CLI.
+
+### Changed
+- `.claude/*.json` and the project instruction file are no longer read through a link that leaves the repo, or from a FIFO, in any repo.
+
 ## v0.102.14, Sessions can wait on background jobs, final messages stay clean (2026-11-04)
 
 ### Fixed
