@@ -32,7 +32,7 @@ from bot.engine.step_parse import (
     _BUILD_PLAN_INJECT_MAX,
     _HIGH_PRIO_RE,
     _REVIEW_STATUS_RE,
-    _extract_deferred,
+    _deferred_lines,
     _extract_latest_plan_text,
 )
 from bot.engine.step_spawn import SpawnConfig, spawn_from
@@ -110,11 +110,12 @@ def _attached_history(ctx: RequestContext, session_id: str) -> str:
 
 # --- The answers ---
 
-def _read_review(run: Instance) -> tuple[bool, str] | None:
-    """``(needs_revision, text)``, or None when the answer cannot be trusted either way.
+def _read_review(run: Instance) -> tuple[bool, str, list[str]] | None:
+    """``(needs_revision, text, deferred)``, or None when the answer cannot be trusted either way.
 
     `_needs_revision` reads a missing block as no revision. Here that would pass a plan
-    nobody managed to check.
+    nobody managed to check. The last block is the answer: the prompt ends on it, and an
+    earlier one is the reviewer quoting a plan about this very format.
     """
     text = run.read_result_text() or ""
     blocks = _REVIEW_STATUS_RE.findall(text)
@@ -123,7 +124,7 @@ def _read_review(run: Instance) -> tuple[bool, str] | None:
     m = _NEEDS_REVISION_RE.search(blocks[-1])
     if not m:
         return None
-    return m.group(1).lower() == "yes", text
+    return m.group(1).lower() == "yes", text, _deferred_lines(blocks[-1])
 
 
 def _read_revised_plan(text: str) -> tuple[str, list[str], list[str]]:
@@ -156,7 +157,7 @@ def _record(row: dict) -> None:
 
 async def _note(ctx: RequestContext, text: str) -> None:
     try:
-        await ctx.messenger.send_text(ctx.channel_id, f"📋 {text}"[:_MAX_NOTE_CHARS], silent=True)
+        await ctx.messenger.send_text(ctx.channel_id, redact_secrets(f"📋 {text}")[:_MAX_NOTE_CHARS], silent=True)
     except Exception:
         log.debug("Plan check note failed for %s", ctx.channel_id, exc_info=True)
 
@@ -270,8 +271,7 @@ async def _check(
         await _note(ctx, f"Plan check could not finish ({row['reason']}). Building the plan as written.")
         return
 
-    needs_revision, review_text = answer
-    out.deferred = _extract_deferred(review)
+    needs_revision, review_text, out.deferred = answer
     row["medium_low"] = len(out.deferred)
     row["critical_high"] = len(_HIGH_PRIO_RE.findall(review_text))
     if not needs_revision:

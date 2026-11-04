@@ -934,6 +934,13 @@ async def _run_autopilot_chain(
                         )
                         result = phase_result
 
+                        # The reboot drain refused this phase. Nothing ran, so
+                        # the chain and phase state stay as they are and boot
+                        # recovery re-runs it (see the same check further down).
+                        if not phase_result and ctx.runner.is_draining:
+                            log.info("Chain stopped at phase %s for the reboot drain", phase.id)
+                            return None
+
                         # 4c: atomically record worktree + first build id from
                         # the spawn output. Atomic so a crash between writes
                         # can't leave first_build_id None while worktree_path

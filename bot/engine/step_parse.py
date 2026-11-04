@@ -231,11 +231,14 @@ def _parse_deferred_block(inst: Instance, pattern: re.Pattern[str]) -> list[str]
     except Exception:
         return []
     m = pattern.search(text)
-    if not m:
-        return []
+    return _deferred_lines(m.group(1)) if m else []
+
+
+def _deferred_lines(block: str) -> list[str]:
+    """The items under DEFERRED: in the body of a status block."""
     lines: list[str] = []
     in_deferred = False
-    for line in m.group(1).splitlines():
+    for line in block.splitlines():
         stripped = line.strip()
         if stripped.startswith("DEFERRED:"):
             in_deferred = True

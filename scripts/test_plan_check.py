@@ -12,6 +12,7 @@ import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
 
 import asyncio
 import json
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -22,7 +23,7 @@ sys.path.insert(0, str(ROOT))
 
 from bot import boot_recovery, config  # noqa: E402
 from bot.claude.runner.prompt_build import PromptMixin  # noqa: E402
-from bot.claude.types import Instance, InstanceOrigin, InstanceStatus, InstanceType  # noqa: E402
+from bot.claude.types import Instance, InstanceOrigin, InstanceStatus, InstanceType, Phase, RunResult  # noqa: E402
 from bot.engine import callbacks, chain_runner, lifecycle, plan_check, prior_art, step_spawn, workflows  # noqa: E402
 from bot.engine.step_parse import _BUILD_PLAN_INJECT_MAX  # noqa: E402
 from bot.engine.step_policy import _AUTOPILOT_HOLD_STEPS, _AUTOPILOT_STEPS, _BUILD_AND_SHIP_STEPS, _CHAIN_PRESETS  # noqa: E402
@@ -232,6 +233,9 @@ class Sc:
     def notes(self):
         return [t for t in self.messenger.texts if t.startswith("📋")]
 
+    def results_text(self):
+        return self.messenger.results
+
 
 def scenario(*a, **kw):
     return Sc(*a, **kw)
@@ -317,8 +321,8 @@ check("reviewer's system prompt is its own", sp == config.PLAN_CHECK_SYSTEM_PROM
 check("no pinned or sibling text reaches it", "PINNED-MARKER" not in sp and "SIBLING-MARKER" not in sp)
 check("the prompt asks the shared question", config.SCOPE_QUESTION in config.PLAN_CHECK_SYSTEM_PROMPT + config.PLAN_CHECK_PROMPT)
 for name in ("PLAN_CHECK_SYSTEM_PROMPT", "PLAN_CHECK_PROMPT", "PLAN_CHECK_APPLY_PROMPT"):
-    check(f"{name} has no em dash", "—" not in getattr(config, name))
-check("the module has no em dash", "—" not in Path(plan_check.__file__).read_text(encoding="utf-8"))
+    check(f"{name} has no em dash", "\u2014" not in getattr(config, name))
+check("the module has no em dash", "\u2014" not in Path(plan_check.__file__).read_text(encoding="utf-8"))
 
 
 print("\na clean review")
@@ -421,8 +425,7 @@ check("...and is recorded", sc.rows()[0]["outcome"] == "could_not_check", sc.row
 sc.close()
 
 sc = scenario(reviewer="clean")
-sc.base_dir_missing = sc.base / "gone"
-with patch.object(config, "DATA_DIR", sc.base_dir_missing):
+with patch.object(config, "DATA_DIR", sc.base / "gone"):
     sc.chain()
 check("a record that cannot be written costs nothing", sc.order == TAIL, sc.order)
 sc.close()
@@ -588,8 +591,154 @@ sc = scenario()
 with patch.object(chain_runner, "spawn_from", AsyncMock(return_value=None)):
     result = sc.chain()
 check("a build that could not start with no drain still fails the chain",
-      sc.store.get_autopilot_chain(SESSION) is None and any("blocked at" in t or "build" in t for t in sc.messenger.texts),
+      sc.store.get_autopilot_chain(SESSION) is None and any("blocked at" in t for t in sc.messenger.texts),
       sc.store.get_autopilot_chain(SESSION))
+sc.close()
+
+
+print("\na phased build at a reboot")
+sc = scenario()
+
+
+async def _phase_refused(ctx, source_id, cfg, source_msg_id=None):
+    sc.runner.is_draining = True
+    return None
+
+
+with patch.object(chain_runner, "_find_phase_plan", lambda *a, **k: [Phase("p1", "One", "mechanical")]), \
+        patch.object(chain_runner, "spawn_from", _phase_refused):
+    result = sc.chain()
+check("a refused phase keeps the chain at the build",
+      result is None and sc.store.get_autopilot_chain(SESSION)[0] == "build",
+      sc.store.get_autopilot_chain(SESSION))
+phases = sc.store.get_chain_phases(SESSION)
+check("...with the phase state kept and not paused for a person",
+      phases is not None and phases.cursor == 0 and phases.paused_at is None, phases)
+check("...and no failure told to the owner",
+      not any("needs your attention" in t or "blocked at" in t for t in sc.messenger.texts), sc.messenger.texts)
+sc.close()
+
+
+print("\nthe answer's last block")
+sc = scenario(reviewer=(
+    "A plan about this format quotes one:\n```review-status\nNEEDS_REVISION: yes\nDEFERRED:\n- Quoted (Low)\n```\n"
+    + review(False, deferred=["Real (Medium)"])
+))
+sc.chain()
+check("the verdict and the deferred list both come from the last block",
+      sc.rows()[0]["outcome"] == "clean" and sc.rows()[0]["medium_low"] == 1
+      and any("Real (Medium)" in r and "Quoted" not in r for r in sc.results_text()), sc.results_text())
+sc.close()
+
+
+print("\nnothing the author writes reaches the thread unredacted")
+secret = "sk-ant-api03-" + "x" * 40
+sc = scenario(reviewer="high", author=f"~~~plan\n{REVISED}\n~~~\n\n### Applied\n- Use {secret}: applied\n")
+sc.chain()
+check("the note is redacted", sc.notes() and not any(secret in n for n in sc.notes()), sc.notes())
+sc.close()
+
+
+print("\nthe real spawn, run and finalize")
+
+
+class LiveMessenger(Messenger):
+    def __getattr__(self, name):
+        return AsyncMock(return_value={"message_id": "m-thinking"})
+
+    def escape(self, text):
+        return text
+
+
+class LiveRunner(Runner):
+    """Everything real but the CLI: a scripted answer per origin."""
+
+    def __init__(self, base, answers):
+        super().__init__()
+        self.base, self.answers = base, answers
+        self.seen = {}
+        self.channels = {}
+
+    def begin_task(self, inst_id, session_id=None, channel_id=None, **kw):
+        self.channels[inst_id] = channel_id
+
+    async def run(self, inst, **kw):
+        session, text = self.answers[inst.origin]
+        self.seen[inst.origin] = {
+            "session": inst.session_id, "mode": inst.mode, "bash": inst.bash_policy,
+            "branch": inst.branch, "worktree": inst.worktree_path, "parent": inst.parent_id,
+            "prompt": inst.prompt,
+        }
+        inst.result_file = str(self.base / f"{inst.id}.md")
+        Path(inst.result_file).write_text(text, encoding="utf-8")
+        return RunResult(session_id=session, result_text=text, cost_usd=0.25)
+
+
+def live(answers, **kw):
+    sc = scenario(**kw)
+    sc.runner = sc.ctx.runner = LiveRunner(sc.base, answers)
+    sc.messenger = sc.ctx.messenger = LiveMessenger()
+    sc.ctx.on_session_resolved = AsyncMock()
+    sc.ctx.resolve_session_id = lambda: SESSION
+    return sc
+
+
+sc = live({
+    InstanceOrigin.PLAN_CHECK: ("fresh-session", review(True, HIGH)),
+    InstanceOrigin.PLAN_CHECK_APPLY: (SESSION, APPLIED),
+})
+sc.source.branch, sc.source.original_branch, sc.source.worktree_path = "b-1", "master", str(sc.base)
+sc.source.plan_active = True
+sc.store.update_instance(sc.source)
+with patch.object(plan_check, "spawn_from", step_spawn.spawn_from), \
+        patch.object(config, "EVAL_ENABLED", False):
+    sc.chain()
+seen = sc.runner.seen
+rev, auth = seen.get(InstanceOrigin.PLAN_CHECK), seen.get(InstanceOrigin.PLAN_CHECK_APPLY)
+check("the reviewer starts with no session", rev and rev["session"] is None, rev)
+check("...behind the read-only floor", rev and rev["mode"] == "explore" and rev["bash"] == "none", rev)
+check("...on the tree the build starts from", rev and rev["branch"] == "b-1" and rev["worktree"] == str(sc.base), rev)
+check("the author resumes the thread's session", auth and auth["session"] == SESSION, auth)
+check("...behind the read-only floor", auth and auth["mode"] == "explore" and auth["bash"] == "none", auth)
+reviewer = next(i for i in sc.store.list_instances() if i.origin == InstanceOrigin.PLAN_CHECK)
+author = next(i for i in sc.store.list_instances() if i.origin == InstanceOrigin.PLAN_CHECK_APPLY)
+check("the reviewer holds no channel", sc.runner.channels.get(reviewer.id) is None, sc.runner.channels)
+check("the author holds the channel", sc.runner.channels.get(author.id) == "chan-1", sc.runner.channels)
+check("the reviewer's session is its own", reviewer.session_id == "fresh-session", reviewer.session_id)
+check("the thread is not rebound", not sc.ctx.on_session_resolved.called, sc.ctx.on_session_resolved.call_args)
+check("no result card from either", sc.messenger.results == [], sc.messenger.results)
+check("the build resumes the author", sc.build_source == author.id, sc.build_source)
+check("the author inherits the plan flag, so the build is still told it has a plan",
+      author.plan_active and config.BUILD_FROM_PLAN_PROMPT in (sc.build_prompt or ""), sc.build_prompt)
+check("the revision reached the build", REVISED in (sc.build_prompt or ""), sc.build_prompt)
+check("a real run's cost reaches the record", sc.rows()[0]["reviewer_cost"] == 0.25 and sc.rows()[0]["author_cost"] == 0.25, sc.rows())
+sc.close()
+
+
+print("\nthe real history lookup, on a real git repo")
+sc = live({InstanceOrigin.PLAN_CHECK: ("fresh-session", review(False))}, override="")
+plan_check._resolve_chain_repo_path = next(
+    v for m, n, v in sc.undo if m is plan_check and n == "_resolve_chain_repo_path"
+)
+git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", str(sc.base)]
+(sc.base / "bot").mkdir()
+(sc.base / "bot" / "widget.py").write_text("x = 1\n", encoding="utf-8")
+subprocess.run([*git, "init", "-q"], check=True)
+subprocess.run([*git, "add", "bot"], check=True)
+subprocess.run([*git, "commit", "-qm", "Add the widget for the first time"], check=True)
+sc.source.origin = InstanceOrigin.PLAN
+sc.source.result_file = str(sc.base / "plan.md")
+Path(sc.source.result_file).write_text(PLAN, encoding="utf-8")
+sc.store.update_instance(sc.source)
+with patch.object(plan_check, "spawn_from", step_spawn.spawn_from), \
+        patch.object(config, "EVAL_ENABLED", False):
+    asyncio.run(plan_check.run_plan_check(sc.ctx, SOURCE, None, SESSION, []))
+prompt = (sc.runner.seen.get(InstanceOrigin.PLAN_CHECK) or {}).get("prompt", "")
+check("Build & Ship's reviewer really gets the plan", PLAN in prompt, prompt[:300])
+check("...and the history of the file it names", "Add the widget for the first time" in prompt, prompt[-1500:])
+check("...and it did not fail open on the way", sc.rows()[-1]["outcome"] == "clean", sc.rows())
+check("...and that history is not added to the brief", sc.store.get_chain_plan_override(SESSION) in (None, ""),
+      sc.store.get_chain_plan_override(SESSION))
 sc.close()
 
 

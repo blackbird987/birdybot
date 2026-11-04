@@ -2565,7 +2565,7 @@ PLAN_CHECK_PROMPT = (
     "- Title (Medium or Low)\n"
     "```\n"
     "NEEDS_REVISION is yes if any Critical or High revision exists and no otherwise. "
-    "List only Medium and Low under DEFERRED. PRIOR_ATTEMPTS is \"none\", or \"<sha> "
+    "List only Medium and Low under DEFERRED, and leave it empty when there are none. PRIOR_ATTEMPTS is \"none\", or \"<sha> "
     "<short reason>\" for each earlier attempt you found."
 )
 

@@ -67,7 +67,8 @@ missing one as could not check.
 
 Two things do stop the chain:
 
-- **A Kill** of the reviewer or the author. Kill means stop.
+- **A Kill** of the reviewer or the author. Kill means stop. The reviewer holds no
+  channel, so stopping it takes the Kill button on its card or its id.
 - **A reboot drain.** The step stops with the chain's state kept at `plan_check`, so
   boot recovery runs the check again instead of building unchecked. `spawn_from` no
   longer gates `check_session` on `resume_session`: a replay queued for this fresh
@@ -75,7 +76,8 @@ Two things do stop the chain:
 
 That drain case exposed a bug in every step. A spawn refused during a drain returned
 None, the chain called it a failure, and the chain state was cleared. The chain now
-returns before that guard while draining.
+returns before that guard while draining, and the phased build's own failure exit does
+the same, with its phase state left for boot recovery to pick up.
 
 ## What must not drift
 
@@ -96,7 +98,9 @@ returns before that guard while draining.
 Each check appends a row to `data/plan_checks.jsonl`: time, repo, thread, source,
 session, reviewer, Critical and High count, Medium and Low count, applied, rejected,
 adopted, outcome (`clean`, `revised`, `kept`, `could_not_check`, `skipped`), reason,
-and both costs. The thread id is what joins it to `data/missed.jsonl`.
+and both costs. The thread id is what joins it to `data/missed.jsonl`. A run that went
+through API billing also adds to the bot's fallback cost tally, as any other run does.
+The row does not say which runs those were.
 
 The bar is in `study/findings/2026-11-04-does-a-fresh-one-pass-plan-check-catch-real.md`,
 written before the first run: read 30 days of rows, confirm each accepted revision
