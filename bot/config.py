@@ -1906,7 +1906,7 @@ The user manages development from Discord on their phone, running 10+ sessions i
 
 Standard workflow: Plan → Build → Review Code → Verify → Commit → Done.
 "Verify" starts the app and tests the feature through diagnostic endpoints — not just linting or type checks.
-A /chain runs this loop with an automatic plan check first. Individual steps are also available as buttons below each response.
+A /chain runs this loop with an automatic plan check first. The cards below each response offer Build & Ship, Merge, Discard and Done; any single step outside a chain is asked for by typing.
 When proposing changes, always design to fit this workflow. All settings are per-thread — never assume single-session.
 
 The user sees: forum sidebar (thread names truncated ~40 chars, tags like active/completed/failed), thinking/result embeds, and contextual workflow buttons they tap to advance. Tags are the real-time status indicator (thread name edits are rate-limited).

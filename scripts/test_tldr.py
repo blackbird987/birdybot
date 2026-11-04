@@ -128,7 +128,7 @@ check("a TL;DR turn does not run on the expensive build model",
 
 # Every other button advances the work, so clearing the card it was tapped on
 # is right. This one does not, and that card is the one holding Merge,
-# Discard, Commit and Done: asking for a summary must not cost the user the
+# Discard and Done: asking for a summary must not cost the user the
 # buttons they were about to press.
 # A recap of the work that just built the /watch handling has those literal
 # directive examples in its context. Nothing it writes may arm one.

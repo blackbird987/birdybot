@@ -15,7 +15,7 @@ could edit them. It reads one bounded table (25 rows, 8K chars, built by
 comes back is parsed into at most `PROMPT_REVIEW_MAX_PROPOSALS` (3) blocks and
 posted to The Ark with Approve and Reject buttons. Approve does not write
 anything either: it opens an ordinary build session in the repo's own forum
-with the proposal as its brief, carrying the usual Review Code / Commit / Done
+with the proposal as its brief, carrying the usual Retry / Done
 buttons, so the edit is made and inspected by the normal path rather than by
 the reviewer. It is not a chain and it does not auto-branch: only `/bg`
 branches, so this edits in place like any other build-mode message. That is the

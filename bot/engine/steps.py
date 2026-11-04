@@ -302,7 +302,7 @@ async def on_tldr(ctx: RequestContext, source_id: str, source_msg_id: str | None
     other button, and it is the difference between a recap and a workflow
     step. The others advance the work, so clearing the card they were tapped
     on is correct. This one does not: the card it sits on is the one carrying
-    Merge, Discard, Commit and Done, and asking for a summary must not cost
+    Merge, Discard and Done, and asking for a summary must not cost
     the user the buttons they were about to press. Nothing is spawned into
     that card's place, so leaving it intact strands nothing.
     """

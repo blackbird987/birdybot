@@ -54,7 +54,7 @@ Six things that must not drift:
 - **It leaves the card it was tapped on alone.** Every other button in
   `spawn_from` advances the work, so clearing the source card's buttons is
   right for them. This one does not advance anything, and that card is the one
-  holding Merge, Discard, Commit and Done: asking for a summary must not cost
+  holding Merge, Discard and Done: asking for a summary must not cost
   the user the buttons they were about to press. `strip_source_buttons=False`
   is the only place TL;DR differs from its neighbours, and the harness pins
   both halves so a copy-paste of the next button cannot quietly flip it back.

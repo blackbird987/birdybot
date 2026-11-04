@@ -97,6 +97,8 @@ def _plan_action_rows(iid: str) -> list[list[ButtonSpec]]:
     them, so their handlers stay.
     """
     # TODO: drop the autopilot, autopilot_hold and review_plan handlers once old cards no longer matter.
+    # TODO: the same goes for the commit and review_code entries in callbacks._WORKFLOW_ACTIONS. Only the
+    # button calls on_commit, so it goes with its entry; on_review_code stays, because chain_runner runs it.
     return [[
         ButtonSpec("Build & Ship", f"build_and_ship:{iid}"),
         ButtonSpec("Done", f"done:{iid}"),
@@ -167,13 +169,11 @@ def action_button_specs(
 
         if instance.branch:
             if has_autopilot_chain:
-                # Autopilot handles merge — show review/action buttons plus a
-                # Discard escape hatch (user may inspect the Diff and decide to
-                # bail out of the branch even mid-chain).
+                # Autopilot handles merge: show Diff and Done plus a Discard
+                # escape hatch (user may inspect the Diff and decide to bail
+                # out of the branch even mid-chain).
                 rows.append([
                     ButtonSpec("Diff", f"diff:{iid}"),
-                    ButtonSpec("Review Code", f"review_code:{iid}"),
-                    ButtonSpec("Commit", f"commit:{iid}"),
                     ButtonSpec("Done", f"done:{iid}"),
                     ButtonSpec("Discard", f"discard:{iid}"),
                 ])
@@ -183,10 +183,6 @@ def action_button_specs(
                     ButtonSpec("Diff", f"diff:{iid}"),
                     ButtonSpec("Merge", f"merge:{iid}"),
                     ButtonSpec("Discard", f"discard:{iid}"),
-                ])
-                rows.append([
-                    ButtonSpec("Review Code", f"review_code:{iid}"),
-                    ButtonSpec("Commit", f"commit:{iid}"),
                     ButtonSpec("Done", f"done:{iid}"),
                 ])
         elif this_planned:
@@ -204,17 +200,12 @@ def action_button_specs(
         elif made_code_changes:
             # Edited/wrote files in-place (no branch)
             rows.append([
-                ButtonSpec("Review Code", f"review_code:{iid}"),
                 ButtonSpec("Retry", f"retry:{iid}"),
                 ButtonSpec("Done", f"done:{iid}"),
             ])
         elif instance.code_active:
-            # Session has uncommitted code changes — offer commit/review
-            rows.append([
-                ButtonSpec("Commit", f"commit:{iid}"),
-                ButtonSpec("Review Code", f"review_code:{iid}"),
-                ButtonSpec("Done", f"done:{iid}"),
-            ])
+            # Session has uncommitted code changes: Done commits them
+            rows.append([ButtonSpec("Done", f"done:{iid}")])
         elif session_has_plan:
             # Fallback: session has a plan from a prior instance, and this
             # instance didn't do anything code-related — offer plan actions.

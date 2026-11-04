@@ -7,7 +7,7 @@ session that wrote the plan decides what to do about it. The code is
 
 It replaces nothing at runtime: `_review_plan_loop` stays, since `auto_fix.py` and
 cards already posted still use it. The Autopilot, Autopilot (Hold) and Review Plan
-buttons are gone from new cards. Their handlers stay for old ones.
+buttons are gone from new cards, and so are Review Code and Commit. Their handlers stay for old ones.
 
 ## Why fresh
 

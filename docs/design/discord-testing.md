@@ -41,7 +41,7 @@ python scripts/discord_read.py [channel_id] [limit]   # default: The Ark, 10
 - `/sync 3` → threads created per project with history
 - `/new` → fresh thread in project forum
 - `/repo` → select menu dropdown (with 2+ repos)
-- Workflow buttons (Plan/Build/Review/Commit) work inside forum threads
+- Workflow buttons (Plan/Build & Ship/Merge/Done) work inside forum threads
 - Send message in The Ark → informational reply (no routing)
 - Send message in archived thread → auto-unarchives + resumes session
 

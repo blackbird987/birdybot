@@ -34,9 +34,9 @@ class InstanceOrigin(str, Enum):
     BUILD = "build"             # [Build It] button
     REVIEW_PLAN = "review_plan" # Autopilot's review loop, and the [Review Plan] button on old cards
     APPLY_REVISIONS = "apply_revisions"  # Autopilot's review loop, and [Apply Revisions] on old cards
-    REVIEW_CODE = "review_code" # [Review Code] button
+    REVIEW_CODE = "review_code" # The chain's review step, and the [Review Code] button on old cards
     TLDR = "tldr"               # [TL;DR] button and /tldr: plain-language recap
-    COMMIT = "commit"           # [Commit] button
+    COMMIT = "commit"           # The [Commit] button on old cards
     DONE = "done"               # [Done] button — commit + close thread
     RELEASE = "release"         # /release command
     RETRY = "retry"             # [Retry] button
