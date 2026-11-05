@@ -2088,8 +2088,8 @@ def primary_account_dir() -> Path | None:
     """The account config dir to pin ``CLAUDE_CONFIG_DIR`` to, or None.
 
     ``CLAUDE_ACCOUNTS`` is ordered and the first entry is the default account.
-    Anything spawning the CLI outside the normal rotation (title generation,
-    one-shot helpers) has to pin to it explicitly: left alone the CLI reads
+    Anything spawning the CLI outside the normal rotation (one-shot helpers, a
+    title with no account chosen) has to pin to it explicitly: left alone the CLI reads
     ``$HOME/.claude``, which on Linux is frequently not one of the configured
     accounts and may not be signed in at all.
 

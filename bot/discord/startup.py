@@ -96,9 +96,9 @@ class StartupMixin:
 
         # Threads a usage limit message got saved as the title of (one-time,
         # non-blocking; no-ops once none are left).
-        if not getattr(self, '_error_titles_repaired', False):
-            self._error_titles_repaired = True
-            asyncio.create_task(self._forums.repair_error_titles(self._name_editing))
+        if not getattr(self, '_limit_titles_repaired', False):
+            self._limit_titles_repaired = True
+            asyncio.create_task(self._forums.repair_limit_titles(self._name_editing))
 
         self._ready_event.set()
 

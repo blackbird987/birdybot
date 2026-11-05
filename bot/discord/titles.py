@@ -21,13 +21,15 @@ log = logging.getLogger(__name__)
 # On Windows, prevent subprocess console windows from popping up
 _NOWND: dict = config.NOWND
 
-# What a limit answer looks like once it has been saved as a title. Only for
-# finding old damage: a new answer is judged on the CLI's error flag, not on this.
-_LIMIT_TITLE = re.compile(r"^You['\u2019]ve hit your(?: \w+)? limit\s*\u00b7\s*resets\b", re.IGNORECASE)
+# A limit answer that got used as a title, as saved ("You've hit your limit \u00b7
+# resets 4pm") or as the thread's name, which has its punctuation stripped ("Youve
+# hit your limit resets 4pm"). Only for finding old damage: a new answer is judged
+# on the CLI's error flag, not on this.
+_LIMIT_TITLE = re.compile(r"^You['\u2019]?ve hit your(?: \w+)? limit\W+resets\b", re.IGNORECASE)
 
 
 def is_limit_message_title(topic: str | None) -> bool:
-    """True when a saved title is really the CLI's usage limit message."""
+    """True when a title or thread name is really the CLI's usage limit message."""
     return bool(topic and _LIMIT_TITLE.match(topic))
 
 
@@ -206,9 +208,8 @@ async def generate_title_text(
     # strip in the runner already knows.
     env.pop("ANTHROPIC_API_KEY", None)
     # Pin to an account, the chosen one or else the primary. Without this the
-    # subprocess falls back to $HOME/.claude, which on Windows happens to be the same directory
-    # but on Linux can be a different — possibly unauthenticated — config dir,
-    # silently failing every title generation.
+    # subprocess falls back to $HOME/.claude, which on Linux can be a different,
+    # possibly unauthenticated, config dir, silently failing every title generation.
     pinned = account or config.primary_account_dir()
     if pinned is not None:
         env["CLAUDE_CONFIG_DIR"] = str(pinned)

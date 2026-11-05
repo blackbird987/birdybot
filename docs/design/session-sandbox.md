@@ -176,7 +176,7 @@ edited a file there and wrote a new one (`scripts/attack_guest_confinement.py`).
 - **Helpers:** the title and log triage calls hold guest text and run outside any
   sandbox, so they run with `--tools "" --strict-mcp-config`. `--tools ""` alone left
   MCP tools offered; the attack run caught that. Titles also drop
-  `SESSION_STRIPPED_ENV_VARS`.
+  `SESSION_STRIPPED_ENV_VARS` and `ANTHROPIC_API_KEY`.
 - **The access fallback is gone.** A grant in a channel with no resolvable repo used
   to pass at its tightest settings and land in the global active repo. Now denied, except
   in the guest's own forum, where an untagged thread still gets asked which repo. `/new` asks

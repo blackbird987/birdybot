@@ -31,12 +31,14 @@ from bot import config
 from bot.claude.runner import ClaudeRunner
 from bot.discord import bot as bot_mod
 from bot.discord import forums as forums_mod
-from bot.discord import spawn_colors, titles
+from bot.discord import channels, spawn_colors, titles
 from bot.discord.forums import ForumManager, ForumProject, ThreadInfo
 
 FAILS: list[str] = []
 LIMIT = "You've hit your weekly limit \u00b7 resets Nov 9, 10am (Europe/Amsterdam)"
 SLEEP = "\U0001f4a4"
+# What a damaged thread is really called: a name has its punctuation stripped.
+LIVE = "Youve hit your limit resets Mar"
 
 
 def check(cond: bool, label: str) -> None:
@@ -213,6 +215,8 @@ def test_matcher() -> None:
     check(match(LIMIT), "the weekly wording")
     check(match("You've hit your limit \u00b7 resets 3pm (UTC)"), "the plain wording")
     check(match("You\u2019ve hit your weekly limit \u00b7 resets Nov 9"), "a curly apostrophe")
+    check(match(LIVE), "a thread's real name, punctuation stripped")
+    check(match(channels.build_title_name(LIMIT)), "which is what the name builder makes of it")
     for real in ("Weekly Usage Limit Check", "Usage limit retry message date fix",
                  "You have hit a limit in the parser", "", None):
         check(not match(real), f"leaves {real!r} alone")
@@ -298,43 +302,49 @@ def _manager(client: FakeClient, infos: list[ThreadInfo]) -> ForumManager:
 async def test_repair() -> None:
     print("repairing old titles")
     saved_thread, saved_pace = discord.Thread, forums_mod.REPAIR_TITLE_PACE_SECS
-    saved_read = titles.read_ai_title
+    saved_read = forums_mod.read_ai_title
     discord.Thread = FakeThread
     forums_mod.REPAIR_TITLE_PACE_SECS = 0
-    named = {"has-title": "Refactor The Parser", "bad-title": LIMIT}
-    titles.read_ai_title = lambda sid: named.get(sid)
+    forums_mod.read_ai_title = lambda sid: "Refactor The Parser" if sid == "has-title" else None
+    title_base = "Refactor The Parser"
     try:
         info = lambda tid, topic, sid=None, **kw: ThreadInfo(thread_id=str(tid), session_id=sid, topic=topic, **kw)
 
-        # Each of the shapes a damaged thread comes in, in one forum.
+        # Each of the shapes a damaged thread comes in, in one forum. The ones that
+        # cannot be fixed go first, to show they do not stop the rest.
         slot_color = spawn_colors.compose_for_slot(0, "x", is_root=True).removesuffix("x")
         threads = {
-            1: FakeThread(1, LIMIT, ),
-            2: FakeThread(2, LIMIT, archived=True),
-            3: FakeThread(3, f"{SLEEP} {LIMIT}"[:100], archived=True),
-            4: FakeThread(4, LIMIT),
+            1: FakeThread(1, LIVE),
+            2: FakeThread(2, LIVE, archived=True),
+            3: FakeThread(3, f"{SLEEP} {LIVE}", archived=True),
+            4: FakeThread(4, LIVE),
             5: FakeThread(5, "Weekly Usage Limit Check"),
-            6: FakeThread(6, f"{slot_color}{SLEEP} {LIMIT}"[:100]),
-            8: FakeThread(8, "You've hit your limit \u00b7 resets 3pm (UTC)", archived=True),
+            6: FakeThread(6, f"{slot_color}{SLEEP} {LIVE}"),
+            8: FakeThread(8, f"{SLEEP} | {LIVE}", archived=True),
+            11: FakeThread(11, "A Name Someone Chose"),
+            12: FakeThread(12, f"{SLEEP} A Name Someone Chose", archived=True),
+            13: FakeThread(13, "new-session"),
         }
         infos = [
+            info(9, LIMIT, "has-title"),  # deleted
+            info(10, LIMIT, "has-title"),  # no access
             info(1, LIMIT, "has-title"),
             info(2, LIMIT, "has-title"),
             info(3, LIMIT, "has-title"),
             info(4, LIMIT, None),
             info(5, "Weekly Usage Limit Check", "has-title"),
             info(6, LIMIT, "has-title", color_slot=0),
-            info(8, "You've hit your limit \u00b7 resets 3pm (UTC)", "bad-title"),
-            info(9, LIMIT, "has-title"),  # deleted, and ahead of nothing it may stop
-            info(10, LIMIT, "has-title"),  # forbidden
+            info(8, "You've hit your limit \u00b7 resets 3pm (UTC)", None),
+            info(11, LIMIT, "has-title"),
+            info(12, LIMIT, None),
+            info(13, LIMIT, "has-title"),  # renamed by a run that died before saving
         ]
         client = FakeClient(threads, cached=(1, 4), errors={10: _forbidden()})
         mgr = _manager(client, infos)
         by_id = {i.thread_id: i for i in infos}
         editing: set[str] = set()
-        await mgr.repair_error_titles(editing)
+        await mgr.repair_limit_titles(editing)
 
-        title_base = "Refactor The Parser"
         check(threads[1].name == title_base and by_id["1"].topic == title_base, "a live thread takes its session's own title")
         check(by_id["1"]._title_generated is True, "and is not named again")
         check(threads[2].name == title_base and threads[2].archived, "an archived thread is renamed and put back to sleep")
@@ -346,50 +356,56 @@ async def test_repair() -> None:
         check(threads[5].calls == [] and by_id["5"].topic == "Weekly Usage Limit Check", "a real title about limits is untouched")
         check(threads[6].name.startswith(slot_color) and title_base in threads[6].name and SLEEP in threads[6].name,
               "the family colour stays too")
-        check(threads[8].name == "new-session" and threads[8].archived, "a session whose own title is the message does not bring it back")
+        check(threads[8].name == f"{SLEEP} new-session" and threads[8].archived, "the old sleep marker with a bar is understood")
+        check(threads[11].calls == [] and by_id["11"].topic == "A Name Someone Chose", "a name chosen since is kept, and the saved title follows it")
+        check(by_id["11"]._title_generated is True, "and is not named again")
+        check(threads[12].calls == [] and by_id["12"].topic == "A Name Someone Chose", "also on a sleeping thread, without its marker")
+        check(threads[13].calls == [] and by_id["13"].topic == "new-session", "a repair that died before saving is not redone")
+        check(by_id["13"]._title_generated is False, "and a later turn may still name it")
         check(by_id["9"].topic == title_base, "a deleted thread stops matching")
         check(titles.is_limit_message_title(by_id["10"].topic), "one that could not be reached is left for the next boot")
+        check(threads[1].name == title_base, "and neither stopped the ones after it")
         check(not editing, "no rename guard left behind")
         check(mgr.saves == 1, "saved once")
 
         print("  second run")
         before = {t.id: list(t.calls) for t in threads.values()}
-        client.errors.clear()  # the forbidden one recovers
-        threads[10] = FakeThread(10, LIMIT)
+        client.errors.clear()  # the unreachable one recovers
+        threads[10] = FakeThread(10, LIVE)
         fetches = client.fetches
-        await mgr.repair_error_titles(editing)
+        await mgr.repair_limit_titles(editing)
         check(all(threads[k].calls == before[k] for k in before), "a second run renames nothing already fixed")
         check(threads[10].name == title_base, "and picks up the one that failed")
         check(client.fetches == fetches + 1, "it only looks at what still matches")
         saves = mgr.saves
-        await mgr.repair_error_titles(editing)
+        await mgr.repair_limit_titles(editing)
         check(mgr.saves == saves, "with nothing left it does not even save")
 
         print("  awkward cases")
-        busy = FakeThread(20, LIMIT)
+        busy = FakeThread(20, LIVE)
         mgr = _manager(FakeClient({20: busy}), [info(20, LIMIT, "has-title")])
         guard = {"20"}
-        await mgr.repair_error_titles(guard)
+        await mgr.repair_limit_titles(guard)
         check(busy.calls == [] and guard == {"20"}, "a thread mid-rename is left, guard and all")
         check(titles.is_limit_message_title(mgr._forum_projects["r"].threads["20"].topic), "and matches again next boot")
 
-        vanished = FakeThread(21, LIMIT, fail=_not_found())
-        after = FakeThread(22, LIMIT)
+        vanished = FakeThread(21, LIVE, fail=_not_found())
+        after = FakeThread(22, LIVE)
         mgr = _manager(FakeClient({21: vanished, 22: after}), [info(21, LIMIT, "has-title"), info(22, LIMIT, "has-title")])
-        await mgr.repair_error_titles(set())
+        await mgr.repair_limit_titles(set())
         check(mgr._forum_projects["r"].threads["21"].topic == title_base, "a thread deleted during the rename stops matching")
         check(after.name == title_base, "and the next one still gets done")
 
-        broken = FakeThread(23, LIMIT, archived=True, fail=RuntimeError("500"))
+        broken = FakeThread(23, LIVE, archived=True, fail=RuntimeError("500"))
         mgr = _manager(FakeClient({23: broken}), [info(23, LIMIT, "has-title")])
-        await mgr.repair_error_titles(set())
+        await mgr.repair_limit_titles(set())
         check(broken.archived and broken.calls[-1] == {"archived": True}, "a failed rename does not leave an old post awake")
         check(titles.is_limit_message_title(mgr._forum_projects["r"].threads["23"].topic), "and is tried again next boot")
         check(mgr.saves == 0, "with nothing fixed nothing is saved")
     finally:
         discord.Thread = saved_thread
         forums_mod.REPAIR_TITLE_PACE_SECS = saved_pace
-        titles.read_ai_title = saved_read
+        forums_mod.read_ai_title = saved_read
 
 
 async def main() -> None:

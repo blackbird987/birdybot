@@ -1763,6 +1763,8 @@ def _test_cut_values() -> None:
     check(values(f"--set=key={ENTROPIC}") == [ENTROPIC], "two labels both come off")
     check(values(f"FOO={ENTROPIC}==") == [f"{ENTROPIC}=="], "a label and padding together")
     check(values(f"abc123xyz789={ENTROPIC}") == [ENTROPIC], "a short odd name is still a label")
+    check(values(f"AWS_SECRET_ACCESS_KEY_PROD_EU_WEST_1={ENTROPIC}") == [ENTROPIC], "a long name with digits is still a label")
+    check(values(f"azureStorageAccount2SharedAccessSignature={ENTROPIC}") == [ENTROPIC], "a long camelCase one too")
     check(not tiers("timeout=30 retries=5 mode=fast"), "ordinary settings pass")
     check(not tiers("name=some-ordinary-value-here"), "an ordinary name=value passes")
     check(values(f"--token={ENTROPIC}") == [ENTROPIC], "nor is a flag")
