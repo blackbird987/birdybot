@@ -10,6 +10,7 @@
 ### Changed
 - **`scripts/peer_setup.py` re-run now updates an existing channel**: it compares and changes only the two bots' overwrites, for the outbox threads. `scripts/peer_perms.py` checks the same ones.
 - **The session sandbox path hook understands Windows paths**: drive-letter globs and `..` split on either separator.
+
 ## v0.102.22, Limit messages stop becoming thread titles, and every guest session is confined (2026-11-05)
 
 ### Security
