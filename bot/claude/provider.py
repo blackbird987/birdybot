@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from bot.claude.types import PEER_ORIGINS, InstanceOrigin
+
 from bot.claude.parser import (
     parse_model_limit as _claude_parse_model_limit,
     parse_usage_limit as _claude_parse_usage_limit,
@@ -102,6 +104,13 @@ class _ClaudeProvider(ProviderConfig):
 
         cmd = [binary or config.CLAUDE_BINARY, "-p"]
         cmd.extend(["--output-format", "stream-json", "--verbose"])
+        # Keyed on the origin and not on a flag the caller passes, so a failover
+        # that rebuilds the command gets the same confinement.
+        if instance.origin in PEER_ORIGINS:  # type: ignore[attr-defined]
+            return self._peer_command(
+                cmd, instance, system_prompt_file, system_prompt_inline,
+                model_override, sandbox_settings_file,
+            )
         # Stream hook events so the runner can log/observe hook decisions
         # (e.g. the worktree path-poisoning guard). Harmless when no hooks
         # are installed.
@@ -183,6 +192,42 @@ class _ClaudeProvider(ProviderConfig):
         if disallowed:
             cmd.extend(["--disallowed-tools", ",".join(sorted(disallowed))])
 
+        return cmd
+
+    def _peer_command(
+        self, cmd: list[str], instance: object,
+        system_prompt_file: str | None, system_prompt_inline: str | None,
+        model_override: str | None, sandbox_settings_file: str | None,
+    ) -> list[str]:
+        """A run carrying the other machine's text: only the flags bot/peer_confine.py names.
+
+        The answering run never resumes, whatever the instance carries: it keeps no
+        session, so a failover starts it over rather than losing it.
+        """
+        from bot import config, peer_confine
+
+        cmd.append("--include-hook-events")
+        if self.supports_effort:
+            cmd.extend(["--effort", instance.effort])  # type: ignore[attr-defined]
+        model = model_override or instance.model or config.DEFAULT_SESSION_MODEL  # type: ignore[attr-defined]
+        is_delivery = instance.origin is InstanceOrigin.PEER_DELIVERY  # type: ignore[attr-defined]
+        if not model and is_delivery:
+            model = config.PRIMARY_MODEL
+        if model:
+            cmd.extend(["--model", model])
+        if system_prompt_file:
+            cmd.extend(["--append-system-prompt-file", system_prompt_file])
+        elif system_prompt_inline:
+            cmd.extend(["--append-system-prompt", system_prompt_inline])
+        if is_delivery:
+            cmd.extend(["--resume", instance.session_id])  # type: ignore[attr-defined]
+            if sandbox_settings_file:
+                cmd.extend(["--settings", sandbox_settings_file])
+            cmd.extend(peer_confine.delivery_flags())
+        else:
+            cmd.extend(peer_confine.answer_flags(
+                peer_confine.settings_for_export(instance.repo_path)  # type: ignore[attr-defined]
+            ))
         return cmd
 
     def parse_usage_limit(self, error_text: str) -> object | None:

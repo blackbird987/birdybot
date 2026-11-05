@@ -119,6 +119,10 @@ _EXPECTED = {
     "secret_hold_pk": ("_handle_secret_hold", 3),
     "secret_allow": ("_handle_secret_request", 3),
     "secret_deny": ("_handle_secret_request", 3),
+    "auto_update_apply": ("_handle_update_card", 3),
+    "auto_update_later": ("_handle_update_card", 3),
+    "peer_run": ("_handle_peer_tap", 3),
+    "peer_decline": ("_handle_peer_tap", 3),
 }
 
 

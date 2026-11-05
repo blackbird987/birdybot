@@ -141,6 +141,7 @@ def _child(spec_path: str, out_path: str) -> int:
 
     class _Builder(PromptMixin):
         provider = _CLAUDE
+        _store = None  # no repo settings here, and the machine link note reads it
 
         @staticmethod
         def _build_master_context_block(instance):  # noqa: ANN001, ANN205

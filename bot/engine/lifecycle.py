@@ -17,7 +17,7 @@ from bot.claude.parser import is_context_overflow_error, looks_like_fatal_auth_e
 from bot.claude.provider import get_provider
 from bot.claude.runner import RebootResult
 from bot.claude.types import (
-    CODE_CHANGE_TOOLS, PLAN_ORIGINS, Instance, InstanceOrigin, InstanceStatus,
+    CODE_CHANGE_TOOLS, PEER_ORIGINS, PLAN_ORIGINS, Instance, InstanceOrigin, InstanceStatus,
     RunResult,
 )
 from bot.platform.base import ButtonSpec, MessageHandle, RequestContext
@@ -302,18 +302,26 @@ _NO_DIRECTIVE_ORIGINS: frozenset[InstanceOrigin] = frozenset({
     InstanceOrigin.STEPBACK,
     InstanceOrigin.PLAN_CHECK,
     InstanceOrigin.PLAN_CHECK_APPLY,
+    InstanceOrigin.PEER_ANSWER,
+    InstanceOrigin.PEER_DELIVERY,
 })
 
 # A judge or plan check run is a check on a thread's work and not a turn in it
 # (judge.md, plan-check.md). It does not occupy the channel or touch the thread's
 # tag: it is a session of its own, so a message arriving meanwhile cannot collide.
-_NOT_A_TURN_ORIGINS = frozenset({InstanceOrigin.JUDGE, InstanceOrigin.PLAN_CHECK})
+# An answer for the other machine is not a turn in any thread at all.
+_NOT_A_TURN_ORIGINS = frozenset({
+    InstanceOrigin.JUDGE, InstanceOrigin.PLAN_CHECK, InstanceOrigin.PEER_ANSWER,
+})
 
 # These runs are read by their caller. They do not retry on a timer (a usage limit
 # means it could not check), post no result card, and are not a child landing. The
 # plan check's author run is here too but not above, since it resumes the thread's
-# own session and has to hold the channel while it does.
-_CALLER_READS_ORIGINS = _NOT_A_TURN_ORIGINS | {InstanceOrigin.PLAN_CHECK_APPLY}
+# own session and has to hold the channel while it does, and a machine-link delivery
+# for the same reason.
+_CALLER_READS_ORIGINS = _NOT_A_TURN_ORIGINS | {
+    InstanceOrigin.PLAN_CHECK_APPLY, InstanceOrigin.PEER_DELIVERY,
+}
 
 
 def _origin_label(origin: InstanceOrigin) -> str:
@@ -564,7 +572,7 @@ async def run_instance(
         # handler's gates (autopilot, depth, wave cap, budget). Local import:
         # commands imports lifecycle at module level.
         if result.result_text and not result.is_error and dispatch_directives:
-            from bot.engine.commands import _execute_bot_commands
+            from bot.engine.directives.dispatch import _execute_bot_commands
             await _execute_bot_commands(ctx, result.result_text, source_inst=inst)
 
         # Check reboot request BEFORE end_task so it's queued when end_task
@@ -590,13 +598,17 @@ async def run_instance(
             try:
                 if not finalized:
                     finalize_run(ctx, inst, result)
-                display_text = collapse_bot_directives(
-                    strip_verify_blocks(result.result_text)
-                )
-                await send_result(
-                    ctx, inst, _with_fallback_footer(display_text, result),
-                    silent=silent, result=result,
-                )
+                # Its caller reads the answer, on any path: posting it here would
+                # put a judge's verdict in the thread, or the other machine's text
+                # in one with nothing in front of it.
+                if inst.origin not in _CALLER_READS_ORIGINS:
+                    display_text = collapse_bot_directives(
+                        strip_verify_blocks(result.result_text)
+                    )
+                    await send_result(
+                        ctx, inst, _with_fallback_footer(display_text, result),
+                        silent=silent, result=result,
+                    )
                 delivered = True
             except (asyncio.CancelledError, Exception):
                 pass
@@ -857,6 +869,11 @@ def finalize_run(ctx: RequestContext, inst: Instance, result: RunResult) -> None
     if result.cost_usd:
         ctx.store.add_cost(result.cost_usd)
 
+    # The other machine's text and answers about a repo stop here. A later session's
+    # prompt quotes history, and the evals quote results.
+    if inst.origin in PEER_ORIGINS:
+        return
+
     # Append to persistent session history log (best-effort)
     _log_history(ctx, inst, result.result_text)
 
@@ -876,6 +893,8 @@ _SKIP_HISTORY_ORIGINS = frozenset({
     InstanceOrigin.APPLY_REVISIONS,
     InstanceOrigin.PLAN_CHECK,
     InstanceOrigin.PLAN_CHECK_APPLY,
+    InstanceOrigin.PEER_ANSWER,
+    InstanceOrigin.PEER_DELIVERY,
 })
 
 
@@ -888,6 +907,9 @@ def _log_history(
     they failed — failures are always logged.
     """
     if inst.status not in (InstanceStatus.COMPLETED, InstanceStatus.FAILED):
+        return
+    # Not even when they failed: a failure's text can quote the other machine.
+    if inst.origin in PEER_ORIGINS:
         return
     # Skip noisy intermediate steps (unless they failed)
     if (inst.origin in _SKIP_HISTORY_ORIGINS

@@ -336,6 +336,25 @@ async def resume_interrupted_chains(
                 await discord_bot._after_turn(ctx, thread_id, dashboard=False)
 
 
+def recover_peer_questions(store) -> None:
+    """Close out a machine-link answer a dead process left, and its temporary export.
+
+    Questions a dead process was still sending carry on when the reader starts.
+    """
+    if not config.PEER_ENABLED:
+        return
+    try:
+        from bot import peer_export
+        from bot.engine import peer_questions
+
+        recovered = peer_questions.recover_after_restart(store)
+        swept = peer_export.sweep_exports()
+        if recovered or swept:
+            log.info("Peer link: %d answer(s) marked failed, %d export(s) removed", recovered, swept)
+    except Exception:
+        log.exception("Peer link recovery failed")
+
+
 def recover_sandboxed_worktrees() -> None:
     """Put back any worktree a dead process left on its private git directory.
 

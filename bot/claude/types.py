@@ -51,10 +51,16 @@ class InstanceOrigin(str, Enum):
     STEPBACK = "stepback"       # /stepback: read-only look at where a repo's work is heading
     PLAN_CHECK = "plan_check"   # Chain step: fresh read-only session checking the plan against the repo
     PLAN_CHECK_APPLY = "plan_check_apply"  # Chain step: the author deciding on what the plan check raised
+    PEER_ANSWER = "peer_answer"  # Machine link: read-only run on an export, answering the other machine
+    PEER_DELIVERY = "peer_delivery"  # Machine link: a no-tools turn telling a thread what came back
 
 
 # Origins that belong to the plan workflow (used in lifecycle + button selection)
 PLAN_ORIGINS = frozenset({InstanceOrigin.PLAN, InstanceOrigin.REVIEW_PLAN, InstanceOrigin.APPLY_REVISIONS})
+
+# Runs carrying the other machine's text. Claude only, confined by bot/peer_confine.py,
+# and kept out of history, eval and everything else a turn normally feeds.
+PEER_ORIGINS = frozenset({InstanceOrigin.PEER_ANSWER, InstanceOrigin.PEER_DELIVERY})
 
 
 # Origins that run on the strong build model (config.BUILD_MODEL, default

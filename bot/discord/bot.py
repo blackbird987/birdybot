@@ -46,6 +46,7 @@ from bot.discord.thread_ctx import ThreadContextMixin
 from bot.discord.titles import generate_title_text, read_ai_title
 from bot.discord.usage_gate import UsageGateMixin
 from bot.discord import memes
+from bot.discord import peer_turns
 from bot.discord import secret_door
 from bot.engine import commands
 from bot.platform.base import RequestContext, delete_after
@@ -1065,7 +1066,14 @@ class ClaudeBot(StartupMixin, ThreadContextMixin, UsageGateMixin, PendingImagesM
         """
         if interaction.type != discord.InteractionType.component:
             return
-        if not self._in_scope(interaction.guild, interaction.channel):
+        # A card in the machine link's thread is outside the workspace on purpose, and
+        # _in_scope also guards on_message, so it stays as it is. This matches exactly
+        # those two buttons in that one channel, and only for the owner.
+        if peer_turns.is_peer_tap(interaction):
+            if not self._is_owner(interaction.user.id):
+                await interactions_mod.settle(interaction, "Only the owner can do that.")
+                return
+        elif not self._in_scope(interaction.guild, interaction.channel):
             await interactions_mod.settle(
                 interaction,
                 "That control is outside this bot's workspace, so it can't act on it.",

@@ -81,6 +81,13 @@ REQUIRED_IN_OWN = {
     SEND_IN_THREADS: "every session thread",
     PIN_MESSAGES: "msg.pin in bot/discord/dashboard.py and bot/monitor/service.py",
 }
+# The channel the two machines share. Both must be able to do these there: the
+# outbox is a thread on each machine's directory message.
+LINK_CHANNEL_NAME = "machine-link"
+REQUIRED_IN_LINK = VIEW | SEND | READ_HISTORY | CREATE_PUBLIC_THREADS | SEND_IN_THREADS
+# And neither should do these: the channel is the audit trail. A default, not a
+# boundary: a bot with Manage Roles could change its own overwrite.
+DENIED_IN_LINK = MANAGE_MESSAGES | MANAGE_THREADS
 # What the code needs from the server as a whole, not from a channel.
 REQUIRED_AT_SERVER = {
     MANAGE_CHANNELS: "guild.create_category in bot/discord/channels.py",
@@ -379,6 +386,34 @@ def own_activity(rest: Rest, me: str, channels: list, spec: BotSpec) -> list:
     return sorted(posts, key=lambda p: p["last_post"], reverse=True)
 
 
+def link_channel_findings(guild_id: str, roles: dict, members: dict, channels: list,
+                          bots=BOTS) -> list:
+    """Can each bot use the machine link, and is it kept from rewriting it?
+
+    On its own because the link channel is top level: ``assess`` only checks
+    permissions inside a bot's own category.
+    """
+    channel = next((c for c in channels if c.get("name") == LINK_CHANNEL_NAME
+                    and c.get("type") == 0), None)
+    if channel is None:
+        return [f"no {LINK_CHANNEL_NAME} channel, so the machines cannot reach each other"]
+    out = []
+    for spec in bots:
+        role_ids = members.get(spec.user_id, [])
+        base = base_permissions(guild_id, roles, role_ids)
+        perms = channel_permissions(base, guild_id, channel.get("permission_overwrites", []),
+                                    role_ids, spec.user_id)
+        missing = names(REQUIRED_IN_LINK & ~perms)
+        if missing:
+            out.append(f"{spec.label} lacks in {LINK_CHANNEL_NAME}: {', '.join(missing)}. "
+                       "Re-run scripts/peer_setup.py")
+        allowed = names(DENIED_IN_LINK & perms)
+        if allowed:
+            out.append(f"{spec.label} should not hold in {LINK_CHANNEL_NAME}: {', '.join(allowed)}. "
+                       "Re-run scripts/peer_setup.py")
+    return out
+
+
 def findings(report: Report, peer_label: str) -> list:
     out = []
     if report.sees_peer:
@@ -424,6 +459,7 @@ def main() -> int:
         return 5
 
     problems = [f for i, r in enumerate(reports) for f in findings(r, BOTS[1 - i].label)]
+    problems.extend(link_channel_findings(guild_id, roles, members, channels))
     guest = env.get("GUEST_AUTO_ROLE", "Guest (no access)")
     guest_role = next((r for r in roles.values() if r["name"] == guest), None)
     if guest_role:

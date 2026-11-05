@@ -8,13 +8,13 @@ import os
 import tempfile
 from pathlib import Path
 
-from bot import config, vault
+from bot import config, peer_confine, vault
 from bot.fsutil import atomic_write_text, read_contained_text, read_repo_config
 from bot.procutil import run_capture
 from bot.claude import context_bloat
 from bot.claude.provider import ProviderConfig
 from bot.claude.sandbox import SandboxRun, instance_confined
-from bot.claude.types import Instance, InstanceOrigin
+from bot.claude.types import PEER_ORIGINS, Instance, InstanceOrigin
 from bot.store import history as history_mod
 
 log = logging.getLogger(__name__)
@@ -152,6 +152,10 @@ class PromptMixin:
         # PRIMARY orientation signal on resume — include the expected
         # CWD/branch so the LLM can verify with `pwd` if something looks off.
         prompt = instance.prompt
+        # The other machine's words go in here and nowhere the instance is read
+        # from: siblings, history, titles and evals all quote instance.prompt.
+        if instance.origin is InstanceOrigin.PEER_DELIVERY:
+            prompt = peer_confine.delivery_prompt(instance.prompt)
         if not prompt:
             sanity_path = instance.worktree_path or instance.repo_path or "(unknown)"
             # Don't hardcode "master" — repos that use main / develop / etc.
@@ -177,7 +181,7 @@ class PromptMixin:
         # double-up.  --resume may replay the original JSONL system prompt
         # verbatim, in which case the system-prompt block never reaches the
         # resumed agent — this user-message slot is the load-bearing copy.
-        if instance.session_id:
+        if instance.session_id and instance.origin not in PEER_ORIGINS:
             master_block = self._build_master_context_block(instance)
             if master_block:
                 prompt = master_block + "\n\n" + prompt
@@ -610,6 +614,12 @@ class PromptMixin:
             return config.PLAN_CHECK_SYSTEM_PROMPT
         if instance.origin is InstanceOrigin.STEPBACK:
             return config.STEPBACK_SYSTEM_PROMPT
+        # None of the rest either: not the repo's instructions, the owner's pinned
+        # context, or the catalog of what else is on this machine.
+        if instance.origin is InstanceOrigin.PEER_ANSWER:
+            return config.PEER_ANSWER_SYSTEM_PROMPT
+        if instance.origin is InstanceOrigin.PEER_DELIVERY:
+            return config.PEER_DELIVERY_SYSTEM_PROMPT
         # Working Location preamble (t-3541): anchor the LLM's CWD/branch
         # ground truth at the very top of the system prompt so it can self-
         # correct after a session loss instead of confabulating about

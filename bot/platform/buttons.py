@@ -134,6 +134,7 @@ def action_button_specs(
     if instance.origin in (
         InstanceOrigin.PROMPT_REVIEW, InstanceOrigin.JUDGE, InstanceOrigin.STEPBACK,
         InstanceOrigin.PLAN_CHECK, InstanceOrigin.PLAN_CHECK_APPLY,
+        InstanceOrigin.PEER_ANSWER, InstanceOrigin.PEER_DELIVERY,
     ):
         if instance.status in (InstanceStatus.RUNNING, InstanceStatus.QUEUED):
             rows.append([ButtonSpec("Kill", f"kill:{iid}")])
@@ -310,6 +311,7 @@ def action_button_specs(
             and instance.origin not in (
                 InstanceOrigin.TLDR, InstanceOrigin.JUDGE,
                 InstanceOrigin.PLAN_CHECK, InstanceOrigin.PLAN_CHECK_APPLY,
+                InstanceOrigin.PEER_ANSWER, InstanceOrigin.PEER_DELIVERY,
             )):
         if host is not None:
             host.append(ButtonSpec("Missed", f"missed:{iid}"))
@@ -317,7 +319,9 @@ def action_button_specs(
             rows.append([ButtonSpec("Missed", f"missed:{iid}")])
     if (instance.status == InstanceStatus.COMPLETED
             and instance.session_id
-            and instance.origin != InstanceOrigin.TLDR):
+            and instance.origin not in (
+                InstanceOrigin.TLDR, InstanceOrigin.PEER_ANSWER, InstanceOrigin.PEER_DELIVERY,
+            )):
         if host is not None:
             host.append(ButtonSpec("TL;DR", f"tldr:{iid}"))
 

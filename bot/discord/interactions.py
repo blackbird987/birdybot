@@ -11,13 +11,14 @@ import discord
 
 from bot import auto_update
 from bot.discord import channels
+from bot.discord.peer_turns import handle_tap as _handle_peer_tap
 from bot.discord.deploy_flow import _handle_approve_deploy, _handle_reboot_repo
 from bot.discord.access import AccessResult, load_access_config
 from bot import vault
 from bot.discord import secret_door
 from bot.discord.adapter import _buttons_to_view
 from bot.discord.modals import QuickTaskModal, SecretRenameModal, _message_without_row
-from bot.engine import commands
+from bot.engine import commands, peer_questions
 from bot.engine import sessions as sessions_mod
 from bot.platform.base import ButtonSpec
 from bot.platform.formatting import MODE_COLOR, VALID_EFFORTS, VALID_MODES, effort_name, mode_name
@@ -110,6 +111,8 @@ _ACTIONS = {
     "new_repo": lambda b, i, a, arg, acc: _handle_new_repo(b, i, arg, acc),
     "new_repo_select": lambda b, i, a, arg, acc: _handle_new_repo_select(b, i, acc),
     "sync_repo": lambda b, i, a, arg, acc: _handle_sync_cli(b, i, arg),
+    peer_questions.RUN_ACTION: lambda b, i, a, arg, acc: _handle_peer_tap(b, i, a, arg),
+    peer_questions.DECLINE_ACTION: lambda b, i, a, arg, acc: _handle_peer_tap(b, i, a, arg),
     "sync_git": lambda b, i, a, arg, acc: _handle_sync_git(b, i, arg),
     "resume_latest": lambda b, i, a, arg, acc: _handle_resume_latest(b, i, arg),
     "reboot_repo": lambda b, i, a, arg, acc: _handle_reboot_repo(b, i, arg),
@@ -140,6 +143,7 @@ _OWNER_ONLY_ACTIONS: frozenset[str] = frozenset({
     "secret_forget", "secret_replace", "secret_keep", "secret_hold_yes",
     "secret_hold_no", "secret_hold_pk", "secret_allow", "secret_deny",
     auto_update.APPLY_ACTION, auto_update.LATER_ACTION,
+    peer_questions.RUN_ACTION, peer_questions.DECLINE_ACTION,
 })
 
 

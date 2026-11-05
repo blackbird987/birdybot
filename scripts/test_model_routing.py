@@ -38,6 +38,7 @@ from bot.engine.workflows import resolve_spawn_model
 # keeps that session's thinking model and stays behind the same floor.
 _THINKING_ORIGINS = frozenset(
     {InstanceOrigin.DIRECT, InstanceOrigin.PROMPT_REVIEW, InstanceOrigin.TLDR, InstanceOrigin.STEPBACK,
+     InstanceOrigin.PEER_ANSWER, InstanceOrigin.PEER_DELIVERY,
      InstanceOrigin.PLAN_CHECK_APPLY}
     | set(PLAN_ORIGINS)
 )

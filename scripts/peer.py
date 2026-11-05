@@ -35,7 +35,7 @@ from bot import peer_record  # noqa: E402
 from bot.procutil import install_root  # noqa: E402
 
 API = "https://discord.com/api/v10"
-OFFLINE_AFTER_SECS = 15 * 60
+OFFLINE_AFTER_SECS = peer_record.OFFLINE_AFTER_SECS
 _HISTORY_LIMIT = 100
 
 EXIT_UNSET, EXIT_NO_RECORD, EXIT_INVALID, EXIT_DISCORD = 2, 3, 4, 5
