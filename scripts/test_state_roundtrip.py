@@ -239,6 +239,7 @@ def full_instance() -> Instance:
         result_collapsed=True,
         is_owner_session=False,
         vault_eligible=True,
+        guest_confined=True,
         bash_policy="allowlist",
         bash_policy_baseline="none",
         effort="max",

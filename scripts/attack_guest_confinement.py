@@ -129,7 +129,10 @@ async def owner_unchanged(runner, model, store) -> None:
     marker = time.time() - 1
     inst = instance(store, "q-owner", f"{MARK}owner")
     await runner.run(inst, None, None)
-    argv_files = [p for p in A.ROOT.glob("argv-*.bin") if p.stat().st_mtime >= marker]
+    argv_files = sorted(
+        (p for p in A.ROOT.glob("argv-*.bin") if p.stat().st_mtime >= marker),
+        key=lambda p: p.stat().st_mtime,
+    )
     argv = argv_files[-1].read_bytes().split(b"\0") if argv_files else []
     dump = os.environ.get("OWNER_DUMP")
     if dump and argv_files:

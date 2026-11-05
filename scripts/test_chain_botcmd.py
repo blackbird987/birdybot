@@ -157,6 +157,7 @@ def _make_env(
         platform="discord",
         store=store,
         runner=runner,
+        thread_has_guest=False,
         session_id="sess-1",
         repo_name="bot",
     )
@@ -272,6 +273,7 @@ def _chain_env(channel: str, store: _ChainStore):
         messenger=msgr, channel_id=channel, platform="discord",
         store=store, runner=SimpleNamespace(), session_id="sess-c",
         repo_name="bot",
+        thread_has_guest=False,
     )
     src = SimpleNamespace(
         id="q-src", session_id="sess-c", repo_path="",

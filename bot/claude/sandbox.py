@@ -187,17 +187,18 @@ def stamp_guest(instance, ctx, source=None) -> None:
     )
 
 
-def instance_confined(store, instance, *, repo_path: str | None = None, ctx=None) -> bool:
+def instance_confined(store, instance, *, ctx=None) -> bool:
     """The one answer for a run: does it go in the sandbox?
 
     Every place that treats a run differently for being sandboxed asks this, so
-    they cannot disagree. With no instance, it goes by the turn and the repo path
-    the caller still knows. It does not raise.
+    they cannot disagree. A caller on a turn passes ctx, so a run older than the
+    guest in its thread still counts, and so does a lookup that came back empty.
+    It does not raise.
     """
-    if instance is None:
-        return context_confined(ctx) or is_sandboxed(store, repo_path)
-    return is_guest_confined(instance) or is_sandboxed(
-        store, getattr(instance, "repo_path", None),
+    return (
+        context_confined(ctx)
+        or is_guest_confined(instance)
+        or is_sandboxed(store, getattr(instance, "repo_path", None))
     )
 
 
@@ -235,10 +236,8 @@ def origin_is_sandboxed(store, instance, ctx=None) -> bool:
     With no instance to ask, a guest's turn or any sandboxed repo means yes: the
     bot-side gates this feeds should not open because a lookup came back empty.
     """
-    if instance is not None:
-        return instance_confined(store, instance)
-    if context_confined(ctx):
-        return True
+    if instance is not None or context_confined(ctx):
+        return instance_confined(store, instance, ctx=ctx)
     try:
         getter = getattr(store, "sandbox_entries", None)
         entries = getter() if callable(getter) else None
@@ -614,7 +613,7 @@ def preflight(provider_name: str, api_fallback: bool, repo_path: str) -> None:
         )
     if api_fallback:
         raise SandboxRefused(
-            "API fallback is off in sandboxed repos: `--bare` skips the hooks and "
+            "API fallback is off for a sandboxed session: `--bare` skips the hooks and "
             "the key stays in the environment"
         )
     if not _HOOK_SCRIPT.is_file():

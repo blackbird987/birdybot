@@ -1016,7 +1016,7 @@ def test_directives() -> None:
     def ctx_for(messenger):
         return RequestContext(
             messenger=messenger, channel_id="c-1", platform="test", store=store, runner=runner,
-            spawn_session=fake_spawn,
+            spawn_session=fake_spawn, thread_has_guest=False,
         )
 
     async def run(text: str, source=inst) -> FakeMessenger:
@@ -1049,7 +1049,7 @@ def test_directives() -> None:
     calm = new_store("direct-calm")
     calm.add_repo("calm", str(plain))
     messenger = FakeMessenger()
-    ctx = RequestContext(messenger=messenger, channel_id="c-1", platform="test", store=calm,
+    ctx = RequestContext(messenger=messenger, channel_id="c-1", platform="test", store=calm, thread_has_guest=False,
                          runner=SimpleNamespace(active_instance_for_session=lambda *a, **k: None,
                                                 active_instance_for_channel=lambda *a, **k: None))
     asyncio.run(_execute_bot_commands(ctx, f"[BOT_CMD: /repo add added {plain}]", source_inst=plain_inst))

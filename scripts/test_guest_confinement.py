@@ -14,7 +14,6 @@ from __future__ import annotations
 import _bootstrap  # noqa: F401
 
 import asyncio
-import json
 import os
 import re
 import shutil
@@ -50,7 +49,9 @@ from bot.claude.provider import get_provider  # noqa: E402
 from bot.claude.runner import ClaudeRunner  # noqa: E402
 from bot.claude.types import Instance, InstanceOrigin, InstanceStatus, InstanceType  # noqa: E402
 from bot.discord import bot as bot_mod  # noqa: E402
-from bot.discord.access import AccessConfig, RepoAccess, UserAccess  # noqa: E402
+from bot.discord import thread_ctx  # noqa: E402
+from bot.discord.access import AccessConfig, AccessResult, RepoAccess, UserAccess  # noqa: E402
+from bot.discord.forums import ThreadInfo  # noqa: E402
 from bot.discord.thread_ctx import ThreadContextMixin  # noqa: E402
 from bot.engine import instance_cmds, judge, query, sandbox_cmds, step_spawn  # noqa: E402
 from bot.engine.directives.dispatch import _execute_bot_commands  # noqa: E402
@@ -104,9 +105,8 @@ def new_instance(repo: Path, inst_id: str = "q-1", **kw) -> Instance:
 
 
 class FakeMessenger:
-    def __init__(self, stop_at_thinking=False):
+    def __init__(self):
         self.posts: list[str] = []
-        self.stop_at_thinking = stop_at_thinking
 
     async def send_text(self, _cid, text, **_kw):
         self.posts.append(text)
@@ -195,9 +195,11 @@ def test_answer() -> None:
     alone_ctx = make_ctx(store)
     check("no instance, guest ctx", sandbox.instance_confined(store, None, ctx=guest_ctx))
     check("no instance, owner in a guest thread", sandbox.instance_confined(store, None, ctx=thread_ctx))
-    check("no instance, owner alone", not sandbox.instance_confined(store, None, ctx=alone_ctx, repo_path=str(repo)))
-    check("no instance, owner alone in a sandboxed repo",
-          sandbox.instance_confined(store, None, ctx=alone_ctx, repo_path=str(other)))
+    check("no instance, owner alone", not sandbox.instance_confined(store, None, ctx=alone_ctx))
+    unstamped = new_instance(repo, "q-old")
+    check("a run older than the guest, asked alone", not sandbox.instance_confined(store, unstamped))
+    check("the same run, asked on the guest's turn", sandbox.instance_confined(store, unstamped, ctx=thread_ctx))
+    check("the origin check agrees", sandbox.origin_is_sandboxed(store, unstamped, thread_ctx))
     bare = new_store("answer-bare", repo)
     check("origin with no instance, guest ctx", sandbox.origin_is_sandboxed(bare, None, guest_ctx))
     check("origin with no instance, owner, nothing on", not sandbox.origin_is_sandboxed(bare, None, alone_ctx))
@@ -326,6 +328,87 @@ def test_family_walk() -> None:
     check("an owner in an unmapped channel stays free", not walk(None))
 
 
+# --- Wakes, schedules and queued prompts: the one replay path they all share ---
+
+def test_replay() -> None:
+    """The real replay and context code, up to the point the turn would start."""
+    repo = new_repo("replay")
+    store = new_store("replay", repo)
+    threads = {
+        "guest": ThreadInfo(thread_id="guest", user_id="1001", session_id="s-g"),
+        "child": ThreadInfo(thread_id="child", user_id="7", parent_thread_id="guest"),
+        "joined": ThreadInfo(thread_id="joined", user_id="7", user_ids={"7", "1001"}),
+        "owner": ThreadInfo(thread_id="owner", user_id="7"),
+        "gone": ThreadInfo(thread_id="gone", user_id="1001"),
+    }
+    grants = {"guest": True, "joined": True, "gone": False}
+
+    async def nothing(*_a, **_kw):
+        return None
+
+    class Host(ThreadContextMixin):
+        _discord_user_id = 7
+        _store = store
+        _runner = fake_runner()
+        messenger = FakeMessenger()
+        _forums = SimpleNamespace(
+            thread_to_project=lambda tid: (SimpleNamespace(repo_name="replay"), threads[tid]) if tid in threads else None,
+            wake_repo_if_dormant=nothing,
+            attach_session_callbacks=lambda *_a, **_k: None,
+        )
+        _cancel_sleep = staticmethod(lambda *_a, **_k: None)
+        _after_turn = staticmethod(nothing)
+
+        def __getattr__(self, _name):
+            # The callbacks _ctx wires onto a turn. This test stops before any is called.
+            return nothing
+
+        def _check_access(self, user_id, *, channel_id=None, repo_name=None):
+            if not grants.get(channel_id):
+                return AccessResult(allowed=False, is_owner=False, reason="gone")
+            return AccessResult(allowed=True, is_owner=False, mode_ceiling="build", bash_policy="none")
+
+    def replay(channel, **kw):
+        seen = []
+
+        async def capture(ctx, _prompt):
+            seen.append(ctx)
+
+        with mock.patch.object(thread_ctx.commands, "on_text", capture):
+            ok = asyncio.run(Host()._replay_to_thread(channel, "wake up", source="wake", **kw))
+        check(f"{channel} replay reached the turn", ok and len(seen) == 1)
+        return seen[0]
+
+    def confined(ctx) -> bool:
+        inst = new_instance(repo, f"q-{ctx.channel_id}-{len(store._instances)}")
+        sandbox.stamp_guest(inst, ctx)
+        return sandbox.is_guest_confined(inst) and sandbox.instance_confined(store, inst)
+
+    ctx = replay("guest")
+    check("a wake in a guest's thread runs as the guest", not ctx.is_owner and ctx.thread_has_guest)
+    check("and its Bash stays closed", ctx.bash_policy == "none")
+    check("and the run is confined", confined(ctx))
+
+    ctx = replay("joined")
+    check("a guest who joined an owner's thread counts", not ctx.is_owner and confined(ctx))
+
+    ctx = replay("child")
+    check("a child of a guest's thread keeps the owner's rights", ctx.is_owner and ctx.thread_has_guest)
+    check("and is confined", confined(ctx))
+
+    ctx = replay("gone")
+    check("a guest whose grant has gone gets the narrowest run",
+          not ctx.is_owner and ctx.mode_ceiling == "explore" and ctx.bash_policy == "none")
+    check("and it is confined", confined(ctx))
+
+    ctx = replay("owner", is_owner=False, user_id="1001")
+    check("a queued guest prompt in an owner's thread runs as the guest", not ctx.is_owner and confined(ctx))
+
+    ctx = replay("owner")
+    check("an owner's own thread is untouched", ctx.is_owner and not ctx.thread_has_guest)
+    check("and is not confined", not confined(ctx))
+
+
 def test_source_scan() -> None:
     """Every place that makes a run stamps it, or says why it does not need to."""
     allow = {
@@ -352,6 +435,13 @@ def test_source_scan() -> None:
             else:
                 check(f"{rel}:{number + 1} stamps", "stamp_guest" in window, line.strip())
     check("the scan found the sites", found >= 10, found)
+    # The scan above only means something while the store makes every instance.
+    direct = [
+        path.relative_to(ROOT).as_posix()
+        for path in sorted((ROOT / "bot").rglob("*.py"))
+        if re.search(r"(?<![\w.])Instance\(", path.read_text(encoding="utf-8"))
+    ]
+    check("only the store builds an Instance", direct == ["bot/store/state.py"], direct)
 
     # Nothing decides on the repo alone except the places that mean the repo.
     allowed = {
@@ -389,7 +479,11 @@ def _clean_wording(result) -> bool:
     """Carries the refusal phrase and none of the other load-bearing ones."""
     lower = (result.error_message or "").lower()
     bad = ("lifetime limit", "out-of-memory", "prompt is too long", "compaction failed")
-    return parser.is_account_agnostic_error(result.error_message) and not any(b in lower for b in bad)
+    return (
+        parser.is_account_agnostic_error(result.error_message)
+        and not parser.is_account_unusable_error(result.error_message)
+        and not any(b in lower for b in bad)
+    )
 
 
 def test_refusals() -> None:
@@ -486,6 +580,11 @@ def test_owner_unchanged() -> None:
     binary = TMP / "fake-claude.sh"
     binary.write_text(f"""#!/bin/bash
 printf '%s\\0' "$@" > "{dump}.argv"
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--append-system-prompt-file" ]; then cp "$arg" "{dump}.sysprompt"; fi
+  prev="$arg"
+done
 env | cut -d= -f1 | sort > "{dump}.env"
 pwd > "{dump}.cwd"
 echo '{{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"s","num_turns":1,"total_cost_usd":0}}'
@@ -496,7 +595,10 @@ echo '{{"type":"result","subtype":"success","is_error":false,"result":"ok","sess
     argv = dump.with_suffix(".argv").read_bytes().split(b"\0") if dump.with_suffix(".argv").exists() else []
     check("the fake CLI ran", bool(argv), getattr(result, "error_message", result))
     check("no settings file on the owner's command line", b"--settings" not in argv, argv[:6])
-    check("no sandbox wording in the prompt", not any(b"sandbox" in a.lower() and b"SANDBOX" in a for a in argv))
+    sysprompt = dump.with_suffix(".sysprompt")
+    check("the system prompt was captured", sysprompt.exists())
+    check("no sandbox note in the system prompt",
+          sysprompt.exists() and "--- Sandbox ---" not in sysprompt.read_text(encoding="utf-8"))
     check("runs in the repo", dump.with_suffix(".cwd").read_text().strip() == str(repo))
     check("the repo's git config is not touched", (repo / ".git" / "config").read_text() == config_before)
     check("no private run directory", not list((config.DATA_DIR / "sandbox" / "runs").glob("q-o-*"))
@@ -566,6 +668,11 @@ def test_spawn() -> None:
     done, posts = asyncio.run(go(guest, "sp-on", owner=False))
     check("not even a sandboxed one", not done and any("can only spawn into its own repo" in p for p in posts), posts)
 
+    older = new_instance(own, "q-older")
+    done, posts = asyncio.run(go(older, "sp-other", has_guest=True))
+    check("a run older than the guest in its thread is held too",
+          not done and any("can only spawn into its own repo" in p for p in posts), posts)
+
     owner_turn = new_instance(own, "q-t")
     owner_turn.guest_confined = True
     done, posts = asyncio.run(go(owner_turn, "sp-other", has_guest=True))
@@ -584,6 +691,7 @@ def test_access() -> None:
     forum_thread = SimpleNamespace(parent_id=555)
     cfg = AccessConfig(users={
         "1001": UserAccess(user_id="1001", display_name="v", repos={"own": RepoAccess(mode="build", bash_policy="none")}, forum_channel_id="555"),
+        "3003": UserAccess(user_id="3003", display_name="g", global_access=True),
     })
     fake = SimpleNamespace(
         _forums=SimpleNamespace(thread_to_project=lambda _cid: None),
@@ -603,6 +711,9 @@ def test_access() -> None:
         check("at their tightest settings", chk(1001, "777").bash_policy == "none")
         check("the owner is not affected", chk(7, "999").allowed)
         check("no grant is denied", not chk(2002, "555").allowed)
+        # Its run is then refused like any guest's (the bot repo case in test_refusals).
+        wide = bot_mod.ClaudeBot._check_access(fake, 3003, repo_name="bot")
+        check("a global grant reaches the bot repo as a guest", wide.allowed and not wide.is_owner)
 
     slash = (ROOT / "bot/discord/slash_commands.py").read_text(encoding="utf-8")
     check("/new asks whether they hold any grant", "has_any_access(load_access_config()" in slash)
@@ -692,7 +803,7 @@ def test_sites_agree() -> None:
 
 
 def main() -> int:
-    tests = (test_answer, test_persistence, test_routes, test_family_walk, test_source_scan,
+    tests = (test_answer, test_persistence, test_routes, test_family_walk, test_replay, test_source_scan,
              test_refusals, test_owner_unchanged, test_sandbox_command, test_spawn, test_access,
              test_query_hard_stop, test_todo, test_sites_agree)
     try:

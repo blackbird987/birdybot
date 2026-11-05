@@ -183,11 +183,10 @@ async def _handle_spawn_directive(
     # A guest's brief stays in the repo it was given: the child is confined
     # anywhere, but a sandboxed target would still let it reach a repo with no grant.
     origin = _resolve_parent_instance(ctx)
-    if is_guest_confined(origin) if origin is not None else context_confined(ctx):
-        target_path = ctx.store.list_repos().get(repo) or ""
-        own_path = (origin.repo_path if origin is not None else "") or (
-            ctx.store.list_repos().get(ctx.repo_name or "") or ""
-        )
+    if is_guest_confined(origin) or context_confined(ctx):
+        repos = ctx.store.list_repos()
+        target_path = repos.get(repo) or ""
+        own_path = getattr(origin, "repo_path", "") or repos.get(ctx.repo_name or "") or ""
         if not own_path or os.path.realpath(own_path) != os.path.realpath(target_path):
             await _reject(
                 f"guest session asked to spawn into another repo {repo}",

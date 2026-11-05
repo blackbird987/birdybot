@@ -155,7 +155,7 @@ async def _handle_chain_directive(
         from bot.claude.sandbox import instance_confined
         policy = load_workflow_policy(
             source_inst.repo_path,
-            sandboxed=instance_confined(ctx.store, source_inst),
+            sandboxed=instance_confined(ctx.store, source_inst, ctx=ctx),
         )
         preset = "ship" if policy["autonomy"] in ("merge", "ship") else "hold"
 

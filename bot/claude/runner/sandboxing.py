@@ -109,10 +109,10 @@ class SandboxMixin:
             return None
         self._last_merge_failure_kind[instance.id] = MERGE_FAIL_SANDBOX_PROTECTED
         if changes is None:
-            return "Merge failed: sandboxed repo, and git could not list what this branch changes."
+            return "Merge failed: sandboxed session, and git could not list what this branch changes."
         listed = ", ".join(f"`{p}`" for p in changes[:8])
         more = f" and {len(changes) - 8} more" if len(changes) > 8 else ""
-        return f"Merge failed: sandboxed repo, and this branch changes {listed}{more}."
+        return f"Merge failed: sandboxed session, and this branch changes {listed}{more}."
 
     async def _sandbox_enter(
         self, instance: "Instance", run: sandbox.SandboxRun,

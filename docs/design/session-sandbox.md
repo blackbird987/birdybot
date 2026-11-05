@@ -181,7 +181,10 @@ edited a file there and wrote a new one (`scripts/attack_guest_confinement.py`).
   to pass at its tightest settings and land in the global active repo. Now denied, except
   in the guest's own forum, where an untagged thread still gets asked which repo. `/new` asks
   `has_any_access` directly, since it runs with no channel. `query` also refuses a
-  non-owner with no repo before `get_active_repo`.
+  non-owner with no repo before `get_active_repo`. A thread missing from the gateway cache
+  (an archived one, say) cannot be shown to be in their forum and is denied.
+- **A `global_access` guest gets no exception.** The grant still routes them to any repo,
+  and a run in one that cannot be sandboxed, the bot repo first of all, is refused.
 
 Open, stated rather than solved:
 
@@ -193,6 +196,8 @@ Open, stated rather than solved:
 - **Deploys stay keyed on the repo** (`deploy_flow`). A deploy of a repo with no setting has
   no fingerprint check, even if a guest worked there. Approving one stays the owner's call.
 - The family walk goes upward only: a parent does not learn a child has a guest.
+- A build refused at the sandbox check has already made its worktree, because the check
+  needs the working directory. It stays until discarded, and `/branches` lists it.
 
 ## Bot-side gates
 
