@@ -21,6 +21,17 @@ log = logging.getLogger(__name__)
 # On Windows, prevent subprocess console windows from popping up
 _NOWND: dict = config.NOWND
 
+# A limit answer that got used as a title, as saved ("You've hit your limit \u00b7
+# resets 4pm") or as the thread's name, which has its punctuation stripped ("Youve
+# hit your limit resets 4pm"). Only for finding old damage: a new answer is judged
+# on the CLI's error flag, not on this.
+_LIMIT_TITLE = re.compile(r"^You['\u2019]?ve hit your(?: \w+)? limit\W+resets\b", re.IGNORECASE)
+
+
+def is_limit_message_title(topic: str | None) -> bool:
+    """True when a title or thread name is really the CLI's usage limit message."""
+    return bool(topic and _LIMIT_TITLE.match(topic))
+
 
 def _encoded_temp_dir() -> str:
     """``tempfile.gettempdir()`` under the CLI's project-dir encoding.
@@ -34,18 +45,6 @@ def _encoded_temp_dir() -> str:
     """
     from bot.claude.session_fork import encode_project_path
     return encode_project_path(tempfile.gettempdir())
-
-
-def _temp_project_dir() -> Path | None:
-    """Path to the CLI projects subdir corresponding to tempfile.gettempdir().
-
-    That is where the title-gen subprocess writes its session jsonl, since it
-    runs with cwd set to the temp dir.
-    """
-    try:
-        return config.CLAUDE_PROJECTS_DIR / _encoded_temp_dir()
-    except Exception:
-        return None
 
 
 def _is_temp_like_project_dir(proj_dir: Path) -> bool:
@@ -163,11 +162,15 @@ def read_ai_title(session_id: str) -> str | None:
     return title if title and len(title) >= 3 else None
 
 
-async def generate_title_text(prompt: str, summary: str = "") -> str | None:
+async def generate_title_text(
+    prompt: str, summary: str = "", *, account: str | None = None,
+) -> str | None:
     """Spawn a lightweight Claude CLI call to generate a 4-6 word thread title.
 
     Bypasses the runner semaphore — this is a standalone, cheap subprocess.
-    Returns the title string, or None on failure/timeout.
+    ``account`` is the config dir to run on; without one it is the primary.
+    Returns the title string, or None on failure/timeout. An error answer is a
+    failure: the CLI prints "You've hit your weekly limit" as its result text.
     """
     from bot.claude.parser import extract_result, parse_stream_line
 
@@ -186,6 +189,8 @@ async def generate_title_text(prompt: str, summary: str = "") -> str | None:
         "--verbose",
         "--permission-mode", "plan",
         "--max-turns", "1",
+        # Nothing to clean up afterwards, in whichever account this runs on.
+        "--no-session-persistence",
         # The prompt quotes a guest's words, and this runs outside any sandbox.
         # --tools does not reach MCP servers: the attack run saw them still offered.
         "--tools", "",
@@ -198,75 +203,49 @@ async def generate_title_text(prompt: str, summary: str = "") -> str | None:
     from bot.claude.runner import SESSION_STRIPPED_ENV_VARS
     for var in SESSION_STRIPPED_ENV_VARS:
         env.pop(var, None)
-    # Pin to the primary configured account. Without this the subprocess falls
-    # back to $HOME/.claude, which on Windows happens to be the same directory
-    # but on Linux can be a different — possibly unauthenticated — config dir,
-    # silently failing every title generation.
-    primary_acct = config.primary_account_dir()
-    if primary_acct is not None:
-        env["CLAUDE_CONFIG_DIR"] = str(primary_acct)
-
-    # Snapshot pre-existing jsonls in the Temp project dir so we can delete
-    # whatever this subprocess writes — the CLI persists every -p call as a
-    # session jsonl, which would otherwise pollute /session lists. The dir
-    # itself may not exist yet on a first-ever call; the CLI creates it.
-    proj_dir = _temp_project_dir()
-    pre_existing: set[str] = set()
-    if proj_dir and proj_dir.is_dir():
-        try:
-            pre_existing = {p.name for p in proj_dir.glob("*.jsonl")}
-        except OSError:
-            pass
+    # config loads .env into this process, so the paid key is in os.environ. Left
+    # in, the CLI bills it and ignores the account below, as a normal session's
+    # strip in the runner already knows.
+    env.pop("ANTHROPIC_API_KEY", None)
+    # Pin to an account, the chosen one or else the primary. Without this the
+    # subprocess falls back to $HOME/.claude, which on Linux can be a different,
+    # possibly unauthenticated, config dir, silently failing every title generation.
+    pinned = account or config.primary_account_dir()
+    if pinned is not None:
+        env["CLAUDE_CONFIG_DIR"] = str(pinned)
 
     proc = None
     stdout = b""
     try:
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-                env=env,
-                cwd=tempfile.gettempdir(),
-                **_NOWND,
-            )
-            stdout, _ = await asyncio.wait_for(
-                proc.communicate(), timeout=config.TITLE_TIMEOUT_SECS,
-            )
-        except asyncio.TimeoutError:
-            log.debug("Title generation timed out")
-            if proc:
-                try:
-                    proc.kill()
-                    await proc.wait()
-                except (ProcessLookupError, OSError):
-                    pass
-            return None
-        except Exception:
-            log.warning("Title generation CLI call failed", exc_info=True)
-            if proc:
-                try:
-                    proc.kill()
-                    await proc.wait()
-                except (ProcessLookupError, OSError):
-                    pass
-            return None
-    finally:
-        # Delete any new jsonls the title-gen subprocess wrote. Re-check
-        # existence here (not the snapshot-time bool) — on a first-ever call
-        # the dir is created by the subprocess, so it can flip from missing
-        # to present between snapshot and cleanup. Safety gate below in
-        # scan_sessions catches anything that slips through.
-        if proj_dir and proj_dir.is_dir():
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            env=env,
+            cwd=tempfile.gettempdir(),
+            **_NOWND,
+        )
+        stdout, _ = await asyncio.wait_for(
+            proc.communicate(), timeout=config.TITLE_TIMEOUT_SECS,
+        )
+    except asyncio.TimeoutError:
+        log.debug("Title generation timed out")
+        if proc:
             try:
-                for p in proj_dir.glob("*.jsonl"):
-                    if p.name not in pre_existing:
-                        try:
-                            p.unlink()
-                        except OSError:
-                            pass
-            except OSError:
-                log.debug("Title-gen jsonl cleanup scan failed", exc_info=True)
+                proc.kill()
+                await proc.wait()
+            except (ProcessLookupError, OSError):
+                pass
+        return None
+    except Exception:
+        log.warning("Title generation CLI call failed", exc_info=True)
+        if proc:
+            try:
+                proc.kill()
+                await proc.wait()
+            except (ProcessLookupError, OSError):
+                pass
+        return None
 
     # Parse stream-json to extract result text
     events = []
@@ -276,6 +255,14 @@ async def generate_title_text(prompt: str, summary: str = "") -> str | None:
             events.append(parsed)
 
     result = extract_result(events)
+    # The flag and the exit code, never the wording. The subtype is no use: a limit
+    # answer comes back as subtype "success" with is_error true and exit 1.
+    if result.is_error or proc.returncode != 0:
+        log.info(
+            "Title generation got an error answer (exit %s): %s",
+            proc.returncode, (result.result_text or result.error_message or "")[:120],
+        )
+        return None
     if not result.result_text:
         return None
 

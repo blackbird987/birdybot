@@ -94,6 +94,12 @@ class StartupMixin:
             self._forum_pins_reconciled = True
             asyncio.create_task(self._forums.reconcile_forum_pins())
 
+        # Threads a usage limit message got saved as the title of (one-time,
+        # non-blocking; no-ops once none are left).
+        if not getattr(self, '_limit_titles_repaired', False):
+            self._limit_titles_repaired = True
+            asyncio.create_task(self._forums.repair_limit_titles(self._name_editing))
+
         self._ready_event.set()
 
         # Holds the last process died with. Once: on_ready fires on every

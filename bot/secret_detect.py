@@ -68,6 +68,7 @@ _SURE_TABLE: list[tuple[str, re.Pattern, str | None, str]] = [
     ("slack_user", re.compile(_LB + r"xoxp-(?P<body>[A-Za-z0-9-]{20,})"), "SLACK_USER_TOKEN", "xoxp-"),
     ("huggingface", re.compile(_LB + r"hf_(?P<body>[A-Za-z0-9]{20,})"), "HF_TOKEN", "hf_"),
     ("runpod", re.compile(_LB + r"rpa_(?P<body>[A-Za-z0-9]{20,})"), "RUNPOD_API_KEY", "rpa_"),
+    ("atlassian", re.compile(_LB + r"ATATT(?P<body>[A-Za-z0-9_=-]{20,})"), "ATLASSIAN_API_TOKEN", "ATATT"),
     ("gitlab", re.compile(_LB + r"glpat-(?P<body>[A-Za-z0-9_-]{20,})"), "GITLAB_TOKEN", "glpat-"),
     ("google", re.compile(_LB + r"AIza(?P<body>[A-Za-z0-9_-]{35})" + _RB), "GOOGLE_API_KEY", "AIza"),
     ("groq", re.compile(_LB + r"gsk_(?P<body>[A-Za-z0-9]{20,})"), "GROQ_API_KEY", "gsk_"),
@@ -426,6 +427,23 @@ def _scan_burn(text: str) -> list[Finding]:
     return out
 
 
+def _label_length(token: str) -> int:
+    """How many leading characters of a token are ``name=`` labels.
+
+    Stops at a random blob: in ``<blob>=CHECKSUM`` the ``=`` is part of the key, and
+    calling the blob a label would leave only a tail too short to count, so the whole
+    key would pass. Anything too short to be a key on its own is taken as a name.
+    """
+    body = token.rstrip("=")
+    offset = 0
+    while (eq := body.find("=", offset)) >= 0:
+        left = body[offset:eq]
+        if len(left) >= _ENTROPY_TOKEN_MIN and is_high_entropy(left):
+            break
+        offset = eq + 1
+    return offset
+
+
 def _scan_ask(text: str, *, attachment: bool) -> list[Finding]:
     """Everything worth a question.
 
@@ -490,10 +508,9 @@ def _scan_ask(text: str, *, attachment: bool) -> list[Finding]:
             # Sentence punctuation goes. "=" stays, it can be base64 padding.
             token = text[start:end].rstrip(".,;:")
             # FOO=value is a label and a value, not one long value.
-            label_end = token.rstrip("=").rfind("=")
-            if label_end >= 0:
-                start += label_end + 1
-                token = token[label_end + 1:]
+            label_len = _label_length(token)
+            start += label_len
+            token = token[label_len:]
             if len(token) >= _ENTROPY_TOKEN_MIN and is_high_entropy(token):
                 out.append(Finding(ASK, start, start + len(token), token, "entropy", ""))
     return out

@@ -898,7 +898,16 @@ class ClaudeBot(StartupMixin, ThreadContextMixin, UsageGateMixin, PendingImagesM
                 if info.session_id else None
             )
             if not title:
-                title = await generate_title_text(prompt, summary)
+                account = None
+                if config.PROVIDER == "claude" and config.CLAUDE_ACCOUNTS:
+                    # This call sets no model, so it runs on the account's default,
+                    # the primary model: same pick as a normal session's.
+                    account = self._runner._pick_account(avoid_model_cooldown=True)
+                    if account is None:
+                        log.info("No account free to name thread %s, next turn tries again", thread_id)
+                        info._title_generated = False
+                        return
+                title = await generate_title_text(prompt, summary, account=account)
             if not title:
                 log.warning("Title generation returned empty for thread %s", thread_id)
                 info._title_generated = False

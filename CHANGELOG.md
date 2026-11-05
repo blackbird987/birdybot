@@ -2,13 +2,23 @@
 
 ## [Unreleased]
 
+## v0.102.22, Limit messages stop becoming thread titles, and every guest session is confined (2026-11-05)
+
 ### Security
+- **An Atlassian API token pasted alone is now caught** (`bot/secret_detect.py`, `docs/design/secret-intake.md`). It starts `ATATT` and is now treated as certain. The general check also split any long value at its last `=`, read the random part as a label and let the whole value through, so a key of that shape from any vendor, pasted alone, got no question at all. It now asks, and `NAME=value` labels still come off.
 - **Every guest session is confined, in every repo** (`docs/design/session-sandbox.md`, `bot/claude/sandbox.py`). A guest's run used to be limited only by a sentence in its prompt unless the owner had run `/sandbox on`: measured on the old code, a guest-shaped session read a fake secret outside its repo and edited a file there. Now each run has one answer, stamped when it is made and kept across retries, later steps, children and restarts. `/sandbox off` does not free a guest.
 - **A guest's repo that cannot be sandboxed refuses the run** with the reason, and never falls back to running it open.
 - **An owner's turn in a thread with a guest is confined too**, because the guest's text is in its history. In the bot repo it is refused and told to start a new thread.
 - **A grant no longer passes in a channel with no repo.** It used to land in the global active repo at the guest's tightest settings. A guest's own forum still works.
 - **`/spawn` from a session with a guest in it reaches only its own repo.**
 - **The title and log triage helpers run with no tools and no MCP servers**, since they hold guest text outside any sandbox. `--tools ""` alone left MCP tools offered.
+
+### Fixed
+- **An error answer can no longer become a thread's title** (`bot/discord/titles.py`). The naming call took any text the CLI returned, so "You've hit your weekly limit" became the name. It now goes by the CLI's error flag and exit code, not the wording, and a later turn tries again.
+- **The naming call no longer uses the paid API key** (`bot/discord/titles.py`). It kept `ANTHROPIC_API_KEY` from `.env` in its environment, so where that key is set the CLI ran on it and ignored the account the call was pinned to. A normal session has stripped the key since v0.61.1, and this call never did.
+- **Naming no longer runs on an account at its limit** (`bot/discord/bot.py`). It was pinned to the first account. It now takes the same pick as a normal session, passing over accounts on cooldown, and skips the call for now if none is free.
+- **Threads already named after a limit message are repaired on boot** (`ForumManager.repair_limit_titles`). Each takes its session's own title, with no model call, or goes back to `new-session`. Archived threads go back to sleep, sleep markers and family colours stay, and pins are not touched. A thread renamed since keeps its name and only its saved title is corrected. Once a thread is fixed it stops matching, so there is nothing to run twice.
+- **The naming call leaves no session file to clean up**, on any account: it now runs with `--no-session-persistence` in place of the snapshot and delete.
 
 ### Changed
 - **A `TODO.md` that is a link or FIFO is skipped with a log warning in every repo**, not only sandboxed ones. An owner with a linked `TODO.md` will notice this.
