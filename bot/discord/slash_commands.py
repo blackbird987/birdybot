@@ -16,7 +16,7 @@ from bot.discord import access as access_mod
 from bot.discord import channels
 from bot.discord import secret_door
 from bot.discord.access import (
-    load_access_config, check_user_access,
+    load_access_config, check_user_access, has_any_access,
     effective_mode as access_effective_mode,
 )
 from bot.claude.types import InstanceStatus
@@ -502,8 +502,8 @@ def setup(bot: ClaudeBot) -> None:
     async def cmd_new(interaction: discord.Interaction, repo: str = "", mode: str = ""):
         is_owner = bot._is_owner(interaction.user.id)
         if not is_owner:
-            access = bot._check_access(interaction.user.id)
-            if not access.allowed:
+            # Not tied to this channel: it offers only the repos the user holds.
+            if not has_any_access(load_access_config(), str(interaction.user.id)):
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
 

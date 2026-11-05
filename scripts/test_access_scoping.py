@@ -2,8 +2,8 @@
 
 _check_access used to fall through: a guest holding any grant at all was
 allowed in every repo, at that repo's own settings. This pins the denial, and
-pins that an unresolvable channel drops to the tightest policy the user holds
-rather than to the permissive defaults.
+pins that a channel with no repo is denied, except the guest's own forum, which
+drops to the tightest policy the user holds rather than to the permissive defaults.
 """
 import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
 
@@ -26,9 +26,10 @@ class FakeSelf:
     _forums = FakeForums()
     def _is_owner(self, uid): return uid == 7
     def _resolve_repo_from_user_forum(self, cid, uid): return None
+    def _in_own_forum(self, cid, holder): return cid == "own-forum"
 
 f = FakeSelf()
-chk = lambda uid, repo=None: B.ClaudeBot._check_access(f, uid, repo_name=repo)
+chk = lambda uid, repo=None, cid=None: B.ClaudeBot._check_access(f, uid, repo_name=repo, channel_id=cid)
 
 fails = []
 def check(label, got, want):
@@ -46,12 +47,18 @@ check("Vin in the BOT repo denied", (r.allowed, r.reason), (False, "No access gr
 r = chk(1001, "The-Citadel")
 check("Vin in Citadel denied", r.allowed, False)
 
+r = chk(1001, None, "some-channel")
+check("Vin, unresolvable channel denied", r.allowed, False)
+
 r = chk(1001, None)
-check("Vin, unresolvable channel -> tightest", (r.allowed, r.mode_ceiling, r.bash_policy),
+check("Vin, no channel at all denied", r.allowed, False)
+
+r = chk(1001, None, "own-forum")
+check("Vin, own forum with no repo tag -> tightest", (r.allowed, r.mode_ceiling, r.bash_policy),
       (True, "build", "none"))
 
-r = chk(1002, None)
-check("multi-grant unresolvable -> tightest of both", (r.allowed, r.mode_ceiling, r.bash_policy),
+r = chk(1002, None, "own-forum")
+check("multi-grant own forum -> tightest of both", (r.allowed, r.mode_ceiling, r.bash_policy),
       (True, "explore", "none"))
 
 r = chk(1002, "a")

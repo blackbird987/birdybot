@@ -150,6 +150,9 @@ async def _invoke_claude(content: bytes) -> str | None:
         "--permission-mode", "plan",
         "--max-turns", "1",
         "--model", config.LOG_TRIAGE_MODEL,
+        # Reads what it is piped. A log line can quote a guest.
+        "--tools", "",
+        "--strict-mcp-config",
     ]
     env = os.environ.copy()
     env.pop("CLAUDE_CODE", None)

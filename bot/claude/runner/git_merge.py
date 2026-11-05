@@ -1157,7 +1157,7 @@ class MergeMixin:
         wt = instance.worktree_path
         # The files here are a session's, and these calls run outside its sandbox.
         git = ["git"]
-        if sandbox.is_sandboxed(getattr(self, "_store", None), instance.repo_path):
+        if sandbox.instance_confined(getattr(self, "_store", None), instance):
             git += sandbox.GIT_SAFE
         # Transient-race guard: retry once after a short pause when status
         # fails or reports clean — t-5592's rescue bailed on exactly one of

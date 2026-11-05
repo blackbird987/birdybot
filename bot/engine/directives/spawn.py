@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 
 from bot.textutil import directive_re, match_name
-from bot.claude.sandbox import is_sandboxed, origin_is_sandboxed
+from bot.claude.sandbox import context_confined, is_guest_confined, is_sandboxed, origin_is_sandboxed
 from bot.claude.types import Instance
 from bot.platform.base import RequestContext, SpawnArgs
 from bot.engine.cmd_state import check_budget
@@ -179,8 +180,23 @@ async def _handle_spawn_directive(
         return True
     repo = canonical
 
-    # A sandboxed session's brief must not run somewhere with fewer walls.
-    if origin_is_sandboxed(ctx.store, _resolve_parent_instance(ctx)) and not is_sandboxed(
+    # A guest's brief stays in the repo it was given: the child is confined
+    # anywhere, but a sandboxed target would still let it reach a repo with no grant.
+    origin = _resolve_parent_instance(ctx)
+    if is_guest_confined(origin) or context_confined(ctx):
+        repos = ctx.store.list_repos()
+        target_path = repos.get(repo) or ""
+        own_path = getattr(origin, "repo_path", "") or repos.get(ctx.repo_name or "") or ""
+        if not own_path or os.path.realpath(own_path) != os.path.realpath(target_path):
+            await _reject(
+                f"guest session asked to spawn into another repo {repo}",
+                f"/spawn refused: a session with a guest in it can only spawn into its own repo, not `{repo}`.",
+            )
+            return True
+
+    # A sandboxed session's brief must not run somewhere with fewer walls. A
+    # guest's child is confined for its own sake, wherever the setting is off.
+    elif origin_is_sandboxed(ctx.store, origin, ctx) and not is_sandboxed(
         ctx.store, ctx.store.list_repos().get(repo),
     ):
         await _reject(

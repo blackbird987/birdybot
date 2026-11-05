@@ -53,9 +53,10 @@ class ThreadContextMixin:
         """Whether this thread or one that spawned it has a guest.
 
         A child reports back to its parent, so a guest there reads what the child
-        did with a key. Only the keys go by this: the child's own runs keep the
-        rights its own thread has, or a build would come back from a reboot unable
-        to edit anything.
+        did with a key, and the child's brief is text the guest could steer. The
+        keys and the sandbox both go by this (sandbox.stamp_guest). Its Bash and
+        mode still follow its own thread's rights: a confined build can still edit
+        and commit.
         """
         seen: set[str] = set()
         while info is not None and info.thread_id not in seen:

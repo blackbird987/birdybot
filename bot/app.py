@@ -18,6 +18,7 @@ from bot.claude.auth_health import (
 )
 from bot.claude import memory as claude_memory
 from bot.claude.runner import ClaudeRunner
+from bot.claude import sandbox
 from bot.claude.types import InstanceStatus
 from bot.engine import commands as engine_commands
 from bot.engine import secret_scan
@@ -876,6 +877,7 @@ async def _do_cooldown_retry_locked(store, runner, inst, discord_bot, channel_id
     )
     new_inst.cooldown_retries = inst.cooldown_retries  # Carry count forward
     new_inst.vault_eligible = inst.vault_eligible and not ctx.thread_has_guest
+    sandbox.stamp_guest(new_inst, ctx, source=inst)
     # If the prior turn was running in a worktree (build / build-derived),
     # the cooldown can interrupt mid-edit. The resumed agent often thinks
     # the task is already done — leaving uncommitted edits stranded. Nudge

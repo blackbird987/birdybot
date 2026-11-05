@@ -151,7 +151,7 @@ class WorktreeMixin:
                 f"Cannot create a worktree for {instance.id}: it has no branch"
             )
         default_branch = self._get_default_branch(repo)
-        sandboxed = sandbox.is_sandboxed(getattr(self, "_store", None), repo)
+        sandboxed = sandbox.instance_confined(getattr(self, "_store", None), instance)
 
         # Idempotent: skip if worktree already exists
         if Path(wt_dir).is_dir():

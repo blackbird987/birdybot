@@ -1194,7 +1194,8 @@ async def test_env_injection() -> None:
             check(calls and "PROJECT_API_KEY" not in calls[-1], "not eligible: no key")
             calls.clear()
             await run(_instance(repo_path=repo, vault_eligible=True, is_owner_session=False, session_id=None))
-            check(calls and "PROJECT_API_KEY" not in calls[-1], "guest session: no key")
+            # A guest in a repo that cannot be sandboxed (a temp dir) does not start at all.
+            check(not calls or "PROJECT_API_KEY" not in calls[-1], "guest session: no key")
             calls.clear()
             await run(_instance(repo_path=repo, vault_eligible=True, repo_name="other", session_id=None))
             check(calls and "PROJECT_API_KEY" not in calls[-1], "ungranted repo: no key")

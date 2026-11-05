@@ -15,9 +15,9 @@ key-shaped text must not go through a bot running the old code.
 Sessions share the bot's Linux uid and `kernel.yama.ptrace_scope` is 0. Any
 session can read `vault.json`, every `.env`, and the memory of any other process
 under that uid. What this protects against is a key sitting in text that gets
-sent, stored or shown. It does not stop a session that goes looking. The opt-in
-per-repo limit on what a session can reach is `docs/design/session-sandbox.md`,
-and it is off unless a repo turns it on.
+sent, stored or shown. It does not stop a session that goes looking. The limit on what a
+session can reach is `docs/design/session-sandbox.md`: always on for a session with a
+guest in it, and opt-in per repo for the owner's.
 
 ## What it does not protect against
 

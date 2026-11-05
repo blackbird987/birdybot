@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from bot import config
-from bot.claude.sandbox import GIT_SAFE
+from bot.claude.sandbox import GIT_SAFE, stamp_guest as sandbox_stamp_guest
 from bot.claude.types import Instance, InstanceOrigin, InstanceStatus, InstanceType
 from bot.engine import cmd_state, lifecycle, step_parse
 from bot.engine.commit_calls import LOG_FORMAT, match_commits, parse_log, read_commit_calls
@@ -424,6 +424,7 @@ def readonly_instance(
     inst.repo_path = repo_path
     inst.bash_policy = "none"
     inst.bash_policy_baseline = "none"
+    sandbox_stamp_guest(inst, ctx)
     routed = resolve_spawn_model(origin)
     if routed:
         inst.model = routed

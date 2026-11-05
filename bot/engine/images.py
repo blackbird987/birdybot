@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING
 
 from bot import config
 from bot.claude.gitpaths import git_toplevel
-from bot.claude.sandbox import is_sandboxed
+from bot.claude.sandbox import instance_confined
 from bot.procutil import run_capture
 from bot.textutil import DIRECTIVE_ARGS, DIRECTIVE_KV_RE, directive_kv, is_quoted_example, mask_tilde_bodies
 
@@ -226,7 +226,7 @@ async def deliver_images(
     captions: list[str] = []
     problems: list[str] = []
     batch_bytes = 0
-    sandboxed = is_sandboxed(ctx.store, getattr(inst, "repo_path", None))
+    sandboxed = instance_confined(ctx.store, inst, ctx=ctx)
     for raw, caption in directives:
         # Off the event loop: the worktree fallback shells out to git.
         resolved, reason = await asyncio.to_thread(

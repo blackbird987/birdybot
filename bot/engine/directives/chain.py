@@ -152,10 +152,10 @@ async def _handle_chain_directive(
     # sensible default (ship repos → ship, else hold), falling back to ship.
     if preset is None:
         from bot.engine.workflows import load_workflow_policy
-        from bot.claude.sandbox import is_sandboxed
+        from bot.claude.sandbox import instance_confined
         policy = load_workflow_policy(
             source_inst.repo_path,
-            sandboxed=is_sandboxed(ctx.store, source_inst.repo_path),
+            sandboxed=instance_confined(ctx.store, source_inst, ctx=ctx),
         )
         preset = "ship" if policy["autonomy"] in ("merge", "ship") else "hold"
 

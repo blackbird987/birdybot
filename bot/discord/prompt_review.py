@@ -163,6 +163,7 @@ async def _run_review_locked(bot, days, repo_name, repo_path, thread) -> str:
         mode="explore",
     )
     inst.origin = InstanceOrigin.PROMPT_REVIEW
+    # Owner only, and in the owner's own review thread: no guest text in this run.
     inst.origin_platform = "discord"
     inst.repo_name = repo_name
     inst.repo_path = repo_path
