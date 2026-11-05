@@ -12,7 +12,7 @@ that package stays free of the bot and this module has no reason to reach into
 `scripts/`. TOML, not a grep: a record's prose can hold a line starting "status".
 
 Fails open: anything unreadable is no finding, never an exception. A repo with
-no `study/config.toml` costs one stat per directory up to its git root. See
+no `study/config.toml` costs a few stats per directory up to its git root. See
 docs/design/findings.md.
 """
 

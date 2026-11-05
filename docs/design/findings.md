@@ -136,7 +136,8 @@ a folder with `HEAD` in it. Anything else named `.git` is walked past: aiagent h
 stray `AIAgent/AIAgent/.git` holding only `info/`, and stopping there hid its registry
 from the tool and from plan reviewers, including the `shut` records. The rule lives in
 both `study.py` and `bot/engine/findings.py`, because neither imports the other.
-`test_findings.py` drives both over the same layouts, so they cannot drift apart.
+`test_findings.py` drives both over the same layouts, so changing one alone fails
+there.
 
 ## What must not drift
 

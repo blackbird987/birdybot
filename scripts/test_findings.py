@@ -146,8 +146,8 @@ with tempfile.TemporaryDirectory() as tmp:
     check("the walk stops at the git root", findings.dead_ends(inner) == [])
 
     # The tool and the reader each keep the rule for what counts as a git root,
-    # because neither imports the other. Same layouts through both, so one cannot
-    # change without the other. `reaches` is whether the registry above is found.
+    # because neither imports the other. Same layouts through both, so changing
+    # one alone fails here. `reaches` is whether the registry above is found.
     def stray_folder(d):
         (d / ".git" / "info").mkdir(parents=True)
 
@@ -177,12 +177,16 @@ with tempfile.TemporaryDirectory() as tmp:
         below = both / make.__name__
         below.mkdir()
         make(below)
-        check(f"reader, {case}: {'walks past' if reaches else 'stops'}",
-              (findings.layout(below) is not None) is reaches, str(findings.layout(below)))
+        verb = "walks past" if reaches else "stops"
+        read = findings.dead_ends(below)
+        check(f"reader, {case}: {verb}", read == ([("2026-11-01-z", "Above.")] if reaches else []),
+              str(read))
         tool = subprocess.run([sys.executable, str(TOOL), "state"], cwd=below,
                               capture_output=True, text=True, encoding="utf-8")
-        check(f"tool, {case}: {'walks past' if reaches else 'stops'}",
-              (tool.returncode == 0) is reaches, tool.stderr)
+        # By what it says, because a crash also exits non-zero.
+        found = ("2026-11-01-z" in tool.stdout if reaches
+                 else "no study/config.toml" in tool.stderr)
+        check(f"tool, {case}: {verb}", found, tool.stdout + tool.stderr)
 
     bare = Path(tmp) / "bare"
     bare.mkdir()

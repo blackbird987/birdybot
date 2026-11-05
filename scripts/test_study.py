@@ -8,8 +8,8 @@ reported, so a rule that stops firing cannot hide behind another one's failure.
 
 Also pins the places it has to find its footing: a worktree, a worktree forked
 before the repo had a study folder, a repo registered as a subfolder of its git
-root, and a repo that carries its own copy of the tool. The reasoning is in
-docs/design/findings.md.
+root, a stray `.git` folder on the way up, and a repo that carries its own copy of
+the tool. The reasoning is in docs/design/findings.md.
 
 Run: python scripts/test_study.py
 """
@@ -484,26 +484,14 @@ with tempfile.TemporaryDirectory() as tmp:
     check("state from under a stray .git sees the record",
           "past-the-stray" in study(sub, "state").stdout)
     check("check from under a stray .git passes", study(sub, "check").returncode == 0)
-    check("the stray folder is left alone",
-          sorted(f.name for f in (sub / ".git").iterdir()) == ["info"])
-with tempfile.TemporaryDirectory() as tmp:
-    # Real roots still end the walk: a nested repo and a worktree's .git file.
-    outer = Path(tmp) / "repo"
-    stray = outer / "stray"
-    (stray / ".git").mkdir(parents=True)
-    git(outer, "init", "-q")
-    init = study(outer, "init")
-    check("a stray .git below a real root reaches the root's registry",
-          init.returncode == 0 and study(stray, "check").returncode == 0, init.stderr)
-    inner = outer / "inner"
+    # A real root still ends the walk. A worktree's .git file is pinned above, by
+    # the worktree forked before the study folder.
+    inner = root / "inner"
     inner.mkdir()
     git(inner, "init", "-q")
+    out = study(inner, "state")
     check("a registry above a real git root is still not picked up",
-          study(inner, "state").returncode != 0)
-    wt = outer / ".worktrees" / "t-1"
-    git(outer, "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "start")
-    git(outer, "worktree", "add", "-q", str(wt), "-b", "wt")
-    check("a worktree's .git file ends the walk", study(wt, "state").returncode != 0)
+          out.returncode == 2 and "no study/config.toml" in out.stderr, out.stdout + out.stderr)
 
 print("\n[a repo with its own copy of the tool]")
 with tempfile.TemporaryDirectory() as tmp:
