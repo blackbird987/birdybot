@@ -36,6 +36,16 @@ class Layout:
     dead_status: str
 
 
+def _is_git_root(d: Path) -> bool:
+    """A real repo root: `.git` is a file (a worktree's or submodule's pointer)
+    or a folder with HEAD in it. A stray `.git` folder is neither, and stopping
+    there hid aiagent's registry. scripts/study/study.py keeps the same rule,
+    because neither side imports the other; test_findings.py holds them together.
+    """
+    dot_git = d / ".git"
+    return dot_git.is_file() or (dot_git / "HEAD").is_file()
+
+
 def layout(repo_path: str | Path) -> Layout | None:
     """Where this repo keeps its records, or None when it has no study folder.
 
@@ -47,7 +57,7 @@ def layout(repo_path: str | Path) -> Layout | None:
             config = d / _CONFIG
             if config.is_file():
                 return _read_layout(d, config)
-            if (d / ".git").exists():
+            if _is_git_root(d):
                 return None
     except (OSError, ValueError):  # ValueError: bad TOML, or not UTF-8
         log.debug("findings: no usable config for %s", repo_path, exc_info=True)

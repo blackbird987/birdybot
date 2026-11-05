@@ -145,6 +145,45 @@ with tempfile.TemporaryDirectory() as tmp:
     git(inner, "init", "-q")
     check("the walk stops at the git root", findings.dead_ends(inner) == [])
 
+    # The tool and the reader each keep the rule for what counts as a git root,
+    # because neither imports the other. Same layouts through both, so one cannot
+    # change without the other. `reaches` is whether the registry above is found.
+    def stray_folder(d):
+        (d / ".git" / "info").mkdir(parents=True)
+
+    def empty_folder(d):
+        (d / ".git").mkdir()
+
+    def folder_with_head(d):
+        (d / ".git").mkdir()
+        (d / ".git" / "HEAD").write_text("ref: refs/heads/master\n", encoding="utf-8")
+
+    def pointer_file(d):
+        (d / ".git").write_text("gitdir: /nowhere/worktrees/x\n", encoding="utf-8")
+
+    def real_repo(d):
+        git(d, "init", "-q")
+
+    both = Path(tmp) / "both"
+    write_config(both, "format = 1\n")
+    record(both / "study" / "findings", "2026-11-01-z", "shut", verdict="Above.")
+    for case, make, reaches in (
+        ("a stray .git folder holding only info/", stray_folder, True),
+        ("an empty .git folder", empty_folder, True),
+        ("a .git folder with HEAD", folder_with_head, False),
+        ("a .git file", pointer_file, False),
+        ("a real git init", real_repo, False),
+    ):
+        below = both / make.__name__
+        below.mkdir()
+        make(below)
+        check(f"reader, {case}: {'walks past' if reaches else 'stops'}",
+              (findings.layout(below) is not None) is reaches, str(findings.layout(below)))
+        tool = subprocess.run([sys.executable, str(TOOL), "state"], cwd=below,
+                              capture_output=True, text=True, encoding="utf-8")
+        check(f"tool, {case}: {'walks past' if reaches else 'stops'}",
+              (tool.returncode == 0) is reaches, tool.stderr)
+
     bare = Path(tmp) / "bare"
     bare.mkdir()
     git(bare, "init", "-q")

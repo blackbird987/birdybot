@@ -468,6 +468,42 @@ with tempfile.TemporaryDirectory() as tmp:
     plain.mkdir()
     check("init outside git uses the current directory",
           study(plain, "init").returncode == 0 and (plain / "study" / "config.toml").exists())
+with tempfile.TemporaryDirectory() as tmp:
+    # aiagent's shape: the git root has the registry, and the registered folder
+    # holds a stray .git with no HEAD in it.
+    root = Path(tmp) / "DegenAI"
+    sub = root / "AIAgent"
+    (sub / ".git" / "info").mkdir(parents=True)
+    git(root, "init", "-q")
+    out = study(sub, "init")
+    check("init from under a stray .git lands at the real git root",
+          (root / "study" / "config.toml").exists() and not (sub / "study").exists(),
+          out.stdout + out.stderr)
+    out = study(sub, "new", "--title", "Past the stray", "--question", "Q")
+    check("new from under a stray .git finds the registry", out.returncode == 0, out.stderr)
+    check("state from under a stray .git sees the record",
+          "past-the-stray" in study(sub, "state").stdout)
+    check("check from under a stray .git passes", study(sub, "check").returncode == 0)
+    check("the stray folder is left alone",
+          sorted(f.name for f in (sub / ".git").iterdir()) == ["info"])
+with tempfile.TemporaryDirectory() as tmp:
+    # Real roots still end the walk: a nested repo and a worktree's .git file.
+    outer = Path(tmp) / "repo"
+    stray = outer / "stray"
+    (stray / ".git").mkdir(parents=True)
+    git(outer, "init", "-q")
+    init = study(outer, "init")
+    check("a stray .git below a real root reaches the root's registry",
+          init.returncode == 0 and study(stray, "check").returncode == 0, init.stderr)
+    inner = outer / "inner"
+    inner.mkdir()
+    git(inner, "init", "-q")
+    check("a registry above a real git root is still not picked up",
+          study(inner, "state").returncode != 0)
+    wt = outer / ".worktrees" / "t-1"
+    git(outer, "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "start")
+    git(outer, "worktree", "add", "-q", str(wt), "-b", "wt")
+    check("a worktree's .git file ends the walk", study(wt, "state").returncode != 0)
 
 print("\n[a repo with its own copy of the tool]")
 with tempfile.TemporaryDirectory() as tmp:
