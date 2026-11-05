@@ -11,6 +11,9 @@
 - **`scripts/peer_setup.py` re-run now updates an existing channel**: it compares and changes only the two bots' overwrites, for the outbox threads. `scripts/peer_perms.py` checks the same ones.
 - **The session sandbox path hook understands Windows paths**: drive-letter globs and `..` split on either separator.
 
+### Fixed
+- **The offline replay tools build a prompt again** (`scripts/replay_ab/prompt.py`, `scripts/judge_replay/replay.py`). Their stand-in prompt builder had no store once the machine link note began reading one, so `test_replay_ab` crashed on master.
+
 ## v0.102.22, Limit messages stop becoming thread titles, and every guest session is confined (2026-11-05)
 
 ### Security
