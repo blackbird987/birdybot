@@ -30,8 +30,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from bot import peer_record
+from bot.procutil import NOWND
 
-log = logging.getLogger(__name__)
+log =logging.getLogger(__name__)
 
 ANSWER_TOOLS = "Read,Glob"
 SETTINGS_FILE = "settings.json"
@@ -367,7 +368,7 @@ def self_check(binary: str, timeout: int = _CHECK_TIMEOUT_SECS) -> CheckResult:
                 cmd, input=f"{_Script.mark}: scripted question", text=True, encoding="utf-8",
                 errors="replace", capture_output=True, cwd=repo_dir,
                 env=scripted_env(server.server_address[1], config_dir), timeout=timeout,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                **NOWND,
             )
         except subprocess.TimeoutExpired:
             return CheckResult(False, f"the check did not finish within {timeout}s")

@@ -24,6 +24,7 @@ from pathlib import Path, PurePosixPath
 
 from bot.claude.sandbox import GIT_SAFE
 from bot.platform.redact import redact_secrets, scrub_known
+from bot.procutil import NOWND
 
 log = logging.getLogger(__name__)
 
@@ -122,8 +123,7 @@ def _destination(root: Path, path: str) -> Path | None:
 def _git(repo: Path, *args: str, stdin: bytes | None = None) -> bytes:
     return subprocess.run(
         ["git", *GIT_SAFE, "-C", str(repo), "--no-optional-locks", *args],
-        input=stdin, capture_output=True, timeout=_GIT_TIMEOUT, check=True,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        input=stdin, capture_output=True, timeout=_GIT_TIMEOUT, check=True, **NOWND,
     ).stdout
 
 

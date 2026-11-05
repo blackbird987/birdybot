@@ -1124,7 +1124,7 @@ def section_export() -> None:
     check("the export is not inside any repo", git_outside.returncode != 0, git_outside.stdout)
     check("removing it leaves nothing", (peer_export.remove_export(export.root), not export.root.exists())[1])
 
-    for bad in ("a\\..\\x", "C:\\x", "con.txt", "NUL", "trail.", "trail "):
+    for bad in ("a\\..\\x", "C:\\x", "con.txt", "NUL", "trail.", "trail "):  # portability: ok
         check(f"{bad!r} is refused as a path", any(
             peer_export._unsafe_part(part) for part in bad.split("/")))
     outside = peer_export._destination(tmp, "a/../../x")
@@ -1229,10 +1229,10 @@ def section_answer_run() -> None:
 
         async def raw_failure(_ctx, inst, handle=None, silent=False):
             inst.status = InstanceStatus.FAILED
-            inst.error = "/home/quincy/secret/path exploded"
+            inst.error = "/srv/someone/secret/path exploded"
         lifecycle.run_instance = raw_failure
         status, text, _line = run(pq.run_answer(ctx, record))
-        check("a raw error does not cross the link", "/home/quincy" not in text and status == peer_record.FAILED)
+        check("a raw error does not cross the link", "/srv/someone" not in text and status == peer_record.FAILED)
 
         async def never_returns(_ctx, inst, handle=None, silent=False):
             seen["slow"] = Path(inst.repo_path)
@@ -1729,18 +1729,19 @@ def section_hook() -> None:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     module.os = SimpleNamespace(path=ntpath, sep="\\")
-    cfg = {"cwd": "C:\\run\\repo", "read": ["C:\\run\\repo"], "write": [], "deny_read": []}
-    inside = (("Read", {"file_path": "C:\\run\\repo\\a.txt"}), ("Read", {"file_path": "a.txt"}),
-              ("Glob", {"pattern": "C:/run/repo/*"}), ("Glob", {"pattern": "src/*"}))
+    # Windows paths on purpose: this runs the hook's rules as they would be on the laptop.
+    cfg = {"cwd": "C:\\run\\repo", "read": ["C:\\run\\repo"], "write": [], "deny_read": []}  # portability: ok
+    inside = (("Read", {"file_path": "C:\\run\\repo\\a.txt"}), ("Read", {"file_path": "a.txt"}),  # portability: ok
+              ("Glob", {"pattern": "C:/run/repo/*"}), ("Glob", {"pattern": "src/*"}))  # portability: ok
     for tool, tool_input in inside:
         check(f"Windows rules: allowed {tool_input}", module.check(tool, tool_input, cfg) is None,
               module.check(tool, tool_input, cfg))
-    blocked = (("Read", {"file_path": "C:\\Users\\me\\.env"}), ("Read", {"file_path": "C:/Users/me/.env"}),
-               ("Read", {"file_path": "D:\\x"}), ("Read", {"file_path": "..\\..\\x"}),
+    blocked = (("Read", {"file_path": "C:\\Users\\me\\.env"}), ("Read", {"file_path": "C:/Users/me/.env"}),  # portability: ok
+               ("Read", {"file_path": "D:\\x"}), ("Read", {"file_path": "..\\..\\x"}),  # portability: ok
                ("Read", {"file_path": "\\\\server\\share\\x"}),
-               ("Glob", {"pattern": "C:/Users/*"}), ("Glob", {"pattern": "C:\\Users\\*"}),
-               ("Glob", {"pattern": "c:/*"}), ("Glob", {"pattern": "\\\\server\\share\\*"}),
-               ("Glob", {"pattern": "..\\..\\*"}), ("Glob", {"path": "C:\\Users", "pattern": "*"}))
+               ("Glob", {"pattern": "C:/Users/*"}), ("Glob", {"pattern": "C:\\Users\\*"}),  # portability: ok
+               ("Glob", {"pattern": "c:/*"}), ("Glob", {"pattern": "\\\\server\\share\\*"}),  # portability: ok
+               ("Glob", {"pattern": "..\\..\\*"}), ("Glob", {"path": "C:\\Users", "pattern": "*"}))  # portability: ok
     for tool, tool_input in blocked:
         check(f"Windows rules: blocked {tool_input}", bool(module.check(tool, tool_input, cfg)), tool_input)
 
