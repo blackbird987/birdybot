@@ -8,8 +8,8 @@ reported, so a rule that stops firing cannot hide behind another one's failure.
 
 Also pins the places it has to find its footing: a worktree, a worktree forked
 before the repo had a study folder, a repo registered as a subfolder of its git
-root, and a repo that carries its own copy of the tool. The reasoning is in
-docs/design/findings.md.
+root, a stray `.git` folder on the way up, and a repo that carries its own copy of
+the tool. The reasoning is in docs/design/findings.md.
 
 Run: python scripts/test_study.py
 """
@@ -468,6 +468,30 @@ with tempfile.TemporaryDirectory() as tmp:
     plain.mkdir()
     check("init outside git uses the current directory",
           study(plain, "init").returncode == 0 and (plain / "study" / "config.toml").exists())
+with tempfile.TemporaryDirectory() as tmp:
+    # aiagent's shape: the git root has the registry, and the registered folder
+    # holds a stray .git with no HEAD in it.
+    root = Path(tmp) / "DegenAI"
+    sub = root / "AIAgent"
+    (sub / ".git" / "info").mkdir(parents=True)
+    git(root, "init", "-q")
+    out = study(sub, "init")
+    check("init from under a stray .git lands at the real git root",
+          (root / "study" / "config.toml").exists() and not (sub / "study").exists(),
+          out.stdout + out.stderr)
+    out = study(sub, "new", "--title", "Past the stray", "--question", "Q")
+    check("new from under a stray .git finds the registry", out.returncode == 0, out.stderr)
+    check("state from under a stray .git sees the record",
+          "past-the-stray" in study(sub, "state").stdout)
+    check("check from under a stray .git passes", study(sub, "check").returncode == 0)
+    # A real root still ends the walk. A worktree's .git file is pinned above, by
+    # the worktree forked before the study folder.
+    inner = root / "inner"
+    inner.mkdir()
+    git(inner, "init", "-q")
+    out = study(inner, "state")
+    check("a registry above a real git root is still not picked up",
+          out.returncode == 2 and "no study/config.toml" in out.stderr, out.stdout + out.stderr)
 
 print("\n[a repo with its own copy of the tool]")
 with tempfile.TemporaryDirectory() as tmp:

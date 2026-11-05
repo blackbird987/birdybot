@@ -131,6 +131,14 @@ forked before the repo had a study folder never reads the main checkout's. `init
 writes at the git root, not the current directory: a repo registered as a subfolder
 of its git root (aiagent) has a worktree whose working directory is the root.
 
+A git root is a path whose `.git` is a file (a worktree's or submodule's pointer) or
+a folder with `HEAD` in it. Anything else named `.git` is walked past: aiagent has a
+stray `AIAgent/AIAgent/.git` holding only `info/`, and stopping there hid its registry
+from the tool and from plan reviewers, including the `shut` records. The rule lives in
+both `study.py` and `bot/engine/findings.py`, because neither imports the other.
+`test_findings.py` drives both over the same layouts, so changing one alone fails
+there.
+
 ## What must not drift
 
 - **The record stays plain markdown, readable without the tool.** A session with

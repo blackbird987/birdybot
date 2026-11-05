@@ -75,13 +75,23 @@ def die(message):
     raise SystemExit(2)
 
 
+def is_git_root(d):
+    """A real repo root: `.git` is a file (a worktree's or submodule's pointer)
+    or a folder with HEAD in it. A stray `.git` folder is neither, and stopping
+    there hid aiagent's registry. bot/engine/findings.py keeps the same rule,
+    because neither side imports the other; test_findings.py holds them together.
+    """
+    dot_git = os.path.join(d, ".git")
+    return os.path.isfile(dot_git) or os.path.isfile(os.path.join(dot_git, "HEAD"))
+
+
 def walk_up(start):
     """`start` and its parents, up to and including the git root."""
     d = os.path.abspath(start)
     while True:
         yield d
         parent = os.path.dirname(d)
-        if os.path.exists(os.path.join(d, ".git")) or parent == d:
+        if is_git_root(d) or parent == d:
             return
         d = parent
 
@@ -175,7 +185,7 @@ def cmd_init(args):
     # directory is the git root even when the repo is registered as a subfolder
     # of it, so anywhere else the sensor and the plan reviewer would miss it.
     top = list(walk_up(start))[-1]
-    root = top if os.path.exists(os.path.join(top, ".git")) else start
+    root = top if is_git_root(top) else start
     os.makedirs(os.path.join(root, FINDINGS_DIR), exist_ok=True)
     write_text(os.path.join(root, CONFIG_PATH), CONFIG_TEMPLATE)
     write_text(os.path.join(root, FINDINGS_DIR, ".gitkeep"), "")

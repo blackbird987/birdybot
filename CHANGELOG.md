@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## v0.102.21, A stray .git folder no longer hides a repo's findings (2026-11-05)
+
+### Fixed
+- **A stray `.git` folder no longer hides a repo's findings.** The study tool and the plan reviewers stopped walking up at anything named `.git`, so aiagent's registry at its git root was invisible from its registered folder, shut records included. A `.git` now counts as a repo root only when it is a file (worktree or submodule pointer) or a folder with `HEAD` in it.
+
 ## v0.102.20, A read-only link between two machines, and a tap before auto-update (2026-11-04)
 
 ### Added
