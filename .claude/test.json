@@ -99,6 +99,7 @@
     "session_picker_filter": "python scripts/test_session_picker_filter.py",
     "access_scoping": "python scripts/test_access_scoping.py",
     "ai_title": "python scripts/test_ai_title.py",
+    "title_errors": "python scripts/test_title_errors.py",
     "branch_scan": "python scripts/test_branch_scan.py",
     "failover_session": "python scripts/test_failover_session.py",
     "fleet_ship": "python scripts/test_fleet_ship.py",

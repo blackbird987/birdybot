@@ -95,6 +95,12 @@ guest cannot store anything and gets no hold.
   the path and leave the rest in the prompt. A location is dropped unless it reads as
   random. A UUID or 40 hex under a label is asked about, because some vendors issue
   keys in those shapes, except after a word like "primary" or "session".
+- **An `=` inside a key is not a label.** `FOO=value` loses its label before the entropy
+  check, but only up to a random stretch long enough to be a key by itself. Atlassian
+  tokens end `=` plus a short checksum: splitting at the last `=` left only the checksum,
+  too short to count, and the whole key passed unasked. A shorter odd name stays a label.
+  Atlassian has its own SURE row because of that shape. Only its prefix was checked, from
+  memory and with fakes, never against a real token.
 - **Output redaction is wider than the door.** The door needs a boundary before a
   key, so `task-...` is not a key. Redaction also matches a key glued to a word, and
   gives up the word.
