@@ -259,16 +259,36 @@ class ClaudeBot(StartupMixin, ThreadContextMixin, UsageGateMixin, PendingImagesM
                     allowed=False, is_owner=False,
                     reason=f"No access grant for `{repo_name}`",
                 )
-            # Repo genuinely unresolvable (a channel the resolver does not
-            # recognise). Allow, but at the tightest settings held anywhere --
-            # the permissive defaults would otherwise undo a bash="none" grant.
+            # No repo, in the one place that is fine: a guest's own forum, on a
+            # thread with no repo tag yet. _route_screened picks their one repo or
+            # asks them to choose. Tightest settings held anywhere until then.
+            if self._in_own_forum(channel_id, cfg.users.get(str(user_id))):
+                return AccessResult(
+                    allowed=True, is_owner=False,
+                    mode_ceiling=get_most_restrictive_ceiling(cfg, str(user_id)),
+                    bash_policy=get_most_restrictive_bash(cfg, str(user_id)),
+                )
+            # Anywhere else a grant says nothing about this channel. Letting it
+            # through ended in the global active repo, whichever that was.
             return AccessResult(
-                allowed=True, is_owner=False,
-                mode_ceiling=get_most_restrictive_ceiling(cfg, str(user_id)),
-                bash_policy=get_most_restrictive_bash(cfg, str(user_id)),
+                allowed=False, is_owner=False,
+                reason="This channel has no repo you have a grant for",
             )
 
         return AccessResult(allowed=False, is_owner=False, reason="No access grant")
+
+    def _in_own_forum(self, channel_id: str | None, grant_holder) -> bool:
+        """Is this channel the guest's personal forum, or a thread directly in it?"""
+        forum_id = getattr(grant_holder, "forum_channel_id", None)
+        if not channel_id or not forum_id:
+            return False
+        if str(channel_id) == str(forum_id):
+            return True
+        try:
+            ch = self.get_channel(int(channel_id))
+        except (TypeError, ValueError):
+            return False
+        return isinstance(ch, discord.Thread) and str(ch.parent_id) == str(forum_id)
 
     def _resolve_repo_from_user_forum(self, channel_id: str, user_id: str) -> str | None:
         """Resolve repo name from a thread in a user's personal forum via tags."""

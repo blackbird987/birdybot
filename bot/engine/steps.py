@@ -32,7 +32,7 @@ from bot.engine.step_parse import (
     _with_plan,
     _verify_why,
 )
-from bot.claude.sandbox import is_sandboxed
+from bot.claude.sandbox import instance_confined
 from bot.engine.step_policy import _load_verify_policy
 from bot.engine.step_spawn import (
     SpawnConfig,
@@ -387,11 +387,11 @@ async def on_sensors(
     if not cwd:
         return inst  # nothing to sense; chain continues
     # Sensors run with the bot's full environment, on a repo's files and commands.
-    if is_sandboxed(ctx.store, inst.repo_path):
+    if instance_confined(ctx.store, inst):
         try:
             await ctx.messenger.send_text(
                 ctx.channel_id,
-                "Sensors skipped: this repo is sandboxed and they would run outside it.",
+                "Sensors skipped: this session is sandboxed and they would run outside it.",
                 silent=True,
             )
         except Exception:
@@ -497,7 +497,7 @@ async def on_verify(ctx: RequestContext, source_id: str, source_msg_id: str | No
     current_msg = source_msg_id
     source_inst = ctx.store.get_instance(source_id)
     verify_policy = _load_verify_policy(
-        source_inst, sandboxed=is_sandboxed(ctx.store, source_inst.repo_path if source_inst else None),
+        source_inst, sandboxed=instance_confined(ctx.store, source_inst, ctx=ctx),
     )
 
     result: Instance | None = None

@@ -186,11 +186,18 @@ async def generate_title_text(prompt: str, summary: str = "") -> str | None:
         "--verbose",
         "--permission-mode", "plan",
         "--max-turns", "1",
+        # The prompt quotes a guest's words, and this runs outside any sandbox.
+        # --tools does not reach MCP servers: the attack run saw them still offered.
+        "--tools", "",
+        "--strict-mcp-config",
     ]
 
     env = os.environ.copy()
     env.pop("CLAUDE_CODE", None)
     env.pop("CLAUDECODE", None)
+    from bot.claude.runner import SESSION_STRIPPED_ENV_VARS
+    for var in SESSION_STRIPPED_ENV_VARS:
+        env.pop(var, None)
     # Pin to the primary configured account. Without this the subprocess falls
     # back to $HOME/.claude, which on Windows happens to be the same directory
     # but on Linux can be a different — possibly unauthenticated — config dir,

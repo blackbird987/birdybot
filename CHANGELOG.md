@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Security
+- **Every guest session is confined, in every repo** (`docs/design/session-sandbox.md`, `bot/claude/sandbox.py`). A guest's run used to be limited only by a sentence in its prompt unless the owner had run `/sandbox on`: measured on the old code, a guest-shaped session read a fake secret outside its repo and edited a file there. Now each run has one answer, stamped when it is made and kept across retries, later steps, children and restarts. `/sandbox off` does not free a guest.
+- **A guest's repo that cannot be sandboxed refuses the run** with the reason, and never falls back to running it open.
+- **An owner's turn in a thread with a guest is confined too**, because the guest's text is in its history. In the bot repo it is refused and told to start a new thread.
+- **A grant no longer passes in a channel with no repo.** It used to land in the global active repo at the guest's tightest settings. A guest's own forum still works.
+- **`/spawn` from a session with a guest in it reaches only its own repo.**
+- **The title and log triage helpers run with no tools and no MCP servers**, since they hold guest text outside any sandbox. `--tools ""` alone left MCP tools offered.
+
+### Changed
+- **A `TODO.md` that is a link or FIFO is skipped with a log warning in every repo**, not only sandboxed ones. An owner with a linked `TODO.md` will notice this.
+- **`/sandbox status` and `/sandbox off` say guests are always confined.** A repo confined only for guests is not listed as sandboxed.
+
 ## v0.102.21, A stray .git folder no longer hides a repo's findings (2026-11-05)
 
 ### Fixed

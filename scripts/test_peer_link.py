@@ -371,8 +371,8 @@ def test_inert_and_isolated() -> None:
     check("no prompt reads the directory", "peer_record" not in build and "bot.discord" not in build)
     owner = SimpleNamespace(is_owner_session=True, bash_policy="all", repo_path="/r")
     plain_store = SimpleNamespace(get_sandbox_entry=lambda *_: None)
-    saved_enabled, saved_sandboxed = config.PEER_ENABLED, prompt_build.is_sandboxed
-    prompt_build.is_sandboxed = lambda _store, _path: False
+    saved_enabled, saved_sandboxed = config.PEER_ENABLED, prompt_build.instance_confined
+    prompt_build.instance_confined = lambda _store, _inst: False
     config.PEER_ENABLED = True
     note_text = prompt_build._peer_link_note(plain_store, owner)
     check("an owner session is pointed at the reader",
@@ -381,12 +381,12 @@ def test_inert_and_isolated() -> None:
         plain_store, SimpleNamespace(is_owner_session=False, bash_policy="all", repo_path="/r")))
     check("a session with no shell is not", not prompt_build._peer_link_note(
         plain_store, SimpleNamespace(is_owner_session=True, bash_policy="none", repo_path="/r")))
-    prompt_build.is_sandboxed = lambda _store, _path: True
+    prompt_build.instance_confined = lambda _store, _inst: True
     check("a sandboxed session is not", not prompt_build._peer_link_note(plain_store, owner))
-    prompt_build.is_sandboxed = lambda _store, _path: False
+    prompt_build.instance_confined = lambda _store, _inst: False
     config.PEER_ENABLED = False
     check("no note when the link is off", not prompt_build._peer_link_note(plain_store, owner))
-    config.PEER_ENABLED, prompt_build.is_sandboxed = saved_enabled, saved_sandboxed
+    config.PEER_ENABLED, prompt_build.instance_confined = saved_enabled, saved_sandboxed
     note = config.PEER_LINK_NOTE
     check("the note is static and says untrusted", "untrusted" in note and note.count("{") == 1)
     check("the module reads config where it is read", hasattr(prompt_build, "config"))

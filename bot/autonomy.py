@@ -12,7 +12,7 @@ import logging
 
 from bot import config
 from bot.textutil import parse_iso_utc
-from bot.claude.sandbox import is_sandboxed
+from bot.claude.sandbox import instance_confined
 
 log = logging.getLogger(__name__)
 
@@ -208,7 +208,7 @@ async def ship_sweep(store, discord_bot) -> None:
     ship_ids: list[str] = []
     for t in targets:
         repo_path = t.inst.repo_path if t.inst else None
-        policy = load_workflow_policy(repo_path, sandboxed=is_sandboxed(store, repo_path))
+        policy = load_workflow_policy(repo_path, sandboxed=instance_confined(store, t.inst, repo_path=repo_path))
         if policy["autonomy"] != "ship":
             continue
         # A per-build veto already owns this session — let Phase 2 handle it.

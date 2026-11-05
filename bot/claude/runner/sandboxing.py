@@ -47,6 +47,12 @@ class SandboxMixin:
         api_fallback: bool, working_dir: str, entry: dict,
     ) -> sandbox.SandboxRun:
         repo_path = instance.repo_path
+        # /sandbox on checks this for a repo it turns on. Nobody did for this one.
+        if entry.get("guest_only"):
+            # Asked of an empty path, the check below would judge the bot's own cwd.
+            problem = sandbox.check_repo_allowed(repo_path, provider.name) if repo_path else "it has no repo"
+            if problem:
+                raise sandbox.SandboxRefused(sandbox.guest_refusal(instance, problem))
         sandbox.preflight(provider.name, api_fallback, repo_path)
         sandbox.harden_repo_git(repo_path)
         sandbox.add_stub_excludes(os.path.join(repo_path, ".git"))
@@ -68,7 +74,7 @@ class SandboxMixin:
         """This spawn's sandbox: a run, a refusal to return, or None when off."""
         store = getattr(self, "_store", None)
         try:
-            entry = sandbox.setting_for(store, instance.repo_path)
+            entry = sandbox.run_setting(store, instance)
         except Exception as exc:
             # On for this repo and unreadable: the run does not go ahead.
             log.error("Refusing %s: %s", instance.id, exc)
@@ -96,7 +102,7 @@ class SandboxMixin:
         so a branch from a sandboxed session does not land them unseen.
         """
         repo = instance.repo_path
-        if not sandbox.is_sandboxed(getattr(self, "_store", None), repo):
+        if not sandbox.instance_confined(getattr(self, "_store", None), instance):
             return None
         changes = sandbox.protected_changes(repo, instance.original_branch, instance.branch)
         if changes == []:

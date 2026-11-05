@@ -12,7 +12,6 @@ import os
 import stat
 from pathlib import Path
 
-from bot.claude import sandbox
 from bot.fsutil import atomic_write_text
 
 
@@ -206,12 +205,11 @@ class ReposMixin:
     def _todo_path(self, repo_path: str) -> Path | None:
         """The repo's TODO.md, or None when a session could have planted it.
 
-        The bot reads and rewrites this file outside any sandbox, so in a sandboxed
-        repo a link or FIFO there is a way to read, clobber or hang on a host file.
+        The bot reads and rewrites this file outside any sandbox, so a link or FIFO
+        there is a way to read, clobber or hang on a host file. Asked of every repo:
+        no run is at hand here, and a guest can be confined in a repo with no setting.
         """
         path = Path(repo_path) / "TODO.md"
-        if not sandbox.is_sandboxed(self, repo_path):
-            return path
         try:
             if stat.S_ISREG(os.lstat(path).st_mode):
                 return path
@@ -219,15 +217,12 @@ class ReposMixin:
             return path
         except OSError:
             pass
-        log.warning("Skipping %s: not a plain file in a sandboxed repo", path)
+        log.warning("Skipping %s: not a plain file", path)
         return None
 
     def _write_todo(self, path: Path, content: str) -> None:
         # A rename replaces a link swapped in since the check, and does not follow it.
-        if sandbox.is_sandboxed(self, str(path.parent)):
-            atomic_write_text(path, content)
-        else:
-            path.write_text(content, encoding="utf-8")
+        atomic_write_text(path, content)
 
     def get_deferred(self, repo_name: str) -> str:
         """Get the deferred revisions section from the repo's TODO.md."""

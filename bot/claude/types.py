@@ -232,6 +232,7 @@ class Instance:
     bash_policy: str = "full"         # current effective policy: "full"=Bash unrestricted; "allowlist"=non-owner allowlist guard; "none"=Bash disabled (e.g. read-only triage floor)
     bash_policy_baseline: str = "full" # un-clamped policy. Inherited verbatim by spawned children so a triage floor on the parent does not propagate forward into a build child.
     vault_eligible: bool = False      # May this run receive vault secrets? Fails closed: is_owner_session defaults True, so a missed path must not be what grants keys. See docs/design/secret-intake.md
+    guest_confined: bool = False      # Sandboxed whatever the repo's setting, because a guest's text is in this run's history. Only ever set, never cleared. See sandbox.stamp_guest and docs/design/session-sandbox.md
     effort: str = "high"             # reasoning effort: low/medium/high/max
     model: str | None = None         # CLI model override (e.g. "sonnet" for plan steps)
     cooldown_retry_at: str | None = None   # ISO datetime — auto-retry after usage limit
@@ -412,6 +413,7 @@ class Instance:
             "bash_policy": self.bash_policy,
             "bash_policy_baseline": self.bash_policy_baseline,
             "vault_eligible": self.vault_eligible,
+            "guest_confined": self.guest_confined,
             "effort": self.effort,
             "model": self.model,
             "cooldown_retry_at": self.cooldown_retry_at,
@@ -494,6 +496,7 @@ class Instance:
             # truth and re-asserts before the next spawn.
             bash_policy_baseline=d.get("bash_policy_baseline", "full"),
             vault_eligible=d.get("vault_eligible", False),
+            guest_confined=d.get("guest_confined", False),
             effort=d.get("effort", "high"),
             model=d.get("model"),
             cooldown_retry_at=d.get("cooldown_retry_at"),

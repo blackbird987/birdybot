@@ -57,7 +57,7 @@ async def _execute_bot_commands(
         repo_args = m.group(1).strip()
         # A session must not register a repo: it would be pointing the bot at a
         # path of its choosing, and the next session there is not sandboxed.
-        if origin_is_sandboxed(ctx.store, source_inst or _resolve_parent_instance(ctx)):
+        if origin_is_sandboxed(ctx.store, source_inst or _resolve_parent_instance(ctx), ctx):
             log.warning("BOT_CMD /repo ignored from a sandboxed session: %s", repo_args)
             try:
                 await ctx.messenger.send_text(

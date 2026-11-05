@@ -13,7 +13,7 @@ from bot.fsutil import atomic_write_text, read_contained_text, read_repo_config
 from bot.procutil import run_capture
 from bot.claude import context_bloat
 from bot.claude.provider import ProviderConfig
-from bot.claude.sandbox import SandboxRun, is_sandboxed
+from bot.claude.sandbox import SandboxRun, instance_confined
 from bot.claude.types import Instance, InstanceOrigin
 from bot.store import history as history_mod
 
@@ -46,7 +46,7 @@ def _peer_link_note(store, instance: Instance) -> str:
     """
     if not (config.PEER_ENABLED and instance.is_owner_session and instance.bash_policy != "none"):
         return ""
-    if is_sandboxed(store, instance.repo_path):
+    if instance_confined(store, instance):
         return ""
     return config.PEER_LINK_NOTE.format(script=Path(config._PROJECT_ROOT) / "scripts" / "peer.py")
 

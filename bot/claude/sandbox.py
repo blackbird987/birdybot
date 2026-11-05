@@ -1,4 +1,4 @@
-"""Opt-in, per-repo sandbox for Claude sessions.
+"""Sandbox for Claude sessions: opt-in per repo, and always on for a guest's.
 
 Everything that decides what a sandboxed session can reach lives here: the
 per-repo setting, the generated CLI settings, the environment it gets, and the
@@ -98,7 +98,7 @@ SANDBOX_NOTE = """
 --- Sandbox ---
 This session runs in a sandbox. Bash sees this working directory, a private temp dir ($TMPDIR) and a few toolchains. The rest of the home directory, /tmp, the bot's data and other repos are not there.
 Not available here, and they will fail: email, Telegram, scripts/instances.py, gh, git push over SSH, podman, systemctl, WebFetch, WebSearch, MCP servers, skills, and any network host not on this repo's list ({hosts}). Do not try to work around this. Stop and say what you need, and the owner can do it or change the setup.
-A few bot commands are off too: /repo is ignored, /spawn only reaches other sandboxed repos, /watch only reads logs inside this directory and cannot follow a pid (the sandbox has its own process numbering).
+A few bot commands are off too: /repo is ignored, /spawn only reaches other sandboxed repos (from a session with a guest in it, only this repo), /watch only reads logs inside this directory and cannot follow a pid (the sandbox has its own process numbering).
 `.claude/` and `.mcp.json` are not writable, with any tool. If a step asks you to write one (for example `.claude/test.json`), do not fight it: put the contents in your final message for the owner to add.
 Your memory directory can be read and not written. Temp files do not survive this run. Package caches do.
 {git_note}"""
@@ -158,14 +158,87 @@ def is_sandboxed(store, repo_path: str | None) -> bool:
         return True
 
 
-def origin_is_sandboxed(store, instance) -> bool:
+def is_guest_confined(instance) -> bool:
+    """Is a guest's text part of this run? Then no repo setting can free it."""
+    return not getattr(instance, "is_owner_session", True) or bool(
+        getattr(instance, "guest_confined", False)
+    )
+
+
+def context_confined(ctx) -> bool:
+    """Does this turn belong to a guest, or to a thread family with a guest in it?"""
+    if ctx is None:
+        return False
+    return not getattr(ctx, "is_owner", True) or bool(getattr(ctx, "thread_has_guest", False))
+
+
+def stamp_guest(instance, ctx, source=None) -> None:
+    """Record on a new run whether it is confined for a guest's sake.
+
+    An Instance has no thread id, so this cannot be asked later. Only ever adds:
+    a run keeps what it or its source already had, so no later step, retry or
+    child can lose it through a default. Set is_owner_session first.
+    """
+    instance.guest_confined = bool(
+        getattr(instance, "guest_confined", False)
+        or is_guest_confined(instance)
+        or (source is not None and is_guest_confined(source))
+        or context_confined(ctx)
+    )
+
+
+def instance_confined(store, instance, *, repo_path: str | None = None, ctx=None) -> bool:
+    """The one answer for a run: does it go in the sandbox?
+
+    Every place that treats a run differently for being sandboxed asks this, so
+    they cannot disagree. With no instance, it goes by the turn and the repo path
+    the caller still knows. It does not raise.
+    """
+    if instance is None:
+        return context_confined(ctx) or is_sandboxed(store, repo_path)
+    return is_guest_confined(instance) or is_sandboxed(
+        store, getattr(instance, "repo_path", None),
+    )
+
+
+def run_setting(store, instance) -> dict | None:
+    """What this run gets: the repo's setting, else the guest default, else None.
+
+    An unreadable setting raises, as setting_for does: a refusal, never a default.
+    "guest_only" marks a repo nobody turned on, which /sandbox on never checked.
+    """
+    entry = setting_for(store, getattr(instance, "repo_path", None))
+    if entry is not None:
+        return entry
+    if is_guest_confined(instance):
+        return {"hosts": list(DEFAULT_HOSTS), "guest_only": True}
+    return None
+
+
+def guest_refusal(instance, problem: str) -> str:
+    """Why a guest-confined run in this repo cannot start. Never an open fallback."""
+    name = getattr(instance, "repo_name", "") or getattr(instance, "repo_path", "") or "this repo"
+    if getattr(instance, "is_owner_session", True):
+        return (
+            f"this thread has a guest in it, so your turn is confined too, and `{name}` "
+            f"cannot be sandboxed: {problem}. Start a new thread to work there."
+        )
+    return (
+        f"guest sessions always run sandboxed, and `{name}` cannot be sandboxed: {problem}. "
+        "The owner has to fix that or remove the grant."
+    )
+
+
+def origin_is_sandboxed(store, instance, ctx=None) -> bool:
     """Did this text come from a sandboxed session?
 
-    With no instance to ask, any sandboxed repo means yes: the bot-side gates
-    this feeds should not open because a lookup came back empty.
+    With no instance to ask, a guest's turn or any sandboxed repo means yes: the
+    bot-side gates this feeds should not open because a lookup came back empty.
     """
     if instance is not None:
-        return is_sandboxed(store, getattr(instance, "repo_path", None))
+        return instance_confined(store, instance)
+    if context_confined(ctx):
+        return True
     try:
         getter = getattr(store, "sandbox_entries", None)
         entries = getter() if callable(getter) else None

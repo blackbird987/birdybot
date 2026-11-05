@@ -7,6 +7,7 @@ import logging
 import secrets
 
 from bot import config, vault
+from bot.claude import sandbox
 from bot.claude.types import InstanceStatus, InstanceType
 from bot.engine import (
     lifecycle,
@@ -280,6 +281,15 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
                 ctx.channel_id,
             )
             return
+        # The global active repo is the owner's. A grant never reaches it.
+        if not ctx.is_owner:
+            await ctx.messenger.send_text(
+                ctx.channel_id,
+                "This channel has no repo you have a grant for. "
+                "Start a thread in your own forum instead.",
+            )
+            log.warning("Refused a guest turn with no repo in channel=%s", ctx.channel_id)
+            return
         repo_name, repo_path = ctx.store.get_active_repo()
     if not repo_path:
         await ctx.messenger.send_text(ctx.channel_id, NO_REPO_MSG)
@@ -374,6 +384,7 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
     inst.user_name = ctx.user_name or ""
     inst.is_owner_session = ctx.is_owner
     inst.vault_eligible = ctx.is_owner and not ctx.thread_has_guest
+    sandbox.stamp_guest(inst, ctx)
     if not ctx.is_owner and ctx.bash_policy:
         inst.bash_policy = ctx.bash_policy
         inst.bash_policy_baseline = ctx.bash_policy

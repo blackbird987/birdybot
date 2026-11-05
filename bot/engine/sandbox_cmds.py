@@ -64,14 +64,17 @@ def turn_off(store, name: str) -> str:
     real, error = _repo(store, name)
     if error:
         return error
-    if real not in store.sandbox_entries():
-        return f"`{name}` is not sandboxed."
+    # A guest's run leaves failed imports in a repo with no setting too, and the
+    # message about one tells the owner to come here.
     cleared = sandbox.clear_failed_imports(real)
+    if real not in store.sandbox_entries():
+        note = f" Cleared {cleared} stuck import(s): those commits are not on their branch." if cleared else ""
+        return f"`{name}` is not sandboxed. Guests are confined there all the same.{note}"
     sandbox.unharden_repo_git(real)
     store.set_sandbox_entry(real, None)
     log.info("Session sandbox off for %s (%s)", name, real)
     note = f" Cleared {cleared} stuck import(s): those commits are not on their branch." if cleared else ""
-    return f"`{name}` is no longer sandboxed, from its next run on.{note}"
+    return f"`{name}` is no longer sandboxed, from its next run on. Guests stay confined there all the same.{note}"
 
 
 def set_hosts(store, name: str, hosts: list[str]) -> str:
@@ -107,4 +110,8 @@ def status(store, provider_name: str) -> str:
     head = "\n".join(lines) if lines else "No repo is sandboxed."
     missing = sandbox.missing_tools()
     tools = ", ".join(f"{tool} {'MISSING' if tool in missing else 'ok'}" for tool in sandbox.REQUIRED_TOOLS)
-    return f"{head}\nProvider: {provider_name}. {tools}."
+    guests = (
+        "Guests are always confined, in every repo, on "
+        f"{', '.join(sandbox.DEFAULT_HOSTS)} unless the repo has its own hosts."
+    )
+    return f"{head}\n{guests}\nProvider: {provider_name}. {tools}."

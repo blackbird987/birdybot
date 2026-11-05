@@ -567,6 +567,7 @@ class StateStore(ReposMixin, AccountsMixin, SchedulesMixin, ChainsMixin):
         # failed run started it as the owner (the field defaults say so).
         new_inst.is_owner_session = inst.is_owner_session
         new_inst.vault_eligible = inst.vault_eligible
+        new_inst.guest_confined = inst.guest_confined or not inst.is_owner_session
         new_inst.user_id = inst.user_id
         new_inst.user_name = inst.user_name
         new_inst.bash_policy = inst.bash_policy

@@ -1300,7 +1300,7 @@ async def _maybe_schedule_auto_merge(
 
     from bot.engine.workflows import load_workflow_policy
     policy = load_workflow_policy(
-        inst.repo_path, sandboxed=sandbox.is_sandboxed(ctx.store, inst.repo_path),
+        inst.repo_path, sandboxed=sandbox.instance_confined(ctx.store, inst),
     )
     if policy["autonomy"] not in ("merge", "ship"):
         return
@@ -2082,7 +2082,7 @@ async def check_wake_request(
                 "Reply or tap a button when you want me to continue.)"
             )
             return
-        watch_sandboxed = sandbox.is_sandboxed(ctx.store, instance.repo_path)
+        watch_sandboxed = sandbox.instance_confined(ctx.store, instance)
         if watch_sandboxed:
             refusal = watches.sandbox_refusal(watch_data, instance.repo_path or "")
             if refusal:
