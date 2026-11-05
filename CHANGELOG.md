@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.102.23, Questions between the two machines (2026-11-05)
+
 ### Added
 - **Questions between the two machines** (`docs/design/peer-link.md`, `bot/engine/peer_questions.py`, `bot/discord/peer_turns.py`). A chat session asks with `/ask_machine`, the owner taps Run once on the other machine, a read-only session answers from a filtered copy of the repo, and the answer reaches the asking thread, even after the laptop slept. Nothing runs without the tap.
 - **A confinement check before every Run once** (`bot/peer_confine.py`). The real CLI against a scripted local endpoint, no model usage. A leak, an extra tool or a check that could not run refuses the tap and says why on the card.
