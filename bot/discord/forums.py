@@ -41,6 +41,10 @@ log = logging.getLogger(__name__)
 # (and then skipped) rather than renamed to itself on every refresh.
 _LEGACY_CONTROL_ROOM_NAMES = ("Control Center", "Control Room")
 
+# Gap between renames when repairing old titles, so a batch of them stays well
+# clear of Discord's limit on channel edits.
+REPAIR_TITLE_PACE_SECS = 1.0
+
 
 # --- Data structures ---
 
@@ -1227,6 +1231,118 @@ class ForumManager:
             return await self._client.fetch_channel(channel_id)
         except (discord.NotFound, discord.Forbidden):
             return None
+
+    # --- Error titles ---
+
+    async def repair_error_titles(self, name_editing: set[str]) -> None:
+        """Rename threads whose saved title is a usage limit message.
+
+        The naming call used to take the CLI's error answer for a title. Each
+        thread gets its session's own title, without spending a model call on
+        it, or goes back to new-session so a later turn can name it. A fixed
+        topic stops matching, so this does nothing once they are all done. It
+        lives in the bot because the autosave would overwrite a script's edits.
+        ``name_editing`` is the bot's guard against racing another rename.
+        """
+        from bot.discord.titles import is_limit_message_title
+
+        counts = {"renamed": 0, "gone": 0, "skipped": 0}
+        for proj in list(self._forum_projects.values()):
+            for tid, info in list(proj.threads.items()):
+                if not is_limit_message_title(info.topic):
+                    continue
+                try:
+                    outcome = await self._repair_error_title(tid, proj, info, name_editing)
+                except Exception:
+                    # Left matching, so the next boot has another go.
+                    log.warning("Could not repair the title of thread %s", tid, exc_info=True)
+                    outcome = "skipped"
+                counts[outcome] += 1
+                if outcome == "renamed":
+                    # Thread name edits are harshly rate-limited.
+                    await asyncio.sleep(REPAIR_TITLE_PACE_SECS)
+        if counts["renamed"] or counts["gone"]:
+            self.save_forum_map()
+        if any(counts.values()):
+            log.info(
+                "Limit message titles: %d renamed, %d thread(s) gone, %d skipped",
+                counts["renamed"], counts["gone"], counts["skipped"],
+            )
+
+    async def _repair_error_title(
+        self, tid: str, proj: ForumProject, info: ThreadInfo, name_editing: set[str],
+    ) -> str:
+        """Fix one thread. Returns "renamed", "gone" or "skipped"."""
+        from bot.discord.titles import is_limit_message_title, read_ai_title
+
+        title = (
+            await asyncio.to_thread(read_ai_title, info.session_id)
+            if info.session_id else None
+        )
+        if is_limit_message_title(title):
+            title = None
+
+        def settle() -> None:
+            info.topic = title or "new-session"
+            info._title_generated = bool(title)
+
+        # A thread that is gone can never be renamed, so its saved topic is what
+        # has to change, or it costs a fetch on every boot from here on.
+        try:
+            thread = await self._get_thread_or_raise(int(tid))
+        except discord.NotFound:
+            settle()
+            return "gone"
+        if not isinstance(thread, discord.Thread):
+            settle()
+            return "gone"
+
+        if tid in name_editing:
+            return "skipped"
+        name_editing.add(tid)
+        try:
+            is_sleeping, _ = channels.parse_thread_name(thread.name)
+            base = channels.build_title_name(title) if title else "new-session"
+            plain = (
+                channels.build_sleeping_thread_name(base) if is_sleeping
+                else channels.build_thread_name(base)
+            )
+            new_name = await spawn_colors.compose_name(tid, plain, proj, self._store)
+            try:
+                await self._rename_thread_keeping_sleep(thread, new_name)
+            except discord.NotFound:
+                settle()
+                return "gone"
+        finally:
+            name_editing.discard(tid)
+        settle()
+        return "renamed"
+
+    async def _get_thread_or_raise(self, thread_id: int):
+        """A channel from cache, else REST. Every failure raises, a 404 included."""
+        return self._client.get_channel(thread_id) or await self._client.fetch_channel(thread_id)
+
+    async def _rename_thread_keeping_sleep(self, thread: discord.Thread, name: str) -> None:
+        """Rename a post, leaving it archived if it was.
+
+        Discord rejects a rename on an archived thread (error 50083), so it is
+        woken in its own request and goes back to sleep in the rename's.
+        """
+        if not thread.archived:
+            await thread.edit(name=name)
+            return
+        thread = await thread.edit(archived=False)
+        try:
+            await thread.edit(name=name, archived=True)
+        except discord.NotFound:
+            raise
+        except Exception:
+            # Do not leave an old post awake in the sidebar over a failed rename.
+            try:
+                await thread.edit(archived=True)
+            except Exception:
+                log.debug("Could not put thread %s back to sleep", thread.id, exc_info=True)
+            raise
 
     # --- Archive Thread ---
 

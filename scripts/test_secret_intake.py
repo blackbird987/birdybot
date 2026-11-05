@@ -68,6 +68,9 @@ HEX64 = "9f" * 8 + "3c" * 8 + "a7" * 8 + "e1" * 8
 SEED = " ".join(["abandon"] * 11 + ["about"])
 PEM = "-----BEGIN " + "PRIVATE KEY-----\n" + "MIIEvQIBADANBgkq" * 4 + "\n-----END " + "PRIVATE KEY-----"
 ENTROPIC = "xQ7mK2pL9vR4tY8wN3bF6hJ1sD5gZ0cA"
+# Fake. The shape only: a long random body with a short tail after an "=".
+ATLASSIAN = "ATATT" + "3xFfGF0" + "pQ8rS2tU6vW0xY4zA7bC1dE5fG9hJ3kL" * 5 + "=DEADBEEF"
+UNKNOWN_VENDOR = "zK4" + "pQ8rS2tU6vW0xY4zA7bC1dE5fG9hJ3kL" * 5 + "=DEADBEEF"
 
 
 def check(cond: bool, label: str) -> None:
@@ -1352,6 +1355,11 @@ def test_formatter() -> None:
     check(GITHUB not in fmt.format(record), "a traceback is scrubbed")
     record = logging.LogRecord("x", logging.INFO, "f", 1, "token: limit reached", (), None)
     check(fmt.format(record) == "token: limit reached", "ordinary words survive")
+    # The one the log actually caught: bot.log cuts a message at 80 characters.
+    record = logging.LogRecord("x", logging.INFO, "f", 1, "Discord msg in: %s", (ATLASSIAN[:80],), None)
+    check("[REDACTED]" in fmt.format(record) and ATLASSIAN[10:60] not in fmt.format(record), "an Atlassian key cut short in a log is scrubbed")
+    record = logging.LogRecord("x", logging.INFO, "f", 1, "saw %s", (ATLASSIAN,), None)
+    check("DEADBEEF" not in fmt.format(record), "whole, its tail goes too")
 
 
 # --- Directive -------------------------------------------------------------
@@ -1742,6 +1750,21 @@ def _test_cut_values() -> None:
     check(values(f"Authorization: Bearer {b64}") == [b64], "a bearer token with slashes")
     check(values(f"glued {b64}") == [b64], "an unlabelled token the path mask would have cut")
     check(values(f"FOO={ENTROPIC}") == [ENTROPIC], "a label is not part of the value")
+    tiers = lambda t, **kw: [f.tier for f in secret_detect.scan(t, **kw)]  # noqa: E731
+    check(SURE in tiers(ATLASSIAN), "an Atlassian key alone is caught for sure")
+    check(values(ATLASSIAN) == [ATLASSIAN], "whole, tail included")
+    check(secret_detect.scan(ATLASSIAN)[0].suggested_name == "ATLASSIAN_API_TOKEN", "and named")
+    check(not tiers("ATATT is a word in some note"), "a bare prefix is not a key")
+    check(tiers(UNKNOWN_VENDOR) == [ASK], "a key of the same shape from anyone else asks")
+    check(values(UNKNOWN_VENDOR) == [UNKNOWN_VENDOR], "and is not cut at its =")
+    labelled = secret_detect.scan(f"MY_API_KEY={UNKNOWN_VENDOR}")
+    check(values(f"MY_API_KEY={UNKNOWN_VENDOR}") == [UNKNOWN_VENDOR], "a label still comes off a value holding an =")
+    check(labelled and labelled[0].suggested_name == "MY_API_KEY", "and still names it")
+    check(values(f"--set=key={ENTROPIC}") == [ENTROPIC], "two labels both come off")
+    check(values(f"FOO={ENTROPIC}==") == [f"{ENTROPIC}=="], "a label and padding together")
+    check(values(f"abc123xyz789={ENTROPIC}") == [ENTROPIC], "a short odd name is still a label")
+    check(not tiers("timeout=30 retries=5 mode=fast"), "ordinary settings pass")
+    check(not tiers("name=some-ordinary-value-here"), "an ordinary name=value passes")
     check(values(f"--token={ENTROPIC}") == [ENTROPIC], "nor is a flag")
     check(values(f"try {ENTROPIC}==") == [f"{ENTROPIC}=="], "base64 padding is kept")
     check(values(f"try {ENTROPIC}.") == [ENTROPIC], "a full stop is not")
