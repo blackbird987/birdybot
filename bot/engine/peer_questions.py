@@ -27,7 +27,7 @@ from bot import config, peer_confine, peer_export, peer_record, vault
 from bot.claude.parser import parse_usage_limit
 from bot.claude.types import PEER_ORIGINS, InstanceOrigin, InstanceStatus
 from bot.fsutil import atomic_write_text
-from bot.platform.redact import redact_secrets, scrub_known
+from bot.peer_export import clean
 
 log = logging.getLogger(__name__)
 
@@ -39,7 +39,8 @@ SEEN, CARDED, RUNNING, POSTING, DONE, DECLINED = (
     "seen", "carded", "running", "posting", "done", "declined",
 )
 
-MAX_AGE_SECS = 7 * 86400
+MAX_AGE_DAYS = 7
+MAX_AGE_SECS = MAX_AGE_DAYS * 86400
 _KEEP_SECS = 30 * 86400
 MAX_OPEN_PER_THREAD = 3
 MAX_ASKS_PER_DAY = 20
@@ -63,11 +64,6 @@ def snowflake_time(message_id: str | int) -> float:
 
 def today(now: float) -> str:
     return datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%d")
-
-
-def clean(text: str) -> str:
-    """Secrets out of anything that crosses the link or stays on disk."""
-    return redact_secrets(scrub_known(text))
 
 
 # --- The seam to the other machine -------------------------------------------
@@ -211,12 +207,12 @@ def expire_asked(store, now: float) -> list[tuple[dict, str]]:
             record.pop("parts", None)
             store.peer_put_asked(record)
             notes.append((record, f"No answer from {record.get('to', 'the other machine')} about "
-                                  f"`{record['repo']}` after 7 days, so that question is closed."))
+                                  f"`{record['repo']}` after {MAX_AGE_DAYS} days, so that question is closed."))
         elif (record.get("status") == ANSWER_RECEIVED
               and now - record.get("answered_at", now) > MAX_AGE_SECS):
             close_delivery(store, record, UNDELIVERABLE, "never found a free moment")
             notes.append((record, f"An answer about `{record['repo']}` could not be brought into "
-                                  f"this thread for a week. It is saved at `{record['answer_path']}`."))
+                                  f"this thread for {MAX_AGE_DAYS} days. It is saved at `{record['answer_path']}`."))
     return notes
 
 
@@ -283,13 +279,32 @@ async def expire_cards(store, transport: Transport, now: float) -> None:
             record["status"] = EXPIRED
             store.peer_put_received(record)
             try:
-                await transport.edit_card(record["card_message_id"], "Expired: nobody tapped this for 7 days.")
+                await transport.edit_card(record["card_message_id"], f"Expired: nobody tapped this for {MAX_AGE_DAYS} days.")
             except Exception:
                 log.warning("Peer link: could not update an expired card", exc_info=True)
 
 
+_pumping = False
+
+
 async def pump_posting(store, transport: Transport) -> None:
-    """Post what is waiting to go out, from the next unposted part. Raises to retry."""
+    """Post what is waiting to go out, from the next unposted part. Raises to retry.
+
+    One at a time: the reader's tick and a finished answer both call this, and two
+    running together would post a part twice and skip the next. If one is already
+    going, this returns and the next tick picks up anything it did not see.
+    """
+    global _pumping
+    if _pumping:
+        return
+    _pumping = True  # No await between the check and this line.
+    try:
+        await _post_waiting(store, transport)
+    finally:
+        _pumping = False
+
+
+async def _post_waiting(store, transport: Transport) -> None:
     for record in store.peer_received_all():
         if record.get("status") != POSTING:
             continue
@@ -318,7 +333,7 @@ def tap_refusal(store, qid: str, now: float) -> str | None:
     if now - record["created_at"] > MAX_AGE_SECS:
         record["status"] = EXPIRED
         store.peer_put_received(record)
-        return "This question is more than 7 days old, so it can no longer be run."
+        return f"This question is more than {MAX_AGE_DAYS} days old, so it can no longer be run."
     return None
 
 
@@ -368,14 +383,22 @@ def prune(store, now: float) -> None:
 # --- The answering run -------------------------------------------------------
 
 
-def _reports_for(store, repo: str) -> list[tuple[str, str]]:
-    """That repo's newest session reports, never a guest's and never an earlier answer."""
+def _report_runs(store, repo: str) -> list:
+    """Runs that may be shown, newest first. Never a guest's and never an earlier answer.
+
+    On the event loop: the store's instances change there, under any thread reading them.
+    """
     runs = [
         inst for inst in store.list_instances(all_=True)
         if inst.repo_name == repo and inst.result_file and inst.origin not in PEER_ORIGINS
         and inst.is_owner_session and not inst.guest_confined
     ]
     runs.sort(key=lambda inst: inst.created_at or "", reverse=True)
+    return runs
+
+
+def _read_reports(runs: list) -> list[tuple[str, str]]:
+    """Their newest reports. Reads files, so off the event loop."""
     reports = []
     for inst in runs:
         text = inst.read_result_text()
@@ -396,15 +419,22 @@ def _plain_failure(inst) -> str:
     return "The answering session failed before it had an answer."
 
 
-def _make_answer_instance(ctx, export: peer_export.Export):
+def _peer_instance(ctx, origin: InstanceOrigin, prompt: str, repo_name: str, repo_path: str,
+                   session_id: str | None = None):
+    """A run touching the other machine's text: read-only, and no keys, whoever asked."""
     # Local import: judge reaches the engine's commands, which import the directives.
     from bot.engine.judge import readonly_instance
 
-    inst = readonly_instance(ctx, InstanceOrigin.PEER_ANSWER, peer_confine.ANSWER_PROMPT,
-                             "", str(export.repo_dir))
+    inst = readonly_instance(ctx, origin, prompt, repo_name, repo_path)
+    inst.session_id = session_id
     inst.vault_eligible = False
     ctx.store.update_instance(inst)
     return inst
+
+
+# run_answer's own failure, and its caller's if it never got that far.
+COULD_NOT_RUN = (peer_record.FAILED, "This machine could not run the answering session.",
+                 "Failed: this machine could not run it. The bot log has why.")
 
 
 async def run_answer(ctx, record: dict) -> tuple[str, str, str]:
@@ -429,13 +459,14 @@ async def run_answer(ctx, record: dict) -> tuple[str, str, str]:
         if not repo_path:
             return (peer_record.UNKNOWN_REPO, f"This machine has no repo called {record['repo']}.",
                     "That repo is no longer registered here.")
-        reports = await asyncio.to_thread(_reports_for, ctx.store, record["repo"])
+        reports = await asyncio.to_thread(_read_reports, _report_runs(ctx.store, record["repo"]))
         export = await asyncio.to_thread(
             peer_export.build_export, repo_path,
             peer_confine.question_block(record["from"], record["text"]), reports,
         )
         peer_confine.write_answer_settings(export.root, export.repo_dir)
-        inst = _make_answer_instance(ctx, export)
+        inst = _peer_instance(ctx, InstanceOrigin.PEER_ANSWER, peer_confine.ANSWER_PROMPT,
+                              "", str(export.repo_dir))
         task = asyncio.create_task(lifecycle.run_instance(ctx, inst, silent=True))
         done, _ = await asyncio.wait({task}, timeout=ANSWER_TIMEOUT_SECS)
         if not done:
@@ -457,8 +488,7 @@ async def run_answer(ctx, record: dict) -> tuple[str, str, str]:
         raise
     except Exception:
         log.exception("Peer link: the answering run failed")
-        return (peer_record.FAILED, "This machine could not run the answering session.",
-                "Failed: this machine could not run it. The bot log has why.")
+        return COULD_NOT_RUN
     finally:
         if export is not None:
             await asyncio.to_thread(peer_export.remove_export, export.root)
@@ -466,14 +496,9 @@ async def run_answer(ctx, record: dict) -> tuple[str, str, str]:
 
 def delivery_instance(ctx, record: dict, session_id: str, repo_name: str, repo_path: str):
     """A no-tool turn on the thread's own session. Its prompt only names the answer."""
-    from bot.engine.judge import readonly_instance
-
-    inst = readonly_instance(ctx, InstanceOrigin.PEER_DELIVERY,
-                             f"{peer_confine.DELIVERY_PREFIX}{record['id']}", repo_name, repo_path)
-    inst.session_id = session_id
-    inst.vault_eligible = False
-    ctx.store.update_instance(inst)
-    return inst
+    return _peer_instance(ctx, InstanceOrigin.PEER_DELIVERY,
+                          f"{peer_confine.DELIVERY_PREFIX}{record['id']}", repo_name, repo_path,
+                          session_id=session_id)
 
 
 def now_secs() -> float:

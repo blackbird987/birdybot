@@ -37,9 +37,15 @@ _delivering: set[str] = set()
 _answering = False
 
 
+def _task_done(task: asyncio.Task) -> None:
+    _kept_tasks.discard(task)
+    if not task.cancelled() and task.exception() is not None:
+        log.error("Peer link: a background step failed", exc_info=task.exception())
+
+
 def _keep(task: asyncio.Task) -> asyncio.Task:
     _kept_tasks.add(task)
-    task.add_done_callback(_kept_tasks.discard)
+    task.add_done_callback(_task_done)
     return task
 
 
@@ -102,7 +108,7 @@ async def handle_tap(bot: ClaudeBot, interaction: discord.Interaction, action: s
         return
     _answering = True  # No await between the check and this line.
     record = peer_questions.mark_running(store, qid, peer_questions.now_secs())
-    _keep(asyncio.create_task(_answer(bot, record, transport)))
+    _keep(asyncio.create_task(_answer(bot, record, transport, str(interaction.channel.id))))
     await interaction.edit_original_response(
         content=f"Running: checking the session is confined, then reading **{record['repo']}**.",
         view=None,
@@ -116,13 +122,21 @@ async def _pump(store, transport) -> None:
         log.warning("Peer link: posting failed, the reader will retry", exc_info=True)
 
 
-async def _answer(bot: ClaudeBot, record: dict, transport) -> None:
-    """Run the question, then send what came of it. The tap is spent either way."""
+async def _answer(bot: ClaudeBot, record: dict, transport, thread_id: str) -> None:
+    """Run the question, then send what came of it. The tap is spent either way.
+
+    The context is the card's thread, never the channel: a stray message in the channel
+    itself would become this machine's newest, which is how its directory is found.
+    """
     global _answering
     try:
-        ctx = bot._ctx(str(config.PEER_CHANNEL_ID), source="peer")
-        ctx.maybe_prime_briefing = None
-        status, text, note = await peer_questions.run_answer(ctx, record)
+        try:
+            ctx = bot._ctx(thread_id, source="peer")
+            ctx.maybe_prime_briefing = None
+            status, text, note = await peer_questions.run_answer(ctx, record)
+        except Exception:
+            log.exception("Peer link: could not start the answering run")
+            status, text, note = peer_questions.COULD_NOT_RUN
         peer_questions.queue_answer(bot._store, record, status, text, peer_questions.DONE, note)
     finally:
         _answering = False
@@ -203,6 +217,7 @@ async def _run_delivery(bot, record, thread_id, info, session_id, repo_name, rep
     ctx.offer_usage_limit_choice = None
     bot._cancel_sleep(thread_id)
     failure: str | None = "could not run"
+    stopped = False
     try:
         try:
             await bot._forums.wake_repo_if_dormant(repo_name, notify_channel_id=thread_id)
@@ -220,6 +235,8 @@ async def _run_delivery(bot, record, thread_id, info, session_id, repo_name, rep
             await asyncio.gather(task, return_exceptions=True)
         else:
             await task
+        # Finished by itself, as killed: the owner tapped Kill or Steer, which is a no.
+        stopped = bool(done) and inst.status is InstanceStatus.KILLED
         text = inst.read_result_text()
         failure = inst.error or "no reply"
         if inst.status is InstanceStatus.COMPLETED and text.strip():
@@ -237,6 +254,12 @@ async def _run_delivery(bot, record, thread_id, info, session_id, repo_name, rep
         log.exception("Peer link: delivery of %s failed", record["id"])
     finally:
         await bot._after_turn(ctx, thread_id, dashboard=False)
+    if stopped:
+        peer_questions.close_delivery(store, record, peer_questions.UNDELIVERABLE, "stopped by the owner")
+        await _note(bot, thread_id, f"That answer about `{record['repo']}` was stopped before it came "
+                                    f"through, and will not be tried again. It is saved at "
+                                    f"`{record.get('answer_path', '')}`.")
+        return
     if failure is None:
         record["status"] = peer_questions.DELIVERED
         record["delivered_at"] = peer_questions.now_secs()

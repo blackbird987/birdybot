@@ -202,8 +202,21 @@ def _dumps(payload: dict) -> str:
     return json.dumps(payload, separators=(",", ":"), ensure_ascii=True)
 
 
+def _well_formed(text: str) -> str:
+    """A lone surrogate would pass JSON here and be refused by the reader over there."""
+    return text.encode("utf-8", "replace").decode("utf-8")
+
+
 def encode_question(qid: str, sender: str, to: str, repo: str, text: str) -> str:
-    """A question's message text. Raises ValueError if it cannot go out whole."""
+    """A question's message text. Raises ValueError for one the other side would refuse.
+
+    The reasons complete the sentence "That question was not sent: it is ...".
+    """
+    text = _well_formed(text)
+    if not text.strip():
+        raise ValueError("empty")
+    if not NAME_RE.fullmatch(sender):
+        raise ValueError("from a machine with an unusable name (MACHINE_NAME)")
     if len(text) > QUESTION_MAX_CHARS:
         raise ValueError(f"longer than {QUESTION_MAX_CHARS} characters")
     message = _dumps({"p": "q", "v": LINK_PROTOCOL, "id": qid, "from": sender,
@@ -228,6 +241,7 @@ def encode_answer(qid: str, status: str, text: str) -> list[str]:
     Splits on escaped length, so a page of non-ASCII text cannot push a part past
     Discord's limit. Too long for the part cap gets a visible cut, not a silent one.
     """
+    text = _well_formed(text)
     if len(text) > ANSWER_MAX_CHARS:
         text = text[:ANSWER_MAX_CHARS - len(_TRUNCATED)] + _TRUNCATED
     room = LINK_MESSAGE_LIMIT - len(_answer_message(qid, ANSWER_MAX_PARTS, ANSWER_MAX_PARTS, status, ""))
@@ -244,7 +258,10 @@ def encode_answer(qid: str, status: str, text: str) -> list[str]:
     chunks.append("".join(current))
     if len(chunks) > ANSWER_MAX_PARTS:
         chunks = chunks[:ANSWER_MAX_PARTS]
-        chunks[-1] = chunks[-1][:max(0, room - _escaped_len(_TRUNCATED))] + _TRUNCATED
+        last = chunks[-1]
+        while last and _escaped_len(last) + _escaped_len(_TRUNCATED) > room:
+            last = last[:-1]
+        chunks[-1] = last + _TRUNCATED
     return [_answer_message(qid, i, len(chunks), status, chunk)
             for i, chunk in enumerate(chunks, 1)]
 
@@ -289,6 +306,12 @@ def _check_id_and_text(record: dict, limit: int) -> None:
     text = record["text"]
     if not isinstance(text, str) or len(text) > limit:
         raise InvalidRecord("bad text")
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        # Valid JSON, but no file or Discord message can hold it, so every later step
+        # would fail on it, on every retry.
+        raise InvalidRecord("text with a lone surrogate") from None
 
 
 def _check_question(record: dict) -> None:
@@ -309,5 +332,6 @@ def _check_answer(record: dict) -> None:
     _check_id_and_text(record, MAX_MESSAGE_CHARS)
     if not _is_int(record["m"], 1, ANSWER_MAX_PARTS) or not _is_int(record["n"], 1, record["m"]):
         raise InvalidRecord("bad part numbers")
-    if record["status"] not in ANSWER_STATUSES:
+    status = record["status"]
+    if not isinstance(status, str) or status not in ANSWER_STATUSES:
         raise InvalidRecord("bad status")

@@ -18,10 +18,11 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -47,6 +48,7 @@ from bot.store.state import StateStore  # noqa: E402
 failures: list[str] = []
 PEER, FORGER, ME, OWNER = 111, 222, 333, 444
 CHANNEL = 555
+CARD_THREAD = 556
 NOW = time.time()
 EPOCH_MS = 1420070400000
 
@@ -101,6 +103,10 @@ class FakeThread(discord.Thread):
         self.fail_send = False
         self.sent_kwargs = []
         self.archive_minutes = None
+        self.archived = False
+
+    async def edit(self, **kw):
+        self.archived = kw.get("archived", self.archived)
 
     def history(self, *, after=None, limit=100, oldest_first=False, **_kw):
         async def gen():
@@ -285,6 +291,41 @@ def section_records() -> None:
     check("the parts join back to the text", joined == "x" * 5000)
     hard = peer_record.encode_answer(Q("abc123"), peer_record.ANSWERED, '"\\\n\u2603' * 800)
     check("escaping cannot push a part over the limit", all(len(p) < 2000 for p in hard))
+    def refused(raw: str) -> bool:
+        try:
+            peer_record.parse_link(raw)
+            return False
+        except peer_record.InvalidRecord:
+            return True
+
+    def answer_json(status="answered", text="x"):
+        return json.dumps({"p": "a", "v": 1, "id": Q("abc123"), "n": 1, "m": 1, "status": status, "text": text})
+
+    for status in ([], {}, 1, None):
+        check(f"a status of {status!r} is refused, not a crash", refused(answer_json(status=status)))
+    check("a lone surrogate is refused, since no file could hold it", refused(answer_json(text="\ud800")))
+    paired = json.loads(answer_json(text="\U0001f600"))
+    check("a real emoji is not", not refused(answer_json(text="\U0001f600")) and paired["text"] == "\U0001f600")
+    check("an answer holding a lone surrogate still goes out readable",
+          not refused(peer_record.encode_answer(Q("abc123"), peer_record.ANSWERED, "a\ud800b")[0]))
+    outgoing = peer_record.encode_question(Q("abc123"), "desktop", "laptop", "bot", "a\ud800b")
+    check("and so does a question", peer_record.parse_link(outgoing)["text"] == "a?b")
+
+    def not_sent(*args) -> str:
+        try:
+            peer_record.encode_question(*args)
+            return ""
+        except ValueError as exc:
+            return str(exc)
+
+    check("an empty question is not sent", not_sent(Q("abc123"), "desktop", "laptop", "bot", "  \n") == "empty")
+    check("a machine name the other side would refuse is not either",
+          "MACHINE_NAME" in not_sent(Q("abc123"), "my machine", "laptop", "bot", "x"))
+    cut = peer_record.encode_answer(Q("abc123"), peer_record.ANSWERED, "\u2603" * 7000)
+    check("a cut non-ASCII answer stays under the part limit and the message limit",
+          len(cut) == peer_record.ANSWER_MAX_PARTS
+          and all(len(p) <= peer_record.LINK_MESSAGE_LIMIT for p in cut), max(len(p) for p in cut))
+    check("and it says it was cut", peer_record.parse_link(cut[-1])["text"].endswith("too long for the link]"))
     for bad, why in ((None, "None"), ("hello", "chat"), ("[1,2]", "a list"), ("", "empty")):
         try:
             peer_record.parse_link(bad)
@@ -403,6 +444,43 @@ def section_reader() -> None:
         run(peer_link.reader_tick(bot5, channel5, FakeTransport()))
         check("a thread deleted outright is forgotten", str(old_thread.id) not in store5.peer_cursor_threads())
 
+        # A bad record of any shape moves the cursor on, so nothing behind it is stuck.
+        store9 = new_store({"bot": str(ROOT)})
+        channel9 = FakeChannel(CHANNEL)
+        thread9 = channel9.make_thread(channel9.directory(PEER))
+        thread9.messages.append(FakeMessage(PEER, json.dumps(
+            {"p": "a", "v": 1, "id": Q("abc123"), "n": 1, "m": 1, "status": [], "text": "x"})))
+        thread9.messages.append(FakeMessage(PEER, q_msg(Q("after1"))))
+        run(peer_link.read_thread(thread9, store9, NOW))
+        check("a question behind a malformed answer is still read", store9.peer_received(Q("after1")) is not None)
+
+        # When a thread counts as finished with.
+        day = 86400
+        store8 = new_store({"bot": str(ROOT)})
+        channel8 = FakeChannel(CHANNEL)
+        bot8 = FakeBot(channel8, store8)
+        quiet_dir = channel8.directory(PEER, when=NOW - 40 * day)
+        quiet = channel8.make_thread(quiet_dir)
+        quiet.messages.append(FakeMessage(PEER, q_msg(Q("quiet1")), when=NOW - 39 * day))
+        run(peer_link._read_new(bot8, channel8, store8, NOW))
+        run(peer_link._read_new(bot8, channel8, store8, NOW))
+        check("a quiet thread still found through the channel keeps its cursor, so it is not re-read",
+              store8.peer_cursor(str(quiet.id)) == str(quiet.messages[-1].id))
+        channel8.messages.remove(quiet_dir)
+        quiet.messages.append(FakeMessage(PEER, q_msg(Q("quiet2")), when=NOW - day))
+        run(peer_link._read_new(bot8, channel8, store8, NOW))
+        run(peer_link._read_new(bot8, channel8, store8, NOW))
+        check("an old thread that spoke yesterday is not finished with",
+              store8.peer_cursor(str(quiet.id)) == str(quiet.messages[-1].id))
+        gone_dir = channel8.directory(PEER, when=NOW - 40 * day)
+        gone = channel8.make_thread(gone_dir)
+        gone.messages.append(FakeMessage(PEER, q_msg(Q("quiet3")), when=NOW - 15 * day))
+        run(peer_link._read_new(bot8, channel8, store8, NOW))
+        channel8.messages.remove(gone_dir)
+        check("a thread is read while it is found", str(gone.id) in store8.peer_cursor_threads())
+        run(peer_link._read_new(bot8, channel8, store8, NOW))
+        check("a left-behind thread quiet for two weeks is", str(gone.id) not in store8.peer_cursor_threads())
+
         # One step failing leaves the others to run.
         store6 = new_store({"bot": str(ROOT)})
         bot6 = FakeBot(channel, store6)
@@ -476,6 +554,20 @@ def section_outbox_and_publisher() -> None:
               len(channel2.messages) == 1 and len(channel2.made[mine.id].messages) == 2)
         check("a question posts with no mentions",
               channel2.made[mine.id].sent_kwargs[0]["allowed_mentions"].users is False)
+
+        # This machine's directory message replaced by hand: the next post follows it.
+        channel2.messages.remove(mine)
+        replaced = run(channel2.send("{}"))
+        run(transport2.post(q_msg(Q("xyz791"))))
+        check("after a replaced directory message, posts go to the new thread",
+              len(channel2.made[replaced.id].messages) == 1 and len(channel2.made[mine.id].messages) == 2)
+
+        # A card in a thread that went to sleep.
+        sleeping = channel2.made[replaced.id]
+        card = run(sleeping.send("the card"))
+        sleeping.archived = True
+        run(transport2.edit_card(str(card.id), "Expired."))
+        check("editing a card wakes its sleeping thread first", not sleeping.archived and card.content == "Expired.")
 
         # What the asker sees of the peer.
         channel3 = FakeChannel(CHANNEL)
@@ -556,6 +648,23 @@ def section_answering_states() -> None:
         run(pq.pump_posting(store3, t3))
         numbers = [peer_record.parse_link(p)["n"] for p in t3.posted]
         check("it resumes at the next part, with no repeat", numbers == list(range(1, total + 1)))
+        store4 = new_store({"bot": str(ROOT)})
+
+        class SlowTransport(FakeTransport):
+            async def post(self, text):
+                await asyncio.sleep(0)
+                await super().post(text)
+
+        t4 = SlowTransport()
+        pq.queue_answer(store4, received(store4, Q("post02")), peer_record.ANSWERED, "z" * 4000, pq.DONE, "")
+        expected = len(store4.peer_received(Q("post02"))["parts"])
+
+        async def both():
+            await asyncio.gather(pq.pump_posting(store4, t4), pq.pump_posting(store4, t4))
+        run(both())
+        check("two pumps at once post each part exactly once",
+              [peer_record.parse_link(p)["n"] for p in t4.posted] == list(range(1, expected + 1)))
+        check("and the next one is free to run", pq._pumping is False)
         check("posting ends done, and the card says so",
               store3.peer_received(Q("post01"))["status"] == pq.DONE and t3.edits[-1][1] == "Answered.")
         check("the parts are not kept once sent", "parts" not in store3.peer_received(Q("post01")))
@@ -813,7 +922,7 @@ def tap(bot, action, qid, *, parent=None, user=OWNER):
     parent = CHANNEL if parent is None else parent
     return SimpleNamespace(
         data={"custom_id": f"{action}:{qid}"},
-        channel=SimpleNamespace(parent_id=parent),
+        channel=SimpleNamespace(parent_id=parent, id=CARD_THREAD),
         user=SimpleNamespace(id=user),
         followup=SimpleNamespace(send=AsyncMock()),
         edit_original_response=AsyncMock(),
@@ -876,6 +985,8 @@ def section_card_and_tap() -> None:
 
         run(tap_and_settle(tap(bot, pq.RUN_ACTION, Q("tap001")), pq.RUN_ACTION, Q("tap001")))
         check("the owner's tap runs it once", ran == [Q("tap001")])
+        check("its context is the card's thread, so nothing can land in the channel itself",
+              bot.ctx.channel_id == str(CARD_THREAD))
         check("the answer goes out and it closes",
               store.peer_received(Q("tap001"))["status"] == pq.DONE
               and peer_record.parse_link(transport.posted[-1])["text"] == "the answer")
@@ -925,6 +1036,18 @@ def section_card_and_tap() -> None:
             await asyncio.gather(*peer_turns._kept_tasks, return_exceptions=True)
         run(tap_expect_error())
         check("a run blowing up does not jam the one-at-a-time slot", not peer_turns._answering)
+        check("and the other machine still hears that it failed",
+              store.peer_received(Q("boom01"))["status"] == pq.DONE
+              and peer_record.parse_link(transport.posted[-1])["status"] == peer_record.FAILED)
+
+        async def lost_task():
+            async def fails():
+                raise RuntimeError("lost")
+            await asyncio.gather(peer_turns._keep(asyncio.create_task(fails())), return_exceptions=True)
+            await asyncio.sleep(0)
+        with patch.object(peer_turns.log, "error") as logged:
+            run(lost_task())
+        check("a background step that fails is logged, not lost", logged.call_count == 1)
     finally:
         pq.run_answer = saved_run
         pq.set_transport(None)
@@ -1006,6 +1129,30 @@ def section_export() -> None:
             peer_export._unsafe_part(part) for part in bad.split("/")))
     outside = peer_export._destination(tmp, "a/../../x")
     check("a path climbing out is refused", outside is None or tmp in outside.resolve().parents)
+
+    for path in (".CLAUDE/settings.json", ".MCP.json", "sub/.Cursor/x", ".GitHub/x.yml"):
+        check(f"{path} is tool configuration in any case",
+              peer_export._exclusion(path, "100644", 1) == "tool configuration")
+    check("an ordinary file is not", peer_export._exclusion("src/claude_helper.py", "100644", 1) is None)
+
+    real_write = peer_export._write_clean
+
+    def refuses_one(dest, data):
+        if dest.name == "leak.txt":
+            raise OSError("this filesystem cannot hold that name")
+        return real_write(dest, data)
+    peer_export._write_clean = refuses_one
+    try:
+        partial = peer_export.build_export(make_repo(), "q", base_dir=tmp)
+    finally:
+        peer_export._write_clean = real_write
+    check("one file that cannot be written does not cost the rest",
+          partial.omitted.get("could not be written") == ["leak.txt"] and partial.files > 0, partial.omitted)
+    peer_export.remove_export(partial.root)
+    report_export = peer_export.build_export(make_repo(), "q", [("r1", "bad \ud800 char")], base_dir=tmp)
+    check("a report with a bad character does not either",
+          (report_export.repo_dir / peer_export.REPORTS_DIR / "r1.md").exists())
+    peer_export.remove_export(report_export.root)
 
     base = Path(tempfile.mkdtemp(dir=tmp))
     (base / f"{peer_export.EXPORT_PREFIX}left").mkdir()
@@ -1129,13 +1276,14 @@ def section_answer_run() -> None:
         guest_run = report(owner=False)
         confined = report(guest=True)
         elsewhere = report(repo_name="other")
-        names = {name for name, _ in pq._reports_for(s2, "bot")}
+        names = {name for name, _ in pq._read_reports(pq._report_runs(s2, "bot"))}
         check("an owner's report on that repo is included", mine in names)
         check("no answering run, delivery, guest, or other repo is",
               not names & {answer_run, delivery, guest_run, confined, elsewhere}, names)
         for _ in range(30):
             report()
-        check("at most twenty reports", len(pq._reports_for(s2, "bot")) == peer_export.MAX_REPORTS)
+        check("at most twenty reports",
+              len(pq._read_reports(pq._report_runs(s2, "bot"))) == peer_export.MAX_REPORTS)
     finally:
         lifecycle.run_instance, peer_confine.self_check, config.MACHINE_NAME = saved
 
@@ -1252,6 +1400,13 @@ def section_delivery() -> None:
         check("three failed tries close it, with a note naming the file",
               store.peer_asked(Q("del001"))["status"] == pq.UNDELIVERABLE and len(calls) == 3
               and record["answer_path"] in bot.messenger.send_text.await_args.args[1])
+
+        store, bot, calls, record = setup(status=InstanceStatus.KILLED, text="")
+        run(peer_turns.deliver_one(bot, record))
+        check("a Kill closes it at once and does not try again",
+              store.peer_asked(Q("del001"))["status"] == pq.UNDELIVERABLE
+              and store.peer_asked(Q("del001"))["attempts"] == 0 and len(calls) == 1)
+        check("and the note names the saved file", record["answer_path"] in bot.messenger.send_text.await_args.args[1])
 
         store, bot, calls, record = setup(status=InstanceStatus.COMPLETED, text="")
         run(peer_turns.deliver_one(bot, record))
@@ -1590,12 +1745,33 @@ def section_hook() -> None:
         check(f"Windows rules: blocked {tool_input}", bool(module.check(tool, tool_input, cfg)), tool_input)
 
 
+def section_scripted_endpoint() -> None:
+    script = peer_confine._Script([], {"SIDE": "CANARY-SIDE", "TOKENS": "CANARY-TOKENS", "MAIN": "CANARY-MAIN"})
+    server = peer_confine.scripted_server(script)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+    def post(path: str, text: str) -> None:
+        body = json.dumps({"messages": [{"role": "user", "content": text}]}).encode()
+        opener.open(urllib.request.Request(f"http://127.0.0.1:{server.server_address[1]}{path}", data=body)).read()
+    try:
+        post("/v1/messages", "a title request holding CANARY-SIDE")
+        check("a leak in the CLI's own side request counts", "SIDE" in script.leaked and script.requests == 0)
+        post("/v1/messages/count_tokens", "CANARY-TOKENS")
+        check("and in a token count", "TOKENS" in script.leaked)
+        post("/v1/messages", f"{script.mark} CANARY-MAIN")
+        check("and the scripted conversation is still counted", "MAIN" in script.leaked and script.requests == 1)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def main() -> int:
     saved_data_dir = config.DATA_DIR
     for section in (section_records, section_reader, section_outbox_and_publisher, section_answering_states,
                     section_asker, section_answers_received, section_card_and_tap, section_export,
                     section_answer_run, section_delivery, section_commands, section_run_instance_paths,
-                    section_prompt_build, section_setup_and_perms, section_source_scans, section_hook):
+                    section_prompt_build, section_setup_and_perms, section_source_scans, section_hook,
+                    section_scripted_endpoint):
         print(f"\n--- {section.__name__}")
         section()
     config.DATA_DIR = saved_data_dir

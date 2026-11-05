@@ -238,15 +238,14 @@ class DiscordTransport:
     def __init__(self, bot, channel):
         self._bot = bot
         self._channel = channel
-        self._outbox = None
 
     async def _own_outbox(self):
-        if self._outbox is None:
-            message = await _find_own_message(self._channel, self._bot.user.id)
-            if message is None:
-                raise RuntimeError("this machine has not published its directory yet")
-            self._outbox = await ensure_outbox(self._bot, self._channel, message)
-        return self._outbox
+        """Looked up each time. A kept copy would go on posting to a replaced message's
+        old thread, which the other side stops reading once it has gone quiet."""
+        message = await _find_own_message(self._channel, self._bot.user.id)
+        if message is None:
+            raise RuntimeError("this machine has not published its directory yet")
+        return await ensure_outbox(self._bot, self._channel, message)
 
     async def _peer_message(self):
         async for message in self._channel.history(limit=_HISTORY_LIMIT):
@@ -273,11 +272,7 @@ class DiscordTransport:
 
     async def post(self, text: str) -> None:
         thread = await self._own_outbox()
-        try:
-            await thread.send(text, allowed_mentions=discord.AllowedMentions.none())
-        except discord.NotFound:
-            self._outbox = None  # Deleted by hand. Look again next time.
-            raise
+        await thread.send(text, allowed_mentions=discord.AllowedMentions.none())
 
     async def post_card(self, record: dict) -> str:
         thread = await self._own_outbox()
@@ -296,6 +291,10 @@ class DiscordTransport:
 
     async def edit_card(self, message_id: str, text: str) -> None:
         thread = await self._own_outbox()
+        # Sending wakes a sleeping thread by itself. Editing is refused (error 50083),
+        # and a card a week old may well be in one.
+        if thread.archived:
+            await thread.edit(archived=False)
         message = await thread.fetch_message(int(message_id))
         await message.edit(content=text, view=None, allowed_mentions=discord.AllowedMentions.none())
 
@@ -346,15 +345,19 @@ async def read_thread(thread, store, now: float) -> int:
     return seen
 
 
-async def peer_threads(bot, channel, store) -> tuple[list, int | None]:
-    """The peer's outbox threads worth reading: its live one, and any it left behind."""
+async def peer_threads(bot, channel, store) -> tuple[list, set[int]]:
+    """The peer's outbox threads worth reading: its live one, and any it left behind.
+
+    Also returns the ids still found through the channel. Their cursors must stay,
+    since without one such a thread would be read from the start again.
+    """
     candidates: list[int] = []
     async for message in channel.history(limit=_HISTORY_LIMIT):
         if _from_peer(message):
             candidates.append(message.id)
             if len(candidates) >= _OLD_THREADS_TO_SCAN:
                 break
-    current = candidates[0] if candidates else None
+    visible = set(candidates)
     for known in store.peer_cursor_threads():
         if int(known) not in candidates:
             candidates.append(int(known))
@@ -362,20 +365,21 @@ async def peer_threads(bot, channel, store) -> tuple[list, int | None]:
     for candidate in candidates:
         thread = await _thread_on(bot, channel, candidate)
         if thread is None:
-            if str(candidate) in store.peer_cursor_threads() and candidate != current:
+            if candidate not in visible:
                 store.peer_drop_cursor(str(candidate))
             continue
         threads.append(thread)
-    return threads, current
+    return threads, visible
 
 
 async def _read_new(bot, channel, store, now: float) -> None:
-    threads, current = await peer_threads(bot, channel, store)
+    threads, visible = await peer_threads(bot, channel, store)
     for thread in threads:
         seen = await read_thread(thread, store, now)
-        drained = (not seen and thread.id != current
-                   and now - peer_questions.snowflake_time(thread.id) > _DRAINED_AFTER_SECS)
-        if drained:
+        # The cursor is the last thing read in it, so this is how long it has been quiet.
+        last = store.peer_cursor(str(thread.id)) or thread.id
+        if (not seen and thread.id not in visible
+                and now - peer_questions.snowflake_time(last) > _DRAINED_AFTER_SECS):
             store.peer_drop_cursor(str(thread.id))
 
 

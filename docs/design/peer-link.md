@@ -196,7 +196,8 @@ resumes the thread's session with `--tools ""` in a nonce-fenced prompt saying i
 untrusted, and the next ordinary turn has every tool back. Each reader tick does at
 most one per thread, oldest first, skipping while the thread is busy, under the same
 channel lock as a typed message. It closes with a one-line note naming the saved file if
-the thread has gained a guest, has no session, or after three failed tries. A usage limit
+the thread has gained a guest, has no session, after the owner taps Kill or Steer on its
+card, or after three failed tries. A usage limit
 does not use up a try. Delivery is at least once across a restart.
 
 **Departures from what stage 1 decided, and why.**
@@ -218,6 +219,8 @@ Invariants:
   these runs, so `_prepare_spawn` does: Claude subscription only, no vault keys.
 - **No remote text in history, sibling prompts or unredacted files.** Answers are
   redacted and have `[BOT_CMD` and `~~~` neutralised when posted and again on receipt.
+  One exception: answer parts wait in `data/state.json` as received until the answer is
+  whole, because a secret can straddle two parts, and are redacted together then.
 - **Windows:** pathlib only, no POSIX-only calls. `sandbox_paths.py` handles drive-letter
   and backslash forms; non-2 hook exits allow, hence `|| exit 2`. `build_settings` calls
   `os.getuid`, so the answering settings are their own small dict.

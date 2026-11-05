@@ -29,6 +29,8 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from bot import peer_record
+
 log = logging.getLogger(__name__)
 
 ANSWER_TOOLS = "Read,Glob"
@@ -116,7 +118,6 @@ def settings_for_export(repo_dir: str | os.PathLike) -> Path:
 
 
 DELIVERY_PREFIX = "peer-delivery:"
-_QID_RE = re.compile(r"[0-9a-f]{16}")
 
 
 def answer_file(qid: str) -> Path:
@@ -147,7 +148,7 @@ def delivery_prompt(marker: str) -> str:
     """
     qid = marker[len(DELIVERY_PREFIX):] if marker.startswith(DELIVERY_PREFIX) else ""
     try:
-        if not _QID_RE.fullmatch(qid):
+        if not peer_record.ID_RE.fullmatch(qid):
             raise OSError("no such question")
         answer = neutralise(answer_file(qid).read_text(encoding="utf-8"))
     except OSError:
@@ -193,19 +194,20 @@ class _Script:
         self.highest_step = -1
         self.lock = threading.Lock()
 
-    def observe(self, raw: str, body: dict) -> int:
+    def scan(self, raw: str) -> None:
+        """Every request the CLI makes, whatever it is for: a leak is a leak."""
         with self.lock:
             for name, value in self.canaries.items():
                 if value in raw:
                     self.leaked.setdefault(name, self.requests)
+
+    def observe(self, body: dict) -> int:
+        with self.lock:
             self.offered.update(t.get("name") for t in body.get("tools") or [])
             self.requests += 1
             step = sum(1 for m in body.get("messages") or [] if m.get("role") == "assistant")
             self.highest_step = max(self.highest_step, step)
             return step
-
-
-_MARK = _Script.mark
 
 
 def _handler_for(script: _Script):
@@ -227,6 +229,7 @@ def _handler_for(script: _Script):
 
         def do_POST(self):
             raw = self.rfile.read(int(self.headers.get("content-length") or 0)).decode("utf-8", "replace")
+            script.scan(raw)
             path = self.path.split("?")[0]
             if path.endswith("/count_tokens"):
                 return self._json(200, {"input_tokens": 1})
@@ -237,7 +240,7 @@ def _handler_for(script: _Script):
             # The CLI's own side requests (titles and so on) get a plain reply.
             if not messages or script.mark not in json.dumps(messages[0]):
                 return self._reply(body, [{"type": "text", "text": "ok"}], "end_turn")
-            step = script.observe(raw, body)
+            step = script.observe(body)
             if step < len(script.steps):
                 name, tool_input = script.steps[step]
                 block = {"type": "tool_use", "id": f"toolu_{uuid.uuid4().hex[:20]}",
@@ -361,7 +364,7 @@ def self_check(binary: str, timeout: int = _CHECK_TIMEOUT_SECS) -> CheckResult:
                *answer_flags(settings)]
         try:
             proc = subprocess.run(
-                cmd, input=f"{_MARK}: scripted question", text=True, encoding="utf-8",
+                cmd, input=f"{_Script.mark}: scripted question", text=True, encoding="utf-8",
                 errors="replace", capture_output=True, cwd=repo_dir,
                 env=scripted_env(server.server_address[1], config_dir), timeout=timeout,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),

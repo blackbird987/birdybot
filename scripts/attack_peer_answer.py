@@ -106,12 +106,12 @@ class Probe(peer_confine._Script):
         self.raw: list[str] = []
         self.systems: list[str] = []
 
-    def observe(self, raw: str, body: dict) -> int:
-        super().observe(raw, body)
+    def observe(self, body: dict) -> int:
+        super().observe(body)
         messages = body.get("messages") or []
         start = max((i for i, m in enumerate(messages) if self.run_marker in json.dumps(m)), default=0)
         with self.lock:
-            self.raw.append(raw)
+            self.raw.append(json.dumps(body))
             self.systems.append(json.dumps(body.get("system") or ""))
         return sum(1 for m in messages[start:] if m.get("role") == "assistant")
 

@@ -5,8 +5,10 @@ read and the persistence that saves them. The state machine that decides what go
 in here is ``bot/engine/peer_questions.py``: this only holds it.
 
 Records are plain dicts, keyed by the question's id, so a question seen twice lands
-on the same record. Text from the other machine is kept here, redacted, and is not
-copied anywhere that instance listings read from.
+on the same record. Text from the other machine is kept here and is not copied
+anywhere that instance listings read from. A question is redacted when it arrives.
+Answer parts wait as received, because a secret can straddle two of them, and are
+redacted together when the answer is whole and saved.
 """
 
 from __future__ import annotations

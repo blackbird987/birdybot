@@ -42,7 +42,7 @@ MAX_REPORTS = 20
 _GIT_TIMEOUT = 120
 _NOTES_LIST_MAX = 200
 
-_EXCLUDED_DIRS = {".claude", ".cursor", ".git", ".vscode", ".idea"}
+_TOOL_CONFIG = {".claude", ".cursor", ".git", ".vscode", ".idea", ".mcp.json"}
 _EXCLUDED_NAMES = {".mcp.json", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", ".netrc", ".npmrc",
                    ".pypirc", ".git-credentials"}
 _SECRET_EXTENSIONS = {".pem", ".key", ".p12", ".pfx", ".crt", ".cer", ".der", ".jks",
@@ -53,6 +53,11 @@ _WORD_SPLIT = re.compile(r"[^a-z0-9]+")
 _INSTRUCTION_FILES = {"claude.md", "claude.local.md", "agents.md"}
 _WINDOWS_DEVICES = {"CON", "PRN", "AUX", "NUL", *(f"COM{n}" for n in range(1, 10)),
                     *(f"LPT{n}" for n in range(1, 10))}
+
+
+def clean(text: str) -> str:
+    """Secrets out of anything that crosses the link or stays on disk."""
+    return redact_secrets(scrub_known(text))
 
 
 def filename_looks_secret(name: str) -> bool:
@@ -82,9 +87,8 @@ def _exclusion(path: str, mode: str, size: int) -> str | None:
     parts = PurePosixPath(path).parts
     if any(part == ".." for part in parts) or path.startswith("/"):
         return "unsafe path"
-    if any(part in _EXCLUDED_DIRS or part.lower().startswith(".git") for part in parts):
-        return "tool configuration"
-    if any(part.lower() in {".mcp.json"} for part in parts):
+    # Lower-cased because `.CLAUDE` is the same folder on Windows.
+    if any(part.lower() in _TOOL_CONFIG or part.lower().startswith(".git") for part in parts):
         return "tool configuration"
     if any(filename_looks_secret(part) for part in parts):
         return "name suggests a secret"
@@ -112,9 +116,7 @@ def _destination(root: Path, path: str) -> Path | None:
     if any(_unsafe_part(part) for part in parts):
         return None
     dest = root.joinpath(*parts)
-    if dest.resolve().parent != root.resolve() and root.resolve() not in dest.resolve().parents:
-        return None
-    return dest
+    return dest if dest.resolve().is_relative_to(root.resolve()) else None
 
 
 def _git(repo: Path, *args: str, stdin: bytes | None = None) -> bytes:
@@ -137,7 +139,7 @@ class Export:
 
 
 def _tree(repo: Path) -> list[tuple[str, str, str, int]]:
-    """(mode, sha, path, size) for every entry at HEAD. No output means no commits."""
+    """(mode, sha, path, size) for every entry at HEAD. Raises on a repo with no commits."""
     raw = _git(repo, "ls-tree", "-r", "-z", "-l", "--full-tree", "HEAD")
     rows = []
     for entry in raw.split(b"\0"):
@@ -162,7 +164,7 @@ def _write_clean(dest: Path, data: bytes) -> bool:
     except UnicodeDecodeError:
         return False
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(redact_secrets(scrub_known(text)), encoding="utf-8")
+    dest.write_text(clean(text), encoding="utf-8")
     return True
 
 
@@ -174,7 +176,10 @@ def _copy_blobs(repo: Path, export: Export) -> None:
         if reason:
             export.note(reason, path)
             continue
-        dest = _destination(export.repo_dir, path)
+        try:
+            dest = _destination(export.repo_dir, path)
+        except OSError:
+            dest = None
         if dest is None:
             export.note("unsafe path", path)
             continue
@@ -195,7 +200,13 @@ def _copy_blobs(repo: Path, export: Export) -> None:
         size = int(header[2])
         data = out[end + 1:end + 1 + size]
         position = end + 1 + size + 1
-        if _write_clean(dest, data):
+        try:
+            written = _write_clean(dest, data)
+        except OSError:
+            # One name this filesystem cannot hold must not cost the whole answer.
+            export.note("could not be written", path)
+            continue
+        if written:
             export.files += 1
         else:
             export.note("binary", path)
@@ -219,7 +230,9 @@ def _write_reports(export: Export, reports: list[tuple[str, str]]) -> None:
     for name, text in reports[:MAX_REPORTS]:
         dest = export.repo_dir / REPORTS_DIR / f"{name}.md"
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(redact_secrets(scrub_known(text)), encoding="utf-8")
+        # errors=replace: a report is whatever the CLI printed, and one bad character
+        # must not cost the answer.
+        dest.write_text(clean(text), encoding="utf-8", errors="replace")
 
 
 def build_export(
