@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.102.22, Limit messages stop becoming thread titles, and every guest session is confined (2026-11-05)
+
 ### Security
 - **An Atlassian API token pasted alone is now caught** (`bot/secret_detect.py`, `docs/design/secret-intake.md`). It starts `ATATT` and is now treated as certain. The general check also split any long value at its last `=`, read the random part as a label and let the whole value through, so a key of that shape from any vendor, pasted alone, got no question at all. It now asks, and `NAME=value` labels still come off.
 - **Every guest session is confined, in every repo** (`docs/design/session-sandbox.md`, `bot/claude/sandbox.py`). A guest's run used to be limited only by a sentence in its prompt unless the owner had run `/sandbox on`: measured on the old code, a guest-shaped session read a fake secret outside its repo and edited a file there. Now each run has one answer, stamped when it is made and kept across retries, later steps, children and restarts. `/sandbox off` does not free a guest.
