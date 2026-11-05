@@ -111,6 +111,10 @@ def _short(value, limit: int = 160) -> str:
 # The one place the persisted top-level key set is written down. If this fails
 # because a key was added or removed on purpose, update the list below.
 EXPECTED_KEYS = frozenset({
+    "peer_asked",
+    "peer_received",
+    "peer_cursors",
+    "peer_daily",
     "instances",
     "repos",
     "repo_descriptions",
@@ -456,6 +460,14 @@ def fixture_state() -> dict:
         "schedules": [sched_full.to_dict(), sched_wake.to_dict()],
         "watches": [watch.to_dict()],
         "watch_counter": 9,
+        "peer_asked": {"q1": {
+            "id": "q1", "repo": "aiagent", "text": "what changed?",
+            "thread_id": "900", "status": "asked", "created_at": 1700000000}},
+        "peer_received": {"q2": {
+            "id": "q2", "from": "laptop", "repo": "bot", "text": "which branch?",
+            "status": "waiting", "created_at": 1700000100}},
+        "peer_cursors": {"800": "123456"},
+        "peer_daily": {"answers": {"date": "2026-11-05", "count": 2}},
     }
 
 
@@ -709,6 +721,12 @@ def _populate_through_api(store: StateStore) -> None:
                             "fp-work-2")
     store.snooze_account_alert(work, "2026-10-17T00:00:00+00:00")
     store.set_login_expiry_warned(work, "2026-11-12T14:10:01+00:00")
+    store.peer_put_asked({"id": "q1", "repo": "aiagent", "text": "what changed?",
+                          "thread_id": "900", "status": "asked", "created_at": 1700000000})
+    store.peer_put_received({"id": "q2", "from": "laptop", "repo": "bot", "text": "which branch?",
+                             "status": "waiting", "created_at": 1700000100})
+    store.peer_set_cursor("800", "123456")
+    store.peer_bump_today("answers", "2026-11-05")
 
     store.set_platform_state("discord", {
         "forum_projects": {"alpha": {"forum_channel_id": "f-1"}},

@@ -257,6 +257,7 @@ async def run() -> None:
 
     orphans = store.mark_orphans()
     boot_recovery.recover_sandboxed_worktrees()
+    boot_recovery.recover_peer_questions(store)
     # Stays None on a clean restart and on every non-Linux host — read much
     # later, when the orphan messages go out, so it must always be bound.
     oom_reason: str | None = None
@@ -659,9 +660,12 @@ async def run() -> None:
             run_resource_check(discord_bot),
         ))
         if config.PEER_ENABLED:
-            from bot.discord.peer_link import run_peer_publisher
+            from bot.discord.peer_link import run_peer_publisher, run_peer_reader
             _bg_tasks.append(asyncio.create_task(
                 run_peer_publisher(discord_bot, stop_event),
+            ))
+            _bg_tasks.append(asyncio.create_task(
+                run_peer_reader(discord_bot, stop_event),
             ))
     if config.LOG_TRIAGE_ENABLED and discord_bot:
         from bot.discord.log_triage import run_triage_service

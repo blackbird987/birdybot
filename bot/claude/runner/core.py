@@ -38,14 +38,15 @@ from bot.claude.parser import (
 )
 from bot.claude.provider import ProviderConfig, get_provider
 from bot.claude.types import (
-    Instance, KillOutcome,
+    PEER_ORIGINS, Instance, InstanceOrigin, KillOutcome,
 )
 from bot.claude.runner.accounts import AccountsMixin
 from bot.claude.runner.admission import AdmissionMixin
 from bot.claude.runner.git_merge import MergeMixin
 from bot.claude.runner.git_release import ReleaseMixin
 from bot.claude.runner.prompt_build import PromptMixin
-from bot.claude.runner.sandboxing import SandboxMixin
+from bot.claude.runner.sandboxing import SandboxMixin, refused_result
+from bot.platform.redact import redact_secrets, scrub_known
 from bot.claude.runner.session_files import SessionFilesMixin
 from bot.claude.runner.worktrees import WorktreeMixin
 from bot.claude.runner.common import (
@@ -162,6 +163,8 @@ async def _wait_or_kill(proc: asyncio.subprocess.Process, grace: float = 5.0) ->
 def _save_result_file(instance: Instance, text: str) -> None:
     """Write a run's final text to its result file and point the instance at it."""
     result_path = config.RESULTS_DIR / f"{instance.id}.md"
+    if instance.origin in PEER_ORIGINS:
+        text = redact_secrets(scrub_known(text))
     result_path.write_text(text, encoding="utf-8")
     instance.result_file = str(result_path)
 
@@ -650,6 +653,11 @@ class ClaudeRunner(
         recovery_state = run.recovery_state
         on_progress = run.on_progress
         api_fallback = run.api_fallback
+
+        # API fallback is --bare, which skips the hooks these runs rely on, and
+        # another provider has none of the flags. Neither gets an unconfined try.
+        if instance.origin in PEER_ORIGINS and (api_fallback or provider.name != "claude"):
+            return refused_result(instance, "the machine link only runs on a Claude subscription")
 
         # Waiting on the semaphore, and the gap between one attempt ending and
         # the next starting, are both windows with no process to signal.
@@ -1554,11 +1562,15 @@ class ClaudeRunner(
         # path of _run_impl) so it fires on BOTH original-account success
         # AND failover-success — failover recurses through _run_impl, so
         # this hook runs on whichever account ultimately succeeded.
-        if not result.is_error and instance.session_id and account_dir:
+        # An answering run keeps no session, so there is nothing to mirror.
+        if (not result.is_error and instance.session_id and account_dir
+                and instance.origin is not InstanceOrigin.PEER_ANSWER):
             await self._mirror_session_to_peer_accounts(instance, account_dir)
 
-        # Extract summary
-        instance.summary = extract_summary(result.result_text)
+        # Extract summary. Not for a run carrying the other machine's text: the
+        # summary lands in state.json and in every later listing, unredacted.
+        if instance.origin not in PEER_ORIGINS:
+            instance.summary = extract_summary(result.result_text)
 
         # Capture the JSONL uuid of the final assistant message so the
         # "Branch from here" button can fork the session at this point.

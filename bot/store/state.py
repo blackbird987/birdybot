@@ -25,6 +25,7 @@ from bot.claude.types import (
 )
 from bot.store.accounts import AccountsMixin
 from bot.store.chains import ChainsMixin
+from bot.store.peer import PeerMixin
 from bot.store.records import AutoFixState, DeployState
 from bot.store.repos import ReposMixin
 from bot.store.schedules import SchedulesMixin
@@ -119,7 +120,7 @@ def _localise_paths(data: dict) -> None:
         data[key] = merged
 
 
-class StateStore(ReposMixin, AccountsMixin, SchedulesMixin, ChainsMixin):
+class StateStore(ReposMixin, AccountsMixin, SchedulesMixin, ChainsMixin, PeerMixin):
     """In-memory state with atomic JSON persistence."""
 
     def __init__(self, state_file: Path, results_dir: Path, retention_days: int = 7,
@@ -182,6 +183,11 @@ class StateStore(ReposMixin, AccountsMixin, SchedulesMixin, ChainsMixin):
         self._chain_deferred: dict[str, list[str]] = {}  # session_id -> deferred revisions
         self._chain_phases: dict[str, dict] = {}  # session_id -> ChainPhaseState dict
         self._chain_entry_sha: dict[str, str] = {}  # session_id -> HEAD sha snapshot
+        # Questions between machines. See bot/store/peer.py.
+        self._peer_asked: dict[str, dict] = {}
+        self._peer_received: dict[str, dict] = {}
+        self._peer_cursors: dict[str, str] = {}
+        self._peer_daily: dict[str, dict] = {}
         self._deploy_state: dict[str, DeployState] = {}  # repo_name -> deploy state
         self._deploy_configs: dict[str, dict] = {}  # repo_name -> deploy config
         self._auto_fix_state: dict[str, AutoFixState] = {}  # "repo:trigger" -> state
@@ -301,6 +307,10 @@ class StateStore(ReposMixin, AccountsMixin, SchedulesMixin, ChainsMixin):
         self._chain_deferred = data.get("chain_deferred", {})
         self._chain_phases = data.get("chain_phases", {})
         self._chain_entry_sha = data.get("chain_entry_sha", {})
+        self._peer_asked = data.get("peer_asked", {})
+        self._peer_received = data.get("peer_received", {})
+        self._peer_cursors = data.get("peer_cursors", {})
+        self._peer_daily = data.get("peer_daily", {})
         self._deploy_state = {
             k: DeployState.from_dict(v)
             for k, v in data.get("deploy_state", {}).items()
@@ -420,6 +430,10 @@ class StateStore(ReposMixin, AccountsMixin, SchedulesMixin, ChainsMixin):
             "chain_deferred": self._chain_deferred,
             "chain_phases": self._chain_phases,
             "chain_entry_sha": self._chain_entry_sha,
+            "peer_asked": self._peer_asked,
+            "peer_received": self._peer_received,
+            "peer_cursors": self._peer_cursors,
+            "peer_daily": self._peer_daily,
             "deploy_state": {k: v.to_dict() for k, v in self._deploy_state.items()},
             "deploy_configs": self._deploy_configs,
             "auto_fix_state": {k: v.to_dict() for k, v in self._auto_fix_state.items()},

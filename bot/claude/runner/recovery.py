@@ -34,7 +34,7 @@ from bot.claude.parser import (
     looks_like_fatal_auth_error,
 )
 from bot.claude.provider import ProviderConfig
-from bot.claude.types import Instance
+from bot.claude.types import Instance, InstanceOrigin
 from bot.claude.runner.common import (
     ContextResetCallback,
     ProgressCallback,
@@ -397,6 +397,11 @@ class RecoveryMixin:
                     )
                     return await run.reenter()
 
+            # A machine-link delivery reports to the session it resumes. With no
+            # session it has no one to report to, so its caller closes it instead.
+            if instance.origin is InstanceOrigin.PEER_DELIVERY:
+                return None
+
             # Layer 3 (last resort): drop session and run blank.  Tag the
             # downstream result so commands.py can surface a "lost prior
             # context" notice to the user instead of silently rebinding to
@@ -698,6 +703,7 @@ class RecoveryMixin:
                 config.CONTEXT_OVERFLOW_FRESH
                 and original_session_id
                 and "overflow_fresh" not in recovery_state
+                and instance.origin is not InstanceOrigin.PEER_DELIVERY
             ):
                 recovery_state.add("overflow_fresh")
                 log.warning(

@@ -1,11 +1,11 @@
-# Machine link: stage 1
+# Machine link
 
 The same bot runs on a Linux desktop (Discord app TT-GPT, category The Foundry)
 and a Windows work laptop (app office bot, category The Office). They ignore each
-other, so the owner carries information between them. This is the first stage of
-a link. It ships three things: a permissions check, a tap before auto-update
-applies, and a read-only project directory. It does not ship questions or tasks
-between machines; those are decided below so they are not derived again.
+other, so the owner carries information between them. Stage 1 is a permissions
+check, a tap before auto-update applies, and a read-only project directory. Stage 2
+is questions between machines, each one tapped on the machine that answers. Tasks
+between machines are not shipped; that decision is below so it is not derived again.
 
 Every session runs as the bot's uid and can read `.env` and the token. A check
 inside a session or on the sender's side is advice, not a boundary. What holds
@@ -131,34 +131,106 @@ level is POSIX-only; `prepare_run` is, and is not called. `core.hooksPath=/dev/n
 on Git for Windows is not tested: it names a path with no hooks in it, and the
 reads run no hooks anyway.
 
+## Stage 2: questions between machines
+
+An owner's chat session writes `[BOT_CMD: /ask_machine repo=X]` with a `~~~ask` body.
+The other machine shows a card, the owner taps Run once there, a read-only session
+answers from a copy of the repo, and the answer reaches the asking thread, even if
+the laptop was asleep for all of it. Nothing runs on a question without that tap.
+
+**Transport.** Questions are never channel messages, because the directory reader
+takes the author's newest. Each machine's outbox is a public thread on its own
+directory message (same id, 7 day auto-archive). The publisher creates it, and its
+existence is how the other side knows this version can answer. The directory record
+gained no field. `bot/peer_record.py` parses `q` and `a` strictly. A message that is
+not JSON is skipped quietly, an unknown protocol holds the cursor and warns once, a
+bad record is skipped and logged. `Message.thread` excludes archived threads, so the
+thread is always fetched by id.
+
+**Reader** (`bot/discord/peer_link.py`). Every 30s it reads the peer's directory
+message, its thread, and what came after a per-thread cursor, taking only messages by
+`PEER_BOT_ID` with no webhook id. Catching up after sleep is the same path. Answers
+count only for ids this machine asked. The cursor is per thread, so older threads
+drain after a directory message is replaced.
+
+**State** (`bot/store/peer.py`, `bot/engine/peer_questions.py`), in `state.json`,
+idempotent by id, first text per id wins, and the tap runs the stored text.
+
+- Asker: asked, answered_received, delivered; or undeliverable, or expired after 7 days.
+- Receiver: seen, carded, running, posting, done; or declined, expired.
+- Boot recovery (`boot_recovery.recover_peer_questions`): `running` posts `failed`
+  because the tap is spent, `posting` resumes at the next part, leftover exports go.
+
+**Asking** (`bot/engine/directives/ask_machine.py`). Only a direct owner session with
+no guest and not sandboxed. 3 open per thread, 20 per day. Refused at once, with no
+record, if the peer has no outbox (it names the version and how to update) or its
+directory lacks that repo.
+
+**The card** (`bot/discord/peer_turns.py`). Posted in this machine's outbox, with the
+question in a code block with backticks and mentions neutralised. Run once and Decline
+go through the `interactions.py` action table, carry the id, and work once. A real
+branch sits ahead of `_in_scope` in `on_interaction`, matching exactly these actions in
+a thread under `PEER_CHANNEL_ID`, then checks the interaction's real user id. `_in_scope`
+is not widened, because `on_message` uses it. A card cannot live in the lobby: the
+lobby is purged at startup.
+
+**Answering** (`InstanceOrigin.PEER_ANSWER`). One at a time, with a turn cap and a
+timeout, no history row, no thread binding, no directives. `bot/peer_export.py` makes a
+temporary copy of tracked files at HEAD plus that repo's newest 20 reports, filtered and
+redacted, with `CLAUDE.md` renamed so it reads as a file. It uses `git ls-tree` and
+`git cat-file --batch` rather than `git archive`, which runs `export-subst` and hands
+back a tar. The question goes in a file there, so no remote text is in the instance's
+prompt. Flags (`peer_confine.answer_flags`, built in the provider branch keyed on origin,
+so a failover rebuilds them): `--restricted --tools Read,Glob --strict-mcp-config
+--permission-mode dontAsk --settings <path hook> --no-session-persistence --max-turns 30`.
+
+**The check before every Run once** (`peer_confine.self_check`). The real CLI against a
+scripted local endpoint, no model usage, under 5s. It tries reads outside the export in
+every spelling, including Windows drive-letter and backslash forms, and plants CLAUDE.md
+canaries that arrive only if the CLI loads them itself. A leak, an extra tool or a check
+that could not run all refuse the tap, and the card says why. There is no unchecked path.
+
+**Delivery** (`InstanceOrigin.PEER_DELIVERY`). A laptop session can post an answer with
+no tap, and the asker cannot tell. So an answer never resumes a turn with a shell: it
+resumes the thread's session with `--tools ""` in a nonce-fenced prompt saying it is
+untrusted, and the next ordinary turn has every tool back. Each reader tick does at
+most one per thread, oldest first, skipping while the thread is busy, under the same
+channel lock as a typed message. It closes with a one-line note naming the saved file if
+the thread has gained a guest, has no session, or after three failed tries. A usage limit
+does not use up a try. Delivery is at least once across a restart.
+
+**Departures from what stage 1 decided, and why.**
+
+- **The reader polls** instead of adding a path to `on_message`, so no peer message
+  can start anything there, and sleep catch-up needs no second code path.
+- **No `store.add_wake`.** It deletes other one-shot rows, `cancel_wakes` deletes them,
+  and `on_wake` can only start a full replay with a shell. The state is the queue, so
+  wakes, watches and the promise nudge are untouched.
+- **Run once only.** No Always grant yet, because grants in `state.json` can be edited by
+  local sessions and "only by tap" would not hold.
+
+Invariants:
+
+- **An answer never resumes a turn with tools,** and no origin here dispatches a
+  directive, on the success or the failure path.
+- **`on_message` is still untouched.**
+- **`--bare` never.** It skips hooks. `sandbox.preflight` will not refuse API fallback for
+  these runs, so `_prepare_spawn` does: Claude subscription only, no vault keys.
+- **No remote text in history, sibling prompts or unredacted files.** Answers are
+  redacted and have `[BOT_CMD` and `~~~` neutralised when posted and again on receipt.
+- **Windows:** pathlib only, no POSIX-only calls. `sandbox_paths.py` handles drive-letter
+  and backslash forms; non-2 hook exits allow, hence `|| exit 2`. `build_settings` calls
+  `os.getuid`, so the answering settings are their own small dict.
+
+Setup: `scripts/peer_setup.py` re-run on an existing channel compares and updates only
+the two bots' overwrites: allow Create Public Threads and Send Messages in Threads, deny
+Manage Messages and Manage Threads. A default, not a boundary.
+
+The measured results are in `study/findings/`. Which work repos are shared is the
+owner's call at each tap, and the owner's code of conduct limits non-work use of the
+laptop. A tap on a phone does not read the code, and session reports may hold work data.
+
 ## Later stages, decided
-
-**Stage 2, questions.** Delivered by a bot directive plus a pending-request record
-and `store.add_wake` when the answer lands, NOT by a background script with /watch:
-
-- watches are refused from build sessions, and a new watch replaces an existing
-  one on the thread;
-- the Windows pid probe `os.kill(pid, 0)` in `bot/engine/watches.py` sends CTRL_C,
-  and Git Bash pids are not Windows pids;
-- the 6h default timeout fires while the laptop sleeps.
-
-The answering session runs on a temporary export of tracked HEAD files plus session
-reports, with redaction and size caps, using an allowlist `--tools Read,Glob` and
-`--strict-mcp-config`. Directive dispatch is off on both paths (`lifecycle.py` and
-`query.py`), because reply text can otherwise start `/spawn` or a `/watch log=`
-read. `--bare` must not be used, since it skips hooks.
-
-Grants are Run once first, then Always per repo for repos without work data, with
-per-repo and global caps. Grants in `state.json` are editable by local sessions, so
-"only by tap" does not hold locally. Only chat sessions ask at first.
-
-Answers arrive marked untrusted. The wave-join text in `bot/discord/orchestrator.py`
-says "continue the work" and is not a usable model for that framing. See also the
-findings on the Claude Code sandbox holding for Bash only, and on a masked key coming
-back through an echoing host.
-
-The owner's code of conduct limits non-work use of the laptop, so which work repos
-are shared is the owner's call.
 
 **Stage 3, tasks.** Deferred. One tap would give a remote prompt a full shell on the
 work laptop, and depth limits cannot be enforced against a session holding the token.
@@ -175,4 +247,13 @@ edit that role or take it off the office bot; it could not see the laptop's chan
 by doing so. Nothing here stops the owner's own sessions on either machine from using
 a token directly: this narrows what a token can reach, not who can use it.
 
-Harnesses: `scripts/test_peer_link.py`, `scripts/test_auto_update_approval.py`.
+Stage 2 was run against the real CLI with a scripted model and a faked Discord. A real
+tap, a real thread (archive, auto-unarchive on send, a thread surviving edits to its
+starter message, thread messages staying out of channel history) and Windows have not
+been exercised. A forged answer can mislead the asking session but has no tools to act
+with. Filtering by filename is a default and misses a secret in an ordinary file whose
+format the redactor does not know.
+
+Harnesses: `scripts/test_peer_link.py`, `scripts/test_auto_update_approval.py`,
+`scripts/test_peer_questions.py`. By hand, on both machines and on every CLI upgrade:
+`scripts/attack_peer_answer.py`.

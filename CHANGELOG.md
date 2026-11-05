@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+- **Questions between the two machines** (`docs/design/peer-link.md`, `bot/engine/peer_questions.py`, `bot/discord/peer_turns.py`). A chat session asks with `/ask_machine`, the owner taps Run once on the other machine, a read-only session answers from a filtered copy of the repo, and the answer reaches the asking thread, even after the laptop slept. Nothing runs without the tap.
+- **A confinement check before every Run once** (`bot/peer_confine.py`). The real CLI against a scripted local endpoint, no model usage. A leak, an extra tool or a check that could not run refuses the tap and says why on the card.
+- **`scripts/attack_peer_answer.py`**: the real-CLI proof, to run by hand on both machines and on every CLI upgrade.
+
+### Changed
+- **`scripts/peer_setup.py` re-run now updates an existing channel**: it compares and changes only the two bots' overwrites, for the outbox threads. `scripts/peer_perms.py` checks the same ones.
+- **The session sandbox path hook understands Windows paths**: drive-letter globs and `..` split on either separator.
+
 ### Security
 - **Every guest session is confined, in every repo** (`docs/design/session-sandbox.md`, `bot/claude/sandbox.py`). A guest's run used to be limited only by a sentence in its prompt unless the owner had run `/sandbox on`: measured on the old code, a guest-shaped session read a fake secret outside its repo and edited a file there. Now each run has one answer, stamped when it is made and kept across retries, later steps, children and restarts. `/sandbox off` does not free a guest.
 - **A guest's repo that cannot be sandboxed refuses the run** with the reason, and never falls back to running it open.

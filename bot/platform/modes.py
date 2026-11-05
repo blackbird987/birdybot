@@ -59,7 +59,7 @@ _WORKFLOW_ORIGINS = frozenset({
     InstanceOrigin.APPLY_REVISIONS, InstanceOrigin.RELEASE,
     InstanceOrigin.VERIFY, InstanceOrigin.VERIFY_RELEASE,
     InstanceOrigin.BUILD_AND_SHIP, InstanceOrigin.SENSOR_FIX,
-    InstanceOrigin.TLDR,
+    InstanceOrigin.TLDR, InstanceOrigin.PEER_ANSWER, InstanceOrigin.PEER_DELIVERY,
 })
 
 

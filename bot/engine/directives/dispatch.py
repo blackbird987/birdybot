@@ -10,6 +10,7 @@ from bot.textutil import directive_re, is_quoted_example, mask_tilde_bodies
 from bot.claude.sandbox import origin_is_sandboxed
 from bot.claude.types import Instance
 from bot.platform.base import RequestContext
+from bot.engine.directives.ask_machine import _handle_ask_directives
 from bot.engine.directives.chain import _handle_chain_directive
 from bot.engine.directives.reply import _handle_reply_directives
 from bot.engine.directives.secret import _handle_secret_directives
@@ -169,6 +170,7 @@ async def _execute_bot_commands(
     await _handle_reply_directives(ctx, result_text)
 
     await _handle_secret_directives(ctx, result_text, source_inst)
+    await _handle_ask_directives(ctx, result_text, source_inst)
 
     # /chain — assistant-issued handoff into the build→ship chain, carrying a
     # plan the agent wrote from the conversation. Only one per response.

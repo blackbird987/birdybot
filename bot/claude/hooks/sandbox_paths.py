@@ -15,12 +15,15 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 
 READ_TOOLS = {"Read", "Grep", "Glob"}
 # Never written with a tool, wherever they sit under the working directory.
 _NO_WRITE_PARTS = {".git", ".claude"}
 _NO_WRITE_NAMES = {".mcp.json"}
+# C:/x and C:\\x. Read on any OS: on Linux it resolves as a relative name, harmlessly.
+_DRIVE = re.compile(r"[A-Za-z]:[\\/]")
 
 
 def _block(message: str) -> None:
@@ -41,14 +44,18 @@ def _under(path: str, root: str) -> bool:
 
 def _glob_root(pattern: str) -> str | None:
     """The literal directory an absolute or home-relative glob starts from."""
-    if not pattern.startswith(("/", "~")):
+    windows = bool(_DRIVE.match(pattern)) or (os.sep == "\\" and pattern.startswith("\\"))
+    if not windows and not pattern.startswith(("/", "~")):
         return None
+    # A backslash separates on Windows and escapes a glob character elsewhere.
+    separators = r"[\\/]" if windows or os.sep == "\\" else "/"
     parts: list[str] = []
-    for part in pattern.split("/"):
+    for part in re.split(separators, pattern):
         if any(ch in part for ch in "*?[{"):
             break
         parts.append(part)
-    return "/".join(parts) or "/"
+    root = "/".join(parts) or "/"
+    return root + "/" if root.endswith(":") else root
 
 
 def check(tool: str, tool_input: dict, cfg: dict) -> str | None:
@@ -64,7 +71,7 @@ def check(tool: str, tool_input: dict, cfg: dict) -> str | None:
         if tool not in ("Glob", "Grep"):
             break
         value = str(tool_input.get(key) or "")
-        if ".." in value.split("/"):
+        if ".." in re.split(r"[\\/]", value):
             return f"'{value}' climbs out of the allowed directories"
         if tool == "Glob" or key == "glob":
             root = _glob_root(value)
