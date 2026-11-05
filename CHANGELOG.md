@@ -12,7 +12,7 @@
 - **The session sandbox path hook understands Windows paths**: drive-letter globs and `..` split on either separator.
 
 ### Fixed
-- **The offline replay tools build a prompt again** (`scripts/replay_ab/prompt.py`, `scripts/judge_replay/replay.py`). Their stand-in prompt builder had no store once the machine link note began reading one, so `test_replay_ab` crashed on master.
+- **The offline replay A/B tool builds a prompt again** (`scripts/replay_ab/prompt.py`). Its stand-in prompt builder had no store once the machine link note began reading one, so `test_replay_ab` crashed on master.
 
 ## v0.102.22, Limit messages stop becoming thread titles, and every guest session is confined (2026-11-05)
 

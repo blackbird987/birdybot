@@ -99,7 +99,6 @@ def _child(spec_path: str, out_path: str) -> int:
 
     class _Builder(PromptMixin):
         provider = _CLAUDE
-        _store = None  # no repo settings here, and the machine link note reads it
 
     inst = Instance(
         id=f"judge-replay-{spec['id']}", name=None, instance_type=InstanceType.QUERY, prompt=text,
