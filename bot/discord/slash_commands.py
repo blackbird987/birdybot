@@ -1240,7 +1240,42 @@ def setup(bot: ClaudeBot) -> None:
                         f"({grant.mode}, bash={grant.bash_policy}, "
                         f"limit={grant.max_daily_queries}/day){forum_link}"
                     )
+            if not ua.buttons:
+                lines.append(f"**{ua.display_name}**: buttons off")
         await interaction.followup.send("\n".join(lines) or "No grants.", ephemeral=True)
+
+    @access_group.command(name="buttons", description="Turn every button on or off for a guest")
+    @app_commands.describe(user="Guest to change", state="off hides all buttons in their threads")
+    @app_commands.choices(state=[
+        app_commands.Choice(name="on", value="on"),
+        app_commands.Choice(name="off", value="off"),
+    ])
+    async def cmd_access_buttons(
+        interaction: discord.Interaction, user: discord.Member, state: str,
+    ):
+        if not bot._is_owner(interaction.user.id):
+            await interaction.response.send_message("Owner only", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        cfg = load_access_config()
+        uid = str(user.id)
+        ua = cfg.users.get(uid)
+        if not ua:
+            await interaction.followup.send(
+                f"**{user.display_name}** has no access grants.", ephemeral=True,
+            )
+            return
+        ua.buttons = state == "on"
+        access_mod.save_access_config(cfg)
+        asyncio.create_task(bot._forums.refresh_user_control_room(uid))
+        if ua.buttons:
+            note = "New cards in their threads carry buttons again; older cards stay as they are."
+        else:
+            asyncio.create_task(bot.strip_guest_buttons(uid))
+            note = "New cards in their threads go out with no buttons, and the ones already posted are being cleared."
+        await interaction.followup.send(
+            f"Buttons {state} for **{user.display_name}**. {note}", ephemeral=True,
+        )
 
     @access_group.command(name="set", description="Change access settings")
     @app_commands.describe(

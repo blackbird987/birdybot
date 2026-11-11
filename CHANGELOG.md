@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- **The owner can turn off every button for one guest** (`/access buttons @user off`, stored as `"buttons": false` in `data/access.json`). For a guest who only chats: every card in a thread with that guest in it (or spawned from one), in their personal forum, control room and welcome post, goes out with no buttons, and the ones already posted are cleared on the switch and on startup. The peak-hour Run/Queue/Cancel gate lets such a guest's turn run instead of waiting on a tap. Everyone else is unchanged.
+
 ## v0.102.23, Questions between the two machines (2026-11-05)
 
 ### Added

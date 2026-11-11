@@ -15,7 +15,7 @@ import discord
 
 from bot import config
 from bot.discord import channels
-from bot.discord.access import AccessResult
+from bot.discord.access import AccessResult, load_access_config
 from bot.discord import idle as idle_mod
 from bot.discord import spawn_colors
 from bot.discord.forums import ThreadInfo
@@ -66,6 +66,109 @@ class ThreadContextMixin:
             lookup = self._forums.thread_to_project(info.parent_thread_id) if info.parent_thread_id else None
             info = lookup[1] if lookup else None
         return False
+
+    def _thread_guest_ids(self, info: ThreadInfo | None) -> set[str]:
+        """Every non-owner this thread belongs to or has heard from."""
+        if info is None:
+            return set()
+        owner_id = str(self._discord_user_id) if self._discord_user_id else None
+        test_ids = set(config.TEST_WEBHOOK_IDS or ())
+        ids = {info.user_id, *info.user_ids}
+        return {u for u in ids if u and u != owner_id and u not in test_ids}
+
+    def _buttons_hidden(self, channel_id: str | None) -> bool:
+        """Should nothing posted in this channel carry buttons?
+
+        True when a guest the owner turned buttons off for is in this thread or
+        one that spawned it (the same family walk as _family_has_guest, since a
+        child's card reaches the parent's guest too), or when the channel is
+        that guest's personal forum, a thread in it, or their control room or
+        archive. Every card the bot posts asks this, in the Discord sender.
+        Never raises: a question it cannot answer shows the buttons.
+        """
+        if not channel_id:
+            return False
+        try:
+            cfg = load_access_config()
+            off = {uid: ua for uid, ua in cfg.users.items() if not ua.buttons}
+            if not off:
+                return False
+            cid = str(channel_id)
+            parent_id = None
+            channel = self.get_channel(int(cid))
+            if channel is not None:
+                pid = getattr(channel, "parent_id", None)
+                parent_id = str(pid) if pid else None
+            for ua in off.values():
+                own = {ua.forum_channel_id, ua.control_thread_id, ua.archive_thread_id} - {None}
+                if cid in own or (parent_id and parent_id == ua.forum_channel_id):
+                    return True
+            lookup = self._forums.thread_to_project(cid)
+            info = lookup[1] if lookup else None
+            seen: set[str] = set()
+            while info is not None and info.thread_id not in seen:
+                seen.add(info.thread_id)
+                if self._thread_guest_ids(info) & off.keys():
+                    return True
+                lookup = (
+                    self._forums.thread_to_project(info.parent_thread_id)
+                    if info.parent_thread_id else None
+                )
+                info = lookup[1] if lookup else None
+        except Exception:
+            log.debug("Could not tell whether %s hides buttons", channel_id, exc_info=True)
+        return False
+
+    async def strip_guest_buttons(self, user_id: str) -> int:
+        """Take the buttons off what is already posted for a guest with buttons off.
+
+        New cards go out bare on their own; this clears the older ones that still
+        carry a view: the starter post of every mapped thread with this guest in
+        it, and the threads in their personal forum (the welcome post among
+        them). Their control room loses its buttons on its next refresh. Only
+        edits a message that still has components. Returns how many it edited.
+        """
+        cfg = load_access_config()
+        ua = cfg.users.get(str(user_id))
+        if ua is None or ua.buttons:
+            return 0
+        thread_ids: set[str] = set()
+        for proj in self._forums.forum_projects.values():
+            for tid, info in proj.threads.items():
+                if str(user_id) in self._thread_guest_ids(info):
+                    thread_ids.add(str(tid))
+        forum = self.get_channel(int(ua.forum_channel_id)) if ua.forum_channel_id else None
+        if isinstance(forum, discord.ForumChannel):
+            thread_ids.update(str(t.id) for t in forum.threads)
+            try:
+                async for t in forum.archived_threads(limit=50):
+                    thread_ids.add(str(t.id))
+            except Exception:
+                log.debug("Could not list archived threads in %s", forum.id, exc_info=True)
+        edited = 0
+        for tid in sorted(thread_ids):
+            try:
+                thread = self.get_channel(int(tid)) or await self.fetch_channel(int(tid))
+                # A forum post's starter message has the thread's own id.
+                msg = await thread.fetch_message(int(tid))
+                if not msg.components or msg.author.id != self.user.id:
+                    continue
+                # An archived thread rejects every edit but unarchiving (50083),
+                # so wake it for the edit and put it back to sleep after.
+                archived = bool(getattr(thread, "archived", False))
+                if archived:
+                    await thread.edit(archived=False)
+                try:
+                    await msg.edit(view=None)
+                    edited += 1
+                finally:
+                    if archived:
+                        await thread.edit(archived=True)
+            except Exception:
+                log.debug("Could not strip buttons from thread %s", tid, exc_info=True)
+        if edited:
+            log.info("Took the buttons off %d posts for user %s", edited, user_id)
+        return edited
 
     def _guest_access(self, user_id: str | None, channel_id: str) -> AccessResult:
         """A guest's grant, for running their prompt when they are not the one tapping.

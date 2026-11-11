@@ -88,6 +88,13 @@ class StartupMixin:
             self._control_rooms_cleaned = True
             asyncio.create_task(self._forums.cleanup_all_control_rooms())
 
+        # Guests the owner turned buttons off for: clear the buttons still on
+        # posts made before the switch (one-time, non-blocking; reads only once
+        # nothing is left to clear).
+        if not getattr(self, '_guest_buttons_stripped', False):
+            self._guest_buttons_stripped = True
+            asyncio.create_task(self._strip_all_guest_buttons())
+
         # A forum has one pin slot — make sure the Control Room holds it
         # (one-time, non-blocking; no-ops on forums that are already right)
         if not getattr(self, '_forum_pins_reconciled', False):
@@ -166,6 +173,16 @@ class StartupMixin:
 
         # Clean up stale worktrees/branches from interrupted autopilot chains
         asyncio.create_task(self._startup_worktree_cleanup())
+
+    async def _strip_all_guest_buttons(self) -> None:
+        """Run strip_guest_buttons for every guest whose buttons are off."""
+        from bot.discord.access import load_access_config
+        try:
+            off = [uid for uid, ua in load_access_config().users.items() if not ua.buttons]
+            for uid in off:
+                await self.strip_guest_buttons(uid)
+        except Exception:
+            log.warning("Clearing guest buttons on startup failed", exc_info=True)
 
     async def _startup_worktree_cleanup(self) -> None:
         """Recover partial worktrees, merge pending results, clean orphans.

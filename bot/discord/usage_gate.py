@@ -80,6 +80,11 @@ class UsageGateMixin:
         # queued entries would be orphaned.
         if not self._forums.thread_to_project(ctx.channel_id):
             return False
+        # A guest with buttons off could never tap Run or Queue, so the turn
+        # just runs (throttled) instead of waiting on a choice they cannot see.
+        hidden = getattr(self, "_buttons_hidden", None)
+        if hidden is not None and hidden(ctx.channel_id):
+            return False
 
         # Double-tap dedup for callback gating: if the same channel + action
         # + instance_id is already awaiting_choice, don't create a duplicate.

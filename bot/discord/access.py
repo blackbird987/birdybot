@@ -57,6 +57,8 @@ class UserAccess:
     control_thread_id: str | None = None   # control room thread in personal forum
     control_message_id: str | None = None  # control room embed message
     archive_thread_id: str | None = None   # archive thread in personal forum
+    # False hides every button in this user's threads, for a guest who only chats.
+    buttons: bool = True
 
     def to_dict(self) -> dict:
         d = {
@@ -73,6 +75,8 @@ class UserAccess:
             d["control_message_id"] = self.control_message_id
         if self.archive_thread_id:
             d["archive_thread_id"] = self.archive_thread_id
+        if not self.buttons:
+            d["buttons"] = False
         return d
 
     @classmethod
@@ -88,6 +92,7 @@ class UserAccess:
             control_thread_id=d.get("control_thread_id"),
             control_message_id=d.get("control_message_id"),
             archive_thread_id=d.get("archive_thread_id"),
+            buttons=d.get("buttons", True) is not False,
         )
 
 
@@ -206,6 +211,12 @@ def check_user_access(
         return None
     canonical = match_name(repo_name, ua.repos)
     return ua.repos[canonical] if canonical else None
+
+
+def buttons_disabled_for(cfg: AccessConfig, user_id: str | None) -> bool:
+    """Has the owner turned off every button for this user? Unknown users keep them."""
+    ua = cfg.users.get(str(user_id)) if user_id else None
+    return bool(ua) and not ua.buttons
 
 
 def has_any_access(cfg: AccessConfig, user_id: str) -> bool:
