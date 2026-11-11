@@ -81,7 +81,8 @@ class UsageGateMixin:
         if not self._forums.thread_to_project(ctx.channel_id):
             return False
         # A guest with buttons off could never tap Run or Queue, so the turn
-        # just runs (throttled) instead of waiting on a choice they cannot see.
+        # runs as it would with the gate off, instead of waiting on a choice
+        # they cannot see.
         hidden = getattr(self, "_buttons_hidden", None)
         if hidden is not None and hidden(ctx.channel_id):
             return False

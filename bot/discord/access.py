@@ -219,10 +219,18 @@ def check_user_access(
     return ua.repos[canonical] if canonical else None
 
 
-def buttons_disabled_for(cfg: AccessConfig, user_id: str | None) -> bool:
-    """Has the owner turned off every button for this user? Unknown users keep them."""
+def buttons_disabled_for(
+    cfg: AccessConfig, user_id: str | None, forum_channel_id: str | None = None,
+) -> bool:
+    """Has the owner turned off every button for this user, or for the guest
+    whose personal forum *forum_channel_id* is? Unknown users keep them."""
     ua = cfg.users.get(str(user_id)) if user_id else None
-    return bool(ua) and not ua.buttons
+    if ua is not None and not ua.buttons:
+        return True
+    forum = str(forum_channel_id) if forum_channel_id else None
+    return forum is not None and any(
+        not u.buttons and u.forum_channel_id == forum for u in cfg.users.values()
+    )
 
 
 def has_any_access(cfg: AccessConfig, user_id: str) -> bool:

@@ -755,7 +755,7 @@ class ForumManager:
                 topic_preview=topic,
                 current_mode=self._store.mode,
                 current_effort=self._store.effort,
-                controls=not access_mod.buttons_disabled_for(load_access_config(), user_id),
+                controls=not access_mod.buttons_disabled_for(load_access_config(), user_id, forum.id),
             )
 
             # Apply repo tag in personal forums
@@ -1885,7 +1885,7 @@ class ForumManager:
     async def _refresh_control_message(
         self, label: str, thread_id: str, message_id: str, *,
         forget: Callable[[], None],
-        render: Callable[[], Awaitable[tuple[discord.Embed, discord.ui.View]]],
+        render: Callable[[], Awaitable[tuple[discord.Embed, discord.ui.View | None]]],
         recreate: Callable[[], Awaitable[None]],
     ) -> None:
         """Redraw one Control Room embed, repo or personal, healing a deleted post.

@@ -1280,7 +1280,7 @@ def setup(bot: ClaudeBot) -> None:
         if found is None:
             return
         cfg, ua = found
-        uid = ua.user_id
+        uid = str(user.id)
         ua.control_room = state == "on"
         access_mod.save_access_config(cfg)
         if ua.control_room:
@@ -1303,7 +1303,7 @@ def setup(bot: ClaudeBot) -> None:
         if found is None:
             return
         cfg, ua = found
-        uid = ua.user_id
+        uid = str(user.id)
         ua.buttons = state == "on"
         access_mod.save_access_config(cfg)
         await bot._forums.refresh_user_control_room(uid)

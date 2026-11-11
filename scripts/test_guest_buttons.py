@@ -4,7 +4,8 @@ A guest who only chats (RipKiwi, the owner's mother) was confused by Build &
 Ship, Plan, Done, Retry and the rest. access.json now carries "buttons": false
 per user, and the Discord sender drops the buttons of every card in a thread
 whose family has that guest in it. This pins the file round-trip, the
-per-channel answer, and the sender dropping the view.
+per-channel answer, the sender dropping the view, the clearing of cards
+already posted, and the usage gate not waiting on a tap.
 """
 import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
 
@@ -77,6 +78,10 @@ check("buttons_disabled_for the guest with them off", A.buttons_disabled_for(cfg
 check("buttons_disabled_for a guest with them on", A.buttons_disabled_for(cfg, VIN), False)
 check("buttons_disabled_for an unknown user", A.buttons_disabled_for(cfg, "999"), False)
 check("buttons_disabled_for no user", A.buttons_disabled_for(cfg, None), False)
+check("buttons_disabled_for anyone posting in her personal forum",
+      A.buttons_disabled_for(cfg, OWNER, 500), True)
+check("buttons_disabled_for anyone posting in another guest's forum",
+      A.buttons_disabled_for(cfg, OWNER, "600"), False)
 
 # --- the per-channel answer ---
 
@@ -212,9 +217,10 @@ class Card(FakeMessage):
 
 
 class SleepyThread(FakeChannel):
-    def __init__(self, cid, archived, history):
+    def __init__(self, cid, archived, history, pinned=False):
         super().__init__(cid, "900")
         self.archived = archived
+        self.flags = type("F", (), {"pinned": pinned})()
         self.thread_edits = []
         self._history = history
         self.history_limits = []
@@ -226,6 +232,12 @@ class SleepyThread(FakeChannel):
         self.history_limits.append(limit)
         for m in self._history[:limit]:
             yield m
+
+    async def fetch_message(self, mid):
+        for m in self._history:
+            if m.id == int(mid):
+                return m
+        raise AD.discord.NotFound(type("R", (), {"status": 404, "reason": "gone"})(), "gone")
 
 
 async def strip_checks():
@@ -240,7 +252,13 @@ async def strip_checks():
     t201 = SleepyThread("201", archived=False, history=[Card(5, BOT_ID, [])])
     t200 = SleepyThread("200", archived=False, history=[Card(6, BOT_ID, ["row"])])
     t300 = SleepyThread("300", archived=False, history=[Card(7, BOT_ID, ["row"])])
-    by_id = {"100": t100, "101": t101, "201": t201, "200": t200, "300": t300}
+    # A long thread whose starter sits past the history window, asleep and
+    # holding its forum's pin: the starter is still cleared, the pin kept.
+    LIMIT = TC.ThreadContextMixin.STRIP_HISTORY_LIMIT
+    long_history = [Card(1000 + i, OTHER, []) for i in range(LIMIT)] + [Card(102, BOT_ID, ["row"])]
+    t102 = SleepyThread("102", archived=True, history=long_history, pinned=True)
+    threads["102"] = ThreadInfo(thread_id="102", user_id=KIWI)
+    by_id = {"100": t100, "101": t101, "102": t102, "201": t201, "200": t200, "300": t300}
 
     class StripBot(FakeBot):
         user = type("U", (), {"id": BOT_ID})()
@@ -252,7 +270,11 @@ async def strip_checks():
             return self.get_channel(cid)
 
     n = await StripBot().strip_hidden_buttons()
-    check("strip edits every bot card that still had buttons in her threads", n, 3)
+    del threads["102"]
+    check("strip edits every bot card that still had buttons in her threads", n, 4)
+    check("strip reaches a starter past the history window", t102._history[-1].edits, [{"view": None}])
+    check("strip leaves a pinned thread awake instead of dropping its pin",
+          t102.thread_edits, [{"archived": False}])
     check("strip cleared her result card and starter",
           [m.edits for m in t100._history], [[{"view": None}], [], [], [{"view": None}]])
     check("strip cleared the child thread's card", t101._history[0].edits, [{"view": None}])

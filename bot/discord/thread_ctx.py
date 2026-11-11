@@ -148,17 +148,28 @@ class ThreadContextMixin:
         return edited
 
     async def _strip_thread_buttons(self, tid: str) -> int:
-        """Clear the view of the bot's own messages in one thread that still have one."""
+        """Clear the view of the bot's own messages in one thread that still have one.
+
+        The last STRIP_HISTORY_LIMIT messages, plus a forum post's starter (the
+        message with the thread's own id, where the mode and effort buttons
+        sit) when the thread is longer than that.
+        """
         thread = self.get_channel(int(tid)) or await self.fetch_channel(int(tid))
-        own = [
-            m async for m in thread.history(limit=self.STRIP_HISTORY_LIMIT)
-            if m.components and m.author.id == self.user.id
-        ]
+        recent = [m async for m in thread.history(limit=self.STRIP_HISTORY_LIMIT)]
+        if len(recent) >= self.STRIP_HISTORY_LIMIT and all(m.id != int(tid) for m in recent):
+            try:
+                recent.append(await thread.fetch_message(int(tid)))
+            except discord.NotFound:
+                pass  # not a forum post: no starter inside the thread
+        own = [m for m in recent if m.components and m.author.id == self.user.id]
         if not own:
             return 0
         # An archived thread rejects every edit but unarchiving (50083), so
-        # wake it for the edits and put it back to sleep after.
+        # wake it for the edits and put it back to sleep after. Not a pinned
+        # one: archiving clears the pin, and a forum's one pin slot belongs
+        # to its control room.
         archived = bool(getattr(thread, "archived", False))
+        pinned = bool(getattr(getattr(thread, "flags", None), "pinned", False))
         if archived:
             await thread.edit(archived=False)
         edited = 0
@@ -170,7 +181,7 @@ class ThreadContextMixin:
                 except Exception:
                     log.debug("Could not clear buttons on %s in %s", msg.id, tid, exc_info=True)
         finally:
-            if archived:
+            if archived and not pinned:
                 await thread.edit(archived=True)
         return edited
 
