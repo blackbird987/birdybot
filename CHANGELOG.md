@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.102.24, Per-guest switches for buttons and the control room (2026-11-11)
+
 ### Added
 - **The owner can turn off every button for one guest** (`/access buttons @user off`, stored as `"buttons": false` in `data/access.json`). For a guest who only chats: every card in a thread with that guest in it (or spawned from one), in their personal forum, control room and welcome post, goes out with no buttons. Cards already posted there (the last 200 messages of each thread, plus its first post) are cleared on the switch and on startup, and a thread spawned from theirs is cleared once it knows its parent. The peak-hour Run/Queue/Cancel gate lets such a guest's turn run instead of waiting on a tap. Everyone else is unchanged. Harness: `scripts/test_guest_buttons.py`.
 - **A guest's control room can be turned off** (`control_room: false` on their entry in `data/access.json`, or `/access control_room <user> off`). The bot then never makes one in their forum, never redraws it, and deletes the one they had. Creation is idempotent on the stored thread id, so deleting the post by hand only brought it back. A failed delete keeps the ids and retries at the next startup. Absent means on, so every other guest is unchanged. Harness: `scripts/test_guest_control_room_off.py`.
