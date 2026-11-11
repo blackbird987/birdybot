@@ -93,7 +93,7 @@ class _Env:
         dashboard.load_access_config = lambda: self.cfg
         access_mod.save_access_config = save
 
-        async def create(forum, name, repos):  # noqa: ANN001, ANN202
+        async def create(forum, name, repos, buttons=True):  # noqa: ANN001, ANN202
             self.created.append(name)
             th = _thread(999)
             msg = MagicMock()

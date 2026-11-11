@@ -186,7 +186,7 @@ _REAL = (
     "_usage_queue_remove", "_usage_queue_promote_expired",
     "_usage_queue_pop_due", "_fire_due_entries", "_retire_gate_message",
     "_migrate_relative_image_paths", "_usage_queue_startup_drain",
-    "_usage_queue_replay_loop", "_replay_to_thread", "_thread_guest_id", "_family_has_guest", "_replay_callback",
+    "_usage_queue_replay_loop", "_replay_to_thread", "_thread_guest_id", "_thread_guest_ids", "_thread_family", "_family_has_guest", "_replay_callback",
     "_after_turn",
 )
 

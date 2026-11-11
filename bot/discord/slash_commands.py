@@ -1233,6 +1233,8 @@ def setup(bot: ClaudeBot) -> None:
             forum_link = f" <#{ua.forum_channel_id}>" if ua.forum_channel_id else ""
             if not ua.control_room:
                 forum_link += " (control room off)"
+            if not ua.buttons:
+                forum_link += " (buttons off)"
             if ua.global_access:
                 lines.append(f"**{ua.display_name}** — all repos{forum_link}")
             else:
@@ -1244,29 +1246,41 @@ def setup(bot: ClaudeBot) -> None:
                     )
         await interaction.followup.send("\n".join(lines) or "No grants.", ephemeral=True)
 
-    @access_group.command(
-        name="control_room", description="Turn a guest's personal control room on or off",
-    )
-    @app_commands.describe(user="Guest to change", state="on or off")
-    @app_commands.choices(state=[
-        app_commands.Choice(name="on", value="on"),
-        app_commands.Choice(name="off", value="off"),
-    ])
-    async def cmd_access_control_room(
-        interaction: discord.Interaction, user: discord.Member, state: str,
-    ):
+    async def _guest_entry(
+        interaction: discord.Interaction, user: discord.Member,
+    ) -> tuple[access_mod.AccessConfig, access_mod.UserAccess] | None:
+        """Owner check, defer and lookup shared by the per-guest on/off switches."""
         if not bot._is_owner(interaction.user.id):
             await interaction.response.send_message("Owner only", ephemeral=True)
-            return
+            return None
         await interaction.response.defer(ephemeral=True)
         cfg = load_access_config()
-        uid = str(user.id)
-        ua = cfg.users.get(uid)
+        ua = cfg.users.get(str(user.id))
         if not ua:
             await interaction.followup.send(
                 f"**{user.display_name}** has no access grants.", ephemeral=True,
             )
+            return None
+        return cfg, ua
+
+    _ON_OFF = [
+        app_commands.Choice(name="on", value="on"),
+        app_commands.Choice(name="off", value="off"),
+    ]
+
+    @access_group.command(
+        name="control_room", description="Turn a guest's personal control room on or off",
+    )
+    @app_commands.describe(user="Guest to change", state="on or off")
+    @app_commands.choices(state=_ON_OFF)
+    async def cmd_access_control_room(
+        interaction: discord.Interaction, user: discord.Member, state: str,
+    ):
+        found = await _guest_entry(interaction, user)
+        if found is None:
             return
+        cfg, ua = found
+        uid = str(user.id)
         ua.control_room = state == "on"
         access_mod.save_access_config(cfg)
         if ua.control_room:
@@ -1278,6 +1292,29 @@ def setup(bot: ClaudeBot) -> None:
             msg = (f"Control room off for **{user.display_name}**. Deleting the "
                    "existing one failed; the next restart tries again.")
         await interaction.followup.send(msg, ephemeral=True)
+
+    @access_group.command(name="buttons", description="Turn every button on or off for a guest")
+    @app_commands.describe(user="Guest to change", state="off hides all buttons in their threads")
+    @app_commands.choices(state=_ON_OFF)
+    async def cmd_access_buttons(
+        interaction: discord.Interaction, user: discord.Member, state: str,
+    ):
+        found = await _guest_entry(interaction, user)
+        if found is None:
+            return
+        cfg, ua = found
+        uid = str(user.id)
+        ua.buttons = state == "on"
+        access_mod.save_access_config(cfg)
+        await bot._forums.refresh_user_control_room(uid)
+        if ua.buttons:
+            note = "New cards in their threads carry buttons again; cards already posted stay bare."
+        else:
+            cleared = await bot.strip_hidden_buttons()
+            note = f"New cards in their threads go out with no buttons; cleared {cleared} older ones."
+        await interaction.followup.send(
+            f"Buttons {state} for **{user.display_name}**. {note}", ephemeral=True,
+        )
 
     @access_group.command(name="set", description="Change access settings")
     @app_commands.describe(

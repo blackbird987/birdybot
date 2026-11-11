@@ -460,7 +460,9 @@ class ForumManager:
             ua = cfg.users.get(str(user_id))
             if ua and not ua.welcome_posted:
                 try:
-                    welcome_thread, _ = await channels.create_user_welcome_post(forum, display_name, repo_names)
+                    welcome_thread, _ = await channels.create_user_welcome_post(
+                        forum, display_name, repo_names, buttons=ua.buttons,
+                    )
                     ua.welcome_posted = True
                     access_mod.save_access_config(cfg)
                 except Exception:
@@ -753,6 +755,7 @@ class ForumManager:
                 topic_preview=topic,
                 current_mode=self._store.mode,
                 current_effort=self._store.effort,
+                controls=not access_mod.buttons_disabled_for(load_access_config(), user_id, forum.id),
             )
 
             # Apply repo tag in personal forums
@@ -1646,7 +1649,7 @@ class ForumManager:
         repo_names = list(ua.repos.keys())
 
         thread, msg = await channels.create_user_control_post(
-            forum, ua.display_name, repo_names,
+            forum, ua.display_name, repo_names, buttons=ua.buttons,
         )
         ua.control_thread_id = str(thread.id)
         ua.control_message_id = str(msg.id)
@@ -1871,7 +1874,7 @@ class ForumManager:
         async def render():  # noqa: ANN202
             repo_names = list(ua.repos.keys())
             return (channels.build_user_control_embed(ua.display_name, repo_names),
-                    channels.build_user_control_view(repo_names))
+                    channels.build_user_control_view(repo_names, ua.buttons))
 
         await self._refresh_control_message(
             f"user {ua.display_name}", ua.control_thread_id, ua.control_message_id,
@@ -1882,7 +1885,7 @@ class ForumManager:
     async def _refresh_control_message(
         self, label: str, thread_id: str, message_id: str, *,
         forget: Callable[[], None],
-        render: Callable[[], Awaitable[tuple[discord.Embed, discord.ui.View]]],
+        render: Callable[[], Awaitable[tuple[discord.Embed, discord.ui.View | None]]],
         recreate: Callable[[], Awaitable[None]],
     ) -> None:
         """Redraw one Control Room embed, repo or personal, healing a deleted post.

@@ -60,6 +60,8 @@ class UserAccess:
     # False: no control room in their forum (never made, an existing one is
     # deleted). Only written when False, so an older entry reads as True.
     control_room: bool = True
+    # False hides every button in this user's threads, for a guest who only chats.
+    buttons: bool = True
 
     def to_dict(self) -> dict:
         d = {
@@ -78,6 +80,8 @@ class UserAccess:
             d["archive_thread_id"] = self.archive_thread_id
         if not self.control_room:
             d["control_room"] = False
+        if not self.buttons:
+            d["buttons"] = False
         return d
 
     @classmethod
@@ -94,6 +98,7 @@ class UserAccess:
             control_message_id=d.get("control_message_id"),
             archive_thread_id=d.get("archive_thread_id"),
             control_room=d.get("control_room", True) is not False,
+            buttons=d.get("buttons", True) is not False,
         )
 
 
@@ -212,6 +217,20 @@ def check_user_access(
         return None
     canonical = match_name(repo_name, ua.repos)
     return ua.repos[canonical] if canonical else None
+
+
+def buttons_disabled_for(
+    cfg: AccessConfig, user_id: str | None, forum_channel_id: str | None = None,
+) -> bool:
+    """Has the owner turned off every button for this user, or for the guest
+    whose personal forum *forum_channel_id* is? Unknown users keep them."""
+    ua = cfg.users.get(str(user_id)) if user_id else None
+    if ua is not None and not ua.buttons:
+        return True
+    forum = str(forum_channel_id) if forum_channel_id else None
+    return forum is not None and any(
+        not u.buttons and u.forum_channel_id == forum for u in cfg.users.values()
+    )
 
 
 def has_any_access(cfg: AccessConfig, user_id: str) -> bool:

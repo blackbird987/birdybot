@@ -468,10 +468,12 @@ async def create_forum_post(
     topic_preview: str = "",
     current_mode: str = "explore",
     current_effort: str = "high",
+    controls: bool = True,
 ) -> tuple[discord.Thread, discord.Message]:
     """Create a new forum post (thread + starter message).
 
-    Returns (thread, starter_message).
+    *controls* False leaves off the mode and effort buttons, for a guest the
+    owner turned buttons off for. Returns (thread, starter_message).
     """
     name = build_thread_name(name)
 
@@ -485,7 +487,7 @@ async def create_forum_post(
     embed.add_field(name="Mode", value=mode_name(current_mode), inline=True)
     embed.add_field(name="Effort", value=effort_name(current_effort), inline=True)
 
-    view = session_controls_view(current_mode, current_effort)
+    view = session_controls_view(current_mode, current_effort) if controls else None
     result = await forum.create_thread(name=name, embed=embed, view=view)
     thread = result.thread
     message = result.message
@@ -947,8 +949,14 @@ def build_user_control_embed(
 
 def build_user_control_view(
     repo_names: list[str],
-) -> discord.ui.View:
-    """Build the button view for a user's personal control room post."""
+    buttons: bool = True,
+) -> discord.ui.View | None:
+    """Build the button view for a user's personal control room post.
+
+    None when the owner turned this user's buttons off.
+    """
+    if not buttons:
+        return None
     view = discord.ui.View(timeout=None)
     # Row 0: New Session per repo (up to 5)
     for rname in repo_names[:5]:
@@ -973,10 +981,11 @@ async def create_user_control_post(
     forum: discord.ForumChannel,
     display_name: str,
     repo_names: list[str],
+    buttons: bool = True,
 ) -> tuple[discord.Thread, discord.Message]:
     """Create a control room post in a user's personal forum."""
     embed = build_user_control_embed(display_name, repo_names)
-    view = build_user_control_view(repo_names)
+    view = build_user_control_view(repo_names, buttons)
 
     result = await forum.create_thread(name=CONTROL_ROOM_NAME, embed=embed, view=view)
     try:
@@ -992,14 +1001,21 @@ async def create_user_welcome_post(
     forum: discord.ForumChannel,
     display_name: str,
     repo_names: list[str],
+    buttons: bool = True,
 ) -> tuple[discord.Thread, discord.Message]:
-    """Create a welcome post in a user's personal forum with a New Session button."""
+    """Create a welcome post in a user's personal forum with a New Session button.
+
+    With *buttons* False the button is left off and the text says to start a post.
+    """
     embed = discord.Embed(
         title=f"Welcome, {display_name}!",
         description=(
             "This is your personal workspace.\n\n"
             "**Start a session** using the button below, "
             "or create a post and start chatting directly."
+        ) if buttons else (
+            "This is your personal workspace.\n\n"
+            "**Start a session** by creating a post and chatting directly."
         ),
         color=discord.Color.blurple(),
     )
@@ -1010,12 +1026,14 @@ async def create_user_welcome_post(
             inline=False,
         )
 
-    view = discord.ui.View(timeout=None)
-    view.add_item(discord.ui.Button(
-        label="New Session",
-        style=discord.ButtonStyle.green,
-        custom_id="new:welcome",
-    ))
+    view = None
+    if buttons:
+        view = discord.ui.View(timeout=None)
+        view.add_item(discord.ui.Button(
+            label="New Session",
+            style=discord.ButtonStyle.green,
+            custom_id="new:welcome",
+        ))
 
     result = await forum.create_thread(name="Welcome", embed=embed, view=view)
     log.info("Created welcome post %s in user forum %s", result.thread.id, forum.name)

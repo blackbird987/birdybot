@@ -88,6 +88,13 @@ class StartupMixin:
             self._control_rooms_cleaned = True
             asyncio.create_task(self._forums.cleanup_all_control_rooms())
 
+        # Guests the owner turned buttons off for: clear the buttons still on
+        # posts made before the switch (one-time, non-blocking; reads only once
+        # nothing is left to clear).
+        if not getattr(self, '_guest_buttons_stripped', False):
+            self._guest_buttons_stripped = True
+            asyncio.create_task(self.strip_hidden_buttons())
+
         # A forum has one pin slot — make sure the Control Room holds it
         # (one-time, non-blocking; no-ops on forums that are already right)
         if not getattr(self, '_forum_pins_reconciled', False):

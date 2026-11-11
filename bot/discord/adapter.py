@@ -83,6 +83,24 @@ class DiscordMessenger:
     def __init__(self, bot: discord.Client) -> None:
         self._bot = bot
 
+    def _shown(
+        self, channel_id: str | None, buttons: list[list[ButtonSpec]] | None,
+    ) -> list[list[ButtonSpec]] | None:
+        """The buttons to put on a message in *channel_id*: none where a guest has them off.
+
+        The one place every card's buttons pass, so result, running, queued,
+        stall and every other card follow the guest's switch alike. Fails open.
+        """
+        if not buttons:
+            return buttons
+        hidden = getattr(self._bot, "_buttons_hidden", None)
+        try:
+            if callable(hidden) and hidden(channel_id) is True:
+                return None
+        except Exception:
+            log.debug("Button check failed for %s", channel_id, exc_info=True)
+        return buttons
+
     def find_channel_for_session(self, session_id: str) -> str | None:
         """Find the Discord channel/thread ID for a session. Returns None if not found."""
         result = self._bot._session_to_thread(session_id)
@@ -120,7 +138,7 @@ class DiscordMessenger:
             description=apply_discord_safety(text),
             color=discord.Color.blurple(),
         )
-        view = _buttons_to_view(buttons)
+        view = _buttons_to_view(self._shown(channel_id, buttons))
         msg = await channel.send(embed=embed, view=view)
         return MessageHandle(
             platform="discord",
@@ -161,7 +179,7 @@ class DiscordMessenger:
             )
             if footer:
                 embed.set_footer(text=footer[:2048])
-            view = _buttons_to_view(buttons)
+            view = _buttons_to_view(self._shown(channel_id, buttons))
             await msg.edit(embed=embed, view=view)
         except Exception:
             log.debug("Failed to edit thinking message %s", message_id, exc_info=True)
@@ -176,7 +194,7 @@ class DiscordMessenger:
         if not channel:
             return ""
 
-        view = _buttons_to_view(buttons)
+        view = _buttons_to_view(self._shown(channel_id, buttons))
         msg = await channel.send(
             content=apply_discord_safety(text, limit=2000),
             view=view, silent=silent,
@@ -236,7 +254,7 @@ class DiscordMessenger:
             if session_loc:
                 embed.set_footer(text=session_loc)
 
-        view = _buttons_to_view(buttons)
+        view = _buttons_to_view(self._shown(channel_id, buttons))
         # Include @mention as content alongside the embed to ping the user.
         # Force non-silent when mentioning so the notification actually fires.
         mention_content = self.format_mention(mention_user_id) if mention_user_id else None
@@ -334,7 +352,7 @@ class DiscordMessenger:
 
         try:
             msg = await channel.fetch_message(int(msg_id))
-            view = _buttons_to_view(buttons)
+            view = _buttons_to_view(self._shown(channel_id, buttons))
             if text is None:
                 await msg.edit(view=view)
             elif msg.embeds:
