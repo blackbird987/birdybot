@@ -29,25 +29,36 @@ log = logging.getLogger(__name__)
 class ThreadContextMixin:
     """ClaudeBot methods; see the module docstring."""
 
-    def _thread_guest_id(self, info: ThreadInfo | None) -> str | None:
-        """The first non-owner this thread belongs to or has heard from, if any.
+    def _thread_guest_ids(self, info: ThreadInfo | None) -> set[str]:
+        """Every non-owner this thread belongs to or has heard from.
 
         A test webhook counts as the owner, the same way on_message treats it.
         """
         if info is None:
-            return None
+            return set()
         owner_id = str(self._discord_user_id) if self._discord_user_id else None
         test_ids = set(config.TEST_WEBHOOK_IDS or ())
+        ids = {info.user_id, *info.user_ids}
+        return {u for u in ids if u and u != owner_id and u not in test_ids}
 
-        def is_guest(uid: str | None) -> bool:
-            return bool(uid) and uid != owner_id and uid not in test_ids
+    def _thread_guest_id(self, info: ThreadInfo | None) -> str | None:
+        """The first non-owner this thread belongs to or has heard from, if any.
 
-        if is_guest(info.user_id):
+        The thread's creator wins, then the lowest id among the others.
+        """
+        guests = self._thread_guest_ids(info)
+        if info is not None and info.user_id in guests:
             return info.user_id
-        for uid in sorted(info.user_ids):
-            if is_guest(uid):
-                return uid
-        return None
+        return min(guests) if guests else None
+
+    def _thread_family(self, info: ThreadInfo | None):
+        """This thread, then each thread that spawned it, up to the root."""
+        seen: set[str] = set()
+        while info is not None and info.thread_id not in seen:
+            seen.add(info.thread_id)
+            yield info
+            lookup = self._forums.thread_to_project(info.parent_thread_id) if info.parent_thread_id else None
+            info = lookup[1] if lookup else None
 
     def _family_has_guest(self, info: ThreadInfo | None) -> bool:
         """Whether this thread or one that spawned it has a guest.
@@ -58,29 +69,13 @@ class ThreadContextMixin:
         mode still follow its own thread's rights: a confined build can still edit
         and commit.
         """
-        seen: set[str] = set()
-        while info is not None and info.thread_id not in seen:
-            seen.add(info.thread_id)
-            if self._thread_guest_id(info) is not None:
-                return True
-            lookup = self._forums.thread_to_project(info.parent_thread_id) if info.parent_thread_id else None
-            info = lookup[1] if lookup else None
-        return False
-
-    def _thread_guest_ids(self, info: ThreadInfo | None) -> set[str]:
-        """Every non-owner this thread belongs to or has heard from."""
-        if info is None:
-            return set()
-        owner_id = str(self._discord_user_id) if self._discord_user_id else None
-        test_ids = set(config.TEST_WEBHOOK_IDS or ())
-        ids = {info.user_id, *info.user_ids}
-        return {u for u in ids if u and u != owner_id and u not in test_ids}
+        return any(self._thread_guest_ids(i) for i in self._thread_family(info))
 
     def _buttons_hidden(self, channel_id: str | None) -> bool:
         """Should nothing posted in this channel carry buttons?
 
         True when a guest the owner turned buttons off for is in this thread or
-        one that spawned it (the same family walk as _family_has_guest, since a
+        one that spawned it (the same family as _family_has_guest, since a
         child's card reaches the parent's guest too), or when the channel is
         that guest's personal forum, a thread in it, or their control room or
         archive. Every card the bot posts asks this, in the Discord sender.
@@ -89,85 +84,94 @@ class ThreadContextMixin:
         if not channel_id:
             return False
         try:
-            cfg = load_access_config()
-            off = {uid: ua for uid, ua in cfg.users.items() if not ua.buttons}
+            off = {uid: ua for uid, ua in load_access_config().users.items() if not ua.buttons}
             if not off:
                 return False
             cid = str(channel_id)
-            parent_id = None
             channel = self.get_channel(int(cid))
-            if channel is not None:
-                pid = getattr(channel, "parent_id", None)
-                parent_id = str(pid) if pid else None
+            pid = getattr(channel, "parent_id", None) if channel is not None else None
+            parent_id = str(pid) if pid else None
             for ua in off.values():
                 own = {ua.forum_channel_id, ua.control_thread_id, ua.archive_thread_id} - {None}
-                if cid in own or (parent_id and parent_id == ua.forum_channel_id):
+                if cid in own or (parent_id is not None and parent_id == ua.forum_channel_id):
                     return True
             lookup = self._forums.thread_to_project(cid)
-            info = lookup[1] if lookup else None
-            seen: set[str] = set()
-            while info is not None and info.thread_id not in seen:
-                seen.add(info.thread_id)
-                if self._thread_guest_ids(info) & off.keys():
-                    return True
-                lookup = (
-                    self._forums.thread_to_project(info.parent_thread_id)
-                    if info.parent_thread_id else None
-                )
-                info = lookup[1] if lookup else None
+            family = self._thread_family(lookup[1] if lookup else None)
+            return any(self._thread_guest_ids(i) & off.keys() for i in family)
         except Exception:
             log.debug("Could not tell whether %s hides buttons", channel_id, exc_info=True)
         return False
 
-    async def strip_guest_buttons(self, user_id: str) -> int:
-        """Take the buttons off what is already posted for a guest with buttons off.
+    # How far back strip_hidden_buttons looks in each thread.
+    STRIP_HISTORY_LIMIT = 200
 
-        New cards go out bare on their own; this clears the older ones that still
-        carry a view: the starter post of every mapped thread with this guest in
-        it, and the threads in their personal forum (the welcome post among
-        them). Their control room loses its buttons on its next refresh. Only
-        edits a message that still has components. Returns how many it edited.
+    async def strip_hidden_buttons(self) -> int:
+        """Take the buttons off cards already posted where buttons are now hidden.
+
+        New cards go out bare on their own; this clears the older ones: every
+        bot message with components in the last STRIP_HISTORY_LIMIT messages of
+        each mapped thread _buttons_hidden says yes to, and of each thread in
+        the personal forum of a guest with buttons off (the welcome post among
+        them). Reads only, once nothing is left to clear. Never raises. Returns
+        how many messages it edited.
         """
-        cfg = load_access_config()
-        ua = cfg.users.get(str(user_id))
-        if ua is None or ua.buttons:
-            return 0
-        thread_ids: set[str] = set()
-        for proj in self._forums.forum_projects.values():
-            for tid, info in proj.threads.items():
-                if str(user_id) in self._thread_guest_ids(info):
-                    thread_ids.add(str(tid))
-        forum = self.get_channel(int(ua.forum_channel_id)) if ua.forum_channel_id else None
-        if isinstance(forum, discord.ForumChannel):
-            thread_ids.update(str(t.id) for t in forum.threads)
-            try:
-                async for t in forum.archived_threads(limit=50):
-                    thread_ids.add(str(t.id))
-            except Exception:
-                log.debug("Could not list archived threads in %s", forum.id, exc_info=True)
         edited = 0
-        for tid in sorted(thread_ids):
-            try:
-                thread = self.get_channel(int(tid)) or await self.fetch_channel(int(tid))
-                # A forum post's starter message has the thread's own id.
-                msg = await thread.fetch_message(int(tid))
-                if not msg.components or msg.author.id != self.user.id:
+        try:
+            targets = {
+                str(tid)
+                for proj in self._forums.forum_projects.values()
+                for tid in proj.threads
+                if self._buttons_hidden(str(tid))
+            }
+            for ua in load_access_config().users.values():
+                if ua.buttons or not ua.forum_channel_id:
                     continue
-                # An archived thread rejects every edit but unarchiving (50083),
-                # so wake it for the edit and put it back to sleep after.
-                archived = bool(getattr(thread, "archived", False))
-                if archived:
-                    await thread.edit(archived=False)
+                forum = self.get_channel(int(ua.forum_channel_id))
+                if not isinstance(forum, discord.ForumChannel):
+                    continue
+                targets.update(str(t.id) for t in forum.threads)
+                try:
+                    async for t in forum.archived_threads(limit=50):
+                        targets.add(str(t.id))
+                except Exception:
+                    log.debug("Could not list archived threads in %s", forum.id, exc_info=True)
+        except Exception:
+            log.warning("Could not list the threads to clear buttons from", exc_info=True)
+            return 0
+        for tid in sorted(targets):
+            try:
+                edited += await self._strip_thread_buttons(tid)
+            except Exception:
+                log.debug("Could not clear buttons in thread %s", tid, exc_info=True)
+        if edited:
+            log.info("Took the buttons off %d messages in %d threads", edited, len(targets))
+        return edited
+
+    async def _strip_thread_buttons(self, tid: str) -> int:
+        """Clear the view of the bot's own messages in one thread that still have one."""
+        thread = self.get_channel(int(tid)) or await self.fetch_channel(int(tid))
+        own = [
+            m async for m in thread.history(limit=self.STRIP_HISTORY_LIMIT)
+            if m.components and m.author.id == self.user.id
+        ]
+        if not own:
+            return 0
+        # An archived thread rejects every edit but unarchiving (50083), so
+        # wake it for the edits and put it back to sleep after.
+        archived = bool(getattr(thread, "archived", False))
+        if archived:
+            await thread.edit(archived=False)
+        edited = 0
+        try:
+            for msg in own:
                 try:
                     await msg.edit(view=None)
                     edited += 1
-                finally:
-                    if archived:
-                        await thread.edit(archived=True)
-            except Exception:
-                log.debug("Could not strip buttons from thread %s", tid, exc_info=True)
-        if edited:
-            log.info("Took the buttons off %d posts for user %s", edited, user_id)
+                except Exception:
+                    log.debug("Could not clear buttons on %s in %s", msg.id, tid, exc_info=True)
+        finally:
+            if archived:
+                await thread.edit(archived=True)
         return edited
 
     def _guest_access(self, user_id: str | None, channel_id: str) -> AccessResult:
@@ -336,6 +340,15 @@ class ThreadContextMixin:
                 # when this child finalizes.
                 new_info.parent_thread_id = ctx.channel_id
                 _bot._store.save()
+                # The starter went out before the child knew its parent, so
+                # its mode buttons only followed the turn's author. Now that
+                # the family is known, a guest with buttons off upstream
+                # clears them.
+                if _bot._buttons_hidden(new_channel_id):
+                    try:
+                        await _bot._strip_thread_buttons(new_channel_id)
+                    except Exception:
+                        log.debug("Could not clear buttons on spawned %s", new_channel_id, exc_info=True)
 
             # Register the new child in its family. Done after parent_thread_id
             # is stamped so find_root sees the link.

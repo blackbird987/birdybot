@@ -1216,6 +1216,7 @@ async def test_guest_routes() -> None:
         _discord_user_id=1,
         _check_access=lambda uid, **_k: OWNER if uid == 1 else GUEST,
     )
+    mixin._thread_guest_ids = lambda i: ThreadContextMixin._thread_guest_ids(mixin, i)
     access = ThreadContextMixin._guest_access(mixin, "2", "100")
     check(not access.is_owner, "a guest's stored id resolves to guest access")
     access = ThreadContextMixin._guest_access(mixin, "1", "100")
@@ -1243,6 +1244,8 @@ async def test_guest_routes() -> None:
     family = {t.thread_id: (None, t) for t in (guest_parent, clean_parent, child, grandchild, clean_child, loop_a, loop_b, orphan)}
     fam = SimpleNamespace(_discord_user_id=1, _forums=SimpleNamespace(thread_to_project=family.get))
     fam._thread_guest_id = lambda i: ThreadContextMixin._thread_guest_id(fam, i)
+    fam._thread_guest_ids = lambda i: ThreadContextMixin._thread_guest_ids(fam, i)
+    fam._thread_family = lambda i: ThreadContextMixin._thread_family(fam, i)
     has_guest = lambda i: ThreadContextMixin._family_has_guest(fam, i)  # noqa: E731
     check(has_guest(child), "an owner's child of a guest's thread gets no keys")
     check(has_guest(grandchild), "nor does its child")

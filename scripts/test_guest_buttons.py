@@ -204,7 +204,7 @@ check("a raising check fails open", AD.DiscordMessenger(Raising())._shown("100",
 # --- clearing buttons already posted ---
 
 
-class Starter(FakeMessage):
+class Card(FakeMessage):
     def __init__(self, mid, author, components):
         super().__init__(mid)
         self.author = type("U", (), {"id": author})()
@@ -212,41 +212,64 @@ class Starter(FakeMessage):
 
 
 class SleepyThread(FakeChannel):
-    def __init__(self, cid, archived):
+    def __init__(self, cid, archived, history):
         super().__init__(cid, "900")
         self.archived = archived
         self.thread_edits = []
+        self._history = history
+        self.history_limits = []
 
     async def edit(self, **kw):
         self.thread_edits.append(kw)
 
+    async def history(self, limit=None):
+        self.history_limits.append(limit)
+        for m in self._history[:limit]:
+            yield m
+
 
 async def strip_checks():
-    BOT_ID = 42
-    t100 = SleepyThread("100", archived=True)
-    t100.messages["100"] = Starter(100, BOT_ID, ["row"])
-    t201 = SleepyThread("201", archived=False)
-    t201.messages["201"] = Starter(201, BOT_ID, [])            # already bare
-    t200 = SleepyThread("200", archived=False)
-    t200.messages["200"] = Starter(200, BOT_ID, ["row"])       # the owner's, not hers
+    BOT_ID, OTHER = 42, 9
+    t100 = SleepyThread("100", archived=True, history=[
+        Card(1, BOT_ID, ["row"]),       # a result card
+        Card(2, OTHER, ["row"]),        # someone else's message
+        Card(3, BOT_ID, []),            # already bare
+        Card(100, BOT_ID, ["row"]),     # the starter post
+    ])
+    t101 = SleepyThread("101", archived=False, history=[Card(4, BOT_ID, ["row"])])
+    t201 = SleepyThread("201", archived=False, history=[Card(5, BOT_ID, [])])
+    t200 = SleepyThread("200", archived=False, history=[Card(6, BOT_ID, ["row"])])
+    t300 = SleepyThread("300", archived=False, history=[Card(7, BOT_ID, ["row"])])
+    by_id = {"100": t100, "101": t101, "201": t201, "200": t200, "300": t300}
 
     class StripBot(FakeBot):
         user = type("U", (), {"id": BOT_ID})()
 
         def get_channel(self, cid):
-            return {"100": t100, "201": t201, "200": t200}.get(str(cid))
+            return by_id.get(str(cid)) or channels.get(str(cid))
 
         async def fetch_channel(self, cid):
             return self.get_channel(cid)
 
-    n = await StripBot().strip_guest_buttons(KIWI)
-    check("strip edits only the post that still had buttons", n, 1)
-    check("strip cleared the starter view", t100.messages["100"].edits, [{"view": None}])
+    n = await StripBot().strip_hidden_buttons()
+    check("strip edits every bot card that still had buttons in her threads", n, 3)
+    check("strip cleared her result card and starter",
+          [m.edits for m in t100._history], [[{"view": None}], [], [], [{"view": None}]])
+    check("strip cleared the child thread's card", t101._history[0].edits, [{"view": None}])
     check("strip woke the archived thread and put it back",
           t100.thread_edits, [{"archived": False}, {"archived": True}])
-    check("strip left the bare post alone", t201.messages["201"].edits, [])
-    check("strip left the owner's thread alone", t200.messages["200"].edits, [])
-    check("strip does nothing for a guest with buttons on", await StripBot().strip_guest_buttons(VIN), 0)
+    check("strip looks back a bounded distance", t100.history_limits, [StripBot.STRIP_HISTORY_LIMIT])
+    check("strip left a thread with nothing to clear asleep and untouched",
+          (t201.thread_edits, t201._history[0].edits), ([], []))
+    check("strip left the owner's thread alone", t200._history[0].edits, [])
+    check("strip left the guest with buttons on alone", t300._history[0].edits, [])
+
+    saved = TC.load_access_config
+    TC.load_access_config = lambda: A.AccessConfig()
+    try:
+        check("strip does nothing when nobody has buttons off", await StripBot().strip_hidden_buttons(), 0)
+    finally:
+        TC.load_access_config = saved
 
 
 asyncio.run(strip_checks())

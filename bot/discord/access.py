@@ -57,6 +57,9 @@ class UserAccess:
     control_thread_id: str | None = None   # control room thread in personal forum
     control_message_id: str | None = None  # control room embed message
     archive_thread_id: str | None = None   # archive thread in personal forum
+    # False: no control room in their forum (never made, an existing one is
+    # deleted). Only written when False, so an older entry reads as True.
+    control_room: bool = True
     # False hides every button in this user's threads, for a guest who only chats.
     buttons: bool = True
 
@@ -75,6 +78,8 @@ class UserAccess:
             d["control_message_id"] = self.control_message_id
         if self.archive_thread_id:
             d["archive_thread_id"] = self.archive_thread_id
+        if not self.control_room:
+            d["control_room"] = False
         if not self.buttons:
             d["buttons"] = False
         return d
@@ -92,6 +97,7 @@ class UserAccess:
             control_thread_id=d.get("control_thread_id"),
             control_message_id=d.get("control_message_id"),
             archive_thread_id=d.get("archive_thread_id"),
+            control_room=d.get("control_room", True) is not False,
             buttons=d.get("buttons", True) is not False,
         )
 

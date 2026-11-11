@@ -1032,6 +1032,10 @@ class ForumManager:
         """Record personal control rooms and archives, creating any missing."""
         cfg = load_access_config()
         for uid, ua in cfg.users.items():
+            if not ua.control_room:
+                if ua.control_thread_id:
+                    await self.retire_user_control_room(uid)
+                continue
             if ua.control_thread_id:
                 self._user_control_thread_ids.add(ua.control_thread_id)
             elif ua.forum_channel_id:
@@ -1072,7 +1076,7 @@ class ForumManager:
         # Re-read: _ensure_user_posts may have just created archives.
         for uid, ua in load_access_config().users.items():
             await follow_batch(
-                (ua.control_thread_id, ua.archive_thread_id),
+                (ua.control_thread_id if ua.control_room else None, ua.archive_thread_id),
                 lambda ch, u=uid: self._auto_follow_user_thread(ch, u),
             )
 
@@ -1125,7 +1129,8 @@ class ForumManager:
         for ua in cfg.users.values():
             try:
                 self._add_pin_scope(
-                    scopes, ua.forum_channel_id, ua.control_thread_id,
+                    scopes, ua.forum_channel_id,
+                    ua.control_thread_id if ua.control_room else None,
                     (ua.archive_thread_id,),
                 )
             except Exception:
@@ -1631,7 +1636,7 @@ class ForumManager:
         """Ensure a control room post exists in a user's personal forum."""
         cfg = load_access_config()
         ua = cfg.users.get(user_id)
-        if not ua or ua.control_thread_id:
+        if not ua or ua.control_thread_id or not ua.control_room:
             return
 
         if not forum:
@@ -1652,6 +1657,42 @@ class ForumManager:
         self._user_control_thread_ids.add(str(thread.id))
         await self._auto_follow_user_thread(thread, user_id)
         log.info("Created control room for user %s (thread=%s)", ua.display_name, thread.id)
+
+    async def retire_user_control_room(self, user_id: str) -> bool:
+        """Delete a user's control room thread and forget its ids.
+
+        For a guest whose entry says ``control_room: false``. A thread that is
+        already gone counts as deleted. Any other failure keeps the ids (and
+        the skip entry, so nobody chats in it) and the next startup tries
+        again; clearing them then would leave the post behind for good.
+        Returns True when the user has no control room left.
+        """
+        cfg = load_access_config()
+        ua = cfg.users.get(user_id)
+        if not ua:
+            return True
+        tid = ua.control_thread_id
+        if not tid:
+            return True
+        try:
+            thread = await self._client.fetch_channel(int(tid))
+            # The id is ours, but never delete anything that is not a thread.
+            if isinstance(thread, discord.Thread):
+                await thread.delete()
+        except discord.NotFound:
+            pass
+        except Exception:
+            self._user_control_thread_ids.add(tid)
+            log.warning("Could not delete control room %s for user %s, will retry next startup",
+                        tid, ua.display_name, exc_info=True)
+            return False
+        self._user_control_thread_ids.discard(tid)
+        ua.control_thread_id = None
+        ua.control_message_id = None
+        access_mod.save_access_config(cfg)
+        log.info("Deleted control room for user %s (thread=%s): turned off for them",
+                 ua.display_name, tid)
+        return True
 
     async def cleanup_all_control_rooms(self) -> None:
         """Delete orphaned messages from all control room threads on startup.
@@ -1819,7 +1860,9 @@ class ForumManager:
         """Update the control room embed for a user's personal forum."""
         cfg = load_access_config()
         ua = cfg.users.get(user_id)
-        if not ua or not ua.control_thread_id or not ua.control_message_id:
+        if not ua or not ua.control_room:
+            return
+        if not ua.control_thread_id or not ua.control_message_id:
             return
 
         def forget() -> None:

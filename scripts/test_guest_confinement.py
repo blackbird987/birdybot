@@ -317,8 +317,9 @@ def test_family_walk() -> None:
     }
     fake = SimpleNamespace(
         _forums=SimpleNamespace(thread_to_project=lambda tid: ("repo", threads[tid]) if tid in threads else None),
-        _thread_guest_id=lambda i: "1001" if i._guest else None,
+        _thread_guest_ids=lambda i: {"1001"} if i._guest else set(),
     )
+    fake._thread_family = lambda i: ThreadContextMixin._thread_family(fake, i)
     walk = lambda i: ThreadContextMixin._family_has_guest(fake, i)  # noqa: E731
     check("a guest's thread", walk(threads["root"]))
     check("a child of it", walk(threads["child"]))
