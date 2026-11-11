@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- **A guest's control room can be turned off** (`control_room: false` on their entry in `data/access.json`, or `/access control_room <user> off`). The bot then never makes one in their forum, never redraws it, and deletes the one they had. Creation is idempotent on the stored thread id, so deleting the post by hand only brought it back. A failed delete keeps the ids and retries at the next startup. Absent means on, so every other guest is unchanged. Harness: `scripts/test_guest_control_room_off.py`.
+
 ## v0.102.23, Questions between the two machines (2026-11-05)
 
 ### Added

@@ -57,6 +57,9 @@ class UserAccess:
     control_thread_id: str | None = None   # control room thread in personal forum
     control_message_id: str | None = None  # control room embed message
     archive_thread_id: str | None = None   # archive thread in personal forum
+    # False: no control room in their forum (never made, an existing one is
+    # deleted). Only written when False, so an older entry reads as True.
+    control_room: bool = True
 
     def to_dict(self) -> dict:
         d = {
@@ -73,6 +76,8 @@ class UserAccess:
             d["control_message_id"] = self.control_message_id
         if self.archive_thread_id:
             d["archive_thread_id"] = self.archive_thread_id
+        if not self.control_room:
+            d["control_room"] = False
         return d
 
     @classmethod
@@ -88,6 +93,7 @@ class UserAccess:
             control_thread_id=d.get("control_thread_id"),
             control_message_id=d.get("control_message_id"),
             archive_thread_id=d.get("archive_thread_id"),
+            control_room=d.get("control_room", True) is not False,
         )
 
 
