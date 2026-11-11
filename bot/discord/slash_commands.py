@@ -1231,6 +1231,8 @@ def setup(bot: ClaudeBot) -> None:
         lines = []
         for uid, ua in cfg.users.items():
             forum_link = f" <#{ua.forum_channel_id}>" if ua.forum_channel_id else ""
+            if not ua.control_room:
+                forum_link += " (control room off)"
             if ua.global_access:
                 lines.append(f"**{ua.display_name}** — all repos{forum_link}")
             else:
@@ -1241,6 +1243,41 @@ def setup(bot: ClaudeBot) -> None:
                         f"limit={grant.max_daily_queries}/day){forum_link}"
                     )
         await interaction.followup.send("\n".join(lines) or "No grants.", ephemeral=True)
+
+    @access_group.command(
+        name="control_room", description="Turn a guest's personal control room on or off",
+    )
+    @app_commands.describe(user="Guest to change", state="on or off")
+    @app_commands.choices(state=[
+        app_commands.Choice(name="on", value="on"),
+        app_commands.Choice(name="off", value="off"),
+    ])
+    async def cmd_access_control_room(
+        interaction: discord.Interaction, user: discord.Member, state: str,
+    ):
+        if not bot._is_owner(interaction.user.id):
+            await interaction.response.send_message("Owner only", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        cfg = load_access_config()
+        uid = str(user.id)
+        ua = cfg.users.get(uid)
+        if not ua:
+            await interaction.followup.send(
+                f"**{user.display_name}** has no access grants.", ephemeral=True,
+            )
+            return
+        ua.control_room = state == "on"
+        access_mod.save_access_config(cfg)
+        if ua.control_room:
+            await bot._forums.ensure_user_control_post(uid)
+            msg = f"Control room on for **{user.display_name}**."
+        elif await bot._forums.retire_user_control_room(uid):
+            msg = f"Control room off for **{user.display_name}**, and removed."
+        else:
+            msg = (f"Control room off for **{user.display_name}**. Deleting the "
+                   "existing one failed; the next restart tries again.")
+        await interaction.followup.send(msg, ephemeral=True)
 
     @access_group.command(name="set", description="Change access settings")
     @app_commands.describe(

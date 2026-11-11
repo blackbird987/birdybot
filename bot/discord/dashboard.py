@@ -440,7 +440,7 @@ async def _refresh_dashboard_impl(
     # Refresh user forum control rooms
     cfg = load_access_config()
     for uid, ua in cfg.users.items():
-        if ua.control_thread_id:
+        if ua.control_thread_id and ua.control_room:
             asyncio.create_task(_safe_refresh(forums.refresh_user_control_room(uid)))
 
 
