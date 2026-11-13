@@ -216,7 +216,7 @@ Slash commands are guild-synced, so they register instantly.
 ```
 /mode explore|plan|build      permission mode
 /model <name>                 model for this thread
-/effort low|medium|high|max   reasoning effort
+/effort low|medium|high|xhigh|max  reasoning effort
 /verbose 0|1|2                progress detail
 /provider claude|cursor       CLI provider
 /context set <text>           context pinned to every prompt

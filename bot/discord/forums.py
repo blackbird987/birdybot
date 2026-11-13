@@ -62,7 +62,7 @@ class ThreadInfo:
     mode: str | None = None
     context: str | None = None        # None=inherit, ""=cleared, str=set
     verbose_level: int | None = None
-    effort: str | None = None         # None=inherit, "low"/"medium"/"high"/"max"
+    effort: str | None = None         # None=inherit, "low"/"medium"/"high"/"xhigh"/"max"
     # Model pin for this thread (/model). None=never set, ""=explicitly back
     # to default routing, str=a --model name. Never validated against a list
     # of known models -- see formatting.normalize_model for why.

@@ -428,7 +428,7 @@ async def on_help(ctx: RequestContext) -> None:
         "`/logs` — bot log\n"
         "`/mode` — explore|plan|build\n"
         "`/verbose` — progress detail (0|1|2)\n"
-        "`/effort` — reasoning effort (low|medium|high|max)\n"
+        "`/effort` — reasoning effort (low|medium|high|xhigh|max)\n"
         "`/model` — model for this thread (or `default`)\n"
         "`/provider` — switch CLI provider (claude|cursor)\n"
         "`/context` — pinned context\n"

@@ -160,7 +160,7 @@ class StateStore(ReposMixin, AccountsMixin, SchedulesMixin, ChainsMixin, PeerMix
         self._watch_counter: int = 0
         self._active_session_id: str | None = None  # Current conversation session
         self._verbose_level: int = 1  # 0=silent, 1=normal, 2=detailed
-        self._effort: str = "high"  # reasoning effort: low/medium/high/max
+        self._effort: str = "high"  # reasoning effort: low/medium/high/xhigh/max
         self._platform_state: dict[str, dict] = {}  # platform -> arbitrary state
         self._autopilot_chains: dict[str, list[str]] = {}  # session_id -> remaining steps
         self._autopilot_chain_meta: dict[str, dict] = {}  # session_id -> {status, updated_at}

@@ -277,7 +277,7 @@ def setup(bot: ClaudeBot) -> None:
         await bot._run_slash(interaction, lambda ctx: commands.on_verbose(ctx, level))
 
     @bot.tree.command(name="effort", description="Reasoning effort level", guild=guild_obj)
-    @app_commands.describe(level="low, medium, high, or max")
+    @app_commands.describe(level="low, medium, high, xhigh, or max")
     async def cmd_effort(interaction: discord.Interaction, level: str = ""):
         if await _refused(interaction):
             return
