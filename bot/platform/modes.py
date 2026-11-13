@@ -75,11 +75,12 @@ def mode_label(mode: str) -> str:
 
 # --- Effort Display ---
 #
-# The one list of effort levels. Every other place (the welcome-embed buttons,
-# /effort, the /spawn effort= key, help texts) reads it, so a level the CLI
-# adds is added here once. Order is lowest to highest and is the button order.
-# The CLI's own list is in `claude --help` under --effort;
-# scripts/test_effort_levels.py fails when the two disagree.
+# The one list of effort levels, lowest to highest (that is the button order).
+# The welcome-embed buttons, /effort, the /spawn effort= key, /help and the
+# /effort slash hint all read it. The prompt texts in config.py and the README
+# cannot (config is imported before this module), so they spell the levels
+# out. scripts/test_effort_levels.py fails when any of them, or the CLI's own
+# list in `claude --help`, disagrees with this one.
 
 EFFORT_DISPLAY: dict[str, str] = {
     "low":    "Low",

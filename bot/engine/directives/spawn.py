@@ -10,7 +10,7 @@ from bot.textutil import directive_re, match_name
 from bot.claude.sandbox import context_confined, is_guest_confined, is_sandboxed, origin_is_sandboxed
 from bot.claude.types import Instance
 from bot.platform.base import RequestContext, SpawnArgs
-from bot.platform.modes import EFFORT_DISPLAY
+from bot.platform.formatting import EFFORT_DISPLAY
 from bot.engine.cmd_state import check_budget
 from bot.engine.directives.common import pair_directives, parse_kv
 

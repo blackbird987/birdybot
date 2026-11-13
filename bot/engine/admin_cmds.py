@@ -12,7 +12,7 @@ from bot.engine import (
     sessions as sessions_mod,
 )
 from bot.platform.base import ButtonSpec, RequestContext
-from bot.platform.formatting import format_status_md
+from bot.platform.formatting import EFFORT_USAGE, format_status_md
 from bot.textutil import clip
 
 log = logging.getLogger(__name__)
@@ -428,7 +428,7 @@ async def on_help(ctx: RequestContext) -> None:
         "`/logs` — bot log\n"
         "`/mode` — explore|plan|build\n"
         "`/verbose` — progress detail (0|1|2)\n"
-        "`/effort` — reasoning effort (low|medium|high|xhigh|max)\n"
+        f"`/effort` — reasoning effort ({EFFORT_USAGE})\n"
         "`/model` — model for this thread (or `default`)\n"
         "`/provider` — switch CLI provider (claude|cursor)\n"
         "`/context` — pinned context\n"

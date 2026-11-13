@@ -6,8 +6,10 @@ added a fifth (xhigh). The buttons, /effort and the /spawn effort= key each
 kept their own copy of the list, so nothing noticed. Now there is one list
 (bot/platform/modes.py EFFORT_DISPLAY) and this test pins:
 
-  - every reader uses that list (buttons, /effort, /spawn effort=),
-  - every help text names every level,
+  - every reader uses that list (buttons, /effort, /spawn effort=, /help,
+    the /effort slash hint),
+  - the texts that cannot import it (config.py prompts, README) name every
+    level, in order,
   - the list matches what `claude --help` says --effort accepts
     (skipped, not failed, when the CLI is not on PATH).
 
@@ -93,6 +95,9 @@ class _Messenger:
     async def send_text(self, _chan, text, **_kw):
         self.sent.append(text)
 
+    def markdown_to_markup(self, text: str) -> str:
+        return text
+
 
 class _Ctx:
     def __init__(self) -> None:
@@ -115,28 +120,24 @@ check("an unknown level is refused with the full usage line",
       ctx.effort is None and ctx.messenger.sent
       and modes.EFFORT_USAGE in ctx.messenger.sent[-1], str(ctx.messenger.sent))
 
+ctx = _Ctx()
+asyncio.run(admin_cmds.on_help(ctx))
+check("/help lists every level", bool(ctx.messenger.sent)
+      and f"reasoning effort ({modes.EFFORT_USAGE})" in ctx.messenger.sent[-1])
+check("/effort slash hint reads the list",
+      "describe(level=EFFORT_USAGE)" in (_root / "bot/discord/slash_commands.py").read_text())
+
 print()
-print("help texts name every level")
-_texts = {
-    "BOT_CONTEXT /effort line": config.BOT_CONTEXT,
-    "SPAWN_CONTEXT effort key": config.SPAWN_CONTEXT,
-    "/help": (_root / "bot/engine/admin_cmds.py").read_text(),
-    "/effort slash hint": (_root / "bot/discord/slash_commands.py").read_text(),
-    "README": (_root / "README.md").read_text(),
-}
-_patterns = {
-    "BOT_CONTEXT /effort line": r"/effort ([a-z|]+) ",
-    "SPAWN_CONTEXT effort key": r"`effort` \(optional\): ([a-z| ]+)\.",
-    "/help": r"reasoning effort \(([a-z|]+)\)",
-    "/effort slash hint": r'level="([a-z, ]+)"',
-    "README": r"/effort ([a-z|]+) ",
-}
-for name, text in _texts.items():
-    m = re.search(_patterns[name], text)
+print("texts that spell the levels out name every one")
+_spelled = (
+    ("BOT_CONTEXT /effort line", config.BOT_CONTEXT, r"/effort ([a-z|]+) "),
+    ("SPAWN_CONTEXT effort key", config.SPAWN_CONTEXT, r"`effort` \(optional\): ([a-z| ]+)\."),
+    ("README", (_root / "README.md").read_text(), r"/effort ([a-z|]+) "),
+)
+for name, text, pattern in _spelled:
+    m = re.search(pattern, text)
     found = re.findall(r"[a-z]+", m.group(1)) if m else []
-    found = [w for w in found if w != "or"]
     check(name, found == LEVELS, str(found))
-_ = admin_cmds  # imported so a syntax error there fails this harness too
 
 print()
 print("matches the installed CLI")
@@ -150,7 +151,9 @@ else:
     except Exception as e:
         out = ""
         print(f"  SKIP  claude --help failed ({e})")
-    m = re.search(r"--effort <level>.*?\(([a-z, ]+)\)", out, re.S)
+    # Only the --effort option's own description: up to the next option line.
+    m = re.search(r"--effort <level>((?:.|\n)*?)(?=\n\s*-|\Z)", out)
+    m = m and re.search(r"\(([a-z, ]+)\)", m.group(1))
     if out and not m:
         print("  SKIP  --effort not described in claude --help")
     elif m:

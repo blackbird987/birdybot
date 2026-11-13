@@ -25,7 +25,7 @@ from bot.discord.monitoring import monitor_setup
 from bot.engine import commands, sandbox_cmds
 from bot.engine import sessions as sessions_mod
 from bot.platform.formatting import (
-    MODE_DISPLAY, VALID_MODES, format_age, model_suggestions,
+    EFFORT_USAGE, MODE_DISPLAY, VALID_MODES, format_age, model_suggestions,
     normalize_model, short_model_label,
 )
 from bot.store import history as history_mod
@@ -277,7 +277,7 @@ def setup(bot: ClaudeBot) -> None:
         await bot._run_slash(interaction, lambda ctx: commands.on_verbose(ctx, level))
 
     @bot.tree.command(name="effort", description="Reasoning effort level", guild=guild_obj)
-    @app_commands.describe(level="low, medium, high, xhigh, or max")
+    @app_commands.describe(level=EFFORT_USAGE)
     async def cmd_effort(interaction: discord.Interaction, level: str = ""):
         if await _refused(interaction):
             return

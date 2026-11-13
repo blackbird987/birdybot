@@ -3,7 +3,7 @@
 ## [Unreleased]
 
 ### Added
-- **Extra High effort** (`xhigh`), the level the Claude CLI accepts between High and Max, is now a fifth effort button and works with `/effort xhigh` and `/spawn ... effort=xhigh`. The levels live in one list (`bot/platform/modes.py`) that the buttons, `/effort` and `/spawn` all read, where before each kept its own copy and none of them noticed the CLI had added one. Harness: `scripts/test_effort_levels.py`, which also fails when the bot's list stops matching `claude --help`.
+- **Extra High effort** (`xhigh`), the level the Claude CLI accepts between High and Max, is now a fifth effort button and works with `/effort xhigh` and `/spawn ... effort=xhigh`. The buttons already read the shared list in `bot/platform/modes.py`, but `/effort` and `/spawn` each kept their own copy of four levels; they, `/help` and the `/effort` slash hint now read that list too. The prompt texts and README spell the levels out and are pinned to it. Harness: `scripts/test_effort_levels.py`, which also fails when the bot's list stops matching `claude --help`.
 
 ## v0.102.24, Per-guest switches for buttons and the control room (2026-11-11)
 

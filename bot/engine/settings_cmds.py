@@ -8,8 +8,9 @@ from datetime import datetime, timedelta, timezone
 
 from bot import config
 from bot.platform.base import RequestContext
-from bot.platform.modes import EFFORT_DISPLAY, EFFORT_USAGE
 from bot.platform.formatting import (
+    EFFORT_DISPLAY,
+    EFFORT_USAGE,
     MODEL_CLEAR_WORDS,
     VALID_MODES,
     format_schedule_list_md,
