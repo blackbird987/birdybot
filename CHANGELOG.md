@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.102.26, Instruction files cleanup (2026-11-13)
+
 ### Changed
 - **Instruction files cleaned up after a prompt audit.** The debugging playbook's kill warning now names the Linux stop paths (`systemctl --user stop|restart claude-bot` and `scripts/botctl.py`) first, with `scripts/stop_bot.bat` kept under Windows. Gone: two incident asides (the playbook's gitignore story now states the rule with its reason), the "written for a smaller model" note, the stale `(v0.3.0)` heading, the "super carefully" intensifiers in the review-code and final-step skills, and every em dash in `CLAUDE.md` and the playbook. "Use ultrathink" stays in the skills: the CLI still acts on the keyword in the bot's headless prompts.
 
