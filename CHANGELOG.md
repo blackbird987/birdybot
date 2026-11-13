@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- **Instruction files cleaned up after a prompt audit.** The debugging playbook's kill warning now names the real Linux restart path (`systemctl --user stop|restart claude-bot`) first, with `scripts/stop_bot.bat` kept under Windows. Dated incident stories, the "written for a smaller model" note, a stale `(v0.3.0)` heading, the "super carefully" intensifiers in two review skills and every em dash in `CLAUDE.md` and the playbook are gone. "Use ultrathink" stays in the skills: the CLI still acts on the keyword in headless prompts.
+
 ## v0.102.25, Extra High effort level (2026-11-13)
 
 ### Added

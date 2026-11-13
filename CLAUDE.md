@@ -25,7 +25,7 @@ python -m bot          # start the bot
 
 When you are asked "are the sessions you spawned done?", the bot already knows
 and `scripts/instances.py` reads it. Do not answer "I can't tell, run /list
-yourself": `/list` had the full answer the one time that happened.
+yourself": the registry holds the same data `/list` shows.
 `ListAgents` is a different dataset (peer CLI sessions, not bot instances).
 
 ```bash
@@ -64,15 +64,15 @@ with the tool, in the same commit as the work. Format: `docs/design/findings.md`
 - Max 5 button rows per View (truncate, don't crash)
 - 2000 char regular message limit, 4096 for embed descriptions
 - Slash commands are guild-synced (instant registration)
-- 3-second interaction timeout — always `defer()` first
+- 3-second interaction timeout: always `defer()` first
 - `intents.members = True` needed for permission overwrites on category creation
 - A forum has exactly **one** pin slot. A second pin is REJECTED (error 30047,
-  "Maximum number pinned threads in this channel reached (1)") — it does not
+  "Maximum number pinned threads in this channel reached (1)"). It does not
   replace the incumbent, so anything already pinned must be unpinned first.
 - Archiving a forum post clears its pin, and an archived thread rejects every
-  field but `archived` (error 50083) — wake it before editing anything else.
+  field but `archived` (error 50083): wake it before editing anything else.
 
-## Discord Architecture (v0.3.0)
+## Discord Architecture
 
 Forum-based: one ForumChannel per project/repo, one thread per session.
 - Bot auto-provisions private category + The Ark (top-level dashboard channel) on startup
@@ -81,11 +81,11 @@ Forum-based: one ForumChannel per project/repo, one thread per session.
 - Dashboard embed pinned in The Ark (auto-updates on instance start/complete)
 - Per-repo control rooms live as pinned threads inside each repo's forum
 - **A forum has ONE pin slot and the Control Room owns it.** Archive and
-  monitor posts must never pin themselves — they used to, and racing the
+  monitor posts must never pin themselves. They used to, and racing the
   control room left 5 of 14 forums with the Archive pinned instead.
   `ForumManager.reconcile_forum_pins()` repairs this once on ready:
   unpin everything else, then pin the control room. Either edit wakes a
-  sleeping post first — Discord rejects every field but `archived` on an
+  sleeping post first: Discord rejects every field but `archived` on an
   archived thread (error 50083), so a post that auto-archived while holding
   the slot would otherwise keep it forever. No edits on correct forums.
   Harness:
@@ -102,7 +102,7 @@ Key data structures in `bot/discord/forums.py`:
 
 Build tasks use git worktrees for parallel isolation:
 - Each build creates a worktree at `{repo}/.worktrees/{instance-id}/`
-- Main repo always stays on master — no `git checkout` in the shared directory
+- Main repo always stays on master (no `git checkout` in the shared directory)
 - Parallel builds on the same repo work without conflicts
 - Session files are copied between main repo and worktree project directories so `--resume` works
 - Per-repo asyncio lock serializes git admin operations (worktree add/remove, merge, branch delete)
@@ -192,13 +192,13 @@ Needs the test webhooks in `.env`; one-time setup is in
 `docs/design/discord-testing.md`.
 
 **Commands:**
-- `list-channels` — show all channels in bot category (verify forums exist)
-- `list-threads <forum_id>` — show active/archived threads + tags
-- `channel-info <id>` — channel type, parent, tags, archive status
-- `send <channel_or_thread_id> <msg>` — send via webhook (auto-picks Ark vs forum webhook)
-- `read <channel_or_thread_id> [limit]` — read messages with embeds/buttons
-- `wait-response <channel_id> [timeout]` — poll for bot response after sending
-- `run-suite` — automated test sequence (forum creation, thread resume, archived resume, dedup, tags)
+- `list-channels`: show all channels in bot category (verify forums exist)
+- `list-threads <forum_id>`: show active/archived threads + tags
+- `channel-info <id>`: channel type, parent, tags, archive status
+- `send <channel_or_thread_id> <msg>`: send via webhook (auto-picks Ark vs forum webhook)
+- `read <channel_or_thread_id> [limit]`: read messages with embeds/buttons
+- `wait-response <channel_id> [timeout]`: poll for bot response after sending
+- `run-suite`: automated test sequence (forum creation, thread resume, archived resume, dedup, tags)
 
 **Quick verification after changes:**
 ```bash
