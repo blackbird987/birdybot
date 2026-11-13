@@ -10,9 +10,10 @@ conservative thing and say what you're unsure about.
 
 ## 1. You ARE the bot process: never kill it directly
 
-Every session here runs as a subprocess of the bot you are modifying. Running
-`systemctl --user stop|restart claude-bot`, `kill`, or on Windows `taskkill`,
-`Stop-Process` or `scripts/stop_bot.bat`, kills YOU mid-response: the user
+Every session here runs as a subprocess of the bot you are modifying. Stopping
+or restarting it any other way (`systemctl --user stop|restart claude-bot`,
+`scripts/botctl.py stop|restart`, `kill`, or on Windows `taskkill`,
+`Stop-Process` or `scripts/stop_bot.bat`) kills YOU mid-response: the user
 sees "interrupted by bot restart" and your work is lost.
 
 The one correct way to restart the bot is the reboot-request file:
