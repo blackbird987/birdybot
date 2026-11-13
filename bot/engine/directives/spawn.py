@@ -10,6 +10,7 @@ from bot.textutil import directive_re, match_name
 from bot.claude.sandbox import context_confined, is_guest_confined, is_sandboxed, origin_is_sandboxed
 from bot.claude.types import Instance
 from bot.platform.base import RequestContext, SpawnArgs
+from bot.platform.formatting import EFFORT_DISPLAY
 from bot.engine.cmd_state import check_budget
 from bot.engine.directives.common import pair_directives, parse_kv
 
@@ -25,7 +26,7 @@ _SPAWN_DIRECTIVE_RE = directive_re("spawn")
 # avoid colliding with the triple-backtick code fences inside the prompt body.
 _SPAWN_ALLOWED_KEYS = {"repo", "title", "mode", "effort"}
 _SPAWN_ALLOWED_MODES = {"explore", "plan", "build"}
-_SPAWN_ALLOWED_EFFORTS = {"low", "medium", "high", "max"}
+_SPAWN_ALLOWED_EFFORTS = tuple(EFFORT_DISPLAY)
 _SPAWN_PROMPT_MAX_BYTES = 32 * 1024  # 32 KiB hard cap on body
 _SPAWN_TITLE_MAX = 80
 _TITLE_CONTROL_CHARS = re.compile(r"[\x00-\x1f]")
@@ -159,7 +160,7 @@ async def _handle_spawn_directive(
             await _reject(
                 f"invalid effort: {effort}",
                 f"/spawn directive ignored — invalid effort `{effort}`. "
-                f"Allowed: `{', '.join(sorted(_SPAWN_ALLOWED_EFFORTS))}`.",
+                f"Allowed: `{', '.join(_SPAWN_ALLOWED_EFFORTS)}`.",
             )
             return True
 

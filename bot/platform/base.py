@@ -242,7 +242,7 @@ class RequestContext:
     mode: str | None = None
     context: str | None = None        # None=inherit, ""=cleared, str=set
     verbose_level: int | None = None
-    effort: str | None = None         # None=inherit, "low"/"medium"/"high"/"max"
+    effort: str | None = None         # None=inherit, "low"/"medium"/"high"/"xhigh"/"max"
     # Per-thread model pin (/model). None=inherit normal routing, ""=explicitly
     # cleared back to routing, str=this exact --model for every run in the thread.
     model: str | None = None

@@ -15,7 +15,7 @@ from bot.platform.buttons import (  # noqa: F401  -- re-exported
     queued_button_specs, resolver_running_button_specs, running_button_specs, stall_button_specs,
 )
 from bot.platform.modes import (  # noqa: F401  -- re-exported
-    _WORKFLOW_ORIGINS, EFFORT_DISPLAY, MODE_COLOR, MODE_DISPLAY, MODEL_CLEAR_WORDS, VALID_EFFORTS,
+    _WORKFLOW_ORIGINS, EFFORT_DISPLAY, EFFORT_USAGE, MODE_COLOR, MODE_DISPLAY, MODEL_CLEAR_WORDS, VALID_EFFORTS,
     VALID_MODES, effort_name, mode_label, mode_name, model_suggestions, normalize_model,
 )
 from bot.platform.redact import redact_secrets  # noqa: F401  -- re-exported

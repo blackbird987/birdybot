@@ -1737,7 +1737,7 @@ Settings:
 - /session — list recent desktop CLI sessions; /session resume <id> to continue one
 - /mode explore|build — switch permission mode
 - /verbose 0|1|2 — progress detail level (silent/normal/detailed)
-- /effort low|medium|high|max — reasoning effort level
+- /effort low|medium|high|xhigh|max — reasoning effort level
 - /model <name> — model for this thread (`/model default` clears it)
 - /context set <text> — pin context to all prompts
 - /repo add|remove|create|switch|list|hide|unhide — manage repos
@@ -1800,7 +1800,7 @@ Rules:
 - `repo` (required): name of a registered repo. Use `/repo list` if unsure — never guess.
 - `title` (required): short thread title, ≤80 chars, double-quoted.
 - `mode` (optional, default "build"): explore | plan | build.
-- `effort` (optional): low | medium | high | max.
+- `effort` (optional): low | medium | high | xhigh | max.
 - The fenced body MUST use tilde fences (`~~~spawn` / `~~~`), not backticks — this avoids colliding with backtick code blocks in the prompt.
 - Up to 5 /spawn directives may run per response. To fan out parallel subsessions, emit multiple directive+body pairs back-to-back — each directive IMMEDIATELY followed by its own ~~~spawn body, then the next directive. A directive without its own body block is skipped; directives beyond 5 are ignored.
 - One short sentence in your response telling the user what's happening is enough; the substance lives in the ~~~spawn blocks. Don't restate the prompt bodies in prose — that's just noise.

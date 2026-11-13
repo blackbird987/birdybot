@@ -214,13 +214,13 @@ Slash commands are guild-synced, so they register instantly.
 **Per-thread settings** (nothing here is global)
 
 ```
-/mode explore|plan|build      permission mode
-/model <name>                 model for this thread
-/effort low|medium|high|max   reasoning effort
-/verbose 0|1|2                progress detail
-/provider claude|cursor       CLI provider
-/context set <text>           context pinned to every prompt
-/alias set|list|delete        command shortcuts
+/mode explore|plan|build           permission mode
+/model <name>                      model for this thread
+/effort low|medium|high|xhigh|max  reasoning effort
+/verbose 0|1|2                     progress detail
+/provider claude|cursor            CLI provider
+/context set <text>                context pinned to every prompt
+/alias set|list|delete             command shortcuts
 ```
 
 **Repos and access**

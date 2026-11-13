@@ -239,7 +239,7 @@ class Instance:
     bash_policy_baseline: str = "full" # un-clamped policy. Inherited verbatim by spawned children so a triage floor on the parent does not propagate forward into a build child.
     vault_eligible: bool = False      # May this run receive vault secrets? Fails closed: is_owner_session defaults True, so a missed path must not be what grants keys. See docs/design/secret-intake.md
     guest_confined: bool = False      # Sandboxed whatever the repo's setting, because a guest's text is in this run's history. Only ever set, never cleared. See sandbox.stamp_guest and docs/design/session-sandbox.md
-    effort: str = "high"             # reasoning effort: low/medium/high/max
+    effort: str = "high"             # reasoning effort: low/medium/high/xhigh/max
     model: str | None = None         # CLI model override (e.g. "sonnet" for plan steps)
     cooldown_retry_at: str | None = None   # ISO datetime — auto-retry after usage limit
     cooldown_retries: int = 0              # Count of cooldown retries attempted (capped at 3)

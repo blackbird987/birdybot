@@ -9,6 +9,8 @@ from datetime import datetime, timedelta, timezone
 from bot import config
 from bot.platform.base import RequestContext
 from bot.platform.formatting import (
+    EFFORT_DISPLAY,
+    EFFORT_USAGE,
     MODEL_CLEAR_WORDS,
     VALID_MODES,
     format_schedule_list_md,
@@ -67,7 +69,7 @@ async def on_verbose(ctx: RequestContext, text: str) -> None:
 
 # --- /effort ---
 
-_VALID_EFFORT = ("low", "medium", "high", "max")
+_VALID_EFFORT = tuple(EFFORT_DISPLAY)
 
 
 async def on_effort(ctx: RequestContext, text: str) -> None:
@@ -76,12 +78,12 @@ async def on_effort(ctx: RequestContext, text: str) -> None:
         ctx.update_effort(text)
         await ctx.messenger.send_text(ctx.channel_id, f"Effort: {text}")
     elif text:
-        await ctx.messenger.send_text(ctx.channel_id, "Usage: /effort low|medium|high|max")
+        await ctx.messenger.send_text(ctx.channel_id, f"Usage: /effort {EFFORT_USAGE}")
     else:
         level = ctx.effective_effort
         await ctx.messenger.send_text(
             ctx.channel_id,
-            f"Effort: {level}\nSet with: /effort low|medium|high|max",
+            f"Effort: {level}\nSet with: /effort {EFFORT_USAGE}",
         )
 
 
