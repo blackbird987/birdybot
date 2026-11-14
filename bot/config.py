@@ -2519,13 +2519,12 @@ TLDR_PROMPT = (
 )
 
 CODE_REVIEW_PROMPT = (
-    'Now carefully read over all of the new code you just wrote and other '
-    'existing code you just modified with "fresh eyes" looking super '
-    'carefully for any obvious bugs, errors, problems, issues, confusion, '
-    'etc. Carefully fix anything you uncover. Use ultrathink. '
-    'Review if this is DRY, scalable, maintainable and modular. '
+    'Now read over all of the new code you just wrote and the existing code '
+    'you just modified with "fresh eyes", looking for bugs, errors, and '
+    'anything confusing, and fix what you find. Use ultrathink. '
+    'Also review whether it is DRY, scalable, maintainable and modular. '
     'If a CHANGELOG entry or commit message has been written, verify each '
-    'bullet corresponds to a real code change in the current diff — flag '
+    'bullet corresponds to a real code change in the current diff, and flag '
     'and fix phantom claims.'
 )
 

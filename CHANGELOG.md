@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- The Review Code step's prompt drops its stacked "carefully / super carefully" intensifiers and an em dash, matching the review-code skill cleanup in v0.102.26.
+
 ## v0.102.26, Instruction files cleanup (2026-11-13)
 
 ### Changed
