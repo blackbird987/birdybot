@@ -30,7 +30,7 @@ thread wins. A thread whose session is running shows nothing.
    (`needs_reboot` with pending changes), "approve deploy" when the config was
    never approved. The count is the merges since the last deploy
    (`pending_sessions`); `pending_changes` is capped changelog lines, not a
-   count.
+   count. Linked to the repo's Control Room, where the Deploy button is.
 5. `account`: an unresolved alert for an account in rotation, and login expiry
    warnings.
 6. `choice_pick`: an open `/choices` offer, with its labels. Read only through
@@ -93,8 +93,8 @@ time-based expiry.
 ## Layout
 
 The Ark: title "The Ark", description "**Needs you (N)**" and the grouped
-lines (at most 15, then "and N more: ..." by kind, under 4096, titles shrink
-before any item is dropped), or "Nothing is waiting on you.". Fields: Status
+lines (at most 15, then "and N more: ..." by kind, under 4096; titles shrink
+first, then items fold into the "and N more" line so its count stays true), or "Nothing is waiting on you.". Fields: Status
 ("Running N", an account warning, "Up since"), then Usage. Footer: version and
 PC name. Buttons: Refresh and Stop All, then New Repo, Claude Login, Provider.
 The orphan count left The Ark; `/branches` prints it.

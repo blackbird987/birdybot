@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
 
-import os
 import shutil
 import sys
 import tempfile
@@ -361,6 +360,8 @@ def arm_records() -> None:
         dep = byk.get("deploy", [])
         check(len(dep) == 1 and dep[0].detail == "approve deploy (2 merges)",
               f"an unapproved pending deploy shows, a booted one hides (got {[d.detail for d in dep]})")
+        check(bool(dep) and dep[0].thread_id == "ctl-a",
+              "a deploy links to its repo's Control Room, where the Deploy button is")
         acc = byk.get("account", [])
         check([a.title for a in acc] == ["x"], f"only unresolved alerts in rotation show (got {[a.title for a in acc]})")
         ch = byk.get("chain_paused", [])
@@ -424,6 +425,20 @@ def arm_render() -> None:
         check(t.count("<#") == 3, "your turn renders as lines")
     room = waiting.render_room(_many(30, "T" * 200))
     check(len(room) <= 1024, f"a Control Room field stays under 1024 (len {len(room)})")
+
+    def accounted(text: str, total: int) -> bool:
+        rows = text.splitlines()
+        shown = sum(1 for ln in rows if "<#" in ln)
+        more = next((ln for ln in rows if ln.startswith("and ")), "and 0 more")
+        return shown + int(more.split()[1]) == total and not text.endswith("…")
+
+    tight_room = waiting.render_room(_many(30, "T" * 200), limit=400)
+    check(len(tight_room) <= 400 and accounted(tight_room, 30),
+          f"a squeezed room folds items into 'and N more' with the right count ({tight_room!r})")
+    tight_ark = waiting.render_ark(sorted(_many(40, "T" * 300), key=lambda i: waiting._RANK[i.kind]),
+                                   limit=700)
+    check(len(tight_ark) <= 700 and accounted(tight_ark, 40),
+          f"a squeezed Ark folds items into 'and N more' with the right count ({tight_ark!r})")
     check(waiting.signature(items) == waiting.signature(list(items)), "signature is stable")
 
 

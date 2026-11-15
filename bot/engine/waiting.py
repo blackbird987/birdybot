@@ -22,8 +22,9 @@ Design note: ``docs/design/needs-you.md``. Harness: ``scripts/test_waiting.py``.
 from __future__ import annotations
 
 import logging
+import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -160,11 +161,15 @@ class GitReader:
         self._timeout = timeout
         self._clock = clock
         self._cache: dict[tuple, tuple[float, object]] = {}
+        # One reader is shared by the refresher's worker thread and any
+        # caller on the loop; the git call itself runs outside the lock.
+        self._lock = threading.Lock()
 
     def _rc(self, repo_path: str, *args: str) -> tuple[int, str] | None:
         key = (repo_path, args)
         now = self._clock()
-        hit = self._cache.get(key)
+        with self._lock:
+            hit = self._cache.get(key)
         if hit is not None and hit[0] > now:
             return hit[1]  # type: ignore[return-value]
         value: tuple[int, str] | None
@@ -176,10 +181,11 @@ class GitReader:
                 value = (r.returncode, r.stdout or "")
         except Exception:
             value = None
-        self._cache[key] = (now + self._ttl, value)
-        if len(self._cache) > 2048:
-            for k in [k for k, (exp, _) in self._cache.items() if exp <= now]:
-                self._cache.pop(k, None)
+        with self._lock:
+            self._cache[key] = (now + self._ttl, value)
+            if len(self._cache) > 2048:
+                for k in [k for k, (exp, _) in self._cache.items() if exp <= now]:
+                    self._cache.pop(k, None)
         return value
 
     def branch_exists(self, repo_path: str, branch: str) -> bool | None:
@@ -225,6 +231,7 @@ class ThreadRef:
 class ThreadIndex:
     threads: dict[str, ThreadRef] = field(default_factory=dict)
     by_session: dict[str, ThreadRef] = field(default_factory=dict)
+    controls: dict[str, str] = field(default_factory=dict)  # repo -> Control Room
 
 
 def _get(obj, name: str, default=None):  # noqa: ANN001, ANN202
@@ -254,6 +261,9 @@ def thread_index(forum_projects) -> ThreadIndex:  # noqa: ANN001
             _get(proj, "control_thread_id"), _get(proj, "archive_thread_id"),
             _get(proj, "monitor_thread_id"),
         ) if x}
+        control = _get(proj, "control_thread_id")
+        if repo and control:
+            idx.controls[repo] = str(control)
         for tid, info in list((_get(proj, "threads") or {}).items()):
             tid = str(tid)
             if tid in specials:
@@ -386,6 +396,8 @@ def _peer_run_once(c: _Ctx) -> Iterable[WaitingItem]:
         if created is None or c.now - created > pq.MAX_AGE_SECS:
             continue
         repo = rec.get("repo")
+        # The repo is named by the other machine; it only counts as hidden
+        # when this machine has a repo of that name parked.
         yield WaitingItem(
             kind="peer_run_once", key=f"peer:{rec.get('id')}", repo=repo,
             thread_id=rec.get("card_thread_id") or None,
@@ -410,8 +422,9 @@ def _deploys(c: _Ctx) -> Iterable[WaitingItem]:
                   else f"deploy pending{count}")
         if ds.last_deploy_error:
             detail += ", last deploy failed"
+        # The Deploy button lives in the repo's Control Room.
         yield c.item("deploy", f"deploy:{repo}:{ds.current_ref}", repo=repo,
-                     title="Deploy", detail=detail)
+                     thread_id=c.idx.controls.get(repo), title="Deploy", detail=detail)
 
 
 def _accounts(c: _Ctx) -> Iterable[WaitingItem]:
@@ -714,6 +727,14 @@ def item_line(it: WaitingItem, *, with_repo: bool = True) -> str:
     return line
 
 
+def _split_turns(items: list[WaitingItem]) -> tuple[list[WaitingItem], list[WaitingItem]]:
+    """(items listed one per line, your-turn items folded into a count line)."""
+    if not YOUR_TURN_AS_COUNT:
+        return list(items), []
+    return ([i for i in items if i.kind != "your_turn"],
+            [i for i in items if i.kind == "your_turn"])
+
+
 def _more_line(rest: list[WaitingItem]) -> str:
     counts: dict[str, int] = {}
     for it in rest:
@@ -736,10 +757,9 @@ def render_ark(items: list[WaitingItem], *, max_lines: int = MAX_ARK_LINES,
     """The Ark's "Needs you" text: grouped by kind, capped, inside ``limit``."""
     if not items:
         return "Nothing is waiting on you."
-    turns = [i for i in items if i.kind == "your_turn"] if YOUR_TURN_AS_COUNT else []
-    listed = [i for i in items if not (YOUR_TURN_AS_COUNT and i.kind == "your_turn")]
+    listed, turns = _split_turns(items)
 
-    def build(title_chars: int | None) -> str:
+    def build(title_chars: int | None, max_lines: int) -> str:
         lines: list[str] = []
         shown = 0
         current = None
@@ -754,8 +774,8 @@ def render_ark(items: list[WaitingItem], *, max_lines: int = MAX_ARK_LINES,
                 n = sum(1 for x in listed if x.kind == it.kind)
                 lines.append(f"**{kind.header if kind else it.kind} ({n})**")
             if title_chars is not None:
-                it = WaitingItem(**{**it.__dict__, "title": _clip(it.title, title_chars),
-                                    "detail": _clip(it.detail, title_chars)})
+                it = replace(it, title=_clip(it.title, title_chars),
+                             detail=_clip(it.detail, title_chars))
             lines.append(item_line(it))
             shown += 1
         if rest:
@@ -764,9 +784,14 @@ def render_ark(items: list[WaitingItem], *, max_lines: int = MAX_ARK_LINES,
             lines.append(_count_line(turns))
         return "\n".join(lines)
 
-    # Titles shrink before any item is dropped.
+    # Titles shrink before any item is dropped; then items fold into the
+    # "and N more" line, which keeps the count honest.
     for chars in (None, 32, 20, 12):
-        text = build(chars)
+        text = build(chars, max_lines)
+        if len(text) <= limit:
+            return text
+    for n in range(min(max_lines, len(listed)) - 1, -1, -1):
+        text = build(12, n)
         if len(text) <= limit:
             return text
     return text[: limit - 1] + "…"
@@ -775,15 +800,20 @@ def render_ark(items: list[WaitingItem], *, max_lines: int = MAX_ARK_LINES,
 def render_room(items: list[WaitingItem], *, max_lines: int = MAX_ROOM_LINES,
                 limit: int = 1024) -> str:
     """One repo's items for its Control Room field, inside Discord's 1024."""
-    turns = [i for i in items if i.kind == "your_turn"] if YOUR_TURN_AS_COUNT else []
-    listed = [i for i in items if not (YOUR_TURN_AS_COUNT and i.kind == "your_turn")]
-    lines = [item_line(i, with_repo=False) for i in listed[:max_lines]]
-    if len(listed) > max_lines:
-        lines.append(_more_line(listed[max_lines:]))
-    if turns:
-        lines.append(_count_line(turns))
-    text = "\n".join(lines)
-    while len(text) > limit and len(lines) > 1:
-        lines.pop(-2 if len(lines) > 1 else -1)
-        text = "\n".join(lines)
-    return text[:limit]
+    listed, turns = _split_turns(items)
+
+    def build(n: int) -> str:
+        lines = [item_line(i, with_repo=False) for i in listed[:n]]
+        if len(listed) > n:
+            lines.append(_more_line(listed[n:]))
+        if turns:
+            lines.append(_count_line(turns))
+        return "\n".join(lines)
+
+    # Items fold into the "and N more" line until it fits, so the count
+    # always matches what was left out.
+    for n in range(min(max_lines, len(listed)), -1, -1):
+        text = build(n)
+        if len(text) <= limit:
+            return text
+    return text[: limit - 1] + "…"

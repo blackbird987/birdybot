@@ -235,7 +235,9 @@ async def on_list(ctx: RequestContext, text: str) -> None:
     # (bot/engine/waiting.py), scoped to a repo when one is named.
     if "questions" in tokens or "asking" in tokens or "attention" in tokens:
         from bot.engine import waiting
-        items = await asyncio.to_thread(waiting.collect, ctx.store, None, repo=repo_filter)
+        # Snapshot the threads here, on the loop that mutates them.
+        idx = waiting.index_from_store(ctx.store)
+        items = await asyncio.to_thread(waiting.collect, ctx.store, idx, repo=repo_filter)
         text = waiting.render_ark(items, max_lines=30)
         if items:
             text = f"**Needs you ({len(items)})**\n{text}"
