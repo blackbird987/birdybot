@@ -16,10 +16,11 @@ from bot.discord.deploy_flow import _handle_approve_deploy, _handle_reboot_repo
 from bot.discord.access import AccessResult, load_access_config
 from bot import vault
 from bot.discord import secret_door
-from bot.discord.adapter import _buttons_to_view
+from bot.discord.adapter import _UNCHANGED, _buttons_to_view, view_without_rows
 from bot.discord.modals import QuickTaskModal, SecretRenameModal, _message_without_row
 from bot.engine import commands, peer_questions
 from bot.engine import sessions as sessions_mod
+from bot.engine.directives import choices as choices_mod
 from bot.platform.base import ButtonSpec
 from bot.platform.formatting import MODE_COLOR, VALID_EFFORTS, VALID_MODES, effort_name, mode_name
 from bot.platform.modes import cap_mode
@@ -353,6 +354,12 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
         channel_id = str(interaction.channel_id)
         await bot._replay_to_thread(channel_id, synth_prompt, source="callback_resume")
         return
+    # --- /choices: a tap answers the card's question (choice:<iid>:<n>) ---
+    # Ahead of _ACTIONS and the owner-only check on purpose: anyone allowed in
+    # this thread may answer, and the answer runs with the tapper's own access.
+    if action == "choice":
+        await _handle_choice_tap(bot, interaction, instance_id, btn_access)
+        return
     log.info("Discord button %s:%s in #%s", action, instance_id[:12], getattr(interaction.channel, "name", "?"))
 
     # --- Quick Task modal (must send modal as initial response, NOT defer) ---
@@ -478,6 +485,96 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
 
 
 # --- Individual handlers ---
+
+
+async def _strip_choice_row(interaction: discord.Interaction) -> None:
+    """Take the /choices row off the tapped card, leaving its other rows."""
+    message = interaction.message
+    if message is None:
+        return
+    try:
+        view = view_without_rows(message, choices_mod.CHOICE_PREFIX)
+        if view is not _UNCHANGED:
+            await interaction.edit_original_response(view=view)
+    except Exception:
+        log.debug("Could not strip choice row", exc_info=True)
+
+
+async def _handle_choice_tap(
+    bot: ClaudeBot, interaction: discord.Interaction, arg: str,
+    btn_access: AccessResult,
+) -> None:
+    """A tap on a /choices button: send its label as the tapper's next message.
+
+    The label is looked up in the stored offer (the id holds only its index),
+    and claimed with no await in between, so a double tap runs once. The turn
+    goes through ``commands.on_text`` like typed text: usage gate, budget gate,
+    rate limit, channel lock and Queued card all apply. Guest bookkeeping runs
+    as for a typed message, so a guest's tap keeps the thread confined.
+    """
+    instance_id, _, idx_raw = arg.rpartition(":")
+    try:
+        idx = int(idx_raw)
+    except ValueError:
+        idx = -1
+    try:
+        await interaction.response.defer()
+    except discord.NotFound:
+        return
+    except discord.InteractionResponded:
+        pass
+    channel_id = str(interaction.channel_id)
+    msg_id = str(interaction.message.id) if interaction.message else None
+    offer, label = choices_mod.claim_for_tap(
+        bot._store, channel_id, instance_id, idx, msg_id=msg_id,
+    )
+    await _strip_choice_row(interaction)
+    if offer is None or label is None:
+        try:
+            await interaction.followup.send(choices_mod.STALE_TAP_TEXT, ephemeral=True)
+        except Exception:
+            pass
+        return
+    choices_mod.record(
+        "tapped", channel_id=channel_id, instance_id=instance_id,
+        repo=offer.get("repo"), index=idx,
+        seconds=choices_mod._age(offer),
+    )
+    name = discord.utils.escape_mentions(
+        discord.utils.escape_markdown(interaction.user.display_name))
+    shown = discord.utils.escape_mentions(discord.utils.escape_markdown(label))
+    try:
+        await interaction.channel.send(
+            f"{name} picked: **{shown}**", silent=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+    except Exception:
+        log.debug("Could not post the picked line", exc_info=True)
+
+    lookup = bot._forums.thread_to_project(channel_id)
+    t_info = lookup[1] if lookup else None
+    repo_name = None
+    if lookup and lookup[0].repo_name != "_default":
+        repo_name = lookup[0].repo_name
+    if t_info is not None:
+        bot._track_thread_user(t_info, interaction.user.id)
+    ctx = bot._ctx(
+        channel_id, session_id=t_info.session_id if t_info else None,
+        repo_name=repo_name, thread_info=t_info, access_result=btn_access,
+        source="choice_tap",
+    )
+    ctx.user_id = str(interaction.user.id)
+    ctx.user_name = interaction.user.display_name
+    if t_info is not None:
+        bot._forums.attach_session_callbacks(ctx, t_info, channel_id)
+    bot._cancel_sleep(channel_id)
+    asyncio.create_task(bot._clear_thread_sleeping(interaction.channel))
+    asyncio.create_task(bot._set_thread_active_tag(interaction.channel, True))
+    asyncio.create_task(bot._refresh_dashboard())
+    try:
+        await commands.on_text(ctx, f"User picked: {label}")
+    finally:
+        await bot._after_turn(ctx, channel_id)
 
 
 async def _handle_watch_stop(
@@ -719,7 +816,8 @@ async def _handle_pending_action(
     ctx = bot._ctx(channel_id,
                    session_id=t_info.session_id if t_info else pending.session_id,
                    repo_name=repo_name,
-                   thread_info=t_info, access_result=run_access)
+                   thread_info=t_info, access_result=run_access,
+                   source=pending.source or "system")
     ctx.user_id = pending.user_id or str(interaction.user.id)
     ctx.user_name = pending.user_name or interaction.user.display_name
     if t_info:

@@ -227,6 +227,32 @@ class Messenger(Protocol):
         """
         return False
 
+    def shows_buttons(self, channel_id: str) -> bool:
+        """Whether a message sent to *channel_id* would carry its buttons.
+
+        The /choices offer asks first, so a channel that drops buttons (a
+        guest with them off, a platform with none) never records an offer
+        nobody can tap. Default: False.
+        """
+        return False
+
+    async def strip_button_rows(
+        self, channel_id: str, msg_id: str, prefix: str,
+    ) -> None:
+        """Remove every button row on one message that holds a button whose
+        callback starts with *prefix*, leaving the other rows as they are.
+
+        Used to close a /choices offer without redrawing the card from specs,
+        which would bring back workflow buttons a later step already took
+        away. Default: no-op.
+        """
+
+
+# Sources that are a person answering in the thread: typed text, or a tap on
+# a /choices button (which sends the label as the tapper's next message).
+# Both reset the spawn-wave cap and count as the human re-engaging.
+HUMAN_SOURCES: frozenset[str] = frozenset({"user_message", "choice_tap"})
+
 
 @dataclass
 class RequestContext:

@@ -310,6 +310,18 @@ class ClaudeBot(StartupMixin, ThreadContextMixin, UsageGateMixin, PendingImagesM
     def _schedule_sleep(self, channel_id: str) -> None:
         idle_mod.schedule_sleep(self, channel_id)
 
+    def _track_thread_user(self, info, user_id) -> None:
+        """Note a person who spoke in a thread (typed, or tapped a /choices button).
+
+        Used for close mentions, and saved at once when it grows: a guest in
+        this set is what keeps the vault out of the thread's runs, and that
+        must survive a restart.
+        """
+        uid = str(user_id)
+        if uid not in info.user_ids:
+            info.user_ids.add(uid)
+            self._forums.save_forum_map()
+
     def _cancel_sleep(self, channel_id: str) -> None:
         idle_mod.cancel_sleep(self, channel_id)
 
@@ -756,14 +768,7 @@ class ClaudeBot(StartupMixin, ThreadContextMixin, UsageGateMixin, PendingImagesM
                         except Exception:
                             log.debug("Wake-on-work check failed for %s",
                                       proj.repo_name, exc_info=True)
-                        # Track interacting user for close mentions
-                        # Saved at once when it grows: a guest in this set is
-                        # what keeps the vault out of the thread's runs, and
-                        # that must survive a restart.
-                        author_id = str(message.author.id)
-                        if author_id not in info.user_ids:
-                            info.user_ids.add(author_id)
-                            self._forums.save_forum_map()
+                        self._track_thread_user(info, message.author.id)
                         session_id = info.session_id or None
                         repo_name = proj.repo_name if proj.repo_name != "_default" else None
                         origin = info.origin

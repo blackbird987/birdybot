@@ -47,6 +47,7 @@ _STYLE_MAP = {
     "secret_hold_pk:": discord.ButtonStyle.danger,
     "secret_allow:": discord.ButtonStyle.success,
     "secret_deny:": discord.ButtonStyle.danger,
+    "choice:": discord.ButtonStyle.primary,      # Blue: an answer to the question above
 }
 
 
@@ -75,6 +76,26 @@ def _buttons_to_view(
             )
             view.add_item(button)
     return view
+
+
+_UNCHANGED = object()
+
+
+def view_without_rows(message: discord.Message, prefix: str):
+    """The message's buttons less every row holding a button whose id starts
+    with ``prefix``. ``_UNCHANGED`` when no such row exists, None when nothing
+    is left (Discord removes the component area on ``view=None``)."""
+    view = discord.ui.View.from_message(message, timeout=None)
+    rows = {
+        item.row for item in view.children
+        if str(getattr(item, "custom_id", "") or "").startswith(prefix)
+    }
+    if not rows:
+        return _UNCHANGED
+    for item in list(view.children):
+        if item.row in rows:
+            view.remove_item(item)
+    return view if view.children else None
 
 
 class DiscordMessenger:
@@ -366,6 +387,31 @@ class DiscordMessenger:
                 )
         except Exception:
             log.debug("Failed to edit message %s", msg_id, exc_info=True)
+
+    def shows_buttons(self, channel_id: str) -> bool:
+        """False only where ``_shown`` would drop a card's buttons. Fails open."""
+        probe = [[ButtonSpec("x", "x")]]
+        return self._shown(channel_id, probe) is not None
+
+    async def strip_button_rows(
+        self, channel_id: str, msg_id: str, prefix: str,
+    ) -> None:
+        """Take away the rows holding a ``prefix`` button; every other row stays.
+
+        Rebuilt from the message itself, never from specs, so a workflow row a
+        later step already removed does not come back.
+        """
+        channel = await self._resolve_channel(channel_id)
+        if not channel:
+            return
+        try:
+            msg = await channel.fetch_message(int(msg_id))
+            view = view_without_rows(msg, prefix)
+            if view is _UNCHANGED:
+                return
+            await msg.edit(view=view)
+        except Exception:
+            log.debug("Failed to strip %s rows from %s", prefix, msg_id, exc_info=True)
 
     async def delete_message(self, channel_id: str, msg_id: str) -> None:
         channel = await self._resolve_channel(channel_id)

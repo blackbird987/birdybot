@@ -12,6 +12,7 @@ from pathlib import Path
 from bot import config
 from bot.claude.types import Instance, InstanceOrigin, InstanceStatus, KillOutcome
 from bot.engine import workflows
+from bot.engine.directives.choices import offer_labels_for
 from bot.platform.base import RequestContext
 from bot.platform.formatting import (
     action_button_specs,
@@ -242,7 +243,8 @@ async def _strip_post_merge_buttons(
         # with a two-line summary card, and on a collapsed one threw away the
         # preview. Nothing about resolving a branch should rewrite what a
         # finished session said.
-        buttons = action_button_specs(inst)
+        buttons = action_button_specs(
+            inst, choices=offer_labels_for(ctx.store, ctx.channel_id, inst.id, result_msg_id))
         await ctx.messenger.edit_text(ctx.channel_id, result_msg_id, None, buttons)
     except Exception:
         log.debug("Failed to strip buttons from %s result message", inst.id)
@@ -289,7 +291,9 @@ async def _finish_branch_action(
     Merge Again and Resolve, and the progress line took the old buttons away.
     """
     # Pass updated buttons when branch was resolved (strips Merge/Discard)
-    buttons = action_button_specs(inst) if not inst.branch else kept_buttons
+    buttons = action_button_specs(
+        inst, choices=offer_labels_for(ctx.store, ctx.channel_id, inst.id, source_msg_id),
+    ) if not inst.branch else kept_buttons
     if source_msg_id:
         await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, escaped, buttons)
     else:

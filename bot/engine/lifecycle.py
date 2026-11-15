@@ -41,6 +41,7 @@ from bot.platform.formatting import (
     strip_verify_blocks,
 )
 from bot.engine import secret_scan, watches
+from bot.engine.directives import choices
 from bot.store import history as history_mod
 from bot.textutil import directive_kv, directive_re, find_tilde_block, is_quoted_example, mask_tilde_bodies, parse_duration, parse_iso_utc
 
@@ -436,6 +437,11 @@ async def run_instance(
     start_time = asyncio.get_event_loop().time()
     result = None
     finalized = False
+    if inst.origin not in _NOT_A_TURN_ORIGINS:
+        # A workflow step, chain step or wake is a turn in the thread too, so
+        # it retires the open /choices offer (a judge or plan check is not).
+        source = ctx.source if ctx.source != "system" else inst.origin.value
+        await choices.close_offer(ctx, ctx.channel_id, choices.close_reason(source))
     ctx.runner.begin_task(
         inst.id, session_id=inst.session_id,
         channel_id=None if inst.origin in _NOT_A_TURN_ORIGINS else ctx.channel_id,
@@ -1379,8 +1385,18 @@ async def send_result(
     result_text: str,
     silent: bool = False,
     result: RunResult | None = None,
-) -> None:
-    """Send result to channel — short inline, long as summary + file."""
+    choices: list[str] | None = None,
+) -> str | None:
+    """Send result to channel: short inline, long as summary + file.
+
+    ``choices`` puts a /choices row on the card (completed results only).
+    Returns the id of the message carrying the buttons when ``choices`` made
+    it onto one, else None: the caller records an offer only for a message
+    that really shows it, never for the suppressed or fallback shapes.
+    """
+    if inst.status != InstanceStatus.COMPLETED:
+        choices = None
+    button_msg_id: str | None = None
     if _is_marker_only_unattended(ctx, inst, result_text, result):
         # A system-fired turn (scheduled nudge, self-wake, cooldown retry)
         # that chose to say nothing: its whole reply was [TURN_COMPLETE].
@@ -1392,7 +1408,7 @@ async def send_result(
             "result card suppressed", inst.id, ctx.source,
         )
         ctx.store.update_instance(inst)
-        return
+        return None
     has_chain = bool(ctx.store.get_autopilot_chain(inst.session_id))
     # Stamp the JSONL uuid on every chunk we send so the Branch button can
     # locate the fork point.  Only the last chunk renders the button (buttons
@@ -1404,7 +1420,9 @@ async def send_result(
         if last_uuid and msg_id:
             inst.jsonl_uuid_by_msg_id[str(msg_id)] = last_uuid
 
-    buttons = action_button_specs(inst, has_autopilot_chain=has_chain)
+    buttons = action_button_specs(
+        inst, has_autopilot_chain=has_chain, choices=choices,
+    )
 
     # Mention user on final result embed (no pending chain steps).
     mention_uid = ctx.user_id if not has_chain else None
@@ -1462,6 +1480,7 @@ async def send_result(
                 mention_user_id=mention_uid,
             )
             _record_msg(msg_id)
+            button_msg_id = msg_id
 
         elif len(result_text) <= config.RESULT_INLINE_MAX:
             inst.result_collapsed = False
@@ -1495,6 +1514,8 @@ async def send_result(
                     buttons if is_last else None, chunk_silent,
                 )
                 _record_msg(msg_id)
+                if is_last:
+                    button_msg_id = msg_id
             # Mention fit in neither end — send separately
             if mention:
                 await ctx.messenger.send_text(
@@ -1503,7 +1524,9 @@ async def send_result(
 
         else:
             inst.result_collapsed = True
-            expand_buttons = action_button_specs(inst, show_expand=True)
+            expand_buttons = action_button_specs(
+                inst, show_expand=True, choices=choices,
+            )
             formatted = format_result_md(inst, preview=result_text)
             markup = ctx.messenger.markdown_to_markup(formatted)
             msg_id = await ctx.messenger.send_result(
@@ -1512,6 +1535,7 @@ async def send_result(
                 mention_user_id=mention_uid,
             )
             _record_msg(msg_id)
+            button_msg_id = msg_id
 
     except Exception:
         log.exception("Failed to send result for %s", inst.id)
@@ -1525,8 +1549,10 @@ async def send_result(
             _record_msg(msg_id)
         except Exception:
             log.exception("Last-resort notification also failed for %s", inst.id)
+        button_msg_id = None  # the fallback text carries no buttons
 
     ctx.store.update_instance(inst)
+    return str(button_msg_id) if (choices and button_msg_id) else None
 
 
 def _promote_deferred_reboot_if_eligible() -> None:

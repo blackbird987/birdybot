@@ -104,3 +104,4 @@
 - [ ] [UX/UI] Drop pipe separator from sleep name (Low)
 - [ ] [UX/UI] Notify user when an account looks cancelled (Medium)
 - [ ] [Bug Risk] Classifier patterns may match task error content (Low)
+- [ ] 2026-11-30: run `python scripts/choices_report.py --days 14`; remove the /choices buttons if fewer than a third of answered offers were taps.

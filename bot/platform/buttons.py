@@ -106,17 +106,60 @@ def _plan_action_rows(iid: str) -> list[list[ButtonSpec]]:
     ]]
 
 
+MAX_ROWS = 5  # Discord's limit; the adapter cuts anything past it from the END
+
+
+def choice_row_specs(instance_id: str, labels: list[str] | None) -> list[ButtonSpec]:
+    """The /choices row: one button per label, ``choice:<iid>:<n>``.
+
+    The id carries the index, not the label: the label is looked up in the
+    stored offer, so a tap can only ever send what the session offered.
+    """
+    return [
+        ButtonSpec(label, f"choice:{instance_id}:{n}")
+        for n, label in enumerate(labels or [])
+    ]
+
+
+def _fit_rows(
+    rows: list[list[ButtonSpec]],
+    droppable: list[list[ButtonSpec] | None],
+    limit: int,
+) -> None:
+    """Drop rows from ``droppable``, in order, until ``rows`` fits ``limit``.
+
+    Rows are matched by identity. Anything not listed (the choice row, the
+    workflow rows, Expand) is never dropped here.
+    """
+    for row in droppable:
+        if len(rows) <= limit:
+            return
+        if row is None:
+            continue
+        for i, r in enumerate(rows):
+            if r is row:
+                del rows[i]
+                break
+
+
 def action_button_specs(
     instance: Instance, show_expand: bool = False,
     has_autopilot_chain: bool = False,
+    choices: list[str] | None = None,
+    max_rows: int = MAX_ROWS,
 ) -> list[list[ButtonSpec]]:
     """Return button row specs based on instance status and origin.
 
     has_autopilot_chain: if True, this session has a paused autopilot chain
     that can be resumed via Continue Autopilot.
+    choices: the labels of this card's open /choices offer. Their row goes
+    first, and to stay within ``max_rows`` the Mode row goes first, then the
+    Branch/Share row. Expand is never dropped.
     """
     rows: list[list[ButtonSpec]] = []
     iid = instance.id
+    mode_row: list[ButtonSpec] | None = None
+    missed_row: list[ButtonSpec] | None = None
 
     # Resolver origin: no buttons on the resolver's own result. The resolve_merge
     # handler posts a follow-up message with the appropriate Merge/Retry/Discard
@@ -256,7 +299,8 @@ def action_button_specs(
             and instance.origin not in _WORKFLOW_ORIGINS):
         target = _NEXT_MODE.get(instance.mode, "explore")
         label = mode_name(target)
-        rows.append([ButtonSpec(f"Mode: {label}", f"mode_{target}:{iid}")])
+        mode_row = [ButtonSpec(f"Mode: {label}", f"mode_{target}:{iid}")]
+        rows.append(mode_row)
 
     # Branch from here — fork the session at the message this button is on.
     # Gated on session_id only; the click handler falls back to the last
@@ -316,7 +360,8 @@ def action_button_specs(
         if host is not None:
             host.append(ButtonSpec("Missed", f"missed:{iid}"))
         elif len(rows) < 4:
-            rows.append([ButtonSpec("Missed", f"missed:{iid}")])
+            missed_row = [ButtonSpec("Missed", f"missed:{iid}")]
+            rows.append(missed_row)
     if (instance.status == InstanceStatus.COMPLETED
             and instance.session_id
             and instance.origin not in (
@@ -325,12 +370,21 @@ def action_button_specs(
         if host is not None:
             host.append(ButtonSpec("TL;DR", f"tldr:{iid}"))
 
+    if choices:
+        rows.insert(0, choice_row_specs(iid, choices))
+    _fit_rows(rows, [mode_row, missed_row, branch_row], max_rows)
     return rows
 
 
-def expanded_button_specs(instance: Instance) -> list[list[ButtonSpec]]:
-    """Action buttons + Collapse for expanded view."""
-    rows = action_button_specs(instance)
+def expanded_button_specs(
+    instance: Instance, choices: list[str] | None = None,
+) -> list[list[ButtonSpec]]:
+    """Action buttons + Collapse for expanded view.
+
+    One row is held back for Collapse, so the action rows give way (Mode,
+    then Branch) rather than the adapter cutting Collapse off the end.
+    """
+    rows = action_button_specs(instance, choices=choices, max_rows=MAX_ROWS - 1)
     collapse_row = [
         ButtonSpec("Collapse \u25b2", f"collapse:{instance.id}"),
         ButtonSpec("Full Log", f"log:{instance.id}"),
