@@ -123,7 +123,9 @@ def _render_directive_chip(verb: str, args: str) -> str | None:
     kv = directive_kv(args)
     parts: list[str] = []
 
-    if verb == "image":
+    if verb in ("image", "choices"):
+        # /choices: the buttons on the card are the visible outcome, and the
+        # prose already names every option.
         return None
     if verb == "wake":
         # Same duration grammar the directive parser applies ("3d", "90m",

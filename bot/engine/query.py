@@ -14,7 +14,8 @@ from bot.engine import (
     pending as pending_mod,
     sessions as sessions_mod,
 )
-from bot.platform.base import RequestContext
+from bot.engine.directives import choices
+from bot.platform.base import HUMAN_SOURCES, RequestContext
 from bot.platform.formatting import (
     collapse_bot_directives,
     format_elapsed,
@@ -92,6 +93,7 @@ async def _enqueue_with_pending_ui(
         callback_action=callback_action,
         callback_instance_id=callback_instance_id,
         callback_source_msg_id=callback_source_msg_id,
+        source=ctx.source,
     )
 
 
@@ -136,7 +138,7 @@ async def on_text(ctx: RequestContext, text: str) -> None:
     # user is re-engaging this thread. Clear the cap so the next /spawn
     # starts a fresh orchestration run. Every other source leaves the
     # counter intact so the cap survives across the loop.
-    if ctx.source == "user_message" and ctx.reset_spawn_wave_count is not None:
+    if ctx.source in HUMAN_SOURCES and ctx.reset_spawn_wave_count is not None:
         try:
             ctx.reset_spawn_wave_count()
         except Exception:
@@ -176,7 +178,9 @@ async def on_text(ctx: RequestContext, text: str) -> None:
                 log.debug("Failed to re-post resolver-running buttons", exc_info=True)
             return
         text = f"{_merge_context_prefix(pm_meta)}\n{text}"
-    await _run_query(ctx, text, fast_repo_commands=True)
+    # A tapped choice is a label the session wrote, not something the person
+    # typed, so it never short-circuits into a repo command.
+    await _run_query(ctx, text, fast_repo_commands=ctx.source != "choice_tap")
 
 
 async def _run_query(
@@ -437,6 +441,9 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
 
     heartbeat_task = asyncio.create_task(heartbeat())
     start_time = asyncio.get_event_loop().time()
+    # Any turn starting here retires the thread's open /choices offer: a typed
+    # message is its answer, anything else moved the conversation on.
+    await choices.close_offer(ctx, ctx.channel_id, choices.close_reason(ctx.source))
     ctx.runner.begin_task(inst.id, session_id=inst.session_id, channel_id=ctx.channel_id)
     result = None
     finalized = False
@@ -532,7 +539,16 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
         # (parity with the background path in lifecycle.run_instance, which has
         # always done this). The dispatchers below keep reading RAW text.
         display_text = collapse_bot_directives(strip_verify_blocks(result.result_text))
-        await lifecycle.send_result(ctx, inst, display_text, result=result)
+        # [BOT_CMD: /choices] is read here, in the chat path only: a workflow
+        # step's card already has its own next-step buttons.
+        labels = None
+        if result.result_text and not result.is_error:
+            labels = await choices.prepare(ctx, inst, result.result_text)
+        button_msg = await lifecycle.send_result(
+            ctx, inst, display_text, result=result, choices=labels,
+        )
+        if labels and button_msg:
+            choices.open_offer(ctx, inst, labels, button_msg)
 
         # A /spawn child's own turns run through here, not run_instance, so
         # this is where most children land. The BLOCKED notice is skipped for
@@ -540,7 +556,7 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
         # question asked back to them is not the child stuck on its brief.
         await lifecycle.notify_parent(
             ctx, inst, result, display_text,
-            skip_blocked=ctx.source == "user_message",
+            skip_blocked=ctx.source in HUMAN_SOURCES,
         )
 
         # Tier 2: scan Claude's response for [BOT_CMD: /repo ...] directives

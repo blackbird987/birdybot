@@ -1301,6 +1301,7 @@ class ClaudeRunner(
                     _record_poisoning(event, warn=True)
 
                     # Detect AskUserQuestion — Claude is blocking on stdin
+                    # TODO: single-select AskUserQuestion could feed the /choices offer; it fired 0 times in 5 days (2026-11-15) and mostly fires in workflow steps where a tap would collide with needs_input handling.
                     if ask_question_input is None:
                         for tool_name, tool_input in iter_tool_blocks(event):
                             if tool_name == "AskUserQuestion":

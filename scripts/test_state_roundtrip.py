@@ -157,6 +157,7 @@ EXPECTED_KEYS = frozenset({
     "watches",
     "watch_counter",
     "sandboxed_repos",
+    "choice_offers",
 })
 
 # Instance attributes that are deliberately not persisted (see the Instance
@@ -455,6 +456,10 @@ def fixture_state() -> dict:
             "notified": True, "resolved": False,
             "snooze_until": "2026-10-17T00:00:00+00:00", "cred_fp": "fp-work-2"}},
         "sandboxed_repos": {f"{R}/repo": {"hosts": ["github.com"]}},
+        "choice_offers": {"chan-choice": {
+            "instance_id": "q-77", "msg_id": "msg-901",
+            "labels": ["Keep it", "Rename it"], "offered_at": 1760000000.25,
+            "repo": "alpha"}},
         "login_expiry_warnings": {
             f"{R}/accounts/main": "2026-11-12T14:10:01+00:00"},
         "schedules": [sched_full.to_dict(), sched_wake.to_dict()],
@@ -574,6 +579,7 @@ def _check_fixture_getters(store: StateStore) -> None:
     _eq("model cooldowns", store.get_model_cooldowns(), fx["model_cooldowns"])
     _eq("account alerts", store.get_account_alerts(), fx["account_alerts"])
     _eq("sandboxed repos", store.sandbox_entries(), fx["sandboxed_repos"])
+    _eq("choice offers", store.list_choice_offers(), fx["choice_offers"])
     _eq("login expiry warnings", store.get_login_expiry_warnings(),
         fx["login_expiry_warnings"])
     _eq("sidelined accounts", store.sidelined_accounts(),
@@ -717,6 +723,8 @@ def _populate_through_api(store: StateStore) -> None:
     store.set_account_cooldown(main, "2026-10-13T00:00:00+00:00", "fp-main-1")
     store.set_model_cooldown(work, "2026-10-12T22:00:00+00:00")
     store.set_sandbox_entry(f"{R}/repo", {"hosts": ["github.com"]})
+    store.put_choice_offer("chan-choice", {"instance_id": "q-1", "msg_id": "m-1",
+                                           "labels": ["A", "B"], "offered_at": 1.0})
     store.set_account_alert(work, "logged_out", "2026-10-10T00:00:00+00:00",
                             "fp-work-2")
     store.snooze_account_alert(work, "2026-10-17T00:00:00+00:00")

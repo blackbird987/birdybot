@@ -1779,6 +1779,22 @@ Rules:
 - Up to 4 images per response, 8 MB each. The file must live under the repo you're working in, its build worktree, or the bot's data dir — anything else is refused for safety, so write generated images inside the repo rather than to a temp folder.
 - Generating an image on the fly (a rendered chart, a screenshot) requires Build mode; sharing one that already exists works in any mode.
 - Don't narrate the directive ("I'm emitting an image command") — just say what the picture shows. The directive line is stripped from what the user reads.
+
+One-tap answers:
+When your reply ends on a question with 2 to 5 fixed answers, you can put them under it as buttons. A tap sends that answer back as the user's next message, and typing still works. Put this at the end of your reply, on its own lines:
+
+[BOT_CMD: /choices]
+~~~choices
+Keep the old name
+Rename it to config.toml
+~~~
+
+Rules:
+- One label per line, 2 to 5 labels, each 40 characters or fewer.
+- Your prose must still name every option, so the question reads fine without the buttons.
+- Not for open questions, and never as a yes/no on something destructive or outward-facing (deleting, sending, publishing, paying). Ask those in words.
+- Never offer what the card's own buttons already do: go, ship it, build, plan, merge, discard, done, retry.
+- Not in the same reply as a /chain or /spawn directive.
 """
 
 # Depth-0 spawn capability. Appended only when the current thread is NOT

@@ -230,6 +230,7 @@ def evaluate_instance(inst: Instance) -> SessionEval:
         ev.flags.extend(_check_claim_grounding(inst, text))
         ev.flags.extend(_check_copy_block_wrapping(inst, text))
         ev.flags.extend(_check_unarmed_promise(inst, text))
+        ev.flags.extend(_check_unoffered_choice(inst, text))
         ev.flags.extend(_check_review_prior_attempts(inst, text))
         ev.flags.extend(_check_chain_prior_attempts(inst, text))
         ev.flags.extend(_check_critical_pass(inst, text))
@@ -490,6 +491,42 @@ def _check_unarmed_promise(inst: Instance, text: str) -> list[EvalFlag]:
             "the thread had nothing to resume it"
         ),
         evidence=promise_evidence(text),
+    )]
+
+
+# "Keep X, or rename it?" / "A or B?" / "Should I X or Y?": an either/or with
+# fixed answers, the shape a /choices row is for.
+_EITHER_OR_RE = re.compile(r"\b(?:or|either)\b", re.IGNORECASE)
+
+
+def _check_unoffered_choice(inst: Instance, text: str) -> list[EvalFlag]:
+    """Did a chat reply end on an either/or question without offering buttons?
+
+    Flag only, never acted on: it measures whether the /choices rule in
+    BOT_CONTEXT lands. Judged from the raw text, since ``evaluate_instance``
+    runs inside ``finalize_run``, before any offer is recorded. Workflow
+    steps and builds are skipped: their cards carry their own buttons.
+    """
+    from bot.claude.types import InstanceOrigin
+    from bot.engine.directives.choices import has_choices_directive
+
+    if inst.branch or inst.origin != InstanceOrigin.DIRECT:
+        return []
+    if has_choices_directive(text):
+        return []
+    paras = [p.strip() for p in re.split(r"\n\s*\n", text.strip()) if p.strip()]
+    if not paras:
+        return []
+    last = paras[-1]
+    if last.startswith(("```", "~~~", "[BOT_CMD")) or not last.rstrip("*_ ").endswith("?"):
+        return []
+    question = last.splitlines()[-1]
+    if not _EITHER_OR_RE.search(question):
+        return []
+    return [EvalFlag(
+        category="unoffered_choice", severity="info",
+        message="Ended on an either/or question without /choices buttons",
+        evidence=question[-120:],
     )]
 
 
@@ -882,6 +919,7 @@ _ATTRIBUTION: tuple[tuple[str, str, str], ...] = (
     ("efficiency", "chain cost", "chain budget (harness)"),
     ("test_failure", "", "VERIFY_PROMPT"),
     ("critical_pass", "", "CRITICAL_PASS"),
+    ("unoffered_choice", "", "BOT_CONTEXT"),
 )
 
 

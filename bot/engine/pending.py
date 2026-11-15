@@ -66,6 +66,9 @@ class PendingPrompt:
     callback_action: str | None = None
     callback_instance_id: str | None = None
     callback_source_msg_id: str | None = None
+    # The queued request's ctx.source ("user_message", "choice_tap", ...), so a
+    # Steer re-runs it as what it was. None (older entries) runs as "system".
+    source: str | None = None
 
     def to_json(self) -> dict:
         d = asdict(self)
@@ -93,6 +96,7 @@ class PendingPrompt:
             callback_action=data.get("callback_action"),
             callback_instance_id=data.get("callback_instance_id"),
             callback_source_msg_id=data.get("callback_source_msg_id"),
+            source=data.get("source"),
         )
 
 
@@ -122,6 +126,7 @@ def register(
     callback_action: str | None = None,
     callback_instance_id: str | None = None,
     callback_source_msg_id: str | None = None,
+    source: str | None = None,
 ) -> PendingPrompt:
     """Register a new pending prompt and persist.
 
@@ -149,6 +154,7 @@ def register(
         callback_action=callback_action,
         callback_instance_id=callback_instance_id,
         callback_source_msg_id=callback_source_msg_id,
+        source=source,
     )
     _by_id[pending.id] = pending
     _by_channel.setdefault(channel_id, []).append(pending.id)

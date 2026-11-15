@@ -188,6 +188,10 @@ class StateStore(ReposMixin, AccountsMixin, SchedulesMixin, ChainsMixin, PeerMix
         self._peer_received: dict[str, dict] = {}
         self._peer_cursors: dict[str, str] = {}
         self._peer_daily: dict[str, dict] = {}
+        # Open /choices offers, one per channel: {channel_id: {instance_id,
+        # msg_id, labels, offered_at, repo}}. Its own key, not on Instance,
+        # because instances are pruned and an offer must outlive a restart.
+        self._choice_offers: dict[str, dict] = {}
         self._deploy_state: dict[str, DeployState] = {}  # repo_name -> deploy state
         self._deploy_configs: dict[str, dict] = {}  # repo_name -> deploy config
         self._auto_fix_state: dict[str, AutoFixState] = {}  # "repo:trigger" -> state
@@ -311,6 +315,7 @@ class StateStore(ReposMixin, AccountsMixin, SchedulesMixin, ChainsMixin, PeerMix
         self._peer_received = data.get("peer_received", {})
         self._peer_cursors = data.get("peer_cursors", {})
         self._peer_daily = data.get("peer_daily", {})
+        self._choice_offers = data.get("choice_offers", {}) or {}
         self._deploy_state = {
             k: DeployState.from_dict(v)
             for k, v in data.get("deploy_state", {}).items()
@@ -388,6 +393,26 @@ class StateStore(ReposMixin, AccountsMixin, SchedulesMixin, ChainsMixin, PeerMix
         self._last_mtime = current_mtime
         return True
 
+    # --- /choices offers (bot/engine/directives/choices.py owns the rules) ---
+
+    def get_choice_offer(self, channel_id: str) -> dict | None:
+        return self._choice_offers.get(str(channel_id))
+
+    def put_choice_offer(self, channel_id: str, offer: dict) -> None:
+        self._choice_offers[str(channel_id)] = offer
+        self.save()
+
+    def pop_choice_offer(self, channel_id: str) -> dict | None:
+        """Remove and return the channel's offer. Synchronous on purpose: a
+        tap claims the offer with no await between the check and this."""
+        offer = self._choice_offers.pop(str(channel_id), None)
+        if offer is not None:
+            self.save()
+        return offer
+
+    def list_choice_offers(self) -> dict[str, dict]:
+        return dict(self._choice_offers)
+
     def mark_dirty(self) -> None:
         """Mark state as changed — actual write deferred to auto-save loop."""
         self._dirty = True
@@ -434,6 +459,7 @@ class StateStore(ReposMixin, AccountsMixin, SchedulesMixin, ChainsMixin, PeerMix
             "peer_received": self._peer_received,
             "peer_cursors": self._peer_cursors,
             "peer_daily": self._peer_daily,
+            "choice_offers": self._choice_offers,
             "deploy_state": {k: v.to_dict() for k, v in self._deploy_state.items()},
             "deploy_configs": self._deploy_configs,
             "auto_fix_state": {k: v.to_dict() for k, v in self._auto_fix_state.items()},

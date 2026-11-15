@@ -60,6 +60,14 @@ async def autonomy_loop(store, runner, discord_bot) -> None:
                         )
                 except Exception:
                     log.exception("Stale spawn-wave sweep failed")
+            # /choices offers nobody answered in a week: drop them and take
+            # their row off the card.
+            if ticks % 5 == 0:
+                try:
+                    from bot.engine.directives.choices import expire_stale
+                    await expire_stale(store, discord_bot.messenger)
+                except Exception:
+                    log.exception("Choice offer expiry failed")
             # Weekly prompt review. Checked on the same 5-minute cadence
             # as the sweeps, but gated on a PERSISTED timestamp rather
             # than on `ticks`: a reboot resets the counter, which would

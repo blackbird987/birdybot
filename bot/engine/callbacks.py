@@ -12,6 +12,7 @@ from bot.engine import (
     lifecycle,
     workflows,
 )
+from bot.engine.directives.choices import offer_labels_for
 from bot.platform.base import RequestContext
 from bot.platform.formatting import (
     action_button_specs,
@@ -158,7 +159,8 @@ async def _on_expand(ctx: RequestContext, inst: Instance, source_msg_id: str | N
     # Expand posts the WHOLE result: chunk 0 replaces the card, the rest
     # follow as plain messages. Collapse deletes the follow-ups again.
     chunks = format_expanded_result_chunks(inst, result_text)
-    buttons = expanded_button_specs(inst)
+    buttons = expanded_button_specs(
+        inst, choices=offer_labels_for(ctx.store, ctx.channel_id, inst.id, source_msg_id))
     await _clear_expand_overflow(ctx, inst)
     head = ctx.messenger.markdown_to_markup(chunks[0])
     if source_msg_id:
@@ -178,7 +180,9 @@ async def _on_expand(ctx: RequestContext, inst: Instance, source_msg_id: str | N
 async def _on_collapse(ctx: RequestContext, inst: Instance, source_msg_id: str | None) -> None:
     await _clear_expand_overflow(ctx, inst)
     collapsed = format_result_md(inst, preview=inst.read_result_text())
-    buttons = action_button_specs(inst, show_expand=True)
+    buttons = action_button_specs(
+        inst, show_expand=True,
+        choices=offer_labels_for(ctx.store, ctx.channel_id, inst.id, source_msg_id))
     markup = ctx.messenger.markdown_to_markup(collapsed)
     if source_msg_id:
         await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, markup, buttons)
@@ -243,7 +247,9 @@ async def _on_mode(
         # Third place that used to guess "is there more behind Expand?"
         # from the result file's size. The delivery path records it.
         show_expand = bool(inst.result_collapsed and inst.result_file)
-        buttons = action_button_specs(inst, show_expand=show_expand)
+        buttons = action_button_specs(
+            inst, show_expand=show_expand,
+            choices=offer_labels_for(ctx.store, ctx.channel_id, inst.id, source_msg_id))
         await ctx.messenger.edit_text(ctx.channel_id, source_msg_id, None, buttons)
 
     capped = actual != target and ctx.mode_ceiling
