@@ -309,8 +309,12 @@ async def scenario_purge_spares_card() -> None:
         for m in (live, stale, plain):
             yield m
 
+    async def pins(limit=50):  # noqa: ANN001
+        for m in ():
+            yield m
+
     lobby = MagicMock(spec=discord.TextChannel)
-    lobby.pins = AsyncMock(return_value=[])
+    lobby.pins = pins
     lobby.purge = purge
     lobby.history = history
     bot = SimpleNamespace(_lobby_channel_id=1, _store=store, get_channel=lambda _i: lobby)

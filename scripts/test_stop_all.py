@@ -125,11 +125,9 @@ def _bot(store, runner):
     b._runner = runner
     b._forums = _Forums()
     b._lobby_channel_id = 0
-    b._dashboard_lock = asyncio.Lock()
-    b._dashboard_pending_flag = [False]
     b._is_owner = lambda uid: True
 
-    async def _refresh_dashboard():
+    async def _refresh_dashboard(**_k):
         pass
     b._refresh_dashboard = _refresh_dashboard
     return b
@@ -175,16 +173,8 @@ async def _ark_case() -> None:
     inter = _Interaction()
     bot = _bot(store, runner)
 
-    async def _no_refresh(*a, **k):
-        pass
-    import bot.discord.dashboard as dashboard
-    saved = dashboard.refresh_dashboard
-    dashboard.refresh_dashboard = _no_refresh
-    try:
-        await wizard.handle_ark_button(bot, inter, "ark:stop_all")
-        await asyncio.sleep(0)
-    finally:
-        dashboard.refresh_dashboard = saved
+    await wizard.handle_ark_button(bot, inter, "ark:stop_all")
+    await asyncio.sleep(0)
 
     _check("ark: bare kill is never called", runner.bare_kills == [],
            str(runner.bare_kills))

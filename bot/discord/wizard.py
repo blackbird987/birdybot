@@ -164,7 +164,7 @@ async def handle_ark_button(
 
     elif action == "refresh":
         await interaction.response.defer(ephemeral=True)
-        await bot._refresh_dashboard()
+        await bot._refresh_dashboard(now=True)
         await interaction.followup.send("Refreshed.", ephemeral=True)
 
     elif action == "stop_all":

@@ -130,8 +130,11 @@ class ClaudeBot(StartupMixin, ThreadContextMixin, UsageGateMixin, PendingImagesM
         )
 
         self._name_editing: set[str] = set()  # thread IDs with a name edit in-flight
-        self._dashboard_lock = asyncio.Lock()  # Serializes dashboard refreshes
-        self._dashboard_pending_flag = [False]  # Mutable flag for dashboard_mod
+        # Every redraw of The Ark and the Control Rooms goes through this:
+        # requests coalesce, passes are spaced, unchanged rooms send nothing.
+        self._dashboard = dashboard_mod.DashboardRefresher(
+            self, store, self._forums, lambda: self._lobby_channel_id,
+        )
         self._idle_timers: dict[str, asyncio.TimerHandle] = {}  # channel_id -> scheduled sleep
         self._sleep_gen: dict[str, int] = {}  # generation counter per channel (stale-callback guard)
         # Pending /ref context: {thread_id: (context_str, unix_epoch_seconds)}
@@ -860,13 +863,18 @@ class ClaudeBot(StartupMixin, ThreadContextMixin, UsageGateMixin, PendingImagesM
 
     # --- Dashboard (delegated to dashboard_mod) ---
 
-    async def _refresh_dashboard(self) -> None:
-        """Update or create the pinned dashboard embed in lobby."""
-        await dashboard_mod.refresh_dashboard(
-            self, self._store, self._forums,
-            self._lobby_channel_id, self._dashboard_lock,
-            self._dashboard_pending_flag,
-        )
+    async def _refresh_dashboard(self, *, now: bool = False) -> None:
+        """Redraw The Ark and the Control Rooms that changed.
+
+        Returns at once and the redraw follows within a few seconds, folded
+        together with every other request in that window. ``now`` is for a
+        person waiting on it (the Refresh button): it redraws everything
+        before returning.
+        """
+        if now:
+            await self._dashboard.refresh_now()
+        else:
+            self._dashboard.request()
 
     async def _warmup_then_refresh_lobby(self) -> None:
         """Warm ccusage cache, then refresh dashboard + clean lobby.
@@ -876,7 +884,7 @@ class ClaudeBot(StartupMixin, ThreadContextMixin, UsageGateMixin, PendingImagesM
         """
         from bot.engine.usage import warmup as _usage_warmup
         await _usage_warmup()
-        await self._refresh_dashboard()
+        await self._refresh_dashboard(now=True)
         await self._cleanup_lobby()
 
     async def _generate_smart_title(
@@ -1011,11 +1019,36 @@ class ClaudeBot(StartupMixin, ThreadContextMixin, UsageGateMixin, PendingImagesM
 
         The live update card stays too: it goes out once per commit and does
         not come back, so purging it would strand the update.
+
+        Stale dashboard pins go first: only the live dashboard keeps its pin,
+        and the frozen copies are then ordinary messages the purge clears.
+        Pins that are not this bot's dashboards are left alone.
         """
         lobby = self.get_channel(self._lobby_channel_id)
         if not lobby or not isinstance(lobby, discord.TextChannel):
             return
-        pinned_ids = {m.id for m in await lobby.pins()}
+        pins = [m async for m in lobby.pins(limit=None)]
+        live_id = self._store.get_platform_state("discord").get("dashboard_message_id")
+        try:
+            unpinned = await dashboard_mod.unpin_stale_dashboards(
+                pins, live_id, getattr(getattr(self, "user", None), "id", None),
+            )
+        except Exception:
+            unpinned = 0
+            log.warning("Stale dashboard unpin failed", exc_info=True)
+        if unpinned:
+            log.info("Lobby cleanup: unpinned %d stale dashboards", unpinned)
+            pins = [m async for m in lobby.pins(limit=None)]
+        pinned_ids = {m.id for m in pins}
+        if live_id and str(live_id).isdigit() and int(live_id) not in pinned_ids:
+            try:
+                await lobby.get_partial_message(int(live_id)).pin()
+                pinned_ids.add(int(live_id))
+                log.info("Lobby cleanup: re-pinned the live dashboard %s", live_id)
+            except discord.NotFound:
+                pass  # gone; the next refresh posts and pins a new one
+            except Exception:
+                log.warning("Could not pin the live dashboard %s", live_id, exc_info=True)
         card_id = auto_update.current_card_custom_id(self._store)
 
         def _keep(m: discord.Message) -> bool:

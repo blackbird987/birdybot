@@ -139,11 +139,7 @@ class StartupMixin:
         if not existing or existing.done():
             from bot.discord.dashboard import start_periodic_refresh
             self._periodic_refresh_task = asyncio.create_task(
-                start_periodic_refresh(
-                    self, self._store, self._forums,
-                    self._lobby_channel_id, self._dashboard_lock,
-                    self._dashboard_pending_flag,
-                )
+                start_periodic_refresh(self._dashboard)
             )
 
         self._start_usage_notifier()
