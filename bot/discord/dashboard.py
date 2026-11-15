@@ -344,7 +344,6 @@ def _count_orphans(store: StateStore) -> int:
     return total
 
 
-
 # ---------------------------------------------------------------------------
 # Refresh: one object owns every redraw of The Ark and the Control Rooms
 # ---------------------------------------------------------------------------
@@ -427,7 +426,6 @@ class DashboardRefresher:
         self._last_pass: float | None = None
         self._ark_digest: str | None = None
         self._room_sigs: dict[str, str] = {}
-        self.passes = 0  # how many passes ran; read by the harness
 
     def request(self, *, sweep: bool = False) -> None:
         """Ask for a redraw soon. Never blocks and never raises."""
@@ -454,7 +452,6 @@ class DashboardRefresher:
     async def _run_pass(self, *, sweep: bool) -> None:
         async with self._pass_lock:
             self._last_pass = self._clock()
-            self.passes += 1
             try:
                 await self._redraw_ark()
             except Exception:
