@@ -315,6 +315,11 @@ _NOT_A_TURN_ORIGINS = frozenset({
     InstanceOrigin.JUDGE, InstanceOrigin.PLAN_CHECK, InstanceOrigin.PEER_ANSWER,
 })
 
+# Runs that leave the thread's open /choices offer alone: the not-a-turn runs,
+# and a TL;DR, which leaves the card it was tapped on intact
+# (docs/design/tldr.md), choice row included.
+_KEEPS_CHOICE_OFFER_ORIGINS = _NOT_A_TURN_ORIGINS | {InstanceOrigin.TLDR}
+
 # These runs are read by their caller. They do not retry on a timer (a usage limit
 # means it could not check), post no result card, and are not a child landing. The
 # plan check's author run is here too but not above, since it resumes the thread's
@@ -437,9 +442,10 @@ async def run_instance(
     start_time = asyncio.get_event_loop().time()
     result = None
     finalized = False
-    if inst.origin not in _NOT_A_TURN_ORIGINS:
+    if inst.origin not in _KEEPS_CHOICE_OFFER_ORIGINS:
         # A workflow step, chain step or wake is a turn in the thread too, so
-        # it retires the open /choices offer (a judge or plan check is not).
+        # it retires the open /choices offer (a judge, plan check or TL;DR
+        # does not).
         source = ctx.source if ctx.source != "system" else inst.origin.value
         await choices.close_offer(ctx, ctx.channel_id, choices.close_reason(source))
     ctx.runner.begin_task(

@@ -47,7 +47,8 @@ log), `buttons.choice_row_specs` and `_fit_rows`, `lifecycle.send_result(choices
   (`_execute_query` and `run_instance`, right before `begin_task`) calls
   `close_offer`: `typed` for a typed message, `superseded:<source>` for
   anything else. A judge, plan check or machine-link answer is not a turn and
-  does not close it.
+  does not close it, and a TL;DR leaves the card it was tapped on alone
+  (`docs/design/tldr.md`), row included (`_KEEPS_CHOICE_OFFER_ORIGINS`).
 - **Close by stripping the row, never by redrawing from specs.** A workflow
   step strips the source card's workflow buttons (`step_spawn`), and a redraw
   from `action_button_specs` would put them back. `strip_button_rows` rebuilds

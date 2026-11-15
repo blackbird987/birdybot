@@ -317,8 +317,8 @@ class RequestContext:
     # recursion cap in /spawn handler trips correctly inside the spawned thread.
     spawn_depth_inherit: int = 0
     # Source of this request — used by the engine to decide whether to reset
-    # the parent's orchestrator wave counter. Only "user_message" (a genuine
-    # human-typed message) resets; every other source (replay, schedule,
+    # the parent's orchestrator wave counter. Only HUMAN_SOURCES (a typed
+    # message, or a tap on a /choices button) reset; every other source (replay, schedule,
     # autopilot, callback_resume, spawn_dispatch, etc.) leaves the counter
     # intact so the cap survives across the full orchestration loop.
     # Default is the safest "non-reset" value: missing tags fail safe.
@@ -347,7 +347,7 @@ class RequestContext:
     # thread isn't trackable (non-forum platforms).
     read_spawn_wave_count: Callable[[], int] | None = None
     # Reset the orchestrator wave counter for THIS thread. Called by the engine
-    # when a genuine user-typed message arrives (source == "user_message") so
+    # when a person answers in the thread (source in HUMAN_SOURCES) so
     # the cap allows a fresh orchestration loop after the user re-engages.
     reset_spawn_wave_count: Callable[[], None] | None = None
     # Self-wake runaway-cap accessors (forum threads only; None elsewhere).

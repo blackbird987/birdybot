@@ -381,8 +381,9 @@ def expanded_button_specs(
 ) -> list[list[ButtonSpec]]:
     """Action buttons + Collapse for expanded view.
 
-    One row is held back for Collapse, so the action rows give way (Mode,
-    then Branch) rather than the adapter cutting Collapse off the end.
+    One row is held back for Collapse. Only a choice row can push the action
+    rows that far, and then they give way (Mode, then Missed, then Branch)
+    rather than the adapter cutting Collapse off the end.
     """
     rows = action_button_specs(instance, choices=choices, max_rows=MAX_ROWS - 1)
     collapse_row = [

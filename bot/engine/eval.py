@@ -508,11 +508,11 @@ def _check_unoffered_choice(inst: Instance, text: str) -> list[EvalFlag]:
     steps and builds are skipped: their cards carry their own buttons.
     """
     from bot.claude.types import InstanceOrigin
-    from bot.engine.directives.choices import _CHOICES_RE
+    from bot.engine.directives.choices import has_choices_directive
 
     if inst.branch or inst.origin != InstanceOrigin.DIRECT:
         return []
-    if _CHOICES_RE.search(text):
+    if has_choices_directive(text):
         return []
     paras = [p.strip() for p in re.split(r"\n\s*\n", text.strip()) if p.strip()]
     if not paras:

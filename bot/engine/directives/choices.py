@@ -77,6 +77,13 @@ def _live_matches(scan: str, pattern: re.Pattern[str]) -> list[re.Match[str]]:
     return [m for m in pattern.finditer(scan) if not is_quoted_example(scan, m.start())]
 
 
+def has_choices_directive(text: str) -> bool:
+    """True when ``text`` carries a live /choices directive (masked, not quoted)."""
+    if not text or "/choices" not in text:
+        return False
+    return bool(_live_matches(mask_tilde_bodies(text), _CHOICES_RE))
+
+
 def _label_problem(label: str) -> str | None:
     if len(label) > MAX_LABEL_LEN:
         return f"longer than {MAX_LABEL_LEN} characters"

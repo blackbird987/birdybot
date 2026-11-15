@@ -6,7 +6,6 @@
 - **One-tap answers.** A session can end a reply with `[BOT_CMD: /choices]` and a `~~~choices` block of 2 to 5 short labels, and they appear as a row of buttons on the result card. A tap sends the label into the thread as the tapper's next message, through the same path typed text takes (usage gate, budget gate, rate limit, channel lock, Queued card), and posts "<name> picked: <label>". Typing still works, and the first answer, or any later turn, takes the row away. Offers survive a restart and expire after a week. Refused labels (too long, command-like, directive syntax) get a notice and are never truncated. Every offer and answer goes to `data/choices.jsonl`; `scripts/choices_report.py --days 14` gives the tap share that decides on 2026-11-30 whether the feature stays. A flag-only eval check (`unoffered_choice`) counts replies that end on an either/or question without buttons. Design note: `docs/design/choices.md`. Harness: `scripts/test_choices.py`.
 
 ### Changed
-- An expanded result card holds a row back for Collapse, so a crowded card drops its Mode row instead of losing Collapse past Discord's five-row limit.
 - A queued message that is steered now runs with the source it was queued with (typed text stays typed text), instead of as a system turn.
 
 ## v0.102.27, Review Code prompt cleanup (2026-11-15)

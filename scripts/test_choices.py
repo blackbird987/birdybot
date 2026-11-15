@@ -672,7 +672,13 @@ def case_turn_starts() -> None:
         i_begin = src.find("begin_task(")
         _check(f"{name} closes before begin_task", 0 < i_close < i_begin, f"{i_close} {i_begin}")
     src = inspect.getsource(lifecycle.run_instance)
-    _check("run_instance skips not-a-turn origins", "_NOT_A_TURN_ORIGINS" in src[:src.find("close_offer(")])
+    _check("run_instance skips the offer-keeping origins",
+           "_KEEPS_CHOICE_OFFER_ORIGINS" in src[:src.find("close_offer(")])
+    keeps = lifecycle._KEEPS_CHOICE_OFFER_ORIGINS
+    _check("TL;DR, judge, plan check keep the offer", {
+        InstanceOrigin.TLDR, InstanceOrigin.JUDGE, InstanceOrigin.PLAN_CHECK} <= keeps, repr(keeps))
+    _check("workflow steps close the offer", not {
+        InstanceOrigin.REVIEW_CODE, InstanceOrigin.DONE} & keeps, repr(keeps))
     src = inspect.getsource(query._execute_query)
     _check("offer opened only with a button message", "if labels and button_msg" in src)
 
@@ -687,6 +693,8 @@ def case_eval() -> None:
     flags = _check_unoffered_choice(inst, "Done.\n\nKeep the old name, or rename it?")
     _check("eval flags unoffered either/or", [f.category for f in flags] == ["unoffered_choice"], repr(flags))
     _check("eval quiet with choices", not _check_unoffered_choice(inst, _reply("Keep", "Rename")))
+    _check("eval still flags when /choices is only quoted",
+           bool(_check_unoffered_choice(inst, "Docs say `[BOT_CMD: /choices]`.\n\nKeep it, or rename it?")))
     _check("eval quiet on open question", not _check_unoffered_choice(inst, "What should it be called?"))
     _check("eval quiet on statement", not _check_unoffered_choice(inst, "Keep it or rename it."))
     _check("eval quiet on builds", not _check_unoffered_choice(_inst(branch="b"), "Keep, or rename?"))
