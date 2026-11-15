@@ -287,6 +287,8 @@ class DiscordTransport:
         )
         message = await thread.send(peer_turns.card_text(record, owner), view=view,
                                     allowed_mentions=mentions)
+        # Where the card is, so the "Needs you" list can link to it.
+        record["card_thread_id"] = str(thread.id)
         return str(message.id)
 
     async def edit_card(self, message_id: str, text: str) -> None:

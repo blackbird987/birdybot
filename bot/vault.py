@@ -22,6 +22,7 @@ import re
 import secrets
 import tempfile
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -449,11 +450,27 @@ def add_request(name: str, repo: str, channel_id: str, session_id: str | None) -
         token = secrets.token_urlsafe(9).replace("-", "x").replace("_", "y")
         data["requests"][token] = {
             "name": name, "repo": repo, "channel_id": channel_id, "session_id": session_id,
+            "created_at": time.time(),
         }
         while len(data["requests"]) > _REQUESTS_MAX:
             data["requests"].pop(next(iter(data["requests"])))
         _write_unlocked(data)
     return token
+
+
+def pending_requests() -> dict[str, dict]:
+    """Open /secret requests by token: copies, names and ids only, never a value.
+
+    For the "Needs you" list, read every pass, so a vault that cannot be read
+    answers an empty dict quietly instead of logging an error each time.
+    """
+    with _lock:
+        try:
+            data = _load()
+        except VaultUnavailable:
+            return {}
+    return {str(t): dict(r) for t, r in (data.get("requests") or {}).items()
+            if isinstance(r, dict)}
 
 
 def pop_request(token: str) -> dict | None:

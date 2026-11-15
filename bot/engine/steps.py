@@ -893,7 +893,10 @@ async def record_merge_failure(
     ctx.store.set_pending_merge(
         inst.id, session_id=session_id, channel_id=channel_id,
         repo_name=inst.repo_name, message=msg, failure_kind=failure_kind,
+        branch=inst.branch, target=inst.original_branch,
     )
+    from bot.engine import waiting
+    waiting.notify_changed()
 
 
 # --- Session resume ---

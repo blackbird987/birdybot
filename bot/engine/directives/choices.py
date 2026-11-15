@@ -256,6 +256,36 @@ def _age(offer: dict) -> float | None:
         return None
 
 
+def offer_live(offer: dict, now: float | None = None) -> bool:
+    """Whether an offer is still inside its week. An undatable one is not.
+
+    The one expiry rule: a tap, the sweep and the waiting list all use it.
+    """
+    now = time.time() if now is None else now
+    try:
+        age = now - float(offer.get("offered_at") or 0)
+    except (TypeError, ValueError, AttributeError):
+        return False
+    return age <= OFFER_TTL_SECONDS
+
+
+def open_offers(store, now: float | None = None) -> dict[str, dict]:
+    """Every offer still open, by channel id: copies, never the stored dicts.
+
+    How anything outside this module reads offers (the "Needs you" list).
+    Fails open to an empty dict.
+    """
+    list_all = getattr(store, "list_choice_offers", None)
+    if list_all is None:
+        return {}
+    try:
+        offers = list_all()
+    except Exception:
+        return {}
+    return {str(cid): dict(o) for cid, o in offers.items()
+            if isinstance(o, dict) and offer_live(o, now)}
+
+
 def claim_for_tap(
     store, channel_id: str, instance_id: str, idx: int,
     msg_id: str | None = None,
@@ -278,7 +308,7 @@ def claim_for_tap(
     labels = offer.get("labels") or []
     if not 0 <= idx < len(labels):
         return None, None
-    if (_age(offer) or 0) > OFFER_TTL_SECONDS:
+    if not offer_live(offer):
         return None, None
     pop(channel_id)
     return offer, labels[idx]
@@ -293,11 +323,7 @@ async def expire_stale(store, messenger, *, now: float | None = None) -> int:
     now = time.time() if now is None else now
     n = 0
     for channel_id, offer in list_all().items():
-        try:
-            age = now - float(offer.get("offered_at") or 0)
-        except (TypeError, ValueError):
-            age = OFFER_TTL_SECONDS + 1
-        if age <= OFFER_TTL_SECONDS:
+        if offer_live(offer, now):
             continue
         if pop(channel_id) is None:
             continue

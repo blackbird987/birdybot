@@ -1,7 +1,8 @@
 """Dashboard embed generation and refresh for Discord lobby.
 
-Builds the pinned dashboard embed showing running instances, costs,
-projects, and attention items. Extracted from bot.py for isolation.
+Builds the pinned dashboard embed (The Ark): the cross-repo "Needs you" list
+from ``bot/engine/waiting.py``, a status line and the usage bar, and owns
+every redraw of it and of the Control Rooms (``DashboardRefresher``).
 """
 
 from __future__ import annotations
@@ -14,30 +15,16 @@ from typing import TYPE_CHECKING, Callable
 
 import discord
 
-from bot.textutil import parse_iso_utc
 from bot import config
 from bot.claude.auth_health import split_accounts
 from bot.claude.types import InstanceStatus
 from bot.discord.access import load_access_config
-from bot.platform.formatting import format_relative_time
 
 if TYPE_CHECKING:
     from bot.discord.forums import ForumManager, ForumProject
     from bot.store.state import StateStore
 
 log = logging.getLogger(__name__)
-
-
-def _preview(text: str | None, limit: int = 30) -> str:
-    """One-line prompt preview, trimmed to *limit* with a … when cut.
-
-    Collapses newlines so a multi-line prompt can't break the dashboard
-    field layout, and signals truncation so the user knows there's more.
-    """
-    s = " ".join((text or "").split())
-    if not s:
-        return "session"
-    return s if len(s) <= limit else s[: limit - 1].rstrip() + "…"
 
 
 # ---------------------------------------------------------------------------
@@ -49,15 +36,16 @@ class ArkView(discord.ui.View):
 
     NOT registered via ``add_view()`` — this bot uses centralized
     ``on_interaction`` dispatch (interactions.handle), not per-view callbacks.
-    Buttons stay interactive because ``timeout=None``.
+    Buttons stay interactive because ``timeout=None``. The custom ids are
+    what that dispatch matches on, so they never change.
     """
 
     def __init__(self, running_count: int = 0):
         super().__init__(timeout=None)
         self.add_item(discord.ui.Button(
-            label="New Repo",
-            style=discord.ButtonStyle.green,
-            custom_id="ark:new_repo",
+            label="Refresh",
+            style=discord.ButtonStyle.secondary,
+            custom_id="ark:refresh",
             row=0,
         ))
         if running_count > 0:
@@ -68,10 +56,10 @@ class ArkView(discord.ui.View):
                 row=0,
             ))
         self.add_item(discord.ui.Button(
-            label="Refresh",
-            style=discord.ButtonStyle.secondary,
-            custom_id="ark:refresh",
-            row=0,
+            label="New Repo",
+            style=discord.ButtonStyle.green,
+            custom_id="ark:new_repo",
+            row=1,
         ))
         self.add_item(discord.ui.Button(
             label="Claude Login",
@@ -91,15 +79,17 @@ class ArkView(discord.ui.View):
 
 def build_dashboard_embed(
     store: StateStore,
-    forum_projects: dict[str, ForumProject],
-    orphan_count: int = 0,
+    waiting_items: list | None = None,
     usage_text: str | None = None,
     start_time: float = 0.0,
 ) -> discord.Embed:
-    """Build the global dashboard embed — mobile-first command center.
+    """The Ark: what is waiting on the owner, then status and usage.
 
-    Shows actionable items (attention, idle, failed) with clickable thread
-    links, global stats, project navigation, cost, and system health.
+    ``waiting_items`` comes from ``bot.engine.waiting.collect``, computed once
+    per refresher pass (docs/design/needs-you.md). Every time in the text is
+    Discord timestamp markup, so an unchanged state renders the same and the
+    refresher's skip holds. Footers do not render that markup, so the start
+    time sits in the status line.
 
     No Discord API calls and no state mutation. Not quite pure: the account
     label stats each account's credentials file (cached on mtime+size in
@@ -107,151 +97,36 @@ def build_dashboard_embed(
     what let a signed-out backup show as ``1/2 accts`` here instead of only
     surfacing at failover time.
     """
-    active_repo, _ = store.get_active_repo()
+    from bot.engine import waiting
 
+    items = list(waiting_items or [])
+    n = len(items)
     embed = discord.Embed(
         title="The Ark",
+        description=(f"**Needs you ({n})**\n" if n else "") + waiting.render_ark(items),
         color=discord.Color.blurple(),
     )
 
-    # --- Build session_id -> thread_id map (used by multiple sections) ---
-    session_to_thread: dict[str, str] = {}
-    for proj in forum_projects.values():
-        for tid, info in proj.threads.items():
-            if info.session_id:
-                session_to_thread[info.session_id] = tid
-
-    # --- Combined item cap for mobile readability ---
-    MAX_LINKED_ITEMS = 12
-    items_remaining = MAX_LINKED_ITEMS
-
-    # --- Needs Attention (needs_input + freshly failed) — clickable links ---
-    attention = store.needs_attention()
-    attention_session_ids: set[str] = set()
-    if attention:
-        attn_lines = []
-        shown = attention[:min(10, items_remaining)]
-        for inst in shown:
-            if inst.session_id:
-                attention_session_ids.add(inst.session_id)
-            icon = "\u2753" if inst.needs_input else "\u274c"
-            line = f"{icon} `{inst.display_id()}` \u2014 {_preview(inst.prompt)}"
-            if inst.repo_name:
-                line = f"**{inst.repo_name}** {line}"
-            thread_id = session_to_thread.get(inst.session_id or "")
-            if thread_id:
-                line += f" \u2022 <#{thread_id}>"
-            attn_lines.append(line)
-        items_remaining -= len(shown)
-        field_val = "\n".join(attn_lines)
-        if len(field_val) > 1024:
-            field_val = field_val[:1021] + "..."
-        embed.add_field(
-            name=f"\u26a0\ufe0f Needs Attention ({len(attention)})",
-            value=field_val, inline=False,
-        )
-
-    # --- Idle Sessions (completed recently, not running — waiting for user) ---
-    # Exclude sessions already shown in Needs Attention
-    idle = store.idle_sessions(max_age_hours=2)
-    idle_with_threads = []
-    for inst in idle:
-        if inst.session_id and inst.session_id in attention_session_ids:
-            continue
-        tid = session_to_thread.get(inst.session_id or "")
-        if tid:
-            idle_with_threads.append((inst, tid))
-    if idle_with_threads and items_remaining > 0:
-        idle_lines = []
-        for inst, tid in idle_with_threads[:min(8, items_remaining)]:
-            label = _preview(inst.prompt)
-            repo_prefix = f"**{inst.repo_name}** " if inst.repo_name else ""
-            idle_lines.append(
-                f"{repo_prefix}`{inst.display_id()}` "
-                f"\u2014 {label} \u2022 <#{tid}>"
-            )
-        items_remaining -= len(idle_lines)
-        field_val = "\n".join(idle_lines)
-        if len(field_val) > 1024:
-            field_val = field_val[:1021] + "..."
-        embed.add_field(
-            name=f"Idle ({len(idle_with_threads)})",
-            value=field_val, inline=False,
-        )
-
-    # --- Failed Recently (last 6h, not already in attention) ---
-    attention_ids = {i.id for i in attention} if attention else set()
-    recent_fails = [
-        f for f in store.recent_failures(hours=6) if f.id not in attention_ids
-    ]
-    if recent_fails and items_remaining > 0:
-        fail_lines = []
-        for inst in recent_fails[:min(5, items_remaining)]:
-            repo_prefix = f"**{inst.repo_name}** " if inst.repo_name else ""
-            tid = session_to_thread.get(inst.session_id or "")
-            link = f" \u2022 <#{tid}>" if tid else ""
-            fail_lines.append(
-                f"\u274c {repo_prefix}`{inst.display_id()}` "
-                f"\u2014 {_preview(inst.prompt)}{link}"
-            )
-        items_remaining -= len(fail_lines)
-        field_val = "\n".join(fail_lines)
-        if len(field_val) > 1024:
-            field_val = field_val[:1021] + "..."
-        embed.add_field(
-            name=f"Failed Recently ({len(recent_fails)})",
-            value=field_val, inline=False,
-        )
-
-    # --- Running / Today / Scheduled (inline row) ---
-    running_count = store.running_count()
-    embed.add_field(name="Running", value=str(running_count), inline=True)
-    embed.add_field(name="Today", value=str(store.instance_count_today()), inline=True)
-    sched_count = len(store.list_schedules())
-    if sched_count:
-        embed.add_field(name="Scheduled", value=str(sched_count), inline=True)
-
-    # --- Projects (enhanced with per-repo running counts) ---
-    if forum_projects:
-        running_by_repo: dict[str, int] = {}
-        for inst in store.list_by_status(InstanceStatus.RUNNING):
-            if inst.repo_name:
-                running_by_repo[inst.repo_name] = running_by_repo.get(inst.repo_name, 0) + 1
-
-        proj_lines = []
-        hidden_projects = 0
-        for name, proj in forum_projects.items():
-            if proj.forum_channel_id and name != "_default":
-                # A hidden repo is deliberately absent here: that is what
-                # hiding is for. It is counted, not listed, so it can never
-                # go missing without a trace.
-                if store.is_repo_dormant(name):
-                    hidden_projects += 1
-                    continue
-                threads = len(proj.threads)
-                parts = [f"<#{proj.forum_channel_id}> ({threads} threads)"]
-                running = running_by_repo.get(name, 0)
-                if running:
-                    parts.append(f"\u2022 {running} running")
-                if name == active_repo:
-                    parts.append("*")
-                proj_lines.append(" ".join(parts))
-        if hidden_projects:
-            proj_lines.append(
-                f"-# {hidden_projects} hidden \u00b7 `/repo list`")
-        if proj_lines:
-            embed.add_field(name="Projects", value="\n".join(proj_lines), inline=False)
-
-    # --- Usage ---
-    usage_label = f"Usage · {config.PLAN_NAME}"
+    # --- Status: running, accounts, up since ---
     total_accts = len(config.CLAUDE_ACCOUNTS)
+    usable_accts = total_accts
     if total_accts > 1:
-        # Show usable/total when one is signed out, so a dead backup can't
-        # masquerade as working failover the way klerk did for five weeks.
         healthy, _ = split_accounts(
             config.CLAUDE_ACCOUNTS, store.sidelined_accounts(),
         )
         usable_accts = len(healthy)
+    status = [f"Running {store.running_count()}"]
+    if usable_accts < total_accts:
+        status.append(f"\u26a0\ufe0f {total_accts - usable_accts} of {total_accts} accounts out")
+    if start_time:
+        status.append(f"Up since <t:{int(start_time)}:R>")
+    embed.add_field(name="Status", value=" \u00b7 ".join(status), inline=False)
+
+    # --- Usage ---
+    usage_label = f"Usage · {config.PLAN_NAME}"
+    if total_accts > 1:
+        # Show usable/total when one is signed out, so a dead backup can't
+        # masquerade as working failover the way klerk did for five weeks.
         if usable_accts < total_accts:
             usage_label += f" · {usable_accts}/{total_accts} accts"
         else:
@@ -261,41 +136,7 @@ def build_dashboard_embed(
     else:
         embed.add_field(name=usage_label, value="Usage data unavailable", inline=False)
 
-    # --- Last Activity ---
-    last = store.last_activity()
-    if last:
-        from datetime import datetime, timezone
-        try:
-            created = parse_iso_utc(last.created_at)
-            delta_secs = (datetime.now(timezone.utc) - created).total_seconds()
-            ago = format_relative_time(delta_secs)
-            if ago != "just now":
-                ago += " ago"
-            repo_part = f" in **{last.repo_name}**" if last.repo_name else ""
-            embed.add_field(
-                name="Last Activity", value=f"{ago}{repo_part}", inline=True,
-            )
-        except Exception:
-            pass
-
-    # --- Uptime ---
-    if start_time:
-        uptime_secs = _time.time() - start_time
-        embed.add_field(
-            name="Uptime", value=format_relative_time(uptime_secs), inline=True,
-        )
-
-    # --- PC / Orphans ---
-    embed.add_field(name="PC", value=config.PC_NAME, inline=True)
-    if orphan_count:
-        embed.add_field(
-            name="Orphans", value=f"{orphan_count} branch/worktree",
-            inline=True,
-        )
-
-    # --- Footer: version ---
-    embed.set_footer(text=f"v{_get_version()}")
-
+    embed.set_footer(text=f"v{_get_version()} \u00b7 {config.PC_NAME}")
     return embed
 
 
@@ -324,26 +165,6 @@ def _get_version() -> str:
     return "unknown"
 
 
-def _count_orphans(store: StateStore) -> int:
-    """Count orphaned branches and worktree directories across all repos.
-
-    Runs subprocess calls (git branch --list) — must be called from a thread.
-    """
-    from pathlib import Path
-    from bot.claude.runner import ClaudeRunner
-
-    instances = store.list_instances()
-    active_branches = {i.branch for i in instances if i.branch}
-    active_worktrees = {i.worktree_path for i in instances if i.worktree_path}
-    total = 0
-    for _rname, rpath in store.list_repos().items():
-        if not Path(rpath).is_dir():
-            continue
-        total += len(ClaudeRunner.scan_orphan_branches(rpath, active_branches))
-        total += len(ClaudeRunner.scan_orphan_worktrees(rpath, active_worktrees))
-    return total
-
-
 # ---------------------------------------------------------------------------
 # Refresh: one object owns every redraw of The Ark and the Control Rooms
 # ---------------------------------------------------------------------------
@@ -359,13 +180,15 @@ PERIODIC_SECONDS = 300
 
 
 def _room_signature(store: StateStore, repo_name: str, proj: ForumProject,
-                    attention_ids: tuple) -> str:
+                    waiting_sig: tuple) -> str:
     """What a repo's Control Room is drawn from, cheaply, without rendering.
 
     A pass redraws only the rooms whose signature moved since the last one
-    that drew them. What this misses (a branch switch, the elapsed minutes on
-    a running line) the periodic sweep picks up, since it renders every room
-    and lets the unchanged-render skip drop the ones that did not move.
+    that drew them. ``waiting_sig`` is the repo's "Needs you" items as keys
+    and times (``waiting.signature``), never a rendered age, so the clock
+    alone moves nothing. What this misses (a branch switch) the periodic
+    sweep picks up, since it renders every room and lets the unchanged-render
+    skip drop the ones that did not move.
     """
     insts = store.list_by_repo(repo_name)
     running = tuple(i.id for i in insts if i.status == InstanceStatus.RUNNING)
@@ -381,7 +204,7 @@ def _room_signature(store: StateStore, repo_name: str, proj: ForumProject,
         deploy = repr(store.get_deploy_state(repo_name))
     except Exception:
         deploy = None
-    return repr((running, attention_ids, completed, cost, deploy,
+    return repr((running, waiting_sig, completed, cost, deploy,
                  proj.control_message_id, len(proj.threads)))
 
 
@@ -395,8 +218,9 @@ class DashboardRefresher:
     ``refresh_now()`` is for a person waiting on the result (the Refresh
     button) and for startup: it runs a pass at once, still one at a time.
 
-    A pass redraws The Ark when its render changed, then the Control Rooms
-    whose signature changed, skipping hidden repos. A sweep (startup, the
+    A pass reads the "Needs you" list once (off the loop), redraws The Ark
+    when its render changed, then the Control Rooms whose signature changed,
+    each handed its own slice of that list, skipping hidden repos. A sweep (startup, the
     periodic tick, Refresh) renders every visible room and the personal ones;
     an unchanged render still sends nothing.
     """
@@ -452,18 +276,33 @@ class DashboardRefresher:
     async def _run_pass(self, *, sweep: bool) -> None:
         async with self._pass_lock:
             self._last_pass = self._clock()
+            items = await self._collect_waiting()
             try:
-                await self._redraw_ark()
+                await self._redraw_ark(items)
             except Exception:
                 log.warning("Dashboard refresh failed", exc_info=True)
             try:
-                await self._redraw_rooms(sweep=sweep)
+                await self._redraw_rooms(sweep=sweep, items=items)
             except Exception:
                 log.warning("Control room refresh pass failed", exc_info=True)
 
+    async def _collect_waiting(self) -> list | None:
+        """The pass's one read of the "Needs you" list. None when it failed.
+
+        The thread index is snapshotted here, on the loop that mutates the
+        forum map; the reads (store, vault, git) then run in a worker thread.
+        """
+        from bot.engine import waiting
+        try:
+            idx = waiting.thread_index(self._forums.forum_projects)
+            return await asyncio.to_thread(waiting.collect, self._store, idx)
+        except Exception:
+            log.warning("Needs-you list could not be read this pass", exc_info=True)
+            return None
+
     # --- The Ark ---
 
-    async def _redraw_ark(self) -> None:
+    async def _redraw_ark(self, items: list | None = None) -> None:
         lobby_id = self._lobby_channel_id()
         if not lobby_id:
             return
@@ -471,11 +310,11 @@ class DashboardRefresher:
         if not lobby or not isinstance(lobby, discord.TextChannel):
             return
 
+        if items is None:
+            # A list that could not be read is not "nothing waiting": keep
+            # what The Ark shows now rather than empty it.
+            return
         from bot.engine.usage import get_usage_bar_async
-        try:
-            orphan_count = await asyncio.to_thread(_count_orphans, self._store)
-        except Exception:
-            orphan_count = 0
         try:
             usage_text = await get_usage_bar_async()
         except Exception:
@@ -483,8 +322,7 @@ class DashboardRefresher:
             usage_text = None
         from bot.engine.commands import get_start_time
         embed = build_dashboard_embed(
-            self._store, self._forums.forum_projects, orphan_count,
-            usage_text=usage_text, start_time=get_start_time(),
+            self._store, items, usage_text=usage_text, start_time=get_start_time(),
         )
         view = ArkView(running_count=self._store.running_count())
 
@@ -499,12 +337,13 @@ class DashboardRefresher:
 
     # --- Control Rooms ---
 
-    async def _redraw_rooms(self, *, sweep: bool) -> None:
-        attention_by_repo: dict[str, list] = {}
-        for inst in self._store.needs_attention():
-            if inst.repo_name:
-                attention_by_repo.setdefault(inst.repo_name, []).append(
-                    (inst.id, bool(inst.needs_input)))
+    async def _redraw_rooms(self, *, sweep: bool, items: list | None = None) -> None:
+        from bot.engine import waiting
+        if items is None:
+            # Without the list a room would render with no "Needs you" field;
+            # the next pass that can read it redraws them.
+            return
+        by_repo = waiting.by_repo(items)
 
         due: list[tuple[str, str]] = []
         for name, proj in list(self._forums.forum_projects.items()):
@@ -515,13 +354,14 @@ class DashboardRefresher:
             if self._store.is_repo_dormant(name):
                 continue
             sig = _room_signature(self._store, name, proj,
-                                  tuple(attention_by_repo.get(name, ())))
+                                  waiting.signature(by_repo.get(name, ())))
             if sweep or self._room_sigs.get(name) != sig:
                 due.append((name, sig))
 
         async def one(name: str, sig: str) -> None:
             try:
-                current = await self._forums.refresh_control_room(name)
+                current = await self._forums.refresh_control_room(
+                    name, waiting=by_repo.get(name, []))
             except Exception:
                 log.debug("Control room refresh failed for %s", name, exc_info=True)
                 current = False

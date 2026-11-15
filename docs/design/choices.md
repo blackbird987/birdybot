@@ -74,7 +74,9 @@ log), `buttons.choice_row_specs` and `_fit_rows`, `lifecycle.send_result(choices
   than five keeps the first five.
 - **Offers live in state.json under `choice_offers`**, not on the Instance:
   instances are pruned, and an offer must survive a restart. The autonomy loop
-  expires offers older than a week.
+  expires offers older than a week. One expiry rule, `offer_live`, serves the
+  tap, the sweep and the "Needs you" list, and anything outside the module
+  reads offers through `open_offers` (copies, fails open; `needs-you.md`).
 
 Sandboxed and guest sessions may offer choices on purpose. A tap sends only
 the label, as the person who tapped, with that person's access; they could

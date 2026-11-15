@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+- **The Ark is one "Needs you" list.** Everything waiting on the owner across every repo, most urgent first and one line per thread: key requests, the bot update, the other machine's questions, deploys, accounts, open `/choices` picks with their labels, questions, paused chains, Resume parent, failed and held merges, failed runs, manual recovery, built work not merged, and a count of threads where it is your turn (answered in the last 48h, no reply yet). At most 15 lines, then "and N more" by kind; "Nothing is waiting on you." when empty. Items in hidden repos are marked "(hidden)". Below it: a Status field (running count, account warning, up since) and Usage; version and PC sit in the footer. Every time is a Discord timestamp, so an unchanged state no longer edits the message. Design: `docs/design/needs-you.md`. Harness: `scripts/test_waiting.py`.
+- **Gone from The Ark:** Idle, Failed Recently, Projects, the Running/Today/Scheduled row, Last Activity and Orphans. The orphan count is in `/branches`, which already printed it.
+- **Each Control Room's "Needs you" field** shows its own repo's slice of the same list, and `/list attention` prints it. The old needs-attention store query is gone.
+- **Old records are filtered, not deleted.** A failed merge shows only while git says its branch exists and is not merged, a paused chain only while its session can resume, and anything undatable or past its window is hidden. On the live state that hides all 21 stale failed-merge records and all 11 stale paused chains; nothing in state.json was removed.
+- The Ark's buttons are two rows: Refresh and Stop All, then New Repo, Claude Login and Provider.
+- New records carry what the list needs: key requests and update cards store when they went out, paused chains store why, failed merges store their branch and target, Resume parent payloads store their thread, and session threads store when the last turn finished and when a person last wrote.
+
 ## v0.102.29, One-tap choice buttons (2026-11-15)
 
 ### Added

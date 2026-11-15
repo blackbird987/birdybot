@@ -321,9 +321,13 @@ class ClaudeBot(StartupMixin, ThreadContextMixin, UsageGateMixin, PendingImagesM
         must survive a restart.
         """
         uid = str(user_id)
+        # "Your turn" closes when a person writes here (bot/engine/waiting.py).
+        info.last_human_at = round(_time.time(), 3)
         if uid not in info.user_ids:
             info.user_ids.add(uid)
             self._forums.save_forum_map()
+        else:
+            self._forums.save_forum_map(persist=False)
 
     def _cancel_sleep(self, channel_id: str) -> None:
         idle_mod.cancel_sleep(self, channel_id)
@@ -349,6 +353,10 @@ class ClaudeBot(StartupMixin, ThreadContextMixin, UsageGateMixin, PendingImagesM
         self._forums.persist_ctx_settings(ctx)
         if pending_thread:
             await self._forums.update_pending_thread(channel_id)
+        try:
+            self._forums.note_turn_finished(channel_id)
+        except Exception:
+            log.debug("Could not stamp the turn on %s", channel_id, exc_info=True)
         asyncio.create_task(self._try_apply_tags_after_run(channel_id))
         self._schedule_sleep(channel_id)
         if dashboard:

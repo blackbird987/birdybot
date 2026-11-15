@@ -231,10 +231,18 @@ async def on_list(ctx: RequestContext, text: str) -> None:
         elif tok in repos:
             repo_filter = tok
 
-    # Build filtered list
+    # "attention" is the same "Needs you" list The Ark shows
+    # (bot/engine/waiting.py), scoped to a repo when one is named.
     if "questions" in tokens or "asking" in tokens or "attention" in tokens:
-        instances = ctx.store.needs_attention()
-    elif status_filters:
+        from bot.engine import waiting
+        items = await asyncio.to_thread(waiting.collect, ctx.store, None, repo=repo_filter)
+        text = waiting.render_ark(items, max_lines=30)
+        if items:
+            text = f"**Needs you ({len(items)})**\n{text}"
+        for chunk in ctx.messenger.chunk_message(text):
+            await ctx.messenger.send_text(ctx.channel_id, chunk)
+        return
+    if status_filters:
         instances = ctx.store.list_by_status(*status_filters)
     else:
         instances = ctx.store.list_instances(all_=show_all)

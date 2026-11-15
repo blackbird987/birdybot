@@ -147,12 +147,18 @@ def _get_payloads(bot: ClaudeBot) -> dict:
     return payloads
 
 
-def store_resume_payload(bot: ClaudeBot, prompt: str) -> str:
-    """Persist a resume prompt and return a short opaque token."""
+def store_resume_payload(bot: ClaudeBot, prompt: str, thread_id: str | None = None) -> str:
+    """Persist a resume prompt and return a short opaque token.
+
+    ``thread_id`` is the parent thread the Resume button goes into, so the
+    "Needs you" list can show it. Entries without one are not shown there.
+    """
     token = secrets.token_urlsafe(8)
     payloads = _get_payloads(bot)
-    payloads[token] = {"prompt": prompt,
-                       "at": datetime.now(timezone.utc).isoformat()}
+    entry = {"prompt": prompt, "at": datetime.now(timezone.utc).isoformat()}
+    if thread_id:
+        entry["thread_id"] = str(thread_id)
+    payloads[token] = entry
     bot._store.save()
     return token
 
@@ -593,7 +599,7 @@ async def _deliver(
     buttons = None
     if not auto_resume:
         try:
-            token = store_resume_payload(bot, resume_prompt)
+            token = store_resume_payload(bot, resume_prompt, thread_id=parent_id)
             buttons = [[ButtonSpec(label="Resume parent", callback_data=f"orch_resume:{token}")]]
         except Exception:
             log.exception("failed to store orch resume payload")

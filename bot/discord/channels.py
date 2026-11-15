@@ -684,8 +684,8 @@ def _format_instance_line(
             line += f" \u2022 <#{thread_id}>"
     started = parse_iso_utc(inst.created_at) if show_elapsed else None
     if started is not None:
-        mins = int((datetime.now(timezone.utc) - started).total_seconds() // 60)
-        line += f" \u2022 {'<1' if mins < 1 else str(mins)}m"
+        # Discord keeps this current, so the render does not change by the minute.
+        line += f" \u2022 <t:{int(started.timestamp())}:R>"
     return line
 
 
@@ -695,7 +695,8 @@ def build_control_embed(
     branch: str | None = None,
     *,
     running_instances: list | None = None,
-    attention_instances: list | None = None,
+    waiting_text: str | None = None,
+    waiting_count: int = 0,
     completed_instances: list | None = None,
     session_to_thread: dict[str, str] | None = None,
     today_cost: float = 0.0,
@@ -708,7 +709,9 @@ def build_control_embed(
 
     Instance lists are optional — when omitted (initial creation),
     the embed shows just branch. When provided (refresh),
-    it shows full dashboard data for this repo.
+    it shows full dashboard data for this repo. ``waiting_text`` is this
+    repo's "Needs you" lines (``waiting.render_room``), ``waiting_count`` how
+    many items they cover.
 
     ``description`` is the derived "what is this repo about" blurb
     (``bot/engine/repo_desc.py``). When present it leads and the path is
@@ -716,7 +719,6 @@ def build_control_embed(
     otherwise and the user has to remember which is which.
     """
     running_instances = running_instances or []
-    attention_instances = attention_instances or []
     completed_instances = completed_instances or []
     active_count = len(running_instances)
 
@@ -731,16 +733,11 @@ def build_control_embed(
         color=discord.Color.dark_grey(),
     )
 
-    # Needs Attention section (top priority)
-    if attention_instances:
-        attn_lines = []
-        for inst in attention_instances[:10]:
-            icon = "\u2753" if inst.needs_input else "\u274c"
-            line = f"{icon} " + _format_instance_line(inst, session_to_thread)
-            attn_lines.append(line)
+    # Needs you (top priority): the same items The Ark lists, this repo's slice
+    if waiting_text:
         embed.add_field(
-            name=f"Needs Attention ({len(attention_instances)})",
-            value=hard_clip("\n".join(attn_lines), 1024, "..."),
+            name=f"Needs you ({waiting_count})",
+            value=hard_clip(waiting_text, 1024, "..."),
             inline=False,
         )
 
