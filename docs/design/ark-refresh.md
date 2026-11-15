@@ -35,7 +35,10 @@ redraw. `bot._refresh_dashboard()` is a thin front for it.
 - The 5-minute periodic loop (`start_periodic_refresh`) only calls
   `request(sweep=True)`.
 
-A pass does two things:
+A pass first builds the "Needs you" list once (`waiting.collect`, in a
+thread, with the thread index snapshotted on the loop; see `needs-you.md`).
+If that list cannot be built, the pass leaves The Ark and every room as they
+are. Then it does two things:
 
 1. **The Ark.** Render, digest the embed and buttons (`forums.control_digest`)
    and skip the edit when the digest matches the last one that landed. The edit
@@ -44,7 +47,8 @@ A pass does two things:
    warning, keeps the stored id and clears the digest, so the next pass retries
    the same message.
 2. **Control Rooms.** Each repo has a cheap signature built from the store with
-   no rendering: running ids, attention ids, the five latest completed ids,
+   no rendering: running ids, the room's slice of the waiting list (item keys,
+   times, details), the five latest completed ids,
    today's cost, the deploy state, the message id and the thread count. A
    normal pass redraws only the rooms whose signature moved. A sweep (startup,
    the periodic tick, Refresh) renders every visible room and the personal
@@ -91,9 +95,11 @@ again. It pauses after every 5 unpins.
 - An unchanged render sends nothing; a failed edit never leaves a digest
   behind that would skip its retry.
 - No usage bar in Control Rooms.
-- No layout change came with this. The Ark's sections (Needs Attention, Idle,
-  Failed Recently, the counts row, Projects, Usage, Last Activity, Uptime, PC,
-  Orphans) are as they were.
+- The Ark is the "Needs you" list, a Status field and Usage, with version and
+  PC in the footer (`needs-you.md`). Every time in it is `<t:EPOCH:R>` markup,
+  never a relative time written out, so an unchanged state gives an unchanged
+  digest. The waiting list is computed once per pass and each room gets its
+  slice.
 
 ## What this does not establish
 
@@ -101,6 +107,4 @@ The harness (`scripts/test_ark_refresh.py`) pins the coalescing, the room
 selection, the skip, the cap, the NotFound-only recreate and the pin cleanup
 against fakes. It does not show the live rate-limit count drop; that is
 measured from `data/logs/bot.log` after a restart ("Global rate limit has been
-hit" lines per hour, before and after). The Ark's own embed carries relative
-times (Uptime, Last Activity), so it still edits roughly once a minute while
-anything triggers it; that is one message and bounded by the 15s floor.
+hit" lines per hour, before and after).

@@ -20,7 +20,7 @@ import discord
 
 from bot import config, peer_confine
 from bot.claude.types import InstanceStatus
-from bot.engine import lifecycle, peer_questions
+from bot.engine import lifecycle, peer_questions, waiting
 from bot.engine.cmd_state import _get_channel_lock
 from bot.platform.buttons import running_button_specs
 from bot.platform.formatting import collapse_bot_directives
@@ -96,6 +96,7 @@ async def handle_tap(bot: ClaudeBot, interaction: discord.Interaction, action: s
         return
     if action == peer_questions.DECLINE_ACTION:
         peer_questions.tap_decline(store, qid)
+        waiting.notify_changed()
         await interaction.edit_original_response(content="Declined. Nothing was read.", view=None)
         _keep(asyncio.create_task(_pump(store, transport)))
         return
@@ -108,6 +109,7 @@ async def handle_tap(bot: ClaudeBot, interaction: discord.Interaction, action: s
         return
     _answering = True  # No await between the check and this line.
     record = peer_questions.mark_running(store, qid, peer_questions.now_secs())
+    waiting.notify_changed()
     _keep(asyncio.create_task(_answer(bot, record, transport, str(interaction.channel.id))))
     await interaction.edit_original_response(
         content=f"Running: checking the session is confined, then reading **{record['repo']}**.",

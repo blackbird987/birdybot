@@ -99,35 +99,26 @@ async def collect_ship_targets(bot: ClaudeBot) -> list[ShipTarget]:
     autopilot-chain state — a paused/interrupted chain owns its thread's
     lifecycle (it will merge on resume); shipping under it would race.
     """
-    from bot.engine.chain_git import _find_session_branch_instance
+    from bot.engine.chain_git import ship_candidates
 
     store, runner, forums = bot._store, bot._runner, bot._forums
-    chained_sessions = set((store.get_all_autopilot_chains() or {}).keys())
-    targets: list[ShipTarget] = []
-    seen_branches: set[str] = set()
-    for proj in list(forums.forum_projects.values()):
-        for tid, info in list(proj.threads.items()):
-            sid = info.session_id
-            if not sid or runner.is_session_active(sid) or sid in chained_sessions:
-                continue
-            inst = _find_session_branch_instance(
-                store, sid,
-                predicate=lambda i: i.status == InstanceStatus.COMPLETED,
-            )
-            if inst is None or not inst.branch or inst.branch in seen_branches:
-                continue
-            ahead = await asyncio.to_thread(
-                _commits_ahead, inst.repo_path, inst.original_branch, inst.branch,
-            )
-            if ahead <= 0:
-                continue
-            seen_branches.add(inst.branch)
-            targets.append(ShipTarget(
-                thread_id=tid, session_id=sid, inst=inst,
-                repo_name=inst.repo_name,
-                title=(info.topic or "").strip() or tid,
-            ))
-    return targets
+    # The thread list is read here, on the loop that mutates it.
+    threads = [
+        (tid, info.session_id, info.topic or "")
+        for proj in list(forums.forum_projects.values())
+        for tid, info in list(proj.threads.items())
+    ]
+    active = {sid for _, sid, _ in threads if sid and runner.is_session_active(sid)}
+    instances = list(store.list_instances(all_=True))
+    found = await asyncio.to_thread(
+        ship_candidates, store, threads,
+        is_active=lambda sid: sid in active, ahead=_commits_ahead, instances=instances,
+    )
+    return [
+        ShipTarget(thread_id=tid, session_id=sid, inst=inst, repo_name=inst.repo_name,
+                   title=topic.strip() or tid)
+        for tid, sid, inst, topic in found
+    ]
 
 
 def _deploy_method(store, repo_name: str) -> str:

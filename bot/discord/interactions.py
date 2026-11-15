@@ -18,7 +18,7 @@ from bot import vault
 from bot.discord import secret_door
 from bot.discord.adapter import _UNCHANGED, _buttons_to_view, view_without_rows
 from bot.discord.modals import QuickTaskModal, SecretRenameModal, _message_without_row
-from bot.engine import commands, peer_questions
+from bot.engine import commands, peer_questions, waiting
 from bot.engine import sessions as sessions_mod
 from bot.engine.directives import choices as choices_mod
 from bot.platform.base import ButtonSpec
@@ -211,6 +211,7 @@ async def _handle_secret_request(
     req = await _secret_vault_call(interaction, vault.pop_request, token)
     if req is _VAULT_FAILED:
         return
+    waiting.notify_changed()
     if req is None:
         await interaction.edit_original_response(content="That request is gone.", view=None)
         return
@@ -337,6 +338,7 @@ async def handle(bot: ClaudeBot, interaction: discord.Interaction) -> None:
         from bot.discord.orchestrator import pop_resume_payload
         token = instance_id  # second segment is the payload token
         synth_prompt = pop_resume_payload(bot, token)
+        waiting.notify_changed()
         if synth_prompt is None:
             try:
                 await interaction.followup.send(
@@ -688,6 +690,7 @@ async def _handle_hold_merge(
             ephemeral=True,
         )
         return
+    waiting.notify_changed()
     try:
         await interaction.message.edit(
             content="Auto-merge held \u2014 merge manually with the Merge "

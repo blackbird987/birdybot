@@ -101,20 +101,32 @@ class ChainsMixin:
             return None
         return self._autopilot_chain_meta.get(session_id)
 
+    def list_autopilot_chain_meta(self) -> dict[str, dict]:
+        """Every chain's meta by session id: copies, for the "Needs you" list."""
+        return {sid: dict(m) for sid, m in list(self._autopilot_chain_meta.items())
+                if isinstance(m, dict)}
+
     def set_autopilot_chain_status(
-        self, session_id: str | None, status: str
+        self, session_id: str | None, status: str, *, reason: str | None = None,
     ) -> None:
-        """Update chain status to 'running' or 'paused' with a timestamp."""
+        """Update chain status to 'running' or 'paused' with a timestamp.
+
+        ``reason`` is the chain's exit outcome on a pause (``needs_input``,
+        ``failed``, ...), kept so the paused chain can say why.
+        """
         if not session_id or status not in ("running", "paused"):
             return
         # Only stamp meta if the chain queue still exists — clearing the chain
         # already drops meta, and we don't want zombie meta with no queue.
         if session_id not in self._autopilot_chains:
             return
-        self._autopilot_chain_meta[session_id] = {
+        meta = {
             "status": status,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
+        if reason:
+            meta["reason"] = reason
+        self._autopilot_chain_meta[session_id] = meta
         self.mark_dirty()
 
     # --- Pending Merges (auto-merge failed; awaiting user resolution) ---
@@ -128,6 +140,8 @@ class ChainsMixin:
         repo_name: str,
         message: str,
         failure_kind: str | None = None,
+        branch: str | None = None,
+        target: str | None = None,
     ) -> None:
         """Record that an auto-merge failed and is awaiting user action.
 
@@ -157,8 +171,16 @@ class ChainsMixin:
             "resolver_instance_id": existing.get("resolver_instance_id", ""),
             "deferred_text": existing.get("deferred_text", ""),
             "failure_kind": failure_kind or existing.get("failure_kind", ""),
+            # The branch and its target, so "Needs you" can tell when the
+            # branch was merged or deleted by other means.
+            "branch": branch or existing.get("branch", ""),
+            "target": target or existing.get("target", ""),
         }
         self.save()
+
+    def list_pending_merges(self) -> dict[str, dict]:
+        """Every failed merge awaiting the owner, by instance id: copies."""
+        return {iid: dict(m) for iid, m in list(self._pending_merges.items())}
 
     def set_pending_merge_failure_kind(
         self, instance_id: str, failure_kind: str | None,
@@ -309,6 +331,10 @@ class ChainsMixin:
             if merge_at and now_iso >= merge_at:
                 due.append((iid, meta))
         return due
+
+    def list_scheduled_merges(self) -> dict[str, dict]:
+        """Every merge countdown (held or not), by instance id: copies."""
+        return {iid: dict(m) for iid, m in list(self._scheduled_merges.items())}
 
     def clear_scheduled_merge(self, instance_id: str) -> None:
         if not instance_id:

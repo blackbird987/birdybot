@@ -103,7 +103,9 @@ async def _exit_chain(
         # Chain queue stays for user-driven resume (needs_input,
         # phantom_detected, phase_gate_risk). Mark it paused so the
         # post-reboot resumer doesn't treat it as crashed-mid-step.
-        ctx.store.set_autopilot_chain_status(session_id, "paused")
+        ctx.store.set_autopilot_chain_status(session_id, "paused", reason=outcome)
+        from bot.engine import waiting
+        waiting.notify_changed()
     await _notify_user(ctx, suffix)
 
 

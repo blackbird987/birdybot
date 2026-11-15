@@ -270,6 +270,8 @@ async def card_new_questions(store, transport: Transport, now: float) -> None:
         record["status"] = CARDED
         store.peer_put_received(record, critical=True)
         store.peer_bump_today("carded", today(now))
+        from bot.engine import waiting
+        waiting.notify_changed()
 
 
 async def expire_cards(store, transport: Transport, now: float) -> None:

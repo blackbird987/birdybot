@@ -81,9 +81,6 @@ class _Store:
     def list_by_repo(self, name):  # noqa: ANN001, ANN202
         return [i for i in self.instances if i.repo_name == name]
 
-    def needs_attention(self):  # noqa: ANN202
-        return [i for i in self.instances if i.needs_input]
-
     def get_repo_daily_cost(self, _n) -> float:  # noqa: ANN001
         return 0.0
 
@@ -116,9 +113,11 @@ class _Forums:
         }
         self.calls: list[str] = []
         self.fail: set[str] = set()
+        self.waiting: dict = {}
 
-    async def refresh_control_room(self, name: str) -> bool:
+    async def refresh_control_room(self, name: str, *, waiting=None) -> bool:  # noqa: ANN001
         self.calls.append(name)
+        self.waiting[name] = waiting
         await asyncio.sleep(0)
         return name not in self.fail
 
@@ -178,29 +177,30 @@ async def _arm_rooms() -> None:
     fm = _Forums(["a", "b", "c", "hidden"])
     store.dormant = {"hidden"}
     r = _refresher(store, fm)
+    items: list = []
 
-    await r._redraw_rooms(sweep=False)
+    await r._redraw_rooms(sweep=False, items=items)
     check(sorted(fm.calls) == ["a", "b", "c"],
           f"the first pass draws every visible room ({sorted(fm.calls)})")
     check("hidden" not in fm.calls, "a hidden repo is never redrawn")
 
     fm.calls.clear()
-    await r._redraw_rooms(sweep=False)
+    await r._redraw_rooms(sweep=False, items=items)
     check(fm.calls == [], f"nothing changed: no room is redrawn ({fm.calls})")
 
     store.instances.append(_Inst(id="q-1", repo_name="b", status=InstanceStatus.RUNNING,
                                  needs_input=False))
-    await r._redraw_rooms(sweep=False)
+    await r._redraw_rooms(sweep=False, items=items)
     check(fm.calls == ["b"], f"an instance starting in b redraws b only ({fm.calls})")
 
     fm.calls.clear()
     store.instances.append(_Inst(id="q-2", repo_name="hidden",
                                  status=InstanceStatus.RUNNING, needs_input=False))
-    await r._redraw_rooms(sweep=False)
+    await r._redraw_rooms(sweep=False, items=items)
     check(fm.calls == [], f"activity in a hidden repo redraws nothing ({fm.calls})")
 
     fm.calls.clear()
-    await r._redraw_rooms(sweep=True)
+    await r._redraw_rooms(sweep=True, items=items)
     check(sorted(fm.calls) == ["a", "b", "c"],
           f"a sweep renders every visible room ({sorted(fm.calls)})")
 
@@ -208,11 +208,26 @@ async def _arm_rooms() -> None:
     fm.fail = {"c"}
     store.instances.append(_Inst(id="q-3", repo_name="c", status=InstanceStatus.RUNNING,
                                  needs_input=False))
-    await r._redraw_rooms(sweep=False)
+    await r._redraw_rooms(sweep=False, items=items)
     fm.fail = set()
     fm.calls.clear()
-    await r._redraw_rooms(sweep=False)
+    await r._redraw_rooms(sweep=False, items=items)
     check(fm.calls == ["c"], f"a room whose redraw failed is retried next pass ({fm.calls})")
+
+    from bot.engine.waiting import WaitingItem
+    fm.calls.clear()
+    items = [WaitingItem(kind="question", key="question:q-9", repo="a",
+                         thread_id="900", title="t", since=1000.0)]
+    await r._redraw_rooms(sweep=False, items=items)
+    check(fm.calls == ["a"], f"an item waiting in a redraws a only ({fm.calls})")
+    check([i.key for i in fm.waiting.get("a") or []] == ["question:q-9"],
+          "the room is handed its own slice of the pass's list")
+    fm.calls.clear()
+    await r._redraw_rooms(sweep=False, items=list(items))
+    check(fm.calls == [], f"the same items again redraw nothing ({fm.calls})")
+    fm.calls.clear()
+    await r._redraw_rooms(sweep=False, items=None)
+    check(fm.calls == [], "a pass whose list could not be read redraws no room")
 
 
 class _Msg:
@@ -375,25 +390,26 @@ async def _arm_ark_skip() -> None:
         return "bar"
     import bot.engine.usage as usage
     saved = (dashboard.discord.TextChannel, dashboard.build_dashboard_embed,
-             dashboard._count_orphans, usage.get_usage_bar_async)
+             usage.get_usage_bar_async)
     dashboard.discord.TextChannel = _Lobby
     dashboard.build_dashboard_embed = lambda *_a, **_k: discord.Embed(title=f"v{version['n']}")
-    dashboard._count_orphans = lambda _s: 0
     usage.get_usage_bar_async = no_bar
     try:
-        await r._redraw_ark()
-        await r._redraw_ark()
+        await r._redraw_ark([])
+        await r._redraw_ark([])
         check(lobby.edits == 1, f"the same render twice edits once ({lobby.edits})")
         version["n"] += 1
         lobby.edit_error = _http(discord.HTTPException, 429)
-        await r._redraw_ark()
+        await r._redraw_ark([])
         lobby.edit_error = None
-        await r._redraw_ark()
+        await r._redraw_ark([])
         check(lobby.edits == 2 and lobby.sent == [],
               f"a failed edit is retried with the same render, nothing posted ({lobby.edits})")
+        await r._redraw_ark(None)
+        check(lobby.edits == 2, "a list that could not be read leaves The Ark as it is")
     finally:
         (dashboard.discord.TextChannel, dashboard.build_dashboard_embed,
-         dashboard._count_orphans, usage.get_usage_bar_async) = saved
+         usage.get_usage_bar_async) = saved
 
 
 def _pin(mid: int, author: int, title: str | None = None, ark_button: bool = False):  # noqa: ANN202

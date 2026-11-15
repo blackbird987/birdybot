@@ -133,6 +133,22 @@ class StartupMixin:
         # the first dashboard render always has cached usage data)
         asyncio.create_task(self._warmup_then_refresh_lobby())
 
+        # A change to something on the "Needs you" list that is not a turn (a
+        # key request, a held merge, a peer card) asks the refresher for a
+        # pass. Safe from a worker thread: it hops back onto this loop.
+        from bot.engine import waiting
+        loop = asyncio.get_running_loop()
+        refresher = self._dashboard
+
+        def _waiting_changed() -> None:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                loop.call_soon_threadsafe(refresher.request)
+            else:
+                refresher.request()
+        waiting.set_listener(_waiting_changed)
+
         # Periodic dashboard refresh (keeps usage data current)
         # Guard: on_ready fires on every reconnect — don't create duplicates
         existing = getattr(self, '_periodic_refresh_task', None)

@@ -14,6 +14,7 @@ import asyncio
 import logging
 import re
 import sys
+import time
 from dataclasses import dataclass
 
 from bot import config
@@ -70,8 +71,15 @@ def carded_sha(store) -> str | None:
     return store.get_platform_state(_STATE_KEY).get("carded_sha")
 
 
+def carded_at(store) -> float | None:
+    """When that card went out (epoch seconds). None for a card from before this was kept."""
+    return store.get_platform_state(_STATE_KEY).get("carded_at")
+
+
 def _record_carded(store, sha: str | None) -> None:
-    store.set_platform_state(_STATE_KEY, {"carded_sha": sha} if sha else {})
+    store.set_platform_state(
+        _STATE_KEY, {"carded_sha": sha, "carded_at": time.time()} if sha else {},
+    )
 
 
 def current_card_custom_id(store) -> str | None:
@@ -116,7 +124,8 @@ async def _offer_update(
 ) -> None:
     """Post one card for ``remote_sha``, unless one already went out for it."""
     store = runner._store
-    previous = carded_sha(store)
+    previous_state = dict(store.get_platform_state(_STATE_KEY) or {})
+    previous = previous_state.get("carded_sha")
     if previous == remote_sha:
         return
     diff = await _git("diff", "--name-only", local_sha, remote_sha, timeout=10)
@@ -135,7 +144,11 @@ async def _offer_update(
     )
     if not delivered:
         log.info("Auto-update: card for %s not delivered, will retry", remote_sha[:7])
-        _record_carded(store, previous)
+        # Put back exactly what was there, so an older card keeps its time.
+        store.set_platform_state(_STATE_KEY, previous_state)
+        return
+    from bot.engine import waiting
+    waiting.notify_changed()
 
 
 @dataclass

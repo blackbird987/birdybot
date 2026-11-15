@@ -78,6 +78,8 @@ async def _handle_secret_directives(
                 ]],
             )
             posted += 1
+            from bot.engine import waiting
+            waiting.notify_changed()
         except Exception:
             # Nobody saw the buttons, so it must not count as pending or the
             # session could never ask again.

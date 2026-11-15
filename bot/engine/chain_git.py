@@ -54,7 +54,7 @@ def _is_worktree_live(repo_path: str, worktree_path: str) -> bool:
 
 def _find_session_branch_instance(
     store, session_id: str | None,
-    *, predicate=None,
+    *, predicate=None, instances=None,
 ) -> Instance | None:
     """Most recent instance in a session with a live branch + worktree.
 
@@ -63,11 +63,13 @@ def _find_session_branch_instance(
     worktree is still registered with git (`_is_worktree_live`).  An
     optional predicate narrows further (e.g. require completion, exclude
     running instances).  Shared between the merge-resume path and the
-    chain-detector so they can't drift out of sync.
+    chain-detector so they can't drift out of sync. ``instances`` is a
+    newest-first snapshot to search instead of the store's list.
     """
     if not session_id:
         return None
-    for inst in store.list_instances(all_=True):  # newest-first
+    pool = store.list_instances(all_=True) if instances is None else instances
+    for inst in pool:  # newest-first
         if inst.session_id != session_id:
             continue
         if not (inst.branch and inst.original_branch and inst.worktree_path):
@@ -78,6 +80,47 @@ def _find_session_branch_instance(
             continue
         return inst
     return None
+
+
+def ship_candidates(
+    store, threads, *, is_active, ahead, instances=None,
+) -> list[tuple[str, str, Instance, str]]:
+    """Threads whose session has built work that is not merged yet.
+
+    ``threads`` is ``(thread_id, session_id, topic)`` triples. A thread
+    qualifies when its session has a completed instance with a live branch and
+    worktree (``_find_session_branch_instance``) AND that branch has commits
+    ahead of its base (``ahead(repo_path, base, branch)``): a branch level with
+    its base is unfinished or no-op work. Skipped: sessions with a run in
+    flight (``is_active``) and sessions with persisted chain state, since a
+    paused chain owns its thread (it merges on resume). One target per branch.
+
+    Synchronous and runs git: call it off the event loop. Shared by fleet
+    ship and the "Needs you" list, so "ready to merge" means one thing.
+    Returns ``(thread_id, session_id, instance, topic)``.
+    """
+    chained = set((store.get_all_autopilot_chains() or {}).keys())
+    pool = list(store.list_instances(all_=True)) if instances is None else instances
+    by_session: dict[str, list[Instance]] = {}
+    for inst in pool:  # keeps newest-first within each session
+        if inst.session_id:
+            by_session.setdefault(inst.session_id, []).append(inst)
+    out: list[tuple[str, str, Instance, str]] = []
+    seen_branches: set[str] = set()
+    for tid, sid, topic in threads:
+        if not sid or sid in chained or is_active(sid):
+            continue
+        inst = _find_session_branch_instance(
+            store, sid, instances=by_session.get(sid, ()),
+            predicate=lambda i: i.status == InstanceStatus.COMPLETED,
+        )
+        if inst is None or not inst.branch or inst.branch in seen_branches:
+            continue
+        if ahead(inst.repo_path, inst.original_branch, inst.branch) <= 0:
+            continue
+        seen_branches.add(inst.branch)
+        out.append((tid, sid, inst, topic))
+    return out
 
 
 def _find_mergeable_instance(store, session_id: str | None) -> Instance | None:

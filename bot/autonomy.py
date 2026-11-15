@@ -177,6 +177,8 @@ async def fire_scheduled_merge(store, runner, discord_bot, iid: str, meta: dict)
             log.exception("Scheduled auto-merge crashed for %s", iid)
             outcome = workflows.MergeOutcome.FAILED
     store.clear_scheduled_merge(iid)
+    from bot.engine import waiting
+    waiting.notify_changed()
     # STOPPED already pinged the thread from _finalize_merge, and the branch
     # landed, so there is no conflict to offer Resolve / Retry for.
     if outcome is workflows.MergeOutcome.FAILED:

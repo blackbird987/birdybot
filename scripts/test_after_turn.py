@@ -49,6 +49,9 @@ class _Forums:
     async def update_pending_thread(self, channel_id):  # noqa: ANN001
         self.calls.append(f"pending:{channel_id}")
 
+    def note_turn_finished(self, channel_id):  # noqa: ANN001
+        self.calls.append(f"turn:{channel_id}")
+
 
 class _Bot:
     _after_turn = ClaudeBot._after_turn
@@ -77,8 +80,8 @@ async def _run(**kw) -> list[str]:  # noqa: ANN003
 async def _arm_steps() -> None:
     print("steps and flags")
     calls = await _run()
-    check(calls == ["persist:ctx", "sleep:7", "tags:7", "dashboard"],
-          f"default: settings, idle timer, tags, dashboard (got {calls})")
+    check(calls == ["persist:ctx", "turn:7", "sleep:7", "tags:7", "dashboard"],
+          f"default: settings, turn stamp, idle timer, tags, dashboard (got {calls})")
     calls = await _run(pending_thread=True)
     check(calls[:2] == ["persist:ctx", "pending:7"],
           f"a /new thread is bound right after its settings (got {calls})")

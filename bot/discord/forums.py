@@ -12,6 +12,7 @@ import enum
 import logging
 import re
 import secrets
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable
@@ -119,6 +120,11 @@ class ThreadInfo:
     # any turn that ends cleanly (marker present, a wake scheduled, or a human
     # reply). Caps the re-nudge loop at config.MAX_CONSEC_NUDGES.
     nudge_count: int = 0
+    # "Needs you" (bot/engine/waiting.py): when the bot's last turn here
+    # finished and when a person last wrote or tapped here (epoch seconds).
+    # A turn newer than the last human message is the owner's turn.
+    last_turn_at: float | None = None
+    last_human_at: float | None = None
 
     def to_dict(self) -> dict:
         d = {
@@ -157,6 +163,10 @@ class ThreadInfo:
             d["wake_count"] = self.wake_count
         if self.nudge_count:
             d["nudge_count"] = self.nudge_count
+        if self.last_turn_at is not None:
+            d["last_turn_at"] = self.last_turn_at
+        if self.last_human_at is not None:
+            d["last_human_at"] = self.last_human_at
         return d
 
     @classmethod
@@ -182,6 +192,8 @@ class ThreadInfo:
             color_slot=data.get("color_slot"),
             wake_count=data.get("wake_count", 0),
             nudge_count=data.get("nudge_count", 0),
+            last_turn_at=data.get("last_turn_at"),
+            last_human_at=data.get("last_human_at"),
         )
 
 
@@ -381,11 +393,27 @@ class ForumManager:
                 self._archive_channel_ids.add(int(p.archive_channel_id))
         log.info("Loaded %d forum projects", len(self._forum_projects))
 
-    def save_forum_map(self) -> None:
+    def save_forum_map(self, *, persist: bool = True) -> None:
         """Persist forum->project mapping to platform_state."""
         state = self._store.get_platform_state("discord")
         state["forum_projects"] = {k: v.to_dict() for k, v in self._forum_projects.items()}
-        self._store.set_platform_state("discord", state, persist=True)
+        self._store.set_platform_state("discord", state, persist=persist)
+
+    def note_turn_finished(self, thread_id: str, now: float | None = None) -> None:
+        """Stamp a session thread's last finished turn, for "Your turn".
+
+        Marked dirty, not saved: the 60s auto-save covers it, and a stamp
+        lost to a crash only drops one thread from that line.
+        """
+        lookup = self.thread_to_project(str(thread_id))
+        if lookup is None:
+            return
+        proj, info = lookup
+        if str(thread_id) in {proj.control_thread_id, proj.archive_thread_id,
+                              proj.monitor_thread_id}:
+            return
+        info.last_turn_at = round(time.time() if now is None else now, 3)
+        self.save_forum_map(persist=False)
 
     def session_to_thread(self, session_id: str) -> tuple[str, ThreadInfo] | None:
         """Reverse lookup: find thread for a session_id. Returns (thread_id, info)."""
@@ -1789,11 +1817,14 @@ class ForumManager:
             log.debug("Failed to delete persisted msg %s", msg_id, exc_info=True)
 
     async def refresh_control_room(self, repo_name: str, *,
-                                   drain_status: str | None = None) -> bool:
+                                   drain_status: str | None = None,
+                                   waiting: list | None = None) -> bool:
         """Update the control room embed for a repo forum.
 
-        True when the room now shows the current render (edited, or already
-        showing it); False when there is no room or the edit failed.
+        ``waiting`` is this repo's "Needs you" items when the caller already
+        has them (the refresher computes the list once per pass); None reads
+        them fresh. True when the room now shows the current render (edited,
+        or already showing it); False when there is no room or the edit failed.
         """
         proj = self._forum_projects.get(repo_name)
         if not proj or not proj.control_thread_id or not proj.control_message_id:
@@ -1806,7 +1837,7 @@ class ForumManager:
 
         async def render():  # noqa: ANN202
             return await self._render_repo_control(
-                proj, repo_name, drain_status=drain_status,
+                proj, repo_name, drain_status=drain_status, waiting=waiting,
             )
 
         return await self._refresh_control_message(
@@ -1816,13 +1847,23 @@ class ForumManager:
         )
 
     async def _render_repo_control(self, proj: ForumProject, repo_name: str, *,
-                                   drain_status: str | None):  # noqa: ANN202
+                                   drain_status: str | None,
+                                   waiting: list | None = None):  # noqa: ANN202
         """The embed and buttons of a repo's Control Room, read fresh."""
         from bot.claude.types import InstanceStatus
+        from bot.engine import waiting as waiting_mod
 
         repo_instances = self._store.list_by_repo(repo_name)
         running = [i for i in repo_instances if i.status == InstanceStatus.RUNNING]
-        attention = [i for i in self._store.needs_attention() if i.repo_name == repo_name]
+        if waiting is None:
+            try:
+                idx = waiting_mod.thread_index(self._forum_projects)
+                waiting = await asyncio.to_thread(
+                    waiting_mod.collect, self._store, idx, repo=repo_name,
+                )
+            except Exception:
+                log.debug("Needs-you read failed for %s", repo_name, exc_info=True)
+                waiting = []
         completed = [i for i in repo_instances
                      if i.status == InstanceStatus.COMPLETED and not i.needs_input][:5]
 
@@ -1856,7 +1897,8 @@ class ForumManager:
         embed = channels.build_control_embed(
             repo_name, repo_path, branch,
             running_instances=running,
-            attention_instances=attention,
+            waiting_text=waiting_mod.render_room(waiting) if waiting else None,
+            waiting_count=len(waiting),
             completed_instances=completed,
             session_to_thread=session_to_thread,
             today_cost=today_cost,

@@ -548,8 +548,10 @@ def case_tap_handler(tmp: Path) -> None:
         def attach_session_callbacks(self, *_a):
             pass
 
-        def save_forum_map(self):
-            saved.append(1)
+        def save_forum_map(self, *, persist=True):  # noqa: ANN001
+            # A repeat tapper still stamps last_human_at, in memory only.
+            if persist:
+                saved.append(1)
 
     class _Bot:
         _store = store
