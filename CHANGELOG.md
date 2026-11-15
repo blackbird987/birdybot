@@ -7,6 +7,7 @@
 - **Gone from The Ark:** Idle, Failed Recently, Projects, the Running/Today/Scheduled row, Last Activity and Orphans. The orphan count is in `/branches`, which already printed it.
 - **Each Control Room's "Needs you" field** shows its own repo's slice of the same list, and `/list attention` prints it. The old needs-attention store query is gone.
 - **Old records are filtered, not deleted.** A failed merge shows only while git says its branch exists and is not merged, a paused chain only while its session can resume, and anything undatable or past its window is hidden. On the live state that hides all 21 stale failed-merge records and all 11 stale paused chains; nothing in state.json was removed.
+- A deploy waiting on approval links to its repo's Control Room, where the Deploy button is.
 - The Ark's buttons are two rows: Refresh and Stop All, then New Repo, Claude Login and Provider.
 - New records carry what the list needs: key requests and update cards store when they went out, paused chains store why, failed merges store their branch and target, Resume parent payloads store their thread, and session threads store when the last turn finished and when a person last wrote.
 
