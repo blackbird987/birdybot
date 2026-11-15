@@ -701,7 +701,6 @@ def build_control_embed(
     today_cost: float = 0.0,
     deploy_state: DeployState | None = None,
     deploy_thread_ids: dict[str, str] | None = None,
-    usage_bar: str | None = None,
     drain_status: str | None = None,
     description: str | None = None,
 ) -> discord.Embed:
@@ -816,9 +815,9 @@ def build_control_embed(
         v = deploy_state.boot_version or "unknown"
         embed.add_field(name="\u2705 Up to date", value=f"`{v}`", inline=True)
 
-    if usage_bar:
-        embed.add_field(name="Usage", value=usage_bar, inline=False)
-    elif today_cost > 0:
+    # No usage bar here: it is account-wide, lives in The Ark, and carrying it
+    # made every room differ on every refresh (docs/design/ark-refresh.md).
+    if today_cost > 0:
         embed.add_field(name="Today", value=f"${today_cost:.4f}", inline=True)
 
     return embed
@@ -910,13 +909,11 @@ async def create_repo_control_post(
     repo_name: str,
     repo_path: str,
     branch: str | None = None,
-    usage_bar: str | None = None,
     has_remote: bool = False,
     description: str | None = None,
 ) -> tuple[discord.Thread, discord.Message]:
     """Create a control room post in a repo forum with action buttons."""
-    embed = build_control_embed(repo_name, repo_path, branch, usage_bar=usage_bar,
-                                description=description)
+    embed = build_control_embed(repo_name, repo_path, branch, description=description)
     view = build_control_view(repo_name, active_count=0, has_remote=has_remote)
 
     result = await forum.create_thread(name=CONTROL_ROOM_NAME, embed=embed, view=view)

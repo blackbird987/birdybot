@@ -42,6 +42,23 @@ log = logging.getLogger(__name__)
 # (and then skipped) rather than renamed to itself on every refresh.
 _LEGACY_CONTROL_ROOM_NAMES = ("Control Center", "Control Room")
 
+# How many Control Rooms may redraw at once. Each refresh used to fire one
+# unbounded task per room, which put 30-odd PATCHes on the wire together and
+# accounted for nearly all of the bot's global rate-limit hits.
+CONTROL_REFRESH_CONCURRENCY = 2
+
+
+def control_digest(embed: discord.Embed, view: discord.ui.View | None) -> str:
+    """A stable digest of what an embed and its buttons would show."""
+    import hashlib
+    import json
+    payload = {
+        "embed": embed.to_dict(),
+        "components": view.to_components() if view is not None else [],
+    }
+    raw = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode()).hexdigest()
+
 # Gap between renames when repairing old titles, so a batch of them stays well
 # clear of Discord's limit on channel edits.
 REPAIR_TITLE_PACE_SECS = 1.0
@@ -275,6 +292,13 @@ class ForumManager:
         # Threads whose current message the secret door deleted: priming's "drop
         # the newest user message" would otherwise drop an earlier one.
         self.current_message_gone: set[str] = set()
+        # Control Room redraws: digest of what each message last showed (by
+        # message id, set only after a successful edit) so an unchanged
+        # render costs no request, and a cap on how many edit at once so a
+        # sweep of every room cannot burst into Discord's global rate limit
+        # (docs/design/ark-refresh.md).
+        self._control_digests: dict[str, str] = {}
+        self._control_sem = asyncio.Semaphore(CONTROL_REFRESH_CONCURRENCY)
 
     @property
     def forum_projects(self) -> dict[str, ForumProject]:
@@ -1764,12 +1788,16 @@ class ForumManager:
         except Exception:
             log.debug("Failed to delete persisted msg %s", msg_id, exc_info=True)
 
-    async def refresh_control_room(self, repo_name: str, *, usage_bar: str | None = None,
-                                   drain_status: str | None = None) -> None:
-        """Update the control room embed for a repo forum."""
+    async def refresh_control_room(self, repo_name: str, *,
+                                   drain_status: str | None = None) -> bool:
+        """Update the control room embed for a repo forum.
+
+        True when the room now shows the current render (edited, or already
+        showing it); False when there is no room or the edit failed.
+        """
         proj = self._forum_projects.get(repo_name)
         if not proj or not proj.control_thread_id or not proj.control_message_id:
-            return
+            return False
 
         def forget() -> None:
             proj.control_thread_id = None
@@ -1778,17 +1806,16 @@ class ForumManager:
 
         async def render():  # noqa: ANN202
             return await self._render_repo_control(
-                proj, repo_name, usage_bar=usage_bar, drain_status=drain_status,
+                proj, repo_name, drain_status=drain_status,
             )
 
-        await self._refresh_control_message(
+        return await self._refresh_control_message(
             repo_name, proj.control_thread_id, proj.control_message_id,
             forget=forget, render=render,
             recreate=lambda: self.ensure_control_post(repo_name),
         )
 
     async def _render_repo_control(self, proj: ForumProject, repo_name: str, *,
-                                   usage_bar: str | None,
                                    drain_status: str | None):  # noqa: ANN202
         """The embed and buttons of a repo's Control Room, read fresh."""
         from bot.claude.types import InstanceStatus
@@ -1825,14 +1852,6 @@ class ForumManager:
                 inst = self._store.get_instance(inst_id)
                 if inst and inst.session_id and inst.session_id in session_to_thread:
                     deploy_thread_ids[inst_id] = session_to_thread[inst.session_id]
-        # Use threaded usage_bar if provided (from dashboard cascade),
-        # otherwise fetch independently (standalone refresh).
-        if usage_bar is None:
-            from bot.engine.usage import get_usage_bar_async
-            try:
-                usage_bar = await get_usage_bar_async()
-            except Exception:
-                pass
         dc = self._store.get_deploy_config(repo_name)
         embed = channels.build_control_embed(
             repo_name, repo_path, branch,
@@ -1843,7 +1862,6 @@ class ForumManager:
             today_cost=today_cost,
             deploy_state=ds,
             deploy_thread_ids=deploy_thread_ids,
-            usage_bar=usage_bar,
             drain_status=drain_status,
             description=blurb,
         )
@@ -1856,14 +1874,14 @@ class ForumManager:
         )
         return embed, view
 
-    async def refresh_user_control_room(self, user_id: str) -> None:
+    async def refresh_user_control_room(self, user_id: str) -> bool:
         """Update the control room embed for a user's personal forum."""
         cfg = load_access_config()
         ua = cfg.users.get(user_id)
         if not ua or not ua.control_room:
-            return
+            return False
         if not ua.control_thread_id or not ua.control_message_id:
-            return
+            return False
 
         def forget() -> None:
             self._user_control_thread_ids.discard(ua.control_thread_id)
@@ -1876,7 +1894,7 @@ class ForumManager:
             return (channels.build_user_control_embed(ua.display_name, repo_names),
                     channels.build_user_control_view(repo_names, ua.buttons))
 
-        await self._refresh_control_message(
+        return await self._refresh_control_message(
             f"user {ua.display_name}", ua.control_thread_id, ua.control_message_id,
             forget=forget, render=render,
             recreate=lambda: self.ensure_user_control_post(user_id),
@@ -1887,15 +1905,82 @@ class ForumManager:
         forget: Callable[[], None],
         render: Callable[[], Awaitable[tuple[discord.Embed, discord.ui.View | None]]],
         recreate: Callable[[], Awaitable[None]],
-    ) -> None:
+    ) -> bool:
         """Redraw one Control Room embed, repo or personal, healing a deleted post.
+
+        Renders first and skips the edit when the result matches what the
+        message last showed, so a sweep of unchanged rooms sends nothing.
+        A changed render edits through a partial message (one request) when
+        the thread is cached, and falls back to fetching the thread when it
+        is not. At most ``CONTROL_REFRESH_CONCURRENCY`` rooms redraw at once.
 
         A deleted thread clears the stored ids (``forget``) and stops; the
         next ensure pass makes a new post. A deleted message clears them too,
         deletes the now-empty thread and makes the new post at once
-        (``recreate``). Anything else is logged at debug and swallowed: this
-        runs on every instance start and completion and must never raise.
+        (``recreate``). Anything else is logged and swallowed: this runs on
+        every instance start and completion and must never raise.
         """
+        async with self._control_sem:
+            try:
+                embed, view = await render()
+            except Exception:
+                log.debug("Failed to render control room for %s", label, exc_info=True)
+                return False
+            digest = control_digest(embed, view)
+            if self._control_digests.get(message_id) == digest:
+                return True
+            # Forget the old digest until this edit lands: a failed edit must
+            # not leave a digest that makes the next pass skip the retry.
+            self._control_digests.pop(message_id, None)
+            fast = await self._edit_control_fast(thread_id, message_id, embed, view)
+            if fast is None:
+                return False  # A real error (a 429, a 5xx): the next refresh retries
+            if not fast and not await self._edit_control_slow(
+                label, thread_id, message_id, embed, view,
+                forget=forget, recreate=recreate,
+            ):
+                return False
+            self._control_digests[message_id] = digest
+            return True
+
+    async def _edit_control_fast(
+        self, thread_id: str, message_id: str,
+        embed: discord.Embed, view: discord.ui.View | None,
+    ) -> bool | None:
+        """Edit through the cached thread with no fetch.
+
+        True: edited. False: not cached, a legacy name, or NotFound, so the
+        slow path should look. None: any other error, logged; nothing more is
+        sent this pass, because a fetch on top of a 429 only adds to it.
+
+        Only taken when the thread is cached and already carries the current
+        name, so the legacy rename on the slow path still happens once.
+        """
+        thread = self._client.get_channel(int(thread_id))
+        if not isinstance(thread, discord.Thread):
+            return False
+        if thread.name != channels.CONTROL_ROOM_NAME and thread.name in _LEGACY_CONTROL_ROOM_NAMES:
+            return False
+        try:
+            await thread.get_partial_message(int(message_id)).edit(embed=embed, view=view)
+            return True
+        except discord.NotFound:
+            return False  # The slow path tells a deleted thread from a deleted message
+        except discord.HTTPException as e:
+            log.warning("Control room edit failed for thread %s (HTTP %s), retrying next refresh",
+                        thread_id, getattr(e, "status", "?"))
+            return None
+        except Exception:
+            log.debug("Control room fast edit failed for thread %s", thread_id, exc_info=True)
+            return None
+
+    async def _edit_control_slow(
+        self, label: str, thread_id: str, message_id: str,
+        embed: discord.Embed, view: discord.ui.View | None, *,
+        forget: Callable[[], None],
+        recreate: Callable[[], Awaitable[None]],
+    ) -> bool:
+        """Fetch the thread, rename a legacy one, then edit; heals deletions."""
         thread = None
         try:
             try:
@@ -1905,11 +1990,11 @@ class ForumManager:
             if not thread or not isinstance(thread, discord.Thread):
                 log.info("Control room thread for %s was deleted, clearing stale IDs", label)
                 forget()
-                return
+                return False
             # Migrate old names to current Control Room name.  The guard on
             # the current name matters: renaming a thread to the name it
             # already has still spends one of Discord's 2-per-10-min rename
-            # slots for that thread, and this runs on every refresh.
+            # slots for that thread.
             if thread.name != channels.CONTROL_ROOM_NAME and thread.name in _LEGACY_CONTROL_ROOM_NAMES:
                 old_name = thread.name
                 try:
@@ -1918,8 +2003,8 @@ class ForumManager:
                 except Exception:
                     pass
             msg = await thread.fetch_message(int(message_id))
-            embed, view = await render()
             await msg.edit(embed=embed, view=view)
+            return True
         except discord.NotFound:
             log.info("Control room message for %s was deleted, recreating", label)
             forget()
@@ -1934,6 +2019,7 @@ class ForumManager:
                 log.debug("Failed to recreate control room for %s", label, exc_info=True)
         except Exception:
             log.debug("Failed to refresh control room for %s", label, exc_info=True)
+        return False
 
     # --- Session Callbacks ---
 
