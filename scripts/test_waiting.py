@@ -362,6 +362,9 @@ def arm_records() -> None:
               f"an unapproved pending deploy shows, a booted one hides (got {[d.detail for d in dep]})")
         check(bool(dep) and dep[0].thread_id == "ctl-a",
               "a deploy links to its repo's Control Room, where the Deploy button is")
+        from bot.engine import waiting
+        room = waiting.render_room(dep)
+        check("<#" not in room, f"inside its own Control Room the deploy has no self-link ({room!r})")
         acc = byk.get("account", [])
         check([a.title for a in acc] == ["x"], f"only unresolved alerts in rotation show (got {[a.title for a in acc]})")
         ch = byk.get("chain_paused", [])
@@ -471,7 +474,8 @@ def live() -> int:
     from bot.engine import waiting
     from bot.store.state import StateStore
 
-    main = Path("/home/quincy/Programming/claude-telegram-bot")
+    from bot.procutil import install_root
+    main = install_root(ROOT)  # the main checkout, where data/ lives
     src = main / "data" / "state.json"
     tmp = Path(tempfile.mkdtemp(prefix="waiting-live-"))
     try:
@@ -543,11 +547,7 @@ def live() -> int:
 
 def main() -> int:
     if "--live" in sys.argv:
-        env = Path("/home/quincy/Programming/claude-telegram-bot/.env")
-        if env.exists() and not (ROOT / ".env").exists():
-            from dotenv import load_dotenv
-            load_dotenv(env)  # values stay in the environment, never printed
-        return live()
+        return live()  # bot.config finds the main checkout's .env itself
     arm_session_kinds()
     arm_dedup_running_hidden()
     arm_choices_reader()

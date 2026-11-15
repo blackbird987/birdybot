@@ -801,6 +801,8 @@ def render_room(items: list[WaitingItem], *, max_lines: int = MAX_ROOM_LINES,
                 limit: int = 1024) -> str:
     """One repo's items for its Control Room field, inside Discord's 1024."""
     listed, turns = _split_turns(items)
+    # A deploy links to the Control Room it is already shown in.
+    listed = [replace(i, thread_id=None) if i.kind == "deploy" else i for i in listed]
 
     def build(n: int) -> str:
         lines = [item_line(i, with_repo=False) for i in listed[:n]]

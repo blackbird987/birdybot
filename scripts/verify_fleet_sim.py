@@ -157,7 +157,8 @@ def make_bot():
 def make_target(tid, repo):
     return fleet.ShipTarget(
         thread_id=tid, session_id=f"sess-{tid}",
-        inst=SimpleNamespace(id=f"ship-{tid}", branch=f"branch-{tid}", repo_name=repo),
+        inst=SimpleNamespace(id=f"ship-{tid}", branch=f"branch-{tid}", repo_name=repo,
+                             original_branch="master"),
         repo_name=repo, title=f"Thread {tid}",
     )
 
