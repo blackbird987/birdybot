@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## v0.102.28, Ark refresh fixes (2026-11-15)
+
+### Fixed
+- **The Ark no longer piles up pinned dashboards.** Any HTTP error on the dashboard edit (a 429, a 5xx) counted as "message gone", so the bot posted and pinned a new dashboard each time; The Ark had 23 pins, 22 of them frozen. Now only NotFound recreates it. Any other error logs a warning, keeps the message and the next refresh retries it. On startup the lobby sweep unpins every stale dashboard and keeps only the live one (the newest when none is recorded). Pins that are not the bot's dashboards are never touched.
+- **Refreshing no longer floods Discord's rate limit.** Every refresh redrew The Ark and fired one unbounded edit per Control Room (31 and counting), and since each room carried the usage bar every room always differed. One refresher object (`DashboardRefresher` in `bot/discord/dashboard.py`) now owns every redraw. Requests in a 3s window fold into one pass, passes are at least 15s apart, and the 5-minute tick goes through it too. A pass redraws only the rooms whose content moved and skips hidden repos. An edit whose render matches what the message already shows sends nothing, and at most 2 rooms edit at once. This replaces the old lock and list flag and closes the D23 TODO. Design: `docs/design/ark-refresh.md`. Harness: `scripts/test_ark_refresh.py`.
+
+### Changed
+- **Control Rooms no longer show the usage bar.** It is account-wide and stays in The Ark. A room still shows Today's spend for its repo when there is any.
+
 ## v0.102.27, Review Code prompt cleanup (2026-11-15)
 
 ### Changed

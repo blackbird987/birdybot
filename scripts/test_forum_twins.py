@@ -10,7 +10,9 @@ Room refresh. Each pair now calls one helper (``_add_followers``,
   * auto-follow adds the right members once each and skips a bad id;
   * a stored archive thread is woken and reused; a deleted one has its id
     cleared, and a new post is made, recorded and followed;
-  * a refresh redraws the embed and migrates a legacy thread name; a deleted
+  * a refresh redraws the embed and migrates a legacy thread name; an
+    unchanged render sends nothing; a cached thread edits without a fetch;
+    a failed edit is retried next time; a deleted
     thread clears the ids without recreating; a deleted message clears them,
     deletes the thread and recreates the post; any other error is swallowed.
 
@@ -58,12 +60,21 @@ class _Thread:
         self.added: list[int] = []
         self.edits: list[dict] = []
         self.deleted = False
+        self.fetches = 0
         self.message = MagicMock()
+        self.message.edited = None
         self.message_error: Exception | None = None
 
         async def edit_msg(**kw):  # noqa: ANN003
             self.message.edited = kw
         self.message.edit = edit_msg
+
+    def get_partial_message(self, _mid):  # noqa: ANN001, ANN202
+        async def edit(**kw):  # noqa: ANN003
+            if self.message_error:
+                raise self.message_error
+            self.message.edited = kw
+        return SimpleNamespace(edit=edit)
 
     async def add_user(self, member) -> None:  # noqa: ANN001
         self.added.append(member.id)
@@ -77,6 +88,7 @@ class _Thread:
         self.deleted = True
 
     async def fetch_message(self, _mid):  # noqa: ANN001, ANN202
+        self.fetches += 1
         if self.message_error:
             raise self.message_error
         return self.message
@@ -261,14 +273,23 @@ async def _arm_refresh() -> None:
 
         async def refresh() -> None:
             if side == "repo":
-                await fm.refresh_control_room("r", usage_bar="")
+                await fm.refresh_control_room("r")
             else:
                 await fm.refresh_user_control_room("2")
 
+        # The digest stands in for "what the render shows"; bumping ``version``
+        # is a render that changed, so the next refresh has something to send.
+        version = [0]
+
+        def changed() -> None:
+            version[0] += 1
+
         with _Patches(cfg):
-            orig = (channels.build_user_control_embed, channels.build_user_control_view)
+            orig = (channels.build_user_control_embed, channels.build_user_control_view,
+                    forums.control_digest)
             channels.build_user_control_embed = lambda *_a: "EMBED"
             channels.build_user_control_view = lambda *_a: "VIEW"
+            forums.control_digest = lambda e, v: f"{e}|{v}|{version[0]}"
             try:
                 thread = _Thread(61, name="Control Center")
                 client.channels[61] = thread
@@ -278,9 +299,18 @@ async def _arm_refresh() -> None:
                 check(thread.name == channels.CONTROL_ROOM_NAME,
                       f"{side}: a legacy name is migrated")
 
+                thread.message.edited = None
+                await refresh()
+                check(thread.message.edited is None and thread.fetches == 1,
+                      f"{side}: an unchanged render sends nothing")
+
+                changed()
                 await refresh()
                 check(len(thread.edits) == 1, f"{side}: the current name is not re-sent")
+                check(thread.message.edited is not None and thread.fetches == 1,
+                      f"{side}: a cached thread is edited without a fetch")
 
+                changed()
                 del client.channels[61]
                 await refresh()
                 check(ids() == (None, None) and recreated == [],
@@ -289,6 +319,7 @@ async def _arm_refresh() -> None:
                       f"{side}: the personal control id is forgotten")
 
                 reset()
+                changed()
                 fm._user_control_thread_ids = {"61"}
                 thread = _Thread(61)
                 thread.message_error = _not_found()
@@ -299,14 +330,21 @@ async def _arm_refresh() -> None:
                       f"{side}: a deleted message clears, deletes the thread, recreates")
 
                 reset()
+                changed()
                 thread = _Thread(61)
                 thread.message_error = RuntimeError("boom")
                 client.channels[61] = thread
                 await refresh()
                 check(ids() == ("61", "62") and not thread.deleted,
                       f"{side}: another error is swallowed and changes nothing")
+
+                thread.message_error = None
+                await refresh()
+                check(thread.message.edited is not None,
+                      f"{side}: a failed edit is retried by the next refresh")
             finally:
-                channels.build_user_control_embed, channels.build_user_control_view = orig
+                (channels.build_user_control_embed, channels.build_user_control_view,
+                 forums.control_digest) = orig
 
 
 async def main() -> int:
