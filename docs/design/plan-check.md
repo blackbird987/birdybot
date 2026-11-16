@@ -29,9 +29,12 @@ chance to give in. It also needs a way to halt, and 10 chains ended
 
 ## Why narrow
 
-The prompt allows four things, each shown with a file and a line: the plan is wrong
+The prompt allows five things, each shown with a file and a line: the plan is wrong
 about the code, it misses a part of the system it must touch, it re-adds something
-reversed without saying why, or it leaves out something the owner asked for. Nothing
+reversed without saying why, it leaves out something the owner asked for, or it
+builds something the repo already has. The last one comes from the owner's own
+corrections, where rebuilding instead of reusing was a third of the "too narrow"
+kind (`study/findings/2026-11-16-the-owner-s-too-narrow-corrections-were-reuse.md`). Nothing
 found is a good answer. The judge finding
 (`study/findings/2026-11-04-a-fresh-judge-did-not-catch-what-the-owner.md`) says what
 a fresh reader can catch: what the repo can show, and little of what only the owner
