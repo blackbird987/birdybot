@@ -96,10 +96,20 @@ def collect_message(repos: list[tuple[str, str, bool]], running: int) -> str:
     )
 
 
+def _is_plain(message) -> bool:
+    """A message someone sent, not a notice Discord posted itself.
+
+    Making an outbox thread leaves a "started a thread" notice in the channel under
+    the bot's own name, newer than its directory. Such a notice cannot be edited
+    (error 50021) and holds no record, so every lookup here skips it.
+    """
+    return message.type == discord.MessageType.default
+
+
 async def _find_own_message(channel, bot_id: int) -> discord.Message | None:
     """Our newest message in the channel. Raises if the channel cannot be read."""
     async for message in channel.history(limit=_HISTORY_LIMIT):
-        if message.author.id == bot_id:
+        if message.author.id == bot_id and _is_plain(message):
             return message
     return None
 
@@ -249,7 +259,7 @@ class DiscordTransport:
 
     async def _peer_message(self):
         async for message in self._channel.history(limit=_HISTORY_LIMIT):
-            if _from_peer(message):
+            if _from_peer(message) and _is_plain(message):
                 return message
         return None
 
@@ -355,7 +365,7 @@ async def peer_threads(bot, channel, store) -> tuple[list, set[int]]:
     """
     candidates: list[int] = []
     async for message in channel.history(limit=_HISTORY_LIMIT):
-        if _from_peer(message):
+        if _from_peer(message) and _is_plain(message):
             candidates.append(message.id)
             if len(candidates) >= _OLD_THREADS_TO_SCAN:
                 break

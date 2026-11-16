@@ -145,7 +145,11 @@ existence is how the other side knows this version can answer. The directory rec
 gained no field. `bot/peer_record.py` parses `q` and `a` strictly. A message that is
 not JSON is skipped quietly, an unknown protocol holds the cursor and warns once, a
 bad record is skipped and logged. `Message.thread` excludes archived threads, so the
-thread is always fetched by id.
+thread is always fetched by id. Making a thread also leaves Discord's own "started a thread"
+notice in the channel under the creator's id, newer than the directory; it cannot be
+edited (error 50021) and is not a record, so every channel lookup takes plain messages
+only (`_is_plain`, and type 0 in `scripts/peer.py`). Missing that stalled both machines
+from 2026-11-06 to 2026-11-16.
 
 **Reader** (`bot/discord/peer_link.py`). Every 30s it reads the peer's directory
 message, its thread, and what came after a per-thread cursor, taking only messages by

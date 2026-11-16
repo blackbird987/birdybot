@@ -54,7 +54,7 @@ def good(**changes) -> dict:
 
 def msg(author=PEER_ID, content=None, stamp=FRESH, **extra) -> dict:
     return {"author": {"id": author}, "content": json.dumps(good()) if content is None else content,
-            "timestamp": stamp, "edited_timestamp": None, **extra}
+            "timestamp": stamp, "edited_timestamp": None, "type": 0, **extra}
 
 
 def refused(text) -> bool:
@@ -160,6 +160,14 @@ def test_reader() -> None:
     check("a forged message above the real one changes nothing", record["machine"] == "laptop")
     check("a webhook carrying the id is ignored",
           stop_code([msg(webhook_id="9")]) == peer.EXIT_NO_RECORD)
+    # The incident of 2026-11-16: making the outbox left Discord's own "outbox" notice
+    # (type 18, thread created) above the record, under the peer's id.
+    notice = msg(content="outbox", type=18, stamp="2026-11-04T11:59:00+00:00")
+    record = peer.load(ENV, NOW, [notice, msg()])
+    check("a thread-created notice above the record is skipped", record["machine"] == "laptop")
+    check("a notice alone is no record, not a bad one",
+          stop_code([notice]) == peer.EXIT_NO_RECORD)
+    record = peer.load(ENV, NOW, [msg(author=FORGER_ID, content=json.dumps(good(machine="forged"))), msg()])
     check("a malformed record is rejected", stop_code([msg(content="nope")]) == peer.EXIT_INVALID)
     check("an oversized record is rejected", stop_code([msg(content="x" * 2001)]) == peer.EXIT_INVALID)
     check("the age comes from Discord's stamp", record["age_secs"] == 120 and not record["looks_offline"])
@@ -176,8 +184,8 @@ def test_reader() -> None:
           "2m old" in text and "Untrusted" in text and "bot: abc1234 on master" in text, text)
 
 
-def fake_message(mid, author_id):
-    return SimpleNamespace(id=mid, author=SimpleNamespace(id=author_id),
+def fake_message(mid, author_id, kind=discord.MessageType.default):
+    return SimpleNamespace(id=mid, author=SimpleNamespace(id=author_id), type=kind,
                            edit=AsyncMock(side_effect=lambda content: SimpleNamespace(
                                id=mid, author=SimpleNamespace(id=author_id), edit=None)))
 
@@ -206,6 +214,16 @@ async def test_publisher() -> None:
     await peer_link.publish_once(channel, 5, "new text", None)
     check("after a restart it finds and edits its own message",
           own.edit.await_count == 1 and channel.send.await_count == 0)
+
+    # Discord's own "started a thread" notice, under our id and newer than the
+    # directory. Editing it is refused (50021), which stalled both machines.
+    notice = fake_message(3, 5, discord.MessageType.thread_created)
+    own = fake_message(1, 5)
+    channel = fake_channel([notice, own])
+    await peer_link.publish_once(channel, 5, "new text", None)
+    check("a thread-created notice above the directory is not the edit target",
+          own.edit.await_count == 1 and notice.edit.await_count == 0
+          and channel.send.await_count == 0)
 
     other = fake_message(2, 6)
     channel = fake_channel([other])

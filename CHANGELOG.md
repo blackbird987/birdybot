@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **The machine link works again in both directions.** Making an outbox thread leaves Discord's own "outbox" notice in the channel under the bot's name, newer than its directory record. Each machine took that notice as its newest message: the publisher tried to edit it and was refused (error 50021, so the desktop's record had not updated since 2026-11-06), and the reader parsed it and rejected the other side as "not JSON". Every lookup in that channel (own record, the other machine's record, its outbox threads, and `scripts/peer.py`) now takes plain messages only. Both harnesses now include the notice.
+
 ## v0.102.30, Needs you list (2026-11-15)
 
 ### Changed
