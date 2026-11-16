@@ -163,11 +163,10 @@ def test_reader() -> None:
     # The incident of 2026-11-16: making the outbox left Discord's own "outbox" notice
     # (type 18, thread created) above the record, under the peer's id.
     notice = msg(content="outbox", type=18, stamp="2026-11-04T11:59:00+00:00")
-    record = peer.load(ENV, NOW, [notice, msg()])
-    check("a thread-created notice above the record is skipped", record["machine"] == "laptop")
+    check("a thread-created notice above the record is skipped",
+          peer.load(ENV, NOW, [notice, msg()])["machine"] == "laptop")
     check("a notice alone is no record, not a bad one",
           stop_code([notice]) == peer.EXIT_NO_RECORD)
-    record = peer.load(ENV, NOW, [msg(author=FORGER_ID, content=json.dumps(good(machine="forged"))), msg()])
     check("a malformed record is rejected", stop_code([msg(content="nope")]) == peer.EXIT_INVALID)
     check("an oversized record is rejected", stop_code([msg(content="x" * 2001)]) == peer.EXIT_INVALID)
     check("the age comes from Discord's stamp", record["age_secs"] == 120 and not record["looks_offline"])
