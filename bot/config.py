@@ -2018,6 +2018,8 @@ CRITICAL_PASS = (
     "- " + SCOPE_QUESTION + "\n"
     "- What is missing? Which parts of the system does it touch that you "
     "have not looked at?\n"
+    "- Reuse? What already exists, in this repo or a repo this one builds "
+    "on, that does part of this? Build on it, or say why it does not fit.\n"
     "- Is there a cleaner or more standard way a senior engineer or designer "
     "would do it?\n"
     "- Retry? If the thread, git history or notes show this goal failing "
@@ -2603,7 +2605,8 @@ PLAN_CHECK_PROMPT = (
     "- It misses a part of the system it has to touch for the change to work.\n"
     "- It re-adds something that was removed on purpose and does not say why this "
     "time is different. The history above is where to look.\n"
-    "- It leaves out something the owner asked for. Quote the owner's words.\n\n"
+    "- It leaves out something the owner asked for. Quote the owner's words.\n"
+    "- It builds something the repo already has. Name the existing file and line.\n\n"
     "Also ask of the plan: " + SCOPE_QUESTION + " Raise this only when the repo shows "
     "the other cases.\n\n"
     "Nothing found is a good answer, and most plans should get it. Do not raise "
@@ -2814,6 +2817,13 @@ VERIFY_PROMPT = (
     '- Verify the port is free after cleanup\n'
     'Do NOT skip cleanup on failure — orphan processes break the next '
     'verify run.\n\n'
+
+    '## Whole goal\n'
+    'Restate, in one line, the outcome the owner asked for end to end, taken '
+    'from the plan or the owner\'s words in this session. Then say whether '
+    'what you verified delivers all of it or only part of it: a trading '
+    'change that closes one leg and never opens the other delivers part. '
+    'Put any part not delivered into the SUMMARY line as "not done: ...".\n\n'
 
     '## Step 7: Report\n'
     'If the change worked, RESULT: pass.\n'
