@@ -2823,7 +2823,8 @@ VERIFY_PROMPT = (
     'from the plan or the owner\'s words in this session. Then say whether '
     'what you verified delivers all of it or only part of it: a trading '
     'change that closes one leg and never opens the other delivers part. '
-    'Put any part not delivered into the SUMMARY line as "not done: ...".\n\n'
+    'Put any part not delivered into the SUMMARY line as "not done: ...". '
+    'Do not build that part here, and it does not change RESULT.\n\n'
 
     '## Step 7: Report\n'
     'If the change worked, RESULT: pass.\n'

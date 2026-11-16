@@ -4,7 +4,7 @@
 
 ### Changed
 - **Proposals and plan checks ask about reuse.** The critical pass on a proposal now asks what already exists, in this repo or one it builds on, that does part of the job, and the plan check flags a plan that rebuilds something the repo already has (naming the file and line). Rebuilding instead of reusing was a third of the owner's "too narrow" corrections (`study/findings/2026-11-16-the-owner-s-too-narrow-corrections-were-reuse.md`).
-- **Verify checks the whole goal.** The verify step restates the outcome the owner asked for end to end and says whether what it verified delivers all of it; any part not delivered goes in its summary as "not done: ...". Whether these checks cut "too narrow" misses is an open question with its bar written down (`study/findings/2026-11-16-do-the-reuse-and-whole-goal-checks-cut-too.md`).
+- **Verify checks the whole goal.** The verify step restates the outcome the owner asked for end to end and says whether what it verified delivers all of it; any part not delivered goes in its summary as "not done: ...". It does not build the missing part itself, and a partial delivery still passes, so the line is for you to read. Whether these checks cut "too narrow" misses is an open question with its bar written down (`study/findings/2026-11-16-do-the-reuse-and-whole-goal-checks-cut-too.md`).
 
 ## v0.102.31, Machine link fix (2026-11-16)
 
