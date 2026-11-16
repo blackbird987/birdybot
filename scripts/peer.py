@@ -68,12 +68,14 @@ def peer_message(messages: list, peer_bot_id: str) -> dict | None:
     """The peer's newest message. Authorship is all that is trusted about it.
 
     A webhook message is refused even if it carries the id: only the peer's own
-    token can write as that author, and a webhook is not that token.
+    token can write as that author, and a webhook is not that token. Only a plain
+    message (type 0) counts: the "started a thread" notice Discord leaves when the
+    peer makes its outbox carries the peer's id too, and is newer than its record.
     """
     for message in messages:
         author = message.get("author") if isinstance(message, dict) else None
         if (isinstance(author, dict) and str(author.get("id")) == peer_bot_id
-                and not message.get("webhook_id")):
+                and not message.get("webhook_id") and message.get("type") == 0):
             return message
     return None
 

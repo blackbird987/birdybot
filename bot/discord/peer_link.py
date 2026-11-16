@@ -96,12 +96,28 @@ def collect_message(repos: list[tuple[str, str, bool]], running: int) -> str:
     )
 
 
-async def _find_own_message(channel, bot_id: int) -> discord.Message | None:
-    """Our newest message in the channel. Raises if the channel cannot be read."""
+async def _directories(channel, by, most: int = 1) -> list:
+    """Up to ``most`` directory messages by one author, newest first.
+
+    Raises if the channel cannot be read. Only a plain message counts, which is how
+    every record is sent: making an outbox thread leaves Discord's own "started a
+    thread" notice under the creator's id, newer than its directory. That notice
+    cannot be edited (error 50021) and holds no record. Taking it as the newest
+    stopped the link both ways, so every directory lookup goes through here.
+    """
+    found = []
     async for message in channel.history(limit=_HISTORY_LIMIT):
-        if message.author.id == bot_id:
-            return message
-    return None
+        if by(message) and message.type == discord.MessageType.default:
+            found.append(message)
+            if len(found) >= most:
+                break
+    return found
+
+
+async def _find_own_message(channel, bot_id: int) -> discord.Message | None:
+    """Our newest directory message. Raises if the channel cannot be read."""
+    found = await _directories(channel, lambda message: message.author.id == bot_id)
+    return found[0] if found else None
 
 
 async def publish_once(channel, bot_id: int, text: str, known: discord.Message | None):
@@ -248,10 +264,8 @@ class DiscordTransport:
         return await ensure_outbox(self._bot, self._channel, message)
 
     async def _peer_message(self):
-        async for message in self._channel.history(limit=_HISTORY_LIMIT):
-            if _from_peer(message):
-                return message
-        return None
+        found = await _directories(self._channel, _from_peer)
+        return found[0] if found else None
 
     async def peer_view(self) -> peer_questions.PeerView:
         """Asked fresh each time, because the answer decides whether a question goes."""
@@ -353,12 +367,8 @@ async def peer_threads(bot, channel, store) -> tuple[list, set[int]]:
     Also returns the ids still found through the channel. Their cursors must stay,
     since without one such a thread would be read from the start again.
     """
-    candidates: list[int] = []
-    async for message in channel.history(limit=_HISTORY_LIMIT):
-        if _from_peer(message):
-            candidates.append(message.id)
-            if len(candidates) >= _OLD_THREADS_TO_SCAN:
-                break
+    candidates = [message.id for message in
+                  await _directories(channel, _from_peer, _OLD_THREADS_TO_SCAN)]
     visible = set(candidates)
     for known in store.peer_cursor_threads():
         if int(known) not in candidates:

@@ -76,8 +76,10 @@ def not_found() -> discord.NotFound:
 
 
 class FakeMessage:
-    def __init__(self, author, content, *, when=NOW, webhook=None, mid=None, thread_parent=None):
+    def __init__(self, author, content, *, when=NOW, webhook=None, mid=None, thread_parent=None,
+                 kind=discord.MessageType.default):
         self.id = mid or next_id(when)
+        self.type = kind
         self.author = SimpleNamespace(id=author)
         self.content = content
         self.webhook_id = webhook
@@ -153,6 +155,10 @@ class FakeChannel(discord.TextChannel):
         thread = FakeThread(message.id, self.id)
         thread.archive_minutes = minutes
         self.made[message.id] = thread
+        # As Discord does: a "started a thread" notice under the creator's name,
+        # newer than the message it hangs on.
+        self.messages.append(FakeMessage(message.author.id, name, thread_parent=self,
+                                         kind=discord.MessageType.thread_created))
         return thread
 
 
@@ -423,6 +429,16 @@ def section_reader() -> None:
         check("250 messages waiting are all read, across ticks",
               len(store4.peer_received_all()) == 250)
 
+        # Each outbox leaves a notice under the peer's id. Notices must not use up the
+        # few directories scanned, or older outboxes stop being found.
+        store_n = new_store({"bot": str(ROOT)})
+        channel_n = FakeChannel(CHANNEL)
+        outboxes = [channel_n.make_thread(channel_n.directory(PEER))
+                    for _ in range(peer_link._OLD_THREADS_TO_SCAN)]
+        found, _visible = run(peer_link.peer_threads(FakeBot(channel_n, store_n), channel_n, store_n))
+        check("thread notices do not crowd out the peer's outboxes",
+              {t.id for t in found} == {t.id for t in outboxes}, [t.id for t in found])
+
         # The directory message was replaced: old thread keeps being read.
         store5 = new_store({"bot": str(ROOT)})
         channel5 = FakeChannel(CHANNEL)
@@ -550,8 +566,12 @@ def section_outbox_and_publisher() -> None:
         run(transport2.post(q_msg(Q("xyz790"))))
         found = run(peer_link._find_own_message(channel2, ME))
         check("posting a question does not move the publisher's edit target", found is mine)
+        plain = [m for m in channel2.messages if m.type == discord.MessageType.default]
         check("questions land in the thread, not the channel",
-              len(channel2.messages) == 1 and len(channel2.made[mine.id].messages) == 2)
+              plain == [mine] and len(channel2.made[mine.id].messages) == 2)
+        check("the outbox left Discord's notice above the directory, as live",
+              any(m.type == discord.MessageType.thread_created and m.id > mine.id
+                  for m in channel2.messages))
         check("a question posts with no mentions",
               channel2.made[mine.id].sent_kwargs[0]["allowed_mentions"].users is False)
 
