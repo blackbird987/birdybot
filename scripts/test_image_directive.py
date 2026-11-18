@@ -22,8 +22,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from bot import config  # noqa: E402
 from bot.engine.images import (  # noqa: E402
+    MAX_FILES_PER_MESSAGE,
+    MAX_MESSAGE_BYTES,
     MAX_IMAGES_PER_RESPONSE,
+    ImageFailure,
+    Upload,
     deliver_images,
+    failure_note,
+    pack_messages,
     parse_image_directives,
     resolve_image,
 )
@@ -49,11 +55,19 @@ class FakeInstance:
 
 
 class FakeMessenger:
-    def __init__(self):
+    def __init__(self, fail_on: int | None = None, empty_on: int | None = None):
         self.batches: list[tuple[list[str], str | None]] = []
         self.texts: list[str] = []
+        self._calls = 0
+        self._fail_on = fail_on      # 1-based upload that raises
+        self._empty_on = empty_on    # 1-based upload that posts nothing
 
     async def send_files(self, channel_id, file_paths, caption=None):
+        self._calls += 1
+        if self._calls == self._fail_on:
+            raise RuntimeError("413 Payload Too Large")
+        if self._calls == self._empty_on:
+            return []
         self.batches.append((list(file_paths), caption))
         return ["1"]
 
@@ -190,36 +204,103 @@ def main() -> int:
     print("\ndelivery")
     msgr = FakeMessenger()
     ctx = FakeCtx(msgr)
-    sent = asyncio.run(deliver_images(
+    out = asyncio.run(deliver_images(
         ctx,
         '[BOT_CMD: /image path="docs/diagram.png" caption="A diagram"]',
         inst,
     ))
-    check("one image delivered", sent == 1, str(sent))
+    check("one image delivered", out.sent == 1 and not out.failures, repr(out))
     check("batched into a single message", len(msgr.batches) == 1)
     check("caption forwarded",
           msgr.batches and msgr.batches[0][1] == "A diagram")
     check("no refusal notice on the happy path", not msgr.texts, str(msgr.texts))
 
     msgr = FakeMessenger()
-    sent = asyncio.run(deliver_images(
+    out = asyncio.run(deliver_images(
         FakeCtx(msgr), "[BOT_CMD: /image ../secrets/id_rsa.png]", inst,
     ))
-    check("refused image sends nothing", sent == 0)
+    check("refused image sends nothing", out.sent == 0)
     check("refusal posts a visible notice", len(msgr.texts) == 1, str(msgr.texts))
+    check("refusal is returned so the session can be told",
+          [f.path for f in out.failures] == ["../secrets/id_rsa.png"], repr(out))
 
     msgr = FakeMessenger()
     many = "\n".join(
-        f"[BOT_CMD: /image docs/diagram.png]" for _ in range(MAX_IMAGES_PER_RESPONSE + 2)
+        "[BOT_CMD: /image docs/diagram.png]" for _ in range(MAX_IMAGES_PER_RESPONSE + 2)
     )
-    sent = asyncio.run(deliver_images(FakeCtx(msgr), many, inst))
+    out = asyncio.run(deliver_images(FakeCtx(msgr), many, inst))
     check(f"per-response cap of {MAX_IMAGES_PER_RESPONSE} holds",
-          sent == MAX_IMAGES_PER_RESPONSE, str(sent))
+          out.sent == MAX_IMAGES_PER_RESPONSE, repr(out.sent))
     check("over-cap drop is reported", len(msgr.texts) == 1, str(msgr.texts))
+    check("each over-cap image is returned as a failure",
+          len(out.failures) == 2 and "limit" in out.failures[0].reason,
+          repr(out.failures))
 
     msgr = FakeMessenger()
-    sent = asyncio.run(deliver_images(FakeCtx(msgr), "no directives here", inst))
-    check("plain text is a no-op", sent == 0 and not msgr.batches and not msgr.texts)
+    out = asyncio.run(deliver_images(FakeCtx(msgr), "no directives here", inst))
+    check("plain text is a no-op",
+          out.sent == 0 and not out.failures and not msgr.batches and not msgr.texts)
+
+    print("\nseveral messages instead of a batch limit")
+    # The 2026-11-18 report: three GIFs a few MB each, everything past 9 MB
+    # refused with "batch upload limit reached". Now they split across messages.
+    gifs = []
+    for i in range(3):
+        g = repo / f"motion-{i}.gif"
+        g.write_bytes(b"GIF89a" + b"\0" * 4_000_000)
+        gifs.append(g)
+    msgr = FakeMessenger()
+    text = "\n".join(
+        f'[BOT_CMD: /image path="{g.name}" caption="clip {i}"]'
+        for i, g in enumerate(gifs)
+    )
+    out = asyncio.run(deliver_images(FakeCtx(msgr), text, inst))
+    check("three 4 MB gifs all delivered", out.sent == 3 and not out.failures,
+          repr(out))
+    check("split into two messages, each under the budget",
+          len(msgr.batches) == 2
+          and all(sum(Path(p).stat().st_size for p in b) <= MAX_MESSAGE_BYTES
+                  for b, _ in msgr.batches),
+          repr([len(b) for b, _ in msgr.batches]))
+    check("order kept across messages",
+          [Path(p).name for b, _ in msgr.batches for p in b]
+          == [g.name for g in gifs])
+    check("each message carries its own images' captions",
+          [c for _, c in msgr.batches] == ["clip 0 · clip 1", "clip 2"],
+          repr([c for _, c in msgr.batches]))
+    check("no 'couldn't share' notice when everything posted", not msgr.texts,
+          str(msgr.texts))
+
+    groups = pack_messages(
+        [Upload(f"f{i}", f"/abs/f{i}", 10) for i in range(MAX_FILES_PER_MESSAGE + 3)]
+    )
+    check(f"a message holds at most {MAX_FILES_PER_MESSAGE} files",
+          [len(g) for g in groups] == [MAX_FILES_PER_MESSAGE, 3],
+          repr([len(g) for g in groups]))
+    check("nothing to pack is no messages", pack_messages([]) == [])
+
+    msgr = FakeMessenger(fail_on=2)
+    out = asyncio.run(deliver_images(FakeCtx(msgr), text, inst))
+    check("a failed upload keeps the other message",
+          out.sent == 2 and len(msgr.batches) == 1, repr(out))
+    check("the failed message's image is returned with the reason",
+          len(out.failures) == 1 and out.failures[0].name == gifs[2].name
+          and "upload failed" in out.failures[0].reason, repr(out.failures))
+    check("and the user sees it", len(msgr.texts) == 1 and gifs[2].name in msgr.texts[0],
+          str(msgr.texts))
+    check("a failed upload reports the path as the turn wrote it",
+          out.failures[0].path == gifs[2].name, repr(out.failures))
+
+    msgr = FakeMessenger(empty_on=1)
+    out = asyncio.run(deliver_images(FakeCtx(msgr), text, inst))
+    check("an upload that posted nothing counts as failed, not sent",
+          out.sent == 1 and len(out.failures) == 2, repr(out))
+
+    note = failure_note([ImageFailure("out/a.gif", "too large (9.1 MB, limit 8 MB)")])
+    check("the session's note names the path and the reason",
+          "`out/a.gif`" in note and "too large" in note, note)
+    check("the note tells it to share again with the directive",
+          "[BOT_CMD: /image]" in note and "did NOT reach" in note, note)
 
     print("\ndisplay")
     shown = collapse_bot_directives(

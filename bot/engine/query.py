@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+from typing import TYPE_CHECKING
 
 from bot import config, vault
 from bot.claude import sandbox
@@ -37,6 +38,9 @@ from bot.engine.resolver import (
     _merge_context_prefix,
     _resolver_in_flight,
 )
+
+if TYPE_CHECKING:
+    from bot.engine.images import ImageFailure
 
 log = logging.getLogger(__name__)
 
@@ -531,9 +535,10 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
 
         # [BOT_CMD: /image] — pictures go up first so the result embed (and its
         # buttons) stays the last thing in the thread.
+        image_failures: list[ImageFailure] = []
         if result.result_text and not result.is_error:
             from bot.engine.images import deliver_images
-            await deliver_images(ctx, result.result_text, inst)
+            image_failures = (await deliver_images(ctx, result.result_text, inst)).failures
 
         # Displayed copy only — directives collapse to one subtext line each
         # (parity with the background path in lifecycle.run_instance, which has
@@ -573,7 +578,9 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
         # [BOT_CMD: /wake] or /watch directive; else reset the runaway counter.
         # The raw result text is passed so the directive can be parsed, and so
         # a promise to report back with nothing armed can be nudged once.
-        await lifecycle.check_wake_request(ctx, inst, final_text=result.result_text)
+        # Images that failed to post ride along so the session finds out.
+        await lifecycle.check_wake_request(ctx, inst, final_text=result.result_text,
+                                           image_failures=image_failures)
     except asyncio.CancelledError:
         # Shutdown cancelled the turn. A finished run is recorded with its real
         # outcome; one still running is marked interrupted, as run_instance does.

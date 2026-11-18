@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## v0.102.33, Image sharing fixes (2026-11-18)
+
+### Fixed
+- **Several images in one reply all post.** A reply's images used to go up as one Discord message with a 9 MB budget, and whatever did not fit was dropped with "batch upload limit reached" (a few GIFs hit it every time). They are now split across as many messages as their sizes need, each with its own captions, and a reply may share up to 10 images (was 4). Only a single file over 8 MB is still refused on size. An upload that posts nothing (the thread could not be found) now counts as failed rather than sent.
+- **The session finds out when an image did not post.** The "couldn't share" line reached Discord but never the session, so it went on as if the picture was there. The failures (file and reason) now ride on whatever resumes the thread next (that turn's own watch or wake, or one already pending); when nothing does (including a watch the bot could not arm), the session is re-invoked with the list, to share them again or say plainly which did not post. It shares the promise nudge's cap, so it cannot loop, and a build session gets a notice to ask it instead. Harnesses: `scripts/test_image_directive.py`, `scripts/test_wake_promise_nudge.py`.
+
 ## v0.102.32, Reuse and whole-goal checks (2026-11-16)
 
 ### Changed
