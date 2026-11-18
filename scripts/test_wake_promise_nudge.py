@@ -391,6 +391,22 @@ c = _run(_SHARED, image_failures=_FAILED, nudge=config.MAX_CONSEC_NUDGES)
 _check("no further nudge", len(c.store.wakes) == 0)
 _check("stop notice surfaced", any("Stopped after" in s for s in c.messenger.sent))
 
+print("Failed images while this turn's watch could not be armed -> still nudged")
+_saved_max = config.WATCH_MAX_ACTIVE
+config.WATCH_MAX_ACTIVE = 0
+try:
+    c = _run(_watch_txt, image_failures=_FAILED)
+finally:
+    config.WATCH_MAX_ACTIVE = _saved_max
+_check("no watch armed", len(c.store.watches) == 0)
+_check("the session is still re-invoked with the list",
+       len(c.store.wakes) == 1 and "motion.gif" in c.store.wakes[0])
+
+print("Failed images with a /wake that has no body (not a wake) -> still nudged")
+c = _run('[BOT_CMD: /wake delay=300 reason="x"]', image_failures=_FAILED)
+_check("one wake carrying the list",
+       len(c.store.wakes) == 1 and "motion.gif" in c.store.wakes[0])
+
 print("Failed images on an unattended dead-end -> one nudge carries both")
 c = _run("Next I'll read the roadmap.", source="cooldown", image_failures=_FAILED)
 _check("one wake", len(c.store.wakes) == 1)

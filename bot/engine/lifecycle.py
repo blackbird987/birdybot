@@ -8,6 +8,7 @@ import logging
 import os
 import re
 from datetime import datetime, timedelta, timezone
+from typing import TYPE_CHECKING
 
 from bot import config
 from bot.procutil import run_capture
@@ -44,6 +45,9 @@ from bot.engine import secret_scan, watches
 from bot.engine.directives import choices
 from bot.store import history as history_mod
 from bot.textutil import directive_kv, directive_re, find_tilde_block, is_quoted_example, mask_tilde_bodies, parse_duration, parse_iso_utc
+
+if TYPE_CHECKING:
+    from bot.engine.images import ImageFailure
 
 log = logging.getLogger(__name__)
 
@@ -534,7 +538,7 @@ async def run_instance(
         # workflow buttons stay the last thing in the thread. Raw text: the
         # collapsed copy above has already had the directives stripped out.
         dispatch_directives = inst.origin not in _NO_DIRECTIVE_ORIGINS
-        image_failures: list = []
+        image_failures: list[ImageFailure] = []
         if result.result_text and not result.is_error and dispatch_directives:
             from bot.engine.images import deliver_images
             image_failures = (await deliver_images(ctx, result.result_text, inst)).failures
@@ -1961,7 +1965,7 @@ def armed_a_directive(text: str) -> bool:
 
 async def check_wake_request(
     ctx: RequestContext, instance: Instance, *, final_text: str = "",
-    image_failures: list | None = None,
+    image_failures: list[ImageFailure] | None = None,
 ) -> None:
     """Schedule a thread-bound self-wake requested by the just-finished turn.
 
@@ -2196,6 +2200,20 @@ async def check_wake_request(
             return True
         return False
 
+    async def _deliver_image_note(extra: str = "") -> None:
+        """Get the image note to the session when this turn arms nothing.
+
+        Rides on a watch or wake an earlier turn armed if there is one,
+        otherwise re-invokes the session with the list. ``extra`` is appended
+        to that nudge (a promise answered in the same resume).
+        """
+        if not image_note:
+            return
+        if _fold_into_armed():
+            _reset_nudge()
+            return
+        await _image_nudge(extra)
+
     # A [BOT_CMD: /watch] directive outranks /wake in the same turn: it names
     # the actual job rather than guessing how long it will take, so it is
     # strictly better information. Handled here (not in a separate post-turn
@@ -2218,6 +2236,7 @@ async def check_wake_request(
             if refusal:
                 _reset()
                 await _notice(refusal)
+                await _deliver_image_note()
                 return
         count = ctx.bump_wake_count() if ctx.bump_wake_count is not None else 1
         if count > config.MAX_CONSEC_WAKES:
@@ -2232,6 +2251,7 @@ async def check_wake_request(
                 "already being watched across all threads. Reply when you "
                 "want me to check on it.)"
             )
+            await _deliver_image_note()
             return
         if image_note:
             watch_data = {**watch_data, "prompt": _with_image_note(watch_data["prompt"])}
@@ -2309,15 +2329,12 @@ async def check_wake_request(
         # parsed directive remains the sole scheduling channel.
         _reset()
         if image_note:
-            # (0) Images failed to post. Ride on a watch or wake an earlier
-            # turn armed if there is one; otherwise re-invoke the session with
-            # the list. A promise in the same turn is answered in the same
-            # nudge, so the two never compete for the one wake slot.
-            if _fold_into_armed():
-                _reset_nudge()
-                return
+            # (0) Images failed to post. A promise in the same turn is
+            # answered in the same nudge, so the two never compete for the one
+            # wake slot. A self-wake claim needs no notice of its own here:
+            # the thread is about to be resumed either way.
             promised = promises_continuation(final_text)
-            await _image_nudge(_PROMISE_NUDGE_PROMPT if promised else "")
+            await _deliver_image_note(_PROMISE_NUDGE_PROMPT if promised else "")
             return
         if claims_self_wake(final_text):
             # (1) The turn ASSERTS it armed a self-wake (e.g. a malformed
@@ -2369,8 +2386,7 @@ async def check_wake_request(
     sched_at = _wake_schedule_at(data)
     if not prompt or sched_at is None:
         log.info("Wake request missing prompt or valid delay; ignoring")
-        if image_note and not _fold_into_armed():
-            await _image_nudge()
+        await _deliver_image_note()
         return
     prompt = _with_image_note(prompt)
     next_run_at, secs = sched_at

@@ -16,8 +16,9 @@ Path safety is the whole risk surface here: an unchecked path turns "share a
 picture" into "read any file on the host and publish it to Discord". So a
 candidate must resolve — after ``..`` collapsing and symlink resolution — to a
 real file under one of this run's own roots (its worktree, its repo, or the
-bot's data dir), carry an image extension, and fit the upload budget. Anything else is refused with a visible notice: a message
-promising a diagram with no diagram attached is worse than no feature at all.
+bot's data dir), carry an image extension, and fit the per-file size cap.
+Anything else is refused with a visible notice: a message promising a diagram
+with no diagram attached is worse than no feature at all.
 """
 
 from __future__ import annotations
@@ -54,7 +55,7 @@ IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 # under 9 MB was refused with "batch upload limit reached", which a turn
 # sharing a few GIFs hit every time.)
 MAX_IMAGE_BYTES = 8_000_000
-MAX_BATCH_BYTES = 9_000_000
+MAX_MESSAGE_BYTES = 9_000_000
 MAX_FILES_PER_MESSAGE = 10  # Discord's attachment cap per message
 MAX_IMAGES_PER_RESPONSE = 10
 _MAX_CAPTION_CHARS = 2000   # Discord's message content limit
@@ -233,29 +234,39 @@ class ImageDelivery:
     failures: list[ImageFailure] = field(default_factory=list)
 
 
-def pack_messages(
-    items: list[tuple[str, int, str | None]],
-) -> list[list[tuple[str, int, str | None]]]:
-    """Split ``(path, size, caption)`` items into per-message groups.
+@dataclass(frozen=True)
+class Upload:
+    """One accepted image, ready to post.
+
+    ``raw`` is the path as the turn wrote it, kept so a failure is reported in
+    the session's own terms; ``path`` is the resolved file that gets uploaded.
+    """
+    raw: str
+    path: str
+    size: int
+    caption: str | None = None
+
+
+def pack_messages(items: list[Upload]) -> list[list[Upload]]:
+    """Split accepted uploads into per-message groups.
 
     Order is kept. A group closes when the next file would push it past
-    ``MAX_BATCH_BYTES`` or ``MAX_FILES_PER_MESSAGE``. Every item fits a group on
-    its own because ``resolve_image`` already refused anything over
+    ``MAX_MESSAGE_BYTES`` or ``MAX_FILES_PER_MESSAGE``. Every item fits a group
+    on its own because ``resolve_image`` already refused anything over
     ``MAX_IMAGE_BYTES``.
     """
-    groups: list[list[tuple[str, int, str | None]]] = []
-    current: list[tuple[str, int, str | None]] = []
+    groups: list[list[Upload]] = []
+    current: list[Upload] = []
     current_bytes = 0
     for item in items:
-        size = item[1]
         if current and (
-            current_bytes + size > MAX_BATCH_BYTES
+            current_bytes + item.size > MAX_MESSAGE_BYTES
             or len(current) >= MAX_FILES_PER_MESSAGE
         ):
             groups.append(current)
             current, current_bytes = [], 0
         current.append(item)
-        current_bytes += size
+        current_bytes += item.size
     if current:
         groups.append(current)
     return groups
@@ -313,7 +324,7 @@ async def deliver_images(
     over_cap = directives[MAX_IMAGES_PER_RESPONSE:]
     directives = directives[:MAX_IMAGES_PER_RESPONSE]
 
-    accepted: list[tuple[str, int, str | None]] = []
+    accepted: list[Upload] = []
     failures = outcome.failures
     sandboxed = instance_confined(ctx.store, inst, ctx=ctx)
     for raw, caption in directives:
@@ -330,7 +341,7 @@ async def deliver_images(
         except OSError:
             failures.append(ImageFailure(raw, "file not readable"))
             continue
-        accepted.append((str(resolved), size, caption))
+        accepted.append(Upload(raw, str(resolved), size, caption))
 
     for raw, _caption in over_cap:
         failures.append(ImageFailure(
@@ -340,26 +351,27 @@ async def deliver_images(
         ))
 
     for group in pack_messages(accepted):
-        paths = [p for p, _, _ in group]
-        captions = [c for _, _, c in group if c]
+        captions = [u.caption for u in group if u.caption]
         caption = " · ".join(captions)[:_MAX_CAPTION_CHARS] if captions else None
         try:
-            ids = await ctx.messenger.send_files(ctx.channel_id, paths, caption=caption)
+            ids = await ctx.messenger.send_files(
+                ctx.channel_id, [u.path for u in group], caption=caption,
+            )
         except Exception as exc:
-            log.exception("/image — upload failed")
+            log.exception("/image: upload failed")
             reason = f"Discord upload failed ({type(exc).__name__})"
-            failures.extend(ImageFailure(p, reason) for p in paths)
+            failures.extend(ImageFailure(u.raw, reason) for u in group)
             continue
         if not ids:
             # The adapter returns no message id when the channel could not be
             # resolved: nothing was posted, and saying otherwise is the bug.
             log.warning("/image: upload to %s returned no message", ctx.channel_id)
             failures.extend(
-                ImageFailure(p, "Discord upload posted nothing") for p in paths
+                ImageFailure(u.raw, "Discord upload posted nothing") for u in group
             )
             continue
-        outcome.sent += len(paths)
-        log.info("/image — delivered %d image(s) to %s", len(paths), ctx.channel_id)
+        outcome.sent += len(group)
+        log.info("/image: delivered %d image(s) to %s", len(group), ctx.channel_id)
 
     if failures:
         # Visible, quiet: without this the turn's prose promises a picture that

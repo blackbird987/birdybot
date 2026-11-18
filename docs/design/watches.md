@@ -109,17 +109,19 @@ session's reply said the picture was there, and its next turn believed it
 (2026-11-18, several GIFs and "batch upload limit reached"). Two changes:
 
 - The batch limit is gone as a reason to drop anything. `pack_messages` splits
-  the images across messages under `MAX_BATCH_BYTES` and `MAX_FILES_PER_MESSAGE`;
+  the images across messages under `MAX_MESSAGE_BYTES` and `MAX_FILES_PER_MESSAGE`;
   only a file over `MAX_IMAGE_BYTES` on its own is refused for size.
 - `deliver_images` returns its failures and both callers hand them to
   `check_wake_request(image_failures=)`. The note (`images.failure_note`) rides
   on whatever resumes the thread next, so it never takes the one wake slot from
   something already armed: this turn's watch or wake, else a watch or wake an
   earlier turn armed (folded into its prompt). Only when nothing would resume
-  the thread is the session re-invoked, through `_nudge_once`, so it shares
+  the thread (a watch this turn wrote but the bot refused counts as nothing)
+  is the session re-invoked, through `_nudge_once`, so it shares
   `MAX_CONSEC_NUDGES` with the other nudges and a file that keeps failing stops
   after the cap. A promise or an unattended dead-end in the same turn is
-  answered in that same nudge. A worktree build is never re-invoked; the user
+  answered in that same nudge. The one path that drops the note is the
+  runaway cap, which stops the thread on purpose. A worktree build is never re-invoked; the user
   gets a notice instead.
 
 Harnesses: `python scripts/test_image_directive.py`,

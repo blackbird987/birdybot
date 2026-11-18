@@ -22,10 +22,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from bot import config  # noqa: E402
 from bot.engine.images import (  # noqa: E402
-    MAX_BATCH_BYTES,
     MAX_FILES_PER_MESSAGE,
+    MAX_MESSAGE_BYTES,
     MAX_IMAGES_PER_RESPONSE,
     ImageFailure,
+    Upload,
     deliver_images,
     failure_note,
     pack_messages,
@@ -258,7 +259,7 @@ def main() -> int:
           repr(out))
     check("split into two messages, each under the budget",
           len(msgr.batches) == 2
-          and all(sum(Path(p).stat().st_size for p in b) <= MAX_BATCH_BYTES
+          and all(sum(Path(p).stat().st_size for p in b) <= MAX_MESSAGE_BYTES
                   for b, _ in msgr.batches),
           repr([len(b) for b, _ in msgr.batches]))
     check("order kept across messages",
@@ -270,7 +271,9 @@ def main() -> int:
     check("no 'couldn't share' notice when everything posted", not msgr.texts,
           str(msgr.texts))
 
-    groups = pack_messages([(f"f{i}", 10, None) for i in range(MAX_FILES_PER_MESSAGE + 3)])
+    groups = pack_messages(
+        [Upload(f"f{i}", f"/abs/f{i}", 10) for i in range(MAX_FILES_PER_MESSAGE + 3)]
+    )
     check(f"a message holds at most {MAX_FILES_PER_MESSAGE} files",
           [len(g) for g in groups] == [MAX_FILES_PER_MESSAGE, 3],
           repr([len(g) for g in groups]))
@@ -285,6 +288,8 @@ def main() -> int:
           and "upload failed" in out.failures[0].reason, repr(out.failures))
     check("and the user sees it", len(msgr.texts) == 1 and gifs[2].name in msgr.texts[0],
           str(msgr.texts))
+    check("a failed upload reports the path as the turn wrote it",
+          out.failures[0].path == gifs[2].name, repr(out.failures))
 
     msgr = FakeMessenger(empty_on=1)
     out = asyncio.run(deliver_images(FakeCtx(msgr), text, inst))

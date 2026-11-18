@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+from typing import TYPE_CHECKING
 
 from bot import config, vault
 from bot.claude import sandbox
@@ -37,6 +38,9 @@ from bot.engine.resolver import (
     _merge_context_prefix,
     _resolver_in_flight,
 )
+
+if TYPE_CHECKING:
+    from bot.engine.images import ImageFailure
 
 log = logging.getLogger(__name__)
 
@@ -531,7 +535,7 @@ async def _execute_query(ctx: RequestContext, prompt: str) -> None:
 
         # [BOT_CMD: /image] — pictures go up first so the result embed (and its
         # buttons) stays the last thing in the thread.
-        image_failures: list = []
+        image_failures: list[ImageFailure] = []
         if result.result_text and not result.is_error:
             from bot.engine.images import deliver_images
             image_failures = (await deliver_images(ctx, result.result_text, inst)).failures
