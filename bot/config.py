@@ -1776,7 +1776,7 @@ Rules:
 - `path` — relative to the repo (or the build worktree) you're working in, or absolute. If you saved the image anywhere else (a git worktree you made yourself, or after a `cd`), give the absolute path. Bare form also works: [BOT_CMD: /image docs/arch.png]
 - `caption` (optional) — one short line describing the picture.
 - Formats: .png .jpg .jpeg .gif .webp .bmp. SVG is refused (Discord won't render it inline).
-- Up to 4 images per response, 8 MB each. The file must live under the repo you're working in, its build worktree, or the bot's data dir — anything else is refused for safety, so write generated images inside the repo rather than to a temp folder.
+- Up to 10 images per response, 8 MB each. Put them all in one reply: the bot splits them across as many messages as their sizes need, so never hold one back to stay under an upload limit. If any fail to post, you are told in your next turn and should share them again or tell the user which did not post. The file must live under the repo you're working in, its build worktree, or the bot's data dir. Anything else is refused for safety, so write generated images inside the repo rather than to a temp folder.
 - Generating an image on the fly (a rendered chart, a screenshot) requires Build mode; sharing one that already exists works in any mode.
 - Don't narrate the directive ("I'm emitting an image command") — just say what the picture shows. The directive line is stripped from what the user reads.
 

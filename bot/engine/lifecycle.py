@@ -534,9 +534,10 @@ async def run_instance(
         # workflow buttons stay the last thing in the thread. Raw text: the
         # collapsed copy above has already had the directives stripped out.
         dispatch_directives = inst.origin not in _NO_DIRECTIVE_ORIGINS
+        image_failures: list = []
         if result.result_text and not result.is_error and dispatch_directives:
             from bot.engine.images import deliver_images
-            await deliver_images(ctx, result.result_text, inst)
+            image_failures = (await deliver_images(ctx, result.result_text, inst)).failures
         await send_result(
             ctx, inst, _with_fallback_footer(display_text, result),
             silent=silent, result=result,
@@ -597,7 +598,8 @@ async def run_instance(
         # can be parsed and a turn that CLAIMED a self-wake but scheduled
         # nothing gets a notice-only heads-up instead of a silent dead-end.
         if dispatch_directives:
-            await check_wake_request(ctx, inst, final_text=result.result_text)
+            await check_wake_request(ctx, inst, final_text=result.result_text,
+                                     image_failures=image_failures)
 
     except asyncio.CancelledError:
         # Shutdown cancelled this task. The 30s drain in app.py keeps the
@@ -1959,6 +1961,7 @@ def armed_a_directive(text: str) -> bool:
 
 async def check_wake_request(
     ctx: RequestContext, instance: Instance, *, final_text: str = "",
+    image_failures: list | None = None,
 ) -> None:
     """Schedule a thread-bound self-wake requested by the just-finished turn.
 
@@ -1979,6 +1982,14 @@ async def check_wake_request(
     itself — the session, not this function, decides. Worktree builds can't safely
     self-wake — their dir may be merged/discarded by fire time — so they're
     refused with a note (parity with the runner gate).
+
+    ``image_failures`` (from ``images.deliver_images``) are the turn's
+    [BOT_CMD: /image] pictures that never reached the thread. The turn has
+    already ended, usually saying they were shared, so the session is told:
+    the note rides on whatever resumes the thread next (this turn's own watch
+    or wake, or one already pending), and when nothing does, the session is
+    re-invoked once under the shared nudge cap so it can retry them or say
+    plainly which did not post.
     """
     async def _notice(text: str) -> None:
         try:
@@ -2042,13 +2053,14 @@ async def check_wake_request(
         log.info(log_msg, ctx.channel_id, count)
         await _notice(nudged)
 
-    async def _nudge_or_stop() -> None:
+    async def _nudge_or_stop(prefix: str = "") -> None:
         # An unattended turn (cooldown retry / self-wake fire) dead-ended: no
         # wake scheduled AND no [TURN_COMPLETE] marker. Left alone the thread
         # silently dies (the q-12314 dead-end). Re-invoke it once (capped) with
         # an explicit instruction to finish, wake, or signal completion.
+        # ``prefix`` carries a failed-image note so one nudge covers both.
         await _nudge_once(
-            prompt=_NUDGE_PROMPT,
+            prompt=f"{prefix}\n\n{_NUDGE_PROMPT}" if prefix else _NUDGE_PROMPT,
             log_msg=("Auto-nudge scheduled for unattended dead-end in thread "
                      "%s (nudge=%d)"),
             exhausted=(
@@ -2120,6 +2132,70 @@ async def check_wake_request(
             "reply when you want me to keep going."
         )
 
+    image_note = ""
+    if image_failures:
+        from bot.engine.images import failure_note
+        image_note = failure_note(image_failures)
+        if instance.branch:
+            # A worktree build is never re-invoked (its directory may be gone
+            # by fire time), so the person in the thread is the only way back.
+            image_note = ""
+            await _notice(
+                "(Those images didn't post, and a build session can't be "
+                "resumed to retry them. Reply and ask it to share them again.)"
+            )
+
+    def _with_image_note(prompt: str) -> str:
+        """Prefix the image note onto a resume prompt, once."""
+        nonlocal image_note
+        if not image_note:
+            return prompt
+        note, image_note = image_note, ""
+        return f"{note}\n\nThen continue with the following.\n\n{prompt}"
+
+    async def _image_nudge(extra: str = "") -> None:
+        # Images failed and nothing else is about to resume the thread.
+        await _nudge_once(
+            prompt=image_note + (f"\n\n{extra}" if extra else ""),
+            log_msg=("Image retry nudge scheduled for thread %s: images from "
+                     "the last turn did not post (nudge=%d)"),
+            exhausted=(
+                "⚠️ Those images didn't post, and the session is out of "
+                "context so it can't retry them. Start a fresh thread to "
+                "share them."
+            ),
+            capped=(
+                f"⏸ Stopped after {config.MAX_CONSEC_NUDGES} nudges, the "
+                "images still aren't posting. Reply or tap a button to "
+                "continue."
+            ),
+            nudged="↻ Asking the session to retry the images that didn't post.",
+        )
+
+    def _fold_into_armed() -> bool:
+        """Carry the image note on a watch or wake armed by an EARLIER turn.
+
+        Adding a wake here would supersede it (one wake per thread), so the
+        note rides on it instead and reaches the session when it fires.
+        """
+        if not image_note:
+            return False
+        armed = ctx.store.watch_for_channel(ctx.channel_id)
+        if armed is not None:
+            armed.prompt = _with_image_note(armed.prompt)
+            ctx.store.update_watch(armed)
+            return True
+        sched = (ctx.store.pending_wake_for_channel(ctx.channel_id)
+                 if _thread_has_pending_wake() else None)
+        # A recurring thread-bound row (bot.engine.nudges) would repeat the
+        # note forever, and add_wake leaves it alone anyway, so only a
+        # one-shot wake carries it.
+        if sched is not None and not getattr(sched, "is_recurring", False):
+            sched.prompt = _with_image_note(sched.prompt)
+            ctx.store.update_schedule(sched)
+            return True
+        return False
+
     # A [BOT_CMD: /watch] directive outranks /wake in the same turn: it names
     # the actual job rather than guessing how long it will take, so it is
     # strictly better information. Handled here (not in a separate post-turn
@@ -2157,6 +2233,8 @@ async def check_wake_request(
                 "want me to check on it.)"
             )
             return
+        if image_note:
+            watch_data = {**watch_data, "prompt": _with_image_note(watch_data["prompt"])}
         watch = watches.build_watch(
             watch_data,
             channel_id=ctx.channel_id,
@@ -2218,7 +2296,7 @@ async def check_wake_request(
         unattended = ctx.source in ("wake", "cooldown")
         if (unattended and not instance.branch
                 and not has_turn_complete_marker(final_text)):
-            await _nudge_or_stop()
+            await _nudge_or_stop(prefix=image_note)
             return
         # Ended cleanly — an attended turn (real completion or a plain human
         # reply), or an unattended turn that signalled [TURN_COMPLETE]. Reset
@@ -2230,6 +2308,17 @@ async def check_wake_request(
         # firing on prose that merely discussed the feature, and an explicit
         # parsed directive remains the sole scheduling channel.
         _reset()
+        if image_note:
+            # (0) Images failed to post. Ride on a watch or wake an earlier
+            # turn armed if there is one; otherwise re-invoke the session with
+            # the list. A promise in the same turn is answered in the same
+            # nudge, so the two never compete for the one wake slot.
+            if _fold_into_armed():
+                _reset_nudge()
+                return
+            promised = promises_continuation(final_text)
+            await _image_nudge(_PROMISE_NUDGE_PROMPT if promised else "")
+            return
         if claims_self_wake(final_text):
             # (1) The turn ASSERTS it armed a self-wake (e.g. a malformed
             # directive the parser rejected) yet nothing was scheduled. Notify
@@ -2280,7 +2369,10 @@ async def check_wake_request(
     sched_at = _wake_schedule_at(data)
     if not prompt or sched_at is None:
         log.info("Wake request missing prompt or valid delay; ignoring")
+        if image_note and not _fold_into_armed():
+            await _image_nudge()
         return
+    prompt = _with_image_note(prompt)
     next_run_at, secs = sched_at
 
     # Runaway guard: every wake request bumps the per-thread counter (reset

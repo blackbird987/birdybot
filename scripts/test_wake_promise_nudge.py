@@ -87,6 +87,7 @@ class _Store:
         self._watch = watch
         self._pending = pending_wake
         self.cancelled = 0
+        self.updated: list[object] = []
 
     def add_wake(self, prompt, channel_id, next_run_at, repo_name, repo_path) -> None:
         self.wakes.append(prompt)
@@ -107,6 +108,12 @@ class _Store:
     def cancel_wakes(self, channel_id) -> int:
         self.cancelled += 1
         return 0
+
+    def update_watch(self, watch) -> None:
+        self.updated.append(watch)
+
+    def update_schedule(self, sched) -> None:
+        self.updated.append(sched)
 
 
 class _Ctx:
@@ -143,9 +150,10 @@ class _Inst:
 
 
 def _run(text, *, source="user_message", branch=None, warn=False, nudge=0,
-         watch=None, pending_wake=None):
+         watch=None, pending_wake=None, image_failures=None):
     ctx = _Ctx(source, nudge=nudge, store=_Store(watch=watch, pending_wake=pending_wake))
-    asyncio.run(check_wake_request(ctx, _Inst(branch, warn), final_text=text))
+    asyncio.run(check_wake_request(ctx, _Inst(branch, warn), final_text=text,
+                                   image_failures=image_failures))
     return ctx
 
 
@@ -301,6 +309,94 @@ _check("nudge counter reset", c._nudge == 0)
 print("An unattended dead-end still nudges (unattended path untouched)")
 c = _run("Next I'll read the roadmap and re-verify.", source="cooldown")
 _check("unattended dead-end still re-invoked", len(c.store.wakes) == 1)
+
+# ---- Images that did not post --------------------------------------------
+# 2026-11-18: a turn shared several GIFs, some never posted, and the session
+# went on as if they had: the "couldn't share" line reached Discord and never
+# the session. The failures now ride on whatever resumes the thread next, or
+# re-invoke the session under the same shared nudge cap.
+from types import SimpleNamespace  # noqa: E402
+
+from bot.engine.images import ImageFailure  # noqa: E402
+
+_FAILED = [ImageFailure("out/motion.gif", "Discord upload failed (HTTPException)")]
+_SHARED = "Here are the clips."
+
+print("Failed images on a clean turn -> the session is re-invoked with the list")
+c = _run(_SHARED, image_failures=_FAILED)
+_check("exactly one wake scheduled", len(c.store.wakes) == 1)
+_check("it names the image and the reason",
+       c.store.wakes and "`out/motion.gif`" in c.store.wakes[0]
+       and "upload failed" in c.store.wakes[0])
+_check("nudge counter bumped (shared cap)", c._nudge == 1)
+_check("user told it is being retried",
+       any("retry the images" in s for s in c.messenger.sent))
+
+print("No failures -> nothing changes")
+c = _run(_SHARED, image_failures=[])
+_check("nothing scheduled", len(c.store.wakes) == 0 and not c.messenger.sent)
+
+print("Failed images plus a promise -> one nudge answers both")
+c = _run(_SHARED + " " + _PROMISE, image_failures=_FAILED)
+_check("one wake", len(c.store.wakes) == 1)
+_check("carrying the image list and the promise nudge",
+       c.store.wakes and "motion.gif" in c.store.wakes[0]
+       and _PROMISE_NUDGE_PROMPT in c.store.wakes[0])
+
+print("Failed images while this turn armed a wake -> the note rides on it")
+c = _run(_wake_txt, image_failures=_FAILED)
+_check("still exactly one wake", len(c.store.wakes) == 1)
+_check("the real prompt, with the image note in front",
+       c.store.wakes and "check the deploy status" in c.store.wakes[0]
+       and c.store.wakes[0].index("motion.gif") < c.store.wakes[0].index("check the deploy"))
+
+print("Failed images while this turn armed a watch -> the note rides on it")
+c = _run(_watch_txt, image_failures=_FAILED)
+_check("watch armed, no extra wake",
+       len(c.store.watches) == 1 and len(c.store.wakes) == 0)
+_check("the watch prompt carries the note",
+       c.store.watches and "motion.gif" in c.store.watches[0].prompt
+       and "report failures" in c.store.watches[0].prompt)
+
+print("Failed images with a watch armed by an earlier turn -> folded, not superseded")
+_old_watch = SimpleNamespace(prompt="read the bench log")
+c = _run(_SHARED, image_failures=_FAILED, watch=_old_watch)
+_check("no wake added", len(c.store.wakes) == 0)
+_check("the earlier watch now carries the note",
+       "motion.gif" in _old_watch.prompt and "read the bench log" in _old_watch.prompt
+       and c.store.updated == [_old_watch])
+
+print("Failed images with a wake pending from an earlier turn -> folded")
+_old_wake = SimpleNamespace(prompt="check CI")
+c = _run(_SHARED, image_failures=_FAILED, pending_wake=_old_wake)
+_check("no wake added", len(c.store.wakes) == 0)
+_check("the pending wake carries the note",
+       "motion.gif" in _old_wake.prompt and "check CI" in _old_wake.prompt)
+
+print("Failed images with only a recurring nudge row -> it is left alone")
+_recurring = SimpleNamespace(prompt="daily standup", is_recurring=True)
+c = _run(_SHARED, image_failures=_FAILED, pending_wake=_recurring)
+_check("recurring row untouched", _recurring.prompt == "daily standup")
+_check("the session is re-invoked instead",
+       len(c.store.wakes) == 1 and "motion.gif" in c.store.wakes[0])
+
+print("Failed images from a build/worktree session -> notice, never a wake")
+c = _run(_SHARED, image_failures=_FAILED, branch="claude-bot/t-1")
+_check("nothing scheduled", len(c.store.wakes) == 0)
+_check("user told to ask for them again",
+       any("ask it to share them again" in s for s in c.messenger.sent))
+
+print("Failed images past the nudge cap -> stop notice, no loop")
+c = _run(_SHARED, image_failures=_FAILED, nudge=config.MAX_CONSEC_NUDGES)
+_check("no further nudge", len(c.store.wakes) == 0)
+_check("stop notice surfaced", any("Stopped after" in s for s in c.messenger.sent))
+
+print("Failed images on an unattended dead-end -> one nudge carries both")
+c = _run("Next I'll read the roadmap.", source="cooldown", image_failures=_FAILED)
+_check("one wake", len(c.store.wakes) == 1)
+_check("image note plus the dead-end nudge",
+       c.store.wakes and "motion.gif" in c.store.wakes[0]
+       and "SYSTEM NUDGE" in c.store.wakes[0])
 
 # ---- The eval flag -------------------------------------------------------
 # The runtime recovers from this; eval counts how often it has to, and points
