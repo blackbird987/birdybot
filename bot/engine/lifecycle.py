@@ -117,6 +117,7 @@ def _format_reset_time(reset_utc: datetime) -> str:
         reset_utc = reset_utc.replace(tzinfo=timezone.utc)
     try:
         import zoneinfo
+        # TODO: read config.OWNER_TZ instead of repeating the zone here.
         tz = zoneinfo.ZoneInfo("Europe/Amsterdam")
         local = reset_utc.astimezone(tz)
         now_local = datetime.now(tz)
@@ -806,6 +807,9 @@ async def backfill_thread_session(ctx: RequestContext, inst: Instance) -> bool:
         return False
 
 
+DECIDED_AWAY_MARKER = "decided while you were away"
+
+
 def finalize_run(ctx: RequestContext, inst: Instance, result: RunResult) -> None:
     """Apply RunResult to Instance and persist."""
     # Defense in depth: a synthetic RunResult from refuse-to-spawn or an
@@ -831,6 +835,11 @@ def finalize_run(ctx: RequestContext, inst: Instance, result: RunResult) -> None
         inst.context_model = result.model
     inst.needs_input = result.needs_input
     inst.finished_at = datetime.now(timezone.utc).isoformat()
+    # A quiet hours turn that made calls on the owner's behalf lists them under
+    # this line (config.QUIET_HOURS_BLOCK). The Needs you list shows the thread
+    # until someone writes there (bot/engine/waiting.py, decided_away).
+    if inst.quiet_hours and not result.is_error:
+        inst.decided_away = DECIDED_AWAY_MARKER in (result.result_text or "").lower()
     # Carry path-poisoning hits onto the Instance so workflows.py (which
     # only sees Instance, not RunResult) can enrich the zero-diff halt
     # notice with which paths the model tried to edit in the main repo.
@@ -1330,6 +1339,10 @@ async def _maybe_schedule_auto_merge(
         return
     if inst.origin not in _AUTO_MERGE_ORIGINS:
         return
+    # TODO: needs_input only catches the CLI's own question tool. A question
+    # asked in prose ("want me to merge?") is not detected, so this can still
+    # schedule a merge under an open question, and that gap is why autonomy
+    # stays opt-in for Build-button runs (see study/findings, held branches).
     if result is not None and result.needs_input:
         return
     if ctx.store.get_autopilot_chain(inst.session_id):

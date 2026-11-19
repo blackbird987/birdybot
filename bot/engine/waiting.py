@@ -85,6 +85,7 @@ KINDS: tuple[Kind, ...] = (
     Kind("failed_run", "❌", "Failed", "failed"),
     Kind("manual_recovery", "\U0001f6e0️", "Needs manual recovery", "recovery"),
     Kind("ready_to_merge", "✅", "Ready to merge", "ready"),
+    Kind("decided_away", "\U0001f319", "Decided while you were away", "decided"),
     Kind("your_turn", "\U0001f4ac", "Your turn", "your turn"),
 )
 KIND_BY_NAME = {k.name: k for k in KINDS}
@@ -486,6 +487,14 @@ def _session_items(c: _Ctx) -> Iterable[WaitingItem]:
                          detail=_clip((inst.error or "").splitlines()[0] if inst.error else "",
                                       DETAIL_CHARS),
                          since=at)
+        elif (getattr(inst, "decided_away", False) and age <= YOUR_TURN_MAX_AGE
+              and inst.status == InstanceStatus.COMPLETED
+              and (ref.last_human_at or 0) < at):
+            # Quiet hours calls the owner has not seen yet. Closes when anyone
+            # writes in the thread, like "Your turn". docs/design/quiet-hours.md
+            yield c.item("decided_away", f"decided:{inst.id}", repo=repo,
+                         thread_id=ref.thread_id, title=_title(ref, inst),
+                         detail="calls made while you were away", since=at)
 
 
 def _paused_chains(c: _Ctx) -> Iterable[WaitingItem]:
@@ -606,7 +615,7 @@ _READERS: tuple[tuple[str, Callable[[_Ctx], Iterable[WaitingItem]]], ...] = (
     ("deploy", _deploys),
     ("account", _accounts),
     ("choice_pick", _choice_picks),
-    ("question/failed/recovery", _session_items),
+    ("question/failed/recovery/decided", _session_items),
     ("chain_paused", _paused_chains),
     ("resume_parent", _resume_parents),
     ("merge_failed", _failed_merges),

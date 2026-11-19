@@ -48,7 +48,10 @@ thread wins. A thread whose session is running shows nothing.
 13. `manual_recovery`: a run that left work needing a hand, 3 days.
 14. `ready_to_merge`: built work ahead of its base, not merged
     (`chain_git.ship_candidates`, shared with fleet ship), 7 days.
-15. `your_turn`: the bot answered last in the past 48h and nobody has written
+15. `decided_away`: a quiet hours turn listed calls it made under "Decided
+    while you were away" (`Instance.decided_away`), until anyone writes in the
+    thread, 48h (`quiet-hours.md`).
+16. `your_turn`: the bot answered last in the past 48h and nobody has written
     there since (`ThreadInfo.last_turn_at` and `last_human_at`).
 
 Child threads (spawned by another session) never show a question or a

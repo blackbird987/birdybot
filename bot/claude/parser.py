@@ -520,6 +520,7 @@ def _extract_reset_time(lower: str):
         # Try to use the user's timezone (Europe/Amsterdam) for parsing
         try:
             import zoneinfo
+            # TODO: read config.OWNER_TZ instead of repeating the zone here.
             tz = zoneinfo.ZoneInfo("Europe/Amsterdam")
         except Exception:
             tz = timezone.utc

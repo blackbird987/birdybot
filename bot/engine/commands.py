@@ -143,6 +143,7 @@ from bot.engine.settings_cmds import (  # noqa: F401
     on_mode,
     on_model,
     on_provider,
+    on_quiet,
     on_schedule,
     on_verbose,
 )

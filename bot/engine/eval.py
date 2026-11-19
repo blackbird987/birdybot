@@ -510,6 +510,11 @@ def _check_unoffered_choice(inst: Instance, text: str) -> list[EvalFlag]:
     from bot.claude.types import InstanceOrigin
     from bot.engine.directives.choices import has_choices_directive
 
+    # A quiet hours turn was told not to ask at all (config.QUIET_HOURS_BLOCK),
+    # so a missing button is not a miss there. Whether it asked anyway is a
+    # separate flag, owned by that block.
+    if getattr(inst, "quiet_hours", False):
+        return _check_quiet_question(text)
     if inst.branch or inst.origin != InstanceOrigin.DIRECT:
         return []
     if has_choices_directive(text):
@@ -527,6 +532,28 @@ def _check_unoffered_choice(inst: Instance, text: str) -> list[EvalFlag]:
         category="unoffered_choice", severity="info",
         message="Ended on an either/or question without /choices buttons",
         evidence=question[-120:],
+    )]
+
+
+def _check_quiet_question(text: str) -> list[EvalFlag]:
+    """Did a quiet hours turn still end on a question? Flag only.
+
+    Some are right (a missing key, deleting data), so this is info severity:
+    it measures whether the quiet hours block lands, not a rule break.
+    """
+    paras = [p.strip() for p in re.split(r"\n\s*\n", (text or "").strip()) if p.strip()]
+    # Directives and their bodies sit after the prose; skip them.
+    while paras and paras[-1].startswith(("```", "~~~", "[BOT_CMD")):
+        paras.pop()
+    if not paras:
+        return []
+    last = paras[-1]
+    if not last.rstrip("*_ ").endswith("?"):
+        return []
+    return [EvalFlag(
+        category="quiet_question", severity="info",
+        message="Quiet hours turn ended on a question",
+        evidence=last.splitlines()[-1][-120:],
     )]
 
 
@@ -920,6 +947,7 @@ _ATTRIBUTION: tuple[tuple[str, str, str], ...] = (
     ("test_failure", "", "VERIFY_PROMPT"),
     ("critical_pass", "", "CRITICAL_PASS"),
     ("unoffered_choice", "", "BOT_CONTEXT"),
+    ("quiet_question", "", "QUIET_HOURS_BLOCK"),
 )
 
 

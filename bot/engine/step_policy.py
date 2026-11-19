@@ -92,13 +92,16 @@ def load_workflow_policy(repo_path: str | None, *, sandboxed: bool = False) -> d
 
     Returns a dict with keys ``autonomy`` ("hold" | "merge" | "ship"),
     ``merge_veto_minutes``, ``ship_grace_minutes``. Absent/malformed file →
-    the ``hold`` default (today's behavior — nothing auto-ships until a repo
-    explicitly opts in). Mirrors ``_load_verify_policy``'s read guardrails.
+    the ``hold`` default, which governs the UNATTENDED paths only: Build-button
+    runs and the fleet sweep do not auto-merge until a repo opts in. A /chain
+    with no preset ships on that default anyway (its review and verify are the
+    gate); see ``repo_chose_autonomy`` and ``directives.chain``.
+    Mirrors ``_load_verify_policy``'s read guardrails.
 
-      hold  — DEFAULT. Manual Merge/Discard; nothing fires on its own.
-      merge — completed build branches auto-merge after a veto window
+      hold  - DEFAULT. Build-button runs park on Merge/Discard.
+      merge - completed build branches auto-merge after a veto window
               (Hold to stop). Deploy rides along as it does today.
-      ship  — like merge, plus the autonomy sweep fleet-ships any stragglers
+      ship  - like merge, plus the autonomy sweep fleet-ships any stragglers
               (deploy + verify-back) for this repo.
 
     A sandboxed repo always holds: this file is one a session could write, and it
@@ -117,6 +120,16 @@ def load_workflow_policy(repo_path: str | None, *, sandboxed: bool = False) -> d
         "merge_veto_minutes": _safe_pos_int(cfg.get("merge_veto_minutes"), 10),
         "ship_grace_minutes": _safe_pos_int(cfg.get("ship_grace_minutes"), 30),
     }
+
+
+def repo_chose_autonomy(repo_path: str | None) -> bool:
+    """Did this repo's ``.claude/workflow.json`` set ``autonomy`` explicitly?
+
+    Tells a repo that chose ``hold`` apart from one that never wrote the file,
+    since both read as hold through ``load_workflow_policy``.
+    """
+    cfg = read_repo_config(repo_path, "workflow.json")
+    return bool(cfg) and "autonomy" in cfg
 
 
 # --- Autopilot chains ---
@@ -144,8 +157,9 @@ _CHAIN_PRESETS: dict[str, list[str]] = {
         "plan_check", "build", "sensors", "review_code", "verify",
         "done", "verify_release", "release", "merge",
     ],
-    # Build + release but stop before merge — parks on Merge/Discard (or the
-    # auto-merge veto window if the repo opted into merge/ship autonomy).
+    # Build + release but stop before merge: parks on Merge/Discard. A chain
+    # never auto-merges from here; the veto window is for Build-button runs.
+    # A /chain only gets this with a stated reason (directives.chain).
     "hold": [
         "plan_check", "build", "sensors", "review_code", "verify",
         "done", "verify_release", "release",

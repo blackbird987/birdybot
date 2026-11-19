@@ -67,6 +67,39 @@ async def on_verbose(ctx: RequestContext, text: str) -> None:
         )
 
 
+# --- /quiet ---
+
+async def on_quiet(ctx: RequestContext, text: str) -> None:
+    """Show or set quiet hours. Owner only (the slash command checks).
+
+    ``/quiet`` shows status, ``/quiet 03:00-09:00`` sets a window, ``/quiet
+    off`` turns them off, ``/quiet default`` goes back to the configured one.
+    """
+    from bot.engine import quiet as quiet_mod
+    arg = text.strip().lower()
+    if not arg:
+        await ctx.messenger.send_text(ctx.channel_id, quiet_mod.status_text(ctx.store))
+        return
+    if arg == "off":
+        quiet_mod.set_window(ctx.store, "off")
+        await ctx.messenger.send_text(
+            ctx.channel_id, "Quiet hours are off. Sessions ask as usual at any hour.",
+        )
+        return
+    if arg == "default":
+        quiet_mod.set_window(ctx.store, None)
+        await ctx.messenger.send_text(ctx.channel_id, quiet_mod.status_text(ctx.store))
+        return
+    w = quiet_mod.parse_window(arg)
+    if w is None:
+        await ctx.messenger.send_text(
+            ctx.channel_id, "Usage: /quiet, /quiet 03:00-09:00, /quiet off, /quiet default",
+        )
+        return
+    quiet_mod.set_window(ctx.store, quiet_mod.format_window(w))
+    await ctx.messenger.send_text(ctx.channel_id, quiet_mod.status_text(ctx.store))
+
+
 # --- /effort ---
 
 _VALID_EFFORT = tuple(EFFORT_DISPLAY)
