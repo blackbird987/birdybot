@@ -534,9 +534,11 @@ def format_result_md(instance: Instance, preview: str | None = None) -> str:
             strip_verify_blocks(redact_secrets(preview)),
         )
         body, dropped = _leading_preview(cleaned, config.RESULT_PREVIEW_MAX)
-        parts.append(body)
         if dropped:
-            parts.append(f"-# +{dropped:,} more characters \u2014 Expand \u25bc")
+            body = append_footer(
+                body, f"-# +{dropped:,} more characters \u2014 Expand \u25bc",
+            )
+        parts.append(body)
     elif instance.summary:
         parts.append(redact_secrets(instance.summary))
 
@@ -547,10 +549,10 @@ def format_result_md(instance: Instance, preview: str | None = None) -> str:
     meta.append(mode_name(instance.mode))
     if instance.chained_from:
         meta.append(f"stacked on {instance.chained_from}")
-    if meta:
-        parts.append(" | ".join(meta))
-
-    return "\n".join(parts)
+    text = "\n".join(parts)
+    # The summary and the error are run text too, and either can end inside
+    # a code block it opened (a summary is one collapsed paragraph).
+    return append_footer(text, " | ".join(meta)) if meta else text
 
 
 # Room held back on the final chunk for the "+N more characters" marker.

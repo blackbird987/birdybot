@@ -343,15 +343,16 @@ def _state_line(a: AccountUsage) -> str:
     return f"`{a.label}` usage unavailable ({a.error or 'unknown error'})"
 
 
-def _as_of(a: AccountUsage) -> str:
-    """When a stale reading was taken, as a timestamp the client counts up.
+def as_of(epoch: float) -> str:
+    """How old shown figures are, as a timestamp the client counts up.
 
     Written out ("as of 12m ago") the text changed every minute, so the
-    dashboard was re-sent on every refresh while a reading was stale. A
-    ``<t:EPOCH:R>`` stays the same string until a fresh reading replaces it
-    (ark-refresh.md: an unchanged render sends nothing).
+    dashboard was re-sent on every refresh while old figures were shown. A
+    ``<t:EPOCH:R>`` stays the same string until fresh figures replace it
+    (ark-refresh.md: an unchanged render sends nothing). Shared with the
+    ccusage fallback bar in ``bot/engine/usage.py``.
     """
-    return f"as of <t:{int(a.fetched_at)}:R>"
+    return f"as of <t:{int(epoch)}:R>"
 
 
 def _subtext(a: AccountUsage) -> str:
@@ -359,7 +360,7 @@ def _subtext(a: AccountUsage) -> str:
     # Discord does not render subtext and the marker would show literally.
     bits = [f"{name} {_pct(p)}" for name, p, _ in a.scoped if p >= 1]
     if a.stale:
-        bits.append(_as_of(a))
+        bits.append(as_of(a.fetched_at))
     return "_" + " · ".join(bits) + "_" if bits else ""
 
 
@@ -418,7 +419,7 @@ def format_plan_usage_details(accounts: list[AccountUsage]) -> str | None:
             continue
         head = f"**{a.label}**"
         if a.stale:
-            head += f" ({_as_of(a)}: {a.error})"
+            head += f" ({as_of(a.fetched_at)}: {a.error})"
         lines.append(head)
         if a.week_pct is not None:
             when = (f" · resets {_ts(a.week_resets_at, 'f')} ({_ts(a.week_resets_at, 'R')})"

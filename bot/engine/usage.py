@@ -793,16 +793,16 @@ async def _ccusage_bar_async() -> str | None:
         block = _parse_block(good_block) if good_block else None
         daily, weekly = _parse_daily_range(good_daily)
         bar = format_usage_bar(block, daily, weekly)
-        # Say how old these figures are. A <t:EPOCH:R> timestamp, not a
-        # written-out "12m ago", so the render stays the same string between
-        # refreshes and the dashboard is not re-sent each minute
-        # (ark-refresh.md). Italic, not -#: embed fields do not render subtext.
+        # Say how old these figures are, from the oldest one drawn. Italic,
+        # not -#: embed fields do not render subtext.
         stamps = [
-            _last_good_at[k] for k, v in ((daily_key, good_daily), (block_key, good_block))
-            if v and k in _last_good_at
+            _last_good_at[key]
+            for key, data in ((daily_key, good_daily), (block_key, good_block))
+            if data and key in _last_good_at
         ]
         if bar and stamps:
-            bar += f"\n_as of <t:{int(min(stamps))}:R>_"
+            from bot.engine import plan_usage
+            bar += f"\n_{plan_usage.as_of(min(stamps))}_"
         return bar
 
     return None

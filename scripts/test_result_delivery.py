@@ -21,6 +21,8 @@ What this locks down:
   (e) The last-resort embed cut announces itself and still respects the cap.
   (i) A footer added under a reply that ends inside a code block it never
       closed lands outside that block, on the real send-result path too.
+  (j) The same holds for the run-facts line under a summary card, whose
+      summary or error can open a code block and never close it.
 
 Calls the real production functions so the test can't drift.
 
@@ -301,6 +303,34 @@ _check("send_result: posted text has balanced fences",
 _check("send_result: the run-facts line is outside the code block",
        "$0.0421" in posted
        and posted[:posted.find("$0.0421")].count("```") % 2 == 0)
+
+# ---- (j) the summary card's run facts stay outside an open fence ----
+print("The summary card's run-facts line stays outside an open fence")
+
+
+def _meta_outside(card: str) -> bool:
+    head, _, last = card.rpartition("\n")
+    return head.count("```") % 2 == 0 and "```" not in last and "Build" in last
+
+
+card_inst = Instance(
+    id="t-997", name=None, instance_type=InstanceType.TASK, prompt="p",
+    repo_name="bot", repo_path=tempfile.gettempdir(),
+    status=InstanceStatus.COMPLETED, mode="build",
+)
+card_inst.duration_ms = 92000
+card_inst.summary = "Fixed it: ```python x = 1"
+_check("summary ending mid-fence: run facts outside the block",
+       _meta_outside(format_result_md(card_inst)))
+card_inst.status = InstanceStatus.FAILED
+card_inst.error = "Traceback:\n```\nKeyError: 'x'"
+_check("error ending mid-fence: run facts outside the block",
+       _meta_outside(format_result_md(card_inst)))
+card_inst.status = InstanceStatus.COMPLETED
+card_inst.summary = "All good."
+_check("a plain summary card is unchanged in shape",
+       format_result_md(card_inst).count("```") == 0
+       and format_result_md(card_inst).startswith("**"))
 
 print()
 if _failures:
