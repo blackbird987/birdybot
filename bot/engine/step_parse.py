@@ -439,6 +439,12 @@ def _verify_why(inst: Instance) -> str | None:
 
 
 _NOT_DONE_RE = re.compile(r'not done:\s*(.+)$', re.IGNORECASE)
+# A "not done:" that names nothing: "nothing", "none.", "n/a, but ...", or
+# the prompt's own "..." placeholder. "none of the tests ran" is a real gap.
+_NOT_DONE_EMPTY_RE = re.compile(
+    r'^(?:(?:none|nothing|n/?a|nil)\s*(?:[.,;:]|$)|(?:\.{3}|\u2026|-+)\s*$)',
+    re.IGNORECASE,
+)
 
 
 def _verify_not_done(inst: Instance) -> str | None:
@@ -464,7 +470,9 @@ def _verify_not_done(inst: Instance) -> str | None:
     if not m:
         return None
     rest = m.group(1).strip()
-    return rest or None
+    if not rest or _NOT_DONE_EMPTY_RE.match(rest):
+        return None
+    return rest
 
 # Pull a fenced ```json``` block out of verifier output.
 _JSON_BLOCK_RE = re.compile(

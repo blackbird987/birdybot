@@ -1033,6 +1033,15 @@ with tempfile.TemporaryDirectory() as _d:
     check_eq("_verify_not_done: none when everything was delivered", _verify_not_done(_inst), None)
     _f.write_text("no block here", encoding="utf-8")
     check_eq("_verify_not_done: none with no verify block", _verify_not_done(_inst), None)
+    for _empty in ("nothing, but the state file is nearly full", "None.", "n/a", "...", "\u2026"):
+        _f.write_text(f"```verify\nRESULT: pass\nSUMMARY: works. not done: {_empty}\n```\n",
+                      encoding="utf-8")
+        check_eq(f"_verify_not_done: a placeholder is not a gap ({_empty!r})",
+                 _verify_not_done(_inst), None)
+    _f.write_text("```verify\nRESULT: pass\nSUMMARY: not done: none of it ran live\n```\n",
+                  encoding="utf-8")
+    check_eq("_verify_not_done: 'none of ...' is a real gap",
+             _verify_not_done(_inst), "none of it ran live")
     check_eq("_verify_not_done: none with no result file",
              _verify_not_done(SimpleNamespace(result_file=None)), None)
 

@@ -9,10 +9,16 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import stat
 from pathlib import Path
 
 from bot.fsutil import atomic_write_text
+
+# A done item an older writer boxed a second time ("- [ ] [x] ...").
+_BOXED_TWICE = "[ ] [x] "
+# Any markdown heading ends the section's top-level list.
+_HEADING_RE = re.compile(r'#{1,6}\s')
 
 
 log = logging.getLogger(__name__)
@@ -166,7 +172,6 @@ class ReposMixin:
         Public so engine code (e.g. plan-review injection) can dedup
         with the same normalization used on append.
         """
-        import re
         text = re.sub(r'\s*\((Critical|High|Medium|Low)\)(\s*\(.*)?\s*$', '', item)
         text = re.sub(r'^-\s*', '', text).strip().lower()
         m = re.match(r'(\[[^\]]+\])\s*(.*)', text)
@@ -286,7 +291,6 @@ class ReposMixin:
         The end is the first heading of any level after the header (a "### "
         sub-heading or the next "## " section), or the end of the file.
         """
-        import re
         start = None
         for i, line in enumerate(lines):
             stripped = line.strip()
@@ -294,7 +298,7 @@ class ReposMixin:
                 if stripped == "## Deferred Revisions":
                     start = i
                 continue
-            if re.match(r'#{1,6}\s', stripped):
+            if _HEADING_RE.match(stripped):
                 return start, i
         return start, len(lines)
 
@@ -306,10 +310,11 @@ class ReposMixin:
             return None
         text = body[2:].strip()
         low = text.lower()
-        # "- [ ] [x] " is a done item an older writer boxed a second time.
-        if low.startswith("[ ] [x] ") or low.startswith("[x] "):
-            return True, text[text.lower().index("[x] ") + 4:]
-        if low == "[x]" or low == "[ ] [x]":
+        if low.startswith(_BOXED_TWICE):
+            return True, text[len(_BOXED_TWICE):]
+        if low.startswith("[x] "):
+            return True, text[4:]
+        if low in ("[x]", _BOXED_TWICE.strip()):
             return True, ""
         if text.startswith("[ ] "):
             return False, text[4:]
@@ -345,8 +350,8 @@ class ReposMixin:
             return content
         for i in range(start + 1, end):
             line = lines[i]
-            if line.lower().startswith("- [ ] [x] "):
-                lines[i] = "- [x] " + line[len("- [ ] [x] "):]
+            if line.lower().startswith("- " + _BOXED_TWICE):
+                lines[i] = "- [x] " + line[2 + len(_BOXED_TWICE):]
         return "".join(lines)
 
     @classmethod
