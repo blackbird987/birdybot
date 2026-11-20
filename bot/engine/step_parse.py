@@ -437,6 +437,35 @@ def _verify_why(inst: Instance) -> str | None:
     why = m.group(1).strip()
     return why or None
 
+
+_NOT_DONE_RE = re.compile(r'not done:\s*(.+)$', re.IGNORECASE)
+
+
+def _verify_not_done(inst: Instance) -> str | None:
+    """What a passing verify said was not delivered, or None.
+
+    VERIFY_PROMPT's "Whole goal" step puts any undelivered part of the
+    owner's goal into the SUMMARY line as "not done: ...", without changing
+    RESULT. Read from the LAST verify block, like ``_verify_why``.
+    """
+    if not inst.result_file:
+        return None
+    try:
+        text = Path(inst.result_file).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    blocks = _VERIFY_BLOCK_RE.findall(text)
+    if not blocks:
+        return None
+    summary = _VERIFY_SUMMARY_RE.search(blocks[-1])
+    if not summary:
+        return None
+    m = _NOT_DONE_RE.search(summary.group(1).strip())
+    if not m:
+        return None
+    rest = m.group(1).strip()
+    return rest or None
+
 # Pull a fenced ```json``` block out of verifier output.
 _JSON_BLOCK_RE = re.compile(
     r'```json\s*\n(.*?)```', re.DOTALL,
