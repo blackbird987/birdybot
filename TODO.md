@@ -72,7 +72,7 @@
 - [x] [Modularity] BOT_CMD scanner belongs in its own module (Low) (stale, 2026-11-20: it has its own module, bot/engine/directives/dispatch.py (fed8bbb))
 - [x] [DRY/Cleanup] Extract git helper methods to a shared location — done, `procutil.run_capture`
 - [x] [Performance] Skip auto-follow for owner-only repos (Low) (stale, 2026-11-20: not worth doing: following the owner into every bot thread is the point (90433f5), one call per thread)
-- [ ] [UX/UI] Show cache age when serving stale fallback data (Low) (queued in the leftovers build, 2026-11-20)
+- [x] [UX/UI] Show cache age when serving stale fallback data (Low) (done in v0.102.36: stale usage figures carry a Discord relative timestamp, the cost-estimate fallback bar too)
 - [x] [DRY/Cleanup] Extract chain resume logic into shared helper — not extractable: the three `advance_chain_phase` calls are 3-4 lines each at different points of one `while` loop, each immediately followed by `break` or `continue`, so the control flow cannot move into a function
 - [x] [DRY/Cleanup] Extract instance-cloning helper shared by retry and PPU — done, `StateStore.clone_instance_for_rerun`, shared by `/retry`, the Retry button, the cooldown auto-retry and pay-per-use
 - [ ] [Bug Risk] Discard path leaves stale completed tag on archived thread (Medium) (owner question below)
@@ -91,7 +91,7 @@
 - [x] [Bug Risk] Recover full backlink metadata, not just thread_name (Medium) (stale, 2026-11-20: the Verify Board and its cleanup were removed in 48ce49e)
 - [x] [DRY/Cleanup] Use set_status("dismissed") instead of hard delete (Medium) (stale, 2026-11-20: the Verify Board and its cleanup were removed in 48ce49e)
 - [x] [Modularity] Fold into reusable /verify cleanup admin command (Medium) (stale, 2026-11-20: the Verify Board and its cleanup were removed in 48ce49e)
-- [ ] [Reliability] Guard against suffix landing inside trailing code fence (Low) (queued in the leftovers build, 2026-11-20)
+- [x] [Reliability] Guard against suffix landing inside trailing code fence (Low) (done in v0.102.36: one shared helper closes an open fence before any footer, short replies and summary cards)
 - [x] [Reliability] Defensive inline comment naming prior incidents (Medium) (stale, 2026-11-20: both guards name the incident inline (forums.py set_thread_session, query.py))
 - [x] [Bug Risk] Mixed semantics in state.json (Medium) (stale, 2026-11-20: the 656a090 cache-token change is the likely meaning, and every record from before it has been pruned)
 - [x] [Reliability] Resume-from-reboot may lose iterative revisions (Medium) (stale, 2026-11-20: 4860dc6 added the store lookup for the newest revision (step_parse.py), it fails safe past 24h)
