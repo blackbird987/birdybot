@@ -64,6 +64,9 @@ _CCUSAGE_CMD: list[str] = _detect_ccusage_cmd()
 
 _cache: dict[str, tuple[float, object]] = {}
 _last_good: dict[str, object] = {}  # Survives negative caching
+# Wall clock (not monotonic) of each _last_good entry: the fallback bar shows
+# it as a Discord <t:EPOCH:R> timestamp, which needs an epoch.
+_last_good_at: dict[str, float] = {}
 _DEFAULT_TTL = getattr(config, "CCUSAGE_CACHE_TTL", 60)
 _URGENT_TTL = 15  # When approaching rate limits
 
@@ -377,6 +380,7 @@ async def _run_ccusage(args: list[str], force: bool = False) -> dict | None:
             data = json.loads(stdout.decode())
             _cache[cache_key] = (time.monotonic(), data)
             _last_good[cache_key] = data
+            _last_good_at[cache_key] = time.time()
             _fail_count = 0  # Reset circuit breaker on success
             return data
         except Exception as e:
@@ -788,7 +792,18 @@ async def _ccusage_bar_async() -> str | None:
     if good_daily or good_block:
         block = _parse_block(good_block) if good_block else None
         daily, weekly = _parse_daily_range(good_daily)
-        return format_usage_bar(block, daily, weekly)
+        bar = format_usage_bar(block, daily, weekly)
+        # Say how old these figures are. A <t:EPOCH:R> timestamp, not a
+        # written-out "12m ago", so the render stays the same string between
+        # refreshes and the dashboard is not re-sent each minute
+        # (ark-refresh.md). Italic, not -#: embed fields do not render subtext.
+        stamps = [
+            _last_good_at[k] for k, v in ((daily_key, good_daily), (block_key, good_block))
+            if v and k in _last_good_at
+        ]
+        if bar and stamps:
+            bar += f"\n_as of <t:{int(min(stamps))}:R>_"
+        return bar
 
     return None
 

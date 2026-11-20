@@ -11,6 +11,9 @@ Covers:
   - a signed-out account (no access token), an expired token (no request is
     made, we never refresh) and a 401 response
   - a network error serving the last good reading, marked stale
+  - a stale reading's age written as a Discord ``<t:EPOCH:R>`` timestamp, so
+    the same reading renders the same string later (an unchanged render sends
+    nothing), and the ccusage last-good fallback carrying the same marker
   - the TTL cache and the negative cache each preventing a second request,
     and a rewritten credentials file busting the cache
   - the embed bar staying under Discord's 1024-char field limit with two
@@ -37,6 +40,9 @@ import shutil
 import sys
 import tempfile
 import time
+from dataclasses import replace
+from datetime import datetime, timezone
+from types import SimpleNamespace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -308,6 +314,83 @@ async def test_fallback(root: Path, http: FakeHttp) -> None:
          usage._ccusage_bar_async, usage._ccusage_details) = old
 
 
+async def test_stale_age() -> None:
+    print("stale age")
+    fetched = 1_790_000_000.0
+    a = plan_usage.AccountUsage(
+        label="main", config_dir="/s", state="ok", session_pct=15, week_pct=73,
+        fetched_at=fetched, stale=True, error="ConnectionError: down")
+    stamp = f"<t:{int(fetched)}:R>"
+    bar = plan_usage.format_plan_usage_bar([a])
+    check(f"as of {stamp}" in bar, "a stale reading's bar says when it was taken, as <t:EPOCH:R>")
+    check("ago" not in bar, "no written-out relative age in the bar")
+    details = plan_usage.format_plan_usage_details([a])
+    check(f"(as of {stamp}: ConnectionError" in details and "ago" not in details,
+          "/usage marks the stale reading the same way, with why")
+    fresh = plan_usage.format_plan_usage_bar([replace(a, stale=False)])
+    check("as of" not in fresh, "a fresh reading carries no age")
+
+    # The same reading five minutes later renders the identical string.
+    # Patched as plan_usage reads it, so the stdlib module is left alone.
+    real_time = plan_usage.time
+    try:
+        plan_usage.time = SimpleNamespace(
+            time=lambda: fetched + 60, monotonic=real_time.monotonic)
+        first = plan_usage.format_plan_usage_bar([a])
+        plan_usage.time = SimpleNamespace(
+            time=lambda: fetched + 360, monotonic=real_time.monotonic)
+        later = plan_usage.format_plan_usage_bar([a])
+    finally:
+        plan_usage.time = real_time
+    check(first == later, "five minutes on, the stale bar renders the same string")
+
+    print("ccusage last-good fallback")
+    since = usage._daily_range_since()
+    today = datetime.now(timezone.utc)
+    daily_key = f"daily --since {since}"
+    block_key = f"blocks --since {today.strftime('%Y%m%d')}"
+    daily_data = {"daily": [{"date": today.strftime("%Y-%m-%d"),
+                             "totalTokens": 1000, "totalCost": 12.0}]}
+    block_data = {"blocks": [{"isActive": True, "tokenCounts": {},
+                              "totalTokens": 500, "costUSD": 4.0}]}
+
+    async def no_block(force: bool = False):
+        return None
+
+    async def no_daily(force: bool = False):
+        return None, None
+
+    saved = (usage.get_current_block, usage._fetch_daily_range,
+             dict(usage._last_good), dict(usage._last_good_at))
+    try:
+        usage.get_current_block = no_block
+        usage._fetch_daily_range = no_daily
+        usage._last_good.clear()
+        usage._last_good_at.clear()
+        usage._last_good[daily_key] = daily_data
+        usage._last_good[block_key] = block_data
+        usage._last_good_at[daily_key] = fetched
+        usage._last_good_at[block_key] = fetched + 120
+        cc = await usage._ccusage_bar_async()
+        check(cc is not None and cc.endswith(f"\n_as of {stamp}_"),
+              "the ccusage fallback says how old its figures are, oldest key wins")
+        check("ago" not in cc and "-# " not in cc,
+              "no written-out age, italic not subtext")
+        again = await usage._ccusage_bar_async()
+        check(again == cc, "the fallback renders the same string on the next pass")
+
+        usage._last_good_at.clear()
+        bare = await usage._ccusage_bar_async()
+        check(bare is not None and "as of" not in bare,
+              "no known timestamp means no age line, figures still shown")
+    finally:
+        (usage.get_current_block, usage._fetch_daily_range) = saved[:2]
+        usage._last_good.clear()
+        usage._last_good.update(saved[2])
+        usage._last_good_at.clear()
+        usage._last_good_at.update(saved[3])
+
+
 def test_endpoint_host() -> None:
     print("token destination")
     check(plan_usage.USAGE_URL.startswith("https://api.anthropic.com/"),
@@ -348,6 +431,7 @@ async def main() -> int:
         await test_cache(root, http)
         await test_format(root, http)
         await test_fallback(root, http)
+        await test_stale_age()
         test_endpoint_host()
     finally:
         plan_usage._http_get = real_get

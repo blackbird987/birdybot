@@ -19,6 +19,8 @@ What this locks down:
   (d) Code fences stay balanced across every split — an odd ``` renders the
       rest of the thread as monospace.
   (e) The last-resort embed cut announces itself and still respects the cap.
+  (i) A footer added under a reply that ends inside a code block it never
+      closed lands outside that block, on the real send-result path too.
 
 Calls the real production functions so the test can't drift.
 
@@ -30,8 +32,11 @@ from __future__ import annotations
 
 import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
 
+import asyncio
 import os
 import sys
+import tempfile
+from types import SimpleNamespace
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
@@ -40,9 +45,11 @@ sys.path.insert(0, _ROOT)
 from bot import config
 from bot.claude.types import Instance, InstanceStatus, InstanceType
 from bot.discord.formatter import apply_discord_safety, chunk_message
+from bot.engine import lifecycle
 from bot.platform.formatting import (
     _CUT_MARKER_ROOM,
     _leading_preview,
+    append_footer,
     format_expanded_result_chunks,
     format_inline_meta_line,
     format_result_md,
@@ -208,6 +215,92 @@ _check(
     "a run with no numbers yet still produces a valid line",
     format_inline_meta_line(blank, "").startswith("-# "),
 )
+
+# ---- (i) a footer never lands inside a trailing open fence ----
+print("A footer under a reply that ends mid-fence stays outside the block")
+meta = "-# 1.5m \u00b7 4.1k \u00b7 $0.0421 \u00b7 Build \u00b7 master"
+open_tail = "Here is the fix:\n\n```python\nprint('hi')\n"
+out = append_footer(open_tail, meta)
+_check("closes the open fence before the footer", out.count("```") % 2 == 0)
+_check("footer comes after the last fence", out.rfind("```") < out.find(meta))
+_check("footer is the last line", out.endswith("\n" + meta))
+closed = "Done.\n\n```\nok\n```"
+_check(
+    "a balanced reply is unchanged apart from the footer",
+    append_footer(closed, meta) == closed + "\n" + meta,
+)
+_check(
+    "plain text gets the footer on its own line",
+    append_footer("hello", meta) == "hello\n" + meta,
+)
+
+long_open = "intro\n\n```python\n" + _para(5000, "code")
+pieces = chunk_message(append_footer(long_open, meta), limit=2000)
+_check("long open-fence reply: every chunk balanced",
+       all(c.count("```") % 2 == 0 for c in pieces))
+_check("long open-fence reply: footer outside the fence in the last chunk",
+       meta in pieces[-1]
+       and pieces[-1][:pieces[-1].find(meta)].count("```") % 2 == 0)
+
+exp_open = "```python\n" + _para(20000, "x")
+exp = format_expanded_result_chunks(inst, exp_open, max_chunks=2)
+_check("expand cut marker sits outside the fence",
+       exp[-1].rfind("```") < exp[-1].find("more characters"))
+_check("expand cut marker keeps its blank line", "\n\n-# +" in exp[-1])
+
+
+class _Messenger:
+    def __init__(self) -> None:
+        self.posts: list[str] = []
+
+    def markdown_to_markup(self, text: str) -> str:
+        return text
+
+    def chunk_message(self, text: str) -> list[str]:
+        return chunk_message(text, limit=2000)
+
+    def format_mention(self, uid: str) -> str:
+        return f"<@{uid}>"
+
+    async def send_result(self, channel_id, markup, **kw):  # noqa: ANN001, ANN003
+        self.posts.append(markup)
+        return f"m{len(self.posts)}"
+
+    async def send_text(self, channel_id, text, *a, **kw):  # noqa: ANN001, ANN002, ANN003
+        self.posts.append(text)
+        return f"m{len(self.posts)}"
+
+
+class _Store:
+    def get_autopilot_chain(self, _sid):  # noqa: ANN001
+        return None
+
+    def update_instance(self, inst, critical: bool = False) -> None:  # noqa: ANN001
+        pass
+
+
+live = Instance(
+    id="q-998", name=None, instance_type=InstanceType.QUERY, prompt="p",
+    repo_name="bot", repo_path=tempfile.gettempdir(),
+    status=InstanceStatus.COMPLETED, mode="build",
+)
+live.duration_ms = 92000
+live.cost_usd = 0.0421
+ctx = SimpleNamespace(
+    source="user", store=_Store(), messenger=_Messenger(),
+    platform="discord", user_id=None, channel_id="c1",
+)
+reply = "Run this:\n\n```bash\nls -la\n"
+asyncio.run(lifecycle.send_result(ctx, live, reply))
+posted = "\n".join(ctx.messenger.posts)
+_check("send_result took the inline path", len(ctx.messenger.posts) == 1
+       and "Run this:" in posted)
+_check("send_result: posted text has balanced fences",
+       posted.count("```") % 2 == 0)
+# Even count of fences before the footer = the footer is outside any block.
+_check("send_result: the run-facts line is outside the code block",
+       "$0.0421" in posted
+       and posted[:posted.find("$0.0421")].count("```") % 2 == 0)
 
 print()
 if _failures:

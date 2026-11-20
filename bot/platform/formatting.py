@@ -477,7 +477,7 @@ def _cut_index(text: str, budget: int) -> int:
     return budget
 
 
-def _close_open_fence(text: str) -> str:
+def close_open_fence(text: str) -> str:
     """Append a closing ``` if *text* ends inside a code block.
 
     Any cut can land mid-fence, and an odd fence count doesn't just look wrong
@@ -490,6 +490,18 @@ def _close_open_fence(text: str) -> str:
     return text
 
 
+def append_footer(text: str, footer: str) -> str:
+    """Add *footer* on its own line under *text*, outside any open code block.
+
+    A reply that ends inside a fence it never closed would otherwise pull
+    whatever is added after it (the grey run-facts line, a "more characters"
+    marker) into the code block, where it renders as code instead of as a
+    footer. Every footer added under Claude-authored text goes through here,
+    so the guard lives in one place rather than at each call site.
+    """
+    return close_open_fence(text) + "\n" + footer
+
+
 def _leading_preview(text: str, budget: int) -> tuple[str, int]:
     """First *budget* chars of *text*, cut on a paragraph/line/word boundary.
 
@@ -499,9 +511,9 @@ def _leading_preview(text: str, budget: int) -> tuple[str, int]:
     """
     text = text.strip()
     if len(text) <= budget:
-        return _close_open_fence(text), 0
+        return close_open_fence(text), 0
     cut = _cut_index(text, budget)
-    return _close_open_fence(text[:cut].rstrip()), len(text) - cut
+    return close_open_fence(text[:cut].rstrip()), len(text) - cut
 
 
 def format_result_md(instance: Instance, preview: str | None = None) -> str:
@@ -601,9 +613,11 @@ def format_expanded_result_chunks(
     if not chunks:
         chunks = [""]
     if remaining:
-        chunks[-1] += (
-            f"\n\n-# +{len(remaining):,} more characters \u2014 "
-            f"/log {instance.id} for the full output"
+        # The leading newline keeps a blank line above the marker.
+        chunks[-1] = append_footer(
+            chunks[-1],
+            f"\n-# +{len(remaining):,} more characters \u2014 "
+            f"/log {instance.id} for the full output",
         )
 
     chunks[0] = header + chunks[0]
