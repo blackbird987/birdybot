@@ -1491,6 +1491,26 @@ async def _run_autopilot_chain(
                     ctx.channel_id, exc_info=True,
                 )
 
+        # A verify that passed but said part of the goal was not delivered.
+        # This only surfaces the line: the pass already advanced the chain and
+        # the merge decision does not change.
+        not_done_lines = "\n".join(
+            f"• {i.verify_not_done}" for i in chain_instances if i.verify_not_done
+        )
+        if not_done_lines:
+            try:
+                await ctx.messenger.send_text(
+                    ctx.channel_id,
+                    "Verified, but not everything asked for was delivered:\n"
+                    f"{not_done_lines}",
+                    silent=True,
+                )
+            except Exception:
+                log.debug(
+                    "Not-done handoff message failed for %s",
+                    ctx.channel_id, exc_info=True,
+                )
+
         # Chain finished without a merge step — prompt the user to test
         # the worktree and decide. Wrapped in try/except so a transient
         # Discord failure never leaves the chain state stuck in the store.

@@ -9,10 +9,16 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import stat
 from pathlib import Path
 
 from bot.fsutil import atomic_write_text
+
+# A done item an older writer boxed a second time ("- [ ] [x] ...").
+_BOXED_TWICE = "[ ] [x] "
+# Any markdown heading ends the section's top-level list.
+_HEADING_RE = re.compile(r'#{1,6}\s')
 
 
 log = logging.getLogger(__name__)
@@ -147,6 +153,13 @@ class ReposMixin:
             self.mark_dirty()
 
     # --- Persistent Per-Repo Deferred Revisions (stored in repo TODO.md) ---
+    #
+    # The section is edited in place, never regenerated. Its items are the
+    # unindented "- " lines of its top-level list: from the header to the first
+    # heading of any level after it. Anything under a sub-heading (an owner's
+    # "### Owner questions" block, say) is the owner's and is never read as an
+    # item, cleared or rewritten. A ticked item ("- [x]") is done: it is not
+    # returned, not cleared, and still blocks a re-append of the same finding.
 
     @staticmethod
     def deferred_dedup_key(item: str) -> str:
@@ -154,11 +167,12 @@ class ReposMixin:
 
         Strips severity tag, leading dash, lowercases, then uses
         [Tag] + first 40 chars of description as the comparison key.
+        A note an owner put after the severity ("(stale, ...)", "(queued
+        ...)") goes with it, so a triaged item still matches its finding.
         Public so engine code (e.g. plan-review injection) can dedup
         with the same normalization used on append.
         """
-        import re
-        text = re.sub(r'\s*\((Critical|High|Medium|Low)\)\s*$', '', item)
+        text = re.sub(r'\s*\((Critical|High|Medium|Low)\)(\s*\(.*)?\s*$', '', item)
         text = re.sub(r'^-\s*', '', text).strip().lower()
         m = re.match(r'(\[[^\]]+\])\s*(.*)', text)
         if m:
@@ -168,8 +182,9 @@ class ReposMixin:
     def append_deferred(self, repo_name: str, items: list[str]) -> None:
         """Append deferred revision items to the repo's TODO.md (deduplicated).
 
-        Uses normalized key matching to prevent the same item from
-        accumulating across sessions.
+        Uses normalized key matching against every top-level item, open or
+        done, so a finding already ticked off is not filed again. New lines go
+        in after the last top-level item; nothing else in the file moves.
         """
         if not repo_name or not items:
             return
@@ -186,18 +201,20 @@ class ReposMixin:
         else:
             content = "# TODO\n"
 
-        # Deduplicate against existing items using normalized keys
-        existing_items = self._parse_deferred_section(content)
-        existing_keys = {self.deferred_dedup_key(i) for i in existing_items}
-        new_items = [
-            item for item in items
-            if self.deferred_dedup_key(item) not in existing_keys
-        ]
+        entries = self._deferred_entries(content)
+        existing_keys = {self.deferred_dedup_key(text) for _, _, text in entries}
+        new_items = []
+        for item in items:
+            key = self.deferred_dedup_key(item)
+            if key in existing_keys:
+                continue
+            existing_keys.add(key)
+            new_items.append(item)
         if not new_items:
             log.debug("All %d deferred items already tracked for %s", len(items), repo_name)
             return
 
-        content = self._update_deferred_section(content, existing_items + new_items)
+        content = self._insert_deferred(content, new_items)
         self._write_todo(todo_path, content)
         log.info("Appended %d deferred items to %s TODO.md (skipped %d dupes)",
                  len(new_items), repo_name, len(items) - len(new_items))
@@ -232,7 +249,7 @@ class ReposMixin:
         return "\n".join(f"- {item}" for item in items)
 
     def get_deferred_items(self, repo_name: str) -> list[str]:
-        """Get deferred revision items from the repo's TODO.md."""
+        """Get the open deferred revision items from the repo's TODO.md."""
         if not repo_name:
             return []
         repo_path = self._repos.get(repo_name)
@@ -245,7 +262,10 @@ class ReposMixin:
         return self._parse_deferred_section(content)
 
     def clear_deferred(self, repo_name: str) -> int:
-        """Remove all deferred items from the repo's TODO.md. Returns count removed."""
+        """Remove the open top-level deferred items. Returns count removed.
+
+        Done items and everything under a sub-heading stay where they are.
+        """
         if not repo_name:
             return 0
         repo_path = self._repos.get(repo_name)
@@ -255,73 +275,117 @@ class ReposMixin:
         if todo_path is None or not todo_path.exists():
             return 0
         content = todo_path.read_text(encoding="utf-8")
-        items = self._parse_deferred_section(content)
-        if not items:
+        open_lines = {i for i, done, _ in self._deferred_entries(content) if not done}
+        if not open_lines:
             return 0
-        content = self._update_deferred_section(content, [])
-        self._write_todo(todo_path, content)
-        log.info("Cleared %d deferred items from %s TODO.md", len(items), repo_name)
-        return len(items)
+        lines = content.splitlines(keepends=True)
+        kept = [line for i, line in enumerate(lines) if i not in open_lines]
+        self._write_todo(todo_path, self._repair_deferred("".join(kept)))
+        log.info("Cleared %d deferred items from %s TODO.md", len(open_lines), repo_name)
+        return len(open_lines)
 
     @staticmethod
-    def _parse_deferred_section(content: str) -> list[str]:
-        """Extract items from ## Deferred Revisions section of a TODO.md."""
-        lines = content.splitlines()
-        in_section = False
-        items = []
-        for line in lines:
-            stripped = line.strip()
-            if stripped == "## Deferred Revisions":
-                in_section = True
-                continue
-            if in_section and stripped.startswith("## "):
-                break
-            if in_section and stripped.startswith("- "):
-                text = stripped[2:]
-                if text.startswith("[ ] "):
-                    text = text[4:]
-                items.append(text)
-        return items
+    def _deferred_scope(lines: list[str]) -> tuple[int | None, int]:
+        """(header index, end index) of the section's top-level list.
 
-    @staticmethod
-    def _update_deferred_section(content: str, items: list[str]) -> str:
-        """Replace or insert the ## Deferred Revisions section in TODO.md."""
-        lines = content.splitlines()
-        section_start = None
-        section_end = None
+        The end is the first heading of any level after the header (a "### "
+        sub-heading or the next "## " section), or the end of the file.
+        """
+        start = None
         for i, line in enumerate(lines):
-            if line.strip() == "## Deferred Revisions":
-                section_start = i
+            stripped = line.strip()
+            if start is None:
+                if stripped == "## Deferred Revisions":
+                    start = i
                 continue
-            if section_start is not None and section_end is None:
-                if line.strip().startswith("## "):
-                    section_end = i
-                    break
+            if _HEADING_RE.match(stripped):
+                return start, i
+        return start, len(lines)
 
-        if items:
-            new_section = [
-                "## Deferred Revisions",
-                "<!-- Auto-managed by code review. Remove items when addressed. -->",
-            ]
-            for item in items:
-                new_section.append(f"- [ ] {item}")
-            new_section.append("")
-        else:
-            new_section = []
+    @staticmethod
+    def _split_deferred_line(line: str) -> tuple[bool, str] | None:
+        """(done, text) for a top-level item line, or None when it is not one."""
+        body = line.rstrip("\r\n")
+        if not body.startswith("- "):
+            return None
+        text = body[2:].strip()
+        low = text.lower()
+        if low.startswith(_BOXED_TWICE):
+            return True, text[len(_BOXED_TWICE):]
+        if low.startswith("[x] "):
+            return True, text[4:]
+        if low in ("[x]", _BOXED_TWICE.strip()):
+            return True, ""
+        if text.startswith("[ ] "):
+            return False, text[4:]
+        if text == "[ ]":
+            return False, ""
+        return False, text
 
-        if section_start is not None:
-            if section_end is None:
-                section_end = len(lines)
-            result = lines[:section_start] + new_section + lines[section_end:]
-        elif items:
-            # Strip trailing blank lines to avoid double-spacing before new section
+    @classmethod
+    def _deferred_entries(cls, content: str) -> list[tuple[int, bool, str]]:
+        """(line index, done, text) of each top-level item in the section."""
+        lines = content.splitlines(keepends=True)
+        start, end = cls._deferred_scope(lines)
+        if start is None:
+            return []
+        entries = []
+        for i in range(start + 1, end):
+            parsed = cls._split_deferred_line(lines[i])
+            if parsed is not None:
+                entries.append((i, parsed[0], parsed[1]))
+        return entries
+
+    @classmethod
+    def _parse_deferred_section(cls, content: str) -> list[str]:
+        """The open top-level items of the ## Deferred Revisions section."""
+        return [text for _, done, text in cls._deferred_entries(content) if not done]
+
+    @classmethod
+    def _repair_deferred(cls, content: str) -> str:
+        """Turn each "- [ ] [x] " top-level line back into "- [x] "."""
+        lines = content.splitlines(keepends=True)
+        start, end = cls._deferred_scope(lines)
+        if start is None:
+            return content
+        for i in range(start + 1, end):
+            line = lines[i]
+            if line.lower().startswith("- " + _BOXED_TWICE):
+                lines[i] = "- [x] " + line[2 + len(_BOXED_TWICE):]
+        return "".join(lines)
+
+    @classmethod
+    def _insert_deferred(cls, content: str, items: list[str]) -> str:
+        """Add "- [ ] item" lines to the section, creating it when missing."""
+        new_lines = [f"- [ ] {item}\n" for item in items]
+        lines = content.splitlines(keepends=True)
+        start, end = cls._deferred_scope(lines)
+        if start is None:
             while lines and lines[-1].strip() == "":
                 lines.pop()
-            result = lines + [""] + new_section
-        else:
-            result = lines
+            if lines and not lines[-1].endswith("\n"):
+                lines[-1] += "\n"
+            section = [
+                "## Deferred Revisions\n",
+                "<!-- Auto-managed by code review. Remove items when addressed. -->\n",
+                *new_lines,
+            ]
+            return "".join(lines + (["\n"] if lines else []) + section)
 
-        text = "\n".join(result)
-        if not text.endswith("\n"):
-            text += "\n"
-        return text
+        item_lines = [
+            i for i in range(start + 1, end)
+            if cls._split_deferred_line(lines[i]) is not None
+        ]
+        if item_lines:
+            at = item_lines[-1] + 1
+        else:
+            at = start + 1
+            if at < end and lines[at].strip().startswith("<!--"):
+                at += 1
+            # Keep the blank line above a following heading or text below the items.
+            if at < len(lines) and lines[at].strip():
+                new_lines.append("\n")
+        if at > 0 and not lines[at - 1].endswith("\n"):
+            lines[at - 1] += "\n"
+        lines[at:at] = new_lines
+        return cls._repair_deferred("".join(lines))

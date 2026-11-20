@@ -28,6 +28,7 @@ from bot.engine.chain_git import (
 )
 from bot.engine.step_parse import (
     _extract_latest_plan_text,
+    _verify_not_done,
     _verify_outcome,
     _with_plan,
     _verify_why,
@@ -526,6 +527,13 @@ async def on_verify(ctx: RequestContext, source_id: str, source_msg_id: str | No
 
         outcome = _verify_outcome(result)
 
+        if outcome == "pass":
+            # A pass can still say part of the goal was not delivered. It does
+            # not change the outcome; the chain lists it when it finishes.
+            not_done = _verify_not_done(result)
+            if not_done:
+                result.verify_not_done = not_done
+                ctx.store.update_instance(result)
         if outcome in ("pass", "skip"):
             break
 

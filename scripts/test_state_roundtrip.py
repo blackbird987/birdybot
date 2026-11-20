@@ -238,6 +238,7 @@ def full_instance() -> Instance:
         needs_input=True,
         needs_manual_verification=True,
         manual_verify_reason="UI needs an eyeball",
+        verify_not_done="the sell leg",
         deferred_revisions=["[Docs] note (Low)", "[Perf] cache (Medium)"],
         jsonl_uuid_by_msg_id={"111": "uuid-1", "222": "uuid-2"},
         expand_msg_ids=["333", "444"],

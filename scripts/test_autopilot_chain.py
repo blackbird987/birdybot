@@ -181,6 +181,7 @@ class Scenario:
         converged: bool = True,
         review_deferred: list[str] | None = None,
         rescue_sha: str | None = None,
+        verify_not_done: str | None = None,
     ) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         base = Path(self.tmp.name)
@@ -200,6 +201,7 @@ class Scenario:
         self.step_cost = step_cost
         self.converged = converged
         self.review_deferred = review_deferred
+        self.verify_not_done = verify_not_done
         self.repo_path = str(base / "repo")
 
         self.calls: list[dict] = []        # one entry per step stub invocation
@@ -254,6 +256,8 @@ class Scenario:
             inst.needs_input = True
             if kind == "parse_failed":
                 inst._verifier_parse_failed = True
+        if step == "verify" and kind == "ok" and self.verify_not_done:
+            inst.verify_not_done = self.verify_not_done
         self.store.update_instance(inst)
         self.produced[step] = inst.id
         self.minted.append((step, inst.id))
@@ -811,6 +815,24 @@ check_eq("deferred revisions: store entry reaped at the end",
          s.store.get_chain_deferred(SESSION), [])
 s.close()
 
+NOT_DONE_HEAD = "Verified, but not everything asked for was delivered:"
+
+s = scenario(verify_not_done="the sell leg")
+run(_chain("ship")(s))
+check_eq("not done: the chain still runs in full and merges",
+         (s.order, s.final_eval().get("outcome"), len(s.finalized)), (SHIP, "merged", 1))
+not_done = [t for t in s.messenger.texts if NOT_DONE_HEAD in t["text"]]
+check("not done: one silent message names the missing part",
+      len(not_done) == 1 and "\u2022 the sell leg" in not_done[0]["text"]
+      and not_done[0]["silent"], repr(not_done))
+s.close()
+
+s = scenario()
+run(_chain("ship")(s))
+check("not done: a plain pass posts no such message",
+      not [t for t in s.messenger.texts if NOT_DONE_HEAD in t["text"]])
+s.close()
+
 s = scenario({"review_loop": "failed"})
 run(workflows.on_autopilot(s.ctx, SOURCE_ID, SOURCE_MSG))
 check_eq("review_loop failure (converged): plain failed exit at review_loop",
@@ -994,6 +1016,34 @@ check_eq("phased resume keeps 'build' at the head (does not skip it)",
 check_eq("phased resume: only the unfinished phase is built",
          len(s.spawns), 1)
 s.close()
+
+
+# The verify step reads the "not done:" part of a passing verify's SUMMARY.
+from bot.engine.step_parse import _verify_not_done  # noqa: E402
+
+with tempfile.TemporaryDirectory() as _d:
+    _f = Path(_d) / "verify.md"
+    _inst = SimpleNamespace(result_file=str(_f))
+    _f.write_text(
+        "```verify\nRESULT: pass\nSUMMARY: not done: an old block\n```\n"
+        "later\n```verify\nRESULT: pass\nTESTS_RUN: 3\n"
+        "SUMMARY: buy leg opens. Not done: the sell leg\n```\n", encoding="utf-8")
+    check_eq("_verify_not_done reads the last block, any case", _verify_not_done(_inst), "the sell leg")
+    _f.write_text("```verify\nRESULT: pass\nSUMMARY: all of it works\n```\n", encoding="utf-8")
+    check_eq("_verify_not_done: none when everything was delivered", _verify_not_done(_inst), None)
+    _f.write_text("no block here", encoding="utf-8")
+    check_eq("_verify_not_done: none with no verify block", _verify_not_done(_inst), None)
+    for _empty in ("nothing, but the state file is nearly full", "None.", "n/a", "...", "\u2026"):
+        _f.write_text(f"```verify\nRESULT: pass\nSUMMARY: works. not done: {_empty}\n```\n",
+                      encoding="utf-8")
+        check_eq(f"_verify_not_done: a placeholder is not a gap ({_empty!r})",
+                 _verify_not_done(_inst), None)
+    _f.write_text("```verify\nRESULT: pass\nSUMMARY: not done: none of it ran live\n```\n",
+                  encoding="utf-8")
+    check_eq("_verify_not_done: 'none of ...' is a real gap",
+             _verify_not_done(_inst), "none of it ran live")
+    check_eq("_verify_not_done: none with no result file",
+             _verify_not_done(SimpleNamespace(result_file=None)), None)
 
 
 # One preset table: the directive parser and the chip's flow text must name

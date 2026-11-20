@@ -229,6 +229,7 @@ class Instance:
     needs_input: bool = False  # AskUserQuestion detected — waiting for user reply
     needs_manual_verification: bool = False  # Verify outcome was `manual` or unrecoverable `fail` under warn — needs a human eyeball
     manual_verify_reason: str | None = None  # WHY: line surfaced in the chain-completion summary
+    verify_not_done: str | None = None  # a passing verify's "not done: ..." part, surfaced at chain end
     deferred_revisions: list[str] = field(default_factory=list)  # Medium/Low revisions from plan review
     jsonl_uuid_by_msg_id: dict[str, str] = field(default_factory=dict)  # Discord msg_id -> JSONL assistant uuid (for "Branch from here")
     expand_msg_ids: list[str] = field(default_factory=list)  # Overflow messages posted by Expand, deleted again by Collapse
@@ -413,6 +414,7 @@ class Instance:
             "needs_input": self.needs_input,
             "needs_manual_verification": self.needs_manual_verification,
             "manual_verify_reason": self.manual_verify_reason,
+            "verify_not_done": self.verify_not_done,
             "deferred_revisions": self.deferred_revisions,
             "jsonl_uuid_by_msg_id": self.jsonl_uuid_by_msg_id,
             "expand_msg_ids": self.expand_msg_ids,
@@ -493,6 +495,7 @@ class Instance:
             needs_input=d.get("needs_input", False),
             needs_manual_verification=d.get("needs_manual_verification", False),
             manual_verify_reason=d.get("manual_verify_reason"),
+            verify_not_done=d.get("verify_not_done"),
             deferred_revisions=d.get("deferred_revisions", []),
             jsonl_uuid_by_msg_id=d.get("jsonl_uuid_by_msg_id", {}),
             expand_msg_ids=d.get("expand_msg_ids", []),

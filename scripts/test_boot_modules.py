@@ -9,6 +9,8 @@
 - ``auto_update.auto_update_loop``: a failure that repeats on every poll is
   announced once, not once per poll.
 - ``boot_recovery.announce_reboot``: a boot with no reboot note says nothing.
+- ``boot_recovery.resume_interrupted_chains``: chains in different threads
+  resume side by side, so one long chain does not hold up the rest.
 
 Run: python scripts/test_boot_modules.py
 Exit 0 = all pass.
@@ -145,10 +147,87 @@ def test_announce_without_note() -> None:
             config.REBOOT_MSG_FILE = saved
 
 
+def test_chains_resume_in_parallel() -> None:
+    from unittest import mock
+
+    from bot.claude.types import Instance, InstanceStatus, InstanceType
+    from bot.engine import chain_runner
+    from bot.store.state import StateStore
+
+    started: list[str] = []
+    finished: list[str] = []
+    after_turn: list[str] = []
+
+    class FakeMessenger:
+        async def send_text(self, *a, **k):
+            return "m"
+
+    class FakeBot:
+        def __init__(self) -> None:
+            self._forums = SimpleNamespace(
+                session_to_thread=lambda sid: (f"thread-{sid}", object()),
+                attach_session_callbacks=lambda *a, **k: None,
+            )
+
+        async def _wait_for_ready(self, _why):
+            return True
+
+        def _ctx(self, thread_id, session_id=None, thread_info=None):
+            return SimpleNamespace(messenger=FakeMessenger(), channel_id=thread_id)
+
+        async def _after_turn(self, ctx, thread_id, dashboard=True):
+            after_turn.append(thread_id)
+
+    async def scenario() -> None:
+        b_started = asyncio.Event()
+
+        async def fake_chain(ctx, source_id, msg, steps, session_id, **kw):
+            started.append(session_id)
+            if session_id == "sess-a":
+                # A only finishes once B has started: run one after another,
+                # this would wait forever.
+                await b_started.wait()
+            else:
+                b_started.set()
+            finished.append(session_id)
+
+        real_sleep = asyncio.sleep
+
+        async def no_sleep(delay, *a, **k):
+            await real_sleep(0)
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(chain_runner, "_run_autopilot_chain", fake_chain), \
+                mock.patch.object(boot_recovery.asyncio, "sleep", no_sleep):
+            store = StateStore(Path(tmp) / "state.json", Path(tmp) / "results")
+            for sid in ("sess-a", "sess-b"):
+                store.set_autopilot_chain(sid, ["build", "verify"])
+                store.update_instance(Instance(
+                    id=f"q-{sid}", name=None, instance_type=InstanceType.QUERY,
+                    prompt="x", repo_name="r", repo_path=tmp,
+                    status=InstanceStatus.COMPLETED, session_id=sid,
+                ))
+            await asyncio.wait_for(
+                boot_recovery.resume_interrupted_chains(store, FakeBot(), set()), 5,
+            )
+
+    try:
+        asyncio.run(scenario())
+        timed_out = False
+    except asyncio.TimeoutError:
+        timed_out = True
+    check("a chain blocked on another thread's chain does not hold it up",
+          not timed_out and sorted(finished) == ["sess-a", "sess-b"],
+          f"timed out={timed_out}, started={started}, finished={finished}")
+    check("each resumed chain gets its after-turn",
+          sorted(after_turn) == ["thread-sess-a", "thread-sess-b"], str(after_turn))
+
+
 def main() -> int:
     test_deploy_registration()
     test_auto_update_dedup()
     test_announce_without_note()
+    test_chains_resume_in_parallel()
     print()
     print(f"{len(FAILS)} failure(s)" if FAILS else "All checks passed")
     return 1 if FAILS else 0
