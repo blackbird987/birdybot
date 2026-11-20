@@ -195,8 +195,8 @@ async def resume_interrupted_chains(
     """
     from datetime import datetime, timedelta, timezone
 
-    from bot.engine import workflows
-    from bot.engine.commands import _get_channel_lock
+    from bot.engine import chain_runner
+    from bot.engine.cmd_state import _get_channel_lock
 
     if not await discord_bot._wait_for_ready("resume_interrupted_chains"):
         return
@@ -215,6 +215,7 @@ async def resume_interrupted_chains(
     # work after a long downtime.
     stale_chain_ttl = timedelta(hours=48)
     now = datetime.now(timezone.utc)
+    ready: list[tuple] = []
     for session_id, steps in all_chains.items():
         meta = store.get_autopilot_chain_meta(session_id) or {}
         status = meta.get("status")
@@ -289,6 +290,13 @@ async def resume_interrupted_chains(
             store.clear_chain_state(session_id)
             continue
 
+        ready.append((session_id, steps, thread_id, info, source))
+
+    # Each chain runs in its own task. Awaited one after another, a single
+    # chain that builds for twenty minutes held every other thread's chain
+    # behind it. Admission (the run slots and the memory hold in the runner)
+    # still decides how many spawn at once.
+    async def _resume_one(session_id, steps, thread_id, info, source) -> None:
         log.info(
             "Resuming autopilot chain for session %s in thread %s (steps: %s)",
             session_id, thread_id, steps,
@@ -316,14 +324,14 @@ async def resume_interrupted_chains(
                     "Chain for session %s changed while waiting for the "
                     "lock; not resuming it", session_id,
                 )
-                continue
+                return
             try:
-                # Re-run from chain[0] — the interrupted step that never
-                # completed.  This differs from resume_autopilot_chain()
+                # Re-run from chain[0], the interrupted step that never
+                # completed. This differs from resume_autopilot_chain(),
                 # which skips [0] (designed for needs_input pauses where
                 # [0] DID complete).
                 label, silent_close = store.get_chain_kwargs(session_id)
-                await workflows._run_autopilot_chain(
+                await chain_runner._run_autopilot_chain(
                     ctx, source.id, None, steps, session_id,
                     silent_close=silent_close,
                     chain_label=label,
@@ -334,6 +342,15 @@ async def resume_interrupted_chains(
                 )
             finally:
                 await discord_bot._after_turn(ctx, thread_id, dashboard=False)
+
+    outcomes = await asyncio.gather(
+        *(_resume_one(*entry) for entry in ready), return_exceptions=True,
+    )
+    for entry, outcome in zip(ready, outcomes):
+        if isinstance(outcome, BaseException):
+            log.error(
+                "Chain resume for session %s raised: %r", entry[0], outcome,
+            )
 
 
 def recover_peer_questions(store) -> None:
