@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+- **A replay cut short by a usage limit is no longer scored as a failed build.** The replay A/B runner (`scripts/replay_ab/`) recorded a limit notice as a result, so a busy account widened the measured noise. It now rebuilds that replicate and runs it again after 15 minutes, and one still limited after its retries is left out of the report.
+- **A replay that does not fit the context window is no longer scored as a failed build.** When the forked transcript plus an arm's files is too long, the CLI answers "Prompt is too long" before any turn runs. The runner now marks that replicate as an overflow and leaves it unscored, with no retry: it is a fact about the arm's size, not a build outcome.
+- **The replay peek tripwire no longer flags a replay's own folder.** Tool inputs are scanned as JSON, where a newline is a backslash and an "n", so `cd <clone>` with a command on the next line read as a path beside the clone and outside it. One replay showed 16 flagged paths where 3 were real. A path now ends at a backslash.
+
 ## v0.102.34, Own merge calls and quiet hours (2026-11-20)
 
 ### Changed

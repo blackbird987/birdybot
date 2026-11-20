@@ -83,6 +83,9 @@ class Job:
     timeout_s: int
     project_dir: Path | None = None  # the forked transcript's dir, kept visible
     result: dict = field(default_factory=dict)
+    # Throws this replicate's sandbox away and returns a fresh Job for it, so a
+    # run an account limit cut short can start again from the same point.
+    rebuild: object = None
 
 
 def finalize_command(cmd: list[str], *, budget_usd: float) -> list[str]:
@@ -194,7 +197,10 @@ def wrap(cmd: list[str], *, repo: Path, unit: str, live_root: Path = LIVE_ROOT,
     ]
 
 
-_PATH_TAIL = r"""[^\s"'`;|&<>()]*"""
+# The texts are tool inputs as JSON, so a newline after a path arrives as a
+# backslash and an "n". A path ends at a backslash, or "cd <clone>" on one line
+# and a command on the next reads as a path beside the clone and outside it.
+_PATH_TAIL = r"""[^\s"'`;|&<>()\\]*"""
 
 
 def find_peeks(texts: list[str], hidden: list[Path], kept: list[Path]) -> list[str]:
@@ -262,6 +268,35 @@ def wait_for_room(min_headroom_mb: float, max_wait_s: int = 1800, poll_s: int = 
             return False
         log(f"  waiting for memory: sessions slice has {room:.0f} MB free, need {min_headroom_mb:.0f}")
         time.sleep(poll_s)
+
+
+# The wording an account's usage limit answers with. A subset of what
+# bot.claude.parser.parse_usage_limit matches, kept here so the harness does
+# not import the bot.
+_LIMIT_RE = re.compile(r"usage limit|plan limit|session limit|weekly limit|hit your limit"
+                       r"|reached your limit|limit reached", re.I)
+
+
+def limit_shaped(res: dict) -> bool:
+    """A run the account's usage limit ended, not one the session finished.
+
+    Such a run says nothing about the arm: it is an error result whose text
+    is the limit notice. Scored, it would read as a failed build and widen
+    the A/A spread by however busy the account was that hour.
+    """
+    return bool(res.get("is_error")) and bool(_LIMIT_RE.search(res.get("result_text") or ""))
+
+
+def overflow_shaped(res: dict) -> bool:
+    """A replay that never started because its first prompt did not fit.
+
+    The forked transcript plus the arm's files is longer than the context
+    window, so the CLI answers "Prompt is too long" before any turn runs. That
+    is a fact about the arm's size on this case, not a build that failed, and
+    it is the same every time: scored, it would read as zero files and no
+    passing tests, and retrying it changes nothing.
+    """
+    return bool(res.get("is_error")) and "prompt is too long" in (res.get("result_text") or "").lower()
 
 
 def run_one(job: Job, *, log=print) -> dict:
@@ -361,12 +396,22 @@ def summarize_stream(path: Path, *, hidden: list[Path] = (), kept: list[Path] = 
 
 
 def run_all(jobs: list[Job], *, concurrency: int = 2, total_cap_usd: float = 20.0,
-            min_headroom_mb: float = 8192, on_done=None, log=print) -> list[dict]:
+            min_headroom_mb: float = 8192, on_done=None, log=print,
+            limit_wait_s: int = 900, limit_retries: int = 40) -> list[dict]:
     """Run jobs at bounded concurrency under a total spend ceiling.
 
     A job that cannot run, or whose scoring raises, is recorded and the queue
     moves on: one bad replicate must not silently end the round. A job never
     started is marked ``{"skipped": True}`` on ``job.result``.
+
+    A run the account's usage limit ended (``limit_shaped``) is not a result.
+    Its sandbox is rebuilt and it runs again after ``limit_wait_s``, up to
+    ``limit_retries`` times; one still limited after that is marked
+    ``limit_hit`` and left unscored, so the report never counts it.
+
+    A replay whose first prompt did not fit the context window
+    (``overflow_shaped``) is marked ``overflow`` and left unscored too, with
+    no retry: the same transcript and files overflow the same way every time.
     """
     cond = threading.Condition()
     spent = [0.0]
@@ -399,8 +444,27 @@ def run_all(jobs: list[Job], *, concurrency: int = 2, total_cap_usd: float = 20.
                 queue.pop(0)
                 reserved[0] += job.budget_usd
             try:
-                wait_for_room(min_headroom_mb, log=log)
-                res = run_one(job, log=log)
+                tries = 0
+                while True:
+                    wait_for_room(min_headroom_mb, log=log)
+                    res = run_one(job, log=log)
+                    if overflow_shaped(res):
+                        res["overflow"] = True
+                        job.result = res
+                        log(f"  {job.label} did not fit the context window, left unscored")
+                        break
+                    if not limit_shaped(res):
+                        break
+                    if not job.rebuild or tries >= limit_retries:
+                        res["limit_hit"] = True
+                        job.result = res
+                        log(f"  {job.label} ended on a usage limit, left unscored")
+                        break
+                    tries += 1
+                    log(f"  {job.label} hit a usage limit, retry {tries}/{limit_retries} "
+                        f"in {limit_wait_s}s")
+                    time.sleep(limit_wait_s)
+                    job = job.rebuild()
             except Exception as e:  # noqa: BLE001
                 res = {"label": job.label, "error": f"{type(e).__name__}: {e}"}
                 job.result = res
@@ -410,7 +474,7 @@ def run_all(jobs: list[Job], *, concurrency: int = 2, total_cap_usd: float = 20.
                 spent[0] += float(res.get("total_cost_usd") or 0.0)
                 results.append(res)
                 cond.notify_all()
-            if on_done and "error" not in res:
+            if on_done and "error" not in res and not res.get("limit_hit") and not res.get("overflow"):
                 try:
                     on_done(job)
                 except Exception as e:  # noqa: BLE001

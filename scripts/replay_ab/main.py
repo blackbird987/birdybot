@@ -81,10 +81,14 @@ def prepare(case, arm: dict, rep_dir: Path, *, budget_usd: float, timeout_s: int
         "project_dir": str(sb.project_dir) if sb.project_dir else None,
         "system_prompt_chars": len(p["system_prompt"]),
     })
+    def rebuild() -> run_mod.Job:
+        sandbox_mod.destroy(rep_dir, sb.project_dir)
+        return prepare(case, arm, rep_dir, budget_usd=budget_usd, timeout_s=timeout_s)
+
     return run_mod.Job(
         label=f"{case.instance_id}/{arm['name']}/{rep_dir.name}", workdir=rep_dir, repo=sb.repo,
         account=case.account, cmd=p["cmd"], prompt=case.prompt, budget_usd=budget_usd,
-        timeout_s=timeout_s, project_dir=sb.project_dir,
+        timeout_s=timeout_s, project_dir=sb.project_dir, rebuild=rebuild,
     )
 
 
@@ -126,7 +130,10 @@ def cmd_run(args) -> int:
 
     def on_done(job: run_mod.Job) -> None:
         case = cases[job.label.split("/", 1)[0]]
-        s = score_mod.score(job.workdir, case, start_sha=starts[job.label], suite=args.suite)
+        # From meta.json, not from what prepare() first returned: a replicate
+        # rebuilt after a usage limit starts from a new arm commit.
+        start = (read_json(job.workdir / "meta.json") or {}).get("start_sha") or starts[job.label]
+        s = score_mod.score(job.workdir, case, start_sha=start, suite=args.suite)
         f2p = s["fail_to_pass"]
         print(f"  scored {job.label}: tests {f2p['passed']}/{f2p['total']}, "
               f"{len(s['diff']['files'])} files, overlap {s['diff']['file_jaccard']}")

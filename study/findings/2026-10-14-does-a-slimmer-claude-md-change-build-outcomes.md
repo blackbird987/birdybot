@@ -2,11 +2,12 @@
 id = "2026-10-14-does-a-slimmer-claude-md-change-build-outcomes"
 title = "Does a slimmer CLAUDE.md change build outcomes"
 date = "2026-10-14"
-status = "open"
+status = "superseded"
 question = "Does the pre-slim CLAUDE.md against the current one change what a replayed build does, beyond the noise of two identical arms?"
 verdict = "Not measured. The slim shipped 2026-10-14 on the owner's approval without the A/B, and TODO.md still lists the A/A round and that arm as not done. Only one spike has run."
 tags = ["context", "replay"]
 source = { file = "/home/quincy/.claude-main/projects/-home-quincy-Programming-claude-telegram-bot/memory/context-budget-replay-ab-proposal.md", section = "whole file" }
+superseded_by = ["2026-11-20-pre-slim-claude-md-against-the-slim-one-on-six"]
 +++
 Second sources: TODO.md (Replay A/B item), CHANGELOG.md (v0.102.2, v0.102.4).
 

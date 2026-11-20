@@ -355,6 +355,71 @@ def test_score_and_cap(case, w: dict, tmp: Path):
     _check(any(r.get("error", "").startswith("OSError") for r in res) and "k0" not in scored
            and sorted(scored) == ["k1", "k2", "k3"], "run_all: a run that raises is recorded, the round goes on")
 
+    # A usage-limit answer is not a result: the replicate is rebuilt and run
+    # again, and only what the session then finished is scored.
+    ran.clear()
+    scored.clear()
+    rebuilt = []
+    limit_res = {"is_error": True, "result_text": "You've hit your limit · resets 3pm",
+                 "total_cost_usd": 0.0}
+
+    def limited_run_one(job, log=print):
+        ran.append(job.label)
+        if job.label == "m0" and ran.count("m0") == 1:
+            return dict(limit_res, label=job.label)
+        if job.label == "m1":
+            return dict(limit_res, label=job.label)
+        return {"label": job.label, "total_cost_usd": 1.0, "is_error": False,
+                "result_text": "fixed the usage limit parser"}
+
+    def mk(i):
+        j = ab_run.Job(label=f"m{i}", workdir=tmp, repo=tmp, account="", cmd=[], prompt="",
+                       budget_usd=1, timeout_s=1)
+        j.rebuild = lambda: (rebuilt.append(j.label), j)[1]
+        return j
+
+    ab_run.run_one, ab_run.slice_headroom_mb = limited_run_one, lambda: None
+    try:
+        jobs = [mk(i) for i in range(3)]
+        res = ab_run.run_all(jobs, concurrency=1, total_cap_usd=99.0, log=lambda *_: None,
+                             on_done=lambda j: scored.append(j.label),
+                             limit_wait_s=0, limit_retries=2)
+    finally:
+        ab_run.run_one, ab_run.slice_headroom_mb = orig_one, orig_room
+    _check(ran.count("m0") == 2 and "m0" in scored and rebuilt.count("m0") == 1,
+           "limit: a limited run is rebuilt, rerun and then scored")
+    _check(ran.count("m1") == 3 and "m1" not in scored
+           and any(r.get("limit_hit") and r.get("label") == "m1" for r in res),
+           "limit: a run still limited after its retries is marked and left unscored")
+    _check(ran.count("m2") == 1 and "m2" in scored and not ab_run.limit_shaped(
+        {"is_error": False, "result_text": "fixed the usage limit parser"}),
+           "limit: a finished run that only mentions a limit is a result")
+
+    ran.clear()
+    scored.clear()
+    rebuilt.clear()
+
+    def overflow_run_one(job, log=print):
+        ran.append(job.label)
+        if job.label == "m0":
+            return {"label": job.label, "is_error": True, "result_text": "Prompt is too long",
+                    "total_cost_usd": 2.75}
+        return {"label": job.label, "total_cost_usd": 1.0, "is_error": False,
+                "result_text": "the prompt is too long for one message, so I split it"}
+
+    ab_run.run_one, ab_run.slice_headroom_mb = overflow_run_one, lambda: None
+    try:
+        res = ab_run.run_all([mk(0), mk(1)], concurrency=1, total_cap_usd=99.0,
+                             log=lambda *_: None, on_done=lambda j: scored.append(j.label),
+                             limit_wait_s=0, limit_retries=2)
+    finally:
+        ab_run.run_one, ab_run.slice_headroom_mb = orig_one, orig_room
+    _check(ran.count("m0") == 1 and "m0" not in scored and not rebuilt
+           and any(r.get("overflow") and r.get("label") == "m0" for r in res),
+           "overflow: a replay that did not fit is marked, not retried and left unscored")
+    _check(ran.count("m1") == 1 and "m1" in scored,
+           "overflow: a finished run that only mentions the wording is a result")
+
     missing = score.fail_to_pass(sb.repo, Path(case.repo_path), case.ref_tip, ["scripts/test_nope.py"])
     _check(missing["tests"]["scripts/test_nope.py"]["kind"] == "missing" and missing["passed"] == 0,
            "score: a harness absent at the tip is missing")
@@ -423,6 +488,11 @@ def test_hiding(tmp: Path):
              json.dumps({"file_path": f"{repo}/a.py"}), json.dumps({"file_path": f"{pd}/s.jsonl"})]
     peeks = ab_run.find_peeks(texts, hidden, [live / ".venv", pd, repo])
     _check(peeks == [f"{live}/data/results/t-1.md"], "peek: a hidden path is caught, kept paths are not")
+
+    multi = [json.dumps({"command": f"cd {repo}\ngrep -n x a.py\ncat {live}/data/state.json\necho done"})]
+    peeks = ab_run.find_peeks(multi, hidden, [live / ".venv", pd, repo])
+    _check(peeks == [f"{live}/data/state.json"],
+           "peek: a command on the line after a path is not read as part of the path")
 
 
 def test_clone_path(case, tmp: Path):
