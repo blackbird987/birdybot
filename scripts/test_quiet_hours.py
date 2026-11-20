@@ -252,6 +252,13 @@ check([f.category for f in eval_mod._check_unoffered_choice(qi, q)] == ["quiet_q
 check(eval_mod._check_unoffered_choice(qi, "Done.\n\nDecided while you were away:\n- kept the name") == [],
       "a quiet turn that decided is not flagged")
 check(eval_mod.attribute_flag("quiet_question", "x") == "QUIET_HOURS_BLOCK", "the flag is owned by the block")
+plan_q = ("Building it now.\n\n[BOT_CMD: /chain preset=ship]\n~~~plan\nChange the parser.\n\n"
+          "Open question for later: keep the old name?\n~~~")
+check(eval_mod._check_unoffered_choice(qi, plan_q) == [],
+      "a question inside a /chain plan body is not the turn asking")
+check([f.category for f in eval_mod._check_unoffered_choice(qi, q + "\n\n[BOT_CMD: /choices]\n~~~choices\nA\nB\n~~~")]
+      == ["quiet_question"], "a quiet turn that asked with buttons still counts as asking")
+
 check(hasattr(eval_mod, "_check_critical_pass"), "the critical pass check is still there")
 
 # --- Needs you ------------------------------------------------------------------------------

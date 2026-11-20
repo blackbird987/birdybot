@@ -889,12 +889,6 @@ CONTEXT_THRASH_MAX_RETRIES: int = max(
     0, min(5, int(os.getenv("CONTEXT_THRASH_MAX_RETRIES", "2")))
 )
 
-# Prepended to the prompt of an auto-resumed attempt only. The CLI's own
-# "read in smaller chunks" advice goes to the operator, not to the agent —
-# the agent just sees its process vanish, so without this it walks straight
-# back into the same wall. The git-status line matters as much as the
-# discipline list: the worktree still holds every edit the killed attempt
-# made, and an agent that assumes otherwise redoes work it already did.
 # Sent at the top of an owner turn during quiet hours, while the owner has not
 # been seen for 20 minutes (bot/engine/quiet.py). It sits in the turn's prompt,
 # never the system prompt, so the system prompt stays byte-stable for caching.
@@ -913,6 +907,12 @@ QUIET_HOURS_BLOCK = (
     "If one part is blocked, do the rest and name the blocked part.]"
 )
 
+# Prepended to the prompt of an auto-resumed attempt only. The CLI's own
+# "read in smaller chunks" advice goes to the operator, not to the agent —
+# the agent just sees its process vanish, so without this it walks straight
+# back into the same wall. The git-status line matters as much as the
+# discipline list: the worktree still holds every edit the killed attempt
+# made, and an agent that assumes otherwise redoes work it already did.
 CONTEXT_THRASH_NUDGE = (
     "--- Automatic recovery: your previous attempt was aborted ---\n"
     "The Claude Code CLI killed your last run: the context window refilled to "

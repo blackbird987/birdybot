@@ -120,7 +120,7 @@ def note_owner_seen(store, now: float | None = None) -> None:
     """Record that the owner just did something. Owner only: the caller checks.
 
     Marked dirty rather than saved: the 60s autosave is plenty for a value
-    with a 20 minute grace, and this runs on every owner message and tap.
+    with a ``PRESENCE_GRACE_S`` grace, and this runs on every owner message and tap.
     """
     try:
         data = dict(_state(store))
@@ -197,7 +197,10 @@ def status_text(store, now: datetime | None = None) -> str:
     if is_quiet(local, w, seen):
         lines.append(f"Active now, until {window_end(local, w):%H:%M}.")
     elif in_window(local, w):
-        lines.append("Inside the window, but you were active in the last 20 minutes, so sessions still ask.")
+        lines.append(
+            f"Inside the window, but you were active in the last {PRESENCE_GRACE_S // 60} minutes, "
+            "so sessions still ask."
+        )
     else:
         lines.append("Not active right now.")
     lines.append("Inside the window, owner sessions decide what can be undone instead of asking, and list those calls for you.")
