@@ -24,6 +24,7 @@ from bot.claude.types import (
 from bot.platform.base import ButtonSpec, MessageHandle, RequestContext
 from bot.platform.formatting import (
     action_button_specs,
+    append_footer,
     collapse_bot_directives,
     format_context_footer,
     format_delay_secs,
@@ -1509,8 +1510,8 @@ async def send_result(
 
         elif len(result_text) <= config.RESULT_INLINE_MAX:
             inst.result_collapsed = False
-            result_text = result_text + "\n" + format_inline_meta_line(
-                inst, session_loc,
+            result_text = append_footer(
+                result_text, format_inline_meta_line(inst, session_loc),
             )
             markup = ctx.messenger.markdown_to_markup(result_text)
             chunks = ctx.messenger.chunk_message(markup)

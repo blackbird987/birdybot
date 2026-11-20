@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## v0.102.36, Footers outside open code blocks, stable stale-usage age (2026-11-20)
+
+### Fixed
+- **Run facts under a reply stay out of a code block.** When a reply ended inside a code block it never closed, the grey line with duration, tokens and cost under a short reply was added inside that block and rendered as code, and so was the duration and mode line under a summary card whose summary or error opened a block. Both now go through one helper that closes an open block first, and so do the "more characters" lines on the card and under Expand, which already closed it on their own. Harness: `scripts/test_result_delivery.py`.
+- **Older usage figures shown as a fallback say how old they are, without re-sending the dashboard every minute.** The real plan figures already said "as of 12m ago" when a refresh failed, but that text changed every minute, so The Ark was edited on every refresh. The age is now a Discord timestamp the app counts up itself, so the render stays the same until fresh figures arrive. The cost-estimate bar, which showed its last good figures with no age at all, now carries the same marker. Harness: `scripts/test_plan_usage.py`.
+
 ## v0.102.35, Review leftovers: release lock, parallel resume, verify gaps, TODO writer (2026-11-20)
 
 ### Fixed

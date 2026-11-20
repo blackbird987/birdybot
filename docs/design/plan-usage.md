@@ -33,7 +33,12 @@ Four things that must not drift:
   on every instance start and completion. A good reading lives
   `PLAN_USAGE_TTL_SECS` (60), a failure five minutes, a failed refresh serves
   the last good reading (up to 3h old) marked with its age, and concurrent
-  redraws share one request through a per-account lock.
+  redraws share one request through a per-account lock. The age is a Discord
+  relative timestamp (`as of <t:EPOCH:R>`), never a written-out "12m ago":
+  the client counts it up, so an unchanged reading gives an unchanged render
+  and the dashboard is not re-sent every minute (`ark-refresh.md`). When the
+  ccusage bar falls back to its last good figures it carries the same marker,
+  from the oldest of the figures it drew.
 
 Knobs: `PLAN_USAGE_API_ENABLED`, `PLAN_USAGE_TTL_SECS` in `bot/config.py`.
 

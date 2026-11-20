@@ -335,13 +335,6 @@ def _pct(p: float) -> str:
     return f"{p:.0f}%"
 
 
-def _age(seconds: float) -> str:
-    mins = int(seconds // 60)
-    if mins < 60:
-        return f"{max(mins, 1)}m"
-    return f"{mins // 60}h{mins % 60:02d}m"
-
-
 def _state_line(a: AccountUsage) -> str:
     if a.state == STATE_SIGNED_OUT:
         return f"`{a.label}` signed out"
@@ -350,12 +343,24 @@ def _state_line(a: AccountUsage) -> str:
     return f"`{a.label}` usage unavailable ({a.error or 'unknown error'})"
 
 
-def _subtext(a: AccountUsage, *, now: float) -> str:
+def as_of(epoch: float) -> str:
+    """How old shown figures are, as a timestamp the client counts up.
+
+    Written out ("as of 12m ago") the text changed every minute, so the
+    dashboard was re-sent on every refresh while old figures were shown. A
+    ``<t:EPOCH:R>`` stays the same string until fresh figures replace it
+    (ark-refresh.md: an unchanged render sends nothing). Shared with the
+    ccusage fallback bar in ``bot/engine/usage.py``.
+    """
+    return f"as of <t:{int(epoch)}:R>"
+
+
+def _subtext(a: AccountUsage) -> str:
     # Italic, not ``-#``: these lines go into embed field values, where
     # Discord does not render subtext and the marker would show literally.
     bits = [f"{name} {_pct(p)}" for name, p, _ in a.scoped if p >= 1]
     if a.stale:
-        bits.append(f"as of {_age(now - a.fetched_at)} ago")
+        bits.append(as_of(a.fetched_at))
     return "_" + " · ".join(bits) + "_" if bits else ""
 
 
@@ -366,7 +371,6 @@ def format_plan_usage_bar(accounts: list[AccountUsage]) -> str | None:
     """
     if not any(a.has_data for a in accounts):
         return None
-    now = time.time()
     labelled = len(accounts) > 1
     blocks: list[list[str]] = []
     subtexts: list[tuple[int, int]] = []  # (block index, line index)
@@ -383,7 +387,7 @@ def format_plan_usage_bar(accounts: list[AccountUsage]) -> str | None:
         if a.session_pct is not None:
             reset = f" · resets {_ts(a.session_resets_at, 'R')}" if a.session_resets_at else ""
             lines.append(f"`{text_bar(a.session_pct / 100)}` session {_pct(a.session_pct)}{reset}")
-        sub = _subtext(a, now=now)
+        sub = _subtext(a)
         if sub:
             subtexts.append((len(blocks), len(lines)))
             lines.append(sub)
@@ -408,7 +412,6 @@ def format_plan_usage_details(accounts: list[AccountUsage]) -> str | None:
     """The fuller block that leads ``/usage``. None when the feature is off."""
     if not accounts:
         return None
-    now = time.time()
     lines = ["**Plan usage** (from Anthropic)"]
     for a in accounts:
         if not a.has_data:
@@ -416,7 +419,7 @@ def format_plan_usage_details(accounts: list[AccountUsage]) -> str | None:
             continue
         head = f"**{a.label}**"
         if a.stale:
-            head += f" (as of {_age(now - a.fetched_at)} ago: {a.error})"
+            head += f" ({as_of(a.fetched_at)}: {a.error})"
         lines.append(head)
         if a.week_pct is not None:
             when = (f" · resets {_ts(a.week_resets_at, 'f')} ({_ts(a.week_resets_at, 'R')})"
