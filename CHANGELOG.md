@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.102.34, Own merge calls and quiet hours (2026-11-20)
+
 ### Changed
 - **A /chain merges on its own unless it says why it should not.** No preset now ships, and `preset=hold` or `preset=verify` needs a `reason=` (you asked to look first, or the change is hard to undo); a hold with no reason runs as ship and the start notice says so. Repos whose workflow.json says hold, and guest or sandboxed sessions, still hold. The merge line says "Merged on my own: review and verify passed." and a held chain's park message names its reason. In two months there were 0 Discard taps against 142 Merge taps, and the sampled unmerged branches were finished work left behind (`study/findings/2026-11-20-held-branches-were-never-discarded.md`).
 
