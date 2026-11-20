@@ -9,7 +9,7 @@ import logging
 import os
 import time
 from collections import Counter
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -2103,3 +2103,20 @@ class ClaudeRunner(
                     "release-lock repo=%s site=%s event=released hold=%.2fs",
                     repo_path, label, hold,
                 )
+
+    def rerun_lock_scope(self, inst: Instance):
+        """The release lock a re-run of ``inst`` must hold, or a no-op scope.
+
+        A fresh release (chain release step, standalone Done, /release) runs
+        under ``release_lock_scope``. A retry of one used to skip it, so a
+        retried release could pick the same version as one running in
+        another worktree. Wrap only the run itself: the caller's follow-up
+        (a chain resume) takes the lock again for its own release steps.
+        """
+        if inst.repo_path and (
+            inst.origin == InstanceOrigin.RELEASE
+            or (inst.origin == InstanceOrigin.DONE
+                and config.DONE_PROMPT_STANDALONE in (inst.prompt or ""))
+        ):
+            return self.release_lock_scope(inst.repo_path, "retry")
+        return nullcontext()

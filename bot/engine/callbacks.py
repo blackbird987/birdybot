@@ -76,7 +76,8 @@ async def _on_retry(ctx: RequestContext, inst: Instance, source_msg_id: str | No
     if not started:
         return
     new_inst, handle = started
-    await lifecycle.run_instance(ctx, new_inst, handle=handle)
+    async with ctx.runner.rerun_lock_scope(new_inst):
+        await lifecycle.run_instance(ctx, new_inst, handle=handle)
     await lifecycle.backfill_thread_session(ctx, new_inst)
 
 
@@ -226,7 +227,8 @@ async def _on_continue_ppu(
     if not started:
         return
     new_inst, handle = started
-    await lifecycle.run_instance(ctx, new_inst, handle=handle)
+    async with ctx.runner.rerun_lock_scope(new_inst):
+        await lifecycle.run_instance(ctx, new_inst, handle=handle)
     # Pay-per-use is the manual twin of the cooldown auto-retry: it fires
     # from the same usage-limit card, so it needs the same backstop.
     await lifecycle.backfill_thread_session(ctx, new_inst)

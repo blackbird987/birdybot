@@ -459,7 +459,9 @@ async def on_retry(ctx: RequestContext, text: str) -> None:
         return
     new_inst, handle = started
 
-    await lifecycle.run_instance(ctx, new_inst, handle=handle)
+    # A retried release takes the release lock a fresh one holds.
+    async with ctx.runner.rerun_lock_scope(new_inst):
+        await lifecycle.run_instance(ctx, new_inst, handle=handle)
     # run_instance doesn't bind; fill a sessionless thread so a wake armed by
     # this retry has something to resume.  Never rebinds — see
     # lifecycle.backfill_thread_session.

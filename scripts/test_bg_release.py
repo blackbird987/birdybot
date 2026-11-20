@@ -13,6 +13,9 @@ Pinned here:
   * A crash inside run_instance is logged and swallowed: the task is detached,
     and run_instance has already reported the crash to the thread.
   * /release tags only when the run completed.
+  * A retry of a release (or of a standalone Done, which cuts one) holds the
+    per-repo release lock for its run, like a fresh release; any other retry
+    does not, and the lock is free once the retry's run is over.
 
 Run:  python scripts/test_bg_release.py
 """
@@ -29,8 +32,10 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from bot.claude.types import Instance, InstanceStatus, InstanceType  # noqa: E402
-from bot.engine import cmd_state, instance_cmds, lifecycle  # noqa: E402
+from bot import config  # noqa: E402
+from bot.claude.runner.core import ClaudeRunner  # noqa: E402
+from bot.claude.types import Instance, InstanceOrigin, InstanceStatus, InstanceType  # noqa: E402
+from bot.engine import callbacks, cmd_state, instance_cmds, lifecycle  # noqa: E402
 
 FAILS: list[str] = []
 
@@ -175,10 +180,86 @@ async def _arm_release() -> None:
     check(runner.tagged == [], f"failed run not tagged (got {runner.tagged})")
 
 
+class _LockRunner:
+    """The runner's real release-lock methods, without the rest of the runner."""
+
+    _get_release_lock = ClaudeRunner._get_release_lock
+    release_lock_scope = ClaudeRunner.release_lock_scope
+    rerun_lock_scope = ClaudeRunner.rerun_lock_scope
+
+    def __init__(self) -> None:
+        self._release_locks: dict[str, asyncio.Lock] = {}
+
+
+def _retry_inst(origin: InstanceOrigin, prompt: str = "p") -> Instance:
+    inst = _inst()
+    inst.origin = origin
+    inst.prompt = prompt
+    return inst
+
+
+async def _retry_held_lock(entry, inst: Instance) -> bool:
+    """Run a retry entry point with a fake run; True when the run held the lock."""
+    runner = _LockRunner()
+    lock = runner._get_release_lock(inst.repo_path)
+    seen: list[bool] = []
+
+    async def fake_start(ctx, src, *a, **kw):  # noqa: ANN001, ANN002, ANN003
+        return inst, {}
+
+    async def fake_run(ctx, run_inst, *a, **kw):  # noqa: ANN001, ANN002, ANN003
+        seen.append(lock.locked())
+
+    async def fake_backfill(ctx, run_inst):  # noqa: ANN001
+        return False
+
+    ctx = SimpleNamespace(store=SimpleNamespace(get_instance=lambda _id: inst),
+                          runner=runner, channel_id="c")
+    saved = (instance_cmds._start_retry, callbacks._start_retry,
+             lifecycle.run_instance, lifecycle.backfill_thread_session)
+    instance_cmds._start_retry = callbacks._start_retry = fake_start
+    lifecycle.run_instance, lifecycle.backfill_thread_session = fake_run, fake_backfill
+    try:
+        await entry(ctx, inst)
+    finally:
+        (instance_cmds._start_retry, callbacks._start_retry,
+         lifecycle.run_instance, lifecycle.backfill_thread_session) = saved
+    check(not lock.locked(), f"{inst.origin.value}: lock is free after the retry")
+    return seen == [True]
+
+
+async def _arm_retry_lock() -> None:
+    print("a retried release holds the release lock")
+    standalone = config.DONE_PROMPT_STANDALONE
+    entries = (
+        ("/retry", lambda ctx, inst: instance_cmds.on_retry(ctx, inst.id)),
+        ("Retry button", lambda ctx, inst: callbacks._on_retry(ctx, inst, None)),
+    )
+    for name, entry in entries:
+        check(await _retry_held_lock(entry, _retry_inst(InstanceOrigin.RELEASE)),
+              f"{name}: a release retry runs under the lock")
+        check(await _retry_held_lock(entry, _retry_inst(InstanceOrigin.DONE, "plan\n\n" + standalone)),
+              f"{name}: a standalone Done retry runs under the lock")
+        check(not await _retry_held_lock(entry, _retry_inst(InstanceOrigin.DONE, config.DONE_PROMPT_CHAIN)),
+              f"{name}: a chain Done retry does not take it")
+        check(not await _retry_held_lock(entry, _retry_inst(InstanceOrigin.BUILD)),
+              f"{name}: a build retry does not take it")
+
+    # The other two retry sites wrap the same scope around their run.
+    root = Path(__file__).resolve().parents[1]
+    app_src = (root / "bot" / "app.py").read_text(encoding="utf-8")
+    cb_src = (root / "bot" / "engine" / "callbacks.py").read_text(encoding="utf-8")
+    check("async with ctx.runner.rerun_lock_scope(new_inst):\n            await lifecycle.run_instance("
+          in app_src, "cooldown retry wraps its run in the lock")
+    check(cb_src.count("async with ctx.runner.rerun_lock_scope(new_inst):") == 2,
+          "Retry button and pay-per-use both wrap their run in the lock")
+
+
 async def main() -> int:
     await _arm_order()
     await _arm_crash()
     await _arm_release()
+    await _arm_retry_lock()
     print()
     if FAILS:
         print(f"FAILED: {len(FAILS)}")

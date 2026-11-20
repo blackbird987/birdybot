@@ -928,7 +928,10 @@ async def _do_cooldown_retry_locked(store, runner, inst, discord_bot, channel_id
 
     log.info("Cooldown retry: %s → %s in channel %s", inst.id, new_inst.id, channel_id)
     try:
-        await lifecycle.run_instance(ctx, new_inst, handle=handle)
+        # A retried release takes the release lock a fresh one holds, and
+        # lets go of it before the chain resume below takes it again.
+        async with ctx.runner.rerun_lock_scope(new_inst):
+            await lifecycle.run_instance(ctx, new_inst, handle=handle)
 
         # Backstop: run_instance never binds, so if the interrupted turn was
         # cut off before it produced a session_id at all, this retry's session
