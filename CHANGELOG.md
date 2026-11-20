@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.102.35, Review leftovers: release lock, parallel resume, verify gaps, TODO writer (2026-11-20)
+
 ### Fixed
 - **A retried release holds the release lock.** A fresh release (the chain's release step, a standalone Done, /release) runs under a per-repo lock so two worktrees cannot pick the same version number, but a retry of one (/retry, the Retry button, pay-per-use, or the automatic retry after a usage cooldown) ran without it. Those four now take the lock for a release or standalone Done retry and let go of it when the run ends, before any chain resume.
 - **Chains cut off by a restart resume side by side.** Boot recovery used to resume them one after another, so a single chain that built for twenty minutes held every other thread's chain behind it. Each now resumes in its own task under its thread's lock; the run slots and the memory hold still decide how many spawn at once.
