@@ -26,6 +26,7 @@ from __future__ import annotations
 import _bootstrap  # noqa: F401  -- relaunches under .venv if deps are missing
 
 import asyncio
+import types
 import os
 import re
 import sys
@@ -117,6 +118,11 @@ with mock.patch.object(quiet, "_now", return_value=t):
 with mock.patch.object(quiet, "_now", return_value=local(14)):
     check(quiet.quiet_block(new_store(), owner, confined=False) == "", "14:00: no block")
 check("\u2014" not in config.QUIET_HOURS_BLOCK, "the block has no em dash")
+quiet.note_owner_seen(None)  # a store-less stand-in in on_message must not raise
+check(True, "recording presence with no store is a no-op")
+broken = types.SimpleNamespace()  # no store methods at all
+quiet.note_owner_seen(broken)
+check(True, "recording presence on a broken store never raises")
 
 # --- /chain arguments ----------------------------------------------------------
 print("/chain arguments")

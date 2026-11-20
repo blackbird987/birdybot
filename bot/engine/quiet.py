@@ -119,9 +119,14 @@ def _state(store) -> dict:
 def note_owner_seen(store, now: float | None = None) -> None:
     """Record that the owner just did something. Owner only: the caller checks.
 
+    Never raises: it runs inside message and interaction handling, which a
+    presence stamp must not be able to break (a None store is a no-op).
+
     Marked dirty rather than saved: the 60s autosave is plenty for a value
     with a ``PRESENCE_GRACE_S`` grace, and this runs on every owner message and tap.
     """
+    if store is None:
+        return
     try:
         data = dict(_state(store))
         data["owner_seen"] = float(now if now is not None else time.time())

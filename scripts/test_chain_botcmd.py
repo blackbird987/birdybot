@@ -241,8 +241,10 @@ from bot.engine.directives import chain as chain_mod
 
 
 
-def _chain_text(plan: str, preset: str = "ship") -> str:
-    return f"Kicking it off.\n\n[BOT_CMD: /chain preset={preset}]\n~~~plan\n{plan}\n~~~\n"
+def _chain_text(plan: str, preset: str = "ship", reason: str = "") -> str:
+    # A hold or verify needs a reason= or it runs as ship (directives.chain).
+    args = f"preset={preset}" + (f' reason="{reason}"' if reason else "")
+    return f"Kicking it off.\n\n[BOT_CMD: /chain {args}]\n~~~plan\n{plan}\n~~~\n"
 
 
 class _ChainStore:
@@ -288,11 +290,13 @@ class _FakeChains:
     def __init__(self, store: _ChainStore, gate: asyncio.Event | None = None,
                  raise_on_call: bool = False) -> None:
         self.calls: list[tuple[str, str]] = []
+        self.hold_reasons: list[str] = []
         self.store = store
         self.gate = gate
         self.raise_on_call = raise_on_call
 
-    async def __call__(self, ctx, source_id, preset, source_msg_id=None):
+    async def __call__(self, ctx, source_id, preset, source_msg_id=None, *, hold_reason=""):
+        self.hold_reasons.append(hold_reason)
         self.calls.append((preset, self.store.overrides[-1] if self.store.overrides else ""))
         if self.gate is not None:
             await self.gate.wait()
@@ -405,7 +409,7 @@ def test_chain_coalesces_before_start() -> None:
         lock = _get_channel_lock(ctx.channel_id)
         async with lock:
             await chain_mod._handle_chain_directive(ctx, _chain_text("PLAN ONE", "ship"), src)
-            await chain_mod._handle_chain_directive(ctx, _chain_text("PLAN TWO", "verify"), src)
+            await chain_mod._handle_chain_directive(ctx, _chain_text("PLAN TWO", "verify", "the user asked to only build and verify"), src)
             for _ in range(10):
                 await asyncio.sleep(0)
             _check(fake.calls == [], "nothing runs while the lock is held")
@@ -413,6 +417,13 @@ def test_chain_coalesces_before_start() -> None:
 
     _with_fake(fake, go)
     _check(fake.calls == [("verify", "PLAN TWO")], "exactly one chain, newest plan and preset")
+    _check(fake.hold_reasons == ["the user asked to only build and verify"],
+           "the newest plan's reason reaches the chain")
+    _check(
+        any("**verify** chain" in m and "Holding the merge for you: the user asked to only build and verify." in m
+            for m in msgr.sent),
+        "the notice names the plan that runs, with its reason",
+    )
     _check(store.cleared == 0, "no supersede when nothing was stored")
     _check(
         any("Got the newer plan" in m for m in msgr.sent),
@@ -434,7 +445,7 @@ def test_chain_queues_during_run() -> None:
             await asyncio.sleep(0)
         _check(fake.calls == [("ship", "PLAN A")], "first chain running")
         n_tasks = len(asyncio.all_tasks())
-        await chain_mod._handle_chain_directive(ctx, _chain_text("PLAN B", "hold"), src)
+        await chain_mod._handle_chain_directive(ctx, _chain_text("PLAN B", "hold", "data migration on the live db"), src)
         _check(len(asyncio.all_tasks()) == n_tasks, "no second drain task")
         _check(len(fake.calls) == 1, "second plan waits for the first")
         gate.set()
@@ -445,6 +456,26 @@ def test_chain_queues_during_run() -> None:
     _check(
         fake.calls == [("ship", "PLAN A"), ("hold", "PLAN B")],
         "both ran, in order",
+    )
+    _check(not chain_mod._chain_drainers, "drainer set empty")
+
+
+def test_hold_without_reason_ships() -> None:
+    print("/chain preset=hold with no reason runs as ship:")
+    store = _ChainStore()
+    ctx, msgr, src = _chain_env("chan-noreason", store)
+    fake = _FakeChains(store)
+
+    async def go():
+        await chain_mod._handle_chain_directive(ctx, _chain_text("PLAN H", "hold"), src)
+        await _settle()
+
+    _with_fake(fake, go)
+    _check(fake.calls == [("ship", "PLAN H")], "it ran as ship")
+    _check(fake.hold_reasons == [""], "no hold reason passed on")
+    _check(
+        any("**ship** chain" in m and "No reason to hold given" in m for m in msgr.sent),
+        "the start notice says it will merge on its own",
     )
     _check(not chain_mod._chain_drainers, "drainer set empty")
 
@@ -490,6 +521,7 @@ def main() -> int:
     test_chain_step_cannot_chain()
     test_chain_coalesces_before_start()
     test_chain_queues_during_run()
+    test_hold_without_reason_ships()
     test_chain_fresh_launch()
     test_chain_raise_clears_drainer()
     if _failures:
