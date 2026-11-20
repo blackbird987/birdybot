@@ -245,6 +245,8 @@ def full_instance() -> Instance:
         is_owner_session=False,
         vault_eligible=True,
         guest_confined=True,
+        quiet_hours=True,
+        decided_away=True,
         bash_policy="allowlist",
         bash_policy_baseline="none",
         effort="max",

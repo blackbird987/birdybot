@@ -62,6 +62,8 @@ class ChainsMixin:
         *,
         label: str,
         silent_close: bool,
+        hold_reason: str = "",
+        decided_merge: bool = False,
     ) -> None:
         """Persist chain entry-point kwargs so resume can restore them.
 
@@ -75,11 +77,26 @@ class ChainsMixin:
         """
         if not session_id:
             return
-        self._chain_kwargs[session_id] = {
-            "label": label,
-            "silent_close": silent_close,
-        }
+        data: dict = {"label": label, "silent_close": silent_close}
+        # Why a /chain stops before the merge, and whether a /chain decided
+        # to merge on its own. Both ride here so a paused chain the user
+        # continues, or one boot recovery resumes, still reports them.
+        if hold_reason:
+            data["hold_reason"] = hold_reason
+        if decided_merge:
+            data["decided_merge"] = True
+        self._chain_kwargs[session_id] = data
         self.mark_dirty()
+
+    def get_chain_hold_reason(self, session_id: str | None) -> str:
+        """The stated reason a /chain holds before the merge, or ''."""
+        data = self._chain_kwargs.get(session_id or "") or {}
+        return str(data.get("hold_reason") or "")
+
+    def get_chain_decided_merge(self, session_id: str | None) -> bool:
+        """True when a /chain chose to merge on its own (preset ship)."""
+        data = self._chain_kwargs.get(session_id or "") or {}
+        return bool(data.get("decided_merge"))
 
     def get_chain_kwargs(
         self, session_id: str | None,

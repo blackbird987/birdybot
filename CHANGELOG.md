@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## v0.102.34, Own merge calls and quiet hours (2026-11-20)
+
+### Changed
+- **A /chain merges on its own unless it says why it should not.** No preset now ships, and `preset=hold` or `preset=verify` needs a `reason=` (you asked to look first, or the change is hard to undo); a hold with no reason runs as ship and the start notice says so. Repos whose workflow.json says hold, and guest or sandboxed sessions, still hold. The merge line says "Merged on my own: review and verify passed." and a held chain's park message names its reason. In two months there were 0 Discard taps against 142 Merge taps, and the sampled unmerged branches were finished work left behind (`study/findings/2026-11-20-held-branches-were-never-discarded.md`).
+
+### Added
+- **Quiet hours.** Between 03:00 and 09:00 Amsterdam time, while you have not been seen for 20 minutes, your sessions stop asking about things that can be undone: they take their own recommendation, act, and list those calls under "Decided while you were away:", which shows in the Needs you list until you write in that thread. They still stop for keys, deleting data, anything sent to people or spending money, and pure taste calls. `/quiet` shows, sets or turns off the window. Design: `docs/design/quiet-hours.md`. Harness: `scripts/test_quiet_hours.py`.
+
 ## v0.102.33, Image sharing fixes (2026-11-18)
 
 ### Fixed

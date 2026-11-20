@@ -167,7 +167,7 @@ class StateStore(ReposMixin, AccountsMixin, SchedulesMixin, ChainsMixin, PeerMix
         # Chain entry-point kwargs (label + silent_close), persisted so a
         # resumed chain (Continue button or reboot recovery) restores the
         # originating identity rather than defaulting back to "Autopilot".
-        self._chain_kwargs: dict[str, dict] = {}  # session_id -> {label, silent_close}
+        self._chain_kwargs: dict[str, dict] = {}  # session_id -> {label, silent_close, hold_reason?, decided_merge?}
         self._pending_merges: dict[str, dict] = {}  # instance_id -> pending merge metadata
         # Auto-merge veto window: instance_id -> {channel_id, session_id,
         # repo_name, branch, merge_at, held, created_at}. Distinct from

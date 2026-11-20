@@ -108,6 +108,12 @@ DISCORD_ENABLED: bool = bool(DISCORD_BOT_TOKEN and DISCORD_GUILD_ID)
 # Test webhook IDs (comma-separated) — allow webhook messages to bypass bot/auth guards
 TEST_WEBHOOK_IDS: set[str] = set(filter(None, os.getenv("TEST_WEBHOOK_IDS", "").split(",")))
 
+# The owner's time zone, for anything said in their local time.
+OWNER_TZ: str = os.getenv("OWNER_TZ", "Europe/Amsterdam")
+# Quiet hours in OWNER_TZ, "HH:MM-HH:MM" (may cross midnight), "off" disables.
+# /quiet overrides it at runtime. docs/design/quiet-hours.md
+QUIET_HOURS: str = os.getenv("QUIET_HOURS", "03:00-09:00")
+
 # Bash guidance for a guest whose grant uses the allowlist policy. Read by
 # the runner when it builds the access block of the system prompt, so it
 # lives here rather than in bot/discord/access.py. Soft enforcement: the
@@ -881,6 +887,24 @@ ACCOUNT_AUTH_COOLDOWN_SECS: int = max(
 # normally with the Retry button. Clamped to 0..5; 0 disables auto-resume.
 CONTEXT_THRASH_MAX_RETRIES: int = max(
     0, min(5, int(os.getenv("CONTEXT_THRASH_MAX_RETRIES", "2")))
+)
+
+# Sent at the top of an owner turn during quiet hours, while the owner has not
+# been seen for 20 minutes (bot/engine/quiet.py). It sits in the turn's prompt,
+# never the system prompt, so the system prompt stays byte-stable for caching.
+# The eval's unoffered-choice check stands down on these turns, because this
+# block tells the session not to ask. docs/design/quiet-hours.md
+QUIET_HOURS_BLOCK = (
+    "[Quiet hours: the owner is asleep until {until} and will not answer before then. "
+    "This overrides, until then, the rules to wait for approval before /chain and to offer one-tap choices. "
+    "Do not end on a question you can answer yourself. "
+    "On a choice that can be undone, take your own recommendation, act on it, and list it under a line "
+    "'Decided while you were away:'. "
+    "If the owner's own message asked for the work, treat that as approval and emit the /chain directive "
+    "instead of asking whether to build (the hold rules still apply). "
+    "Stop and wait only for: a missing key or credential, deleting data, anything sent to other people "
+    "or spending money, or a choice that is purely the owner's taste with no safe default. "
+    "If one part is blocked, do the rest and name the blocked part.]"
 )
 
 # Prepended to the prompt of an auto-resumed attempt only. The CLI's own
@@ -1738,6 +1762,7 @@ Settings:
 - /mode explore|build — switch permission mode
 - /verbose 0|1|2 — progress detail level (silent/normal/detailed)
 - /effort low|medium|high|xhigh|max — reasoning effort level
+- /quiet [HH:MM-HH:MM|off]: quiet hours, when owner sessions decide what can be undone instead of asking
 - /model <name> — model for this thread (`/model default` clears it)
 - /context set <text> — pin context to all prompts
 - /repo add|remove|create|switch|list|hide|unhide — manage repos
@@ -1886,11 +1911,13 @@ Format (directive on its own line, immediately followed by its ~~~plan body):
 The full implementation plan, written from our conversation: every file to change and what the change is, the approach, and anything to verify afterward. This is injected as the build's brief, so make it concrete and self-contained.
 ~~~
 
-Presets (pick by what the user asked for):
-- `ship` — build → review → verify → release → merge, closes the thread. Use for "ship it" / "go" / a plain approval when the repo auto-ships.
-- `hold` — build → review → verify → release, then STOPS before merge and leaves Merge/Discard for you to decide. Use when the user wants to inspect before it lands. (No auto-merge here even on an auto-ship repo — `hold` is an explicit "don't merge yet".)
-- `verify` — build → review → verify only, then stops with the branch open. Use for "build and verify" / a build+verify loop.
-- Omit `preset=` to let the repo's own autonomy policy choose.
+Presets. Ship is the default: you decide, and the chain merges once review and verify pass.
+- `ship`: build, review, verify, release, merge, closes the thread. Use for any approval unless one of the two hold reasons below applies.
+- `hold`: build, review, verify, release, then STOPS before merge and leaves Merge/Discard to the user.
+- `verify`: build, review, verify only, then stops with the branch open.
+- `hold` and `verify` need a `reason=`, and only two reasons count: (1) the user explicitly asked to look before it lands, or to only build and verify; (2) the change is hard to undo, which means one of: a data migration or schema change on live data, deleting data or files the user keeps, a production deploy beyond the normal merge push, spending money, sending messages to real people. The normal push to origin on merge is NOT outward-facing for this purpose. A hold or verify with no reason runs as ship.
+  Example: [BOT_CMD: /chain preset=hold reason="data migration on the live db"]
+- Omit `preset=` and it ships, unless the repo's own .claude/workflow.json says hold.
 
 Rules:
 - Tilde fences (`~~~plan` / `~~~`), never backticks — same reason as /spawn.

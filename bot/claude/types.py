@@ -238,6 +238,8 @@ class Instance:
     bash_policy: str = "full"         # current effective policy: "full"=Bash unrestricted; "allowlist"=non-owner allowlist guard; "none"=Bash disabled (e.g. read-only triage floor)
     bash_policy_baseline: str = "full" # un-clamped policy. Inherited verbatim by spawned children so a triage floor on the parent does not propagate forward into a build child.
     vault_eligible: bool = False      # May this run receive vault secrets? Fails closed: is_owner_session defaults True, so a missed path must not be what grants keys. See docs/design/secret-intake.md
+    decided_away: bool = False        # A quiet hours run that listed calls under "Decided while you were away" (lifecycle.finalize_run). Shown in Needs you until someone writes in the thread
+    quiet_hours: bool = False         # This run's prompt carried the quiet hours block (bot/engine/quiet.py). The eval's unoffered-choice check and the Needs you "decided while you were away" item read it
     guest_confined: bool = False      # Sandboxed whatever the repo's setting, because a guest's text is in this run's history. Only ever set, never cleared. See sandbox.stamp_guest and docs/design/session-sandbox.md
     effort: str = "high"             # reasoning effort: low/medium/high/xhigh/max
     model: str | None = None         # CLI model override (e.g. "sonnet" for plan steps)
@@ -420,6 +422,8 @@ class Instance:
             "bash_policy_baseline": self.bash_policy_baseline,
             "vault_eligible": self.vault_eligible,
             "guest_confined": self.guest_confined,
+            "quiet_hours": self.quiet_hours,
+            "decided_away": self.decided_away,
             "effort": self.effort,
             "model": self.model,
             "cooldown_retry_at": self.cooldown_retry_at,
@@ -503,6 +507,8 @@ class Instance:
             bash_policy_baseline=d.get("bash_policy_baseline", "full"),
             vault_eligible=d.get("vault_eligible", False),
             guest_confined=d.get("guest_confined", False),
+            quiet_hours=d.get("quiet_hours", False),
+            decided_away=d.get("decided_away", False),
             effort=d.get("effort", "high"),
             model=d.get("model"),
             cooldown_retry_at=d.get("cooldown_retry_at"),

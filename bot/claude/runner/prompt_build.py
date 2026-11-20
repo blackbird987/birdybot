@@ -181,6 +181,22 @@ class PromptMixin:
         # double-up.  --resume may replay the original JSONL system prompt
         # verbatim, in which case the system-prompt block never reaches the
         # resumed agent — this user-message slot is the load-bearing copy.
+        # Quiet hours (bot/engine/quiet.py): right above the owner's own words,
+        # in this slot and never the system prompt, which must stay byte-stable.
+        # The stamp is what the eval and the Needs you list read afterwards.
+        quiet_text = ""
+        try:
+            from bot.engine import quiet as quiet_mod
+            quiet_text = quiet_mod.quiet_block(
+                self._store, instance,
+                confined=instance_confined(self._store, instance),
+            )
+        except Exception:
+            log.debug("quiet hours block skipped for %s", instance.id, exc_info=True)
+        instance.quiet_hours = bool(quiet_text)
+        if quiet_text:
+            prompt = quiet_text + "\n\n" + prompt
+
         if instance.session_id and instance.origin not in PEER_ORIGINS:
             master_block = self._build_master_context_block(instance)
             if master_block:

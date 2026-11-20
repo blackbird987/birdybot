@@ -7,7 +7,7 @@ import logging
 from datetime import datetime, timezone
 from typing import NamedTuple
 
-from bot.textutil import DIRECTIVE_KV_RE, directive_re, find_tilde_block, is_quoted_example, mask_tilde_bodies, parse_iso_utc
+from bot.textutil import directive_kv, directive_re, find_tilde_block, is_quoted_example, mask_tilde_bodies, parse_iso_utc
 from bot.claude.types import Instance, InstanceOrigin
 from bot.engine import (
     prior_art,
@@ -29,36 +29,78 @@ _CHAIN_ALLOWED_PRESETS = frozenset(workflows._CHAIN_PRESETS)
 _CHAIN_PLAN_MAX_BYTES = 32 * 1024
 
 
-def _parse_chain_preset(args_str: str) -> str | None:
-    """Extract a valid preset from a /chain directive's args, or None.
+class _ChainArgs(NamedTuple):
+    """What a /chain directive's arguments asked for.
 
-    Empty/absent args → None (means "use the repo's autonomy policy default,
-    falling back to ship"). An explicit but invalid preset also returns None
-    with a warning so a typo degrades to the default rather than silently
-    doing nothing.
+    ``preset`` None means "let the repo's autonomy policy pick". ``reason`` is
+    the stated reason to hold back the merge ('' when none was given).
+    """
+    preset: str | None
+    reason: str
+
+
+# Presets that stop before the merge. Each one has to say why (CHAIN_CONTEXT):
+# the owner never discarded a held branch in two months
+# (study/findings/2026-11-20-held-branches-were-never-discarded), so a hold with
+# no reason only delays or strands finished work.
+_HOLD_PRESETS = frozenset({"hold", "verify"})
+
+
+def _parse_chain_args(args_str: str) -> _ChainArgs:
+    """Read every key=value pair of a /chain directive's arguments.
+
+    ``preset=`` and ``reason=`` may come in either order, and a quoted value may
+    hold spaces (``reason="data migration on the live db"``). A bare
+    ``ship``/``hold``/``verify`` as the first word is accepted too. An explicit
+    but unknown preset degrades to None with a warning, so a typo falls back to
+    the default rather than doing nothing.
     """
     args_str = (args_str or "").strip()
     if not args_str:
-        return None
-    m = DIRECTIVE_KV_RE.search(args_str)
-    if m:
-        key = m.group(1)
-        val = m.group(2) or m.group(3) or m.group(4) or ""
-        if key == "preset" and val in _CHAIN_ALLOWED_PRESETS:
-            return val
-    # bare "ship"/"hold"/"verify" without preset= is also accepted
-    token = args_str.split()[0]
-    if token in _CHAIN_ALLOWED_PRESETS:
-        return token
-    log.warning("BOT_CMD /chain — unrecognized preset args: %r", args_str)
-    return None
+        return _ChainArgs(None, "")
+    kv = directive_kv(args_str)
+    # The notices add their own full stop, and a reason is one line, not a plan.
+    reason = " ".join((kv.get("reason") or "").split()).rstrip(". ")[:200]
+    preset: str | None = None
+    if "preset" in kv:
+        if kv["preset"] in _CHAIN_ALLOWED_PRESETS:
+            preset = kv["preset"]
+        else:
+            log.warning("BOT_CMD /chain: unrecognized preset in %r", args_str)
+    else:
+        token = args_str.split()[0]
+        if token in _CHAIN_ALLOWED_PRESETS:
+            preset = token
+        elif not kv:
+            log.warning("BOT_CMD /chain: unrecognized preset args: %r", args_str)
+    return _ChainArgs(preset, reason)
 
 
-def _extract_chain_directive(result_text: str) -> tuple[str | None, str] | None:
+def _parse_chain_preset(args_str: str) -> str | None:
+    """The preset alone; see ``_parse_chain_args``."""
+    return _parse_chain_args(args_str).preset
+
+
+def _resolve_hold(
+    preset: str, reason: str, *, confined: bool,
+) -> tuple[str, str, bool]:
+    """Apply the "a hold needs a reason" rule.
+
+    Returns ``(preset, reason, upgraded)``. A hold or verify with no reason
+    becomes ship, unless the session is confined (sandboxed or a guest's):
+    those keep exactly the preset they asked for, since a confined session
+    must never be able to turn its own chain into a merge.
+    """
+    if preset in _HOLD_PRESETS and not reason and not confined:
+        return "ship", "", True
+    return preset, reason, False
+
+
+def _extract_chain_directive_full(result_text: str) -> tuple[_ChainArgs, str] | None:
     """Find the first REAL (unquoted) /chain directive + its ~~~plan body.
 
-    Returns ``(preset, plan_body)`` or None if there's no usable directive.
-    ``preset`` may be None (→ policy default). Directives on quoted/code/heading
+    Returns ``(args, plan_body)`` or None if there's no usable directive.
+    ``args.preset`` may be None (→ policy default). Directives on quoted/code/heading
     lines are skipped (same guard as /spawn and /wake).
     """
     scan = mask_tilde_bodies(result_text)
@@ -66,15 +108,23 @@ def _extract_chain_directive(result_text: str) -> tuple[str | None, str] | None:
         if is_quoted_example(scan, m.start()):
             log.debug("BOT_CMD /chain skipped: a quoted example")
             continue
-        preset = _parse_chain_preset(m.group(1) or "")
+        args = _parse_chain_args(m.group(1) or "")
         span = find_tilde_block(result_text, "plan", m.end())
         body = result_text[span[0]:span[1]].strip() if span else ""
         if len(body.encode("utf-8", "ignore")) > _CHAIN_PLAN_MAX_BYTES:
             body = body.encode("utf-8", "ignore")[:_CHAIN_PLAN_MAX_BYTES].decode(
                 "utf-8", "ignore",
             )
-        return preset, body
+        return args, body
     return None
+
+
+def _extract_chain_directive(result_text: str) -> tuple[str | None, str] | None:
+    """``(preset, plan_body)`` of the first real /chain directive, or None."""
+    found = _extract_chain_directive_full(result_text)
+    if found is None:
+        return None
+    return found[0].preset, found[1]
 
 
 class _QueuedChain(NamedTuple):
@@ -82,6 +132,10 @@ class _QueuedChain(NamedTuple):
     plan_body: str
     source_id: str
     repo_path: str
+    # Why this chain stops before the merge ('' for a ship).
+    hold_reason: str = ""
+    # A hold with no reason that was turned into a ship; the start notice says so.
+    upgraded: bool = False
 
 
 # One queued plan per session: a newer /chain overwrites a plan not yet started.
@@ -122,10 +176,11 @@ async def _handle_chain_directive(
     directives queue in the order they arrive and a cancelled turn can't
     leave the session marked as drained by a task that never started.
     """
-    parsed = _extract_chain_directive(result_text)
+    parsed = _extract_chain_directive_full(result_text)
     if parsed is None:
         return
-    preset, plan_body = parsed
+    args, plan_body = parsed
+    preset, reason = args.preset, args.reason
 
     session_id = source_inst.session_id
     if not session_id:
@@ -148,22 +203,39 @@ async def _handle_chain_directive(
         )
         return
 
-    # Resolve preset: explicit wins; else the repo's autonomy policy picks a
-    # sensible default (ship repos → ship, else hold), falling back to ship.
+    # Resolve preset: explicit wins; else the repo's autonomy policy picks.
+    # A repo that never wrote .claude/workflow.json reads as "hold", but that
+    # is only the no-opt-in fallback for unattended auto-merges, so it ships
+    # here: the chain's own review and verify are the gate. Only a repo that
+    # explicitly chose hold, or a confined session, holds by default.
+    from bot.claude.sandbox import instance_confined
+    confined = instance_confined(ctx.store, source_inst, ctx=ctx)
     if preset is None:
         from bot.engine.workflows import load_workflow_policy
-        from bot.claude.sandbox import instance_confined
-        policy = load_workflow_policy(
-            source_inst.repo_path,
-            sandboxed=instance_confined(ctx.store, source_inst, ctx=ctx),
+        from bot.engine.step_policy import repo_chose_autonomy
+        policy = load_workflow_policy(source_inst.repo_path, sandboxed=confined)
+        if policy["autonomy"] in ("merge", "ship"):
+            preset = "ship"
+        elif confined or repo_chose_autonomy(source_inst.repo_path):
+            preset = "hold"
+            reason = reason or ("this session is confined" if confined
+                                else "this repo's workflow.json says hold")
+        else:
+            preset = "ship"
+
+    preset, reason, upgraded = _resolve_hold(preset, reason, confined=confined)
+    if upgraded:
+        log.info(
+            "BOT_CMD /chain: hold without a reason from %s, running as ship",
+            source_inst.id,
         )
-        preset = "ship" if policy["autonomy"] in ("merge", "ship") else "hold"
 
     # Newest wins. The override is written by the drain once it holds the
     # lock, so a chain still running can't have it swapped mid-flight or
     # wiped by its own terminal clear_chain_state.
     _pending_chains[session_id] = _QueuedChain(
         preset, plan_body, source_inst.id, source_inst.repo_path,
+        hold_reason=reason if preset != "ship" else "", upgraded=upgraded,
     )
 
     if session_id in _chain_drainers:
@@ -184,7 +256,7 @@ async def _handle_chain_directive(
         preset, session_id, len(plan_body),
     )
     _chain_drainers.add(session_id)
-    asyncio.create_task(_drain_chains(ctx, session_id, preset))
+    asyncio.create_task(_drain_chains(ctx, session_id))
 
 
 def _format_age(updated_at: str | None) -> str:
@@ -214,9 +286,24 @@ def _supersede_note(remaining: list[str], meta: dict | None) -> str:
     return " ".join(parts) + " with this one."
 
 
-async def _drain_chains(
-    ctx: RequestContext, session_id: str, preset: str,
-) -> None:
+def _start_notice(entry: _QueuedChain) -> str:
+    """The one line that opens a chain, written for that entry's own plan."""
+    preset = entry.preset
+    text = (
+        f"Starting **{preset}** chain from our plan. I'll build, review, "
+        f"verify"
+        + (", release and merge automatically." if preset == "ship"
+           else " and release." if preset == "hold"
+           else ".")
+    )
+    if entry.upgraded:
+        text += "\nNo reason to hold given, so this will merge on its own."
+    elif entry.hold_reason:
+        text += f"\nHolding the merge for you: {entry.hold_reason}."
+    return text
+
+
+async def _drain_chains(ctx: RequestContext, session_id: str) -> None:
     """Run this session's queued /chain plans, one at a time, under the lock.
 
     Holding the channel lock means no chain is live on this session (every
@@ -225,16 +312,17 @@ async def _drain_chains(
     goes out first so a supersede note can never land above it.
     """
     try:
-        await _send_quiet(
-            ctx,
-            f"Starting **{preset}** chain from our plan. I'll build, review, "
-            f"verify"
-            + (", release and merge automatically." if preset == "ship"
-               else " and release." if preset == "hold"
-               else "."),
-        )
+        # Announce the plan queued right now. A newer plan that replaces it
+        # before the lock is held gets its own notice below, so the user never
+        # reads one plan's preset over another plan's chain.
+        announced = _pending_chains.get(session_id)
+        if announced is not None:
+            await _send_quiet(ctx, _start_notice(announced))
         async with _get_channel_lock(ctx.channel_id):
             while (entry := _pending_chains.pop(session_id, None)) is not None:
+                if entry is not announced:
+                    await _send_quiet(ctx, _start_notice(entry))
+                announced = None
                 remaining = ctx.store.get_autopilot_chain(session_id)
                 if remaining:
                     meta = ctx.store.get_autopilot_chain_meta(session_id)
@@ -262,6 +350,7 @@ async def _drain_chains(
                 try:
                     await workflows.on_conversational_chain(
                         ctx, entry.source_id, entry.preset,
+                        hold_reason=entry.hold_reason,
                     )
                 except Exception:
                     log.exception(

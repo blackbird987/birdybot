@@ -706,7 +706,7 @@ class MergeOutcome(enum.Enum):
 
 async def _finalize_merge(
     ctx: RequestContext, merge_target: Instance, *, close_silent: bool = False,
-    skip_close: bool = False, stop_silent: bool = False,
+    skip_close: bool = False, stop_silent: bool = False, note: str = "",
 ) -> MergeOutcome:
     """Merge a build branch + post-merge bookkeeping + close the thread.
 
@@ -732,6 +732,10 @@ async def _finalize_merge(
     `stop_silent`: post the STOPPED warning without a ping. Only for a caller
     that pings about the stop itself (the chain's exit mention), so the user
     is notified once rather than twice for one event.
+
+    `note`: one extra line under the merge summary, posted only on MERGED.
+    The chain passes the "merged on my own" line; every other caller leaves
+    it empty, since the owner made those calls.
     """
     if not merge_target.branch or not merge_target.original_branch:
         return MergeOutcome.FAILED
@@ -783,7 +787,8 @@ async def _finalize_merge(
     if ctx.on_merged:
         await ctx.on_merged()
     await ctx.messenger.send_text(
-        ctx.channel_id, f"✅ {merge_msg}", silent=True,
+        ctx.channel_id, f"✅ {merge_msg}" + (f"\n{note}" if note else ""),
+        silent=True,
     )
     if not skip_close:
         try:

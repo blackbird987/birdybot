@@ -310,8 +310,9 @@ class Scenario:
             return inst, (not sc.converged)
 
         async def finalize_merge(ctx, target, *, close_silent=False, skip_close=False,
-                                 stop_silent=False):
-            sc.finalized.append({"id": target.id, "close_silent": close_silent})
+                                 stop_silent=False, note=""):
+            sc.finalized.append({"id": target.id, "close_silent": close_silent,
+                                 "note": note})
             sc.stop_silent.append(stop_silent)
             sc._record("merge", target.id, None)
             if sc.merge_stopped:
@@ -636,6 +637,27 @@ for step in ("build", "review_code", "verify", "done", "release"):
     check_eq(f"{step} needs input: not counted as completed",
              s.final_eval().get("completed"), SHIP[:idx])
     s.close()
+
+print()
+print("the merge line says when the chain decided to merge")
+
+from bot.engine.chain_runner import DECIDED_MERGE_NOTE  # noqa: E402
+s = scenario({})
+run(_chain("ship")(s))
+check_eq("chain ship: the merge carries the decided note",
+         [f["note"] for f in s.finalized], [DECIDED_MERGE_NOTE])
+s.close()
+s = scenario({})
+run(workflows.on_autopilot(s.ctx, SOURCE_ID, SOURCE_MSG))
+check_eq("autopilot: the merge carries no note",
+         [f["note"] for f in s.finalized], [""])
+s.close()
+s = scenario({})
+run(workflows.on_conversational_chain(s.ctx, SOURCE_ID, "hold", SOURCE_MSG,
+                                      hold_reason="live db migration"))
+check("chain hold: the park message names the reason",
+      any("Held for you: live db migration." in t["text"] for t in s.messenger.texts))
+s.close()
 
 print()
 print("verify_release: phantom claims and parse failures")

@@ -276,6 +276,13 @@ def setup(bot: ClaudeBot) -> None:
             return
         await bot._run_slash(interaction, lambda ctx: commands.on_verbose(ctx, level))
 
+    @bot.tree.command(name="quiet", description="Quiet hours: sessions decide instead of asking", guild=guild_obj)
+    @app_commands.describe(window="HH:MM-HH:MM, off, or default; empty shows status")
+    async def cmd_quiet(interaction: discord.Interaction, window: str = ""):
+        if await _refused(interaction, owner_only=True):
+            return
+        await bot._run_slash(interaction, lambda ctx: commands.on_quiet(ctx, window))
+
     @bot.tree.command(name="effort", description="Reasoning effort level", guild=guild_obj)
     @app_commands.describe(level=EFFORT_USAGE)
     async def cmd_effort(interaction: discord.Interaction, level: str = ""):

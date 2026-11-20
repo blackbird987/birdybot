@@ -49,6 +49,7 @@ from bot.discord import memes
 from bot.discord import peer_turns
 from bot.discord import secret_door
 from bot.engine import commands
+from bot.engine import quiet as quiet_mod
 from bot.platform.base import RequestContext, delete_after
 from bot.services.twitter import enrich_with_tweets
 
@@ -580,6 +581,12 @@ class ClaudeBot(StartupMixin, ThreadContextMixin, UsageGateMixin, PendingImagesM
             )
             if not msg_access.allowed:
                 return
+            # Quiet hours stand down while the owner is around. The owner by
+            # author id only: a test webhook passes as owner but is not them.
+            # Never allowed to break the message: note_owner_seen swallows its
+            # own errors, and a store-less stand-in passes None.
+            if msg_access.is_owner:
+                quiet_mod.note_owner_seen(getattr(self, "_store", None))
         else:
             msg_access = AccessResult(allowed=True, is_owner=True)
 
@@ -1110,6 +1117,10 @@ class ClaudeBot(StartupMixin, ThreadContextMixin, UsageGateMixin, PendingImagesM
         a 3-second spinner ending in "This interaction failed", which looks
         identical to the bot being down and is just as hard to diagnose.
         """
+        # A tap or a slash command is the owner being awake (bot/engine/quiet.py).
+        # Before the type check, so slash commands count too.
+        if self._is_owner(interaction.user.id):
+            quiet_mod.note_owner_seen(getattr(self, "_store", None))
         if interaction.type != discord.InteractionType.component:
             return
         # A card in the machine link's thread is outside the workspace on purpose, and

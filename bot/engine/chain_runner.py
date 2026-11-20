@@ -64,6 +64,11 @@ from bot.engine.steps import (
 
 log = logging.getLogger(__name__)
 
+# The merge line of a /chain that chose to merge on its own. Only that path
+# passes it: the Done button, the veto auto-merge and fleet ship share
+# _finalize_merge and must not claim the decision was the bot's.
+DECIDED_MERGE_NOTE = "Merged on my own: review and verify passed."
+
 
 async def _post_deferred(ctx: RequestContext, items: list[str]) -> None:
     deferred_text = "\n".join(f"• {d}" for d in items[:10])
@@ -336,8 +341,14 @@ async def on_conversational_chain(
     source_id: str,
     preset: str,
     source_msg_id: str | None = None,
+    *,
+    hold_reason: str = "",
 ) -> Instance | None:
     """Launch a chain from a `/chain` directive the session agent emitted.
+
+    ``hold_reason`` is the stated reason a hold or verify chain stops before
+    the merge; the park message shows it. A ship chain records that it chose
+    to merge on its own, and the merge line says so.
 
     ``preset`` is one of ``_CHAIN_PRESETS``. The plan text was already stored
     on the session (set_chain_plan_override) by the directive handler, so the
@@ -356,6 +367,8 @@ async def on_conversational_chain(
         list(steps), "plan_check",
         silent_close=(preset == "ship"),
         chain_label=label,
+        hold_reason=hold_reason if preset != "ship" else "",
+        decided_merge=(preset == "ship"),
     )
 
 
@@ -1228,6 +1241,9 @@ async def _run_autopilot_chain(
                     merge_outcome = await _finalize_merge(
                         ctx, merge_target, close_silent=silent_close,
                         stop_silent=True,
+                        note=(DECIDED_MERGE_NOTE
+                              if ctx.store.get_chain_decided_merge(session_id)
+                              else ""),
                     )
                     if merge_outcome is MergeOutcome.STOPPED:
                         # The branch landed on a tree that must not ship:
@@ -1481,9 +1497,12 @@ async def _run_autopilot_chain(
         if "merge" not in steps and result and result.branch and result.original_branch:
             try:
                 iid = result.id
+                hold_reason = ctx.store.get_chain_hold_reason(session_id)
+                held_line = f"Held for you: {hold_reason}.\n" if hold_reason else ""
                 await ctx.messenger.send_text(
                     ctx.channel_id,
                     f"\U0001f6ec Chain complete on branch `{result.branch}`.\n"
+                    f"{held_line}"
                     f"Test the worktree, then merge or discard.",
                     buttons=[[
                         ButtonSpec("Merge", f"merge:{iid}"),
@@ -1559,6 +1578,8 @@ async def _launch_chain(
     *,
     silent_close: bool = False,
     chain_label: str = "Autopilot",
+    hold_reason: str = "",
+    decided_merge: bool = False,
 ) -> Instance | None:
     """Shared setup for chain entry points: look up source, slice steps, dispatch."""
     source = ctx.store.get_instance(source_id)
@@ -1579,6 +1600,8 @@ async def _launch_chain(
             source.session_id,
             label=chain_label,
             silent_close=silent_close,
+            hold_reason=hold_reason,
+            decided_merge=decided_merge,
         )
     return await _run_autopilot_chain(
         ctx, source_id, source_msg_id,
