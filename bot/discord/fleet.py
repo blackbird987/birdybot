@@ -566,13 +566,20 @@ async def _verify_one(
         and not inst.needs_input
     )
     if verified:
-        # Verify turn finished cleanly — close the thread. Silent: the
-        # verify report embed in-thread + the origin summary carry the signal.
-        try:
-            await bot.messenger.close_conversation(thread_id, skip_mention=True)
-        except Exception:
-            log.debug("fleet: close after verify failed for %s", thread_id, exc_info=True)
-        await _say(bot, origin, f"✅ Fleet verify done: <#{thread_id}> — thread closed.")
+        # Verify turn finished cleanly: close the thread, unless its end card
+        # still has open items. Silent: the verify report embed in-thread and
+        # the origin summary carry the signal.
+        from bot.engine import recap
+        closed = await recap.close_thread(
+            bot._store, bot.messenger, thread_id, skip_mention=True,
+        )
+        if closed:
+            await _say(bot, origin, f"✅ Fleet verify done: <#{thread_id}>, thread closed.")
+        else:
+            await _say(
+                bot, origin,
+                f"✅ Fleet verify done: <#{thread_id}>, left open for its open items.",
+            )
     else:
         await _say(
             bot, origin,

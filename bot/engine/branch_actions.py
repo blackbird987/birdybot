@@ -303,7 +303,8 @@ async def _finish_branch_action(
         await _strip_post_merge_buttons(ctx, inst, skip_msg_id=source_msg_id)
     # Close thread if this was a post-Done merge/discard (branch resolved)
     if inst.origin == InstanceOrigin.DONE and not inst.branch and not keep_open:
-        try:
-            await ctx.messenger.close_conversation(ctx.channel_id, skip_mention=True)
-        except Exception:
-            pass
+        # Through the end card's gate: a card with open items keeps it open.
+        from bot.engine import recap
+        await recap.close_thread(
+            ctx.store, ctx.messenger, ctx.channel_id, skip_mention=True,
+        )

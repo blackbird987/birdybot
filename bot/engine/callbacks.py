@@ -7,7 +7,7 @@ from pathlib import Path
 
 from bot import config
 from bot.claude.types import Instance
-from bot.engine import missed
+from bot.engine import missed, recap
 from bot.engine import (
     lifecycle,
     workflows,
@@ -125,14 +125,24 @@ async def _on_merge(ctx: RequestContext, inst: Instance, source_msg_id: str | No
             msg = await ctx.runner.merge_branch(inst)  # returns "Already merged (...)"
             await _finish_resolved_branch(ctx, inst, msg, source_msg_id)
             return
-        await show_branch_progress(ctx, source_msg_id, merge_progress_text(inst))
+        on_card = recap.card_record(ctx.store, ctx.channel_id, source_msg_id) is not None
+        if on_card:
+            # Tapped on the end card: the card stays, the progress and the
+            # outcome go in a message of their own.
+            source_msg_id = await recap.move_branch_action_off_card(
+                ctx, source_msg_id, merge_progress_text(inst))
+        else:
+            await show_branch_progress(ctx, source_msg_id, merge_progress_text(inst))
         # The "merged" tag lands inside merge_from_user, before the close.
         escaped, msg = await workflows.merge_from_user(ctx, inst, owner_approved=ctx.is_owner)
+        keep_open = workflows.merge_blocks_ship(msg)
         await _finish_branch_action(
             ctx, inst, escaped, source_msg_id,
-            keep_open=workflows.merge_blocks_ship(msg),
+            keep_open=keep_open or on_card,
             kept_buttons=merge_failed_button_specs(inst.id),
         )
+        if on_card and not inst.branch:
+            await recap.branch_resolved(ctx, keep_open=keep_open)
 
 
 async def _on_discard(ctx: RequestContext, inst: Instance, source_msg_id: str | None) -> None:
@@ -146,10 +156,17 @@ async def _on_discard(ctx: RequestContext, inst: Instance, source_msg_id: str | 
             outcome = await ctx.runner.discard_branch(inst)  # returns "Already discarded (...)"
             await _finish_resolved_branch(ctx, inst, outcome.message, source_msg_id)
             return
-        await show_branch_progress(ctx, source_msg_id, discard_progress_text(inst))
+        on_card = recap.card_record(ctx.store, ctx.channel_id, source_msg_id) is not None
+        if on_card:
+            source_msg_id = await recap.move_branch_action_off_card(
+                ctx, source_msg_id, discard_progress_text(inst))
+        else:
+            await show_branch_progress(ctx, source_msg_id, discard_progress_text(inst))
         outcome = await perform_discard(ctx, inst, "Discard button")
         escaped = ctx.messenger.escape(outcome.message)
-        await _finish_branch_action(ctx, inst, escaped, source_msg_id)
+        await _finish_branch_action(ctx, inst, escaped, source_msg_id, keep_open=on_card)
+        if on_card and not inst.branch:
+            await recap.branch_resolved(ctx)
 
 
 async def _on_expand(ctx: RequestContext, inst: Instance, source_msg_id: str | None) -> None:
@@ -331,6 +348,9 @@ async def handle_callback(
 
     elif action in _MODE_ACTIONS:
         await _on_mode(ctx, _MODE_ACTIONS[action], instance_id, source_msg_id)
+
+    elif action == recap.CLOSE_ACTION:
+        await recap.on_close_tap(ctx, instance_id, source_msg_id)
 
     elif action == "missed_kind":
         await missed.on_missed_kind(ctx, instance_id, source_msg_id)

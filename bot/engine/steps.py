@@ -671,29 +671,43 @@ async def on_done(
     if prompt_variant == "chain":
         return result
 
-    # Standalone Done: if a build branch is open, attempt the same merge +
-    # tag + close sequence the autopilot chain runs. On failure the
-    # Merge/Discard buttons remain (current behavior) so the user can
-    # resolve manually.
+    # A Done that asked a question is not finished: no merge, no card, and
+    # above all no close on a question nobody has answered yet.
+    if result.needs_input:
+        return result
+
+    # Standalone Done ends in the end card (bot/engine/recap.py). Its words
+    # are gathered now, while the worktree the session runs in still exists.
+    from bot.engine import recap
+    draft = await recap.prepare(ctx, result)
+
+    # A build branch gets the same merge + tag sequence the autopilot chain
+    # runs. On failure the Merge/Discard buttons remain so the user can
+    # resolve by hand.
     if result.branch and result.original_branch:
-        outcome = await _finalize_merge(ctx, result, close_silent=True)
+        report: list[str] = []
+        outcome = await _finalize_merge(
+            ctx, result, close_silent=True, skip_close=True, report=report,
+        )
         if outcome is MergeOutcome.FAILED:
+            await recap.post(ctx, draft, recap.EndState(kind="merge_failed"),
+                             close=False)
             # silent=False: this path has no follow-up _exit_chain mention, so
             # the banner post itself must ping or the user never learns the
             # merge failed (the t-4736-class invisible-rot bug).
             await record_merge_failure(
                 ctx, result, session_id=result.session_id,
-                lead="Done hit a merge conflict — needs your attention.\n\n",
+                lead="Done hit a merge conflict, needs your attention.\n\n",
                 silent=False,
             )
+        elif outcome is MergeOutcome.MERGED:
+            await recap.post(ctx, draft, recap.EndState(
+                kind="merged", merge_notes=report), close=True)
+        # STOPPED: _finalize_merge posted the warning and closes nothing.
         return result
 
-    # No branch to merge — close the thread directly.
-    try:
-        await ctx.messenger.close_conversation(ctx.channel_id, skip_mention=True)
-    except Exception:
-        log.debug("Failed to close conversation for channel %s", ctx.channel_id, exc_info=True)
-
+    # No branch to merge: the card, then the close (refused while open).
+    await recap.post(ctx, draft, recap.EndState(kind="local"), close=True)
     return result
 
 
@@ -714,7 +728,8 @@ class MergeOutcome(enum.Enum):
 
 async def _finalize_merge(
     ctx: RequestContext, merge_target: Instance, *, close_silent: bool = False,
-    skip_close: bool = False, stop_silent: bool = False, note: str = "",
+    skip_close: bool = False, stop_silent: bool = False,
+    report: list[str] | None = None,
 ) -> MergeOutcome:
     """Merge a build branch + post-merge bookkeeping + close the thread.
 
@@ -741,9 +756,12 @@ async def _finalize_merge(
     that pings about the stop itself (the chain's exit mention), so the user
     is notified once rather than twice for one event.
 
-    `note`: one extra line under the merge summary, posted only on MERGED.
-    The chain passes the "merged on my own" line; every other caller leaves
-    it empty, since the owner made those calls.
+    `report`: the end card's caller. On MERGED the merge message is appended
+    here instead of posted, because the card (bot/engine/recap.py) says it.
+    The STOPPED warnings still post: they are what stops the chain.
+
+    The close goes through ``recap.close_thread``, which leaves a thread
+    open while its end card has anything open.
     """
     if not merge_target.branch or not merge_target.original_branch:
         return MergeOutcome.FAILED
@@ -794,17 +812,18 @@ async def _finalize_merge(
     # may ship. Apply "merged" tag before close (tag must land before archive)
     if ctx.on_merged:
         await ctx.on_merged()
-    await ctx.messenger.send_text(
-        ctx.channel_id, f"✅ {merge_msg}" + (f"\n{note}" if note else ""),
-        silent=True,
-    )
+    if report is not None:
+        report.append(merge_msg)
+    else:
+        await ctx.messenger.send_text(
+            ctx.channel_id, f"✅ {merge_msg}",
+            silent=True,
+        )
     if not skip_close:
-        try:
-            await ctx.messenger.close_conversation(
-                ctx.channel_id, skip_mention=close_silent,
-            )
-        except Exception:
-            log.debug("Failed to close conversation after merge", exc_info=True)
+        from bot.engine import recap
+        await recap.close_thread(
+            ctx.store, ctx.messenger, ctx.channel_id, skip_mention=close_silent,
+        )
     return MergeOutcome.MERGED
 
 

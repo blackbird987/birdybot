@@ -45,6 +45,8 @@ CHAIN_MAX_AGE = 7 * DAY
 UPDATE_MAX_AGE = 7 * DAY
 SECRET_MAX_AGE = 3 * DAY
 YOUR_TURN_MAX_AGE = 48 * 3600.0
+# An end card's open items: work the session named but did not do.
+OPEN_ITEMS_MAX_AGE = 7 * DAY
 
 # The Ark shows this many item lines, then "and N more" by kind.
 MAX_ARK_LINES = 15
@@ -85,6 +87,7 @@ KINDS: tuple[Kind, ...] = (
     Kind("failed_run", "❌", "Failed", "failed"),
     Kind("manual_recovery", "\U0001f6e0️", "Needs manual recovery", "recovery"),
     Kind("ready_to_merge", "✅", "Ready to merge", "ready"),
+    Kind("open_items", "\U0001f4cc", "Open items", "open"),
     Kind("decided_away", "\U0001f319", "Decided while you were away", "decided"),
     Kind("your_turn", "\U0001f4ac", "Your turn", "your turn"),
 )
@@ -596,6 +599,34 @@ def _ready_to_merge(c: _Ctx) -> Iterable[WaitingItem]:
                      detail=f"`{inst.branch}` is built, not merged", since=at)
 
 
+def _open_items(c: _Ctx) -> Iterable[WaitingItem]:
+    """An end card that named open items, until anyone writes in its thread.
+
+    A tap on one of its Next buttons is a message too, so picking an item up
+    closes this the same way typing does (docs/design/session-recap.md).
+    """
+    list_all = getattr(c.store, "list_recaps", None)
+    if list_all is None:
+        return
+    for cid, rec in (list_all() or {}).items():
+        if not isinstance(rec, dict):
+            continue
+        items = [str(x) for x in (rec.get("open_items") or []) if str(x).strip()]
+        at = _num(rec.get("posted_at"))
+        if not items or at is None or c.now - at > OPEN_ITEMS_MAX_AGE:
+            continue
+        ref = c.idx.threads.get(str(cid))
+        if ref is not None and (ref.last_human_at or 0) >= at:
+            continue
+        more = f" (+{len(items) - 1} more)" if len(items) > 1 else ""
+        yield c.item("open_items", f"open:{cid}:{int(at)}",
+                     repo=rec.get("repo") or (ref.repo if ref else None),
+                     thread_id=str(cid), title=_title(ref) if ref else
+                     _clip(str(rec.get("headline") or "session"), TITLE_CHARS),
+                     detail=_clip(items[0], DETAIL_CHARS - len(more)) + more,
+                     since=at)
+
+
 def _your_turn(c: _Ctx) -> Iterable[WaitingItem]:
     for ref in c.idx.threads.values():
         if ref.parent_thread_id or ref.last_turn_at is None:
@@ -621,6 +652,7 @@ _READERS: tuple[tuple[str, Callable[[_Ctx], Iterable[WaitingItem]]], ...] = (
     ("merge_failed", _failed_merges),
     ("merge_held", _held_merges),
     ("ready_to_merge", _ready_to_merge),
+    ("open_items", _open_items),
     ("your_turn", _your_turn),
 )
 

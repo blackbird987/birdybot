@@ -310,7 +310,8 @@ def test_finalize_reports_stopped_on_blocked_tree() -> None:
     # own text, or a later edit can reorder it while the behaviour checks above
     # still pass on the fakes.
     src = inspect.getsource(steps._finalize_merge)
-    close = src.find("close_conversation")
+    # Every bot close goes through the end card's gate (recap.close_thread).
+    close = src.find("await recap.close_thread(")
     for name in ("merge_msg_repo_unusable", "merge_msg_release_orphaned"):
         at = src.find(name)
         check(f"{name} is checked before the thread is closed",

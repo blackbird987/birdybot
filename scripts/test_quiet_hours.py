@@ -182,7 +182,7 @@ class Msgr:
         return None
 
 
-def merge(note: str) -> list[str]:
+def merge() -> list[str]:
     m = Msgr()
     ctx = SimpleNamespace(messenger=m, channel_id="c", on_merged=None)
     target = inst(branch="claude-bot/t-1", original_branch="master")
@@ -190,20 +190,30 @@ def merge(note: str) -> list[str]:
     async def fake_merge(_ctx, _t):  # noqa: ANN001, ANN202
         return "Merged `claude-bot/t-1` into `master`."
     with mock.patch.object(steps, "merge_and_record", fake_merge):
-        asyncio.run(steps._finalize_merge(ctx, target, note=note))
+        asyncio.run(steps._finalize_merge(ctx, target, skip_close=True))
     return m.sent
 
 
-from bot.engine import chain_runner  # noqa: E402
+from bot.engine import chain_runner, recap  # noqa: E402
 
-sent = merge(chain_runner.DECIDED_MERGE_NOTE)
-check(sent and sent[0].endswith("\nMerged on my own: review and verify passed."), "a chain merge says so")
-check(merge("") == ["✅ Merged `claude-bot/t-1` into `master`."], "a merge with no note is unchanged")
-src = (ROOT / "bot").rglob("*.py")
-passers = [p.name for p in src if re.search(r"_finalize_merge\([^)]*note=", p.read_text(), re.S)]
-check(passers == ["chain_runner.py"], f"only the chain merge passes a note (got {passers})")
+# The chain's merge line now rides on the end card (bot/engine/recap.py), so
+# the "merged on my own" note goes there and nowhere else.
+check(merge() == ["✅ Merged `claude-bot/t-1` into `master`."], "a plain merge posts the merge line")
+card = recap.build_card(
+    recap.Draft(final=inst(), facts=recap.Facts(repo="r", commit="abc1234")),
+    recap.EndState(kind="merged", decided_note=chain_runner.DECIDED_MERGE_NOTE))
+notes = next((v for n, v in card.spec.fields if n == "Notes"), "")
+check(chain_runner.DECIDED_MERGE_NOTE in notes, "a chain merge says so on its end card")
+users = [p.name for p in (ROOT / "bot").rglob("*.py") if "DECIDED_MERGE_NOTE" in p.read_text()]
+check(users == ["chain_runner.py"], f"only the chain merge carries the note (got {users})")
 cr = (ROOT / "bot/engine/chain_runner.py").read_text()
-check("Held for you: {hold_reason}." in cr, "the hold park message names the reason")
+check("merged and ctx.store.get_chain_decided_merge(session_id)" in cr,
+      "and only when the chain decided the merge itself")
+held = recap.build_card(
+    recap.Draft(final=inst(), facts=recap.Facts(repo="r", hold_reason="migration")),
+    recap.EndState(kind="held", branch_instance_id="t-1"))
+check("Held: migration" in held.spec.description, "the held end card names the reason")
+check("get_chain_hold_reason(session_id)" in cr, "and the chain reads it from the chain state")
 
 # --- Prompt placement ------------------------------------------------------------------
 print("Prompt placement")

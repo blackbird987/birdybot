@@ -426,7 +426,17 @@ class StateStore(ReposMixin, AccountsMixin, SchedulesMixin, ChainsMixin, PeerMix
         return self._recaps.get(str(channel_id))
 
     def put_recap(self, channel_id: str, record: dict) -> None:
-        """A newer card supersedes the older one: one record per channel."""
+        """A newer card supersedes the older one: one record per channel.
+
+        Records older than 30 days are dropped on the way, so threads that
+        never get another card do not keep one forever.
+        """
+        import time as _time
+        cutoff = _time.time() - 30 * 86400
+        for cid in [c for c, r in self._recaps.items()
+                    if not isinstance(r, dict)
+                    or float(r.get("posted_at") or 0) < cutoff]:
+            self._recaps.pop(cid, None)
         self._recaps[str(channel_id)] = record
         self.save()
 
