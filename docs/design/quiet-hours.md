@@ -21,9 +21,10 @@ for a call the bot can make. Harness: `scripts/test_quiet_hours.py`. Finding:
   (`set_chain_kwargs(hold_reason=, decided_merge=)`), so a paused chain the
   owner continues, or one boot recovery resumes, still reports them. The
   `get_chain_kwargs` tuple keeps its `(label, silent_close)` shape.
-- The chain merge passes `note=DECIDED_MERGE_NOTE` to `_finalize_merge`, the
-  only caller that does: Done, the veto auto-merge and fleet ship were the
-  owner's call. The hold park message adds "Held for you: <reason>."
+- The chain's end card carries `DECIDED_MERGE_NOTE` in its Notes when the
+  chain merged on its own (`get_chain_decided_merge`), and only the chain
+  does: Done, the veto auto-merge and fleet ship were the owner's call. A held
+  chain's end card says "Held: <reason>." (`docs/design/session-recap.md`).
 
 ## Quiet hours
 

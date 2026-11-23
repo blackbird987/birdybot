@@ -363,7 +363,7 @@ def test_k_gates_run_before_the_irreversible_step() -> None:
            True, "and the containment check includes the orphaned release")
     merge_src = inspect.getsource(workflows._finalize_merge)
     check = merge_src.find("merge_msg_release_orphaned")
-    close = merge_src.find("close_conversation")
+    close = merge_src.find("await recap.close_thread(")
     _check("merge_and_record" in merge_src, True,
            "the chain merges through the shared bookkeeping")
     _check(close != -1 and check != -1 and check < close, True,
@@ -372,7 +372,10 @@ def test_k_gates_run_before_the_irreversible_step() -> None:
     finish_src = inspect.getsource(branch_actions._finish_branch_action)
     _check("not keep_open" in finish_src, True,
            "the Merge button's post-Done close can be held open")
-    _check("keep_open=workflows.merge_blocks_ship(msg)" in inspect.getsource(callbacks),
+    on_merge = inspect.getsource(callbacks._on_merge)
+    _check("keep_open = workflows.merge_blocks_ship(msg)" in on_merge
+           and "keep_open=keep_open" in on_merge
+           and "branch_resolved(ctx, keep_open=keep_open)" in on_merge,
            True, "and the Merge button holds it open on a tree that must not ship")
 
     # Discard has two orderings to keep, in opposite directions: the scan has

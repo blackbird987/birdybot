@@ -163,8 +163,17 @@ def chain_active(store, session_id: str | None) -> bool:
         return False
 
 
-def open_offer(ctx, inst, labels: list[str], msg_id: str) -> None:
-    """Record the offer the card ``msg_id`` now carries. Fails open."""
+def open_offer(
+    ctx, inst, labels: list[str], msg_id: str,
+    messages: list[str] | None = None,
+) -> None:
+    """Record the offer the card ``msg_id`` now carries. Fails open.
+
+    ``messages``, one per label, is what a tap sends instead of the label:
+    the end card's Next buttons carry a short label and a full instruction
+    (docs/design/session-recap.md). A list that does not line up with the
+    labels is dropped, so a tap falls back to the label.
+    """
     put = getattr(ctx.store, "put_choice_offer", None)
     if put is None:
         return
@@ -175,6 +184,8 @@ def open_offer(ctx, inst, labels: list[str], msg_id: str) -> None:
         "offered_at": time.time(),
         "repo": ctx.repo_name or getattr(inst, "repo_name", None),
     }
+    if messages and len(messages) == len(labels):
+        offer["messages"] = [str(m) for m in messages]
     try:
         put(ctx.channel_id, offer)
     except Exception:
@@ -284,6 +295,17 @@ def open_offers(store, now: float | None = None) -> dict[str, dict]:
         return {}
     return {str(cid): dict(o) for cid, o in offers.items()
             if isinstance(o, dict) and offer_live(o, now)}
+
+
+def tap_text(offer: dict, idx: int, label: str) -> str:
+    """What a tap sends into the thread: the offer's message for that button
+    when it carries one, otherwise the label as the tapper's pick."""
+    msgs = offer.get("messages") if isinstance(offer, dict) else None
+    if isinstance(msgs, list) and 0 <= idx < len(msgs):
+        msg = msgs[idx]
+        if isinstance(msg, str) and msg.strip():
+            return msg
+    return f"User picked: {label}"
 
 
 def claim_for_tap(

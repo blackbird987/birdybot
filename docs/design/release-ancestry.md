@@ -22,7 +22,7 @@ a point where the revert is still undoable:
   failure would hand it to the cleanup and retry path it does not belong in.
   Same pattern as `REPO_UNUSABLE_MARKER` next door. Under autopilot,
   `steps._finalize_merge` stops on the marker **before**
-  `apply_post_merge_deploy` and `close_conversation`, so the chain never ships
+  `apply_post_merge_deploy` and the close (`recap.close_thread`), so the chain never ships
   a tree that reverts a release and never closes the thread on one. It
   returns `MergeOutcome.STOPPED`, not MERGED and not FAILED: every caller
   (chain, standalone Done, scheduled auto-merge, fleet ship) must neither

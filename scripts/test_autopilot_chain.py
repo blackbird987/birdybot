@@ -116,14 +116,24 @@ class FakeMessenger:
         return "m-sent"
 
     async def send_result(self, channel_id, text, metadata=None, silent=False, **kw):
-        self.results.append({"text": text, "metadata": metadata, "silent": silent})
+        self.results.append({"text": text, "metadata": metadata, "silent": silent,
+                             "buttons": kw.get("buttons"),
+                             "mention": kw.get("mention_user_id")})
         return "m-result"
+
+    def cards(self) -> list[dict]:
+        """End cards. This fake has no send_card, so they arrive as text."""
+        return [r for r in self.results if r.get("buttons") is not None
+                and "missed:" in str([b.callback_data for row in r["buttons"] for b in row])]
 
     async def is_conversation_closed(self, channel_id) -> bool:
         return self.closed
 
     def format_mention(self, user_id) -> str:
         return f"<@{user_id}>"
+
+    def markdown_to_markup(self, md: str) -> str:
+        return md
 
     async def close_conversation(self, *a, **kw) -> None:
         return None
@@ -141,6 +151,11 @@ class FakeRunner:
         self.rescued: list[str] = []
         self.discarded: list[str] = []
         self.is_draining = False
+
+    def check_spawn_allowed(self) -> str | None:
+        # The end card's recap turn is a real spawn; the harness skips it the
+        # way a reboot drain does, so the card falls back to the bot's facts.
+        return "harness: no recap turn"
 
     def begin_task(self, task_id: str) -> None:
         self.began.append(task_id)
@@ -314,9 +329,10 @@ class Scenario:
             return inst, (not sc.converged)
 
         async def finalize_merge(ctx, target, *, close_silent=False, skip_close=False,
-                                 stop_silent=False, note=""):
+                                 stop_silent=False, report=None):
             sc.finalized.append({"id": target.id, "close_silent": close_silent,
-                                 "note": note})
+                                 "skip_close": skip_close,
+                                 "report": report is not None})
             sc.stop_silent.append(stop_silent)
             sc._record("merge", target.id, None)
             if sc.merge_stopped:
@@ -434,9 +450,12 @@ def _entry(label: str, launch, want_steps: list[str], *, want_label: str,
     check_eq(f"{label}: ordered steps", sc.order, want_steps)
     check_eq(f"{label}: persisted kwargs seen by every step",
              {c["kwargs"] for c in sc.calls}, {(want_label, want_silent)})
-    check_eq(f"{label}: finalized merge",
-             [f["close_silent"] for f in sc.finalized],
-             [want_silent] if merges else [])
+    check_eq(f"{label}: finalized merge", len(sc.finalized), 1 if merges else 0)
+    if merges:
+        # The end card owns the close and the ping: a silent-close preset
+        # posts it quietly, the others ping with it.
+        check_eq(f"{label}: end card ping follows the preset",
+                 [c["silent"] for c in sc.messenger.cards()], [want_silent])
     ev = sc.final_eval()
     check_eq(f"{label}: eval outcome", ev.get("outcome"), "merged" if merges else "completed")
     check_eq(f"{label}: eval completed == steps", ev.get("completed"), want_steps)
@@ -537,14 +556,23 @@ print()
 print("hold and verify hand off to Merge / Discard / Diff, ship does not")
 
 for label, sc in (("hold", hold), ("verify", ver)):
-    handoff = [t for t in sc.messenger.texts if "Chain complete on branch" in t["text"]]
-    check_eq(f"{label}: one handoff message", len(handoff), 1)
-    btns = [b.callback_data.split(":")[0] for b in handoff[0]["buttons"][0]]
-    check_eq(f"{label}: handoff buttons", btns, ["merge", "discard", "diff"])
-    check_eq(f"{label}: handoff pings (not silent)", handoff[0]["silent"], False)
+    cards = sc.messenger.cards()
+    check_eq(f"{label}: one end card", len(cards), 1)
+    btns = [b.callback_data.split(":")[0] for b in cards[0]["buttons"][0]] if cards else []
+    check_eq(f"{label}: the card carries the branch row", btns, ["merge", "discard", "diff"])
+    check(f"{label}: the card says it waits for the merge",
+          bool(cards) and "waiting for your merge" in cards[0]["text"])
+    check_eq(f"{label}: the card pings (not silent)",
+             (cards[0]["silent"], cards[0]["mention"]) if cards else None, (False, "u1"))
     check_eq(f"{label}: never reaches _finalize_merge", sc.finalized, [])
-check("ship: no handoff message (it merged)",
-      not [t for t in ship.messenger.texts if "Chain complete on branch" in t["text"]])
+    check(f"{label}: no old handoff message",
+          not [t for t in sc.messenger.texts if "Chain complete on branch" in t["text"]])
+ship_cards = ship.messenger.cards()
+check("ship: one end card, no branch row (it merged)",
+      len(ship_cards) == 1 and "merge:" not in str(
+          [b.callback_data for row in ship_cards[0]["buttons"] for b in row]))
+check_eq("ship: the merge reports to the card and leaves the close to it",
+         [(f["skip_close"], f["report"]) for f in ship.finalized], [(True, True)])
 check_eq("ship: finalized the instance the release step produced",
          ship.finalized[0]["id"], ship.produced["release"])
 for sc in (ship, hold, ver, unk):
@@ -648,19 +676,21 @@ print("the merge line says when the chain decided to merge")
 from bot.engine.chain_runner import DECIDED_MERGE_NOTE  # noqa: E402
 s = scenario({})
 run(_chain("ship")(s))
-check_eq("chain ship: the merge carries the decided note",
-         [f["note"] for f in s.finalized], [DECIDED_MERGE_NOTE])
+check("chain ship: the end card carries the decided note",
+      any(DECIDED_MERGE_NOTE in c["text"] for c in s.messenger.cards()))
 s.close()
 s = scenario({})
 run(workflows.on_autopilot(s.ctx, SOURCE_ID, SOURCE_MSG))
-check_eq("autopilot: the merge carries no note",
-         [f["note"] for f in s.finalized], [""])
+check("autopilot: the end card carries no note",
+      s.messenger.cards() and not any(DECIDED_MERGE_NOTE in c["text"] for c in s.messenger.cards()))
+check("autopilot: its end card pings (the completion ping)",
+      [c["mention"] for c in s.messenger.cards()] == ["u1"])
 s.close()
 s = scenario({})
 run(workflows.on_conversational_chain(s.ctx, SOURCE_ID, "hold", SOURCE_MSG,
                                       hold_reason="live db migration"))
-check("chain hold: the park message names the reason",
-      any("Held for you: live db migration." in t["text"] for t in s.messenger.texts))
+check("chain hold: the end card names the reason",
+      any("Held: live db migration" in c["text"] for c in s.messenger.cards()))
 s.close()
 
 print()
@@ -741,6 +771,9 @@ check_eq("merge failed: merge counts as completed",
 banner = [t for t in s.messenger.texts if t["buttons"] and not t["text"].startswith(MENTION)
           and "Chain complete" not in t["text"]]
 check_eq("merge failed: one banner with buttons", len(banner), 1)
+failed_cards = s.messenger.cards()
+check("merge failed: the end card still lands and says so",
+      len(failed_cards) == 1 and "The merge did not land" in failed_cards[0]["text"])
 check("merge failed: banner is the generic conflict copy",
       banner[0]["text"] == workflows.merge_failed_banner(None))
 check_eq("merge failed: pending merge recorded for the target",
@@ -815,22 +848,24 @@ check_eq("deferred revisions: store entry reaped at the end",
          s.store.get_chain_deferred(SESSION), [])
 s.close()
 
-NOT_DONE_HEAD = "Verified, but not everything asked for was delivered:"
+NOT_DONE_HEAD = "Not delivered:"
 
 s = scenario(verify_not_done="the sell leg")
 run(_chain("ship")(s))
 check_eq("not done: the chain still runs in full and merges",
          (s.order, s.final_eval().get("outcome"), len(s.finalized)), (SHIP, "merged", 1))
-not_done = [t for t in s.messenger.texts if NOT_DONE_HEAD in t["text"]]
-check("not done: one silent message names the missing part",
-      len(not_done) == 1 and "\u2022 the sell leg" in not_done[0]["text"]
-      and not_done[0]["silent"], repr(not_done))
+not_done = [c for c in s.messenger.cards() if NOT_DONE_HEAD in c["text"]]
+check("not done: the end card names the missing part under For you, and pings",
+      len(not_done) == 1 and "\u2022 Not delivered: the sell leg" in not_done[0]["text"]
+      and not not_done[0]["silent"], repr(not_done))
+check("not done: and the thread stays open",
+      s.store.get_recap("chan-1") and s.store.get_recap("chan-1")["open_items"])
 s.close()
 
 s = scenario()
 run(_chain("ship")(s))
-check("not done: a plain pass posts no such message",
-      not [t for t in s.messenger.texts if NOT_DONE_HEAD in t["text"]])
+check("not done: a plain pass posts no such line",
+      not [c for c in s.messenger.cards() if NOT_DONE_HEAD in c["text"]])
 s.close()
 
 s = scenario({"review_loop": "failed"})
@@ -984,8 +1019,8 @@ res = run(workflows.resume_autopilot_chain(s.ctx, SOURCE_ID, SOURCE_MSG, SESSION
 check_eq("resume skips the answered step and runs the rest",
          s.order, ["done", "verify_release", "release", "merge"])
 check_eq("resume restores the original label and silent close",
-         (s.calls[0]["kwargs"], s.finalized[-1]["close_silent"]),
-         (("Chain (ship)", True), True))
+         (s.calls[0]["kwargs"], [c["silent"] for c in s.messenger.cards()]),
+         (("Chain (ship)", True), [True]))
 check_eq("resume finishes and clears state", (s.queue, s.final_eval().get("outcome")),
          (None, "merged"))
 s.close()
@@ -997,6 +1032,20 @@ s.behaviour = {}
 s.calls.clear()
 run(workflows.resume_autopilot_chain(s.ctx, SOURCE_ID, SOURCE_MSG, SESSION))
 check_eq("a single remaining step is re-run, not skipped", s.order, ["release"])
+s.close()
+
+# A restart between the release and the merge: the resumed chain starts at
+# its merge with no result of its own, and still ends on a card for the
+# instance it merged.
+s = scenario()
+s.store.set_autopilot_chain(SESSION, ["release", "merge"])
+s.store.set_chain_kwargs(SESSION, label="Chain (ship)", silent_close=True)
+run(workflows.resume_autopilot_chain(s.ctx, SOURCE_ID, SOURCE_MSG, SESSION))
+check_eq("resumed at the merge: only the merge runs", s.order, ["merge"])
+_cards = s.messenger.cards()
+check("resumed at the merge: the merged instance gets its end card",
+      len(_cards) == 1 and "Merged into" in _cards[0]["text"]
+      and len(s.finalized) == 1, repr(_cards))
 s.close()
 
 s = scenario()

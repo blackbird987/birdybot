@@ -311,6 +311,7 @@ _NO_DIRECTIVE_ORIGINS: frozenset[InstanceOrigin] = frozenset({
     InstanceOrigin.PLAN_CHECK_APPLY,
     InstanceOrigin.PEER_ANSWER,
     InstanceOrigin.PEER_DELIVERY,
+    InstanceOrigin.RECAP,
 })
 
 # A judge or plan check run is a check on a thread's work and not a turn in it
@@ -324,7 +325,44 @@ _NOT_A_TURN_ORIGINS = frozenset({
 # Runs that leave the thread's open /choices offer alone: the not-a-turn runs,
 # and a TL;DR, which leaves the card it was tapped on intact
 # (docs/design/tldr.md), choice row included.
-_KEEPS_CHOICE_OFFER_ORIGINS = _NOT_A_TURN_ORIGINS | {InstanceOrigin.TLDR}
+_KEEPS_CHOICE_OFFER_ORIGINS = _NOT_A_TURN_ORIGINS | {
+    InstanceOrigin.TLDR, InstanceOrigin.RECAP,
+}
+
+_FINALIZE_ORIGINS = frozenset({
+    InstanceOrigin.COMMIT, InstanceOrigin.DONE, InstanceOrigin.RELEASE,
+})
+
+
+def finalize_status(text: str | None) -> str | None:
+    """The finished status line of a commit, Done or release turn.
+
+    Its result card is gone when the end card follows it
+    (``_end_card_follows``), so the line under the step carries the one
+    fact worth keeping there: the version it cut, or the commit it made.
+    """
+    info = parse_finalize_output(text or "")
+    if not info:
+        return None
+    if info.version:
+        return f"done: {info.version}"
+    if info.commit_hash:
+        return f"done: committed {info.commit_hash[:7]}"
+    return None
+
+
+def _end_card_follows(inst: Instance) -> bool:
+    """Whether this finished turn's result card is replaced by the end card.
+
+    Only when the caller running it posts one (``recap.card_follows``):
+    ``on_done`` for a standalone Done, the chain for its Done and release.
+    A /commit, a lone /release, or a Done re-run by a cooldown retry or
+    /retry has no such caller, so it keeps its card and its Merge/Discard.
+    A question is never replaced: nothing is finished yet.
+    """
+    from bot.engine import recap
+    return recap.card_replaced(inst) and recap.card_will_follow()
+
 
 # These runs are read by their caller. They do not retry on a timer (a usage limit
 # means it could not check), post no result card, and are not a child landing. The
@@ -333,6 +371,7 @@ _KEEPS_CHOICE_OFFER_ORIGINS = _NOT_A_TURN_ORIGINS | {InstanceOrigin.TLDR}
 # for the same reason.
 _CALLER_READS_ORIGINS = _NOT_A_TURN_ORIGINS | {
     InstanceOrigin.PLAN_CHECK_APPLY, InstanceOrigin.PEER_DELIVERY,
+    InstanceOrigin.RECAP,
 }
 
 
@@ -496,6 +535,8 @@ async def run_instance(
                 icon, status = "❌", "failed"
             else:
                 icon, status = "✅", "done"
+                if inst.origin in _FINALIZE_ORIGINS:
+                    status = finalize_status(result.result_text) or status
             origin_label = _origin_label(inst.origin)
             prefix = f"{icon} " if icon else ""
             try:
@@ -923,6 +964,7 @@ _SKIP_HISTORY_ORIGINS = frozenset({
     InstanceOrigin.PLAN_CHECK_APPLY,
     InstanceOrigin.PEER_ANSWER,
     InstanceOrigin.PEER_DELIVERY,
+    InstanceOrigin.RECAP,
 })
 
 
@@ -1493,6 +1535,13 @@ async def send_result(
             # Strip the raw summary block from result_text
             result_text = strip_summary_block(result_text)
             meta["_finalize"] = finalize_info
+            if _end_card_follows(inst):
+                # The end card (bot/engine/recap.py) carries the changelog,
+                # version and run facts this card would repeat.
+                log.info("send_result: %s card left to the end card", inst.id)
+                inst.card_left_out = True
+                ctx.store.update_instance(inst)
+                return None
 
     try:
         if inst.status == InstanceStatus.FAILED or not result_text or finalize_info:

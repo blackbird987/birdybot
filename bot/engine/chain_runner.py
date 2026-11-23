@@ -45,6 +45,7 @@ from bot.engine.step_policy import (
     _BUILD_AND_SHIP_STEPS,
     _CHAIN_PRESETS,
 )
+from bot.engine import recap
 from bot.engine.step_spawn import (
     SpawnConfig,
     _last_msg_id,
@@ -621,10 +622,13 @@ async def on_amend_done(
     vr.needs_input = False
     ctx.store.update_instance(vr)
 
-    done_result = await on_done(
-        ctx, verify_release_instance_id, source_msg_id,
-        prompt_variant="chain", extra_context=rationale or None,
-    )
+    # The chain's own Done, re-run: like the first one it leaves its card to
+    # the chain's end card, which the resume below posts.
+    with recap.card_follows():
+        done_result = await on_done(
+            ctx, verify_release_instance_id, source_msg_id,
+            prompt_variant="chain", extra_context=rationale or None,
+        )
     if (not done_result
             or done_result.status != InstanceStatus.COMPLETED
             or done_result.needs_input):
@@ -734,6 +738,11 @@ async def _run_autopilot_chain(
     # Track chain progress for eval
     chain_instances: list[Instance] = []
     completed_steps: list[str] = []
+    # The end card's words, gathered before a merge deletes the worktree,
+    # and what the merge said (bot/engine/recap.py).
+    end_draft: recap.Draft | None = None
+    merge_report: list[str] = []
+    merged = False
 
     # Keep a chain-level task active so reboot waits for the entire chain,
     # not just individual steps (which have gaps between them).
@@ -744,6 +753,10 @@ async def _run_autopilot_chain(
     # the step, not the conversation — see "A thread must always know its
     # session" in docs/design/thread-session-binding.md).
     ctx.runner.begin_task(chain_task_id)
+    # The chain posts the end card itself, so its Done and release turns leave
+    # theirs out (lifecycle._end_card_follows). A retry of one of them later
+    # runs outside this and keeps its own card.
+    card_token = recap.begin_card_follows()
     try:
         for step in steps:
             # Update remaining steps in session state for resume
@@ -1232,25 +1245,31 @@ async def _run_autopilot_chain(
                     merge_target = _find_mergeable_instance(ctx.store, session_id)
 
                 if merge_target and merge_target.branch and merge_target.original_branch:
-                    # close_silent is driven by the chain entry point:
-                    # Autopilot keeps the loud chain-completion ping; Build &
-                    # Ship opts into a silent close (the in-thread "✅
-                    # {merge_msg}" summary + tag flip carry the signal).
+                    # The end card's facts are read before the merge, while
+                    # the branch still exists; the merge line goes into
+                    # merge_report for the card instead of its own message,
+                    # and the card decides the close and the ping
+                    # (bot/engine/recap.py), so no close_silent here.
                     # stop_silent: on a STOPPED merge the exit mention below
                     # is the ping, so the warning itself posts quietly.
-                    merge_outcome = await _finalize_merge(
-                        ctx, merge_target, close_silent=silent_close,
-                        stop_silent=True,
-                        note=(DECIDED_MERGE_NOTE
-                              if ctx.store.get_chain_decided_merge(session_id)
-                              else ""),
+                    end_draft = await recap.prepare(
+                        ctx, merge_target, chain_instances=chain_instances,
+                        leftovers=len(chain_deferred or []),
                     )
+                    merge_outcome = await _finalize_merge(
+                        ctx, merge_target,
+                        skip_close=True, stop_silent=True, report=merge_report,
+                    )
+                    merged = merge_outcome is MergeOutcome.MERGED
                     if merge_outcome is MergeOutcome.STOPPED:
                         # The branch landed on a tree that must not ship:
                         # _finalize_merge already skipped deploy and close and
                         # posted the warning. Not a conflict, so no Resolve /
                         # Retry banner, and not a finished chain either, so it
-                        # must not be recorded as merged.
+                        # must not be recorded as merged. The card still lands
+                        # under the warning, quietly: the exit mention pings.
+                        await recap.post(ctx, end_draft, recap.EndState(
+                            kind="merge_stopped"), close=False)
                         completed_steps.append(step)
                         await _exit_chain_needs_input(
                             ctx, source_id, session_id, steps, completed_steps,
@@ -1262,6 +1281,10 @@ async def _run_autopilot_chain(
                         )
                         return result
                     if merge_outcome is MergeOutcome.FAILED:
+                        # The summary still lands, above the conflict banner
+                        # it points at, and the thread stays open.
+                        await recap.post(ctx, end_draft, recap.EndState(
+                            kind="merge_failed"), close=False)
                         await record_merge_failure(
                             ctx, merge_target, session_id=merge_target.session_id,
                         )
@@ -1468,75 +1491,41 @@ async def _run_autopilot_chain(
         _eval_chain_safe(ctx.store, source_id, steps, completed_steps,
                          chain_instances, outcome)
 
-        # Terminal-state handoff: if any chain instance is flagged for manual
-        # verification, surface the WHY lines so the user knows what to eyeball.
-        manual_items = [
-            i for i in chain_instances if i.needs_manual_verification
-        ]
-        if manual_items:
-            why_lines = "\n".join(
-                f"• {i.manual_verify_reason}"
-                for i in manual_items if i.manual_verify_reason
-            )
+        # The end card: one message for the whole chain, in place of the
+        # manual-check note, the not-delivered note, the merge line and the
+        # "chain complete on branch" handoff (bot/engine/recap.py). Wrapped so
+        # a Discord failure never leaves the chain state stuck in the store.
+        # A chain resumed at its merge step (a restart mid-chain) has no
+        # result of its own: the instance it merged is the one the card is for.
+        final = result if result is not None else (
+            end_draft.final if end_draft is not None else None)
+        if final is not None:
             try:
-                await ctx.messenger.send_text(
-                    ctx.channel_id,
-                    f"ℹ️ Couldn't be verified automatically — worth "
-                    f"eyeballing by hand:\n{why_lines}",
-                    silent=True,
-                )
+                held = bool("merge" not in steps and final.branch
+                            and final.original_branch)
+                hold_reason = (ctx.store.get_chain_hold_reason(session_id)
+                               if held else None)
+                if end_draft is None:
+                    end_draft = await recap.prepare(
+                        ctx, final, chain_instances=chain_instances,
+                        leftovers=len(chain_deferred or []),
+                        hold_reason=hold_reason,
+                    )
+                kind = "merged" if merged else ("held" if held else "local")
+                decided = (DECIDED_MERGE_NOTE
+                           if merged and ctx.store.get_chain_decided_merge(session_id)
+                           else "")
+                await recap.post(ctx, end_draft, recap.EndState(
+                    kind=kind, merge_notes=merge_report, decided_note=decided,
+                    branch_instance_id=final.id if held else None,
+                ), close=merged, loud=not silent_close)
             except Exception:
-                log.debug(
-                    "Manual-verify handoff message failed for %s",
-                    ctx.channel_id, exc_info=True,
-                )
-
-        # A verify that passed but said part of the goal was not delivered.
-        # This only surfaces the line: the pass already advanced the chain and
-        # the merge decision does not change.
-        not_done_lines = "\n".join(
-            f"• {i.verify_not_done}" for i in chain_instances if i.verify_not_done
-        )
-        if not_done_lines:
-            try:
-                await ctx.messenger.send_text(
-                    ctx.channel_id,
-                    "Verified, but not everything asked for was delivered:\n"
-                    f"{not_done_lines}",
-                    silent=True,
-                )
-            except Exception:
-                log.debug(
-                    "Not-done handoff message failed for %s",
-                    ctx.channel_id, exc_info=True,
-                )
-
-        # Chain finished without a merge step — prompt the user to test
-        # the worktree and decide. Wrapped in try/except so a transient
-        # Discord failure never leaves the chain state stuck in the store.
-        if "merge" not in steps and result and result.branch and result.original_branch:
-            try:
-                iid = result.id
-                hold_reason = ctx.store.get_chain_hold_reason(session_id)
-                held_line = f"Held for you: {hold_reason}.\n" if hold_reason else ""
-                await ctx.messenger.send_text(
-                    ctx.channel_id,
-                    f"\U0001f6ec Chain complete on branch `{result.branch}`.\n"
-                    f"{held_line}"
-                    f"Test the worktree, then merge or discard.",
-                    buttons=[[
-                        ButtonSpec("Merge", f"merge:{iid}"),
-                        ButtonSpec("Discard", f"discard:{iid}"),
-                        ButtonSpec("Diff", f"diff:{iid}"),
-                    ]],
-                    silent=False,
-                )
-            except Exception:
-                log.exception("Hold chain handoff message failed to send")
+                log.exception("End card failed for chain %s", source_id)
 
         ctx.store.clear_chain_state(session_id)
         return result
     finally:
+        recap.end_card_follows(card_token)
         ctx.runner.end_task(chain_task_id)
 
 

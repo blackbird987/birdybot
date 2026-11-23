@@ -574,7 +574,7 @@ async def _handle_choice_tap(
     asyncio.create_task(bot._set_thread_active_tag(interaction.channel, True))
     asyncio.create_task(bot._refresh_dashboard())
     try:
-        await commands.on_text(ctx, f"User picked: {label}")
+        await commands.on_text(ctx, choices_mod.tap_text(offer, idx, label))
     finally:
         await bot._after_turn(ctx, channel_id)
 
